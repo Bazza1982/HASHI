@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -1448,6 +1448,7 @@ class HERAdapter(BaseBackend):
     """HASHI Engine Runtime (HER), derived from the MIT-licensed Claw runtime."""
     DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
     DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
+    habit_pipeline_owner = "adapter"
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -1475,6 +1476,7 @@ class HERAdapter(BaseBackend):
         self._binary_resolution: ClawBinaryResolution | None = None
         self._supports_stream_json = False
         self._session_id: str | None = None
+        self._session_mode = not bool(self._extra.get("ephemeral_session"))
         self._session_state_path = self.config.workspace_dir / "backend_state" / "claw_session.json"
         self._gateway_context_path: Path | None = None
         self._gateway_config_home: Path | None = None
@@ -1487,6 +1489,8 @@ class HERAdapter(BaseBackend):
         self._habit_notification_job_ids: set[str] = set()
 
     def _load_session_identity(self) -> None:
+        if self._ephemeral_session() or not self._session_mode:
+            return
         try:
             payload = json.loads(self._session_state_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -1507,6 +1511,12 @@ class HERAdapter(BaseBackend):
             )
 
     def _persist_session_identity(self) -> None:
+        if self._ephemeral_session():
+            return
+        if not self._session_mode:
+            self._session_id = None
+            self._session_state_path.unlink(missing_ok=True)
+            return
         if not self._session_id:
             self._session_state_path.unlink(missing_ok=True)
             return
@@ -1532,6 +1542,18 @@ class HERAdapter(BaseBackend):
             self.global_config,
             self._extra,
         )
+
+    def _habit_request_eligible(self, request_id: str) -> bool:
+        """Honor request-scoped runtime eligibility without runtime coupling."""
+        if self._ephemeral_session() or self._extra.get("habit_learning_eligible") is False:
+            return False
+        runtime = getattr(self.config, "_hashi_runtime", None)
+        meta = dict(getattr(runtime, "current_request_meta", None) or {})
+        if str(meta.get("request_id") or "") != str(request_id or ""):
+            return True
+        if "habit_learning_eligible" not in meta:
+            return True
+        return bool(meta.get("habit_learning_eligible"))
 
     def _her_habit_store(self) -> _her_habits.HERHabitStore:
         if self._habit_store_instance is None:
@@ -1994,6 +2016,10 @@ class HERAdapter(BaseBackend):
             return None if "*" in parsed else parsed
         return None
 
+    def _ephemeral_session(self) -> bool:
+        """Keep an internal one-shot run isolated from the user's HER state."""
+        return bool(self._extra.get("ephemeral_session"))
+
     def _global_claw_config(self) -> dict[str, Any]:
         raw = (
             getattr(self.global_config, "her_providers", None)
@@ -2349,6 +2375,24 @@ class HERAdapter(BaseBackend):
         self.logger.info("HER handle_new_session: cleared persisted HER session identity.")
         return True
 
+    def set_session_mode(self, enabled: bool) -> None:
+        """Apply HASHI's fixed-versus-full-context session ownership policy."""
+        requested = bool(enabled) and not self._ephemeral_session()
+        previous = self._session_mode
+        self._session_mode = requested
+        if requested:
+            if not previous and self._session_id is None:
+                self._load_session_identity()
+        else:
+            self._session_id = None
+            self._session_state_path.unlink(missing_ok=True)
+        self.logger.info(
+            "HER session mode set to %s (previous=%s ephemeral=%s)",
+            "ON" if requested else "OFF",
+            "ON" if previous else "OFF",
+            self._ephemeral_session(),
+        )
+
     async def shutdown(self):
         pending_meditations = list(self._habit_meditation_tasks)
         pending_notifications = list(self._habit_notification_tasks)
@@ -2393,6 +2437,13 @@ class HERAdapter(BaseBackend):
             await on_stream_event(StreamEvent(kind=KIND_PROGRESS, summary="HER task started"))
 
         habit_config = self._habit_meditation_config()
+        if habit_config.enabled and not self._habit_request_eligible(request_id):
+            habit_config = replace(habit_config, enabled=False)
+            self.logger.info(
+                "HER Habit pipeline skipped by request eligibility: request=%s",
+                request_id,
+            )
+        session_mode_enabled = self._session_mode and not self._ephemeral_session()
         habit_notification_context = self._habit_notification_context(
             request_id,
             silent=silent,
@@ -2427,16 +2478,18 @@ class HERAdapter(BaseBackend):
                 async with self._habit_execution_lock:
                     result = await self._run_task_async(
                         task_prompt,
-                        resume=self._session_id,
+                        resume=self._session_id if session_mode_enabled else None,
                         request_id=request_id,
                         on_stream_event=on_stream_event,
+                        track_session_identity=session_mode_enabled,
                     )
             else:
                 result = await self._run_task_async(
                     prompt,
-                    resume=self._session_id,
+                    resume=self._session_id if session_mode_enabled else None,
                     request_id=request_id,
                     on_stream_event=on_stream_event,
+                    track_session_identity=session_mode_enabled,
                 )
         except asyncio.CancelledError as exc:
             if self.current_proc:
@@ -2500,7 +2553,7 @@ class HERAdapter(BaseBackend):
                         )
                     )
         usage_data = result.json_data.get("usage") or {}
-        if result.session_id:
+        if result.session_id and session_mode_enabled:
             previous = self._session_id
             self._session_id = result.session_id
             self._persist_session_identity()
@@ -2510,8 +2563,13 @@ class HERAdapter(BaseBackend):
                 result.session_id,
                 bool(previous),
             )
-        else:
+        elif session_mode_enabled:
             self.logger.warning("HER response omitted session_id for request=%s; next turn cannot resume safely.", request_id)
+        elif result.session_id:
+            self.logger.info(
+                "HER session checkpoint ignored for full-context request: request=%s",
+                request_id,
+            )
         tool_errors = sum(
             1
             for item in result.tool_results

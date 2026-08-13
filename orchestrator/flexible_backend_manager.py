@@ -665,6 +665,7 @@ class FlexibleBackendManager:
             habit_config["enabled"] = False
             extra["habit_meditation"] = habit_config
             extra["habit_learning_eligible"] = False
+            extra["ephemeral_session"] = True
             adapter_cfg.extra = extra
         self._attach_runtime_context(adapter_cfg)
         from adapters.registry import get_backend_class

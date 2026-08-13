@@ -8,6 +8,7 @@ import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -925,6 +926,118 @@ def test_claw_adapter_ignores_checkpoint_for_other_model(tmp_path):
     second._load_session_identity()
 
     assert second._session_id is None
+
+
+def test_her_full_context_session_mode_clears_stale_checkpoint(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._session_id = "fixed-session"
+    adapter._persist_session_identity()
+
+    adapter.set_session_mode(False)
+
+    assert adapter._session_mode is False
+    assert adapter._session_id is None
+    assert not adapter._session_state_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_her_full_context_turn_never_resumes_or_checkpoints_session(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = tmp_path / "hashi-her"
+    adapter._session_id = "stale-session"
+    adapter._persist_session_identity()
+    adapter.set_session_mode(False)
+    adapter._run_task_async = AsyncMock(
+        return_value=ClawTaskResult(
+            text="done",
+            model="deepseek/test",
+            permission_mode="workspace-write",
+            cwd=str(tmp_path),
+            returncode=0,
+            duration_ms=1,
+            stdout="",
+            stderr="",
+            json_data={},
+            tool_uses=[],
+            tool_results=[],
+            session_id="full-context-session",
+        )
+    )
+
+    response = await adapter.generate_response("complete context", "req-flex")
+
+    assert response.is_success is True
+    assert adapter._run_task_async.await_args.kwargs["resume"] is None
+    assert adapter._run_task_async.await_args.kwargs["track_session_identity"] is False
+    assert adapter._session_id is None
+    assert not adapter._session_state_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_her_task_runner_applies_meditation_safety_overrides(tmp_path):
+    fake = _write_exe(
+        tmp_path / "hashi-her",
+        """
+        #!/usr/bin/env python3
+        import json, os, sys
+        print(json.dumps({
+            "message": "meditated",
+            "model": "deepseek/test",
+            "session_id": "meditation-session",
+            "argv": sys.argv[1:],
+            "planning": os.environ.get("CLAW_TASK_PLANNING"),
+            "iterations": os.environ.get("CLAW_MAX_TOOL_ITERATIONS"),
+        }))
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={
+            "permission_mode": "danger-full-access",
+            "dangerously_skip_permissions": True,
+        },
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = fake
+
+    result = await adapter._run_task_async(
+        "Meditate on bounded evidence.",
+        resume=None,
+        request_id="req-meditation",
+        track_session_identity=False,
+        permission_mode_override="read-only",
+        allowed_tools_override=["read_file"],
+        task_env_overrides={
+            "CLAW_TASK_PLANNING": "0",
+            "CLAW_MAX_TOOL_ITERATIONS": "8",
+        },
+    )
+
+    args = result.json_data["argv"]
+    assert result.permission_mode == "read-only"
+    assert args[args.index("--permission-mode") + 1] == "read-only"
+    assert args[args.index("--allowedTools") + 1] == "read_file"
+    assert "--dangerously-skip-permissions" not in args
+    assert "--resume" not in args
+    assert result.json_data["planning"] == "0"
+    assert result.json_data["iterations"] == "8"
 
 
 @pytest.mark.asyncio

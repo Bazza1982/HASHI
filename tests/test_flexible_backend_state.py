@@ -682,6 +682,7 @@ def test_ephemeral_her_backend_cannot_enable_habit_learning(tmp_path, monkeypatc
 
     assert backend.config.extra["habit_meditation"]["enabled"] is False
     assert backend.config.extra["habit_learning_eligible"] is False
+    assert backend.config.extra["ephemeral_session"] is True
 
 
 @pytest.mark.asyncio

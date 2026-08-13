@@ -405,6 +405,28 @@ async def test_enabled_feature_plans_and_schedules_meditation_at_every_effort(
 
 
 @pytest.mark.asyncio
+async def test_runtime_intake_ineligibility_disables_adapter_habit_pipeline(tmp_path):
+    adapter = _adapter(tmp_path, enabled=True)
+    _seed_habit(adapter._her_habit_store())
+    adapter.config._hashi_runtime = SimpleNamespace(
+        current_request_meta={
+            "request_id": "req-internal",
+            "habit_learning_eligible": False,
+        }
+    )
+    adapter._run_task_async = AsyncMock(return_value=_task_result())
+    adapter._schedule_habit_meditation = Mock()
+    prompt = "Internal maintenance request"
+
+    response = await adapter.generate_response(prompt, request_id="req-internal")
+
+    assert response.is_success is True
+    assert adapter._run_task_async.await_args.args[0] == prompt
+    assert "her_habit_meditation" not in response.stream_metadata
+    adapter._schedule_habit_meditation.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_habit_on_off_preserves_exact_visible_output_and_tool_side_effects(
     tmp_path,
 ):
