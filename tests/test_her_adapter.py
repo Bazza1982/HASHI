@@ -21,6 +21,7 @@ from adapters.her import (
     ClawTaskResult,
     ClawTimeoutError,
     _build_claw_incomplete_report,
+    _claw_incomplete_response,
     _claw_run_is_incomplete,
     _parse_json_output,
     _parse_stream_json_output,
@@ -94,6 +95,63 @@ def test_claw_max_iterations_builds_chinese_verified_fallback_report():
     assert metadata["verified_tool_results"] == 1
     assert metadata["uncertain_tool_results"] == 0
     assert metadata["recommended_action"] == "continue"
+
+
+@pytest.mark.parametrize(
+    "effort,iterations",
+    [("low", 12), ("medium", 32), ("high", 96), ("xhigh", 192), ("max", 384), ("max+", 512)],
+)
+def test_claw_max_iterations_preserves_primary_agent_final_for_every_effort(effort, iterations):
+    primary_final = f"已走完 {iterations} 轮；下一回合从存档继续。"
+    result = ClawTaskResult(
+        text=primary_final,
+        model="deepseek/test",
+        permission_mode="workspace-write",
+        cwd="/workspace",
+        returncode=0,
+        duration_ms=10,
+        stdout="",
+        stderr="",
+        json_data={},
+        tool_uses=[{"id": "write-1", "name": "browser_click"}],
+        tool_results=[{"tool_use_id": "write-1", "output": {"success": True}, "is_error": False}],
+        session_id=f"session-{effort}",
+        iterations=iterations,
+        completion_status="incomplete",
+        stop_reason="max_iterations",
+    )
+
+    response, metadata = _claw_incomplete_response(result, prompt="请继续")
+
+    assert response.startswith(primary_final)
+    assert "**CONTINUE**" in response
+    assert metadata["persona_final_response_preserved"] is True
+    assert metadata["fallback_report_generated"] is False
+
+
+def test_claw_max_iterations_does_not_deliver_dangling_tool_markup():
+    result = ClawTaskResult(
+        text="准备继续。\n<｜｜DSML｜｜tool_calls>\n尚未执行的调用",
+        model="deepseek/test",
+        permission_mode="read-only",
+        cwd="/workspace",
+        returncode=0,
+        duration_ms=10,
+        stdout="",
+        stderr="",
+        json_data={},
+        tool_uses=[{"id": "read-1", "name": "bash"}],
+        tool_results=[{"tool_use_id": "read-1", "output": "ok", "is_error": False}],
+        session_id="session-1",
+        iterations=12,
+        completion_status="incomplete",
+        stop_reason="max_iterations",
+    )
+
+    response, metadata = _claw_incomplete_response(result, prompt="继续")
+
+    assert "<｜｜DSML｜｜tool_calls>" not in response
+    assert metadata["persona_final_response_preserved"] is False
 
 
 def test_stream_json_parser_accepts_legacy_diagnostics_when_run_finished_exists():
@@ -851,12 +909,8 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
     resumed = await adapter.generate_response("continue", "req-2")
 
     assert response.is_success is True
-    assert "Execution incomplete" in response.text
-    assert "`browser_get_text` ×1" in response.text
-    assert "`browser_click` ×1" in response.text
-    assert "**PIVOT**" in response.text
-    assert "无" not in response.text
-    assert "adapter done" not in response.text
+    assert response.text.startswith("adapter done")
+    assert "**CONTINUE**" in response.text
     assert resumed.is_success is True
     assert adapter._session_id == "session-1"
     assert response.usage.input_tokens == 3
@@ -865,11 +919,12 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
     assert response.stream_metadata["claw_completion_status"] == "incomplete"
     assert response.stream_metadata["claw_execution_effort"] == "high"
     assert response.stream_metadata["claw_max_iterations"] == 96
-    assert response.stream_metadata["fallback_report_generated"] is True
+    assert response.stream_metadata["fallback_report_generated"] is False
+    assert response.stream_metadata["persona_final_response_preserved"] is True
     assert response.stream_metadata["successful_tool_results"] == 2
     assert response.stream_metadata["verified_tool_results"] == 1
     assert response.stream_metadata["uncertain_tool_results"] == 1
-    assert response.stream_metadata["recommended_action"] == "pivot"
+    assert response.stream_metadata["recommended_action"] == "continue"
 
 
 @pytest.mark.asyncio
