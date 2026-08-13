@@ -23,12 +23,12 @@ is accepted only as a migration alias.
 
 | Platform | Runtime | Source | Status |
 | --- | --- | --- | --- |
-| Linux x86-64 | `0.1.0-hashi.12` | `7ce6cf431502ca5a78a1874f09db9c2de7211562` | Current certified standalone HASHI package |
-| Windows x86-64 | `0.1.3-hashi.3` | `b27f4180802a7735f745ddd764e5b9b1b88f7e9f` | Older reviewed artifact; not `.12` parity |
+| Linux x86-64 | `0.1.0-hashi.13` | `d63b1bf86600cd4f54015c0dd5656cbcd35a8f3b` | Current certified standalone HASHI package |
+| Windows x86-64 | Not packaged | — | Current Windows build and parity certification pending |
 
-The certified Linux `.12` SHA-256 is
-`7e14a22bb51d9c99de3eb92c627434adf631fed898fc4dca420a8faf2b6a9a32`.
-Do not infer Windows parity from the shared manifest. A current Windows build
+The certified Linux `.13` SHA-256 is
+`be6321017747858fc8cbc11796c4c79a73403de1bd5508caf245b32288ec4bb5`.
+Do not infer Windows parity from the Linux manifest. A current Windows build
 needs its own reproducible source lock, checksum, product integration, and test
 evidence.
 

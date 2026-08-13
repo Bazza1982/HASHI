@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Tool Gateway And Telemetry Plan
 
-Status: active implementation for packaged HER `0.1.0-hashi.12`; remaining telemetry and
+Status: active implementation for packaged HER `0.1.0-hashi.13`; remaining telemetry and
 cross-platform release work is tracked below
 Owner: HASHI
 Created: 2026-05-23
@@ -24,8 +24,8 @@ Related docs:
 The original problem and architecture sections below are retained as the design
 record. They are no longer a description of the pre-Gateway runtime:
 
-- packaged Linux HER `0.1.0-hashi.12` is pinned by manifest, provenance, and
-  SHA-256; the manifest's Windows binary is older and not `.10` parity;
+- packaged Linux HER `0.1.0-hashi.13` is pinned by manifest, provenance, and
+  SHA-256; the manifest contains no Windows binary and Windows parity remains pending;
 - the per-agent owner-only GatewayContext and required MCP stdio server are
   implemented around the canonical ToolRegistry, including permission checks,
   audit, argument validation, loop guards, and Browser tools;
@@ -317,7 +317,7 @@ The packaged HER runtime should have explicit version metadata:
 
 ```json
 {
-  "hashi_claw_version": "0.1.0-hashi.12",
+  "hashi_claw_version": "0.1.0-hashi.13",
   "upstream_claw_commit": "f8e1bb7262b261da1ee6bfcd461bfc5b676f6a6d",
   "build_target": "linux-x86_64",
   "sha256": "..."
@@ -987,7 +987,7 @@ Acceptance:
 
 ### Phase C: Claw MCP Config Integration
 
-Status: **implemented and retained through packaged `0.1.0-hashi.12`.** HASHI creates an isolated
+Status: **implemented and retained through packaged `0.1.0-hashi.13`.** HASHI creates an isolated
 `CLAW_CONFIG_HOME`, validates the required `hashi-tools` entry during initialization,
 and resumes the session ID emitted by Claw.
 

@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Certified HER `0.1.0-hashi.12` integration** — pinned the Linux HASHI
-  Engine Runtime package to source `7ce6cf4`, preserved fixed-mode session
+- **Certified HER `0.1.0-hashi.13` integration** — pinned the Linux HASHI
+  Engine Runtime package to source `d63b1bf`, preserved fixed-mode session
   resume and structured streaming, exposed the shared HASHI Tool Registry over
   a private MCP stdio gateway, and added provider/model routing plus HER
   execution budgets through `max+`. Effort is now a capability ceiling: the adaptive
@@ -21,8 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-only workspace/Git tool registry and page immutable raw evidence by stable ID;
   MAX+ may additionally rerun only exact plan-declared tests inside a disposable,
   network-isolated snapshot. Review remains advisory, and no private token or wall-clock
-  ceiling exists. The current Windows manifest entry remains
-  an older runtime and is not yet parity-certified. See the
+  ceiling exists. Direct-response plans now return the planner's complete answer once,
+  without a redundant execution generation or terminal semantic-compaction delay. No
+  current Windows artifact is packaged or parity-certified. See the
   [unreleased checkpoint](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md).
 - **Secure HER multimedia bridge** — Telegram media now reaches HER as actual
   media; the bounded `media_read` tool supports local image, PDF, audio, and

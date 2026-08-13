@@ -38,7 +38,7 @@ by observable protocol and state:
 - streamed text and reasoning fragments are neither lost nor altered;
 - messages, progress, verbose output, and final delivery remain ordered and readable;
 - tool calls execute once, return once, and leave verifiable state;
-- effort limits, finalization reserve, and MAX+ time handling end cleanly;
+- effort limits, finalization reserve, and operator-owned timeout handling end cleanly;
 - fixed and flex context are neither lost nor replayed twice;
 - `/stop`, bare continuation, `/new`, restart, and compaction preserve the state the
   current HASHI design promises;
@@ -60,7 +60,7 @@ wrong route, false completion, runaway loop, or incorrect recovery **is** a HER 
 - HER efforts `low`, `medium`, `high`, `xhigh`, `max`, and `max+`.
 - HASHI `fixed` and `flex` modes.
 - Cold starts, warm sessions, long sessions, interrupted sessions, process failures,
-  provider faults, exact iteration exhaustion, and MAX+ time exhaustion.
+  provider faults, exact iteration exhaustion, and operator-owned timeout exhaustion.
 - Thinking on/off, verbose on/off, typing on/off, and final-message promotion.
 - Consecutive user messages, queue order, interrupted-task continuation, Memory+,
   context compaction, and session recreation.
@@ -69,7 +69,7 @@ wrong route, false completion, runaway loop, or incorrect recovery **is** a HER 
 ### 2.2 Out of scope
 
 - Comparing Flash and Pro answer quality, creativity, or benchmark scores.
-- Changing effort budgets, MAX+ policy, provider reasoning depth, or HER architecture.
+- Changing effort iteration limits, MAX+ policy, provider reasoning depth, or HER architecture.
 - Real mutations outside Ajiao's disposable lab.
 - HASHI1 deployment or validation.
 - Testing unrelated wrapper, audit, or dual-brain behavior except where shared delivery
@@ -271,8 +271,8 @@ prove exact edge behavior before any paid API run:
 16. Fixed/flex prompt assembly, `/stop` rebinding, `/new`, Memory+, compaction, and final
     delivery are verified without a network dependency.
 17. At MEDIUM through MAX+, a direct-response greeting produces one adaptive plan and one
-    reply with no task tools, test, self-review, or independent review; LOW replies without
-    a planning call.
+    reply with no second execution generation, terminal semantic compaction, task tools,
+    test, self-review, or independent review; LOW replies without a planning call.
 18. HIGH exposes only optional self-review. XHIGH, MAX, and MAX+ expose optional
     independent review, and the plan may select `none` at every level.
 19. An independent reviewer receives a separate read-only registry, can inspect actual
