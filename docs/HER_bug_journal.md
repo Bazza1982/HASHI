@@ -89,7 +89,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **HER source:** `781e39db266f33164245825d006d91cfc054fcf7`.
 - **Fixed HER:** `0.1.0-hashi.17` Linux x86-64 / SHA-256
   `6e7ea72f5c50fb6af1d3adf67478ee79f8a55741f78ec2c4a775a3e43039af57`.
-- **HASHI package commit:** pending this packaging checkpoint.
+- **HASHI package commit:** `768aa0fe`.
 - **Regression tests:** `high_effort_reserves_turns_for_review_and_validation`,
   `high_effort_adds_a_critical_review_after_tool_failure`,
   `high_effort_deduplicates_repeated_unplanned_tool_reviews`, and
