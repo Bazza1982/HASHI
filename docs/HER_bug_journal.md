@@ -94,7 +94,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **HER source:** `e6fd0349ff53ed731fd4e34e7ddcb8a7946ddaaf`.
 - **Fixed HER:** `0.1.0-hashi.18` Linux x86-64 / SHA-256
   `86cc892a23448c8bab045467dc6a72eccd8cea77fdfe1ea059a63cce5de4cc8c`.
-- **HASHI package commit:** pending.
+- **HASHI package commit:** `fb01d2801a9f5cca2c029a6a94e9ab68e6409bb4`.
 - **Regression tests:**
   `fixed_session_planner_sees_resumed_options_at_every_planning_effort` recreates an
   A/B/C assistant turn followed by an incremental `A` across `medium`, `high`,
