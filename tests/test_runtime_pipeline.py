@@ -344,6 +344,59 @@ async def test_build_turn_prompt_collects_context_sections_and_updates_audit_sta
 
 
 @pytest.mark.asyncio
+async def test_scheduler_her_turn_uses_isolated_full_context_session():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.agent_mode = "fixed"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id="persistent-session",
+        persistent_session_busy=False,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    item = _item(source="scheduler")
+
+    runtime_pipeline.begin_queue_item(runtime, item)
+    prompt = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
+
+    assert runtime.current_request_meta["session_scope"] == "isolated_per_run"
+    assert runtime._request_meta_by_id[item.request_id]["session_scope"] == "isolated_per_run"
+    assert prompt.incremental is False
+
+
+@pytest.mark.asyncio
+async def test_new_her_turn_isolated_while_persistent_background_turn_is_busy():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.agent_mode = "fixed"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id="persistent-session",
+        persistent_session_busy=True,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    item = _item(source="text")
+
+    runtime_pipeline.begin_queue_item(runtime, item)
+    prompt = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
+
+    assert runtime.current_request_meta["session_scope"] == "isolated_per_run"
+    assert prompt.incremental is False
+
+
+@pytest.mark.asyncio
 async def test_build_turn_prompt_binds_bare_continue_to_persisted_stopped_task():
     runtime = _runtime()
     original_item = _item(

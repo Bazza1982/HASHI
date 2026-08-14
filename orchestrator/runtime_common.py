@@ -17,6 +17,7 @@ class QueuedRequest:
     is_retry: bool = False
     deliver_to_telegram: bool = True
     skip_memory_injection: bool = False
+    session_scope: str | None = None
 
 
 def _safe_excerpt(text: str, limit: int = 160) -> str:

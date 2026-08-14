@@ -51,10 +51,13 @@ PERMISSION_MODE_RANK = {"read-only": 0, "workspace-write": 1, "danger-full-acces
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OLLAMA_DUMMY_API_KEY = "__ollama_dummy__"
 HER_DISPLAY_NAME = "HASHI Engine Runtime (HER)"
-HER_VERSION = "0.1.0-hashi.14"
+HER_VERSION = "0.1.0-hashi.15"
 PACKAGED_CLAW_RUNTIME = "hashi-her"
 PACKAGED_CLAW_MANIFEST_VERSION = 1
 CLAW_RUNTIME_POLICIES = {"prefer-packaged", "require-packaged", "system-only"}
+HER_SESSION_SCOPE_PERSISTENT = "persistent"
+HER_SESSION_SCOPE_ISOLATED = "isolated_per_run"
+HER_DIAGNOSTIC_MAX_CHARS = 8192
 SECRET_ENV_KEYS = {
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -553,6 +556,11 @@ def redact_secret_text(text: str | None, extra_values: list[str] | None = None) 
     for value in extra_values or []:
         if value and value != OLLAMA_DUMMY_API_KEY:
             redacted = redacted.replace(value, "<redacted>")
+    redacted = re.sub(
+        r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]+",
+        r"\1<redacted>",
+        redacted,
+    )
     return redacted
 
 
@@ -1531,6 +1539,7 @@ class HERAdapter(BaseBackend):
         self._session_id: str | None = None
         self._session_mode = not bool(self._extra.get("ephemeral_session"))
         self._session_state_path = self.config.workspace_dir / "backend_state" / "claw_session.json"
+        self._persistent_session_lock = asyncio.Lock()
         self._gateway_context_path: Path | None = None
         self._gateway_config_home: Path | None = None
         self._habit_store_instance: _her_habits.HERHabitStore | None = None
@@ -1544,6 +1553,34 @@ class HERAdapter(BaseBackend):
         self._habit_meditation_job_ids: set[str] = set()
         self._habit_notification_tasks: set[asyncio.Task] = set()
         self._habit_notification_job_ids: set[str] = set()
+
+    @property
+    def persistent_session_busy(self) -> bool:
+        """Whether a turn currently owns the mutable persistent HER session."""
+        return self._persistent_session_lock.locked()
+
+    def _runtime_request_meta(self, request_id: str) -> dict[str, Any]:
+        runtime = getattr(self.config, "_hashi_runtime", None)
+        registry = getattr(runtime, "_request_meta_by_id", None)
+        if isinstance(registry, Mapping):
+            meta = registry.get(str(request_id or ""))
+            if isinstance(meta, Mapping):
+                return dict(meta)
+        current = getattr(runtime, "current_request_meta", None)
+        if isinstance(current, Mapping) and str(current.get("request_id") or "") == str(
+            request_id or ""
+        ):
+            return dict(current)
+        return {}
+
+    def _request_session_scope(self, request_id: str) -> str:
+        raw = str(
+            self._runtime_request_meta(request_id).get("session_scope")
+            or HER_SESSION_SCOPE_PERSISTENT
+        ).strip().lower()
+        if raw == HER_SESSION_SCOPE_ISOLATED:
+            return raw
+        return HER_SESSION_SCOPE_PERSISTENT
 
     def _load_session_identity(self) -> None:
         if self._ephemeral_session() or not self._session_mode:
@@ -1589,6 +1626,119 @@ class HERAdapter(BaseBackend):
         os.replace(temporary, self._session_state_path)
         self._session_state_path.chmod(0o600)
 
+    @staticmethod
+    def _bounded_diagnostic_text(value: Any, limit: int = HER_DIAGNOSTIC_MAX_CHARS) -> str:
+        text = redact_secret_text(str(value or ""))
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + "…"
+
+    @classmethod
+    def _sanitize_diagnostic_value(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(key): cls._sanitize_diagnostic_value(nested)
+                for key, nested in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._sanitize_diagnostic_value(item) for item in value]
+        if isinstance(value, str):
+            return cls._bounded_diagnostic_text(value)
+        return value
+
+    def _persist_diagnostic_record(self, record: Mapping[str, Any]) -> None:
+        """Append one request-correlated, locally redacted HER diagnostic."""
+        try:
+            state_dir = self.config.workspace_dir / "backend_state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            path = state_dir / "her_diagnostics.jsonl"
+            payload = self._sanitize_diagnostic_value({
+                "timestamp": time.time(),
+                "agent": self.config.name,
+                **dict(record),
+            })
+            with path.open("a", encoding="utf-8") as diagnostics:
+                diagnostics.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+            path.chmod(0o600)
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not mask the backend failure
+            self.logger.warning(
+                "HER diagnostic persistence failed safely: error=%s",
+                type(exc).__name__,
+            )
+
+    def _persist_command_failure(
+        self,
+        *,
+        request_id: str,
+        returncode: int,
+        parsed_error: Mapping[str, Any] | None,
+        stderr: str,
+        resume: str | None,
+    ) -> None:
+        self._persist_diagnostic_record(
+            {
+                "kind": "command_failure",
+                "request_id": request_id,
+                "returncode": returncode,
+                "resumed_session": bool(resume),
+                "session_id": resume,
+                "parsed_error": dict(parsed_error or {}),
+                "stderr": self._bounded_diagnostic_text(stderr),
+            }
+        )
+
+    def _quarantine_persistent_session(self, request_id: str, exc: BaseException) -> None:
+        previous_session = self._session_id
+        self._session_id = None
+        try:
+            self._persist_session_identity()
+        except Exception as persist_exc:  # noqa: BLE001 - preserve the original turn failure
+            self.logger.warning(
+                "HER session quarantine checkpoint cleanup failed safely: request=%s error=%s",
+                request_id,
+                type(persist_exc).__name__,
+            )
+        parsed_error = getattr(exc, "parsed_error", None)
+        parsed_error = parsed_error if isinstance(parsed_error, Mapping) else {}
+        self._persist_diagnostic_record(
+            {
+                "kind": "session_quarantined",
+                "request_id": request_id,
+                "session_id": previous_session,
+                "error_kind": parsed_error.get("error_kind")
+                or parsed_error.get("type")
+                or type(exc).__name__,
+                "reason": "persistent_turn_failed_before_safe_completion",
+            }
+        )
+        self.logger.warning(
+            "HER persistent session quarantined: request=%s session=%s error=%s",
+            request_id,
+            previous_session or "unavailable",
+            type(exc).__name__,
+        )
+
+    @staticmethod
+    def _command_error_metadata(exc: ClawCommandError) -> dict[str, Any]:
+        parsed = exc.parsed_error if isinstance(exc.parsed_error, Mapping) else {}
+        allowed = {
+            "kind",
+            "error_kind",
+            "http_status",
+            "error_type",
+            "provider_request_id",
+            "error_message",
+            "body_snippet",
+            "retryable",
+            "last_safe_event",
+            "checkpoint_preserved",
+        }
+        return {
+            key: parsed.get(key)
+            for key in allowed
+            if key in parsed
+        }
+
     @property
     def _extra(self) -> dict[str, Any]:
         extra = getattr(self.config, "extra", None) or {}
@@ -1604,9 +1754,8 @@ class HERAdapter(BaseBackend):
         """Honor request-scoped runtime eligibility without runtime coupling."""
         if self._ephemeral_session() or self._extra.get("habit_learning_eligible") is False:
             return False
-        runtime = getattr(self.config, "_hashi_runtime", None)
-        meta = dict(getattr(runtime, "current_request_meta", None) or {})
-        if str(meta.get("request_id") or "") != str(request_id or ""):
+        meta = self._runtime_request_meta(request_id)
+        if not meta:
             return True
         if "habit_learning_eligible" not in meta:
             return True
@@ -1634,10 +1783,7 @@ class HERAdapter(BaseBackend):
         *,
         silent: bool,
     ) -> dict[str, Any]:
-        runtime = getattr(self.config, "_hashi_runtime", None)
-        meta = dict(getattr(runtime, "current_request_meta", None) or {})
-        if str(meta.get("request_id") or "") != str(request_id or ""):
-            meta = {}
+        meta = self._runtime_request_meta(request_id)
         return {
             "chat_id": meta.get("chat_id"),
             "verbose_at_start": bool(meta.get("verbose_at_start")),
@@ -2037,8 +2183,17 @@ class HERAdapter(BaseBackend):
 
         parsed_error = getattr(exc, "parsed_error", None)
         parsed_error = parsed_error if isinstance(parsed_error, Mapping) else {}
-        raw_kind = parsed_error.get("kind") or parsed_error.get("type")
+        raw_kind = (
+            parsed_error.get("error_kind")
+            or parsed_error.get("type")
+            or parsed_error.get("kind")
+        )
         error_kind = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(raw_kind or "unknown"))[:80]
+        terminal_kind = re.sub(
+            r"[^a-zA-Z0-9_.-]+",
+            "_",
+            str(parsed_error.get("kind") or "unknown"),
+        )[:80]
         reason = "foreground_error_without_grounded_task_result"
         self.logger.info(
             "HER Habit Meditation skipped: request=%s reason=%s exception=%s error_kind=%s",
@@ -2056,6 +2211,7 @@ class HERAdapter(BaseBackend):
                 reason=reason,
                 exception_type=type(exc).__name__,
                 error_kind=error_kind,
+                terminal_kind=terminal_kind,
                 returncode=getattr(exc, "returncode", None),
                 grounded_task_result=False,
             )
@@ -2509,6 +2665,16 @@ class HERAdapter(BaseBackend):
                 request_id,
             )
         session_mode_enabled = self._session_mode and not self._ephemeral_session()
+        session_scope = self._request_session_scope(request_id)
+        persistent_session = (
+            session_mode_enabled and session_scope == HER_SESSION_SCOPE_PERSISTENT
+        )
+        self.logger.info(
+            "HER request session scope: request=%s scope=%s persistent_busy=%s",
+            request_id,
+            session_scope,
+            self.persistent_session_busy,
+        )
         habit_notification_context = self._habit_notification_context(
             request_id,
             silent=silent,
@@ -2537,22 +2703,53 @@ class HERAdapter(BaseBackend):
                 self.effort,
             )
 
+        async def execute_request() -> ClawTaskResult:
+            if not persistent_session:
+                return await self._run_task_async(
+                    task_prompt,
+                    resume=None,
+                    request_id=request_id,
+                    on_stream_event=on_stream_event,
+                    track_session_identity=False,
+                )
+
+            async with self._persistent_session_lock:
+                previous = self._session_id
+                try:
+                    result = await self._run_task_async(
+                        task_prompt,
+                        resume=previous,
+                        request_id=request_id,
+                        on_stream_event=on_stream_event,
+                        track_session_identity=True,
+                    )
+                except (asyncio.CancelledError, Exception) as exc:
+                    self._quarantine_persistent_session(request_id, exc)
+                    raise
+                checkpoint_session = result.session_id or self._session_id
+                if checkpoint_session:
+                    self._session_id = checkpoint_session
+                    self._persist_session_identity()
+                    self.logger.info(
+                        "HER session checkpoint: request=%s session=%s resumed=%s",
+                        request_id,
+                        checkpoint_session,
+                        bool(previous),
+                    )
+                else:
+                    self._session_id = None
+                    self._persist_session_identity()
+                    self.logger.warning(
+                        "HER response omitted session_id for request=%s; "
+                        "persistent checkpoint was cleared.",
+                        request_id,
+                    )
+                return result
+
         started = time.perf_counter()
         try:
-            result = await self._run_task_async(
-                task_prompt,
-                resume=self._session_id if session_mode_enabled else None,
-                request_id=request_id,
-                on_stream_event=on_stream_event,
-                track_session_identity=session_mode_enabled,
-            )
+            result = await execute_request()
         except asyncio.CancelledError as exc:
-            if self.current_proc:
-                await self.force_kill_process_tree(
-                    self.current_proc,
-                    logger=self.logger,
-                    reason=f"cancelled:{request_id}",
-                )
             if habit_config.enabled:
                 self._record_failed_turn_meditation_skip(request_id=request_id, exc=exc)
             raise
@@ -2563,7 +2760,13 @@ class HERAdapter(BaseBackend):
         except ClawCommandError as exc:
             if habit_config.enabled:
                 self._record_failed_turn_meditation_skip(request_id=request_id, exc=exc)
-            return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
+            return BackendResponse(
+                text="",
+                duration_ms=self._duration_ms(started),
+                error=str(exc),
+                is_success=False,
+                stream_metadata={"her_error": self._command_error_metadata(exc)},
+            )
         except (ClawError, ValueError) as exc:
             if habit_config.enabled:
                 self._record_failed_turn_meditation_skip(request_id=request_id, exc=exc)
@@ -2580,22 +2783,11 @@ class HERAdapter(BaseBackend):
                         )
                     )
         usage_data = result.json_data.get("usage") or {}
-        if result.session_id and session_mode_enabled:
-            previous = self._session_id
-            self._session_id = result.session_id
-            self._persist_session_identity()
+        if result.session_id and not persistent_session:
             self.logger.info(
-                "HER session checkpoint: request=%s session=%s resumed=%s",
+                "HER session checkpoint ignored for isolated request: request=%s scope=%s",
                 request_id,
-                result.session_id,
-                bool(previous),
-            )
-        elif session_mode_enabled:
-            self.logger.warning("HER response omitted session_id for request=%s; next turn cannot resume safely.", request_id)
-        elif result.session_id:
-            self.logger.info(
-                "HER session checkpoint ignored for full-context request: request=%s",
-                request_id,
+                session_scope,
             )
         tool_errors = sum(
             1
@@ -2604,7 +2796,8 @@ class HERAdapter(BaseBackend):
         )
         self.logger.info(
             "HER task completed: request=%s model=%s session=%s iterations=%s "
-            "completion=%s stop_reason=%s provider_stop_reason=%s tool_calls=%d tool_errors=%d gateway=%s",
+            "completion=%s stop_reason=%s provider_stop_reason=%s tool_calls=%d "
+            "tool_errors=%d gateway=%s session_scope=%s",
             request_id,
             result.model,
             result.session_id or self._session_id or "unavailable",
@@ -2615,6 +2808,7 @@ class HERAdapter(BaseBackend):
             len(result.tool_uses),
             tool_errors,
             bool(self._gateway_context_path),
+            session_scope,
         )
         stream_usage = _stream_json_usage(result.stdout) if self._supports_stream_json else {}
         thinking_tokens = int(
@@ -2665,6 +2859,7 @@ class HERAdapter(BaseBackend):
                 "claw_provider_stop_reason": result.provider_stop_reason or "unknown",
                 "claw_execution_effort": self.effort,
                 "claw_max_iterations": self._max_tool_iterations(),
+                "her_session_scope": session_scope,
                 **(
                     {
                         "her_habit_meditation": True,
@@ -2680,6 +2875,50 @@ class HERAdapter(BaseBackend):
     @staticmethod
     def _duration_ms(started: float) -> float:
         return round((time.perf_counter() - started) * 1000, 2)
+
+    async def _wait_for_her_task_with_timeouts(
+        self,
+        task: asyncio.Future,
+        *,
+        started_monotonic: float,
+        activity_state: list[float],
+    ) -> str | None:
+        """Enforce timeouts per subprocess, not across concurrent HER runs."""
+        while not task.done():
+            total_runtime = max(0.0, time.perf_counter() - started_monotonic)
+            if total_runtime >= self.HARD_TIMEOUT_SEC:
+                return "hard"
+            idle_for = max(0.0, time.time() - activity_state[0])
+            if idle_for >= self.IDLE_TIMEOUT_SEC:
+                return "idle"
+            wait_slice = min(
+                5.0,
+                max(0.1, self.HARD_TIMEOUT_SEC - total_runtime),
+                max(0.1, self.IDLE_TIMEOUT_SEC - idle_for),
+            )
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=wait_slice)
+            except asyncio.TimeoutError:
+                continue
+        return None
+
+    def _her_timeout_diagnostic(
+        self,
+        timeout_kind: str,
+        *,
+        started_monotonic: float,
+        activity_state: list[float],
+    ) -> str:
+        total_runtime = max(0.0, time.perf_counter() - started_monotonic)
+        last_output_age = max(0.0, time.time() - activity_state[0])
+        idle_source = self._timeout_source("idle_timeout_sec").replace(" ", "_")
+        hard_source = self._timeout_source("hard_timeout_sec").replace(" ", "_")
+        return (
+            f"kind={timeout_kind}, idle_timeout_s={self.IDLE_TIMEOUT_SEC}, "
+            f"idle_source={idle_source}, hard_timeout_s={self.HARD_TIMEOUT_SEC}, "
+            f"hard_source={hard_source}, last_output_age_s={last_output_age:.2f}, "
+            f"total_runtime_s={total_runtime:.2f}"
+        )
 
     async def _run_task_async(
         self,
@@ -2729,6 +2968,7 @@ class HERAdapter(BaseBackend):
         )
         if track_session_identity:
             self.current_proc = proc
+        activity_state = [time.time()]
         self._touch_activity()
         communication_task = asyncio.create_task(
             self._communicate_stream_json(
@@ -2737,19 +2977,22 @@ class HERAdapter(BaseBackend):
                 request_id,
                 on_stream_event,
                 track_session_identity=track_session_identity,
+                activity_state=activity_state,
             )
             if self._supports_stream_json
-            else self._communicate_with_activity(proc)
+            else self._communicate_with_activity(proc, activity_state=activity_state)
         )
         try:
-            timeout_kind = await self._wait_for_task_with_timeouts(
+            timeout_kind = await self._wait_for_her_task_with_timeouts(
                 communication_task,
                 started_monotonic=started,
+                activity_state=activity_state,
             )
             if timeout_kind is not None:
-                diagnostic = self._timeout_diagnostic(
+                diagnostic = self._her_timeout_diagnostic(
                     timeout_kind,
                     started_monotonic=started,
+                    activity_state=activity_state,
                 )
                 self.logger.error(
                     f"HER request {request_id} {timeout_kind}-timed out "
@@ -2770,6 +3013,16 @@ class HERAdapter(BaseBackend):
                     f"was idle for {timeout_s}s with no output"
                     if timeout_kind == "idle"
                     else f"exceeded hard timeout of {timeout_s}s"
+                )
+                self._persist_diagnostic_record(
+                    {
+                        "kind": "command_timeout",
+                        "request_id": request_id,
+                        "timeout_kind": timeout_kind,
+                        "timeout_seconds": timeout_s,
+                        "resumed_session": bool(resume),
+                        "session_id": resume,
+                    }
                 )
                 raise ClawTimeoutError(
                     f"HER command {detail}.",
@@ -2807,7 +3060,20 @@ class HERAdapter(BaseBackend):
                 protocol_non_json_line_count,
             )
         if proc.returncode != 0:
-            message = parsed.get("error") if isinstance(parsed, dict) else None
+            self._persist_command_failure(
+                request_id=request_id,
+                returncode=proc.returncode or 1,
+                parsed_error=parsed if isinstance(parsed, Mapping) else None,
+                stderr=stderr,
+                resume=resume,
+            )
+            message = (
+                parsed.get("error_message")
+                or parsed.get("error")
+                or parsed.get("message")
+                if isinstance(parsed, dict)
+                else None
+            )
             raise ClawCommandError(
                 message or f"HER command exited with code {proc.returncode}",
                 returncode=proc.returncode or 1,
@@ -2838,6 +3104,8 @@ class HERAdapter(BaseBackend):
     async def _communicate_with_activity(
         self,
         proc: asyncio.subprocess.Process,
+        *,
+        activity_state: list[float] | None = None,
     ) -> tuple[bytes, bytes]:
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
@@ -2850,6 +3118,8 @@ class HERAdapter(BaseBackend):
                     break
                 chunks.append(chunk)
                 self._touch_activity()
+                if activity_state is not None:
+                    activity_state[0] = time.time()
 
         await asyncio.gather(
             read_stream(proc.stdout, stdout_chunks),
@@ -2866,6 +3136,7 @@ class HERAdapter(BaseBackend):
         on_stream_event: StreamCallback = None,
         *,
         track_session_identity: bool = True,
+        activity_state: list[float] | None = None,
     ) -> tuple[bytes, bytes]:
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
@@ -2876,12 +3147,15 @@ class HERAdapter(BaseBackend):
                 stdout_chunks.append(line)
                 self._persist_stream_json_line(line)
                 self._touch_activity()
+                if activity_state is not None:
+                    activity_state[0] = time.time()
                 try:
                     event = json.loads(line.decode(errors="replace"))
                 except json.JSONDecodeError:
                     self.logger.warning("Ignoring non-JSON HER stream line: %r", line[:200])
                     continue
                 self._persist_control_event(request_id, event)
+                self._persist_stream_diagnostic_event(request_id, event)
                 if event.get("kind") == "run_started" and track_session_identity:
                     session_id = str(event.get("session_id") or "").strip()
                     if session_id:
@@ -2984,6 +3258,8 @@ class HERAdapter(BaseBackend):
             async for line in iter_stream_lines(proc.stderr):
                 stderr_chunks.append(line)
                 self._touch_activity()
+                if activity_state is not None:
+                    activity_state[0] = time.time()
 
         await asyncio.gather(read_stdout(), read_stderr())
         await proc.wait()
@@ -3022,3 +3298,23 @@ class HERAdapter(BaseBackend):
                 encoding="utf-8",
             )
             checkpoint_tmp.replace(checkpoint_path)
+
+    def _persist_stream_diagnostic_event(
+        self,
+        request_id: str,
+        event: Mapping[str, Any],
+    ) -> None:
+        kind = str(event.get("kind") or "")
+        is_failed_terminal = (
+            kind == "run_finished"
+            and str(event.get("completion_status") or "").lower() == "error"
+        )
+        if not is_failed_terminal and kind != "terminal_diagnostic":
+            return
+        self._persist_diagnostic_record(
+            {
+                "kind": "stream_event",
+                "request_id": request_id,
+                "event": dict(event),
+            }
+        )

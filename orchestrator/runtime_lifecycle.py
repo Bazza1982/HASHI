@@ -281,9 +281,18 @@ async def process_queue(runtime: Any) -> None:
             runtime.error_logger.exception(f"Error in flex queue processing: {exc}")
             runtime.is_generating = False
         finally:
-            runtime.current_request_meta = None
             if item is not None:
+                background_ids = getattr(runtime, "_background_request_ids", set())
+                if item.request_id not in background_ids:
+                    registry = getattr(runtime, "_request_meta_by_id", None)
+                    if isinstance(registry, dict):
+                        registry.pop(item.request_id, None)
+                current_meta = getattr(runtime, "current_request_meta", None)
+                if isinstance(current_meta, dict) and current_meta.get("request_id") == item.request_id:
+                    runtime.current_request_meta = None
                 runtime.queue.task_done()
+            else:
+                runtime.current_request_meta = None
 
 
 async def _cancel_tasks(tasks: set[asyncio.Task]) -> None:
