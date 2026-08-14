@@ -148,10 +148,107 @@ def test_claw_max_iterations_does_not_deliver_dangling_tool_markup():
         stop_reason="max_iterations",
     )
 
-    response, metadata = _claw_incomplete_response(result, prompt="继续")
+    response, metadata = _claw_incomplete_response(
+        result,
+        prompt="""
+# IDENTITY.md
+- **Name:** 小夏 (Sunny)
+- **Self-reference:** Uses 小夏 or 我, with preference for 小夏.
+- **Emoji:** 🌸
+
+# USER.md
+- **What to call them:** 爸爸（可用敬称「您」，禁止使用「你」）
+""".strip(),
+    )
 
     assert "<｜｜DSML｜｜tool_calls>" not in response
+    assert response.startswith("爸爸，小夏这次还没有全部做完")
+    assert "执行未完成" not in response
+    assert "completion_status" not in response
+    assert "第 **12** 轮碰到执行上限" in response
+    assert "**1** 次操作拿到了正常回执" in response
+    assert "小夏不会把它报成成功" in response
+    assert response.count("🌸") == 3
+    assert "**建议：CONTINUE**" in response
     assert metadata["persona_final_response_preserved"] is False
+    assert metadata["persona_interpretation_generated"] is True
+    assert metadata["fallback_report_generated"] is True
+
+
+def test_claw_max_iterations_without_model_final_uses_sunny_persona_and_receipt_counts():
+    result = ClawTaskResult(
+        text="",
+        model="deepseek/test",
+        permission_mode="workspace-write",
+        cwd="/workspace",
+        returncode=0,
+        duration_ms=10,
+        stdout="",
+        stderr="",
+        json_data={},
+        tool_uses=[
+            {"id": f"tool-{index}", "name": "bash" if index <= 5 else "edit_file"}
+            for index in range(1, 12)
+        ],
+        tool_results=[
+            {"tool_use_id": f"tool-{index}", "output": "ok", "is_error": False}
+            for index in range(1, 12)
+        ],
+        iterations=12,
+        completion_status="incomplete",
+        stop_reason="max_iterations",
+    )
+
+    response, metadata = _claw_incomplete_response(
+        result,
+        prompt="""
+# IDENTITY.md
+- **Name:** 小夏 (Sunny)
+- **Vibe:** Warm and helpful. Calls Barry 爸爸.
+- **Self-reference:** Uses 小夏 or 我, with preference for 小夏.
+- **Emoji:** 🌸
+
+# USER.md - About Your Human
+- **What to call them:** 爸爸（可用敬称「您」，禁止使用「你」）
+""".strip(),
+    )
+
+    assert response.startswith("爸爸，小夏这次还没有全部做完")
+    assert "**11** 次操作拿到了正常回执" in response
+    assert "没有工具失败或缺失回执" in response
+    assert "整体任务仍未完成" in response
+    assert "**建议：CONTINUE**" in response
+    assert "`bash`" not in response
+    assert "completion_status" not in response
+    assert metadata["persona_interpretation_generated"] is True
+    assert metadata["successful_tool_results"] == 11
+    assert metadata["failed_tool_results"] == 0
+
+
+def test_claw_max_iterations_without_persona_uses_natural_neutral_fallback():
+    result = ClawTaskResult(
+        text="",
+        model="deepseek/test",
+        permission_mode="read-only",
+        cwd="/workspace",
+        returncode=0,
+        duration_ms=10,
+        stdout="",
+        stderr="",
+        json_data={},
+        tool_uses=[],
+        tool_results=[],
+        iterations=12,
+        completion_status="incomplete",
+        stop_reason="max_iterations",
+    )
+
+    response, metadata = _claw_incomplete_response(result, prompt="continue")
+
+    assert response.startswith("I haven't finished everything yet")
+    assert "Execution incomplete" not in response
+    assert "**Recommendation: CONTINUE**" in response
+    assert metadata["persona_interpretation_generated"] is True
 
 
 def test_stream_json_parser_accepts_legacy_diagnostics_when_run_finished_exists():
