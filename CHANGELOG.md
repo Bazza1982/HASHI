@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Evidence-grounded HER assurance checkpoints (`0.1.0-hashi.17`)** — HIGH
+  self-review and shared XHIGH/MAX/MAX+ mid-task replanning now receive a bounded
+  inline view of the current turn's real tool inputs and results. Reviews remain
+  advisory and fail open to the primary agent's answer. Repeated divergence through
+  the same canonical tool capability triggers one immediate review before normal
+  periodic cadence resumes. This package checkpoint is certified for HASHI1 Linux
+  x86-64; the prior Windows `.16` artifact remains separately archived.
 - **Certified HER `0.1.0-hashi.13` integration** — pinned the Linux HASHI
   Engine Runtime package to source `d63b1bf`, preserved fixed-mode session
   resume and structured streaming, exposed the shared HASHI Tool Registry over

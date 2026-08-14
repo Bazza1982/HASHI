@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for HER `0.1.0-hashi.16`; earlier unreleased integration checkpoint
+Status: active for HER `0.1.0-hashi.17`; earlier unreleased integration checkpoint
 recorded in
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
 
@@ -17,13 +17,14 @@ not certify a Windows build, another architecture, or a downstream integration.
 
 | Field | Certified value |
 | --- | --- |
-| Package version | `0.1.0-hashi.16` |
-| HER source | `cc28e447f1f32f5a4325bbe1670e2568ed01749a` |
+| Package version | `0.1.0-hashi.17` |
+| HER source | `781e39db266f33164245825d006d91cfc054fcf7` |
 | Upstream base | Claw `4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d` |
-| Linux target / SHA-256 | `linux-x86_64` / `2af160e894f2387a7e54df4bcd226f44af98dd8b539e3d9e5702f01c68dca640` |
-| Windows target / SHA-256 | `windows-x86_64` / `02934539ce8fa38213633c31130eaa1df70c647efdb2df138f3a0797a60da6ab` |
+| Linux target / SHA-256 | `linux-x86_64` / `6e7ea72f5c50fb6af1d3adf67478ee79f8a55741f78ec2c4a775a3e43039af57` |
 
-Both binaries report the same clean source commit and their native target triple.
+This HASHI1 release certifies Linux x86-64 only. The Windows
+`0.1.0-hashi.16` artifact remains archived under its original source identity and
+must not be represented as a `0.1.0-hashi.17` build.
 
 ## Ownership and session boundary
 
@@ -129,6 +130,14 @@ advisory. They trigger primary-agent reconsideration within the planned scope bu
 replace its judgment, suppress its final answer, or redefine completion. Provider-returned
 encrypted or redacted reasoning is never reconstructed.
 
+HIGH self-review and the shared mid-task replanning checkpoints use the same immutable
+task evidence store through a bounded inline ledger of current-turn tool inputs and
+results. The ledger is evidence for reflection, never new authorization. A checkpoint
+may update its task frame and trigger further primary-agent thought or revision, but a
+format failure or adverse finding remains fail-open and cannot suppress or replace the
+primary agent's answer. Repeated divergence through the same canonical tool capability
+triggers one immediate review; the configured periodic cadence then resumes.
+
 ## Tool Gateway contract
 
 `ToolRegistry` remains the single capability catalog and execution core. API backends
@@ -150,7 +159,7 @@ adapter generated under the agent's `backend_state` directory.
 
 ## Multimedia and media-read contract
 
-HER `.16` can consume model-visible images returned by allowed MCP tools. The
+HER `.17` can consume model-visible images returned by allowed MCP tools. The
 Gateway accepts canonical MCP image content and the reviewed legacy screenshot
 result shapes, then validates MIME type, decoded size, item count, and ordering
 before forwarding provider content. MCP `isError` results remain failures even
