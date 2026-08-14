@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import platform as py_platform
+import re
 import shutil
 import subprocess
 import sys
@@ -2026,33 +2027,44 @@ class HERAdapter(BaseBackend):
                 type(exc).__name__,
             )
 
-    def _habit_failure_result(
+    def _record_failed_turn_meditation_skip(
         self,
-        exc: BaseException,
         *,
-        started: float,
-    ) -> ClawTaskResult:
-        try:
-            permission_mode = self._permission_mode()
-        except Exception:  # noqa: BLE001 - preserve the original failure
-            permission_mode = "unknown"
-        return ClawTaskResult(
-            text="",
-            model=self._claw_model(),
-            permission_mode=permission_mode,
-            cwd=str(self.effective_workdir),
-            returncode=int(getattr(exc, "returncode", 1) or 1),
-            duration_ms=self._duration_ms(started),
-            stdout=str(getattr(exc, "stdout", "") or ""),
-            stderr=str(getattr(exc, "stderr", "") or str(exc)),
-            json_data={},
-            tool_uses=[],
-            tool_results=[],
-            session_id=None,
-            iterations=None,
-            completion_status="failed",
-            stop_reason=type(exc).__name__,
+        request_id: str,
+        exc: BaseException,
+    ) -> None:
+        """Keep ungrounded foreground failures out of the Habit learner."""
+
+        parsed_error = getattr(exc, "parsed_error", None)
+        parsed_error = parsed_error if isinstance(parsed_error, Mapping) else {}
+        raw_kind = parsed_error.get("kind") or parsed_error.get("type")
+        error_kind = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(raw_kind or "unknown"))[:80]
+        reason = "foreground_error_without_grounded_task_result"
+        self.logger.info(
+            "HER Habit Meditation skipped: request=%s reason=%s exception=%s error_kind=%s",
+            request_id,
+            reason,
+            type(exc).__name__,
+            error_kind,
         )
+        try:
+            _her_habits.append_habit_audit(
+                self.config.workspace_dir,
+                "habit_meditation_skipped",
+                agent_id=self.config.name,
+                request_id=request_id,
+                reason=reason,
+                exception_type=type(exc).__name__,
+                error_kind=error_kind,
+                returncode=getattr(exc, "returncode", None),
+                grounded_task_result=False,
+            )
+        except Exception as audit_exc:  # noqa: BLE001 - audit must not mask failure
+            self.logger.warning(
+                "HER Habit Meditation skip audit failed safely: request=%s error=%s",
+                request_id,
+                type(audit_exc).__name__,
+            )
 
     def _allowed_tools(self) -> list[str] | None:
         """Return an explicit Claw-native tool restriction, if configured.
@@ -2542,47 +2554,19 @@ class HERAdapter(BaseBackend):
                     reason=f"cancelled:{request_id}",
                 )
             if habit_config.enabled:
-                self._schedule_habit_meditation(
-                    job_id=meditation_job_id,
-                    request_id=request_id,
-                    task_prompt=prompt,
-                    task_result=self._habit_failure_result(exc, started=started),
-                    config=habit_config,
-                    notification_context=habit_notification_context,
-                )
+                self._record_failed_turn_meditation_skip(request_id=request_id, exc=exc)
             raise
         except ClawTimeoutError as exc:
             if habit_config.enabled:
-                self._schedule_habit_meditation(
-                    job_id=meditation_job_id,
-                    request_id=request_id,
-                    task_prompt=prompt,
-                    task_result=self._habit_failure_result(exc, started=started),
-                    config=habit_config,
-                    notification_context=habit_notification_context,
-                )
+                self._record_failed_turn_meditation_skip(request_id=request_id, exc=exc)
             return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
         except ClawCommandError as exc:
             if habit_config.enabled:
-                self._schedule_habit_meditation(
-                    job_id=meditation_job_id,
-                    request_id=request_id,
-                    task_prompt=prompt,
-                    task_result=self._habit_failure_result(exc, started=started),
-                    config=habit_config,
-                    notification_context=habit_notification_context,
-                )
+                self._record_failed_turn_meditation_skip(request_id=request_id, exc=exc)
             return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
         except (ClawError, ValueError) as exc:
             if habit_config.enabled:
-                self._schedule_habit_meditation(
-                    job_id=meditation_job_id,
-                    request_id=request_id,
-                    task_prompt=prompt,
-                    task_result=self._habit_failure_result(exc, started=started),
-                    config=habit_config,
-                    notification_context=habit_notification_context,
-                )
+                self._record_failed_turn_meditation_skip(request_id=request_id, exc=exc)
             return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
 
         if on_stream_event is not None:
