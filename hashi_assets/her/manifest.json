@@ -1,21 +1,21 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-her",
-  "version": "0.1.0-hashi.18",
+  "version": "0.1.0-hashi.19",
   "display_name": "HASHI Engine Runtime (HER)",
   "upstream_runtime": "Claw",
   "upstream_version": "0.1.3-hashi.33",
   "license": "MIT",
   "license_file": "CLAW_LICENSE",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "e6fd0349ff53ed731fd4e34e7ddcb8a7946ddaaf",
+  "source_commit": "79be4613e37d03781713253a04aa64aedf3f1902",
   "source_branch": "agent/remove-token-budget-fix-reasoning-stream",
   "build_date": "2026-08-14",
-  "notes": "HER 0.1.0-hashi.18 gives every planning-enabled fixed-mode checkpoint the same effective normalized session message view as the primary task agent. MEDIUM, HIGH, XHIGH, MAX, and MAX+ planning, replanning, self-review, and direct-response finalization can therefore resolve references to preserved prior user and assistant turns without phrase matching or duplicate HASHI history injection; LOW remains planning-disabled. The release retains 0.1.0-hashi.17's evidence-grounded advisory checkpoints and fail-open final-answer ownership. This HASHI1 release certifies the Linux x86-64 package only; the prior Windows 0.1.0-hashi.16 artifact remains archived but is not represented as a 0.1.0-hashi.18 build.",
+  "notes": "HER 0.1.0-hashi.19 preserves the complete normalized fixed-session message view for every planning-enabled checkpoint, then appends a request-local task-control envelope and requests provider-native JSON output so long conversations cannot turn a TaskFrame checkpoint into ordinary prose or tool execution. MEDIUM, HIGH, XHIGH, MAX, and MAX+ planning, replanning, self-review, and direct-response finalization share this contract; LOW remains planning-disabled. The envelope is never persisted and grants no user authority. This HASHI1 release certifies the Linux x86-64 package only; the prior Windows 0.1.0-hashi.16 artifact remains archived but is not represented as a 0.1.0-hashi.19 build.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.0-hashi.18/linux-x86_64/hashi-her",
-      "sha256": "86cc892a23448c8bab045467dc6a72eccd8cea77fdfe1ea059a63cce5de4cc8c",
+      "path": "releases/0.1.0-hashi.19/linux-x86_64/hashi-her",
+      "sha256": "3cd9dbee8617b7fb23a7df7893cc2a3bd17a70b0d0c3fa5945f41ab88f674538",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-her"
     }

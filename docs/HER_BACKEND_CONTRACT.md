@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for HER `0.1.0-hashi.18`; earlier unreleased integration checkpoint
+Status: active for HER `0.1.0-hashi.19`; earlier unreleased integration checkpoint
 recorded in
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
 
@@ -17,14 +17,14 @@ not certify a Windows build, another architecture, or a downstream integration.
 
 | Field | Certified value |
 | --- | --- |
-| Package version | `0.1.0-hashi.18` |
-| HER source | `e6fd0349ff53ed731fd4e34e7ddcb8a7946ddaaf` |
+| Package version | `0.1.0-hashi.19` |
+| HER source | `79be4613e37d03781713253a04aa64aedf3f1902` |
 | Upstream base | Claw `4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d` |
-| Linux target / SHA-256 | `linux-x86_64` / `86cc892a23448c8bab045467dc6a72eccd8cea77fdfe1ea059a63cce5de4cc8c` |
+| Linux target / SHA-256 | `linux-x86_64` / `3cd9dbee8617b7fb23a7df7893cc2a3bd17a70b0d0c3fa5945f41ab88f674538` |
 
 This HASHI1 release certifies Linux x86-64 only. The Windows
 `0.1.0-hashi.16` artifact remains archived under its original source identity and
-must not be represented as a `0.1.0-hashi.18` build.
+must not be represented as a `0.1.0-hashi.19` build.
 
 ## Ownership and session boundary
 
@@ -62,6 +62,14 @@ and direct-response finalization at every planning-enabled effort (`medium`, `hi
 `xhigh`, `max`, and `max+`). `low` deliberately has planning disabled. HASHI must not
 duplicate the fixed-session history in the new prompt, and the runtime must not rely on
 phrase matching to decide when context is needed.
+
+After that exact persistent-session prefix, HER appends one request-local task-control
+envelope and asks compatible providers for a JSON object. The envelope is deliberately
+last so a long conversation cannot make the model continue ordinary chat, emit prose,
+or execute a tool instead of returning the required TaskFrame. It is runtime control,
+not user intent or new authority, and it is never appended to the persistent session.
+Existing format validation and bounded retries remain fail-safe for providers that
+occasionally return empty or invalid JSON.
 
 For every Flex turn, the complete canonical turn payload is the user message seen by
 HER's task planner. The authoritative current request is repeated separately as the

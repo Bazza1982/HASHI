@@ -132,6 +132,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Long-session HER planner protocol (`0.1.0-hashi.19`)** — preserved the
+  complete fixed-session context while moving the planning control boundary to a
+  non-persisted trailing envelope and enabling provider-native JSON output. This
+  prevents a long conversation from producing ordinary prose or tool markup at a
+  TaskFrame checkpoint, exhausting format retries, and falling back to an unrelated
+  historical task. The Linux x86-64 package is pinned to source `79be4613` and
+  SHA-256 `3cd9dbee8617b7fb...`.
 - **Fixed-session HER planner continuity (`0.1.0-hashi.18`)** — all
   planning-enabled effort levels now give planning, replanning, self-review, and
   direct-response checkpoints the same normalized persistent session view used by

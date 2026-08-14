@@ -65,13 +65,69 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260813-027` | Fixed — live verification pending | P1 | Habit Meditation model work occupied the foreground execution queue and process slot | `test_habit_meditation_model_work_does_not_block_foreground_task`; `test_habit_meditation_uses_low_effort_tool_free_snapshot` |
 | `HER-20260813-028` | Fixed — live verification pending | P1 | max-iteration handling could replace a usable primary-agent final answer with a mechanical incomplete report | `test_claw_incomplete_max_iterations_preserves_normal_final`; `test_claw_incomplete_dangling_tool_markup_uses_deterministic_report` |
 | `HER-20260814-029` | Fixed — live verification pending | P2 | HIGH/XHIGH shared checkpoints reviewed stale task frames without current tool evidence and repeated the same divergence review | `high_effort_reserves_turns_for_review_and_validation`; `high_effort_deduplicates_repeated_unplanned_tool_reviews` |
-| `HER-20260814-030` | Fixed — live verification pending | P1 | fixed-mode planner saw only the incremental current prompt, not the persistent session view used by the primary agent | `fixed_session_planner_sees_resumed_options_at_every_planning_effort`; `medium_plus_plans_replans_and_reports_non_blocking_tool_divergence` |
+| `HER-20260814-030` | Verified | P1 | fixed-mode planner saw only the incremental current prompt, not the persistent session view used by the primary agent | `fixed_session_planner_sees_resumed_options_at_every_planning_effort`; `medium_plus_plans_replans_and_reports_non_blocking_tool_divergence` |
+| `HER-20260814-031` | Verified | P1 | long fixed sessions could make the planner answer as the conversational agent instead of returning TaskFrame JSON | `planner_request_preserves_session_prefix_and_appends_nonpersistent_control`; fixed-session direct-response effort matrix |
 
 ## Historical entries
 
+### HER-20260814-031 — long fixed sessions displaced the planner protocol
+
+- **Status:** Verified
+- **Severity:** P1
+- **Expected:** the planner sees the same effective fixed-session context as the
+  primary agent and returns one schema-valid TaskFrame without tools or side effects,
+  leaving enough time for the user-visible turn to complete inside Workbench's
+  280-second wait boundary.
+- **Actual:** the planner correctly resolved the current `A` against the preceding
+  choices but replied as the conversational agent: first as prose, then as tool
+  markup, then as prose again. Three rejected frames consumed roughly 501 seconds,
+  Workbench returned HTTP 504, and conservative fallback let the primary agent resume
+  an unrelated historical task from the same production session.
+- **User-visible impact:** a continuity answer timed out while backend work continued;
+  fallback could perform stale in-scope-looking work after the caller had already
+  received 504.
+- **Root cause:** the full persistent conversation correctly preceded the planner's
+  system instructions, but a very long chat made the provider continue the normal
+  assistant role instead of obeying the earlier TaskFrame output contract. The first
+  live canary also violated its own fresh-session requirement by reusing a production
+  session, so it did not isolate the protocol regression.
+- **Fix:** retain the persistent session as an exact request prefix, append a final
+  request-local task-control envelope that explicitly forbids prose, tools, and task
+  execution, and request provider-native JSON output for TaskFrame and other
+  schema-bound runtime calls. The envelope is not persisted and grants no user
+  authority. The corrected canary explicitly requires restatement only, with no tools
+  or writes.
+- **HER source:** `79be4613e37d03781713253a04aa64aedf3f1902`.
+- **Fixed HER:** `0.1.0-hashi.19` Linux x86-64 / SHA-256
+  `3cd9dbee8617b7fb23a7df7893cc2a3bd17a70b0d0c3fa5945f41ab88f674538`.
+- **Regression tests:** the planner request preserves all normalized session messages
+  as an exact prefix, appends exactly one non-persistent control envelope, maps JSON
+  mode only onto schema-bound calls, and verifies direct responses at `medium`,
+  `high`, `xhigh`, `max`, and `max+`; `low` remains the planning-disabled negative
+  control.
+- **Automated verification:** format check, Rust runtime `655/655`, two conformance
+  tests, 12 integration tests, full workspace/all-target tests, and workspace/all-target
+  Clippy with warnings denied passed from the pinned clean source.
+- **Live provider verification:** isolated two-round fixed sessions passed on direct
+  DeepSeek at all six effort levels. Every round completed under 29 seconds, every
+  planning-enabled level emitted one parsed control frame, `low` emitted none, all
+  second turns recovered the exact effort-specific marker, and no tools or workspace
+  writes occurred.
+- **Workbench verification:** HASHI1 `temp`, fixed HER, direct DeepSeek
+  `deepseek-v4-pro`, and `/effort max` used a previously empty HER checkpoint and
+  `/api/browser/chat/send` with `timeout_s=280`. Request `req-0001` returned HTTP 200
+  in 48.197496 seconds with all three options. Its first schema-valid JSON frame was
+  rejected for retaining future work in a `direct_response`; the bounded retry parsed
+  normally, with no prose or tool markup. Request `req-0002` contained only `A`,
+  parsed its TaskFrame on attempt one, restored blue `ORCHID-WB-MAX-731`, and returned
+  HTTP 200 in 37.865036 seconds. Both runs finished in one iteration with
+  `tool_calls=0`; the tool-action audit gained no rows; the five-line persistent
+  session contains no task-control envelope. No `/new`, reset, or wipe flow was used.
+- **Recurrence count:** 0
+
 ### HER-20260814-030 — fixed-mode planner was detached from the persistent session
 
-- **Status:** Fixed — live verification pending
+- **Status:** Verified
 - **Severity:** P1
 - **Expected:** every planning-enabled fixed-mode checkpoint sees the same effective
   normalized session messages as the primary task agent, including the immediately
@@ -102,9 +158,11 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   proves a later replan sees the primary agent's complete tool-bearing session.
 - **Automated verification:** Rust runtime `655/655`, full Rust workspace tests, and
   workspace/all-target Clippy with warnings denied passed from the pinned clean source.
-- **Live retest required:** reload Sakura onto `.18`, establish a fresh fixed session,
-  have her emit concrete A/B/C choices, reply only `A`, and confirm the planner event
-  and final answer resolve the preserved option without a HASHI recent-context copy.
+- **Live verification:** the `.19` Workbench canary recorded under
+  `HER-20260814-031` established a new fixed HER session, then sent only `A` on the
+  second turn. The first-attempt planner and final response both resolved the preserved
+  option as blue `ORCHID-WB-MAX-731` without a duplicated HASHI history prompt, tool
+  call, write, reset, or timeout.
 - **Recurrence count:** 0
 
 ### HER-20260814-029 — assurance checkpoints could not see current execution evidence
