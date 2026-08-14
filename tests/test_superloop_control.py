@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from threading import Event, Thread
 
+import orchestrator.superloop_interlock as superloop_interlock
+
 from orchestrator.superloop_control import SuperloopControlService
 from orchestrator.superloop_interlock import DispatchInterlockError, guarded_dispatch
 from orchestrator.superloop_store import SuperloopStore, agent_actor
@@ -140,3 +142,30 @@ def test_completed_pause_is_a_hard_boundary_for_dispatch_acceptance(tmp_path: Pa
             raise AssertionError("paused loop admitted a new dispatch")
     except DispatchInterlockError as exc:
         assert exc.decision.reason == "paused"
+
+
+def test_dispatch_lock_uses_windows_file_lock_fallback(tmp_path: Path, monkeypatch) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    _create_loop(store, "sl-control-windows-lock")
+
+    class FakeMsvcrt:
+        LK_LOCK = 1
+        LK_UNLCK = 2
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, int]] = []
+
+        def locking(self, _fileno: int, mode: int, size: int) -> None:
+            self.calls.append((mode, size))
+
+    fake_msvcrt = FakeMsvcrt()
+    monkeypatch.setattr(superloop_interlock, "fcntl", None)
+    monkeypatch.setattr(superloop_interlock, "msvcrt", fake_msvcrt)
+
+    with superloop_interlock.loop_dispatch_lock(store, "sl-control-windows-lock"):
+        assert fake_msvcrt.calls == [(fake_msvcrt.LK_LOCK, 1)]
+
+    assert fake_msvcrt.calls == [
+        (fake_msvcrt.LK_LOCK, 1),
+        (fake_msvcrt.LK_UNLCK, 1),
+    ]
