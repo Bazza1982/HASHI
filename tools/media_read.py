@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.registry import StructuredToolOutput
+from tools.ocr import OCRResult, extract_image_bytes, format_ocr_block, normalize_ocr_languages
 
 
 IMAGE_EXTENSIONS = {
@@ -204,7 +205,12 @@ def _image_block(encoded: bytes) -> dict[str, str]:
     }
 
 
-def _read_image(path: Path) -> StructuredToolOutput:
+def _read_image(
+    path: Path,
+    *,
+    ocr_mode: str = "auto",
+    ocr_languages: tuple[str, ...] | None = None,
+) -> StructuredToolOutput:
     from PIL import Image
 
     _check_size(path, IMAGE_MAX_BYTES, "image")
@@ -229,14 +235,30 @@ def _read_image(path: Path) -> StructuredToolOutput:
     except Exception as exc:
         raise MediaReadError(f"image decode failed: {exc}") from exc
 
+    ocr_result: OCRResult | None = None
+    if ocr_mode != "off":
+        ocr_result = extract_image_bytes(encoded, languages=ocr_languages)
+        if ocr_mode == "required" and (
+            ocr_result.status not in {"ok", "empty"} or ocr_result.missing_languages
+        ):
+            detail = ocr_result.error or ocr_result.status
+            raise MediaReadError(f"required OCR is unavailable or incomplete: {detail}")
+
+    ocr_status = ocr_result.status if ocr_result is not None else "off"
+    used_languages = "+".join(ocr_result.used_languages) if ocr_result is not None else "none"
     summary = (
         f"Media image ready: name={path.name}; format={original_format}; "
         f"source={original_size[0]}x{original_size[1]}; "
-        f"normalized={normalized_size[0]}x{normalized_size[1]}; frame=1."
+        f"normalized={normalized_size[0]}x{normalized_size[1]}; frame=1; "
+        f"ocr_status={ocr_status}; ocr_languages={used_languages}."
     )
+    content: list[dict[str, str]] = [{"type": "text", "text": summary}]
+    if ocr_result is not None:
+        content.append({"type": "text", "text": format_ocr_block(ocr_result)})
+    content.append(_image_block(encoded))
     return StructuredToolOutput(
         output=summary,
-        content=[{"type": "text", "text": summary}, _image_block(encoded)],
+        content=content,
     )
 
 
@@ -535,7 +557,23 @@ async def execute_media_read(
         )
         kind = await asyncio.to_thread(_validate_signature, path)
         if kind == "image":
-            return await asyncio.to_thread(_read_image, path)
+            ocr_mode = str(args.get("ocr_mode") or "auto").strip().casefold()
+            if ocr_mode not in {"auto", "required", "off"}:
+                raise MediaReadError("ocr_mode must be auto, required, or off")
+            raw_languages = args.get("ocr_languages")
+            if raw_languages is not None and not isinstance(raw_languages, list):
+                raise MediaReadError("ocr_languages must be an array of language codes")
+            ocr_languages = (
+                normalize_ocr_languages(raw_languages)
+                if raw_languages is not None
+                else None
+            )
+            return await asyncio.to_thread(
+                _read_image,
+                path,
+                ocr_mode=ocr_mode,
+                ocr_languages=ocr_languages,
+            )
         if kind == "pdf":
             mode = str(args.get("pdf_pages") or "auto")
             if mode not in {"auto", "all", "none"}:

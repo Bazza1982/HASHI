@@ -42,6 +42,10 @@ test = [
 ]
 whatsapp = ["neonize>=1.0.0"]
 voice = ["edge-tts>=6.0.0"]
+ocr = [
+    "paddleocr==3.7.0",
+    "paddlepaddle==3.3.1",
+]
 kubernetes = ["kubernetes>=29.0.0,<32.0.0"]
 vector = [
     "sqlite-vec>=0.1.6",

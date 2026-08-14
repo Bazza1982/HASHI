@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "id": "hashi-paddleocr-multilingual-ocr",
+  "runtime": {
+    "paddleocr": "3.7.0",
+    "paddlepaddle": "3.3.1"
+  },
+  "source": {
+    "owner": "PaddlePaddle",
+    "base_url": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0",
+    "release": "paddle3.0.0"
+  },
+  "license": "Apache-2.0",
+  "default_languages": [
+    "eng",
+    "chi_sim",
+    "chi_tra",
+    "jpn",
+    "kor",
+    "ara",
+    "rus",
+    "fra",
+    "deu"
+  ],
+  "routes": {
+    "universal": ["eng", "chi_sim", "chi_tra", "jpn", "fra", "deu"],
+    "korean": ["kor"],
+    "eslav": ["rus"],
+    "arabic": ["ara"]
+  },
+  "models": [
+    {
+      "name": "PP-OCRv6_medium_det",
+      "role": "detection",
+      "archive": {
+        "name": "PP-OCRv6_medium_det_infer.tar",
+        "size_bytes": 62279680,
+        "sha256": "144d0621e059566e5086e228829171591c144c2deb07b2dad4962214fbabfcf7"
+      },
+      "files": [
+        {"path": "inference.json", "size_bytes": 312150, "sha256": "0f1a7ec35da36173529c7a60238b7f7919e3831929c3f700ad90ad4896adecd5"},
+        {"path": "inference.pdiparams", "size_bytes": 61960476, "sha256": "85218d2e3d98f5a21c58b4220627be923a97aee5db3cc71f39536ab31ac53960"},
+        {"path": "inference.yml", "size_bytes": 886, "sha256": "7298d5ead546584af2504d03355f881ac7a7bc0eb1e282d3e159277c1d0af871"}
+      ]
+    },
+    {
+      "name": "PP-OCRv6_medium_rec",
+      "role": "universal",
+      "archive": {
+        "name": "PP-OCRv6_medium_rec_infer.tar",
+        "size_bytes": 76851200,
+        "sha256": "4eecc1c6a4623765042e6fc15446da0da110b7d875b6b72b2d351d2b2dbd4da6"
+      },
+      "files": [
+        {"path": "inference.json", "size_bytes": 221814, "sha256": "0b2e25e990bd072f1bf77d59d67d508bce6c4bd44af6624e0fb27d6da2cd00e8"},
+        {"path": "inference.pdiparams", "size_bytes": 76465087, "sha256": "1b01c79a914587933f615569e75de54f2e638ebb5d3f3b3c1b38c24ede8c7319"},
+        {"path": "inference.yml", "size_bytes": 150580, "sha256": "991b700facf5b50a7de193468207d5f4255b538dde0d312ae3b7c7a9b6873129"}
+      ]
+    },
+    {
+      "name": "korean_PP-OCRv5_mobile_rec",
+      "role": "korean",
+      "archive": {
+        "name": "korean_PP-OCRv5_mobile_rec_infer.tar",
+        "size_bytes": 13680640,
+        "sha256": "a6261f800ad335aa6ef77b6f7c4dcedfd5e11b95f4d70982d41ee31c2ace5e66"
+      },
+      "files": [
+        {"path": "inference.json", "size_bytes": 217724, "sha256": "562404e3c590c50c93778d5f0a94df21b47b5ab8f3ea6d47c7f8a7930c3bc844"},
+        {"path": "inference.pdiparams", "size_bytes": 13342671, "sha256": "cac3e5f12cf04aaa77f6a5bc704e4e736ef2908476551891d84b41b4e9090462"},
+        {"path": "inference.yml", "size_bytes": 96039, "sha256": "f757fa1c40e99edcf27e9cce879b93eb2a51fa46f5ef39095689b8c37dd75998"}
+      ]
+    },
+    {
+      "name": "eslav_PP-OCRv5_mobile_rec",
+      "role": "eslav",
+      "archive": {
+        "name": "eslav_PP-OCRv5_mobile_rec_infer.tar",
+        "size_bytes": 8058880,
+        "sha256": "b9f70da0ca2bbc4d4cb7ba406a2d023061178437d6a930f07c8ca18c6c591839"
+      },
+      "files": [
+        {"path": "inference.json", "size_bytes": 217712, "sha256": "3fb6e2e658f5139ff16e35260de8f0577f106a9505c902e1dfc1f4f1d03cc9cb"},
+        {"path": "inference.pdiparams", "size_bytes": 7811519, "sha256": "f11057b05d8517868bca505271278973d706600d9dcc184cbcf5c4512091c32b"},
+        {"path": "inference.yml", "size_bytes": 4538, "sha256": "025039bac23eb4a308efcefa4d58eab3af440767815c6ba6938468bf6353ee5a"}
+      ]
+    },
+    {
+      "name": "arabic_PP-OCRv5_mobile_rec",
+      "role": "arabic",
+      "archive": {
+        "name": "arabic_PP-OCRv5_mobile_rec_infer.tar",
+        "size_bytes": 8151040,
+        "sha256": "a25c1f96cd0cda485b942851b5afb4a95bc4041a56c295bb4439190d53ee0a14"
+      },
+      "files": [
+        {"path": "inference.json", "size_bytes": 217712, "sha256": "d43832804d89c0e18d59f8446a3babd0ef60c44bc335efddac3176caf71d50af"},
+        {"path": "inference.pdiparams", "size_bytes": 7922839, "sha256": "4b4271fd1dd89a40b2056e1a42e58de7c0df2fdcf1a97ca9a8916d7ec45f9143"},
+        {"path": "inference.yml", "size_bytes": 6165, "sha256": "21368419e6c016c31db55d316d59e11c128e1913e6e6fe10287084710043d3a6"}
+      ]
+    }
+  ]
+}
