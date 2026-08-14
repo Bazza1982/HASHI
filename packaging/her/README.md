@@ -23,14 +23,15 @@ is accepted only as a migration alias.
 
 | Platform | Runtime | Source | Status |
 | --- | --- | --- | --- |
-| Linux x86-64 | `0.1.0-hashi.13` | `d63b1bf86600cd4f54015c0dd5656cbcd35a8f3b` | Current certified standalone HASHI package |
-| Windows x86-64 | Not packaged | — | Current Windows build and parity certification pending |
+| Linux x86-64 | `0.1.0-hashi.14` | `efc3a469e1a32e97ebecd995ed73ac41eaa5de54` | Current certified standalone HASHI package |
+| Windows x86-64 | `0.1.0-hashi.14` | `efc3a469e1a32e97ebecd995ed73ac41eaa5de54` | Native Windows version smoke certified |
 
-The certified Linux `.13` SHA-256 is
-`be6321017747858fc8cbc11796c4c79a73403de1bd5508caf245b32288ec4bb5`.
-Do not infer Windows parity from the Linux manifest. A current Windows build
-needs its own reproducible source lock, checksum, product integration, and test
-evidence.
+The certified `.14` SHA-256 digests are
+`76aa013b0d9f6a00336b8c29958a9b5d3af83df34309cb725b6b36f4cf746ce0`
+for Linux and
+`3fb3eee1297a0349868e650263d2f40de1e53e59a262590ee743f2c55ce71345`
+for Windows. Both binaries use the same clean source lock; each platform keeps
+its own checksum and runtime smoke evidence.
 
 ## Verification
 
