@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for HER `0.1.0-hashi.15`; earlier unreleased integration checkpoint
+Status: active for HER `0.1.0-hashi.16`; earlier unreleased integration checkpoint
 recorded in
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
 
@@ -17,11 +17,11 @@ not certify a Windows build, another architecture, or a downstream integration.
 
 | Field | Certified value |
 | --- | --- |
-| Package version | `0.1.0-hashi.15` |
-| HER source | `43edc6e0d5b4a664f9cf29001ae413d04e87e4f4` |
+| Package version | `0.1.0-hashi.16` |
+| HER source | `cc28e447f1f32f5a4325bbe1670e2568ed01749a` |
 | Upstream base | Claw `4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d` |
-| Linux target / SHA-256 | `linux-x86_64` / `fea66c95d04846667147147182c062d08c74e40d90ae4b41aa8e09b1d27f7292` |
-| Windows target / SHA-256 | `windows-x86_64` / `308ce14df39641fe939970abfd9c75757ad8af623e46832a3abba5007f69f6a8` |
+| Linux target / SHA-256 | `linux-x86_64` / `2af160e894f2387a7e54df4bcd226f44af98dd8b539e3d9e5702f01c68dca640` |
+| Windows target / SHA-256 | `windows-x86_64` / `02934539ce8fa38213633c31130eaa1df70c647efdb2df138f3a0797a60da6ab` |
 
 Both binaries report the same clean source commit and their native target triple.
 
@@ -51,6 +51,15 @@ The Bridge sends an incremental turn only in `fixed` mode after the adapter has 
 session identity. Flex, Wrapper, Audit, and Dual Brain use HASHI-owned assembled
 context. Those full-context modes must not also resume HER's previous internal
 conversation.
+
+For every Flex turn, the complete canonical turn payload is the user message seen by
+HER's task planner. The authoritative current request is repeated separately as the
+active task boundary, but it never replaces the labeled Additional System Context,
+Memory+ Continuity, Recent Context, or other accompanying evidence. Initial planning,
+format retries, independent-review revisions, revision retries, and later replanning all
+preserve that same payload. A planner may finalize a `direct_response` only after seeing
+the complete payload. This is a mode-wide context contract; it does not depend on a list
+of phrases or lexical triggers.
 
 HER now implements the runtime's `set_session_mode()` hook. Disabling session
 mode clears the in-memory identity and its persisted checkpoint, passes no
@@ -141,7 +150,7 @@ adapter generated under the agent's `backend_state` directory.
 
 ## Multimedia and media-read contract
 
-HER `.15` can consume model-visible images returned by allowed MCP tools. The
+HER `.16` can consume model-visible images returned by allowed MCP tools. The
 Gateway accepts canonical MCP image content and the reviewed legacy screenshot
 result shapes, then validates MIME type, decoded size, item count, and ordering
 before forwarding provider content. MCP `isError` results remain failures even
