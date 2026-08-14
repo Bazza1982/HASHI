@@ -100,6 +100,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **HER source:** `79be4613e37d03781713253a04aa64aedf3f1902`.
 - **Fixed HER:** `0.1.0-hashi.19` Linux x86-64 / SHA-256
   `3cd9dbee8617b7fb23a7df7893cc2a3bd17a70b0d0c3fa5945f41ab88f674538`.
+- **HASHI package commit:** `0d27419a8916b9ca15bd83743eff729e634d06c7`.
 - **Regression tests:** the planner request preserves all normalized session messages
   as an exact prefix, appends exactly one non-persistent control envelope, maps JSON
   mode only onto schema-bound calls, and verifies direct responses at `medium`,
