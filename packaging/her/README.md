@@ -23,15 +23,15 @@ is accepted only as a migration alias.
 
 | Platform | Runtime | Source | Status |
 | --- | --- | --- | --- |
-| Linux x86-64 | `0.1.0-hashi.16` | `cc28e447f1f32f5a4325bbe1670e2568ed01749a` | Current certified standalone HASHI package |
-| Windows x86-64 | `0.1.0-hashi.16` | `cc28e447f1f32f5a4325bbe1670e2568ed01749a` | Native Windows version smoke certified |
+| Linux x86-64 | `0.1.0-hashi.17` | `781e39db266f33164245825d006d91cfc054fcf7` | Current certified HASHI1 package |
 
-The certified `.16` SHA-256 digests are
-`2af160e894f2387a7e54df4bcd226f44af98dd8b539e3d9e5702f01c68dca640`
-for Linux and
-`02934539ce8fa38213633c31130eaa1df70c647efdb2df138f3a0797a60da6ab`
-for Windows. Both binaries use the same clean source lock; each platform keeps
-its own checksum and runtime smoke evidence.
+The certified Linux `.17` SHA-256 digest is
+`6e7ea72f5c50fb6af1d3adf67478ee79f8a55741f78ec2c4a775a3e43039af57`.
+This HASHI1 release is deliberately Linux-only. The native Windows
+`0.1.0-hashi.16` artifact remains archived with source
+`cc28e447f1f32f5a4325bbe1670e2568ed01749a` and SHA-256
+`02934539ce8fa38213633c31130eaa1df70c647efdb2df138f3a0797a60da6ab`;
+it is not represented as a `.17` build.
 
 ## Verification
 

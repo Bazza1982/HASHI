@@ -64,8 +64,40 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260813-026` | Fixed — live verification pending | P1 | MAX+ critic gates could repeatedly delay and then suppress otherwise usable completed work | `max_effort_returns_agent_owned_final_after_execution_review_exhaustion`; `max_plus_trivial_plan_skips_independent_review_gates` |
 | `HER-20260813-027` | Fixed — live verification pending | P1 | Habit Meditation model work occupied the foreground execution queue and process slot | `test_habit_meditation_model_work_does_not_block_foreground_task`; `test_habit_meditation_uses_low_effort_tool_free_snapshot` |
 | `HER-20260813-028` | Fixed — live verification pending | P1 | max-iteration handling could replace a usable primary-agent final answer with a mechanical incomplete report | `test_claw_incomplete_max_iterations_preserves_normal_final`; `test_claw_incomplete_dangling_tool_markup_uses_deterministic_report` |
+| `HER-20260814-029` | Fixed — live verification pending | P2 | HIGH/XHIGH shared checkpoints reviewed stale task frames without current tool evidence and repeated the same divergence review | `high_effort_reserves_turns_for_review_and_validation`; `high_effort_deduplicates_repeated_unplanned_tool_reviews` |
 
 ## Historical entries
+
+### HER-20260814-029 — assurance checkpoints could not see current execution evidence
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P2
+- **Expected:** HIGH self-review and shared XHIGH/MAX/MAX+ mid-task replanning see
+  the current turn's real tool inputs and results, then provide advisory feedback that
+  may make the primary agent think again or revise without suppressing its answer.
+- **Actual:** checkpoint requests contained the canonical turn payload and previous
+  task frame but no current tool results. A long Sakura run therefore retained empty
+  progress/evidence fields and eventually claimed that no tools had run. Repeated use
+  of the same unplanned shell capability also triggered a new blind review each time.
+- **Root cause:** `run_task_checkpoint` was not connected to the immutable evidence
+  store used by independent completion review, and divergence triggers had no
+  per-capability turn-level deduplication.
+- **Fix:** pass current assistant tool calls and tool results into every mid-task
+  checkpoint, render a bounded inline evidence ledger, keep the review explicitly
+  advisory/fail-open, and trigger only one immediate review per unplanned canonical
+  tool capability before returning to the configured periodic cadence.
+- **HER source:** `781e39db266f33164245825d006d91cfc054fcf7`.
+- **Fixed HER:** `0.1.0-hashi.17` Linux x86-64 / SHA-256
+  `6e7ea72f5c50fb6af1d3adf67478ee79f8a55741f78ec2c4a775a3e43039af57`.
+- **HASHI package commit:** pending this packaging checkpoint.
+- **Regression tests:** `high_effort_reserves_turns_for_review_and_validation`,
+  `high_effort_adds_a_critical_review_after_tool_failure`,
+  `high_effort_deduplicates_repeated_unplanned_tool_reviews`, and
+  `inline_catalog_exposes_results_without_advertising_unavailable_tools`.
+- **Live retest required:** one HIGH multi-tool task and one XHIGH task must show
+  non-empty execution evidence in the checkpoint while the primary answer is still
+  delivered normally.
+- **Recurrence count:** 0
 
 ### HER-20260813-026 — MAX+ assurance became a hard completion gate
 
