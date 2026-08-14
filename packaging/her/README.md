@@ -23,15 +23,15 @@ is accepted only as a migration alias.
 
 | Platform | Runtime | Source | Status |
 | --- | --- | --- | --- |
-| Linux x86-64 | `0.1.0-hashi.18` | `e6fd0349ff53ed731fd4e34e7ddcb8a7946ddaaf` | Current certified HASHI1 package |
+| Linux x86-64 | `0.1.0-hashi.19` | `79be4613e37d03781713253a04aa64aedf3f1902` | Current certified HASHI1 package |
 
-The certified Linux `.18` SHA-256 digest is
-`86cc892a23448c8bab045467dc6a72eccd8cea77fdfe1ea059a63cce5de4cc8c`.
+The certified Linux `.19` SHA-256 digest is
+`3cd9dbee8617b7fb23a7df7893cc2a3bd17a70b0d0c3fa5945f41ab88f674538`.
 This HASHI1 release is deliberately Linux-only. The native Windows
 `0.1.0-hashi.16` artifact remains archived with source
 `cc28e447f1f32f5a4325bbe1670e2568ed01749a` and SHA-256
 `02934539ce8fa38213633c31130eaa1df70c647efdb2df138f3a0797a60da6ab`;
-it is not represented as a `.18` build.
+it is not represented as a `.19` build.
 
 ## Verification
 
