@@ -13,6 +13,7 @@ from PIL import Image
 from tools.gateway.context import load_gateway_context, write_gateway_context
 from tools.gateway.mcp_stdio import ToolGateway
 from tools.media_read import MediaProbe, MediaReadError, _probe_av, execute_media_read
+from tools.ocr import OCRResult
 from tools.registry import StructuredToolOutput, ToolRegistry
 
 
@@ -43,16 +44,72 @@ async def test_media_read_normalizes_image_to_mcp_image_without_bytes_in_output(
     assert result.is_error is False
     assert result.content is not None
     assert result.content[0]["type"] == "text"
-    assert result.content[1]["type"] == "image"
-    assert result.content[1]["mimeType"] == "image/jpeg"
-    assert base64.b64decode(result.content[1]["data"]).startswith(b"\xff\xd8\xff")
-    assert result.content[1]["data"] not in result.output
+    image = next(block for block in result.content if block["type"] == "image")
+    assert image["mimeType"] == "image/jpeg"
+    assert base64.b64decode(image["data"]).startswith(b"\xff\xd8\xff")
+    assert image["data"] not in result.output
     assert "normalized=40x30" in result.output
     audit = json.loads(
         (tmp_path / "tool_action_audit.jsonl").read_text(encoding="utf-8").splitlines()[-1]
     )
     assert audit["tool_name"] == "media_read"
-    assert result.content[1]["data"] not in json.dumps(audit)
+    assert image["data"] not in json.dumps(audit)
+
+
+@pytest.mark.asyncio
+async def test_media_read_adds_bounded_multilingual_ocr_before_the_image(tmp_path, monkeypatch):
+    path = tmp_path / "medicine.png"
+    Image.new("RGB", (40, 30), "white").save(path)
+    monkeypatch.setattr(
+        "tools.media_read.extract_image_bytes",
+        lambda *_args, **_kwargs: OCRResult(
+            status="ok",
+            text="感冒薬 약 دواء médicament Medikament",
+            requested_languages=("chi_sim", "jpn", "kor", "ara", "fra", "deu"),
+            used_languages=("chi_sim", "jpn", "kor", "ara", "fra", "deu"),
+        ),
+    )
+
+    result = await execute_media_read(
+        {
+            "path": str(path),
+            "ocr_languages": ["chi_sim", "jpn", "kor", "ara", "fra", "deu"],
+        },
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        media_roots=[],
+    )
+
+    assert isinstance(result, StructuredToolOutput)
+    assert [block["type"] for block in result.content] == ["text", "text", "image"]
+    assert "感冒薬 약 دواء médicament Medikament" in result.content[1]["text"]
+    assert "ocr_status=ok" in result.output
+    assert "感冒薬" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_media_read_required_ocr_fails_closed_when_models_are_missing(tmp_path, monkeypatch):
+    path = tmp_path / "medicine.png"
+    Image.new("RGB", (40, 30), "white").save(path)
+    monkeypatch.setattr(
+        "tools.media_read.extract_image_bytes",
+        lambda *_args, **_kwargs: OCRResult(
+            status="unavailable",
+            requested_languages=("chi_tra",),
+            missing_languages=("chi_tra",),
+            error="language model missing",
+        ),
+    )
+
+    result = await execute_media_read(
+        {"path": str(path), "ocr_mode": "required", "ocr_languages": ["chi_tra"]},
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        media_roots=[],
+    )
+
+    assert isinstance(result, str)
+    assert result.startswith("Error: media_read failed: required OCR")
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "id": "hashi-tesseract-fast-multilingual-ocr",
+  "engine": {
+    "name": "tesseract",
+    "minimum_version": "4.1.1"
+  },
+  "source": "https://github.com/tesseract-ocr/tessdata_fast",
+  "revision": "87416418657359cb625c412a48b6e1d6d41c29bd",
+  "license": "Apache-2.0",
+  "license_file": {
+    "path": "LICENSE",
+    "size_bytes": 11358,
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  "default_languages": [
+    "eng",
+    "chi_sim",
+    "chi_tra",
+    "jpn",
+    "kor",
+    "ara",
+    "rus",
+    "fra",
+    "deu"
+  ],
+  "files": [
+    {
+      "language": "eng",
+      "name": "eng.traineddata",
+      "size_bytes": 4113088,
+      "sha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
+    },
+    {
+      "language": "osd",
+      "name": "osd.traineddata",
+      "size_bytes": 10562727,
+      "sha256": "9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff"
+    },
+    {
+      "language": "chi_sim",
+      "name": "chi_sim.traineddata",
+      "size_bytes": 2469156,
+      "sha256": "a5fcb6f0db1e1d6d8522f39db4e848f05984669172e584e8d76b6b3141e1f730"
+    },
+    {
+      "language": "chi_tra",
+      "name": "chi_tra.traineddata",
+      "size_bytes": 2366642,
+      "sha256": "529c5b5797d64b126065cd55f2bb4c7fd7b15790798091b1ff259941a829330b"
+    },
+    {
+      "language": "jpn",
+      "name": "jpn.traineddata",
+      "size_bytes": 2471260,
+      "sha256": "1f5de9236d2e85f5fdf4b3c500f2d4926f8d9449f28f5394472d9e8d83b91b4d"
+    },
+    {
+      "language": "kor",
+      "name": "kor.traineddata",
+      "size_bytes": 1677415,
+      "sha256": "6b85e11d9bbf07863b97b3523b1b112844c43e713df8b66418a081fd1060b3b2"
+    },
+    {
+      "language": "ara",
+      "name": "ara.traineddata",
+      "size_bytes": 1432056,
+      "sha256": "e3206d3dc87fd50c24a0fb9f01838615911d25168f4e64415244b67d2bb3e729"
+    },
+    {
+      "language": "rus",
+      "name": "rus.traineddata",
+      "size_bytes": 3861738,
+      "sha256": "e16e5e036cce1d9ec2b00063cf8b54472625b9e14d893a169e2b0dedeb4df225"
+    },
+    {
+      "language": "fra",
+      "name": "fra.traineddata",
+      "size_bytes": 1130365,
+      "sha256": "ced037562e8c80c13122dece28dd477d399af80911a28791a66a63ac1e3445ca"
+    },
+    {
+      "language": "deu",
+      "name": "deu.traineddata",
+      "size_bytes": 1525436,
+      "sha256": "19d219bbb6672c869d20a9636c6816a81eb9a71796cb93ebe0cb1530e2cdb22d"
+    }
+  ]
+}

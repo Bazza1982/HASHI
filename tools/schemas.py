@@ -74,6 +74,32 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "Absolute or workspace-relative local media path.",
                     },
+                    "ocr_mode": {
+                        "type": "string",
+                        "enum": ["auto", "required", "off"],
+                        "description": (
+                            "Image OCR mode. auto (default) returns bounded OCR evidence when "
+                            "available, required fails if the requested language models are not "
+                            "ready, and off returns only the normalized image."
+                        ),
+                    },
+                    "ocr_languages": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "eng", "chi_sim", "chi_tra", "jpn", "kor",
+                                "ara", "rus", "fra", "deu",
+                            ],
+                        },
+                        "minItems": 1,
+                        "uniqueItems": True,
+                        "description": (
+                            "Optional OCR language hints: English, Simplified/Traditional "
+                            "Chinese, Japanese, Korean, Arabic, Russian, French, and German. "
+                            "All are eligible by default; script detection narrows each run."
+                        ),
+                    },
                     "pdf_pages": {
                         "type": "string",
                         "enum": ["auto", "all", "none"],
