@@ -132,6 +132,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Fixed-session HER planner continuity (`0.1.0-hashi.18`)** — all
+  planning-enabled effort levels now give planning, replanning, self-review, and
+  direct-response checkpoints the same normalized persistent session view used by
+  the primary agent. A reply such as `A` can resolve the options in the immediately
+  preceding assistant turn without lexical triggers or duplicated HASHI context.
+  `low` remains intentionally planning-disabled. The HASHI1 Linux x86-64 package is
+  pinned to source `e6fd0349` and SHA-256 `86cc892a23448c8b...`.
 - **HER Debug Lab clean-clone portability** — removed the dependency on a
   developer-specific HER source path and mandatory local `ajiao`/`agents.json`
   state. Missing operator files are now valid baselines, while present files
