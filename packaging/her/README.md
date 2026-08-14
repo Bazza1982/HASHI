@@ -24,14 +24,14 @@ is accepted only as a migration alias.
 | Platform | Runtime | Source | Status |
 | --- | --- | --- | --- |
 | Linux x86-64 | `0.1.0-hashi.19` | `79be4613e37d03781713253a04aa64aedf3f1902` | Current certified HASHI1 package |
+| Windows x86-64 | `0.1.0-hashi.19` | `79be4613e37d03781713253a04aa64aedf3f1902` | Native build and local-command smoke certified |
 
 The certified Linux `.19` SHA-256 digest is
 `3cd9dbee8617b7fb23a7df7893cc2a3bd17a70b0d0c3fa5945f41ab88f674538`.
-This HASHI1 release is deliberately Linux-only. The native Windows
-`0.1.0-hashi.16` artifact remains archived with source
-`cc28e447f1f32f5a4325bbe1670e2568ed01749a` and SHA-256
-`02934539ce8fa38213633c31130eaa1df70c647efdb2df138f3a0797a60da6ab`;
-it is not represented as a `.19` build.
+The native Windows `.19` SHA-256 digest is
+`f483723f249e89b08eec2f091553e1dc2e207dbe9565a819a41c264b9e3f00f5`.
+Its embedded Git SHA is the same pinned source commit, and native `version`,
+`doctor`, `status`, and `prompt --help` stdin-capability smokes passed.
 
 ## Verification
 

@@ -60,7 +60,7 @@ are code-complete with automated regression coverage, and the initial Nana `.13`
 MAX+ canary is green. Remaining gates are:
 
 - complete broader Nana media/Habit validation, then the intended wider reboot;
-- build and certify a current Windows HER package;
+- complete live Windows provider/tool/media rollout evidence for the native `.19` package;
 - publish only reviewed HASHI files from a clean checkout.
 
 See

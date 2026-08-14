@@ -21,10 +21,12 @@ not certify a Windows build, another architecture, or a downstream integration.
 | HER source | `79be4613e37d03781713253a04aa64aedf3f1902` |
 | Upstream base | Claw `4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d` |
 | Linux target / SHA-256 | `linux-x86_64` / `3cd9dbee8617b7fb23a7df7893cc2a3bd17a70b0d0c3fa5945f41ab88f674538` |
+| Windows target / SHA-256 | `windows-x86_64` / `f483723f249e89b08eec2f091553e1dc2e207dbe9565a819a41c264b9e3f00f5` |
 
-This HASHI1 release certifies Linux x86-64 only. The Windows
-`0.1.0-hashi.16` artifact remains archived under its original source identity and
-must not be represented as a `0.1.0-hashi.19` build.
+The Linux package passed the full pinned-source certification suite. The Windows
+package was built natively from the same clean source commit and passed native
+`version`, `doctor`, `status`, target/provenance, and stdin-capability smokes.
+Platform-specific live provider and rollout evidence remains separate.
 
 ## Ownership and session boundary
 
