@@ -48,6 +48,7 @@ def test_main_push_gate_inherits_only_approved_merged_pr_authorization():
     )
 
     for marker in (
+        "types: [opened, synchronize, reopened, labeled, unlabeled]",
         "listPullRequestsAssociatedWithCommit",
         'pull.merged_at && pull.base.ref === targetBranch',
         'label.name) === "core-change-approved"',
