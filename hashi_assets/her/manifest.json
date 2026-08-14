@@ -1,21 +1,21 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-her",
-  "version": "0.1.0-hashi.17",
+  "version": "0.1.0-hashi.18",
   "display_name": "HASHI Engine Runtime (HER)",
   "upstream_runtime": "Claw",
   "upstream_version": "0.1.3-hashi.33",
   "license": "MIT",
   "license_file": "CLAW_LICENSE",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "781e39db266f33164245825d006d91cfc054fcf7",
+  "source_commit": "e6fd0349ff53ed731fd4e34e7ddcb8a7946ddaaf",
   "source_branch": "agent/remove-token-budget-fix-reasoning-stream",
   "build_date": "2026-08-14",
-  "notes": "HER 0.1.0-hashi.17 gives HIGH, XHIGH, MAX, and MAX+ task checkpoints a bounded inline view of the current turn's real tool inputs and results, using the same immutable evidence store as independent completion review. Checkpoints remain advisory and fail open: they can trigger more primary-agent thought or revision but cannot suppress or replace the final answer. Repeated divergence from the plan through the same canonical tool capability triggers one immediate review, after which the configured periodic cadence resumes instead of producing a review storm. This HASHI1 release certifies the Linux x86-64 package only; the prior Windows 0.1.0-hashi.16 artifact remains archived but is not represented as a 0.1.0-hashi.17 build.",
+  "notes": "HER 0.1.0-hashi.18 gives every planning-enabled fixed-mode checkpoint the same effective normalized session message view as the primary task agent. MEDIUM, HIGH, XHIGH, MAX, and MAX+ planning, replanning, self-review, and direct-response finalization can therefore resolve references to preserved prior user and assistant turns without phrase matching or duplicate HASHI history injection; LOW remains planning-disabled. The release retains 0.1.0-hashi.17's evidence-grounded advisory checkpoints and fail-open final-answer ownership. This HASHI1 release certifies the Linux x86-64 package only; the prior Windows 0.1.0-hashi.16 artifact remains archived but is not represented as a 0.1.0-hashi.18 build.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.0-hashi.17/linux-x86_64/hashi-her",
-      "sha256": "6e7ea72f5c50fb6af1d3adf67478ee79f8a55741f78ec2c4a775a3e43039af57",
+      "path": "releases/0.1.0-hashi.18/linux-x86_64/hashi-her",
+      "sha256": "86cc892a23448c8bab045467dc6a72eccd8cea77fdfe1ea059a63cce5de4cc8c",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-her"
     }

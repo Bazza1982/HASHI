@@ -65,8 +65,47 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260813-027` | Fixed — live verification pending | P1 | Habit Meditation model work occupied the foreground execution queue and process slot | `test_habit_meditation_model_work_does_not_block_foreground_task`; `test_habit_meditation_uses_low_effort_tool_free_snapshot` |
 | `HER-20260813-028` | Fixed — live verification pending | P1 | max-iteration handling could replace a usable primary-agent final answer with a mechanical incomplete report | `test_claw_incomplete_max_iterations_preserves_normal_final`; `test_claw_incomplete_dangling_tool_markup_uses_deterministic_report` |
 | `HER-20260814-029` | Fixed — live verification pending | P2 | HIGH/XHIGH shared checkpoints reviewed stale task frames without current tool evidence and repeated the same divergence review | `high_effort_reserves_turns_for_review_and_validation`; `high_effort_deduplicates_repeated_unplanned_tool_reviews` |
+| `HER-20260814-030` | Fixed — live verification pending | P1 | fixed-mode planner saw only the incremental current prompt, not the persistent session view used by the primary agent | `fixed_session_planner_sees_resumed_options_at_every_planning_effort`; `medium_plus_plans_replans_and_reports_non_blocking_tool_divergence` |
 
 ## Historical entries
+
+### HER-20260814-030 — fixed-mode planner was detached from the persistent session
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P1
+- **Expected:** every planning-enabled fixed-mode checkpoint sees the same effective
+  normalized session messages as the primary task agent, including the immediately
+  preceding assistant answer and the current incremental user turn.
+- **Actual:** Sakura offered A/B/C choices in her persistent session, but the next
+  planner request contained only the new `A` turn. The planner treated it as an
+  unexplained letter and finalized that misunderstanding without invoking the
+  session-backed primary generation.
+- **User-visible impact:** immediate conversational references could lose continuity
+  at `medium`, `high`, `xhigh`, `max`, or `max+`, and a planner-owned direct response
+  could make the loss visible even though Claw had correctly persisted the history.
+- **Root cause:** `run_task_checkpoint` rebuilt every planning request as a one-message
+  vector from `turn_payload`; primary execution independently used
+  `self.session.messages`. HASHI fixed mode correctly sent incremental turns and was
+  not the owner of the missing context.
+- **Fix:** all task checkpoints now clone the same already-normalized session message
+  view used for execution. The prompt contract explicitly treats earlier messages as
+  context while keeping the newest authoritative request as the sole active task. No
+  lexical trigger or duplicate HASHI history injection is used.
+- **HER source:** `e6fd0349ff53ed731fd4e34e7ddcb8a7946ddaaf`.
+- **Fixed HER:** `0.1.0-hashi.18` Linux x86-64 / SHA-256
+  `86cc892a23448c8bab045467dc6a72eccd8cea77fdfe1ea059a63cce5de4cc8c`.
+- **HASHI package commit:** pending.
+- **Regression tests:**
+  `fixed_session_planner_sees_resumed_options_at_every_planning_effort` recreates an
+  A/B/C assistant turn followed by an incremental `A` across `medium`, `high`,
+  `xhigh`, `max`, and `max+`; `medium_plus_plans_replans_and_reports_non_blocking_tool_divergence`
+  proves a later replan sees the primary agent's complete tool-bearing session.
+- **Automated verification:** Rust runtime `655/655`, full Rust workspace tests, and
+  workspace/all-target Clippy with warnings denied passed from the pinned clean source.
+- **Live retest required:** reload Sakura onto `.18`, establish a fresh fixed session,
+  have her emit concrete A/B/C choices, reply only `A`, and confirm the planner event
+  and final answer resolve the preserved option without a HASHI recent-context copy.
+- **Recurrence count:** 0
 
 ### HER-20260814-029 — assurance checkpoints could not see current execution evidence
 

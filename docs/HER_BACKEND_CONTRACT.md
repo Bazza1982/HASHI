@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for HER `0.1.0-hashi.17`; earlier unreleased integration checkpoint
+Status: active for HER `0.1.0-hashi.18`; earlier unreleased integration checkpoint
 recorded in
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
 
@@ -17,14 +17,14 @@ not certify a Windows build, another architecture, or a downstream integration.
 
 | Field | Certified value |
 | --- | --- |
-| Package version | `0.1.0-hashi.17` |
-| HER source | `781e39db266f33164245825d006d91cfc054fcf7` |
+| Package version | `0.1.0-hashi.18` |
+| HER source | `e6fd0349ff53ed731fd4e34e7ddcb8a7946ddaaf` |
 | Upstream base | Claw `4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d` |
-| Linux target / SHA-256 | `linux-x86_64` / `6e7ea72f5c50fb6af1d3adf67478ee79f8a55741f78ec2c4a775a3e43039af57` |
+| Linux target / SHA-256 | `linux-x86_64` / `86cc892a23448c8bab045467dc6a72eccd8cea77fdfe1ea059a63cce5de4cc8c` |
 
 This HASHI1 release certifies Linux x86-64 only. The Windows
 `0.1.0-hashi.16` artifact remains archived under its original source identity and
-must not be represented as a `0.1.0-hashi.17` build.
+must not be represented as a `0.1.0-hashi.18` build.
 
 ## Ownership and session boundary
 
@@ -52,6 +52,16 @@ The Bridge sends an incremental turn only in `fixed` mode after the adapter has 
 session identity. Flex, Wrapper, Audit, and Dual Brain use HASHI-owned assembled
 context. Those full-context modes must not also resume HER's previous internal
 conversation.
+
+Inside a fixed HER session, every task-control checkpoint receives the same effective,
+normalized Claw session message list used by primary task execution. The current user
+turn is appended before planning, while preserved prior user and assistant turns remain
+available for references such as selecting an option from the immediately preceding
+answer. This shared session-view contract applies to planning, replanning, self-review,
+and direct-response finalization at every planning-enabled effort (`medium`, `high`,
+`xhigh`, `max`, and `max+`). `low` deliberately has planning disabled. HASHI must not
+duplicate the fixed-session history in the new prompt, and the runtime must not rely on
+phrase matching to decide when context is needed.
 
 For every Flex turn, the complete canonical turn payload is the user message seen by
 HER's task planner. The authoritative current request is repeated separately as the
@@ -159,7 +169,7 @@ adapter generated under the agent's `backend_state` directory.
 
 ## Multimedia and media-read contract
 
-HER `.17` can consume model-visible images returned by allowed MCP tools. The
+HER `.18` can consume model-visible images returned by allowed MCP tools. The
 Gateway accepts canonical MCP image content and the reviewed legacy screenshot
 result shapes, then validates MIME type, decoded size, item count, and ordering
 before forwarding provider content. MCP `isError` results remain failures even
