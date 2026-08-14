@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for HER `0.1.0-hashi.13`; unreleased integration checkpoint
+Status: active for HER `0.1.0-hashi.15`; earlier unreleased integration checkpoint
 recorded in
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
 
@@ -15,16 +15,15 @@ not certify a Windows build, another architecture, or a downstream integration.
 
 ## Certified package identity
 
-| Field | Certified Linux value |
+| Field | Certified value |
 | --- | --- |
-| Package version | `0.1.0-hashi.13` |
-| HER source | `d63b1bf86600cd4f54015c0dd5656cbcd35a8f3b` |
+| Package version | `0.1.0-hashi.15` |
+| HER source | `43edc6e0d5b4a664f9cf29001ae413d04e87e4f4` |
 | Upstream base | Claw `4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d` |
-| Target | `linux-x86_64` |
-| SHA-256 | `be6321017747858fc8cbc11796c4c79a73403de1bd5508caf245b32288ec4bb5` |
+| Linux target / SHA-256 | `linux-x86_64` / `fea66c95d04846667147147182c062d08c74e40d90ae4b41aa8e09b1d27f7292` |
+| Windows target / SHA-256 | `windows-x86_64` / `308ce14df39641fe939970abfd9c75757ad8af623e46832a3abba5007f69f6a8` |
 
-The manifest contains no Windows artifact. Historical Windows work is not packaged by
-this checkpoint and must not be used as evidence of current cross-platform parity.
+Both binaries report the same clean source commit and their native target triple.
 
 ## Ownership and session boundary
 
@@ -40,6 +39,11 @@ name) therefore:
 - captures `session_id` from `run_started` before tool execution and checkpoints it again
   from `run_finished`;
 - passes `--resume <session_id>` on the next turn in the same backend lifecycle;
+- permits only one writer at a time for that mutable persistent session;
+- runs scheduler requests and requests arriving during a detached persistent turn in
+  isolated sessions with a complete HASHI-owned context snapshot;
+- quarantines a persistent session after a failed turn so the next request rebuilds
+  from complete HASHI context instead of resuming possibly invalid tool state;
 - clears the Claw identity on `/new` and when a new adapter instance is created;
 - keeps Claw configuration and Tool Gateway state isolated per agent workspace.
 
@@ -54,10 +58,10 @@ mode clears the in-memory identity and its persisted checkpoint, passes no
 replace the fixed-mode checkpoint. This prevents a later switch back to fixed
 mode from splicing pre-Flex HER history onto post-Flex conversation.
 
-Capturing the ID at `run_started` allows a cancelled fixed-mode turn to retain
-its intended session identity. Resume after a hard process kill remains
-best-effort if HER did not persist the session file before exit; that case is
-logged and must not silently switch to a different agent's session.
+The ID captured at `run_started` is tentative until successful completion. A
+cancelled, timed-out, or failed persistent turn clears the HASHI checkpoint;
+the underlying session file remains available for diagnostics but is not
+automatically resumed.
 Runtime-owned Meditation explicitly sets `ephemeral_session`; every internal
 health/helper call must do the same. Generic ephemeral HER backend construction
 also forces that flag and disables both session tracking and Habit eligibility,
@@ -137,7 +141,7 @@ adapter generated under the agent's `backend_state` directory.
 
 ## Multimedia and media-read contract
 
-HER `.10` can consume model-visible images returned by allowed MCP tools. The
+HER `.15` can consume model-visible images returned by allowed MCP tools. The
 Gateway accepts canonical MCP image content and the reviewed legacy screenshot
 result shapes, then validates MIME type, decoded size, item count, and ordering
 before forwarding provider content. MCP `isError` results remain failures even
@@ -186,6 +190,18 @@ concatenates those raw fragments without trimming or guessing token boundaries. 
 prevents both joined words (`Theusersays`) and invented spaces inside words
 (`prov id er`).
 
+Before any OpenAI-compatible provider request, HER validates the translated
+assistant tool-call/tool-result sequence. A missing, duplicate, orphaned, or
+interleaved result fails locally as `invalid_session_state`; HER never silently
+reorders or deletes history to make an invalid request appear valid.
+
+Failed `run_finished` events retain redacted `http_status`, `error_type`,
+`provider_request_id`, semantic `error_message`, bounded `body_snippet`, and
+`retryable` fields when available. HASHI correlates those fields and bounded
+stderr with its own request ID in `backend_state/her_diagnostics.jsonl`.
+Redaction targets configured credential values and bearer tokens; status,
+provider trace IDs, error types, and diagnostic prose remain intact.
+
 ## Binary contract
 
 Production resolution uses `runtime_policy = require-packaged`. The adapter verifies the
@@ -233,5 +249,5 @@ The current open HER gates are:
 
 - capture live image, PDF, audio, screenshot, session-mode, and `/habit` canary
   evidence after reboot;
-- build and certify a `.10`-equivalent Windows package before claiming platform
-  parity.
+- run a detached-turn plus scheduler concurrency canary against the packaged
+  `.15` runtime before widening rollout.

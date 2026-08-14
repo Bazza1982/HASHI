@@ -663,7 +663,11 @@ async def test_provider_http_error_never_enters_habit_learning_or_notification(t
             "HER command exited with code 1",
             returncode=1,
             stderr="provider rejected unsupported image input",
-            parsed_error={"kind": "api_http_error", "error": "HTTP 400"},
+            parsed_error={
+                "kind": "run_finished",
+                "error_kind": "api_http_error",
+                "error": "HTTP 400",
+            },
         )
     )
     adapter._schedule_habit_meditation = Mock()
@@ -685,6 +689,7 @@ async def test_provider_http_error_never_enters_habit_learning_or_notification(t
     assert audit["event"] == "habit_meditation_skipped"
     assert audit["exception_type"] == "ClawCommandError"
     assert audit["error_kind"] == "api_http_error"
+    assert audit["terminal_kind"] == "run_finished"
     assert audit["returncode"] == 1
     assert not (tmp_path / "backend_state" / "her_habit_meditation").exists()
 

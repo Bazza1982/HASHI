@@ -24,6 +24,35 @@ EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
     "Please check that all required API keys (e.g. brave_api_key for web search) are configured in secrets.json."
 )
 
+HER_SESSION_SCOPE_PERSISTENT = "persistent"
+HER_SESSION_SCOPE_ISOLATED = "isolated_per_run"
+
+
+def request_meta_for(runtime, request_id: str) -> dict[str, Any]:
+    registry = getattr(runtime, "_request_meta_by_id", None)
+    if isinstance(registry, dict):
+        meta = registry.get(str(request_id or ""))
+        if isinstance(meta, dict):
+            return dict(meta)
+    current = getattr(runtime, "current_request_meta", None)
+    if isinstance(current, dict) and str(current.get("request_id") or "") == str(request_id or ""):
+        return dict(current)
+    return {}
+
+
+def _resolve_her_session_scope(runtime, item) -> str:
+    explicit = str(getattr(item, "session_scope", None) or "").strip().lower()
+    if explicit in {HER_SESSION_SCOPE_PERSISTENT, HER_SESSION_SCOPE_ISOLATED}:
+        return explicit
+    if str(getattr(runtime.config, "active_backend", "") or "") != "her":
+        return HER_SESSION_SCOPE_PERSISTENT
+    if str(item.source or "").strip().lower().startswith("scheduler"):
+        return HER_SESSION_SCOPE_ISOLATED
+    backend = getattr(getattr(runtime, "backend_manager", None), "current_backend", None)
+    if bool(getattr(backend, "persistent_session_busy", False)):
+        return HER_SESSION_SCOPE_ISOLATED
+    return HER_SESSION_SCOPE_PERSISTENT
+
 
 @dataclass(frozen=True)
 class QueueItemStart:
@@ -110,7 +139,7 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         f"(source={item.source}, silent={item.silent}, prompt_len={len(item.prompt)}, "
         f"queue_wait_s={queue_wait_s:.2f})"
     )
-    runtime.current_request_meta = {
+    request_meta = {
         "request_id": item.request_id,
         "chat_id": item.chat_id,
         "prompt": item.prompt,
@@ -123,7 +152,14 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         "verbose_at_start": bool(getattr(runtime, "_verbose", False)),
         "silent": bool(item.silent),
         "deliver_to_telegram": bool(item.deliver_to_telegram),
+        "session_scope": _resolve_her_session_scope(runtime, item),
     }
+    runtime.current_request_meta = request_meta
+    registry = getattr(runtime, "_request_meta_by_id", None)
+    if not isinstance(registry, dict):
+        registry = {}
+        runtime._request_meta_by_id = registry
+    registry[item.request_id] = request_meta
     runtime._mark_activity()
     activity_store = getattr(runtime, "request_activity", None)
     if activity_store is not None:
@@ -157,10 +193,13 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
     )
     session_id = getattr(backend, "_session_id", None)
+    request_meta = request_meta_for(runtime, item.request_id)
+    session_scope = str(request_meta.get("session_scope") or HER_SESSION_SCOPE_PERSISTENT)
     incremental = (
         runtime.backend_manager.agent_mode == "fixed"
         and supports_sessions
         and session_id is not None
+        and session_scope == HER_SESSION_SCOPE_PERSISTENT
     )
     continuity_enabled = is_memory_plus_enabled(runtime.workspace_dir)
     extra_sections = runtime._workzone_prompt_section()

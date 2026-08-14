@@ -1000,7 +1000,16 @@ class FlexibleBackendManager:
             return
         context = dict(getattr(registry, "audit_context", {}) or {})
         runtime = getattr(self, "runtime", None)
-        request_meta = dict(getattr(runtime, "current_request_meta", None) or {})
+        meta_registry = getattr(runtime, "_request_meta_by_id", None)
+        request_meta = (
+            dict(meta_registry.get(request_id) or {})
+            if isinstance(meta_registry, dict)
+            else {}
+        )
+        if not request_meta:
+            current_meta = dict(getattr(runtime, "current_request_meta", None) or {})
+            if str(current_meta.get("request_id") or "") == str(request_id or ""):
+                request_meta = current_meta
         context.update(
             {
                 "_runtime": runtime,

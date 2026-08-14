@@ -1042,6 +1042,251 @@ async def test_her_full_context_turn_never_resumes_or_checkpoints_session(tmp_pa
     assert not adapter._session_state_path.exists()
 
 
+def _concurrency_task_result(tmp_path, *, text: str, session_id: str) -> ClawTaskResult:
+    return ClawTaskResult(
+        text=text,
+        model="deepseek/test",
+        permission_mode="workspace-write",
+        cwd=str(tmp_path),
+        returncode=0,
+        duration_ms=1,
+        stdout="",
+        stderr="",
+        json_data={"usage": {}},
+        tool_uses=[],
+        tool_results=[],
+        session_id=session_id,
+        iterations=1,
+        completion_status="completed",
+        stop_reason="end_turn",
+    )
+
+
+@pytest.mark.asyncio
+async def test_her_persistent_session_is_single_flight(tmp_path):
+    runtime = SimpleNamespace(
+        _request_meta_by_id={
+            "req-first": {"session_scope": "persistent"},
+            "req-second": {"session_scope": "persistent"},
+        },
+        current_request_meta=None,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+        _hashi_runtime=runtime,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = tmp_path / "hashi-her"
+    adapter._session_id = "session-initial"
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    calls = []
+
+    async def run_task(prompt, *, resume, request_id, track_session_identity, **kwargs):
+        calls.append((request_id, resume, track_session_identity))
+        if request_id == "req-first":
+            first_started.set()
+            await release_first.wait()
+            return _concurrency_task_result(
+                tmp_path,
+                text="first",
+                session_id="session-after-first",
+            )
+        return _concurrency_task_result(
+            tmp_path,
+            text="second",
+            session_id="session-after-second",
+        )
+
+    adapter._run_task_async = run_task
+    first = asyncio.create_task(adapter.generate_response("first", "req-first"))
+    await first_started.wait()
+    second = asyncio.create_task(adapter.generate_response("second", "req-second"))
+    await asyncio.sleep(0.02)
+
+    assert calls == [("req-first", "session-initial", True)]
+    assert adapter.persistent_session_busy is True
+
+    release_first.set()
+    first_response, second_response = await asyncio.gather(first, second)
+
+    assert first_response.is_success is True
+    assert second_response.is_success is True
+    assert calls == [
+        ("req-first", "session-initial", True),
+        ("req-second", "session-after-first", True),
+    ]
+    assert adapter._session_id == "session-after-second"
+
+
+@pytest.mark.asyncio
+async def test_her_isolated_turn_runs_while_background_persistent_turn_is_unfinished(tmp_path):
+    runtime = SimpleNamespace(
+        _request_meta_by_id={
+            "req-background": {"session_scope": "persistent"},
+            "req-isolated": {"session_scope": "isolated_per_run"},
+        },
+        current_request_meta=None,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+        _hashi_runtime=runtime,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = tmp_path / "hashi-her"
+    adapter._session_id = "session-main"
+    background_started = asyncio.Event()
+    release_background = asyncio.Event()
+    calls = []
+
+    async def run_task(prompt, *, resume, request_id, track_session_identity, **kwargs):
+        calls.append((request_id, resume, track_session_identity))
+        if request_id == "req-background":
+            background_started.set()
+            await release_background.wait()
+            return _concurrency_task_result(
+                tmp_path,
+                text="background",
+                session_id="session-main-next",
+            )
+        return _concurrency_task_result(
+            tmp_path,
+            text="isolated",
+            session_id="session-isolated",
+        )
+
+    adapter._run_task_async = run_task
+    background = asyncio.create_task(
+        adapter.generate_response("background", "req-background")
+    )
+    await background_started.wait()
+
+    isolated = await asyncio.wait_for(
+        adapter.generate_response("cron", "req-isolated"),
+        timeout=1,
+    )
+
+    assert isolated.is_success is True
+    assert ("req-isolated", None, False) in calls
+    assert adapter._session_id == "session-main"
+
+    release_background.set()
+    background_response = await background
+    assert background_response.is_success is True
+    assert adapter._session_id == "session-main-next"
+
+
+@pytest.mark.asyncio
+async def test_her_failure_persists_structured_error_and_redacted_stderr(tmp_path):
+    fake = _write_exe(
+        tmp_path / "hashi-her",
+        """
+        #!/usr/bin/env python3
+        import json, sys
+        print(json.dumps({
+            "kind": "run_finished",
+            "message": "Execution failed before completion.",
+            "completion_status": "error",
+            "error_kind": "api_http_error",
+            "http_status": 400,
+            "error_type": "invalid_request_error",
+            "provider_request_id": "provider-req-123",
+            "error_message": "tool result is missing",
+            "body_snippet": "invalid sequence",
+            "retryable": False,
+        }))
+        print("Authorization: Bearer secret-token", file=sys.stderr)
+        raise SystemExit(1)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = fake
+    adapter._supports_stream_json = True
+
+    with pytest.raises(ClawCommandError) as raised:
+        await adapter._run_task_async(
+            "prompt",
+            resume="session-before-error",
+            request_id="req-error",
+        )
+
+    assert str(raised.value) == "tool result is missing"
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "backend_state" / "her_diagnostics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    failure = next(record for record in records if record["kind"] == "command_failure")
+    assert failure["request_id"] == "req-error"
+    assert failure["parsed_error"]["http_status"] == 400
+    assert failure["parsed_error"]["provider_request_id"] == "provider-req-123"
+    assert failure["stderr"] == "Authorization: Bearer <redacted>\n"
+    assert "secret-token" not in json.dumps(records)
+
+
+@pytest.mark.asyncio
+async def test_her_failed_persistent_turn_quarantines_session_and_surfaces_metadata(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = tmp_path / "hashi-her"
+    adapter._session_id = "session-poisoned"
+    adapter._persist_session_identity()
+    adapter._run_task_async = AsyncMock(
+        side_effect=ClawCommandError(
+            "pending tool result",
+            returncode=1,
+            parsed_error={
+                "kind": "run_finished",
+                "error_kind": "invalid_session_state",
+                "error_type": "invalid_message_sequence",
+                "error_message": "pending tool result",
+            },
+        )
+    )
+
+    response = await adapter.generate_response("continue", "req-poisoned")
+
+    assert response.is_success is False
+    assert response.error == "pending tool result"
+    assert response.stream_metadata["her_error"]["error_kind"] == "invalid_session_state"
+    assert response.stream_metadata["her_error"]["error_type"] == "invalid_message_sequence"
+    assert adapter._session_id is None
+    assert not adapter._session_state_path.exists()
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "backend_state" / "her_diagnostics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    quarantine = next(
+        record for record in records if record["kind"] == "session_quarantined"
+    )
+    assert quarantine["session_id"] == "session-poisoned"
+    assert quarantine["error_kind"] == "invalid_session_state"
+
+
 @pytest.mark.asyncio
 async def test_her_task_runner_applies_meditation_safety_overrides(tmp_path):
     fake = _write_exe(

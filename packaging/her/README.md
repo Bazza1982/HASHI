@@ -23,13 +23,13 @@ is accepted only as a migration alias.
 
 | Platform | Runtime | Source | Status |
 | --- | --- | --- | --- |
-| Linux x86-64 | `0.1.0-hashi.14` | `efc3a469e1a32e97ebecd995ed73ac41eaa5de54` | Current certified standalone HASHI package |
-| Windows x86-64 | `0.1.0-hashi.14` | `efc3a469e1a32e97ebecd995ed73ac41eaa5de54` | Native Windows version smoke certified |
+| Linux x86-64 | `0.1.0-hashi.15` | `43edc6e0d5b4a664f9cf29001ae413d04e87e4f4` | Current certified standalone HASHI package |
+| Windows x86-64 | `0.1.0-hashi.15` | `43edc6e0d5b4a664f9cf29001ae413d04e87e4f4` | Native Windows version smoke certified |
 
-The certified `.14` SHA-256 digests are
-`76aa013b0d9f6a00336b8c29958a9b5d3af83df34309cb725b6b36f4cf746ce0`
+The certified `.15` SHA-256 digests are
+`fea66c95d04846667147147182c062d08c74e40d90ae4b41aa8e09b1d27f7292`
 for Linux and
-`3fb3eee1297a0349868e650263d2f40de1e53e59a262590ee743f2c55ce71345`
+`308ce14df39641fe939970abfd9c75757ad8af623e46832a3abba5007f69f6a8`
 for Windows. Both binaries use the same clean source lock; each platform keeps
 its own checksum and runtime smoke evidence.
 

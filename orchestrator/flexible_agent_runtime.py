@@ -195,6 +195,10 @@ class FlexibleAgentRuntime:
         self.last_prompt = None
         self.last_response: dict | None = None
         self.current_request_meta: dict | None = None
+        # Request metadata remains addressable after background detachment so
+        # concurrent isolated HER runs never read another turn's context.
+        self._request_meta_by_id: dict[str, dict[str, Any]] = {}
+        self._background_request_ids: set[str] = set()
         self.last_activity_at = datetime.now()
         self.last_success_at: datetime | None = None
         self.last_error_at: datetime | None = None
@@ -7580,6 +7584,11 @@ class FlexibleAgentRuntime:
     def _register_background_task(self, gen_task: asyncio.Task, item: QueuedRequest) -> None:
         """Track a detached generation task and wire up its completion callback."""
         self._background_tasks.add(gen_task)
+        background_request_ids = getattr(self, "_background_request_ids", None)
+        if not isinstance(background_request_ids, set):
+            background_request_ids = set()
+            self._background_request_ids = background_request_ids
+        background_request_ids.add(item.request_id)
 
         def _on_done(task: asyncio.Task) -> None:
             self._background_tasks.discard(task)
@@ -7594,6 +7603,10 @@ class FlexibleAgentRuntime:
     async def _on_background_complete(self, task: asyncio.Task, item: QueuedRequest) -> None:
         """Called when a background generate_response task finishes."""
         if self.is_shutting_down:
+            getattr(self, "_background_request_ids", set()).discard(item.request_id)
+            registry = getattr(self, "_request_meta_by_id", None)
+            if isinstance(registry, dict):
+                registry.pop(item.request_id, None)
             return
 
         try:
@@ -7855,6 +7868,11 @@ class FlexibleAgentRuntime:
             self.error_logger.exception(
                 f"Unhandled error in _on_background_complete for {item.request_id}: {e}"
             )
+        finally:
+            getattr(self, "_background_request_ids", set()).discard(item.request_id)
+            registry = getattr(self, "_request_meta_by_id", None)
+            if isinstance(registry, dict):
+                registry.pop(item.request_id, None)
 
     async def process_queue(self):
         await runtime_lifecycle.process_queue(self)
