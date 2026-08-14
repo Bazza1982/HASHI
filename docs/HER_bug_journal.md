@@ -99,7 +99,9 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   or writes.
 - **HER source:** `79be4613e37d03781713253a04aa64aedf3f1902`.
 - **Fixed HER:** `0.1.0-hashi.19` Linux x86-64 / SHA-256
-  `3cd9dbee8617b7fb23a7df7893cc2a3bd17a70b0d0c3fa5945f41ab88f674538`.
+  `3cd9dbee8617b7fb23a7df7893cc2a3bd17a70b0d0c3fa5945f41ab88f674538`;
+  Windows x86-64 / SHA-256
+  `f483723f249e89b08eec2f091553e1dc2e207dbe9565a819a41c264b9e3f00f5`.
 - **HASHI package commit:** `0d27419a8916b9ca15bd83743eff729e634d06c7`.
 - **Regression tests:** the planner request preserves all normalized session messages
   as an exact prefix, appends exactly one non-persistent control envelope, maps JSON
@@ -108,7 +110,9 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   control.
 - **Automated verification:** format check, Rust runtime `655/655`, two conformance
   tests, 12 integration tests, full workspace/all-target tests, and workspace/all-target
-  Clippy with warnings denied passed from the pinned clean source.
+  Clippy with warnings denied passed from the pinned clean source. The native Windows
+  release build embedded the exact source SHA and passed `version`, `doctor`, `status`,
+  target/provenance, and stdin-capability smokes.
 - **Live provider verification:** isolated two-round fixed sessions passed on direct
   DeepSeek at all six effort levels. Every round completed under 29 seconds, every
   planning-enabled level emitted one parsed control frame, `low` emitted none, all

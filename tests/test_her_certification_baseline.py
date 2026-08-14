@@ -24,16 +24,21 @@ def test_her_certification_baseline_matches_packaged_manifest():
     assert HER_VERSION == manifest["version"]
 
 
-def test_packaged_her_binary_matches_manifest_digest():
+def test_packaged_her_binaries_match_manifest_digests():
     root = PROJECT_ROOT / "hashi_assets" / "her"
     manifest = _load(root / "manifest.json")
-    binary_metadata = manifest["binaries"]["linux-x86_64"]
-    binary = (root / binary_metadata["path"]).resolve()
+    assert set(manifest["binaries"]) == {"linux-x86_64", "windows-x86_64"}
 
-    assert binary.is_relative_to(root.resolve())
-    assert binary.is_file()
-    assert binary.name == binary_metadata["binary_name"]
-    assert hashlib.sha256(binary.read_bytes()).hexdigest() == binary_metadata["sha256"]
+    for platform_key, binary_metadata in manifest["binaries"].items():
+        binary = (root / binary_metadata["path"]).resolve()
+
+        assert binary.is_relative_to(root.resolve()), platform_key
+        assert binary.is_file(), platform_key
+        assert binary.name == binary_metadata["binary_name"], platform_key
+        assert (
+            hashlib.sha256(binary.read_bytes()).hexdigest()
+            == binary_metadata["sha256"]
+        ), platform_key
 
 
 def test_her_certification_requires_all_workspace_tests_to_pass():

@@ -1,10 +1,10 @@
 # HASHI Engine Runtime (HER) Tool Gateway And Telemetry Plan
 
-Status: active implementation for packaged HER `0.1.0-hashi.13`; remaining telemetry and
-cross-platform release work is tracked below
+Status: active implementation for packaged HER `0.1.0-hashi.19`; remaining telemetry and
+platform-specific live rollout work is tracked below
 Owner: HASHI
 Created: 2026-05-23
-Updated: 2026-08-13
+Updated: 2026-08-14
 
 HER is derived from the MIT-licensed Claw runtime. Upstream Claw names are
 retained below only for source, protocol, environment, and license references.
@@ -24,8 +24,8 @@ Related docs:
 The original problem and architecture sections below are retained as the design
 record. They are no longer a description of the pre-Gateway runtime:
 
-- packaged Linux HER `0.1.0-hashi.13` is pinned by manifest, provenance, and
-  SHA-256; the manifest contains no Windows binary and Windows parity remains pending;
+- packaged Linux and Windows x86-64 HER `0.1.0-hashi.19` binaries are pinned by
+  manifest, source provenance, target triple, and SHA-256;
 - the per-agent owner-only GatewayContext and required MCP stdio server are
   implemented around the canonical ToolRegistry, including permission checks,
   audit, argument validation, loop guards, and Browser tools;
@@ -39,7 +39,7 @@ record. They are no longer a description of the pre-Gateway runtime:
 Session-mode control for Flex/composed turns and adapter-owned Habit-pipeline
 mutual exclusion are implemented with regression coverage. Remaining gates are
 live post-reboot multimedia/Habit/session evidence, complete reasoning-token
-source persistence, and a current Windows package.
+source persistence, and platform-specific live rollout evidence.
 
 ## Decision
 
@@ -855,8 +855,8 @@ When `is_error = true`, `error_kind` must use the enum defined in
 
 ### Phase 0: Vendor And Package Claw Runtime
 
-Status: **implemented for the certified Linux package; current Windows parity
-and additional platform artifacts remain open.** Source provenance is pinned
+Status: **implemented for the pinned Linux and Windows x86-64 packages;
+additional platform artifacts remain open.** Source provenance is pinned
 rather than inferred from a branch name, and the upstream MIT notice ships as
 `CLAW_LICENSE`.
 

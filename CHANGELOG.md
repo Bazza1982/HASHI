@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Native Windows HER `0.1.0-hashi.19` package** — built the Windows x86-64
+  runtime from the same pinned clean source as Linux `.19`, embedded the exact
+  source SHA, and passed native version, doctor, status, and stdin-capability
+  smokes. The manifest pins its platform, target triple, path, and SHA-256.
 - **Evidence-grounded HER assurance checkpoints (`0.1.0-hashi.17`)** — HIGH
   self-review and shared XHIGH/MAX/MAX+ mid-task replanning now receive a bounded
   inline view of the current turn's real tool inputs and results. Reviews remain
