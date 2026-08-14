@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from adapters.her import ClawTaskResult, ClawTimeoutError, HERAdapter
+from adapters.her import ClawCommandError, ClawTaskResult, ClawTimeoutError, HERAdapter
 from adapters.her_habits import (
     HABIT_MEDITATION_ENV,
     MAX_MEDITATION_ATTEMPTS,
@@ -629,7 +629,7 @@ async def test_deterministic_create_retrieve_and_behavioral_use_closed_loop(tmp_
 
 
 @pytest.mark.asyncio
-async def test_failed_started_her_run_still_schedules_bounded_meditation(tmp_path):
+async def test_failed_started_her_run_skips_ungrounded_meditation(tmp_path):
     adapter = _adapter(tmp_path, enabled=True)
     adapter._run_task_async = AsyncMock(
         side_effect=ClawTimeoutError("idle timeout", timeout_s=60)
@@ -642,11 +642,51 @@ async def test_failed_started_her_run_still_schedules_bounded_meditation(tmp_pat
     )
 
     assert response.is_success is False
-    adapter._schedule_habit_meditation.assert_called_once()
-    failure = adapter._schedule_habit_meditation.call_args.kwargs["task_result"]
-    assert failure.completion_status == "failed"
-    assert failure.stop_reason == "ClawTimeoutError"
-    assert "idle timeout" in failure.stderr
+    adapter._schedule_habit_meditation.assert_not_called()
+    audit = json.loads(
+        (tmp_path / "backend_state" / "her_habit_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[-1]
+    )
+    assert audit["event"] == "habit_meditation_skipped"
+    assert audit["reason"] == "foreground_error_without_grounded_task_result"
+    assert audit["exception_type"] == "ClawTimeoutError"
+    assert audit["grounded_task_result"] is False
+    assert not (tmp_path / "backend_state" / "her_habit_meditation").exists()
+
+
+@pytest.mark.asyncio
+async def test_provider_http_error_never_enters_habit_learning_or_notification(tmp_path):
+    adapter = _adapter(tmp_path, enabled=True)
+    adapter._run_task_async = AsyncMock(
+        side_effect=ClawCommandError(
+            "HER command exited with code 1",
+            returncode=1,
+            stderr="provider rejected unsupported image input",
+            parsed_error={"kind": "api_http_error", "error": "HTTP 400"},
+        )
+    )
+    adapter._schedule_habit_meditation = Mock()
+    adapter._spawn_habit_notification_job = Mock()
+
+    response = await adapter.generate_response(
+        "--- CURRENT USER REQUEST — AUTHORITATIVE ---\nRead this image.",
+        request_id="provider-image-error",
+    )
+
+    assert response.is_success is False
+    adapter._schedule_habit_meditation.assert_not_called()
+    adapter._spawn_habit_notification_job.assert_not_called()
+    audit = json.loads(
+        (tmp_path / "backend_state" / "her_habit_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[-1]
+    )
+    assert audit["event"] == "habit_meditation_skipped"
+    assert audit["exception_type"] == "ClawCommandError"
+    assert audit["error_kind"] == "api_http_error"
+    assert audit["returncode"] == 1
+    assert not (tmp_path / "backend_state" / "her_habit_meditation").exists()
 
 
 @pytest.mark.asyncio

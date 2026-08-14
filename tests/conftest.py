@@ -31,5 +31,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     anyio_marker = pytest.mark.anyio
     for item in items:
         obj = getattr(item, "obj", None)
-        if obj is not None and inspect.iscoroutinefunction(obj):
+        if (
+            obj is not None
+            and inspect.iscoroutinefunction(obj)
+            and item.get_closest_marker("asyncio") is None
+        ):
             item.add_marker(anyio_marker)
