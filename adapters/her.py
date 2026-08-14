@@ -341,6 +341,62 @@ def _claw_pair_tool_ledger(
     return ledger
 
 
+def _claw_clean_persona_value(value: str, *, max_chars: int = 32) -> str:
+    """Return a short visible persona cue without carrying profile commentary."""
+    cleaned = " ".join(str(value).split()).strip(
+        " \t*_`#：:;；,，。.-—–\"'“”‘’「」『』"
+    )
+    cleaned = re.split(r"[（(]", cleaned, maxsplit=1)[0].strip()
+    cleaned = re.split(r"\s+(?:or|或者|或)\s+", cleaned, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    if not cleaned or len(cleaned) > max_chars:
+        return ""
+    return cleaned
+
+
+def _claw_persona_name(prompt: str) -> str:
+    """Extract a declared assistant name from common HASHI identity formats."""
+    patterns = (
+        r"(?mi)^\s*[-*]\s*\*\*\s*(?:name|assistant name|名字|姓名)\s*:\s*\*\*\s*([^\n]{1,80})$",
+        r"(?mi)^\s*#{1,3}\s*([^#\n]{1,40}?)\s*[—–-]\s*(?:个人助理档案|personal assistant profile|assistant profile)\s*$",
+        r"(?:你叫|你的名字是)\s*(?:\*\*)?([^*\n，。]{1,40})(?:\*\*)?",
+        r"(?mi)^\s*[-*]\s*\*\*\s*self-reference\s*:\s*\*\*.*?preference\s+for\s+([^,.;\n]{1,32})",
+        r"(?m)^\s*[-*]\s*(?:自称|自我称呼).*?优先(?:使用)?[「“\"]?([^」”\"，。\s]{1,24})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, prompt)
+        if match:
+            name = _claw_clean_persona_value(match.group(1))
+            if name:
+                return name
+    return ""
+
+
+def _claw_persona_address(prompt: str) -> str:
+    """Extract the persona's explicitly configured form of address for the user."""
+    patterns = (
+        r"(?mi)^\s*[-*]\s*\*\*\s*(?:what to call them|address the user as|用户称呼|称呼用户)\s*:\s*\*\*\s*([^\n]{1,80})$",
+        r"称呼用户(?:优先)?为\s*[「『“\"]([^」』”\"\n]{1,32})[」』”\"]",
+        r"称用户为\s*[「『“\"]([^」』”\"\n]{1,32})[」』”\"]",
+        r"(?:使用|用)\s*[「『‘“'\"]([^」』’”'\"\n]{1,32})[」』’”'\"]\s*(?:来)?称呼",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, prompt)
+        if match:
+            address = _claw_clean_persona_value(match.group(1))
+            if address:
+                return address
+    return ""
+
+
+def _claw_persona_emoji(prompt: str) -> str:
+    """Extract a short explicitly configured persona emoji, when present."""
+    match = re.search(
+        r"(?mi)^\s*[-*]\s*\*\*\s*emoji\s*:\s*\*\*\s*([^\s\n]{1,8})",
+        prompt,
+    )
+    return _claw_clean_persona_value(match.group(1), max_chars=8) if match else ""
+
+
 def _build_claw_incomplete_report(result: ClawTaskResult, *, prompt: str) -> tuple[str, dict[str, Any]]:
     ledger = _claw_pair_tool_ledger(result.tool_uses, result.tool_results)
     successful: list[str] = []
@@ -463,12 +519,100 @@ def _build_claw_incomplete_report(result: ClawTaskResult, *, prompt: str) -> tup
     return report, metadata
 
 
+def _build_claw_persona_incomplete_report(
+    result: ClawTaskResult,
+    *,
+    prompt: str,
+    metadata: Mapping[str, Any],
+) -> str:
+    """Render an honest iteration-limit result through the active persona."""
+    use_chinese = any("\u4e00" <= char <= "\u9fff" for char in f"{prompt}\n{result.text}")
+    persona_name = _claw_persona_name(prompt)
+    address = _claw_persona_address(prompt)
+    emoji = _claw_persona_emoji(prompt)
+    recommendation = str(metadata.get("recommended_action") or "stop").upper()
+    iterations = result.iterations if result.iterations is not None else "未知"
+    successful_count = int(metadata.get("successful_tool_results") or 0)
+    failed_count = int(metadata.get("failed_tool_results") or 0)
+    missing_count = int(metadata.get("missing_tool_results") or 0)
+
+    if use_chinese:
+        greeting = f"{address}，" if address else ""
+        speaker = persona_name or "我"
+        opening = (
+            f"{greeting}{persona_name}这次还没有全部做完，先向您如实报个进度。"
+            if persona_name
+            else f"{greeting}这次还没有全部做完，先如实报个进度。"
+        )
+        if emoji:
+            opening += emoji
+
+        if successful_count and not failed_count and not missing_count:
+            receipt_text = (
+                f"已有 **{successful_count}** 次操作拿到了正常回执，没有工具失败或缺失回执。"
+            )
+        elif successful_count or failed_count or missing_count:
+            receipt_text = (
+                f"目前有 **{successful_count}** 次操作拿到正常回执，"
+                f"失败 **{failed_count}** 次，缺少回执 **{missing_count}** 次。"
+            )
+        else:
+            receipt_text = "目前还没有足够的工具回执可以确认业务进度。"
+
+        honesty = (
+            f"这回合在第 **{iterations}** 轮碰到执行上限。{receipt_text}"
+            f"但整体任务仍未完成，所以{speaker}不会把它报成成功。"
+        )
+        if emoji:
+            honesty += emoji
+
+        if recommendation == "CONTINUE":
+            action = f"下一回合可以继续；{speaker}会先核验现有结果，避免重复已经完成的操作。"
+        elif recommendation == "PIVOT":
+            action = f"现有回执里有失败或缺失；{speaker}会先换一种策略，再继续处理。"
+        else:
+            action = f"目前没有可确认的进展；{speaker}会先停下来，请您重新确认目标或方向。"
+        if emoji:
+            action += emoji
+
+        return "\n\n".join((opening, honesty, action, f"**建议：{recommendation}**"))
+
+    greeting = f"{address}, " if address else ""
+    opening = (
+        f"{greeting}{persona_name} hasn't finished everything yet, so here is an honest progress update."
+        if persona_name
+        else f"{greeting}I haven't finished everything yet, so here is an honest progress update."
+    )
+    if emoji:
+        opening += emoji
+    if successful_count and not failed_count and not missing_count:
+        receipt_text = f"{successful_count} operations returned normal receipts, with no failures or missing receipts."
+    elif successful_count or failed_count or missing_count:
+        receipt_text = (
+            f"There are {successful_count} successful receipts, {failed_count} failures, "
+            f"and {missing_count} missing receipts."
+        )
+    else:
+        receipt_text = "There are not enough tool receipts to confirm business progress yet."
+    honesty = (
+        f"This turn reached its execution limit after **{iterations}** iterations. {receipt_text} "
+        "The overall task remains incomplete, so I will not report it as successful."
+    )
+    if recommendation == "CONTINUE":
+        action = "Continue in the next turn, verifying current results before repeating any completed operation."
+    elif recommendation == "PIVOT":
+        action = "Address the failed or missing receipt, then continue with a different approach."
+    else:
+        action = "Stop and reassess the goal before doing more work."
+    return "\n\n".join((opening, honesty, action, f"**Recommendation: {recommendation}**"))
+
+
 def _claw_incomplete_response(
     result: ClawTaskResult,
     *,
     prompt: str,
 ) -> tuple[str, dict[str, Any]]:
-    """Preserve the primary agent's safe closing response at an iteration ceiling."""
+    """Preserve a safe model closing or render the ceiling through its persona."""
     report, metadata = _build_claw_incomplete_report(result, prompt=prompt)
     stop_reason = str(result.stop_reason or "").strip().lower()
     model_text = str(result.text or "").strip()
@@ -501,6 +645,12 @@ def _claw_incomplete_response(
             "fallback_report_generated": False,
             "persona_final_response_preserved": True,
             "persona_interpretation_generated": False,
+        }
+    if stop_reason == "max_iterations":
+        return _build_claw_persona_incomplete_report(result, prompt=prompt, metadata=metadata), {
+            **metadata,
+            "persona_final_response_preserved": False,
+            "persona_interpretation_generated": True,
         }
     return report, {
         **metadata,
@@ -2823,11 +2973,12 @@ class HERAdapter(BaseBackend):
             response_text, fallback_metadata = _claw_incomplete_response(result, prompt=prompt)
             self.logger.warning(
                 "HER incomplete run finalized: request=%s completion=%s "
-                "stop_reason=%s persona_preserved=%s recommendation=%s",
+                "stop_reason=%s persona_preserved=%s persona_interpreted=%s recommendation=%s",
                 request_id,
                 result.completion_status or "unknown",
                 result.stop_reason or "unknown",
                 fallback_metadata.get("persona_final_response_preserved", False),
+                fallback_metadata.get("persona_interpretation_generated", False),
                 fallback_metadata.get("recommended_action") or "unknown",
             )
         if habit_config.enabled:
