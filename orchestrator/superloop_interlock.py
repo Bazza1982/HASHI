@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-import fcntl
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # Windows native runtime has no fcntl.
+    fcntl = None
+
+try:
+    import msvcrt
+except ModuleNotFoundError:  # Unix-like runtimes have no msvcrt.
+    msvcrt = None
 
 from orchestrator.superloop_store import SuperloopStore
 
@@ -34,6 +43,28 @@ class DispatchInterlockError(RuntimeError):
         self.decision = decision
 
 
+def _acquire_dispatch_file_lock(handle: Any) -> None:
+    handle.seek(0)
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return
+    if msvcrt is not None:
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        return
+    raise RuntimeError("Superloop dispatch file locking is unavailable on this platform")
+
+
+def _release_dispatch_file_lock(handle: Any) -> None:
+    handle.seek(0)
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+    if msvcrt is not None:
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    raise RuntimeError("Superloop dispatch file locking is unavailable on this platform")
+
+
 @contextmanager
 def loop_dispatch_lock(store: SuperloopStore, loop_id: str) -> Iterator[None]:
     """Serialize dispatch acceptance with pause/resume state transitions."""
@@ -43,11 +74,11 @@ def loop_dispatch_lock(store: SuperloopStore, loop_id: str) -> Iterator[None]:
         raise FileNotFoundError(f"Loop state not found: {loop_id}")
     lock_path = loop_dir / ".dispatch.lock"
     with open(lock_path, "a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        _acquire_dispatch_file_lock(handle)
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _release_dispatch_file_lock(handle)
 
 
 @contextmanager
