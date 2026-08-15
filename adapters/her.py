@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -1675,6 +1676,7 @@ def run_claw_json_command(
     binary_path: str | os.PathLike[str] | None = None,
     env: Mapping[str, str] | None = None,
     timeout_s: float = DEFAULT_CLAW_TIMEOUT_SEC,
+    stdin_text: str | None = None,
 ) -> ClawCommandResult:
     binary = find_claw_binary(binary_path, env=env)
     command = [str(binary), *args]
@@ -1682,15 +1684,21 @@ def run_claw_json_command(
     process_env = build_claw_env(env)
     secret_values = [process_env.get(key, "") for key in SECRET_ENV_KEYS]
     try:
+        run_kwargs: dict[str, Any] = {
+            "cwd": str(cwd),
+            "env": process_env,
+            "capture_output": True,
+            "text": True,
+            "timeout": timeout_s,
+            "check": False,
+        }
+        if stdin_text is None:
+            run_kwargs["stdin"] = subprocess.DEVNULL
+        else:
+            run_kwargs["input"] = stdin_text
         completed = subprocess.run(
             command,
-            cwd=str(cwd),
-            env=process_env,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
+            **run_kwargs,
         )
     except subprocess.TimeoutExpired as exc:
         raise ClawTimeoutError(
@@ -1764,6 +1772,7 @@ def run_claw_task(
         binary_path=binary_path,
         env=env,
         timeout_s=timeout_s,
+        stdin_text=prompt,
     )
     data = result.json_data
     return ClawTaskResult(
@@ -1822,7 +1831,10 @@ def build_claw_task_args(
         args.append("--dangerously-skip-permissions")
     if resume:
         args.extend(["--resume", resume])
-    args.extend(["prompt", prompt])
+    # HER's prompt command supports stdin.  Never place user/task content in
+    # argv: large catalogue or media prompts can exceed the operating system's
+    # argument-size limit before the child process starts.
+    args.extend(["prompt", "--stdin"])
     return args
 
 
@@ -3379,7 +3391,7 @@ class HERAdapter(BaseBackend):
             task_env.update({str(key): str(value) for key, value in task_env_overrides.items()})
         proc = await asyncio.create_subprocess_exec(
             *command,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self.effective_workdir),
@@ -3399,9 +3411,14 @@ class HERAdapter(BaseBackend):
                 commentary_prompt=prompt,
                 track_session_identity=track_session_identity,
                 activity_state=activity_state,
+                stdin_data=prompt.encode("utf-8"),
             )
             if self._supports_stream_json
-            else self._communicate_with_activity(proc, activity_state=activity_state)
+            else self._communicate_with_activity(
+                proc,
+                activity_state=activity_state,
+                stdin_data=prompt.encode("utf-8"),
+            )
         )
         try:
             timeout_kind = await self._wait_for_her_task_with_timeouts(
@@ -3527,6 +3544,7 @@ class HERAdapter(BaseBackend):
         proc: asyncio.subprocess.Process,
         *,
         activity_state: list[float] | None = None,
+        stdin_data: bytes | None = None,
     ) -> tuple[bytes, bytes]:
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
@@ -3542,7 +3560,22 @@ class HERAdapter(BaseBackend):
                 if activity_state is not None:
                     activity_state[0] = time.time()
 
+        async def write_stdin() -> None:
+            if proc.stdin is None:
+                return
+            try:
+                if stdin_data:
+                    proc.stdin.write(stdin_data)
+                    await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                proc.stdin.close()
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    await proc.stdin.wait_closed()
+
         await asyncio.gather(
+            write_stdin(),
             read_stream(proc.stdout, stdout_chunks),
             read_stream(proc.stderr, stderr_chunks),
         )
@@ -3559,6 +3592,7 @@ class HERAdapter(BaseBackend):
         commentary_prompt: str = "",
         track_session_identity: bool = True,
         activity_state: list[float] | None = None,
+        stdin_data: bytes | None = None,
     ) -> tuple[bytes, bytes]:
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
@@ -3686,7 +3720,21 @@ class HERAdapter(BaseBackend):
                 if activity_state is not None:
                     activity_state[0] = time.time()
 
-        await asyncio.gather(read_stdout(), read_stderr())
+        async def write_stdin() -> None:
+            if proc.stdin is None:
+                return
+            try:
+                if stdin_data:
+                    proc.stdin.write(stdin_data)
+                    await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                proc.stdin.close()
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    await proc.stdin.wait_closed()
+
+        await asyncio.gather(write_stdin(), read_stdout(), read_stderr())
         await proc.wait()
         return b"".join(stdout_chunks), b"".join(stderr_chunks)
 

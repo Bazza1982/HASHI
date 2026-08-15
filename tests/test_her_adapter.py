@@ -794,6 +794,9 @@ def test_run_claw_task_builds_safe_one_shot_command(tmp_path):
         assert "read-only" in sys.argv
         assert "--allowedTools" in sys.argv
         assert "read,glob" in sys.argv
+        assert "--stdin" in sys.argv
+        assert "inspect" not in sys.argv
+        assert sys.stdin.read() == "inspect"
         print(json.dumps({
           "message": "done",
           "model": "deepseek/test",
@@ -848,7 +851,7 @@ def test_build_claw_task_args_matches_cli_shape():
         "--resume",
         "latest",
         "prompt",
-        "hello",
+        "--stdin",
     ]
 
 
@@ -862,6 +865,38 @@ def test_build_claw_task_args_accepts_stream_json():
 
     assert args[args.index("--output-format") + 1] == "stream-json"
     assert "--allowedTools" not in args
+    assert "hello" not in args
+    assert args[-2:] == ["prompt", "--stdin"]
+
+
+def test_run_claw_task_streams_large_prompt_over_stdin(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys
+        prompt = sys.stdin.read()
+        print(json.dumps({
+            "message": str(len(prompt)),
+            "model": "deepseek/test",
+            "argv_bytes": sum(len(value.encode()) for value in sys.argv[1:]),
+            "prompt_in_argv": prompt in sys.argv,
+        }))
+        """,
+    )
+    prompt = "large-prompt\n" + ("x" * (200 * 1024))
+
+    result = run_claw_task(
+        tmp_path,
+        prompt,
+        "deepseek/test",
+        permission_mode="read-only",
+        binary_path=fake,
+    )
+
+    assert result.text == str(len(prompt))
+    assert result.json_data["prompt_in_argv"] is False
+    assert result.json_data["argv_bytes"] < 1_000
 
 
 def test_claw_adapter_defaults_to_all_native_tools_and_accepts_wildcard(tmp_path):
