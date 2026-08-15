@@ -4,8 +4,9 @@ Presentation switches consume disjoint subsets of this stream:
 
 * ``/think`` receives ``KIND_THINKING`` events containing genuine
   provider-returned reasoning (or an explicit provider-redacted reasoning
-  notice), plus ``KIND_COMMENTARY`` events containing model-authored interim
-  commentary when a backend exposes it.
+  notice), plus ``KIND_COMMENTARY`` events when a backend exposes them through
+  the generic thinking display.  HER owns a separate ``/commentary`` policy,
+  so its persona updates never depend on ``/think``.
 * ``/verbose`` receives progress, tool/file/shell, result, and error events.
 * ``KIND_TEXT_DELTA`` is reserved for local observers and final-answer
   assembly; Telegram does not present live answer drafts.

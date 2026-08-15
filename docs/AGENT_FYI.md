@@ -54,6 +54,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/superloop`: recording-first long-running workflow orchestration.
 - `/verbose [on|off]`: toggle richer long-task status display.
 - `/think [on|off]`: toggle model-authored interim commentary and available provider-reasoning messages. Independent from `/verbose`; generic progress and tools remain under `/verbose`.
+- `/commentary [on|off]`: HER-only persona acknowledgements and High+ progress updates. Independent from `/think` and `/verbose`; other backends retain their own display rules.
 - `/typing [on|off|status]`: control both the temporary typing bubble and Telegram's native typing indicator, independently from `/verbose` and `/think`.
 - `/stop`: cancel current processing. HASHI durably preserves the interrupted user task;
   a later plain `continue`, `resume`, or `继续` request is explicitly rebound to that task,

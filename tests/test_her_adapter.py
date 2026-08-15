@@ -20,7 +20,10 @@ from adapters.her import (
     ClawProviderSecretMissing,
     ClawTaskResult,
     ClawTimeoutError,
+    _HERCommentaryController,
+    _build_claw_commentary_lease,
     _build_claw_incomplete_report,
+    _claw_jsonl_to_stream_events,
     _claw_incomplete_response,
     _claw_run_is_incomplete,
     _parse_json_output,
@@ -41,11 +44,13 @@ from adapters.claw_cli import ClawCLIAdapter
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
     KIND_ACKNOWLEDGEMENT,
+    KIND_COMMENTARY,
     KIND_PROGRESS,
     KIND_TEXT_DELTA,
     KIND_THINKING,
     KIND_TOOL_END,
     KIND_TOOL_START,
+    StreamEvent,
 )
 from orchestrator.flexible_backend_registry import (
     allows_custom_models,
@@ -58,6 +63,148 @@ def _write_exe(path: Path, body: str) -> Path:
     path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
+
+
+def test_claw_replan_emits_persona_commentary_from_task_frame():
+    prompt = """
+    你的名字是 Sunny。
+    称呼用户为「爸爸」。
+    - **Emoji:** ☀️
+    """
+    events = _claw_jsonl_to_stream_events(
+        {
+            "kind": "task_plan",
+            "phase": "replan",
+            "frame": {
+                "active_goal": "修复任务",
+                "completed": ["定位失败原因"],
+                "remaining_work": ["运行回归测试"],
+                "failures": [],
+                "next_action": "运行针对性回归测试",
+            },
+        },
+        commentary_prompt=prompt,
+    )
+
+    commentary = next(event for event in events if event.kind == KIND_COMMENTARY)
+    assert "爸爸" in commentary.summary
+    assert "Sunny" in commentary.summary
+    assert "定位失败原因" in commentary.summary
+    assert "运行针对性回归测试" in commentary.summary
+    assert "☀️" in commentary.summary
+
+
+def test_claw_initial_task_plan_does_not_duplicate_acknowledgement_as_commentary():
+    events = _claw_jsonl_to_stream_events(
+        {
+            "kind": "task_plan",
+            "phase": "initial",
+            "frame": {
+                "active_goal": "inspect",
+                "completed": [],
+                "remaining_work": ["inspect"],
+                "next_action": "inspect",
+            },
+        },
+        commentary_prompt="You are Sunny.",
+    )
+
+    assert all(event.kind != KIND_COMMENTARY for event in events)
+
+
+@pytest.mark.asyncio
+async def test_claw_commentary_lease_emits_persona_update_and_stops_cleanly():
+    received = []
+
+    async def callback(event):
+        received.append(event)
+
+    prompt = "你的名字是 Sunny。称呼用户为「爸爸」。\n- **Emoji:** ☀️"
+    controller = _HERCommentaryController(
+        callback,
+        prompt=prompt,
+        progress_enabled=True,
+        first_update_s=0.01,
+        min_gap_s=0.01,
+        target_interval_s=0.02,
+        hard_interval_s=0.03,
+        activity_grace_s=0.001,
+    )
+    lease_task = asyncio.create_task(controller.run())
+    for _ in range(30):
+        if received:
+            break
+        await asyncio.sleep(0.005)
+    controller.close()
+    await lease_task
+
+    assert len(received) == 1
+    assert received[0].kind == KIND_COMMENTARY
+    assert received[0].summary == _build_claw_commentary_lease(prompt)
+    assert "爸爸" in received[0].summary
+    assert "Sunny" in received[0].summary
+    assert "☀️" in received[0].summary
+
+
+@pytest.mark.asyncio
+async def test_claw_commentary_lease_prefers_pending_persona_milestone():
+    received = []
+
+    async def callback(event):
+        received.append(event)
+
+    controller = _HERCommentaryController(
+        callback,
+        prompt="You are Sunny.",
+        progress_enabled=True,
+        first_update_s=0.02,
+        min_gap_s=0.02,
+        target_interval_s=0.04,
+        hard_interval_s=0.06,
+        activity_grace_s=0.001,
+    )
+    lease_task = asyncio.create_task(controller.run())
+    acknowledgement = StreamEvent(
+        kind=KIND_ACKNOWLEDGEMENT,
+        summary="Sunny will inspect the request.",
+    )
+    milestone = StreamEvent(
+        kind=KIND_COMMENTARY,
+        summary="Sunny has completed the inspection and will run the focused check next.",
+    )
+    await controller.forward(acknowledgement)
+    await controller.forward(milestone)
+    for _ in range(30):
+        if len(received) >= 2:
+            break
+        await asyncio.sleep(0.005)
+    controller.close()
+    await lease_task
+
+    assert received == [acknowledgement, milestone]
+
+
+@pytest.mark.asyncio
+async def test_medium_claw_controller_forwards_ack_but_suppresses_progress_commentary():
+    received = []
+
+    async def callback(event):
+        received.append(event)
+
+    controller = _HERCommentaryController(
+        callback,
+        prompt="You are Sunny.",
+        progress_enabled=False,
+    )
+    await controller.forward(
+        StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary="Sunny will inspect the request.")
+    )
+    await controller.forward(
+        StreamEvent(kind=KIND_COMMENTARY, summary="Sunny has a progress update.")
+    )
+    controller.close()
+
+    assert [event.kind for event in received] == [KIND_ACKNOWLEDGEMENT]
 
 
 def test_claw_max_iterations_builds_chinese_verified_fallback_report():

@@ -146,12 +146,14 @@ def test_display_preferences_survive_new_runtime_objects(tmp_path):
     first_runtime = _runtime(tmp_path)
     telegram_stream_policy.set_display_preference(first_runtime, "verbose", False)
     telegram_stream_policy.set_display_preference(first_runtime, "think", False)
+    telegram_stream_policy.set_display_preference(first_runtime, "commentary", False)
     telegram_stream_policy.set_typing_enabled(first_runtime, False)
 
     restarted_runtime = _runtime(tmp_path)
 
     assert telegram_stream_policy.get_display_preference(restarted_runtime, "verbose") is False
     assert telegram_stream_policy.get_display_preference(restarted_runtime, "think") is False
+    assert telegram_stream_policy.get_display_preference(restarted_runtime, "commentary") is False
     assert telegram_stream_policy.get_display_policy(restarted_runtime).typing_enabled is False
 
 
@@ -162,6 +164,7 @@ def test_display_preferences_survive_new_runtime_objects(tmp_path):
         (".verbose_off", "verbose", False),
         (".think", "think", True),
         (".think_off", "think", False),
+        (".commentary_off", "commentary", False),
     ],
 )
 def test_display_preferences_migrate_legacy_markers(tmp_path, marker, name, expected):
@@ -231,6 +234,72 @@ async def test_typing_command_does_not_change_verbose_or_think_preferences(tmp_p
     assert telegram_stream_policy.get_display_policy(runtime).typing_enabled is True
     assert runtime._verbose is False
     assert runtime._think is False
+
+
+@pytest.mark.asyncio
+async def test_her_commentary_command_persists_without_changing_think_or_verbose(tmp_path):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.workspace_dir = tmp_path / "workspaces" / "sunny"
+    runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+    runtime.config = SimpleNamespace(active_backend="her", extra={})
+    runtime.backend_manager = SimpleNamespace(current_backend=SimpleNamespace(effort="high"))
+    runtime._commentary = True
+    runtime._verbose = False
+    runtime._think = False
+    runtime._is_authorized_user = lambda _user_id: True
+    replies = []
+
+    async def _reply_text(_update, text, **kwargs):
+        replies.append((text, kwargs))
+
+    runtime._reply_text = _reply_text
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=1))
+
+    await FlexibleAgentRuntime.cmd_commentary(
+        runtime,
+        update,
+        SimpleNamespace(args=["off"]),
+    )
+
+    assert runtime._commentary is False
+    assert runtime._verbose is False
+    assert runtime._think is False
+    assert telegram_stream_policy.get_display_preference(runtime, "commentary") is False
+    assert (runtime.workspace_dir / ".commentary_off").exists()
+    assert "<b>Current</b> · <b>OFF</b>" in replies[-1][0]
+    assert "does not change /think or /verbose" in replies[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_commentary_command_on_non_her_backend_reports_only_and_does_not_mutate(tmp_path):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.workspace_dir = tmp_path / "workspaces" / "sunny"
+    runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+    runtime.config = SimpleNamespace(active_backend="codex-cli", extra={})
+    runtime._commentary = False
+    runtime._verbose = True
+    runtime._think = True
+    runtime._is_authorized_user = lambda _user_id: True
+    telegram_stream_policy.set_display_preference(runtime, "commentary", False)
+    replies = []
+
+    async def _reply_text(_update, text, **kwargs):
+        replies.append((text, kwargs))
+
+    runtime._reply_text = _reply_text
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=1))
+
+    await FlexibleAgentRuntime.cmd_commentary(
+        runtime,
+        update,
+        SimpleNamespace(args=["on"]),
+    )
+
+    assert runtime._commentary is False
+    assert telegram_stream_policy.get_display_preference(runtime, "commentary") is False
+    assert "HER ONLY" in replies[-1][0]
+    assert "codex-cli" in replies[-1][0]
+    assert "Nothing was changed" in replies[-1][0]
 
 
 @pytest.mark.asyncio
@@ -360,7 +429,7 @@ async def test_verbose_stream_display_obeys_shared_edit_budget(tmp_path):
 @pytest.mark.asyncio
 async def test_verbose_and_think_receive_disjoint_event_classes():
     runtime = object.__new__(FlexibleAgentRuntime)
-    runtime.config = SimpleNamespace(active_backend="claw-cli")
+    runtime.config = SimpleNamespace(active_backend="codex-cli")
     runtime.logger = SimpleNamespace(debug=lambda _message: None)
     runtime._thinking_chars_this_req = 0
     runtime._openrouter_think_chunk = ""
@@ -383,6 +452,27 @@ async def test_verbose_and_think_receive_disjoint_event_classes():
     assert verbose_event.kind == KIND_PROGRESS
     assert verbose_queue.empty()
     assert think_buffer == ["r" * 160, commentary]
+
+
+@pytest.mark.asyncio
+async def test_her_commentary_never_enters_think_buffer():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.config = SimpleNamespace(active_backend="her")
+    runtime.logger = SimpleNamespace(debug=lambda _message: None)
+    runtime._thinking_chars_this_req = 0
+    runtime._openrouter_think_chunk = ""
+    runtime._last_openrouter_think_snippet = None
+    think_buffer = []
+    callback = FlexibleAgentRuntime._make_stream_callback(
+        runtime,
+        think_buffer=think_buffer,
+    )
+
+    await callback(
+        StreamEvent(kind=KIND_COMMENTARY, summary="Sunny has a persona progress update. ☀️")
+    )
+
+    assert think_buffer == []
 
 
 @pytest.mark.asyncio

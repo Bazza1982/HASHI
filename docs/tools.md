@@ -56,9 +56,10 @@ Five execution modes:
 - `/model` — switch model (inline keyboard), then optionally choose or keep effort when the model supports it
 - `/mode [fixed|flex|wrapper|audit|dual-brain]` — switch execution mode; `/mode memory+` only enables Memory+ and keeps the current mode
 - `/think [on|off]` — show model-authored interim commentary plus genuine provider-returned reasoning chunks or explicit provider-redaction notices; independent of `/verbose` and `/typing`
+- `/commentary [on|off]` — HER only: control persona acknowledgements and High+ progress updates; independent of `/think`, `/verbose`, and raw reasoning
 - `/verbose [on|off]` — show a temporary progress card with timing, progress, and available tool-result summaries; reasoning and answer drafts are excluded
 - `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
-- `/stream` and `/preview` — retired compatibility commands that point to the three controls above; Telegram answers are delivered only when complete
+- `/stream` and `/preview` — retired compatibility commands that point to the display controls above; Telegram answers are delivered only when complete
 - `/skill` — browse, toggle, and run skills (inline keyboard)
 - `/active [on|off] [minutes]` — toggle bridge-managed proactive heartbeat (default 10 min)
 - `/nudge [list]` — show idle continuation jobs. `/nudge <minutes> <exit condition>` creates an idle-only continuation job; `/nudge max <id-fragment> <+100|-100|number|unlimited>` adjusts the optional fire limit. Telegram nudge panels also include `Max -100`, `Max +100`, and `Max ∞` buttons.
@@ -478,7 +479,7 @@ Recommended protocol for Windows UI work:
 ## Important Behavior Notes
 - Bridge owns continuity; backends are treated as stateless.
 - Backend capabilities are not identical — session model, file handling, tool use, and streaming vary per backend.
-- `/think` accepts only model-authored interim commentary and genuine provider reasoning. It never treats generic start, busy, progress, tool, or answer-delta events as either. If the current backend exposes neither commentary nor reasoning, `/think on` remains quiet.
+- `/think` accepts only backend-native interim commentary and genuine provider reasoning. It never treats generic start, busy, progress, tool, or answer-delta events as either. HER persona updates use `/commentary` instead and never enter `/think`. If the current backend exposes neither commentary nor reasoning, `/think on` remains quiet.
 - `/handoff` restores continuity from bridge-owned transcript history, not CLI resume state.
 - Model and effort changes at runtime are not automatically persisted back to `agents.json`.
 - Backend-specific behaviors must be labeled as such, not described as universal.
@@ -498,3 +499,5 @@ Recommended protocol for Windows UI work:
 | Ollama API | The model's `reasoning` field when available | HASHI tool-gateway summaries for locally enabled tools |
 
 Assistant answer deltas remain available to local activity observers, but they are never displayed as Telegram previews. Codex commentary is kept distinct from both generic progress and private/provider reasoning, then routed to `/think` as Codex's user-visible substitute. Long commentary is split across Telegram messages rather than truncated. `/typing` is backend-independent.
+
+HER `/commentary` is enabled by default as a durable workspace preference. Medium effort sends only the persona acknowledgement. High and above also send model-frame milestone updates, with an honest persona lease around 90 seconds for the first long wait, then a three-minute target and five-minute hard maximum. The lease survives background detach and stops with task completion or cancellation. On non-HER backends, `/commentary` reports that the setting is unavailable and changes nothing.
