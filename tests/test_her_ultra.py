@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -57,7 +58,7 @@ def _subtask_payload(
     *,
     depends_on: tuple[str, ...] = (),
     optional: bool = False,
-    allowed_actions: tuple[str, ...] = ("read",),
+    retry_safe: bool = True,
 ) -> dict:
     return {
         "id": subtask_id,
@@ -66,11 +67,8 @@ def _subtask_payload(
         "depends_on": list(depends_on),
         "model_class": "current",
         "effort": "high",
-        "allowed_actions": list(allowed_actions),
-        "workspace_strategy": (
-            "isolated_worktree" if "write" in allowed_actions else "shared_read_only"
-        ),
-        "retry_safe": "write" not in allowed_actions,
+        "workspace_strategy": "shared_read_only",
+        "retry_safe": retry_safe,
         "deliverables": [f"Result {subtask_id}"],
         "acceptance": [f"Evidence {subtask_id}"],
         "optional": optional,
@@ -133,11 +131,15 @@ def test_extract_json_object_prefers_outer_latest_complete_object():
 
 def test_ultra_config_caps_concurrency_at_ten():
     config = HERUltraConfig.from_mapping(
-        {"max_concurrent_subagents": 99, "write_tasks_enabled": "false"}
+        {
+            "max_concurrent_subagents": 99,
+            "max_plan_revisions": 99,
+        }
     )
 
     assert config.max_concurrent_subagents == 10
-    assert config.write_tasks_enabled is False
+    assert config.max_plan_revisions == 2
+    assert config.primary_inner_effort == "high"
 
 
 def test_task_contract_accepts_dag_and_rejects_cycles():
@@ -175,51 +177,41 @@ def test_task_contract_accepts_dag_and_rejects_cycles():
         )
 
 
-def test_task_contract_fails_closed_on_authority_model_and_write_drift():
-    goal = "Read only"
+def test_task_contract_does_not_reauthorize_or_narrow_parent_authority():
+    goal = "Use the inherited Agent authority"
     request_id = "req-authority"
     authority = _authority()
-    validator = HERUltraTaskContractValidator(_config(write_tasks_enabled=True))
+    validator = HERUltraTaskContractValidator(_config())
     payload = _plan_payload(
         goal="different goal",
         parent_request_id=request_id,
         authority=authority,
-        subtasks=[_subtask_payload("writer", allowed_actions=("write",))],
+        subtasks=[_subtask_payload("writer", retry_safe=False)],
     )
-    payload["subtasks"][0]["model"] = "not-allowed"
+    payload["subtasks"][0].update(
+        {
+            "allowed_actions": [],
+            "required_permission_mode": "read-only",
+            "required_tools": [],
+            "required_paths": ["/wrong/legacy/path"],
+        }
+    )
 
-    with pytest.raises(HERUltraContractError) as captured:
-        validator.validate_plan(
-            payload,
-            authoritative_goal=goal,
-            parent_request_id=request_id,
-            authority=authority,
-            revision=1,
-        )
-
-    error = str(captured.value)
-    assert "authoritative_goal" in error
-    assert "mutating subtask" in error
-    assert "model is not allowed" in error
-
-    write_authority = _authority(write_enabled=True)
-    write_payload = _plan_payload(
-        goal=goal,
+    plan = validator.validate_plan(
+        payload,
+        authoritative_goal=goal,
         parent_request_id=request_id,
-        authority=write_authority,
-        subtasks=[_subtask_payload("writer", allowed_actions=("write",))],
+        authority=authority,
+        revision=1,
     )
-    with pytest.raises(HERUltraContractError, match="worktree integration"):
-        validator.validate_plan(
-            write_payload,
-            authoritative_goal=goal,
-            parent_request_id=request_id,
-            authority=write_authority,
-            revision=1,
-        )
+
+    assert plan.subtasks[0].retry_safe is False
+    assert not hasattr(plan.subtasks[0], "required_permission_mode")
+    assert not hasattr(plan.subtasks[0], "required_tools")
+    assert not hasattr(plan.subtasks[0], "required_paths")
 
 
-def test_worker_result_requires_strict_evidence():
+def test_worker_result_accepts_natural_text_and_coerces_optional_json_fields():
     subtask = HERUltraSubtask(
         subtask_id="a",
         title="A",
@@ -228,13 +220,33 @@ def test_worker_result_requires_strict_evidence():
         model="",
         model_class="current",
         effort="high",
-        allowed_actions=("read",),
         deliverables=("result",),
         acceptance=("evidence",),
         optional=False,
         retry_safe=True,
         workspace_strategy="shared_read_only",
     )
+    natural = HERUltraWorkerResult.from_invocation(
+        HERUltraInvocationResult(text="The relevant test passes."),
+        subtask=subtask,
+        result_id="result-natural",
+        attempt=1,
+    )
+    assert natural.status == "completed"
+    assert natural.claims == ("The relevant test passes.",)
+
+    blocked = HERUltraWorkerResult.from_invocation(
+        HERUltraInvocationResult(
+            text="BLOCKED: tool 'bash' requires danger-full-access permission"
+        ),
+        subtask=subtask,
+        result_id="result-blocked",
+        attempt=1,
+    )
+    assert blocked.status == "blocked"
+    assert blocked.completed is False
+    assert blocked.error_type == "permission_blocked"
+
     invocation = HERUltraInvocationResult(
         text=json.dumps(
             {
@@ -252,12 +264,125 @@ def test_worker_result_requires_strict_evidence():
         subtask=subtask,
         result_id="result-1",
         attempt=1,
-        strict=True,
+    )
+
+    assert result.status == "completed"
+    assert result.claims == ("not-a-list",)
+
+
+def test_worker_result_preserves_noncanonical_deliverable_payload():
+    subtask = HERUltraSubtask(
+        subtask_id="os-release",
+        title="OS release",
+        objective="Read OS facts",
+        depends_on=(),
+        model="model",
+        model_class="current",
+        effort="high",
+        deliverables=("OS fields",),
+        acceptance=("values returned",),
+        optional=False,
+        retry_safe=True,
+        workspace_strategy="shared_read_only",
+    )
+    payload = {
+        "status": "completed",
+        "subtask_id": "os-release",
+        "result": {"fields": {"NAME": "Ubuntu", "VERSION_ID": "22.04"}},
+        "sources": ["/etc/os-release"],
+        "validation_performed": "Read and cross-checked the source.",
+        "unresolved": [],
+    }
+
+    result = HERUltraWorkerResult.from_invocation(
+        HERUltraInvocationResult(text=json.dumps(payload)),
+        subtask=subtask,
+        result_id="result-os-release",
+        attempt=1,
+    )
+
+    assert result.completed is True
+    assert result.evidence == ("/etc/os-release",)
+    assert result.validation == ("Read and cross-checked the source.",)
+    assert result.raw_payload == payload
+
+
+def test_worker_result_rejects_empty_completed_receipt():
+    subtask = HERUltraSubtask(
+        subtask_id="filesystem",
+        title="Filesystem",
+        objective="Report capacity",
+        depends_on=(),
+        model="model",
+        model_class="current",
+        effort="high",
+        deliverables=("capacity values",),
+        acceptance=("actual values returned",),
+        optional=False,
+        retry_safe=True,
+        workspace_strategy="shared_read_only",
+    )
+
+    result = HERUltraWorkerResult.from_invocation(
+        HERUltraInvocationResult(text=json.dumps({"status": "completed"})),
+        subtask=subtask,
+        result_id="result-empty",
+        attempt=1,
     )
 
     assert result.status == "failed"
     assert result.error_type == "malformed_output"
-    assert "claims must be a list" in result.error
+    assert result.error == "completed worker result contains no deliverable payload"
+    assert result.transient is True
+    assert result.raw_payload == {"status": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_assembly_receives_complete_noncanonical_worker_payload(tmp_path):
+    goal = "Report OS facts"
+    authority = _authority()
+    plan_payload = _plan_payload(
+        goal=goal,
+        parent_request_id="req-raw-payload",
+        authority=authority,
+        subtasks=[_subtask_payload("os-release")],
+    )
+    worker_payload = {
+        "status": "completed",
+        "subtask_id": "os-release",
+        "result": {"fields": {"NAME": "Ubuntu", "VERSION_ID": "22.04"}},
+        "sources": ["/etc/os-release"],
+        "validation_performed": "Exact values copied from the file.",
+    }
+
+    async def primary(spec):
+        if spec.phase == "planning":
+            return HERUltraInvocationResult(
+                text=json.dumps(plan_payload), session_id="primary"
+            )
+        assert spec.phase == "assembly"
+        assert '"NAME": "Ubuntu"' in spec.prompt
+        assert '"VERSION_ID": "22.04"' in spec.prompt
+        assert '"raw_payload"' in spec.prompt
+        return HERUltraInvocationResult(text="verified answer", session_id="primary")
+
+    async def worker(_spec):
+        return HERUltraInvocationResult(text=json.dumps(worker_payload))
+
+    outcome = await HERUltraOrchestrator(
+        config=_config(),
+        ledger_root=tmp_path,
+        primary_executor=primary,
+        worker_executor=worker,
+        run_id_factory=lambda: "run-raw-payload",
+    ).run(
+        authoritative_goal=goal,
+        parent_request_id="req-raw-payload",
+        authority=authority,
+    )
+
+    assert outcome.is_success is True
+    assert outcome.text == "verified answer"
 
 
 def test_run_ledger_is_durable_idempotent_and_cancellation_fenced(tmp_path):
@@ -302,6 +427,7 @@ async def test_orchestrator_uses_parallel_workers_and_one_primary_assembly(tmp_p
     active = 0
     maximum_active = 0
     events = []
+    commentary_facts = []
     plan_payload = _plan_payload(
         goal=goal,
         parent_request_id=request_id,
@@ -346,12 +472,17 @@ async def test_orchestrator_uses_parallel_workers_and_one_primary_assembly(tmp_p
     async def capture(event):
         events.append(event)
 
+    async def render_commentary(facts):
+        commentary_facts.append(dict(facts))
+        return f"persona:{facts['phase']}"
+
     orchestrator = HERUltraOrchestrator(
         config=_config(),
         ledger_root=tmp_path,
         primary_executor=primary,
         worker_executor=worker,
         on_stream_event=capture,
+        persona_commentary_renderer=render_commentary,
         run_id_factory=lambda: "run-parallel",
     )
 
@@ -370,7 +501,30 @@ async def test_orchestrator_uses_parallel_workers_and_one_primary_assembly(tmp_p
     assert worker_calls[:2] == ["a", "b"]
     assert worker_calls[-1] == "c"
     assert [phase for phase, _session in phases] == ["planning", "assembly"]
-    assert all(event.delivery_class == DELIVERY_TECHNICAL for event in events)
+    assert {event.delivery_class for event in events} == {
+        DELIVERY_TECHNICAL,
+        "user_commentary",
+    }
+    assert [facts["phase"] for facts in commentary_facts] == [
+        "planning_started",
+        "plan_accepted",
+        "worker_progress",
+        "worker_progress",
+        "assembly_started",
+    ]
+    final_progress = next(
+        facts
+        for facts in commentary_facts
+        if facts["phase"] == "worker_progress" and facts["terminal_subtasks"] == 3
+    )
+    assert final_progress == {
+        "phase": "worker_progress",
+        "terminal_subtasks": 3,
+        "total_subtasks": 3,
+        "completed_subtasks": 3,
+        "failed_subtasks": 0,
+        "blocked_subtasks": 0,
+    }
     assert len({event.event_id for event in events}) == len(events)
 
 
@@ -424,6 +578,132 @@ async def test_orchestrator_retries_only_transient_retry_safe_worker(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_worker_inherits_full_parent_authority_without_subtask_reauthorization(
+    tmp_path,
+):
+    authority = HERUltraAuthorityEnvelope.build(
+        permission_mode="danger-full-access",
+        access_root="/",
+        allowed_tools=("*",),
+        write_enabled=True,
+    )
+    plan_payload = _plan_payload(
+        goal="Perform system work",
+        parent_request_id="req-full-authority",
+        authority=authority,
+        subtasks=[_subtask_payload("system-change", retry_safe=False)],
+    )
+    worker_specs = []
+
+    async def primary(spec):
+        if spec.phase == "planning":
+            return HERUltraInvocationResult(
+                text=json.dumps(plan_payload), session_id="primary"
+            )
+        return HERUltraInvocationResult(text="assembled", session_id="primary")
+
+    async def worker(spec):
+        worker_specs.append(spec)
+        return _worker_success(spec.subtask_id)
+
+    outcome = await HERUltraOrchestrator(
+        config=_config(),
+        ledger_root=tmp_path,
+        primary_executor=primary,
+        worker_executor=worker,
+        run_id_factory=lambda: "run-full-authority",
+    ).run(
+        authoritative_goal="Perform system work",
+        parent_request_id="req-full-authority",
+        authority=authority,
+    )
+
+    assert outcome.is_success is True
+    assert len(worker_specs) == 1
+    assert worker_specs[0].permission_mode == "danger-full-access"
+    assert worker_specs[0].allowed_tools == ("*",)
+    assert worker_specs[0].workspace == "/"
+    assert worker_specs[0].retry_safe is False
+
+
+@pytest.mark.asyncio
+async def test_primary_marks_non_idempotent_worker_as_not_retryable(tmp_path):
+    authority = _authority(write_enabled=True)
+    plan_payload = _plan_payload(
+        goal="Change state once",
+        parent_request_id="req-no-retry",
+        authority=authority,
+        subtasks=[_subtask_payload("change-once", retry_safe=False)],
+    )
+    attempts = 0
+
+    async def primary(spec):
+        if spec.phase == "planning":
+            return HERUltraInvocationResult(
+                text=json.dumps(plan_payload), session_id="primary"
+            )
+        raise AssertionError("assembly must not run without usable evidence")
+
+    async def worker(_spec):
+        nonlocal attempts
+        attempts += 1
+        return HERUltraInvocationResult(
+            text="",
+            is_success=False,
+            error="uncertain transport result",
+            error_type="transport",
+            retryable=True,
+        )
+
+    outcome = await HERUltraOrchestrator(
+        config=_config(subagent_retry_limit=3),
+        ledger_root=tmp_path,
+        primary_executor=primary,
+        worker_executor=worker,
+        run_id_factory=lambda: "run-no-retry",
+    ).run(
+        authoritative_goal="Change state once",
+        parent_request_id="req-no-retry",
+        authority=authority,
+    )
+
+    assert outcome.is_success is False
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_persona_commentary_renderer_failure_uses_explicit_neutral_fallback(
+    tmp_path,
+):
+    events = []
+
+    async def broken_renderer(_facts):
+        raise RuntimeError("renderer unavailable")
+
+    async def capture(event):
+        events.append(event)
+
+    orchestrator = HERUltraOrchestrator(
+        config=_config(),
+        ledger_root=tmp_path,
+        primary_executor=lambda _spec: None,
+        worker_executor=lambda _spec: None,
+        on_stream_event=capture,
+        persona_commentary_renderer=broken_renderer,
+    )
+
+    await orchestrator._emit_persona_commentary(
+        {"phase": "planning_started"},
+        event_id="fallback-commentary",
+        phase="planning",
+    )
+
+    assert len(events) == 1
+    assert events[0].delivery_class == "user_commentary"
+    assert events[0].summary.startswith("[HER neutral fallback]")
+
+
+@pytest.mark.asyncio
 async def test_failed_dependency_is_not_dispatched(tmp_path):
     goal = "Do dependent work"
     request_id = "req-dependency"
@@ -439,10 +719,15 @@ async def test_failed_dependency_is_not_dispatched(tmp_path):
         ],
     )
 
+    primary_phases = []
+
     async def primary(spec):
-        return HERUltraInvocationResult(
-            text=json.dumps(plan_payload), session_id="primary"
-        )
+        primary_phases.append(spec.phase)
+        if spec.phase == "planning":
+            return HERUltraInvocationResult(
+                text=json.dumps(plan_payload), session_id="primary"
+            )
+        pytest.fail("assembly must not run when no required worker produced evidence")
 
     async def worker(spec):
         worker_calls.append(spec.subtask_id)
@@ -468,7 +753,9 @@ async def test_failed_dependency_is_not_dispatched(tmp_path):
     )
 
     assert outcome.is_success is False
+    assert "Primary assembly was not started" in outcome.error
     assert worker_calls == ["a"]
+    assert primary_phases == ["planning"]
     state = json.loads(
         (tmp_path / "run-dependency" / "state.json").read_text(encoding="utf-8")
     )
@@ -490,6 +777,8 @@ async def test_direct_plan_records_user_facing_answer_in_primary_session(tmp_pat
     )
     worker_called = False
     phases = []
+    commentary_facts = []
+    events = []
 
     async def primary(spec):
         phases.append((spec.phase, spec.resume_session_id))
@@ -498,13 +787,24 @@ async def test_direct_plan_records_user_facing_answer_in_primary_session(tmp_pat
                 text=json.dumps(plan_payload), session_id="primary"
             )
         assert spec.phase == "direct_response"
-        assert spec.resume_session_id == "primary"
-        return HERUltraInvocationResult(text="direct answer", session_id="primary")
+        assert goal in spec.prompt
+        assert "Momo persona" in spec.prompt
+        assert "direct answer" in spec.prompt
+        return HERUltraInvocationResult(
+            text="persona-rendered direct answer", session_id="primary-direct"
+        )
 
     async def worker(_spec):
         nonlocal worker_called
         worker_called = True
         raise AssertionError("worker must not run")
+
+    async def render_commentary(facts):
+        commentary_facts.append(dict(facts))
+        return "must not be delivered"
+
+    async def capture(event):
+        events.append(event)
 
     outcome = await HERUltraOrchestrator(
         config=_config(),
@@ -512,6 +812,9 @@ async def test_direct_plan_records_user_facing_answer_in_primary_session(tmp_pat
         primary_executor=primary,
         worker_executor=worker,
         run_id_factory=lambda: "run-direct",
+        persona_guidance="Use the Momo persona.",
+        persona_commentary_renderer=render_commentary,
+        on_stream_event=capture,
     ).run(
         authoritative_goal=goal,
         parent_request_id=request_id,
@@ -519,9 +822,33 @@ async def test_direct_plan_records_user_facing_answer_in_primary_session(tmp_pat
     )
 
     assert outcome.is_success is True
-    assert outcome.text == "direct answer"
+    assert outcome.text == "persona-rendered direct answer"
     assert worker_called is False
     assert phases == [("planning", ""), ("direct_response", "primary")]
+    assert commentary_facts == []
+    assert not [event for event in events if event.delivery_class == "user_commentary"]
+
+
+def test_planning_prompt_contains_exact_authoritative_goal(tmp_path):
+    goal = "帮我扫描整个磁盘，找找有没有垃圾可以清理"
+    orchestrator = HERUltraOrchestrator(
+        config=_config(),
+        ledger_root=tmp_path,
+        primary_executor=None,
+        worker_executor=None,
+    )
+
+    prompt = orchestrator._planning_prompt(
+        authoritative_goal=goal,
+        parent_request_id="req-goal-binding",
+        authority=_authority(),
+        revision=1,
+        prior_error="",
+    )
+
+    assert goal in prompt
+    assert '"authoritative_goal"' in prompt
+    assert "Do not ask for a goal that is present" in prompt
 
 
 @pytest.mark.asyncio
@@ -541,18 +868,18 @@ async def test_invalid_plan_is_corrected_in_same_primary_session(tmp_path):
     async def primary(spec):
         calls.append((spec.phase, spec.resume_session_id, spec.prompt))
         if spec.phase == "planning":
-            invalid = {**valid, "authoritative_goal": "wrong goal"}
+            invalid = {**valid, "subtasks": "not-a-list"}
             return HERUltraInvocationResult(
                 text=json.dumps(invalid), session_id="primary-invalid"
             )
         if spec.phase == "plan_correction":
-            assert "authoritative_goal does not exactly match" in spec.prompt
+            assert "subtasks must be a list" in spec.prompt
             return HERUltraInvocationResult(
                 text=json.dumps(valid), session_id="primary-corrected"
             )
         assert spec.phase == "direct_response"
         return HERUltraInvocationResult(
-            text="corrected answer", session_id="primary-final"
+            text="corrected final answer", session_id="primary-direct"
         )
 
     async def worker(_spec):
@@ -571,13 +898,47 @@ async def test_invalid_plan_is_corrected_in_same_primary_session(tmp_path):
     )
 
     assert outcome.is_success is True
-    assert outcome.text == "corrected answer"
+    assert outcome.text == "corrected final answer"
     assert outcome.plan_revision == 2
     assert [(phase, session) for phase, session, _prompt in calls] == [
         ("planning", ""),
         ("plan_correction", "primary-invalid"),
         ("direct_response", "primary-corrected"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_primary_provider_failure_is_not_treated_as_plan_correction(tmp_path):
+    calls = []
+
+    async def primary(spec):
+        calls.append(spec.phase)
+        return HERUltraInvocationResult(
+            text="",
+            is_success=False,
+            error="provider unavailable",
+            error_type="provider",
+            retryable=True,
+        )
+
+    async def worker(_spec):
+        raise AssertionError("worker must not run without a plan")
+
+    outcome = await HERUltraOrchestrator(
+        config=_config(),
+        ledger_root=tmp_path,
+        primary_executor=primary,
+        worker_executor=worker,
+        run_id_factory=lambda: "run-provider-failure",
+    ).run(
+        authoritative_goal="Investigate",
+        parent_request_id="req-provider-failure",
+        authority=_authority(),
+    )
+
+    assert outcome.is_success is False
+    assert outcome.error == "provider unavailable"
+    assert calls == ["planning"]
 
 
 @pytest.mark.asyncio
@@ -770,9 +1131,12 @@ def _claw_result(
 
 @pytest.mark.asyncio
 async def test_her_adapter_ultra_returns_one_response_and_checkpoints_primary(tmp_path):
+    persona_path = tmp_path / "SYSTEM.md"
+    persona_path.write_text("Use the Momo persona.", encoding="utf-8")
     cfg = SimpleNamespace(
         name="test",
         workspace_dir=tmp_path,
+        system_md=persona_path,
         model="deepseek/deepseek-v4-flash",
         extra={
             "effort": "ultra",
@@ -799,13 +1163,19 @@ async def test_her_adapter_ultra_returns_one_response_and_checkpoints_primary(tm
     async def run_task(prompt, **kwargs):
         calls.append((prompt, kwargs))
         request_id = kwargs["request_id"]
+        if prompt.startswith("HER ULTRA COMMENTARY RENDERER"):
+            return _claw_result(
+                "Momo persona progress",
+                model=kwargs.get("model_override") or cfg.model,
+                session_id="persona-commentary",
+            )
         if prompt.startswith("[HER Ultra Primary Planning Contract]"):
             return _claw_result(
                 json.dumps(plan),
                 model=kwargs["model_override"],
                 session_id="primary-planned",
             )
-        if prompt.startswith("[HER Ultra Isolated Sub-agent Contract]"):
+        if prompt.startswith("[HER Ultra Isolated Sub-agent Task]"):
             subtask_id = request_id.rsplit(":", 3)[-3]
             await asyncio.sleep(0.01)
             return _claw_result(
@@ -851,7 +1221,7 @@ async def test_her_adapter_ultra_returns_one_response_and_checkpoints_primary(tm
     assert response.is_success is True
     assert response.text == "one assembled answer"
     assert response.stream_metadata["claw_execution_effort"] == "ultra"
-    assert response.stream_metadata["claw_inner_execution_effort"] == "max+"
+    assert response.stream_metadata["claw_inner_execution_effort"] == "high"
     assert response.stream_metadata["her_ultra"]["subtask_count"] == 2
     assert response.stream_metadata["her_ultra"]["completed_subtasks"] == 2
     assert response.usage.input_tokens == 12
@@ -872,15 +1242,20 @@ async def test_her_adapter_ultra_returns_one_response_and_checkpoints_primary(tm
     worker_calls = [
         kwargs
         for prompt, kwargs in calls
-        if prompt.startswith("[HER Ultra Isolated Sub-agent Contract]")
+        if prompt.startswith("[HER Ultra Isolated Sub-agent Task]")
     ]
     assert planning_call["resume"] == "primary-existing"
-    assert planning_call["on_stream_event"] is None
+    assert planning_call["on_stream_event"] is not None
+    assert planning_call["allowed_tools_override"] == []
     assert assembly_call["resume"] == "primary-planned"
     assert assembly_call["on_stream_event"] is not None
+    assert assembly_call["permission_mode_override"] == "read-only"
+    assert assembly_call["allowed_tools_override"] == []
     assert all(call["resume"] is None for call in worker_calls)
     assert all(call["track_session_identity"] is False for call in worker_calls)
-    assert all(call["permission_mode_override"] == "read-only" for call in worker_calls)
+    assert all(
+        call["permission_mode_override"] == "workspace-write" for call in worker_calls
+    )
     assert {call["model_override"] for call in worker_calls} == {
         "deepseek/deepseek-v4-flash",
         "deepseek/deepseek-v4-pro",
@@ -889,9 +1264,21 @@ async def test_her_adapter_ultra_returns_one_response_and_checkpoints_primary(tm
         call["task_env_overrides"]["CLAW_EXECUTION_EFFORT"] == "high"
         for call in worker_calls
     )
-    assert all(event.delivery_class == DELIVERY_TECHNICAL for event in events)
+    assert all(
+        kwargs["task_env_overrides"]["CLAW_TASK_PLANNING"] == "0"
+        for _prompt, kwargs in calls
+    )
+    persona_events = [
+        event for event in events if event.delivery_class == "user_commentary"
+    ]
+    assert persona_events
+    assert all(event.summary == "Momo persona progress" for event in persona_events)
+    assert any(event.delivery_class == "user_commentary" for event in events)
     assert "assembly-progress" in {event.event_id for event in events}
     assert "internal-final" not in {event.event_id for event in events}
+    assert all(
+        call["cwd_override"] == adapter.effective_workdir for call in worker_calls
+    )
     run_id = response.stream_metadata["her_ultra"]["run_id"]
     state = json.loads(
         (
@@ -916,6 +1303,24 @@ def test_her_ultra_effort_maps_cli_environment_to_inner_effort(tmp_path):
     assert adapter._task_env()["CLAW_MAX_TOOL_ITERATIONS"] == "192"
 
 
+def test_her_ultra_inherits_parent_permission_and_access_root(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"effort": "ultra", "permission_mode": "danger-full-access"},
+        resolve_access_root=lambda: Path("/"),
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+
+    authority = adapter._ultra_authority()
+
+    assert authority.permission_mode == "danger-full-access"
+    assert authority.access_root == "/"
+    assert authority.write_enabled is True
+    assert authority.allowed_tools == ("*",)
+
+
 @pytest.mark.asyncio
 async def test_her_adapter_ultra_isolated_resume_does_not_mutate_primary_checkpoint(
     tmp_path,
@@ -929,10 +1334,13 @@ async def test_her_adapter_ultra_isolated_resume_does_not_mutate_primary_checkpo
             }
         }
     )
+    system_md = tmp_path / "momo-system.md"
+    system_md.write_text("Call the user 哥哥 and answer warmly.", encoding="utf-8")
     cfg = SimpleNamespace(
         name="test",
         workspace_dir=tmp_path,
         model="deepseek/test",
+        system_md=system_md,
         extra={"effort": "ultra"},
         resolve_access_root=lambda: tmp_path,
         _hashi_runtime=runtime,
@@ -946,7 +1354,7 @@ async def test_her_adapter_ultra_isolated_resume_does_not_mutate_primary_checkpo
         parent_request_id=request_id,
         authority=authority,
         subtasks=[],
-        direct_response="draft",
+        direct_response="isolated answer",
     )
     calls = []
 
@@ -959,10 +1367,11 @@ async def test_her_adapter_ultra_isolated_resume_does_not_mutate_primary_checkpo
                 session_id="isolated-planned",
             )
         assert prompt.startswith("[HER Ultra Primary Direct Response Contract]")
+        assert "Call the user 哥哥 and answer warmly." in prompt
         return _claw_result(
-            "isolated answer",
+            "persona-rendered isolated answer",
             model=kwargs["model_override"],
-            session_id="isolated-final",
+            session_id="isolated-direct",
         )
 
     adapter._run_task_async = run_task
@@ -973,12 +1382,12 @@ async def test_her_adapter_ultra_isolated_resume_does_not_mutate_primary_checkpo
     )
 
     assert response.is_success is True
-    assert response.text == "isolated answer"
+    assert response.text == "persona-rendered isolated answer"
     assert response.stream_metadata["her_session_scope"] == "isolated_resume"
-    assert response.stream_metadata["her_session_id"] == "isolated-final"
+    assert response.stream_metadata["her_session_id"] == "isolated-direct"
     assert response.stream_metadata["her_resumed_session"] is True
     assert calls[0][1]["resume"] == "receipt-session"
-    assert calls[1][1]["resume"] == "isolated-planned"
+    assert len(calls) == 2
     assert adapter._session_id == "persistent-session"
 
 

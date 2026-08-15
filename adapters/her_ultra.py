@@ -27,9 +27,10 @@ from typing import Any
 
 from adapters.stream_events import (
     DELIVERY_TECHNICAL,
+    DELIVERY_USER_COMMENTARY,
+    KIND_COMMENTARY,
     KIND_ERROR,
     KIND_PROGRESS,
-    KIND_REVIEW,
     KIND_VALIDATION,
     StreamCallback,
     StreamEvent,
@@ -42,15 +43,11 @@ HER_ULTRA_STATE_VERSION = 1
 HER_ULTRA_SINGLE_AGENT_EFFORTS = frozenset(
     {"low", "medium", "high", "xhigh", "max", "max+"}
 )
-HER_ULTRA_READ_ONLY_ACTIONS = frozenset({"read", "test", "run"})
-HER_ULTRA_MUTATING_ACTIONS = frozenset(
-    {"write", "edit", "delete", "send", "publish", "submit", "execute"}
-)
 HER_ULTRA_WORKSPACE_STRATEGIES = frozenset(
     {"shared_read_only", "isolated_worktree", "immutable_snapshot"}
 )
 _SUBTASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-_STATUS_VALUES = frozenset({"completed", "failed", "requires_user_input"})
+_STATUS_VALUES = frozenset({"completed", "blocked", "failed", "requires_user_input"})
 _TRANSIENT_WORKER_ERROR_TYPES = frozenset(
     {"connection", "provider_unavailable", "rate_limit", "timeout", "transport"}
 )
@@ -120,14 +117,12 @@ class HERUltraConfig:
 
     enabled: bool = True
     max_concurrent_subagents: int = HER_ULTRA_MAX_CONCURRENT_SUBAGENTS
-    primary_inner_effort: str = "max+"
+    primary_inner_effort: str = "high"
     subagent_default_effort: str = "high"
     subagent_timeout_sec: int = 300
     subagent_retry_limit: int = 1
-    max_plan_revisions: int = 3
+    max_plan_revisions: int = 2
     max_subtasks: int = HER_ULTRA_MAX_SUBTASKS
-    strict_structured_results: bool = True
-    write_tasks_enabled: bool = False
     max_assembly_chars: int = 200_000
     primary_model: str = ""
     allowed_models: tuple[str, ...] = ()
@@ -165,7 +160,7 @@ class HERUltraConfig:
                     return False
             raise HERUltraContractError(f"invalid Ultra config value: {key}")
 
-        primary_effort = str(raw.get("primary_inner_effort") or "max+").strip().lower()
+        primary_effort = str(raw.get("primary_inner_effort") or "high").strip().lower()
         worker_effort = (
             str(raw.get("subagent_default_effort") or "high").strip().lower()
         )
@@ -202,15 +197,13 @@ class HERUltraConfig:
             subagent_default_effort=worker_effort,
             subagent_timeout_sec=bounded_int("subagent_timeout_sec", 300, 1, 86_400),
             subagent_retry_limit=bounded_int("subagent_retry_limit", 1, 0, 3),
-            max_plan_revisions=bounded_int("max_plan_revisions", 3, 1, 5),
+            max_plan_revisions=bounded_int("max_plan_revisions", 2, 1, 2),
             max_subtasks=bounded_int(
                 "max_subtasks",
                 HER_ULTRA_MAX_SUBTASKS,
                 1,
                 HER_ULTRA_MAX_SUBTASKS,
             ),
-            strict_structured_results=boolean("strict_structured_results", True),
-            write_tasks_enabled=boolean("write_tasks_enabled", False),
             max_assembly_chars=bounded_int(
                 "max_assembly_chars", 200_000, 10_000, 1_000_000
             ),
@@ -273,16 +266,11 @@ class HERUltraSubtask:
     model: str
     model_class: str
     effort: str
-    allowed_actions: tuple[str, ...]
     deliverables: tuple[str, ...]
     acceptance: tuple[str, ...]
     optional: bool
     retry_safe: bool
     workspace_strategy: str
-
-    @property
-    def mutating(self) -> bool:
-        return bool(set(self.allowed_actions) & HER_ULTRA_MUTATING_ACTIONS)
 
 
 @dataclass(frozen=True)
@@ -331,16 +319,6 @@ class HERUltraTaskContractValidator:
         revision: int,
     ) -> HERUltraPlan:
         errors: list[str] = []
-        plan_goal = str(payload.get("authoritative_goal") or "")
-        if plan_goal != authoritative_goal:
-            errors.append("authoritative_goal does not exactly match Runtime input")
-        plan_parent = str(payload.get("parent_request_id") or "")
-        if plan_parent != parent_request_id:
-            errors.append("parent_request_id does not exactly match Runtime input")
-        plan_digest = str(payload.get("authority_envelope_digest") or "")
-        if plan_digest != authority.digest:
-            errors.append("authority_envelope_digest does not match Runtime authority")
-
         direct = bool(payload.get("ultra_not_beneficial", False))
         direct_response = _bounded_text(payload.get("direct_response"), 100_000)
         raw_subtasks = payload.get("subtasks")
@@ -379,9 +357,6 @@ class HERUltraTaskContractValidator:
                 depends_on = _string_list(
                     raw.get("depends_on", []), field_name="depends_on"
                 )
-                actions = _string_list(
-                    raw.get("allowed_actions", ["read"]), field_name="allowed_actions"
-                )
                 deliverables = _string_list(
                     raw.get("deliverables", []), field_name="deliverables"
                 )
@@ -390,41 +365,14 @@ class HERUltraTaskContractValidator:
                 )
             except HERUltraContractError as exc:
                 task_errors.append(str(exc))
-                depends_on, actions, deliverables, acceptance = (), (), (), ()
+                depends_on, deliverables, acceptance = (), (), ()
             if subtask_id and subtask_id in depends_on:
                 task_errors.append("a subtask cannot depend on itself")
-            if not actions:
-                task_errors.append("allowed_actions cannot be empty")
-            unknown_actions = set(actions) - (
-                HER_ULTRA_READ_ONLY_ACTIONS | HER_ULTRA_MUTATING_ACTIONS
-            )
-            if unknown_actions:
-                task_errors.append(
-                    "unsupported allowed_actions: " + ", ".join(sorted(unknown_actions))
-                )
-            mutating = bool(set(actions) & HER_ULTRA_MUTATING_ACTIONS)
-            if mutating:
-                if not (
-                    self.config.write_tasks_enabled
-                    and authority.write_enabled
-                    and authority.permission_mode != "read-only"
-                ):
-                    task_errors.append(
-                        "mutating subtask exceeds the active Ultra authority"
-                    )
-                else:
-                    task_errors.append(
-                        "mutating Ultra subtasks remain disabled until isolated "
-                        "worktree integration is implemented"
-                    )
             workspace_strategy = str(
-                raw.get("workspace_strategy")
-                or ("isolated_worktree" if mutating else "shared_read_only")
+                raw.get("workspace_strategy") or "shared_read_only"
             ).strip()
             if workspace_strategy not in HER_ULTRA_WORKSPACE_STRATEGIES:
                 task_errors.append("workspace_strategy is invalid")
-            if mutating and workspace_strategy == "shared_read_only":
-                task_errors.append("mutating subtask requires an isolated workspace")
             if not deliverables:
                 task_errors.append("deliverables cannot be empty")
             if not acceptance:
@@ -460,11 +408,10 @@ class HERUltraTaskContractValidator:
                     model=model,
                     model_class=model_class,
                     effort=effort,
-                    allowed_actions=actions,
                     deliverables=deliverables,
                     acceptance=acceptance,
                     optional=bool(raw.get("optional", False)),
-                    retry_safe=bool(raw.get("retry_safe", not mutating)),
+                    retry_safe=bool(raw.get("retry_safe", True)),
                     workspace_strategy=workspace_strategy,
                 )
             )
@@ -589,10 +536,17 @@ class HERUltraWorkerResult:
     attempt: int = 1
     model: str = ""
     usage: Mapping[str, Any] = field(default_factory=dict)
+    # Keep the complete structured worker report for Primary assembly. Worker
+    # providers do not consistently use the canonical result field names.
+    raw_payload: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def completed(self) -> bool:
         return self.status == "completed"
+
+    @property
+    def blocked(self) -> bool:
+        return self.status == "blocked"
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -605,7 +559,6 @@ class HERUltraWorkerResult:
         subtask: HERUltraSubtask,
         result_id: str,
         attempt: int,
-        strict: bool,
     ) -> HERUltraWorkerResult:
         usage = {
             "input_tokens": max(0, int(invocation.input_tokens)),
@@ -638,7 +591,36 @@ class HERUltraWorkerResult:
 
         try:
             payload = extract_json_object(invocation.text)
-        except HERUltraContractError as exc:
+        except HERUltraContractError:
+            plain_text = str(invocation.text or "").strip()
+            if plain_text:
+                lowered = plain_text.lower()
+                blocked = lowered.startswith("blocked") or any(
+                    marker in lowered
+                    for marker in (
+                        "permission denied",
+                        "requires danger-full-access",
+                        "requires workspace-write",
+                        "escapes workspace boundary",
+                    )
+                )
+                return cls(
+                    subtask_id=subtask.subtask_id,
+                    result_id=result_id,
+                    status="blocked" if blocked else "completed",
+                    claims=(plain_text,),
+                    evidence=(),
+                    artifacts=(),
+                    validation=(),
+                    uncertainty="",
+                    unresolved_items=(),
+                    retry_safe=subtask.retry_safe,
+                    error=plain_text if blocked else "",
+                    error_type="permission_blocked" if blocked else "",
+                    attempt=attempt,
+                    model=invocation.model,
+                    usage=usage,
+                )
             return cls(
                 subtask_id=subtask.subtask_id,
                 result_id=result_id,
@@ -650,63 +632,47 @@ class HERUltraWorkerResult:
                 uncertainty="",
                 unresolved_items=(),
                 retry_safe=subtask.retry_safe,
-                error=str(exc),
+                error="HER worker returned no result",
                 error_type="malformed_output",
                 transient=False,
                 attempt=attempt,
                 model=invocation.model,
                 usage=usage,
             )
-        returned_id = str(payload.get("subtask_id") or "")
-        if returned_id != subtask.subtask_id:
-            return cls(
-                subtask_id=subtask.subtask_id,
-                result_id=result_id,
-                status="failed",
-                claims=(),
-                evidence=(),
-                artifacts=(),
-                validation=(),
-                uncertainty="",
-                unresolved_items=(),
-                retry_safe=subtask.retry_safe,
-                error="worker result subtask_id does not match its dispatch",
-                error_type="malformed_output",
-                transient=False,
-                attempt=attempt,
-                model=invocation.model,
-                usage=usage,
-            )
-        contract_errors = []
         returned_status = str(payload.get("status") or "completed").strip().lower()
-        status = returned_status
-        if returned_status not in _STATUS_VALUES:
-            contract_errors.append("status is invalid")
-            status = "failed"
-        claims_raw = payload.get("claims") or []
-        evidence_raw = payload.get("evidence") or []
+        status = returned_status if returned_status in _STATUS_VALUES else "completed"
+        claims_raw = payload.get("claims") or payload.get("result") or []
+        evidence_raw = (
+            payload.get("evidence")
+            or payload.get("sources")
+            or payload.get("source")
+            or []
+        )
         artifacts_raw = payload.get("artifacts") or []
         if not isinstance(claims_raw, list):
-            contract_errors.append("claims must be a list")
-            claims_raw = []
+            claims_raw = [str(claims_raw)] if str(claims_raw).strip() else []
         if not isinstance(evidence_raw, list):
-            contract_errors.append("evidence must be a list")
             evidence_raw = []
         if not isinstance(artifacts_raw, list):
-            contract_errors.append("artifacts must be a list")
             artifacts_raw = []
         claims = tuple(claims_raw)
         evidence = tuple(evidence_raw)
         artifacts = tuple(artifacts_raw)
-        validation_raw = payload.get("validation") or []
+        validation_raw = (
+            payload.get("validation") or payload.get("validation_performed") or []
+        )
         if not isinstance(validation_raw, list):
-            contract_errors.append("validation must be a list")
-            validation_raw = []
+            validation_raw = (
+                [str(validation_raw)] if str(validation_raw).strip() else []
+            )
         validation = tuple(validation_raw)
-        unresolved_raw = payload.get("unresolved_items") or []
+        unresolved_raw = (
+            payload.get("unresolved_items") or payload.get("unresolved") or []
+        )
         if not isinstance(unresolved_raw, list):
-            contract_errors.append("unresolved_items must be a list")
-            unresolved_raw = []
+            unresolved_raw = (
+                [str(unresolved_raw)] if str(unresolved_raw).strip() else []
+            )
         interaction_raw = payload.get("requires_user_input")
         interaction = (
             dict(interaction_raw) if isinstance(interaction_raw, Mapping) else None
@@ -714,9 +680,7 @@ class HERUltraWorkerResult:
         if status == "requires_user_input" and (
             interaction is None or not str(interaction.get("prompt") or "").strip()
         ):
-            contract_errors.append(
-                "requires_user_input status requires an interaction prompt"
-            )
+            status = "failed"
         if status == "requires_user_input" and interaction is not None:
             interaction_kind = str(interaction.get("kind") or "question").lower()
             if interaction_kind not in {
@@ -725,7 +689,7 @@ class HERUltraWorkerResult:
                 "continuation",
                 "question",
             }:
-                contract_errors.append("requires_user_input kind is invalid")
+                status = "failed"
             if interaction_kind == "choice":
                 labels = interaction.get("labels")
                 if (
@@ -735,35 +699,35 @@ class HERUltraWorkerResult:
                         isinstance(label, str) and label.strip() for label in labels
                     )
                 ):
-                    contract_errors.append(
-                        "choice interaction requires non-empty labels"
-                    )
-        if strict and status == "completed":
-            if not claims:
-                contract_errors.append("claims are required")
-            elif not all(isinstance(claim, str) and claim.strip() for claim in claims):
-                contract_errors.append("claims must contain non-empty strings")
-            if not evidence:
-                contract_errors.append("evidence is required")
-            elif not all(
-                isinstance(item, Mapping)
-                and str(item.get("type") or "").strip()
-                and str(item.get("reference") or "").strip()
-                for item in evidence
-            ):
-                contract_errors.append("evidence entries require type and reference")
-            if not validation:
-                contract_errors.append("validation is required")
-            elif not all(isinstance(item, str) and item.strip() for item in validation):
-                contract_errors.append("validation must contain non-empty strings")
-        if contract_errors:
+                    status = "failed"
+        empty_completed_result = (
+            status == "completed"
+            and not any((claims, evidence, artifacts))
+            and not any(
+                value not in (None, "", [], {}, ())
+                for key, value in payload.items()
+                if key
+                not in {
+                    "status",
+                    "subtask_id",
+                    "retry_safe",
+                    "validation",
+                    "validation_performed",
+                    "uncertainty",
+                    "unresolved",
+                    "unresolved_items",
+                }
+            )
+        )
+        if empty_completed_result:
             status = "failed"
         retry_safe = subtask.retry_safe and bool(
             payload.get("retry_safe", subtask.retry_safe)
         )
         error_type = (
             "malformed_output"
-            if contract_errors
+            if empty_completed_result
+            or (status == "failed" and returned_status == "requires_user_input")
             else str(payload.get("error_type") or "")
         )
         return cls(
@@ -778,18 +742,28 @@ class HERUltraWorkerResult:
             unresolved_items=tuple(str(item) for item in unresolved_raw),
             retry_safe=retry_safe,
             error=_bounded_text(
-                "; ".join(contract_errors) if contract_errors else payload.get("error"),
+                (
+                    "completed worker result contains no deliverable payload"
+                    if empty_completed_result
+                    else "requires_user_input needs a valid prompt and choices"
+                    if status == "failed" and returned_status == "requires_user_input"
+                    else payload.get("error")
+                ),
                 4_000,
             ),
             error_type=error_type,
             transient=(
-                bool(payload.get("transient", False))
-                and error_type.lower() in _TRANSIENT_WORKER_ERROR_TYPES
+                empty_completed_result
+                or (
+                    bool(payload.get("transient", False))
+                    and error_type.lower() in _TRANSIENT_WORKER_ERROR_TYPES
+                )
             ),
             requires_user_input=interaction,
             attempt=attempt,
             model=invocation.model,
             usage=usage,
+            raw_payload=dict(payload),
         )
 
 
@@ -969,6 +943,7 @@ PrimaryExecutor = Callable[
 WorkerExecutor = Callable[
     [HERUltraWorkerExecutionSpec], Awaitable[HERUltraInvocationResult]
 ]
+PersonaCommentaryRenderer = Callable[[Mapping[str, Any]], Awaitable[str]]
 
 
 class HERUltraOrchestrator:
@@ -983,12 +958,16 @@ class HERUltraOrchestrator:
         worker_executor: WorkerExecutor,
         on_stream_event: StreamCallback = None,
         run_id_factory: Callable[[], str] | None = None,
+        persona_guidance: str = "",
+        persona_commentary_renderer: PersonaCommentaryRenderer | None = None,
     ) -> None:
         self.config = config
         self.ledger_root = Path(ledger_root)
         self.primary_executor = primary_executor
         self.worker_executor = worker_executor
         self.on_stream_event = on_stream_event
+        self.persona_guidance = _bounded_text(persona_guidance, 12_000)
+        self.persona_commentary_renderer = persona_commentary_renderer
         self.run_id_factory = run_id_factory or (
             lambda: f"ultra-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:12]}"
         )
@@ -1075,8 +1054,13 @@ class HERUltraOrchestrator:
                 )
                 primary_session_id = invocation.session_id or primary_session_id
                 if not invocation.is_success:
-                    contract_error = invocation.error or "Primary planner failed"
-                    continue
+                    return await self._failed_outcome(
+                        started=started,
+                        status="failed",
+                        error=invocation.error or "Primary planner failed",
+                        primary_session_id=primary_session_id,
+                        plan_revision=revision,
+                    )
                 try:
                     plan = validator.parse_plan(
                         invocation.text,
@@ -1127,14 +1111,13 @@ class HERUltraOrchestrator:
                 cancellation_generation=generation,
             )
             await self._emit(
-                KIND_VALIDATION,
-                f"HER Ultra plan accepted: {len(plan.subtasks)} subtasks",
-                event_id=f"{run_id}:technical:plan:{plan.revision}:accepted",
+                KIND_PROGRESS,
+                f"HER Ultra finished permission preflight and accepted {len(plan.subtasks)} subtasks.",
+                event_id=f"{run_id}:commentary:plan:{plan.revision}:accepted",
                 phase="planning",
             )
-
             if plan.ultra_not_beneficial:
-                direct = await self._invoke_primary(
+                direct_response = await self._invoke_primary(
                     phase="direct_response",
                     revision=plan.revision,
                     prompt=self._direct_response_prompt(plan),
@@ -1142,13 +1125,13 @@ class HERUltraOrchestrator:
                     primary_session_id=primary_session_id,
                     generation=generation,
                 )
-                primary_session_id = direct.session_id or primary_session_id
-                if not direct.is_success or not direct.text.strip():
+                primary_session_id = direct_response.session_id or primary_session_id
+                if not direct_response.is_success or not direct_response.text.strip():
                     return await self._failed_outcome(
                         started=started,
                         status="failed",
-                        error=direct.error
-                        or "Primary direct response returned no final answer",
+                        error=direct_response.error
+                        or "Primary direct response renderer returned no answer",
                         primary_session_id=primary_session_id,
                         plan_revision=plan.revision,
                     )
@@ -1166,7 +1149,7 @@ class HERUltraOrchestrator:
                 return self._outcome(
                     started=started,
                     status="completed",
-                    text=direct.text,
+                    text=direct_response.text,
                     is_success=True,
                     error="",
                     primary_session_id=primary_session_id,
@@ -1174,6 +1157,27 @@ class HERUltraOrchestrator:
                     subtask_count=0,
                     completed_subtasks=0,
                 )
+
+            # Match the single-agent HER acknowledgement contract: do not
+            # announce work until planning has established that this is not a
+            # direct response.  Simple messages therefore produce only their
+            # final Persona reply.
+            await self._emit_persona_commentary(
+                {
+                    "phase": "planning_started",
+                    "message_type": "acknowledgement",
+                },
+                event_id=f"{run_id}:persona:planning:started",
+                phase="planning",
+            )
+            await self._emit_persona_commentary(
+                {
+                    "phase": "plan_accepted",
+                    "subtask_count": len(plan.subtasks),
+                },
+                event_id=f"{run_id}:persona:plan:{plan.revision}:accepted",
+                phase="planning",
+            )
 
             self._ledger.transition(
                 event_id=f"{run_id}:run:dispatching",
@@ -1256,23 +1260,30 @@ class HERUltraOrchestrator:
                     pending_interaction=interaction,
                 )
 
-            required_failures = [
-                task.subtask_id
+            required_results = {
+                task.subtask_id: results[task.subtask_id]
                 for task in plan.subtasks
-                if not task.optional and not results[task.subtask_id].completed
-            ]
-            if required_failures:
+                if not task.optional and task.subtask_id in results
+            }
+            completed_required = sum(
+                result.completed for result in required_results.values()
+            )
+            if required_results and completed_required == 0:
+                failures = "; ".join(
+                    f"{task_id}: {result.error or result.status}"
+                    for task_id, result in required_results.items()
+                )
                 return await self._failed_outcome(
                     started=started,
                     status="failed",
-                    error="required Ultra subtasks failed: "
-                    + ", ".join(required_failures),
+                    error=(
+                        "All required Ultra workers failed before producing usable "
+                        f"evidence. Primary assembly was not started. {failures}"
+                    ),
                     primary_session_id=primary_session_id,
                     plan_revision=plan.revision,
                     subtask_count=len(plan.subtasks),
-                    completed_subtasks=sum(
-                        result.completed for result in results.values()
-                    ),
+                    completed_subtasks=0,
                 )
 
             self._raise_if_cancelled(generation)
@@ -1284,9 +1295,26 @@ class HERUltraOrchestrator:
                 cancellation_generation=generation,
             )
             await self._emit(
-                KIND_REVIEW,
-                "HER Ultra Primary assembly started",
-                event_id=f"{run_id}:technical:assembly:started",
+                KIND_PROGRESS,
+                "HER Ultra finished the worker stage and is assembling the verified results.",
+                event_id=f"{run_id}:commentary:assembly:started",
+                phase="assembly",
+            )
+            await self._emit_persona_commentary(
+                {
+                    "phase": "assembly_started",
+                    "subtask_count": len(plan.subtasks),
+                    "completed_subtasks": sum(
+                        result.completed for result in results.values()
+                    ),
+                    "failed_subtasks": sum(
+                        result.status == "failed" for result in results.values()
+                    ),
+                    "blocked_subtasks": sum(
+                        result.blocked for result in results.values()
+                    ),
+                },
+                event_id=f"{run_id}:persona:assembly:started",
                 phase="assembly",
             )
             assembly = await self._invoke_primary(
@@ -1380,6 +1408,7 @@ class HERUltraOrchestrator:
         pending = set(tasks_by_id)
         results: dict[str, HERUltraWorkerResult] = {}
         running: dict[asyncio.Task[HERUltraWorkerResult], str] = {}
+        reported_progress: set[int] = set()
 
         while pending or running:
             self._raise_if_cancelled(generation)
@@ -1457,6 +1486,34 @@ class HERUltraOrchestrator:
                 except asyncio.CancelledError:
                     raise HERUltraCancelled(self._cancel_reason or "cancelled")
                 results[task_id] = result
+                terminal = len(results)
+                if (
+                    terminal == 1 or terminal == len(tasks_by_id) or terminal % 5 == 0
+                ) and terminal not in reported_progress:
+                    reported_progress.add(terminal)
+                    blocked = sum(item.blocked for item in results.values())
+                    failed = sum(item.status == "failed" for item in results.values())
+                    await self._emit(
+                        KIND_PROGRESS,
+                        f"HER Ultra worker progress: {terminal}/{len(tasks_by_id)} terminal; "
+                        f"blocked={blocked}; failed={failed}.",
+                        event_id=f"{self.run_id}:commentary:workers:{terminal}",
+                        phase="execution",
+                    )
+                    await self._emit_persona_commentary(
+                        {
+                            "phase": "worker_progress",
+                            "terminal_subtasks": terminal,
+                            "total_subtasks": len(tasks_by_id),
+                            "completed_subtasks": sum(
+                                item.completed for item in results.values()
+                            ),
+                            "failed_subtasks": failed,
+                            "blocked_subtasks": blocked,
+                        },
+                        event_id=f"{self.run_id}:persona:workers:{terminal}",
+                        phase="execution",
+                    )
         return results
 
     async def _execute_subtask(
@@ -1551,7 +1608,6 @@ class HERUltraOrchestrator:
                 subtask=subtask,
                 result_id=f"{attempt_id}:result:1",
                 attempt=attempt,
-                strict=self.config.strict_structured_results,
             )
             self._raise_if_cancelled(generation)
             accepted = self._ledger.transition(
@@ -1585,7 +1641,7 @@ class HERUltraOrchestrator:
                 attempt < maximum_attempts
                 and result.transient
                 and result.retry_safe
-                and not subtask.mutating
+                and subtask.retry_safe
             )
             if not retry_allowed:
                 await self._emit(
@@ -1704,10 +1760,39 @@ class HERUltraOrchestrator:
                 summary=_bounded_text(summary, 500),
                 detail=_bounded_text(detail, 2_000),
                 event_id=event_id,
-                delivery_class=DELIVERY_TECHNICAL,
+                delivery_class=(
+                    DELIVERY_USER_COMMENTARY
+                    if kind == KIND_COMMENTARY
+                    else DELIVERY_TECHNICAL
+                ),
                 origin="her_ultra",
                 phase=phase,
             )
+        )
+
+    async def _emit_persona_commentary(
+        self,
+        facts: Mapping[str, Any],
+        *,
+        event_id: str,
+        phase: str,
+    ) -> None:
+        if self.on_stream_event is None or self.persona_commentary_renderer is None:
+            return
+        try:
+            summary = str(await self.persona_commentary_renderer(dict(facts))).strip()
+            if not summary:
+                raise ValueError("persona commentary renderer returned no text")
+        except Exception:  # noqa: BLE001 - commentary has an explicit safe fallback
+            summary = (
+                "[HER neutral fallback] Work is still in progress; "
+                "another update will follow at the next verified stage."
+            )
+        await self._emit(
+            KIND_COMMENTARY,
+            summary,
+            event_id=event_id,
+            phase=phase,
         )
 
     def _planning_prompt(
@@ -1727,9 +1812,6 @@ class HERUltraOrchestrator:
         )
         schema = {
             "plan_id": f"{parent_request_id}:ultra:plan:{revision}",
-            "parent_request_id": parent_request_id,
-            "authoritative_goal": authoritative_goal,
-            "authority_envelope_digest": authority.digest,
             "ultra_not_beneficial": False,
             "direct_response": "required only when ultra_not_beneficial=true",
             "subtasks": [
@@ -1741,7 +1823,6 @@ class HERUltraOrchestrator:
                     "model": "one exact allowed model or empty",
                     "model_class": "pro|flash|current|primary",
                     "effort": self.config.subagent_default_effort,
-                    "allowed_actions": ["read"],
                     "workspace_strategy": "shared_read_only",
                     "retry_safe": True,
                     "deliverables": ["concrete output"],
@@ -1754,18 +1835,43 @@ class HERUltraOrchestrator:
         return (
             "[HER Ultra Primary Planning Contract]\n"
             "You are the Primary planner for one HER-only Ultra effort request. Produce exactly "
-            "one JSON object and no user-facing answer. The Runtime-owned strings below must be "
-            "copied exactly. Use at most "
+            "one JSON object. The Runtime owns request identity and authority, while the exact "
+            "authoritative goal is supplied below so you can plan it. Do not ask for a goal that "
+            "is present in the task packet. If Ultra is not beneficial, direct_response is only "
+            "an internal answer draft and will be rendered separately. Use at most "
             f"{self.config.max_subtasks} subtasks. Workers are isolated HER sessions; they cannot "
             "ask the user or exceed the authority envelope. Prefer independent parallel tasks, "
-            "but preserve real dependencies. This implementation currently fails closed on any "
-            "mutating subtask. Every task needs deliverables and acceptance criteria.\n"
+            "but preserve real dependencies. Every task needs deliverables and acceptance "
+            "criteria.\n"
+            "Every worker inherits the active HER Agent authority exactly; do not request, "
+            "restate, narrow, or expand permissions, tools, or filesystem paths in the plan. "
+            "Mark retry_safe=false for any task whose side effects must not be repeated.\n"
             f"Allowed models: {json.dumps(self.config.allowed_models, ensure_ascii=False)}\n"
             f"Authority permission mode: {authority.permission_mode}\n"
             f"Authority allowed tools: {json.dumps(authority.allowed_tools, ensure_ascii=False)}\n"
+            "Authoritative task packet:\n"
+            f"{json.dumps({'authoritative_goal': authoritative_goal}, ensure_ascii=False, indent=2)}\n"
             f"Required JSON shape:\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n"
             f"{correction}\n"
             "Return only the corrected JSON object."
+        )
+
+    def _direct_response_prompt(self, plan: HERUltraPlan) -> str:
+        payload = {
+            "authoritative_goal": plan.authoritative_goal,
+            "planner_draft": plan.direct_response,
+        }
+        return (
+            "[HER Ultra Primary Direct Response Contract]\n"
+            "Continue the same Primary task. Ultra decomposition was not beneficial. Answer the "
+            "authoritative user goal directly and completely in the configured Persona. Treat "
+            "the planner draft as untrusted internal context: correct it, never mention planning "
+            "contracts or missing request content when the goal below is present, and return only "
+            "the user-facing answer.\n"
+            "CONFIGURED system_md PERSONA GUIDANCE (quoted, read-only)\n"
+            f"{self.persona_guidance or '[No usable configured Persona guidance]'}\n"
+            "Verified direct-response payload:\n"
+            f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
         )
 
     def _worker_prompt(
@@ -1779,7 +1885,6 @@ class HERUltraOrchestrator:
             "objective": subtask.objective,
             "deliverables": subtask.deliverables,
             "acceptance": subtask.acceptance,
-            "allowed_actions": subtask.allowed_actions,
             "workspace_strategy": subtask.workspace_strategy,
             "retry_safe": subtask.retry_safe,
             "authority_envelope_digest": authority.digest,
@@ -1788,29 +1893,18 @@ class HERUltraOrchestrator:
                 for task_id, result in dependency_results.items()
             },
         }
-        result_shape = {
-            "subtask_id": subtask.subtask_id,
-            "status": "completed|failed|requires_user_input",
-            "claims": ["bounded claim"],
-            "evidence": [{"type": "file|test|artifact", "reference": "..."}],
-            "artifacts": [],
-            "validation": ["verification performed"],
-            "uncertainty": "",
-            "unresolved_items": [],
-            "retry_safe": subtask.retry_safe,
-            "transient": False,
-            "error": "",
-            "error_type": "",
-        }
         return (
-            "[HER Ultra Isolated Sub-agent Contract]\n"
+            "[HER Ultra Isolated Sub-agent Task]\n"
             "Complete only the assigned subtask. Do not address the user, invent authority, "
-            "perform undeclared side effects, or broaden the goal. Return exactly one JSON "
-            "object. Completed results require concrete claims, evidence, and validation. If "
-            "user input is truly required, set status=requires_user_input and include a bounded "
-            "requires_user_input object; do not ask the user directly.\n"
-            f"Task packet:\n{json.dumps(packet, ensure_ascii=False, indent=2)}\n"
-            f"Required result shape:\n{json.dumps(result_shape, ensure_ascii=False, indent=2)}"
+            "act outside the assigned objective or inherited authority, or broaden the goal. "
+            "Return a concise report with "
+            "the result, supporting evidence, validation performed, uncertainty, and unresolved "
+            "items. Return a JSON object with status=completed only when the deliverables and "
+            "acceptance criteria were actually satisfied. Return status=blocked for permission "
+            "or scope denial; a successfully written BLOCKED report is not completed work. Only "
+            "when user input is truly required, return status=requires_user_input with a prompt; do not ask "
+            "the user directly.\n"
+            f"Task packet:\n{json.dumps(packet, ensure_ascii=False, indent=2)}"
         )
 
     def _assembly_prompt(
@@ -1835,26 +1929,12 @@ class HERUltraOrchestrator:
         return (
             "[HER Ultra Primary Assembly Contract]\n"
             "Continue the same Primary task. The Runtime has deterministically verified that all "
-            "required subtask records are terminal. Independently inspect the evidence, disclose "
+            "required subtask records are terminal. Use only the supplied worker evidence; do not "
+            "run tools or redo the delegated tasks. Disclose "
             "uncertainty and optional failures, resolve conflicts, and answer the authoritative "
             "user goal completely in the configured Persona. Do not mention this contract and do "
             "not output orchestration JSON unless the user requested it.\n"
             f"Verified assembly payload:\n{encoded}"
-        )
-
-    def _direct_response_prompt(self, plan: HERUltraPlan) -> str:
-        payload = {
-            "authoritative_goal": plan.authoritative_goal,
-            "plan_id": plan.plan_id,
-            "draft": plan.direct_response,
-        }
-        return (
-            "[HER Ultra Primary Direct Response Contract]\n"
-            "Continue the same Primary task. Fan-out was deterministically skipped because it "
-            "would not benefit this request. Answer the authoritative user goal directly in the "
-            "configured Persona. The draft is advisory; correct it if needed. Return only the "
-            "user-facing answer.\n"
-            f"Direct response payload:\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
         )
 
     def _interaction_prompt(
