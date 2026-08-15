@@ -309,6 +309,85 @@ def test_claw_max_iterations_builds_chinese_verified_fallback_report():
     assert metadata["recommended_action"] == "continue"
 
 
+def test_claw_max_iterations_with_recovered_read_failure_recommends_continue():
+    result = ClawTaskResult(
+        text="",
+        model="deepseek/test",
+        permission_mode="read-only",
+        cwd="/workspace",
+        returncode=0,
+        duration_ms=10,
+        stdout="",
+        stderr="",
+        json_data={},
+        tool_uses=[
+            {"id": "read-1", "name": "read_file"},
+            {"id": "read-2", "name": "mcp__hashi-tools__file_read"},
+        ],
+        tool_results=[
+            {
+                "tool_use_id": "read-1",
+                "output": "outside workspace",
+                "is_error": True,
+            },
+            {"tool_use_id": "read-2", "output": "verified", "is_error": False},
+        ],
+        session_id="session-live-canary",
+        iterations=12,
+        completion_status="incomplete",
+        stop_reason="max_iterations",
+    )
+
+    report, metadata = _build_claw_incomplete_report(result, prompt="continue")
+
+    assert "**CONTINUE**" in report
+    assert "**PIVOT**" not in report
+    assert metadata["successful_tool_results"] == 1
+    assert metadata["failed_tool_results"] == 1
+    assert metadata["verified_tool_results"] == 1
+    assert metadata["uncertain_tool_results"] == 0
+    assert metadata["recommended_action"] == "continue"
+
+
+@pytest.mark.parametrize(
+    "failure_names",
+    [("read_file", "read_file"), ("read_file", "glob")],
+)
+def test_claw_max_iterations_with_unresolved_failures_still_recommends_pivot(
+    failure_names,
+):
+    result = ClawTaskResult(
+        text="",
+        model="deepseek/test",
+        permission_mode="read-only",
+        cwd="/workspace",
+        returncode=0,
+        duration_ms=10,
+        stdout="",
+        stderr="",
+        json_data={},
+        tool_uses=[
+            {"id": "read-1", "name": failure_names[0]},
+            {"id": "read-2", "name": failure_names[1]},
+            {"id": "read-3", "name": "mcp__hashi-tools__file_read"},
+        ],
+        tool_results=[
+            {"tool_use_id": "read-1", "output": "failed once", "is_error": True},
+            {"tool_use_id": "read-2", "output": "failed twice", "is_error": True},
+            {"tool_use_id": "read-3", "output": "verified", "is_error": False},
+        ],
+        session_id="session-stuck",
+        iterations=12,
+        completion_status="incomplete",
+        stop_reason="max_iterations",
+    )
+
+    report, metadata = _build_claw_incomplete_report(result, prompt="continue")
+
+    assert "**PIVOT**" in report
+    assert metadata["recommended_action"] == "pivot"
+
+
 @pytest.mark.parametrize(
     "effort,iterations",
     [

@@ -316,9 +316,13 @@ def _claw_has_explicit_verification(result: Any) -> bool:
 
 def _claw_tool_is_read_only(name: str) -> bool:
     normalized = name.strip().lower()
+    # MCP tools are emitted as ``mcp__server__tool``.  Classify the callable
+    # leaf rather than the transport namespace so a successful Tool Gateway
+    # ``file_read`` is not reported as unverified progress.
+    normalized = normalized.rsplit("__", 1)[-1]
     leaf = normalized.rsplit(".", 1)[-1]
     leaf = leaf.removeprefix("browser_")
-    return leaf.startswith(_CLAW_READ_ONLY_TOOL_MARKERS)
+    return leaf == "file_read" or leaf.startswith(_CLAW_READ_ONLY_TOOL_MARKERS)
 
 
 def _claw_count_names(names: list[str], *, empty: str = "无") -> str:
@@ -539,7 +543,14 @@ def _build_claw_incomplete_report(
 
     stop_reason = str(result.stop_reason or "incomplete").strip().lower()
     max_iterations = stop_reason == "max_iterations"
-    if failed or missing or repeated_failure:
+    recovered_failure_at_limit = bool(
+        max_iterations
+        and successful
+        and len(failed) == 1
+        and not missing
+        and not repeated_failure
+    )
+    if missing or repeated_failure or (failed and not recovered_failure_at_limit):
         recommendation = "PIVOT"
         recommendation_zh = "改变策略后再继续；不要重复执行未经核验的副作用操作。"
         recommendation_en = (
