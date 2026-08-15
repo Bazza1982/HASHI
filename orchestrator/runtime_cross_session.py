@@ -49,6 +49,7 @@ _CHOICE_REPLY_RE = re.compile(
     r"([A-Z](?:\s*[,，/、&+]\s*[A-Z])*)",
     re.IGNORECASE,
 )
+_QUESTION_END_RE = re.compile(r"[?？](?:[^\w]|_)*\Z")
 _SHORT_ANSWER_RE = re.compile(
     r"(?:yes|no|ok|okay|sure|do it|go ahead|"
     r"是|否|好|好的|可以|不|不要|继续|繼續|はい|いいえ)",
@@ -220,7 +221,7 @@ def _pending_interaction(
     recommendation = str(metadata.get("recommended_action") or "").strip().upper()
     if recommendation == "CONTINUE" or status == "incomplete":
         return {"kind": "continuation", "token": "CONTINUE"}
-    if assistant_text.rstrip().endswith(("?", "？")):
+    if _QUESTION_END_RE.search(assistant_text.rstrip()):
         return {"kind": "question"}
     return None
 

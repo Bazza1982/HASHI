@@ -323,6 +323,50 @@ def test_newer_primary_choice_prevents_stale_scheduler_choice_binding(tmp_path):
     assert receipt["resolved_by"] == "newer_primary_interaction:req-primary"
 
 
+def test_newer_primary_question_with_trailing_emoji_closes_scheduler_prompt(tmp_path):
+    runtime = _runtime(tmp_path)
+    scheduler_item = _item()
+    scheduler_text = "Task incomplete. CONTINUE from the saved session."
+    runtime_cross_session.record_turn_result(
+        runtime,
+        scheduler_item,
+        assistant_text=scheduler_text,
+        response=_response(
+            scheduler_text,
+            session_id="scheduler-session",
+            completion="incomplete",
+            stop_reason="max_iterations",
+            recommendation="continue",
+        ),
+        delivered=True,
+        completion_path="foreground",
+    )
+    primary_item = _item(
+        request_id="req-primary",
+        source="text",
+        prompt="Show me the current choices",
+        summary="Primary question",
+    )
+    primary_text = "想先做哪件，哥哥？💌"
+
+    runtime_cross_session.record_turn_result(
+        runtime,
+        primary_item,
+        assistant_text=primary_text,
+        response=_response(
+            primary_text,
+            session_id="primary-session",
+            session_scope="persistent",
+        ),
+        delivered=True,
+        completion_path="foreground",
+    )
+
+    receipt = runtime_cross_session.load_receipts(runtime)[0]
+    assert receipt["active"] is False
+    assert receipt["resolved_by"] == "newer_primary_interaction:req-primary"
+
+
 def test_newer_scheduler_completion_closes_older_scheduler_choice(tmp_path):
     runtime = _runtime(tmp_path)
     old_item = _item(request_id="req-old")
