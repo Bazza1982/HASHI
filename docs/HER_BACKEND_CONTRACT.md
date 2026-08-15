@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for HER `0.1.0-hashi.19`; earlier unreleased integration checkpoint
+Status: active for HER `0.1.0-hashi.20`; earlier unreleased integration checkpoint
 recorded in
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
 
@@ -17,11 +17,11 @@ not certify a Windows build, another architecture, or a downstream integration.
 
 | Field | Certified value |
 | --- | --- |
-| Package version | `0.1.0-hashi.19` |
-| HER source | `79be4613e37d03781713253a04aa64aedf3f1902` |
+| Package version | `0.1.0-hashi.20` |
+| HER source | `5ed5b30ef2ab0f80ab6d4fd08a1b7b64e77faf05` |
 | Upstream base | Claw `4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d` |
-| Linux target / SHA-256 | `linux-x86_64` / `3cd9dbee8617b7fb23a7df7893cc2a3bd17a70b0d0c3fa5945f41ab88f674538` |
-| Windows target / SHA-256 | `windows-x86_64` / `f483723f249e89b08eec2f091553e1dc2e207dbe9565a819a41c264b9e3f00f5` |
+| Linux target / SHA-256 | `linux-x86_64` / `3c601931478d645c17c9317a6975dcba0944ff48731d2991d70b3af4ffa59167` |
+| Windows target / SHA-256 | `windows-x86_64` / `5463a3d006edcb61a6d066d9b1441046602b03fbb37e207988315a073d8ef3b6` |
 
 The Linux package passed the full pinned-source certification suite. The Windows
 package was built natively from the same clean source commit and passed native
@@ -132,6 +132,21 @@ For a validated `direct_response` profile, the acknowledgement field is the comp
 final answer and `remaining_work` must be empty. HER returns that answer once without a
 second execution generation. Semantic compaction runs only when another model call is
 required, so completed answers are never held behind a maintenance provider call.
+
+Semantic compaction remains capacity-driven at the existing context threshold. Before
+starting its provider call, HER derives an internal deadline from HASHI's effective
+`/timeout` idle policy, caps it by the request's remaining hard timeout, and reserves a
+small cleanup grace so timeout cancellation and the terminal event can complete before
+the outer watchdog. This is not a second operator setting. If a model has already
+selected a tool, HER dispatches that tool and records its result before considering
+compaction for the next provider call. A validated compaction atomically replaces only
+eligible historical active context; the current turn remains verbatim, and the complete
+pre-compaction session is archived as recoverable raw history. Provider, timeout, and
+schema failures leave active context unchanged and are attempted at most once per
+request. With `/verbose on`, `started`, `completed`, and `failed` lifecycle events expose
+the effective deadline/source, trigger phase, elapsed time, outcome, and continuation
+state. With `/verbose off`, those events remain in local audit logs without adding
+Telegram progress messages.
 
 The adaptive task profile records task kind, risk, state-change scope, direct-response
 eligibility, deliverables, material claims, verification mode, testing mode, exact test

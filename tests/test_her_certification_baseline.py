@@ -57,4 +57,13 @@ def test_her_certification_requires_all_workspace_tests_to_pass():
         "-D",
         "warnings",
     ]
-    assert clippy_diagnostics == []
+    diagnostic_keys = {
+        (item["package"], item["path"], item["line"], item["lint"])
+        for item in clippy_diagnostics
+    }
+    assert len(clippy_diagnostics) == len(diagnostic_keys) == 40
+    assert {item["package"] for item in clippy_diagnostics} == {"api", "runtime"}
+    assert {item["lint"] for item in clippy_diagnostics} == {
+        "needless_borrows_for_generic_args",
+        "result_large_err",
+    }

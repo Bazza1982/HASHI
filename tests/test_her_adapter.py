@@ -112,6 +112,50 @@ def test_claw_initial_task_plan_does_not_duplicate_acknowledgement_as_commentary
     assert all(event.kind != KIND_COMMENTARY for event in events)
 
 
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("started", "🧠 semantic_compaction started"),
+        ("completed", "✅ semantic_compaction completed"),
+        ("failed", "⚠️ semantic_compaction failed"),
+    ],
+)
+def test_semantic_compaction_lifecycle_maps_to_bounded_verbose_progress(
+    status, expected
+):
+    event = {
+        "kind": "semantic_compaction",
+        "status": status,
+        "request_id": "req-compaction",
+        "session_id": "session-compaction",
+        "trigger_phase": "post_tool",
+        "estimated_input_tokens": 351_000,
+        "removed_message_count": 144 if status == "completed" else 0,
+        "timeout_seconds": 3_595,
+        "timeout_source": "user override",
+        "elapsed_ms": 40_840,
+        "original_context_unchanged": status != "completed",
+        "will_continue": True,
+        "reason": "provider call timed out" if status == "failed" else "",
+    }
+
+    [mapped] = _claw_jsonl_to_stream_events(event)
+
+    assert mapped.kind == KIND_PROGRESS
+    assert expected in mapped.summary
+    assert len(mapped.summary) <= 500
+    assert "request_id=req-compaction" in mapped.detail
+    assert "session_id=session-compaction" in mapped.detail
+    assert "trigger_phase=post_tool" in mapped.detail
+    assert "estimated_input_tokens=351000" in mapped.detail
+    assert "timeout_seconds=3595" in mapped.detail
+    assert "timeout_source=user override" in mapped.detail
+    assert "elapsed_ms=40840" in mapped.detail
+    if status == "failed":
+        assert "original context unchanged" in mapped.summary
+        assert "continuing" in mapped.summary
+
+
 @pytest.mark.asyncio
 async def test_claw_commentary_lease_emits_persona_update_and_stops_cleanly():
     received = []
@@ -1620,6 +1664,60 @@ async def test_her_task_runner_applies_meditation_safety_overrides(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_her_task_runner_passes_effective_timeout_policy_to_compaction(tmp_path):
+    fake = _write_exe(
+        tmp_path / "hashi-her",
+        """
+        #!/usr/bin/env python3
+        import json, os
+        print(json.dumps({
+            "message": "done",
+            "model": "deepseek/test",
+            "session_id": "timeout-session",
+            "idle": os.environ.get("CLAW_SEMANTIC_COMPACTION_IDLE_TIMEOUT_SECONDS"),
+            "idle_source": os.environ.get("CLAW_SEMANTIC_COMPACTION_IDLE_TIMEOUT_SOURCE"),
+            "hard": os.environ.get("CLAW_REQUEST_HARD_TIMEOUT_SECONDS"),
+            "hard_source": os.environ.get("CLAW_REQUEST_HARD_TIMEOUT_SOURCE"),
+        }))
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={
+            "permission_mode": "danger-full-access",
+            "idle_timeout_sec": 7_200,
+            "hard_timeout_sec": 14_400,
+            "_hashi_timeout_policy": {
+                "sources": {
+                    "idle_timeout_sec": "user override",
+                    "hard_timeout_sec": "backend configuration",
+                }
+            },
+        },
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = fake
+
+    result = await adapter._run_task_async(
+        "exercise timeout inheritance",
+        resume=None,
+        request_id="req-timeout-policy",
+        task_env_overrides={
+            "CLAW_SEMANTIC_COMPACTION_IDLE_TIMEOUT_SECONDS": "1",
+            "CLAW_REQUEST_HARD_TIMEOUT_SECONDS": "2",
+        },
+    )
+
+    assert result.json_data["idle"] == "7200"
+    assert result.json_data["idle_source"] == "user override"
+    assert result.json_data["hard"] == "14400"
+    assert result.json_data["hard_source"] == "backend configuration"
+
+
+@pytest.mark.asyncio
 async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     fake = _write_exe(
         tmp_path / "claw",
@@ -1676,8 +1774,16 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
                                 {"category": "testing", "issue": "Planned test checked"},
                             ], "missing_evidence": [], "required_changes": [],
                             "evidence_refs": ["ReviewFile sha256", "ReviewRun isolated result"]}},
-                {"kind": "semantic_compaction", "status": "started", "removed_message_count": 0, "timeout_seconds": 60},
-                {"kind": "semantic_compaction", "status": "completed", "removed_message_count": 12, "timeout_seconds": 60},
+                {"kind": "semantic_compaction", "status": "started", "session_id": "stream-session",
+                 "trigger_phase": "post_tool", "estimated_input_tokens": 351000,
+                 "removed_message_count": 0, "timeout_seconds": 3595,
+                 "timeout_source": "user override", "elapsed_ms": 0,
+                 "original_context_unchanged": True, "will_continue": True},
+                {"kind": "semantic_compaction", "status": "completed", "session_id": "stream-session",
+                 "trigger_phase": "post_tool", "estimated_input_tokens": 351000,
+                 "removed_message_count": 12, "timeout_seconds": 3595,
+                 "timeout_source": "user override", "elapsed_ms": 40840,
+                 "original_context_unchanged": False, "will_continue": True},
                 {"kind": "thinking_summary", "summary": "thinking block received (48 chars hidden)", "thinking_chars": 48},
                 {"kind": "assistant_delta", "text": "partial answer"},
                 {"kind": "tool_start", "name": "read_file", "summary": "reading README.md"},
@@ -1766,9 +1872,24 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     assert KIND_TOOL_START in [event.kind for event in events]
     assert KIND_TOOL_END in [event.kind for event in events]
     assert sum(
-        event.kind == KIND_PROGRESS and "semantic compaction" in event.summary
+        event.kind == KIND_PROGRESS and "semantic_compaction" in event.summary
         for event in events
     ) == 2
+    assert any(
+        event.kind == KIND_PROGRESS
+        and "🧠 semantic_compaction started" in event.summary
+        and "~351K tokens" in event.summary
+        and "user override" in event.summary
+        and "request_id=req-stream" in event.detail
+        for event in events
+    )
+    assert any(
+        event.kind == KIND_PROGRESS
+        and "✅ semantic_compaction completed" in event.summary
+        and "removed 12" in event.summary
+        and "raw history retained" in event.summary
+        for event in events
+    )
     assert any(event.detail == "thinking_chars=48" for event in events)
     assert not any("may be summarized or hidden" in event.summary for event in events)
     assert "HER tool started:" in caplog.text
@@ -1802,6 +1923,10 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     assert persisted_control["request"]["user_message"] == "raw task frame"
     assert json.loads(persisted_control["raw_output"]) == {"decision": "pass"}
     assert persisted_control["usage"]["input_tokens"] == 13
+    persisted_compaction = next(
+        event for event in raw_events if event.get("kind") == "semantic_compaction"
+    )
+    assert persisted_compaction["session_id"] == "stream-session"
     correlated_controls = [
         json.loads(line)
         for line in (tmp_path / "claw_control_events.jsonl").read_text(encoding="utf-8").splitlines()
@@ -1810,6 +1935,13 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     assert any(
         record["event"].get("kind") == "control_invocation"
         and record["event"].get("gate") == "planning"
+        for record in correlated_controls
+    )
+    assert any(
+        record["request_id"] == "req-stream"
+        and record["event"].get("kind") == "semantic_compaction"
+        and record["event"].get("request_id") == "req-stream"
+        and record["event"].get("session_id") == "stream-session"
         for record in correlated_controls
     )
 
