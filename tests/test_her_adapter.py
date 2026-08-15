@@ -1212,7 +1212,7 @@ def test_build_claw_task_args_matches_cli_shape():
         "--resume",
         "latest",
         "prompt",
-        "--stdin",
+        "hello",
     ]
 
 
@@ -1258,6 +1258,42 @@ def test_run_claw_task_streams_large_prompt_over_stdin(tmp_path):
     assert result.text == str(len(prompt))
     assert result.json_data["prompt_in_argv"] is False
     assert result.json_data["argv_bytes"] < 1_000
+
+
+def test_run_claw_task_passes_resumed_prompt_as_text_without_stdin(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys
+        stdin = sys.stdin.read()
+        print(json.dumps({
+            "message": "done",
+            "model": "deepseek/test",
+            "argv": sys.argv[1:],
+            "stdin": stdin,
+        }))
+        """,
+    )
+
+    result = run_claw_task(
+        tmp_path,
+        "resume the real task",
+        "deepseek/test",
+        permission_mode="read-only",
+        resume="session-1",
+        binary_path=fake,
+    )
+
+    assert result.text == "done"
+    assert result.json_data["argv"][-4:] == [
+        "--resume",
+        "session-1",
+        "prompt",
+        "resume the real task",
+    ]
+    assert "--stdin" not in result.json_data["argv"]
+    assert result.json_data["stdin"] == ""
 
 
 def test_claw_adapter_defaults_to_all_native_tools_and_accepts_wildcard(tmp_path):
@@ -2043,6 +2079,62 @@ async def test_her_task_runner_applies_meditation_safety_overrides(tmp_path):
     assert result.json_data["iterations"] == "8"
     assert result.json_data["cwd"] == str(worker_cwd)
     assert result.cwd == str(worker_cwd)
+
+
+@pytest.mark.asyncio
+async def test_her_task_runner_passes_resumed_prompt_as_text_without_stdin(tmp_path):
+    fake = _write_exe(
+        tmp_path / "hashi-her",
+        """
+        #!/usr/bin/env python3
+        import json, sys
+        stdin = sys.stdin.read()
+        print(json.dumps({
+            "kind": "run_started",
+            "model": "deepseek/test",
+            "session_id": "session-next",
+        }))
+        print(json.dumps({
+            "kind": "run_finished",
+            "message": "resumed",
+            "model": "deepseek/test",
+            "session_id": "session-next",
+            "completion_status": "completed",
+            "stop_reason": "end_turn",
+            "provider_stop_reason": "end_turn",
+            "tool_uses": [],
+            "tool_results": [],
+            "argv": sys.argv[1:],
+            "stdin": stdin,
+        }))
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"permission_mode": "danger-full-access"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = fake
+    adapter._supports_stream_json = True
+
+    result = await adapter._run_task_async(
+        "continue the exact checkpoint",
+        resume="session-current",
+        request_id="req-resume-stdin-regression",
+    )
+
+    assert result.text == "resumed"
+    assert result.json_data["argv"][-4:] == [
+        "--resume",
+        "session-current",
+        "prompt",
+        "continue the exact checkpoint",
+    ]
+    assert "--stdin" not in result.json_data["argv"]
+    assert result.json_data["stdin"] == ""
 
 
 @pytest.mark.asyncio

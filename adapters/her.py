@@ -2049,7 +2049,7 @@ def run_claw_task(
         binary_path=binary_path,
         env=env,
         timeout_s=timeout_s,
-        stdin_text=prompt,
+        stdin_text=None if resume else prompt,
     )
     data = result.json_data
     return ClawTaskResult(
@@ -2113,10 +2113,15 @@ def build_claw_task_args(
         args.append("--dangerously-skip-permissions")
     if resume:
         args.extend(["--resume", resume])
-    # HER's prompt command supports stdin.  Never place user/task content in
-    # argv: large catalogue or media prompts can exceed the operating system's
-    # argument-size limit before the child process starts.
-    args.extend(["prompt", "--stdin"])
+    # Fresh prompts support explicit stdin transport, which keeps large task
+    # content out of argv.  The packaged HER CLI's resumed-prompt grammar is
+    # different: ``--resume SESSION prompt TEXT``.  Passing ``--stdin`` there
+    # makes the CLI treat that literal flag as TEXT and ignore the real prompt
+    # on stdin, so resumed turns must use the supported positional form.
+    if resume:
+        args.extend(["prompt", prompt])
+    else:
+        args.extend(["prompt", "--stdin"])
     return args
 
 
@@ -4480,6 +4485,7 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
             output_format="stream-json" if self._supports_stream_json else "json",
         )
         command = [str(self._binary), *args]
+        stdin_data = None if resume else prompt.encode("utf-8")
         started = time.perf_counter()
         extra_kwargs = {}
         if os.name != "nt":
@@ -4520,7 +4526,11 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
                 )
             proc = await asyncio.create_subprocess_exec(
                 *command,
-                stdin=asyncio.subprocess.PIPE,
+                stdin=(
+                    asyncio.subprocess.PIPE
+                    if stdin_data is not None
+                    else asyncio.subprocess.DEVNULL
+                ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(task_cwd),
@@ -4547,13 +4557,13 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
                 commentary_prompt=prompt,
                 track_session_identity=track_session_identity,
                 activity_state=activity_state,
-                stdin_data=prompt.encode("utf-8"),
+                stdin_data=stdin_data,
             )
             if self._supports_stream_json
             else self._communicate_with_activity(
                 proc,
                 activity_state=activity_state,
-                stdin_data=prompt.encode("utf-8"),
+                stdin_data=stdin_data,
             )
         )
         try:
