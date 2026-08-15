@@ -34,11 +34,14 @@ def test_hot_reload_preflight_ignores_sources_outside_code_root(tmp_path):
     module = types.ModuleType("orchestrator.external")
     module.__file__ = str(outside)
 
-    assert preflight_module_sources(
-        ["orchestrator.external"],
-        code_root=code_root,
-        modules={"orchestrator.external": module},
-    ) == []
+    assert (
+        preflight_module_sources(
+            ["orchestrator.external"],
+            code_root=code_root,
+            modules={"orchestrator.external": module},
+        )
+        == []
+    )
 
 
 def test_hot_reload_discovery_excludes_cold_process_modules(tmp_path):
@@ -73,10 +76,13 @@ def test_hot_reload_discovery_rejects_prefixed_modules_outside_project(tmp_path)
     module = types.ModuleType("tools.external")
     module.__file__ = str(outside)
 
-    assert discover_loaded_project_modules(
-        {module.__name__: module},
-        code_root=project,
-    ) == []
+    assert (
+        discover_loaded_project_modules(
+            {module.__name__: module},
+            code_root=project,
+        )
+        == []
+    )
 
 
 def test_hot_reload_orders_adapter_protocol_before_consumers():
@@ -85,6 +91,7 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
         "adapters.her",
         "adapters.openrouter_api",
         "adapters.base",
+        "adapters.her_persona",
         "adapters.stream_io",
         "adapters.stream_events",
         "adapters.deepseek_api",
@@ -97,9 +104,14 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
     assert ordered.index("adapters.stream_events") < ordered.index("adapters.base")
     assert ordered.index("adapters.stream_io") < ordered.index("adapters.claw_cli")
     assert ordered.index("adapters.base") < ordered.index("adapters.claw_cli")
+    assert ordered.index("adapters.her_persona") < ordered.index("adapters.her")
     assert ordered.index("adapters.her") < ordered.index("adapters.claw_cli")
-    assert ordered.index("adapters.openrouter_api") < ordered.index("adapters.deepseek_api")
-    assert ordered.index("adapters.claw_cli") < ordered.index("orchestrator.runtime_pipeline")
+    assert ordered.index("adapters.openrouter_api") < ordered.index(
+        "adapters.deepseek_api"
+    )
+    assert ordered.index("adapters.claw_cli") < ordered.index(
+        "orchestrator.runtime_pipeline"
+    )
     assert ordered.index("orchestrator.runtime_pipeline") < ordered.index(
         "orchestrator.flexible_agent_runtime"
     )
@@ -108,13 +120,19 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
 def test_hot_reload_discovery_skips_stale_module_without_source(tmp_path):
     stale = types.ModuleType("orchestrator.runtime_removed_feature")
     stale.__file__ = str(
-        tmp_path / "orchestrator" / "__pycache__" / "runtime_removed_feature.cpython-312.pyc"
+        tmp_path
+        / "orchestrator"
+        / "__pycache__"
+        / "runtime_removed_feature.cpython-312.pyc"
     )
 
-    assert discover_loaded_project_modules(
-        {stale.__name__: stale},
-        code_root=tmp_path,
-    ) == []
+    assert (
+        discover_loaded_project_modules(
+            {stale.__name__: stale},
+            code_root=tmp_path,
+        )
+        == []
+    )
 
 
 def test_hot_reload_refreshes_stream_event_vocabulary_before_adapters():

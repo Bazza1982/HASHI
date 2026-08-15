@@ -38,6 +38,7 @@ FOUNDATION_PHASES = {
     "orchestrator.runtime_defaults": 0,
     "orchestrator.workspace_state": 0,
     "adapters.base": 1,
+    "adapters.her_persona": 1,
     "adapters.xai_oauth_credentials": 1,
     "orchestrator.model_catalog": 1,
     "orchestrator.manager_registry": 1,
@@ -99,11 +100,7 @@ def discover_loaded_project_modules(
         return True
 
     return sorted(
-        (
-            name
-            for name in list(loaded)
-            if is_reloadable_project_module(name)
-        ),
+        (name for name in list(loaded) if is_reloadable_project_module(name)),
         key=module_reload_key,
     )
 

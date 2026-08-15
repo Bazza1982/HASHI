@@ -10,7 +10,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   1. Read the character's seed `.md` file from `agent_seeds/`.
   2. Create a dedicated directory in `workspaces/<agent_id>/`.
   3. Write the seed content into `workspaces/<agent_id>/AGENT.md`.
-  4. Update `agents.json` by adding a new entry to the `agents` list. Refer to `agents.json.samples` for the standard Flex Agent schema. The agent's "system_md" must point to `workspaces/<agent_id>/AGENT.md`
+  4. Update `agents.json` by adding a new entry to the `agents` list. Refer to `agents.json.samples` for the standard Flex Agent schema. The Agent's `system_md` must point to its explicit Persona file; filenames such as `agent.md`, `AGENT.md`, and custom configured paths are all valid.
   5. Configure credentials in `secrets.json`. Use `WORKBENCH_ONLY_NO_TOKEN` if a Telegram token is not yet available.
   6. Ask the user to restart.
 
@@ -54,7 +54,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/superloop`: recording-first long-running workflow orchestration.
 - `/verbose [on|off]`: toggle richer long-task status display.
 - `/think [on|off]`: toggle model-authored interim commentary and available provider-reasoning messages. Independent from `/verbose`; generic progress and tools remain under `/verbose`.
-- `/commentary [on|off]`: HER-only persona acknowledgements and High+ progress updates. Independent from `/think` and `/verbose`; other backends retain their own display rules.
+- `/commentary [on|off]`: HER-only model-authored Persona acknowledgements plus High+ milestone and neutral lease updates. Independent from `/think` and `/verbose`; other backends retain their own display rules.
 - `/typing [on|off|status]`: control both the temporary typing bubble and Telegram's native typing indicator, independently from `/verbose` and `/think`.
 - `/stop`: cancel current processing. HASHI durably preserves the interrupted user task;
   a later plain `continue`, `resume`, or `继续` request is explicitly rebound to that task,

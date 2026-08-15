@@ -23,11 +23,13 @@ from adapters.her import (
     _HERCommentaryController,
     _build_claw_commentary_lease,
     _build_claw_incomplete_report,
+    _claw_incomplete_persona_facts,
     _claw_jsonl_to_stream_events,
     _claw_incomplete_response,
     _claw_run_is_incomplete,
     _parse_json_output,
     _parse_stream_json_output,
+    _validated_claw_incomplete_persona_report,
     build_claw_env,
     build_claw_task_args,
     detect_hashi_claw_platform,
@@ -65,7 +67,7 @@ def _write_exe(path: Path, body: str) -> Path:
     return path
 
 
-def test_claw_replan_emits_persona_commentary_from_task_frame():
+def test_claw_replan_emits_neutral_commentary_without_guessing_persona():
     prompt = """
     你的名字是 Sunny。
     称呼用户为「爸爸」。
@@ -87,11 +89,12 @@ def test_claw_replan_emits_persona_commentary_from_task_frame():
     )
 
     commentary = next(event for event in events if event.kind == KIND_COMMENTARY)
-    assert "爸爸" in commentary.summary
-    assert "Sunny" in commentary.summary
+    assert commentary.summary.startswith("HER 进度：")
+    assert "爸爸" not in commentary.summary
+    assert "Sunny" not in commentary.summary
     assert "定位失败原因" in commentary.summary
     assert "运行针对性回归测试" in commentary.summary
-    assert "☀️" in commentary.summary
+    assert "☀️" not in commentary.summary
 
 
 def test_claw_initial_task_plan_does_not_duplicate_acknowledgement_as_commentary():
@@ -157,7 +160,7 @@ def test_semantic_compaction_lifecycle_maps_to_bounded_verbose_progress(
 
 
 @pytest.mark.asyncio
-async def test_claw_commentary_lease_emits_persona_update_and_stops_cleanly():
+async def test_claw_commentary_lease_emits_neutral_update_and_stops_cleanly():
     received = []
 
     async def callback(event):
@@ -185,9 +188,10 @@ async def test_claw_commentary_lease_emits_persona_update_and_stops_cleanly():
     assert len(received) == 1
     assert received[0].kind == KIND_COMMENTARY
     assert received[0].summary == _build_claw_commentary_lease(prompt)
-    assert "爸爸" in received[0].summary
-    assert "Sunny" in received[0].summary
-    assert "☀️" in received[0].summary
+    assert received[0].summary.startswith("HER 仍在处理")
+    assert "爸爸" not in received[0].summary
+    assert "Sunny" not in received[0].summary
+    assert "☀️" not in received[0].summary
 
 
 @pytest.mark.asyncio
@@ -241,7 +245,9 @@ async def test_medium_claw_controller_forwards_ack_but_suppresses_progress_comme
         progress_enabled=False,
     )
     await controller.forward(
-        StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary="Sunny will inspect the request.")
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT, summary="Sunny will inspect the request."
+        )
     )
     await controller.forward(
         StreamEvent(kind=KIND_COMMENTARY, summary="Sunny has a progress update.")
@@ -290,9 +296,18 @@ def test_claw_max_iterations_builds_chinese_verified_fallback_report():
 
 @pytest.mark.parametrize(
     "effort,iterations",
-    [("low", 12), ("medium", 32), ("high", 96), ("xhigh", 192), ("max", 384), ("max+", 512)],
+    [
+        ("low", 12),
+        ("medium", 32),
+        ("high", 96),
+        ("xhigh", 192),
+        ("max", 384),
+        ("max+", 512),
+    ],
 )
-def test_claw_max_iterations_preserves_primary_agent_final_for_every_effort(effort, iterations):
+def test_claw_max_iterations_preserves_primary_agent_final_for_every_effort(
+    effort, iterations
+):
     primary_final = f"已走完 {iterations} 轮；下一回合从存档继续。"
     result = ClawTaskResult(
         text=primary_final,
@@ -305,7 +320,9 @@ def test_claw_max_iterations_preserves_primary_agent_final_for_every_effort(effo
         stderr="",
         json_data={},
         tool_uses=[{"id": "write-1", "name": "browser_click"}],
-        tool_results=[{"tool_use_id": "write-1", "output": {"success": True}, "is_error": False}],
+        tool_results=[
+            {"tool_use_id": "write-1", "output": {"success": True}, "is_error": False}
+        ],
         session_id=f"session-{effort}",
         iterations=iterations,
         completion_status="incomplete",
@@ -318,6 +335,32 @@ def test_claw_max_iterations_preserves_primary_agent_final_for_every_effort(effo
     assert "**CONTINUE**" in response
     assert metadata["persona_final_response_preserved"] is True
     assert metadata["fallback_report_generated"] is False
+
+
+def test_claw_budget_exhaustion_also_preserves_safe_primary_agent_closing():
+    result = ClawTaskResult(
+        text="殿下，这回合预算已用尽；臣会从保存处继续。",
+        model="deepseek/test",
+        permission_mode="workspace-write",
+        cwd="/workspace",
+        returncode=0,
+        duration_ms=10,
+        stdout="",
+        stderr="",
+        json_data={},
+        tool_uses=[],
+        tool_results=[],
+        session_id="session-budget",
+        iterations=9,
+        completion_status="incomplete",
+        stop_reason="budget_exhausted",
+    )
+
+    response, metadata = _claw_incomplete_response(result, prompt="请继续")
+
+    assert response.startswith(result.text)
+    assert metadata["persona_final_response_preserved"] is True
+    assert metadata.get("persona_render_required") is not True
 
 
 def test_claw_max_iterations_does_not_deliver_dangling_tool_markup():
@@ -353,16 +396,16 @@ def test_claw_max_iterations_does_not_deliver_dangling_tool_markup():
     )
 
     assert "<｜｜DSML｜｜tool_calls>" not in response
-    assert response.startswith("爸爸，小夏这次还没有全部做完")
-    assert "执行未完成" not in response
-    assert "completion_status" not in response
-    assert "第 **12** 轮碰到执行上限" in response
-    assert "**1** 次操作拿到了正常回执" in response
-    assert "小夏不会把它报成成功" in response
-    assert response.count("🌸") == 3
-    assert "**建议：CONTINUE**" in response
+    assert response.startswith("## ⚠️ 执行未完成")
+    assert "爸爸" not in response
+    assert "小夏" not in response
+    assert "`completion_status=incomplete`" in response
+    assert "任务在 **12** 轮后停止" in response
+    assert "`bash` ×1" in response
+    assert "**CONTINUE**" in response
     assert metadata["persona_final_response_preserved"] is False
-    assert metadata["persona_interpretation_generated"] is True
+    assert metadata["persona_interpretation_generated"] is False
+    assert metadata["persona_render_required"] is True
     assert metadata["fallback_report_generated"] is True
 
 
@@ -404,14 +447,14 @@ def test_claw_max_iterations_without_model_final_uses_sunny_persona_and_receipt_
 """.strip(),
     )
 
-    assert response.startswith("爸爸，小夏这次还没有全部做完")
-    assert "**11** 次操作拿到了正常回执" in response
-    assert "没有工具失败或缺失回执" in response
-    assert "整体任务仍未完成" in response
-    assert "**建议：CONTINUE**" in response
-    assert "`bash`" not in response
-    assert "completion_status" not in response
-    assert metadata["persona_interpretation_generated"] is True
+    assert response.startswith("## ⚠️ 执行未完成")
+    assert "爸爸" not in response
+    assert "小夏" not in response
+    assert "`bash` ×5, `edit_file` ×6" in response
+    assert "失败的工具结果：无" in response
+    assert "**CONTINUE**" in response
+    assert metadata["persona_interpretation_generated"] is False
+    assert metadata["persona_render_required"] is True
     assert metadata["successful_tool_results"] == 11
     assert metadata["failed_tool_results"] == 0
 
@@ -436,10 +479,157 @@ def test_claw_max_iterations_without_persona_uses_natural_neutral_fallback():
 
     response, metadata = _claw_incomplete_response(result, prompt="continue")
 
-    assert response.startswith("I haven't finished everything yet")
-    assert "Execution incomplete" not in response
-    assert "**Recommendation: CONTINUE**" in response
-    assert metadata["persona_interpretation_generated"] is True
+    assert response.startswith("## ⚠️ Execution incomplete")
+    assert "**CONTINUE**" in response
+    assert metadata["persona_interpretation_generated"] is False
+    assert metadata["persona_render_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_incomplete_persona_renderer_uses_only_configured_system_md(tmp_path):
+    configured = tmp_path / "nested" / "voice.md"
+    configured.parent.mkdir()
+    configured.write_text(
+        "Fictional Persona: 月桂司书；称呼用户为殿下。", encoding="utf-8"
+    )
+    (tmp_path / "AGENT.md").write_text("WRONG FALLBACK PERSONA", encoding="utf-8")
+    before = configured.read_bytes()
+    result = ClawTaskResult(
+        text="",
+        model="deepseek/test",
+        permission_mode="workspace-write",
+        cwd=str(tmp_path),
+        returncode=0,
+        duration_ms=10,
+        stdout="",
+        stderr="",
+        json_data={},
+        tool_uses=[{"id": "read-1", "name": "read_file"}],
+        tool_results=[
+            {"tool_use_id": "read-1", "output": "verified", "is_error": False}
+        ],
+        session_id="session-1",
+        iterations=12,
+        completion_status="incomplete",
+        stop_reason="max_iterations",
+    )
+    _neutral, metadata = _claw_incomplete_response(
+        result, prompt="ignored prompt Persona"
+    )
+    facts = _claw_incomplete_persona_facts(result, metadata=metadata)
+    rendered_payload = {
+        "heading": "殿下，月桂司书如实呈上未完成进度。",
+        "facts": [
+            {
+                "index": index,
+                "source": fact,
+                "rendered": f"月桂司书记录：{fact}",
+            }
+            for index, fact in enumerate(facts, start=1)
+        ],
+        "closing": "殿下若准许，下一回合将依建议继续。",
+    }
+    adapter = HERAdapter.__new__(HERAdapter)
+    adapter.config = SimpleNamespace(
+        system_md=configured,
+        workspace_dir=tmp_path,
+    )
+    adapter.run_habit_dream_model = AsyncMock(
+        return_value=SimpleNamespace(
+            text=json.dumps(rendered_payload, ensure_ascii=False)
+        )
+    )
+
+    report, render_metadata = await adapter._render_incomplete_persona_response(
+        result,
+        request_id="req-persona",
+        metadata=metadata,
+    )
+
+    assert report is not None and report.startswith("殿下，月桂司书")
+    assert render_metadata["persona_renderer_succeeded"] is True
+    [call] = adapter.run_habit_dream_model.await_args_list
+    renderer_prompt = call.args[0]
+    assert "月桂司书" in renderer_prompt
+    assert "WRONG FALLBACK PERSONA" not in renderer_prompt
+    audit = (tmp_path / "backend_state" / "her_persona_audit.jsonl").read_text(
+        encoding="utf-8"
+    )
+    assert "accepted" in audit
+    assert "Fictional Persona" not in audit
+    assert configured.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_incomplete_persona_renderer_missing_source_uses_neutral_without_model_call(
+    tmp_path,
+):
+    result = ClawTaskResult(
+        text="",
+        model="deepseek/test",
+        permission_mode="read-only",
+        cwd=str(tmp_path),
+        returncode=0,
+        duration_ms=10,
+        stdout="",
+        stderr="",
+        json_data={},
+        tool_uses=[],
+        tool_results=[],
+        iterations=12,
+        completion_status="incomplete",
+        stop_reason="max_iterations",
+    )
+    _neutral, metadata = _claw_incomplete_response(result, prompt="continue")
+    adapter = HERAdapter.__new__(HERAdapter)
+    adapter.config = SimpleNamespace(
+        system_md=tmp_path / "missing.md",
+        workspace_dir=tmp_path,
+    )
+    adapter.run_habit_dream_model = AsyncMock()
+
+    report, render_metadata = await adapter._render_incomplete_persona_response(
+        result,
+        request_id="req-missing-persona",
+        metadata=metadata,
+    )
+
+    assert report is None
+    assert render_metadata["persona_renderer_attempted"] is False
+    assert render_metadata["persona_fallback_reason"] == "system_md_missing"
+    adapter.run_habit_dream_model.assert_not_awaited()
+
+
+def test_incomplete_persona_validator_rejects_reordered_or_altered_facts():
+    facts = ["Iterations used: 12.", "Recommended action: CONTINUE."]
+    valid = {
+        "heading": "Persona heading",
+        "facts": [
+            {"index": index, "source": fact, "rendered": fact}
+            for index, fact in enumerate(facts, start=1)
+        ],
+        "closing": "Persona closing",
+    }
+    assert "Iterations used" in _validated_claw_incomplete_persona_report(
+        json.dumps(valid),
+        facts=facts,
+    )
+
+    reordered = json.loads(json.dumps(valid))
+    reordered["facts"].reverse()
+    with pytest.raises(ValueError):
+        _validated_claw_incomplete_persona_report(
+            json.dumps(reordered),
+            facts=facts,
+        )
+
+    altered = json.loads(json.dumps(valid))
+    altered["facts"][0]["rendered"] = "Iterations used: 13."
+    with pytest.raises(ValueError):
+        _validated_claw_incomplete_persona_report(
+            json.dumps(altered),
+            facts=facts,
+        )
 
 
 def test_stream_json_parser_accepts_legacy_diagnostics_when_run_finished_exists():
@@ -448,7 +638,9 @@ def test_stream_json_parser_accepts_legacy_diagnostics_when_run_finished_exists(
             json.dumps({"kind": "run_started", "session_id": "session-1"}),
             "Permission approval required",
             "Approve this tool call? [y/N]: not-json",
-            json.dumps({"kind": "run_finished", "message": "done", "session_id": "session-1"}),
+            json.dumps(
+                {"kind": "run_finished", "message": "done", "session_id": "session-1"}
+            ),
         ]
     )
 
@@ -560,7 +752,9 @@ def test_detect_hashi_claw_platform_linux_wsl_candidate():
 def test_load_packaged_claw_manifest_rejects_non_hashi_runtime(tmp_path):
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
-        json.dumps({"manifest_version": 1, "runtime": "claw", "version": "1", "binaries": {}}),
+        json.dumps(
+            {"manifest_version": 1, "runtime": "claw", "version": "1", "binaries": {}}
+        ),
         encoding="utf-8",
     )
 
@@ -571,7 +765,9 @@ def test_load_packaged_claw_manifest_rejects_non_hashi_runtime(tmp_path):
 def test_resolve_packaged_claw_binary_validates_checksum(tmp_path):
     root = tmp_path / "hashi_assets" / "her"
     binary = _write_packaged_claw(root)
-    platform = detect_hashi_claw_platform(system="Linux", machine="x86_64", release="6.8")
+    platform = detect_hashi_claw_platform(
+        system="Linux", machine="x86_64", release="6.8"
+    )
 
     resolved = resolve_packaged_claw_binary(root, platform=platform)
 
@@ -592,7 +788,12 @@ def test_find_claw_binary_uses_packaged_runtime_before_env(tmp_path):
     )
     global_cfg = SimpleNamespace(project_root=tmp_path)
 
-    assert find_claw_binary(global_config=global_cfg, env={"CLAW_BINARY": str(env_claw), "PATH": ""}) == packaged.resolve()
+    assert (
+        find_claw_binary(
+            global_config=global_cfg, env={"CLAW_BINARY": str(env_claw), "PATH": ""}
+        )
+        == packaged.resolve()
+    )
 
 
 def test_find_claw_binary_checksum_mismatch_falls_back_to_env(tmp_path):
@@ -609,7 +810,9 @@ def test_find_claw_binary_checksum_mismatch_falls_back_to_env(tmp_path):
     )
     global_cfg = SimpleNamespace(project_root=tmp_path)
 
-    resolved = discover_claw_binary(global_config=global_cfg, env={"CLAW_BINARY": str(env_claw), "PATH": ""})
+    resolved = discover_claw_binary(
+        global_config=global_cfg, env={"CLAW_BINARY": str(env_claw), "PATH": ""}
+    )
 
     assert resolved.path == env_claw.resolve()
     assert resolved.source == "env:CLAW_BINARY"
@@ -625,7 +828,9 @@ def test_find_claw_binary_require_packaged_fails_closed(tmp_path):
     agent_cfg = SimpleNamespace(extra={"claw_runtime_policy": "require-packaged"})
 
     with pytest.raises(ClawBinaryNotFound, match="required but unavailable"):
-        find_claw_binary(global_config=global_cfg, agent_config=agent_cfg, env={"PATH": ""})
+        find_claw_binary(
+            global_config=global_cfg, agent_config=agent_cfg, env={"PATH": ""}
+        )
 
 
 def test_find_claw_binary_require_packaged_does_not_bypass_manifest(tmp_path):
@@ -667,7 +872,9 @@ def test_find_claw_binary_accepts_global_claw_provider_binary(tmp_path):
     )
     global_cfg = SimpleNamespace(claw_providers={"binary_path": str(fake)})
 
-    assert find_claw_binary(global_config=global_cfg, env={"PATH": ""}) == fake.resolve()
+    assert (
+        find_claw_binary(global_config=global_cfg, env={"PATH": ""}) == fake.resolve()
+    )
 
 
 def test_build_claw_env_uses_allowlist_only():
@@ -722,7 +929,9 @@ def test_claw_execution_effort_maps_to_iteration_budget(
 
     assert adapter.effort == effort
     assert adapter._task_env()["CLAW_MAX_TOOL_ITERATIONS"] == expected_iterations
-    assert adapter._task_env()["CLAW_TASK_PLANNING"] == ("0" if effort == "low" else "1")
+    assert adapter._task_env()["CLAW_TASK_PLANNING"] == (
+        "0" if effort == "low" else "1"
+    )
     assert adapter._task_env()["CLAW_EXECUTION_EFFORT"] == effort
     if effort == "max+":
         assert "CLAW_MAX_PLUS_TIME_BUDGET_SECONDS" not in adapter._task_env()
@@ -767,7 +976,9 @@ def test_max_plus_checkpoint_is_request_correlated_and_atomically_recoverable(tm
         )
     )
     assert checkpoint == {"request_id": "req-max-plus", "event": event}
-    assert not (tmp_path / "backend_state" / "claw_max_plus_checkpoint.json.tmp").exists()
+    assert not (
+        tmp_path / "backend_state" / "claw_max_plus_checkpoint.json.tmp"
+    ).exists()
 
 
 def test_run_claw_doctor_parses_json(tmp_path):
@@ -780,7 +991,10 @@ def test_run_claw_doctor_parses_json(tmp_path):
         """,
     )
 
-    assert run_claw_doctor(tmp_path, binary_path=fake) == {"kind": "doctor", "status": "ok"}
+    assert run_claw_doctor(tmp_path, binary_path=fake) == {
+        "kind": "doctor",
+        "status": "ok",
+    }
 
 
 def test_run_claw_json_command_raises_for_non_zero_json_error(tmp_path):
@@ -795,7 +1009,9 @@ def test_run_claw_json_command_raises_for_non_zero_json_error(tmp_path):
     )
 
     with pytest.raises(ClawCommandError) as raised:
-        run_claw_json_command(["doctor", "--output-format", "json"], cwd=tmp_path, binary_path=fake)
+        run_claw_json_command(
+            ["doctor", "--output-format", "json"], cwd=tmp_path, binary_path=fake
+        )
 
     assert raised.value.returncode == 1
     assert raised.value.parsed_error == {"error": "bad key", "kind": "api_http_error"}
@@ -811,7 +1027,9 @@ def test_run_claw_json_command_raises_for_non_json_output(tmp_path):
     )
 
     with pytest.raises(ClawJsonError):
-        run_claw_json_command(["doctor", "--output-format", "json"], cwd=tmp_path, binary_path=fake)
+        run_claw_json_command(
+            ["doctor", "--output-format", "json"], cwd=tmp_path, binary_path=fake
+        )
 
 
 def test_run_claw_json_command_timeout(tmp_path):
@@ -825,7 +1043,12 @@ def test_run_claw_json_command_timeout(tmp_path):
     )
 
     with pytest.raises(ClawTimeoutError):
-        run_claw_json_command(["doctor", "--output-format", "json"], cwd=tmp_path, binary_path=fake, timeout_s=0.1)
+        run_claw_json_command(
+            ["doctor", "--output-format", "json"],
+            cwd=tmp_path,
+            binary_path=fake,
+            timeout_s=0.1,
+        )
 
 
 def test_run_claw_task_builds_safe_one_shot_command(tmp_path):
@@ -1128,7 +1351,9 @@ def test_claw_permission_mode_respects_global_max(tmp_path):
         extra={"permission_mode": "danger-full-access"},
         resolve_access_root=lambda: tmp_path,
     )
-    global_cfg = SimpleNamespace(claw_providers={"max_permission_mode": "workspace-write"})
+    global_cfg = SimpleNamespace(
+        claw_providers={"max_permission_mode": "workspace-write"}
+    )
     adapter = ClawCLIAdapter(cfg, global_cfg, api_key="test-key")
 
     assert adapter._permission_mode() == "workspace-write"
@@ -1447,7 +1672,9 @@ async def test_her_persistent_session_is_single_flight(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_her_isolated_turn_runs_while_background_persistent_turn_is_unfinished(tmp_path):
+async def test_her_isolated_turn_runs_while_background_persistent_turn_is_unfinished(
+    tmp_path,
+):
     runtime = SimpleNamespace(
         _request_meta_by_id={
             "req-background": {"session_scope": "persistent"},
@@ -1564,7 +1791,9 @@ async def test_her_failure_persists_structured_error_and_redacted_stderr(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_her_failed_persistent_turn_quarantines_session_and_surfaces_metadata(tmp_path):
+async def test_her_failed_persistent_turn_quarantines_session_and_surfaces_metadata(
+    tmp_path,
+):
     cfg = SimpleNamespace(
         name="test",
         workspace_dir=tmp_path,
@@ -1593,8 +1822,13 @@ async def test_her_failed_persistent_turn_quarantines_session_and_surfaces_metad
 
     assert response.is_success is False
     assert response.error == "pending tool result"
-    assert response.stream_metadata["her_error"]["error_kind"] == "invalid_session_state"
-    assert response.stream_metadata["her_error"]["error_type"] == "invalid_message_sequence"
+    assert (
+        response.stream_metadata["her_error"]["error_kind"] == "invalid_session_state"
+    )
+    assert (
+        response.stream_metadata["her_error"]["error_type"]
+        == "invalid_message_sequence"
+    )
     assert adapter._session_id is None
     assert not adapter._session_state_path.exists()
     records = [
@@ -1814,7 +2048,9 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
 
     assert await adapter.initialize() is True
     with caplog.at_level(logging.INFO):
-        response = await adapter.generate_response("hello", "req-stream", on_stream_event=collect)
+        response = await adapter.generate_response(
+            "hello", "req-stream", on_stream_event=collect
+        )
 
     assert response.is_success is True
     assert response.text == "final answer"
@@ -1871,10 +2107,13 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     assert KIND_TEXT_DELTA in [event.kind for event in events]
     assert KIND_TOOL_START in [event.kind for event in events]
     assert KIND_TOOL_END in [event.kind for event in events]
-    assert sum(
-        event.kind == KIND_PROGRESS and "semantic_compaction" in event.summary
-        for event in events
-    ) == 2
+    assert (
+        sum(
+            event.kind == KIND_PROGRESS and "semantic_compaction" in event.summary
+            for event in events
+        )
+        == 2
+    )
     assert any(
         event.kind == KIND_PROGRESS
         and "🧠 semantic_compaction started" in event.summary
@@ -1901,7 +2140,9 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     assert "outcome=inspection_tools allow_tools=True" in caplog.text
     raw_events = [
         json.loads(line)
-        for line in (tmp_path / "claw_exec_events.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (tmp_path / "claw_exec_events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     persisted_review = next(
         event
@@ -1929,7 +2170,9 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     assert persisted_compaction["session_id"] == "stream-session"
     correlated_controls = [
         json.loads(line)
-        for line in (tmp_path / "claw_control_events.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (tmp_path / "claw_control_events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     assert {record["request_id"] for record in correlated_controls} == {"req-stream"}
     assert any(
@@ -1986,7 +2229,9 @@ async def test_claw_adapter_stream_json_emits_actual_thinking_delta(tmp_path):
         events.append(event)
 
     assert await adapter.initialize() is True
-    response = await adapter.generate_response("hello", "req-stream", on_stream_event=collect)
+    response = await adapter.generate_response(
+        "hello", "req-stream", on_stream_event=collect
+    )
 
     assert response.is_success is True
     assert response.usage.thinking_tokens == 8
@@ -2006,7 +2251,8 @@ async def test_claw_adapter_stream_json_emits_actual_thinking_delta(tmp_path):
     )
     assert any(
         event.kind == KIND_THINKING
-        and event.detail == "thinking_chars=0;redacted=true;source=reasoning_details.encrypted"
+        and event.detail
+        == "thinking_chars=0;redacted=true;source=reasoning_details.encrypted"
         for event in events
     )
 
@@ -2187,7 +2433,9 @@ async def test_her_adapter_shutdown_reaps_request_during_semantic_compaction(tmp
 
 
 @pytest.mark.asyncio
-async def test_claw_adapter_enforces_idle_timeout_and_logs_effective_policy(tmp_path, caplog):
+async def test_claw_adapter_enforces_idle_timeout_and_logs_effective_policy(
+    tmp_path, caplog
+):
     fake = _write_exe(
         tmp_path / "claw",
         """

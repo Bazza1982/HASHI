@@ -220,8 +220,8 @@ def test_dream_commit_journals_combine_rewrite_archive_and_protected_conflict(
     assert journal._snapshot_path(run_id).is_file()
     assert list(journal.raw_root.glob(f"{run_id}-attempt-1.txt"))
     assert list(journal.validation_root.glob(f"{run_id}-attempt-1.json"))
-    report = render_deterministic_report(manifest, persona_intro="I watched over the catalogue.")
-    assert report.startswith("I watched over the catalogue.")
+    report = render_deterministic_report(manifest)
+    assert report.startswith("🌙 Dream completed")
     assert f"/dream undo {run_id} 1" in report
 
 

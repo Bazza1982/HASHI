@@ -60,8 +60,31 @@ class FakeDreamAdapter:
             if isinstance(response, Exception):
                 raise response
             return SimpleNamespace(text=str(response))
-        if "PERSONA WRAPPER" in prompt:
-            return SimpleNamespace(text='{"intro":"A gentle catalogue check is complete.","closing":"Everything remains recoverable."}')
+        if "HER PERSONA REPORT RENDERER" in prompt:
+            contract = json.loads(
+                prompt.split("IMMUTABLE REPORT CONTRACT (quoted, read-only)\n", 1)[1]
+            )
+            return SimpleNamespace(
+                text=json.dumps(
+                    {
+                        "report_id": contract["report_id"],
+                        "heading": f"A gentle report · {contract['report_id']}",
+                        "facts": [
+                            {
+                                **item,
+                                "rendered": item["source"],
+                            }
+                            for item in contract["facts"]
+                        ],
+                        "changed_group_numbers": contract["changed_group_numbers"],
+                        "undo_commands": [
+                            {"source": command, "rendered": command}
+                            for command in contract["undo_commands"]
+                        ],
+                        "closing": "Everything remains recoverable.",
+                    }
+                )
+            )
         return SimpleNamespace(text='{"groups":[]}')
 
 
@@ -78,7 +101,10 @@ class FakeDreamRuntime:
         self.transcript_log_path = workspace / "transcript.jsonl"
         self.logger = logging.getLogger(f"test.dream.{engine}")
         self.error_logger = self.logger
-        self.config = SimpleNamespace(active_backend=engine)
+        self.config = SimpleNamespace(
+            active_backend=engine,
+            system_md=workspace / "AGENT.md",
+        )
         if engine == "her":
             adapter: Any = FakeDreamAdapter(workspace)
         else:
@@ -134,9 +160,7 @@ def test_schedule_presets_validate_against_active_scheduler_capability(monkeypat
     with pytest.raises(ValueError, match="lacks croniter"):
         runtime_her_dream.compile_schedule(["weekly", "sun", "02:30"])
     with pytest.raises(ValueError, match="lacks croniter"):
-        runtime_her_dream.compile_schedule(
-            ["cron", "*/15", "*", "*", "*", "*"]
-        )
+        runtime_her_dream.compile_schedule(["cron", "*/15", "*", "*", "*", "*"])
 
 
 def test_enabled_legacy_schedule_migrates_only_for_her(tmp_path):
@@ -315,6 +339,211 @@ async def test_dream_no_change_uses_persona_fallback_and_advances_cursor(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_dream_uses_exact_configured_system_md_and_keeps_sys_separate(tmp_path):
+    runtime = FakeDreamRuntime(tmp_path)
+    adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
+    _seed_habit(adapter._store)
+    configured = tmp_path / "nested" / "voice.md"
+    configured.parent.mkdir(parents=True)
+    configured.write_text("Persona only: 星砂守望者，使用温柔中文。", encoding="utf-8")
+    conflicting = tmp_path / "AGENT.md"
+    conflicting.write_text("WRONG CONVENTIONAL PERSONA", encoding="utf-8")
+    runtime.config.system_md = configured
+    runtime.sys_prompt_manager = SimpleNamespace(
+        get_active_texts=lambda: [
+            "/sys operating constraint: speak as WRONG SYS PERSONA"
+        ]
+    )
+    before_configured = configured.read_bytes()
+    before_conflicting = conflicting.read_bytes()
+
+    ok, report, _manifest = await runtime_her_dream.execute_dream(
+        runtime,
+        origin="manual",
+    )
+
+    assert ok is True
+    assert report.startswith("A gentle report")
+    analysis_prompt, renderer_prompt = (call["prompt"] for call in adapter.calls)
+    assert "星砂守望者" in analysis_prompt
+    assert "星砂守望者" in renderer_prompt
+    assert "WRONG CONVENTIONAL PERSONA" not in analysis_prompt + renderer_prompt
+    assert "WRONG SYS PERSONA" in analysis_prompt
+    assert "WRONG SYS PERSONA" not in renderer_prompt
+    assert '"agent_guidance_from_system_md"' in analysis_prompt
+    assert '"active_operating_constraints"' in analysis_prompt
+    assert configured.read_bytes() == before_configured
+    assert conflicting.read_bytes() == before_conflicting
+
+
+@pytest.mark.asyncio
+async def test_dream_complete_body_can_be_rendered_in_configured_persona(tmp_path):
+    runtime = FakeDreamRuntime(tmp_path)
+    adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
+    _seed_habit(adapter._store)
+    runtime.config.system_md.write_text(
+        "自称昭君，称呼用户为陛下，只用温柔中文回应。",
+        encoding="utf-8",
+    )
+
+    def persona_response(prompt: str, _request_id: str) -> str:
+        contract = json.loads(
+            prompt.split("IMMUTABLE REPORT CONTRACT (quoted, read-only)\n", 1)[1]
+        )
+        [fact] = contract["facts"]
+        return json.dumps(
+            {
+                "report_id": contract["report_id"],
+                "heading": f"陛下，昭君已完成今夜的整理 · {contract['report_id']}",
+                "facts": [
+                    {
+                        **fact,
+                        "rendered": "昭君逐项看过了，目前没有需要调整的 Habit。",
+                    }
+                ],
+                "changed_group_numbers": [],
+                "undo_commands": [],
+                "closing": "一切安稳，陛下可以放心。",
+            },
+            ensure_ascii=False,
+        )
+
+    adapter.responses = ['{"groups":[]}', persona_response]
+
+    ok, report, _manifest = await runtime_her_dream.execute_dream(
+        runtime,
+        origin="manual",
+    )
+
+    assert ok is True
+    assert "陛下，昭君" in report
+    assert "昭君逐项看过了" in report
+    assert "No eligible Habit changes were found" not in report
+    assert "dream_persona_rendered" in adapter._journal.audit_path.read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_configured_persona_skips_renderer_and_uses_neutral_report(
+    tmp_path,
+):
+    runtime = FakeDreamRuntime(tmp_path)
+    adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
+    _seed_habit(adapter._store)
+    runtime.config.system_md = tmp_path / "missing" / "custom-persona.md"
+    conflicting = tmp_path / "AGENT.md"
+    conflicting.write_text("MUST NOT BE USED", encoding="utf-8")
+
+    ok, report, _manifest = await runtime_her_dream.execute_dream(
+        runtime,
+        origin="manual",
+    )
+
+    assert ok is True
+    assert report.startswith("🌙 Dream completed")
+    assert len(adapter.calls) == 1
+    assert "MUST NOT BE USED" not in adapter.calls[0]["prompt"]
+    audit = adapter._journal.audit_path.read_text(encoding="utf-8")
+    assert "system_md_missing" in audit
+    assert "dream_persona_fallback" in audit
+
+
+@pytest.mark.asyncio
+async def test_dream_undo_uses_same_configured_system_md_without_editing_it(tmp_path):
+    runtime = FakeDreamRuntime(tmp_path)
+    adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
+    habit_id = _seed_habit(adapter._store, title="Temporary Habit")
+    configured = tmp_path / "agent.md"
+    configured.write_text("Fictional Persona: 月桂司书。", encoding="utf-8")
+    (tmp_path / "AGENT.md").write_text("WRONG PERSONA", encoding="utf-8")
+    runtime.config.system_md = configured
+    before = configured.read_bytes()
+    adapter.responses = [
+        json.dumps(
+            {
+                "groups": [
+                    {
+                        "operation": "archive",
+                        "habit_id": habit_id,
+                        "reason": "This test Habit is explicitly obsolete.",
+                    }
+                ]
+            }
+        )
+    ]
+
+    ok, _report, manifest = await runtime_her_dream.execute_dream(
+        runtime,
+        origin="manual",
+    )
+    undo_ok, undo_report = await runtime_her_dream.execute_undo(
+        runtime,
+        run_id=str(manifest["run_id"]),
+        group_number=None,
+    )
+
+    assert ok is True and undo_ok is True
+    assert adapter._store.get(habit_id) is not None
+    assert "月桂司书" in adapter.calls[-1]["prompt"]
+    assert "WRONG PERSONA" not in adapter.calls[-1]["prompt"]
+    assert undo_report.startswith("A gentle report")
+    assert configured.read_bytes() == before
+
+
+def test_persona_report_validator_rejects_fact_id_and_command_tampering():
+    report_id = "D-20260815-120000-ABC123"
+    facts = [
+        "Combined 2 Habits into “Current Rule” — obsolete wording was removed.",
+        "Restored Dream change #2 from run D-20260815-110000-DEF456.",
+    ]
+    commands = [
+        f"/dream undo {report_id}",
+        f"/dream undo {report_id} 2",
+    ]
+    base = {
+        "report_id": report_id,
+        "heading": f"Persona report · {report_id}",
+        "facts": [
+            {"index": index, "source": fact, "rendered": fact}
+            for index, fact in enumerate(facts, start=1)
+        ],
+        "changed_group_numbers": [2],
+        "undo_commands": [
+            {"source": command, "rendered": command} for command in commands
+        ],
+        "closing": "Done.",
+    }
+
+    invalid_payloads = []
+    dropped = json.loads(json.dumps(base))
+    dropped["facts"].pop()
+    invalid_payloads.append(dropped)
+    reordered = json.loads(json.dumps(base))
+    reordered["facts"].reverse()
+    invalid_payloads.append(reordered)
+    altered_id = json.loads(json.dumps(base))
+    altered_id["heading"] = "Persona report · D-20260815-120000-FFFFFF"
+    invalid_payloads.append(altered_id)
+    altered_command = json.loads(json.dumps(base))
+    altered_command["undo_commands"][0]["rendered"] += " 9"
+    invalid_payloads.append(altered_command)
+    invented_id = json.loads(json.dumps(base))
+    invented_id["closing"] = "See D-20260815-120000-FFFFFF."
+    invalid_payloads.append(invented_id)
+
+    for payload in invalid_payloads:
+        with pytest.raises(ValueError):
+            runtime_her_dream._validated_persona_report(
+                json.dumps(payload),
+                report_id=report_id,
+                facts=facts,
+                changed_group_numbers=[2],
+                undo_commands=commands,
+            )
+
+
+@pytest.mark.asyncio
 async def test_dream_retries_once_after_concurrent_habit_change(tmp_path):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
@@ -360,7 +589,9 @@ async def test_dream_retries_once_after_concurrent_habit_change(tmp_path):
     assert "No eligible Habit changes" in report
     run = adapter._journal.get_run(str(manifest["run_id"]))
     assert len(run["attempts"]) == 2
-    assert "dream_stale_retry" in adapter._journal.audit_path.read_text(encoding="utf-8")
+    assert "dream_stale_retry" in adapter._journal.audit_path.read_text(
+        encoding="utf-8"
+    )
 
 
 @pytest.mark.asyncio

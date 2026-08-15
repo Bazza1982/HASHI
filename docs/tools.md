@@ -56,7 +56,7 @@ Five execution modes:
 - `/model` — switch model (inline keyboard), then optionally choose or keep effort when the model supports it
 - `/mode [fixed|flex|wrapper|audit|dual-brain]` — switch execution mode; `/mode memory+` only enables Memory+ and keeps the current mode
 - `/think [on|off]` — show model-authored interim commentary plus genuine provider-returned reasoning chunks or explicit provider-redaction notices; independent of `/verbose` and `/typing`
-- `/commentary [on|off]` — HER only: control persona acknowledgements and High+ progress updates; independent of `/think`, `/verbose`, and raw reasoning
+- `/commentary [on|off]` — HER only: control model-authored Persona acknowledgements plus High+ milestone and neutral lease updates; independent of `/think`, `/verbose`, and raw reasoning
 - `/verbose [on|off]` — show a temporary progress card with timing, progress, and available tool-result summaries; reasoning and answer drafts are excluded
 - `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
 - `/stream` and `/preview` — retired compatibility commands that point to the display controls above; Telegram answers are delivered only when complete
@@ -479,7 +479,7 @@ Recommended protocol for Windows UI work:
 ## Important Behavior Notes
 - Bridge owns continuity; backends are treated as stateless.
 - Backend capabilities are not identical — session model, file handling, tool use, and streaming vary per backend.
-- `/think` accepts only backend-native interim commentary and genuine provider reasoning. It never treats generic start, busy, progress, tool, or answer-delta events as either. HER persona updates use `/commentary` instead and never enter `/think`. If the current backend exposes neither commentary nor reasoning, `/think on` remains quiet.
+- `/think` accepts only backend-native interim commentary and genuine provider reasoning. It never treats generic start, busy, progress, tool, or answer-delta events as either. HER acknowledgements and bounded progress updates use `/commentary` instead and never enter `/think`. If the current backend exposes neither commentary nor reasoning, `/think on` remains quiet.
 - `/handoff` restores continuity from bridge-owned transcript history, not CLI resume state.
 - Model and effort changes at runtime are not automatically persisted back to `agents.json`.
 - Backend-specific behaviors must be labeled as such, not described as universal.
@@ -500,4 +500,4 @@ Recommended protocol for Windows UI work:
 
 Assistant answer deltas remain available to local activity observers, but they are never displayed as Telegram previews. Codex commentary is kept distinct from both generic progress and private/provider reasoning, then routed to `/think` as Codex's user-visible substitute. Long commentary is split across Telegram messages rather than truncated. `/typing` is backend-independent.
 
-HER `/commentary` is enabled by default as a durable workspace preference. Medium effort sends only the persona acknowledgement. High and above also send model-frame milestone updates, with an honest persona lease around 90 seconds for the first long wait, then a three-minute target and five-minute hard maximum. The lease survives background detach and stops with task completion or cancellation. On non-HER backends, `/commentary` reports that the setting is unavailable and changes nothing.
+HER `/commentary` is enabled by default as a durable workspace preference. Medium effort sends only the model-authored Persona acknowledgement. High and above also send bounded TaskFrame milestone updates. When no new model-authored milestone exists, the first long wait receives a clearly neutral HER runtime lease around 90 seconds, followed by a three-minute target and five-minute hard maximum. Synthetic milestones and leases never infer identity from prompt text. The lease survives background detach and stops with task completion or cancellation. On non-HER backends, `/commentary` reports that the setting is unavailable and changes nothing.
