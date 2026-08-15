@@ -634,9 +634,9 @@ configuration summary.
 
 | Command | Description |
 |---------|-------------|
-| `/verbose [on\|off]` | Show a temporary progress card with timing and available tool-result summaries |
-| `/think [on\|off]` | Show model-authored interim commentary plus genuine provider-returned reasoning when available |
-| `/commentary [on\|off]` | HER only: control model-authored persona acknowledgements plus High+ milestone and neutral lease updates independently from `/think` and `/verbose` |
+| `/verbose [on\|off]` | Show bounded technical execution telemetry only: planning, tools, tests, validation, retries, and runtime status |
+| `/think [on\|off]` | Show backend-owned reasoning output; for HER this is genuine provider-returned reasoning only |
+| `/commentary [on\|off]` | HER only: show each explicitly model-authored Persona acknowledgement or interim report once, independently from `/think` and `/verbose` |
 | `/typing [on\|off\|status]` | Control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator |
 | `/safevoice [on\|off]` | Toggle voice confirmation (default: ON) |
 | `/active [on\|off\|minutes]` | Toggle proactive heartbeat |

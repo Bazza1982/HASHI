@@ -1407,8 +1407,10 @@ class BridgeAgentRuntime:
 
     def _make_stream_callback(self, event_queue: asyncio.Queue | None = None,
                               think_buffer: list | None = None):
-        """Route progress to verbose and reasoning/commentary to think."""
+        """Present explicit owners; retain legacy kind routing for old adapters."""
         from adapters.stream_events import (
+            DELIVERY_REASONING,
+            DELIVERY_TECHNICAL,
             KIND_COMMENTARY,
             KIND_ERROR,
             KIND_FILE_EDIT,
@@ -1418,6 +1420,7 @@ class BridgeAgentRuntime:
             KIND_THINKING,
             KIND_TOOL_END,
             KIND_TOOL_START,
+            legacy_delivery_class,
         )
         verbose_kinds = {
             KIND_ERROR,
@@ -1434,15 +1437,19 @@ class BridgeAgentRuntime:
         _chunk_hard_limit = 150
         _chunk_endings = ("。", "！", "？", "\n")
         async def _callback(event):
-            if event_queue is not None and event.kind in verbose_kinds:
+            explicit_owner = str(getattr(event, "delivery_class", "") or "")
+            owner = explicit_owner or legacy_delivery_class(event.kind)
+            if (
+                event_queue is not None
+                and owner == DELIVERY_TECHNICAL
+                and event.kind in verbose_kinds
+            ):
                 try:
                     event_queue.put_nowait(event)
                 except asyncio.QueueFull:
                     _logger.debug(f"Stream event queue full, dropping: {event.summary[:40]!r}")
             if think_buffer is not None:
-                if event.kind == KIND_COMMENTARY:
-                    if _engine in {"her", "claw-cli"}:
-                        return
+                if not explicit_owner and event.kind == KIND_COMMENTARY:
                     if self._openrouter_think_chunk:
                         think_buffer.append(self._openrouter_think_chunk)
                         self._openrouter_think_chunk = ""
@@ -1450,7 +1457,7 @@ class BridgeAgentRuntime:
                     if commentary:
                         think_buffer.append(commentary)
                     return
-                if event.kind != KIND_THINKING:
+                if owner != DELIVERY_REASONING or event.kind != KIND_THINKING:
                     return
                 # Provider deltas already encode their own word boundaries.
                 # Never trim, deduplicate, or invent separators between them.
@@ -4525,6 +4532,7 @@ class BridgeAgentRuntime:
         else:
             _think_file.unlink(missing_ok=True)
         telegram_stream_policy.set_display_preference(self, "think", self._think)
+        her_backend = self._commentary_available()
         await update.message.reply_text(
             setting_card(
                 "💭",
@@ -4532,8 +4540,12 @@ class BridgeAgentRuntime:
                 current=f"<b>{status_label(self._think)}</b>",
                 facts=["<b>Saved</b> · workspace setting"],
                 consequence=(
-                    "Shows model-authored interim commentary and genuine provider-returned reasoning when available."
+                    "For HER, shows genuine provider-returned reasoning only; Persona reports stay under /commentary."
+                    if self._think and her_backend
+                    else "Shows model-authored interim commentary and genuine provider-returned reasoning when available."
                     if self._think
+                    else "HER provider reasoning is hidden; /commentary and /verbose are unaffected."
+                    if her_backend
                     else "Model commentary and provider reasoning are hidden."
                 ),
                 action="Changes apply immediately and persist across reboot.",
@@ -4585,16 +4597,17 @@ class BridgeAgentRuntime:
             current=f"<b>{status_label(self._commentary)}</b>",
             facts=[
                 f"<b>HER effort</b> · <code>{html.escape(effort)}</code>",
-                "<b>Medium</b> · persona acknowledgement only",
-                "<b>High+</b> · acknowledgement plus persona progress updates",
-                "<b>Long tasks</b> · first update around 90s; then 3m target / 5m maximum",
+                "<b>Medium</b> · may emit the model-authored Persona acknowledgement",
+                "<b>High+</b> · may also emit model-authored material progress/Replan reports",
+                "<b>Delivery</b> · one durable message per stable event identity",
+                "<b>Neutral runtime leases</b> · technical /verbose only",
                 "<b>Independent</b> · does not change /think or /verbose",
                 "<b>Saved</b> · workspace setting",
             ],
             consequence=(
-                "HER sends concise, persona-consistent progress messages without exposing raw reasoning."
+                "HER shows only explicit model-authored Persona reports here; technical telemetry and provider reasoning stay separate."
                 if self._commentary
-                else "HER acknowledgements and routine persona progress messages are hidden."
+                else "Optional HER Persona acknowledgements and interim reports are hidden; final and required control messages remain visible."
             ),
             action="Use /commentary on or /commentary off.",
         )

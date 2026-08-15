@@ -46,6 +46,16 @@ KIND_ACKNOWLEDGEMENT = getattr(
 KIND_REVIEW = getattr(_stream_events, "KIND_REVIEW", "review")
 KIND_VALIDATION = getattr(_stream_events, "KIND_VALIDATION", "validation")
 KIND_TESTING = getattr(_stream_events, "KIND_TESTING", "testing")
+DELIVERY_TECHNICAL = getattr(_stream_events, "DELIVERY_TECHNICAL", "technical")
+DELIVERY_USER_COMMENTARY = getattr(
+    _stream_events,
+    "DELIVERY_USER_COMMENTARY",
+    "user_commentary",
+)
+DELIVERY_REASONING = getattr(_stream_events, "DELIVERY_REASONING", "reasoning")
+DELIVERY_FINAL = getattr(_stream_events, "DELIVERY_FINAL", "final")
+DELIVERY_CONTROL = getattr(_stream_events, "DELIVERY_CONTROL", "control")
+DELIVERY_INTERNAL = getattr(_stream_events, "DELIVERY_INTERNAL", "internal")
 
 DEFAULT_CLAW_TIMEOUT_SEC = 30
 DEFAULT_CLAW_TASK_TIMEOUT_SEC = 1800
@@ -114,7 +124,6 @@ CLAW_EXECUTION_EFFORT_ITERATIONS = {
 
 HER_COMMENTARY_EFFORTS = frozenset({"high", "xhigh", "max", "max+"})
 HER_COMMENTARY_FIRST_UPDATE_S = 90.0
-HER_COMMENTARY_MIN_GAP_S = 90.0
 HER_COMMENTARY_TARGET_INTERVAL_S = 180.0
 HER_COMMENTARY_HARD_INTERVAL_S = 300.0
 HER_COMMENTARY_ACTIVITY_GRACE_S = 30.0
@@ -359,77 +368,11 @@ def _claw_pair_tool_ledger(
     return ledger
 
 
-def _claw_commentary_items(value: Any, *, limit: int = 2) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    items: list[str] = []
-    for raw_item in value:
-        item = " ".join(str(raw_item).split()).strip()
-        if item:
-            items.append(item[:180])
-        if len(items) >= limit:
-            break
-    return items
-
-
 def _claw_uses_chinese(*values: str) -> bool:
     return any("\u4e00" <= char <= "\u9fff" for value in values for char in value)
 
 
-def _build_claw_task_commentary(frame: Mapping[str, Any], *, prompt: str) -> str:
-    """Render a neutral milestone without treating prompt text as Persona authority."""
-    completed = _claw_commentary_items(frame.get("completed"))
-    remaining = _claw_commentary_items(frame.get("remaining_work"))
-    failures = _claw_commentary_items(frame.get("failures"), limit=1)
-    next_action = " ".join(str(frame.get("next_action") or "").split()).strip()[:180]
-    if not any((completed, remaining, failures, next_action)):
-        return ""
-
-    try:
-        frame_text = json.dumps(frame, ensure_ascii=False)
-    except (TypeError, ValueError):
-        frame_text = ""
-    use_chinese = _claw_uses_chinese(prompt, frame_text)
-
-    if use_chinese:
-        if completed:
-            more = f"等 {len(completed)} 项" if len(completed) > 1 else ""
-            opening = f"HER 进度：已完成「{completed[0]}」{more}。"
-        elif failures:
-            opening = f"HER 进度：处理中遇到「{failures[0]}」。"
-        else:
-            opening = "HER 进度：任务仍在处理中。"
-        if next_action:
-            follow_up = f"下一步：「{next_action}」。"
-        elif remaining:
-            follow_up = f"下一步：继续处理「{remaining[0]}」。"
-        else:
-            follow_up = "目前正在收尾；有可确认的结果后将继续更新。"
-        if failures and completed:
-            follow_up = f"目前还需要处理「{failures[0]}」；{follow_up}"
-        return f"{opening}{follow_up}"[:500]
-
-    if completed:
-        more = f" and {len(completed) - 1} other item" if len(completed) > 1 else ""
-        if len(completed) > 2:
-            more += "s"
-        opening = f"HER progress: completed “{completed[0]}”{more}."
-    elif failures:
-        opening = f"HER progress: “{failures[0]}” needs attention."
-    else:
-        opening = "HER progress: the task is still in progress."
-    if next_action:
-        follow_up = f" Next: “{next_action}”."
-    elif remaining:
-        follow_up = f" Next: continue with “{remaining[0]}”."
-    else:
-        follow_up = (
-            " Wrapping up; another update will follow when a result is confirmed."
-        )
-    return f"{opening}{follow_up}"[:500]
-
-
-def _build_claw_commentary_lease(prompt: str) -> str:
+def _build_claw_technical_lease(prompt: str) -> str:
     """Return a neutral runtime lease without inventing task progress or Persona."""
     if _claw_uses_chinese(prompt):
         return (
@@ -441,35 +384,34 @@ def _build_claw_commentary_lease(prompt: str) -> str:
     ).strip()[:500]
 
 
-class _HERCommentaryController:
-    """Prefer milestone commentary while enforcing a bounded visible lease."""
+class _HERStreamCadenceController:
+    """Apply effort-level generation cadence before the presentation router."""
 
     def __init__(
         self,
         callback,
         *,
+        request_id: str = "",
         prompt: str,
         progress_enabled: bool,
         first_update_s: float = HER_COMMENTARY_FIRST_UPDATE_S,
-        min_gap_s: float = HER_COMMENTARY_MIN_GAP_S,
         target_interval_s: float = HER_COMMENTARY_TARGET_INTERVAL_S,
         hard_interval_s: float = HER_COMMENTARY_HARD_INTERVAL_S,
         activity_grace_s: float = HER_COMMENTARY_ACTIVITY_GRACE_S,
     ) -> None:
         self._callback = callback
+        self._request_id = str(request_id or "her-request")
         self._prompt = prompt
         self.progress_enabled = bool(progress_enabled)
         self._first_update_s = max(0.01, float(first_update_s))
-        self._min_gap_s = max(0.0, float(min_gap_s))
         self._target_interval_s = max(0.01, float(target_interval_s))
         self._hard_interval_s = max(self._target_interval_s, float(hard_interval_s))
         self._activity_grace_s = max(0.0, float(activity_grace_s))
         now = time.monotonic()
         self._last_visible_at = now
         self._last_activity_at = now
-        self._last_summary = ""
         self._has_progress_update = False
-        self._pending_commentary: StreamEvent | None = None
+        self._lease_revision = 0
         self._closed = False
         self._changed = asyncio.Event()
         self._emit_lock = asyncio.Lock()
@@ -481,32 +423,35 @@ class _HERCommentaryController:
         if event.kind == KIND_ACKNOWLEDGEMENT:
             async with self._emit_lock:
                 self._last_visible_at = time.monotonic()
-                self._last_summary = (event.summary or "").strip()
                 await self._callback(event)
             return
         if event.kind != KIND_COMMENTARY:
             await self._callback(event)
             return
-        if not self.progress_enabled or not (event.summary or "").strip():
+        if not (event.summary or "").strip():
             return
-        if (event.summary or "").strip() == self._last_summary:
+        if not self.progress_enabled:
+            # Source-classified model commentary has already passed HER's
+            # generation policy.  Never repeat the effort decision here.
+            await self._callback(event)
             return
-        if now - self._last_visible_at < self._min_gap_s:
-            self._pending_commentary = event
-            return
-        await self._emit(event, allow_repeat=False)
+        # HER decides whether to generate this event; delivery identity, rather
+        # than matching prose, decides whether it is a replay.
+        async with self._emit_lock:
+            self._last_visible_at = time.monotonic()
+            self._has_progress_update = True
+            self._changed.set()
+            await self._callback(event)
 
-    async def _emit(self, event: StreamEvent, *, allow_repeat: bool) -> None:
+    async def _emit(self, event: StreamEvent) -> None:
         async with self._emit_lock:
             if self._closed:
                 return
             summary = (event.summary or "").strip()
-            if not summary or (not allow_repeat and summary == self._last_summary):
+            if not summary:
                 return
             self._last_visible_at = time.monotonic()
-            self._last_summary = summary
             self._has_progress_update = True
-            self._pending_commentary = None
             self._changed.set()
             await self._callback(event)
 
@@ -536,16 +481,20 @@ class _HERCommentaryController:
                 continue
             if self._closed:
                 break
-            if self._pending_commentary is not None:
-                await self._emit(self._pending_commentary, allow_repeat=False)
-                continue
+            self._lease_revision += 1
             await self._emit(
                 StreamEvent(
-                    kind=KIND_COMMENTARY,
-                    summary=_build_claw_commentary_lease(self._prompt),
-                    detail="HER neutral runtime commentary lease",
-                ),
-                allow_repeat=True,
+                    kind=KIND_PROGRESS,
+                    summary=_build_claw_technical_lease(self._prompt),
+                    detail="HER neutral runtime technical lease",
+                    event_id=(
+                        f"{self._request_id}:technical:lease:{self._lease_revision}"
+                    ),
+                    delivery_class=DELIVERY_TECHNICAL,
+                    origin="her_runtime",
+                    phase="execution",
+                    revision=self._lease_revision,
+                )
             )
 
     def close(self) -> None:
@@ -1375,6 +1324,155 @@ def _stream_json_usage(text: str) -> dict[str, Any]:
     return usage.to_dict()
 
 
+def _her_stream_revision(event: Mapping[str, Any]) -> int | None:
+    frame = event.get("frame") if isinstance(event.get("frame"), Mapping) else {}
+    for value in (
+        event.get("revision"),
+        event.get("revision_round"),
+        frame.get("revision"),
+    ):
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _her_task_frame_is_direct_response(event: Mapping[str, Any]) -> bool:
+    frame = event.get("frame") if isinstance(event.get("frame"), Mapping) else {}
+    value = frame.get("direct_response", event.get("direct_response"))
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _her_stream_phase(event: Mapping[str, Any]) -> str:
+    explicit = str(event.get("phase") or "").strip().lower()
+    if explicit:
+        return explicit
+    kind = str(event.get("kind") or "")
+    if kind == "run_started":
+        return "initial"
+    if kind in {"independent_review", "control_invocation"}:
+        return "verification"
+    if kind in {"run_finished", "provider_stop_reason", "terminal_diagnostic"}:
+        return "finalization"
+    return "execution"
+
+
+def _her_stream_origin(event: Mapping[str, Any]) -> str:
+    kind = str(event.get("kind") or "")
+    if kind in {"task_acknowledgement", "task_plan", "user_commentary", "task_commentary"}:
+        return "her_planner"
+    if kind in {"thinking_delta", "thinking_redacted", "thinking_summary"}:
+        return "provider"
+    if kind == "assistant_delta":
+        return "primary_model"
+    if kind in {"tool_call", "tool_start", "tool_end"}:
+        return "tool_gateway"
+    if kind in {"independent_review", "control_invocation"}:
+        return "her_reviewer"
+    return "her_runtime"
+
+
+def _her_stream_delivery(
+    event: Mapping[str, Any],
+    mapped: StreamEvent,
+) -> tuple[str, bool, str]:
+    kind = str(event.get("kind") or "")
+    if mapped.kind == KIND_THINKING:
+        provenance = str(event.get("visibility") or "").strip()
+        if not provenance:
+            provenance = {
+                "thinking_delta": "provider_returned",
+                "thinking_redacted": "provider_redacted",
+                "thinking_summary": "provider_summary",
+            }.get(kind, "provider_returned")
+        return DELIVERY_REASONING, False, provenance
+    if mapped.kind in {KIND_ACKNOWLEDGEMENT, KIND_COMMENTARY}:
+        return DELIVERY_USER_COMMENTARY, False, "model_authored"
+    if mapped.kind == KIND_TEXT_DELTA:
+        return DELIVERY_INTERNAL, False, "provider_returned"
+    if kind == "permission_required":
+        return DELIVERY_CONTROL, True, "runtime_control"
+    if kind == "error" or event.get("type") == "error" or event.get("error"):
+        return DELIVERY_CONTROL, True, "runtime_error"
+    return DELIVERY_TECHNICAL, False, "runtime_observed"
+
+
+def _her_stream_event_id(
+    event: Mapping[str, Any],
+    mapped: StreamEvent,
+    *,
+    request_id: str,
+    source_index: int | None,
+    mapped_index: int,
+) -> str:
+    explicit = str(event.get("event_id") or "").strip()
+    if explicit:
+        return explicit if mapped_index == 0 else f"{explicit}:{mapped_index}"
+    request = str(request_id or "her-request")
+    kind = str(event.get("kind") or "unknown")
+    phase = _her_stream_phase(event)
+    revision = _her_stream_revision(event)
+    if kind == "task_acknowledgement":
+        return f"{request}:ack:initial"
+    if kind == "task_plan":
+        if phase == "initial":
+            suffix = "initial"
+        elif revision is not None:
+            suffix = f"{phase}:{revision}"
+        else:
+            frame = event.get("frame") if isinstance(event.get("frame"), Mapping) else {}
+            digest = hashlib.sha256(
+                json.dumps(frame, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:16]
+            suffix = f"{phase}:{digest}"
+        if mapped.delivery_class == DELIVERY_USER_COMMENTARY:
+            return f"{request}:commentary:{suffix}"
+        if mapped_index == 0:
+            return f"{request}:plan:{suffix}"
+        return f"{request}:technical:task_plan:{suffix}:{mapped_index}"
+    if kind in {"user_commentary", "task_commentary"}:
+        identity = revision if revision is not None else source_index
+        return f"{request}:commentary:{phase}:{identity or 0}:{mapped_index}"
+    ordinal = source_index if source_index is not None else 0
+    owner = mapped.delivery_class or DELIVERY_INTERNAL
+    return f"{request}:{owner}:{kind}:{ordinal}:{mapped_index}"
+
+
+def _with_her_stream_metadata(
+    mapped: StreamEvent,
+    event: Mapping[str, Any],
+    *,
+    request_id: str,
+    source_index: int | None,
+    mapped_index: int,
+) -> StreamEvent:
+    delivery_class, required, provenance = _her_stream_delivery(event, mapped)
+    enriched = replace(
+        mapped,
+        delivery_class=delivery_class,
+        origin=_her_stream_origin(event),
+        phase=_her_stream_phase(event),
+        revision=_her_stream_revision(event),
+        required=required,
+        provenance=provenance,
+    )
+    return replace(
+        enriched,
+        event_id=_her_stream_event_id(
+            event,
+            enriched,
+            request_id=request_id,
+            source_index=source_index,
+            mapped_index=mapped_index,
+        ),
+    )
+
+
 def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
     kind = str(event.get("kind") or "")
     if kind == "run_started":
@@ -1424,9 +1522,10 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
         return StreamEvent(kind=KIND_TEXT_DELTA, summary=text[:200]) if text else None
     if kind == "task_acknowledgement":
         text = str(event.get("text") or event.get("summary") or "").strip()
-        return (
-            StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary=text[:500]) if text else None
-        )
+        return StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary=text) if text else None
+    if kind in {"user_commentary", "task_commentary"}:
+        text = str(event.get("text") or event.get("summary") or "").strip()
+        return StreamEvent(kind=KIND_COMMENTARY, summary=text) if text else None
     if kind == "permission_required":
         tool_name = str(event.get("tool_name") or "tool")
         current_mode = str(event.get("current_mode") or "unknown")
@@ -1627,8 +1726,11 @@ def _claw_jsonl_to_stream_events(
     event: Mapping[str, Any],
     *,
     commentary_prompt: str = "",
+    request_id: str = "",
+    source_index: int | None = None,
 ) -> list[StreamEvent]:
-    """Expand one HER JSONL record into user-visible verbose activities."""
+    """Expand one HER JSONL record into explicitly owned stream activities."""
+    _ = commentary_prompt  # retained for call compatibility; never used as Persona authority
     events: list[StreamEvent] = []
     primary = _claw_jsonl_to_stream_event(event)
     if primary is not None:
@@ -1683,7 +1785,16 @@ def _claw_jsonl_to_stream_events(
         )
 
     if event_kind != "task_plan":
-        return events
+        return [
+            _with_her_stream_metadata(
+                mapped,
+                event,
+                request_id=request_id,
+                source_index=source_index,
+                mapped_index=index,
+            )
+            for index, mapped in enumerate(events)
+        ]
     frame = event.get("frame") if isinstance(event.get("frame"), Mapping) else {}
     assurance = (
         frame.get("assurance") if isinstance(frame.get("assurance"), Mapping) else {}
@@ -1691,13 +1802,21 @@ def _claw_jsonl_to_stream_events(
     phase = str(event.get("phase") or "update")
 
     if phase != "initial":
-        commentary = _build_claw_task_commentary(frame, prompt=commentary_prompt)
+        # Replan commentary is accepted only when the planning model authored it.
+        # A deterministic TaskFrame summary remains technical and must never
+        # impersonate the configured Agent Persona.
+        commentary = str(
+            event.get("commentary")
+            or frame.get("commentary")
+            or frame.get("acknowledgement")
+            or ""
+        ).strip()
         if commentary:
             events.append(
                 StreamEvent(
                     kind=KIND_COMMENTARY,
                     summary=commentary,
-                    detail=f"HER task plan phase={phase}"[:1000],
+                    detail=f"HER model-authored task plan phase={phase}"[:1000],
                 )
             )
 
@@ -1776,7 +1895,16 @@ def _claw_jsonl_to_stream_events(
                 detail=json.dumps(unverified, ensure_ascii=False)[:4000],
             )
         )
-    return events
+    return [
+        _with_her_stream_metadata(
+            mapped,
+            event,
+            request_id=request_id,
+            source_index=source_index,
+            mapped_index=index,
+        )
+        for index, mapped in enumerate(events)
+    ]
 
 
 def claw_supports_stream_json(
@@ -3567,7 +3695,14 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
 
         if on_stream_event is not None:
             await on_stream_event(
-                StreamEvent(kind=KIND_PROGRESS, summary="HER task started")
+                StreamEvent(
+                    kind=KIND_PROGRESS,
+                    summary="HER task started",
+                    event_id=f"{request_id}:technical:task_started",
+                    delivery_class=DELIVERY_TECHNICAL,
+                    origin="her_runtime",
+                    phase="initial",
+                )
             )
 
         habit_config = self._habit_meditation_config()
@@ -3616,25 +3751,19 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
                 self.effort,
             )
 
-        commentary_controller: _HERCommentaryController | None = None
-        commentary_task: asyncio.Task | None = None
+        cadence_controller: _HERStreamCadenceController | None = None
+        cadence_task: asyncio.Task | None = None
         request_stream_callback = on_stream_event
         if on_stream_event is not None:
-            commentary_delivery_enabled = bool(
-                getattr(on_stream_event, "her_commentary_delivery_enabled", True)
-            )
-            commentary_controller = _HERCommentaryController(
+            cadence_controller = _HERStreamCadenceController(
                 on_stream_event,
+                request_id=request_id,
                 prompt=prompt,
-                progress_enabled=(
-                    not silent
-                    and commentary_delivery_enabled
-                    and self.effort in HER_COMMENTARY_EFFORTS
-                ),
+                progress_enabled=self.effort in HER_COMMENTARY_EFFORTS,
             )
-            request_stream_callback = commentary_controller.forward
-            if commentary_controller.progress_enabled:
-                commentary_task = asyncio.create_task(commentary_controller.run())
+            request_stream_callback = cadence_controller.forward
+            if cadence_controller.progress_enabled:
+                cadence_task = asyncio.create_task(cadence_controller.run())
 
         async def execute_request() -> ClawTaskResult:
             if not persistent_session:
@@ -3715,28 +3844,32 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
                 is_success=False,
             )
         finally:
-            if commentary_controller is not None:
-                commentary_controller.close()
-            if commentary_task is not None:
-                commentary_task.cancel()
+            if cadence_controller is not None:
+                cadence_controller.close()
+            if cadence_task is not None:
+                cadence_task.cancel()
                 try:
-                    await commentary_task
+                    await cadence_task
                 except asyncio.CancelledError:
                     pass
                 except Exception as exc:
                     self.logger.warning(
-                        "HER commentary lease stopped after callback failure: %s",
+                        "HER stream cadence stopped after callback failure: %s",
                         type(exc).__name__,
                     )
 
-        if on_stream_event is not None:
-            for tool in result.tool_uses:
+        if on_stream_event is not None and not self._supports_stream_json:
+            for index, tool in enumerate(result.tool_uses, start=1):
                 if isinstance(tool, dict):
                     await on_stream_event(
                         StreamEvent(
                             kind=KIND_TOOL_END,
                             summary=f"HER used {tool.get('name') or 'tool'}",
                             tool_name=str(tool.get("name") or ""),
+                            event_id=f"{request_id}:technical:tool_summary:{index}",
+                            delivery_class=DELIVERY_TECHNICAL,
+                            origin="tool_gateway",
+                            phase="execution",
                         )
                     )
         usage_data = result.json_data.get("usage") or {}
@@ -4203,8 +4336,33 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
     ) -> tuple[bytes, bytes]:
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
+        source_index = 0
+        pending_acknowledgement: StreamEvent | None = None
+        initial_direct_response: bool | None = None
+
+        async def emit_stream_event(stream_event: StreamEvent) -> None:
+            if on_stream_event is not None:
+                await on_stream_event(stream_event)
+
+        async def flush_pending_acknowledgement() -> None:
+            nonlocal pending_acknowledgement
+            if pending_acknowledgement is None:
+                return
+            stream_event = pending_acknowledgement
+            if initial_direct_response:
+                stream_event = replace(
+                    stream_event,
+                    event_id=f"{request_id}:final",
+                    delivery_class=DELIVERY_FINAL,
+                    phase="finalization",
+                    required=True,
+                    provenance="model_authored_direct_response",
+                )
+            pending_acknowledgement = None
+            await emit_stream_event(stream_event)
 
         async def read_stdout() -> None:
+            nonlocal initial_direct_response, pending_acknowledgement, source_index
             assert proc.stdout is not None
             async for line in iter_stream_lines(proc.stdout):
                 stdout_chunks.append(line)
@@ -4219,6 +4377,7 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
                         "Ignoring non-JSON HER stream line: %r", line[:200]
                     )
                     continue
+                source_index += 1
                 if event.get("kind") == "semantic_compaction":
                     event.setdefault("request_id", request_id)
                     event.setdefault("session_id", self._session_id or "")
@@ -4253,17 +4412,31 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
                     )
                 elif kind == "task_plan":
                     if str(event.get("phase") or "update") != "initial":
-                        persona_source = self._her_persona_source()
-                        self._persist_persona_audit(
-                            request_id,
-                            report_type="commentary",
-                            renderer_attempted=False,
-                            renderer_succeeded=False,
-                            model_authored=False,
-                            validation_outcome="neutral_taskframe_milestone",
-                            failure_reason=None,
-                            **persona_source.audit_fields(),
+                        frame = (
+                            event.get("frame")
+                            if isinstance(event.get("frame"), Mapping)
+                            else {}
                         )
+                        commentary = str(
+                            event.get("commentary")
+                            or frame.get("commentary")
+                            or frame.get("acknowledgement")
+                            or ""
+                        ).strip()
+                        if commentary:
+                            persona_source = self._her_persona_source()
+                            self._persist_persona_audit(
+                                request_id,
+                                report_type="commentary",
+                                renderer_attempted=False,
+                                renderer_succeeded=False,
+                                model_authored=True,
+                                validation_outcome=(
+                                    "model_authored_replan_event_received"
+                                ),
+                                failure_reason=None,
+                                **persona_source.audit_fields(),
+                            )
                     self.logger.info(
                         "HER task plan received: phase=%s frame=%s",
                         event.get("phase") or "unknown",
@@ -4372,11 +4545,44 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
                         ],
                     )
                 if on_stream_event is not None:
-                    for stream_event in _claw_jsonl_to_stream_events(
+                    stream_events = _claw_jsonl_to_stream_events(
                         event,
                         commentary_prompt=commentary_prompt,
-                    ):
-                        await on_stream_event(stream_event)
+                        request_id=request_id,
+                        source_index=source_index,
+                    )
+                    if kind == "task_acknowledgement":
+                        pending_acknowledgement = next(
+                            (
+                                stream_event
+                                for stream_event in stream_events
+                                if stream_event.kind == KIND_ACKNOWLEDGEMENT
+                            ),
+                            None,
+                        )
+                        stream_events = [
+                            stream_event
+                            for stream_event in stream_events
+                            if stream_event.kind != KIND_ACKNOWLEDGEMENT
+                        ]
+                        if initial_direct_response is not None:
+                            await flush_pending_acknowledgement()
+                    elif kind == "task_plan" and str(
+                        event.get("phase") or "update"
+                    ) == "initial":
+                        initial_direct_response = _her_task_frame_is_direct_response(
+                            event
+                        )
+                        await flush_pending_acknowledgement()
+                    elif kind == "run_finished":
+                        if initial_direct_response is None:
+                            initial_direct_response = False
+                        await flush_pending_acknowledgement()
+                    for stream_event in stream_events:
+                        await emit_stream_event(stream_event)
+            if initial_direct_response is None:
+                initial_direct_response = False
+            await flush_pending_acknowledgement()
 
         async def read_stderr() -> None:
             assert proc.stderr is not None

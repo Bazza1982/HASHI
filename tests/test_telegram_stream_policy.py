@@ -8,7 +8,14 @@ import pytest
 
 from orchestrator import telegram_stream_policy
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
-from adapters.stream_events import KIND_COMMENTARY, KIND_PROGRESS, KIND_TEXT_DELTA, KIND_THINKING, StreamEvent
+from adapters.stream_events import (
+    DELIVERY_USER_COMMENTARY,
+    KIND_COMMENTARY,
+    KIND_PROGRESS,
+    KIND_TEXT_DELTA,
+    KIND_THINKING,
+    StreamEvent,
+)
 
 
 def _runtime(tmp_path, *, extra=None):
@@ -540,7 +547,12 @@ async def test_her_commentary_never_enters_think_buffer():
     )
 
     await callback(
-        StreamEvent(kind=KIND_COMMENTARY, summary="Sunny has a persona progress update. ☀️")
+        StreamEvent(
+            kind=KIND_COMMENTARY,
+            summary="Sunny has a persona progress update. ☀️",
+            event_id="req-1:commentary:replan:1",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+        )
     )
 
     assert think_buffer == []

@@ -3730,21 +3730,11 @@ class FlexibleAgentRuntime:
         capabilities = getattr(backend, "capabilities", None)
         reasoning_available = bool(getattr(capabilities, "supports_thinking_stream", False))
         commentary_available = bool(getattr(capabilities, "supports_commentary_stream", False))
-        return setting_card(
-            "💭",
-            "Thinking output",
-            current=f"<b>{status_label(self._think)}</b>",
-            facts=[
-                f"<b>Provider reasoning</b> · <code>{'AVAILABLE' if reasoning_available else 'NOT EXPOSED'}</code>",
-                f"<b>Model commentary</b> · <code>{'AVAILABLE' if commentary_available else 'NOT EXPOSED'}</code>",
-                "<b>Saved</b> · workspace setting",
-            ],
-            consequence=(
-                "Shows model-authored interim commentary and genuine provider-returned reasoning when available."
-                if self._think
-                else "Model commentary and provider reasoning are hidden. Progress and typing are unaffected."
-            ),
-            action="Changes apply immediately and persist across reboot.",
+        return runtime_menu_views.thinking_output_text(
+            enabled=self._think,
+            her_backend=self._commentary_available(),
+            reasoning_available=reasoning_available,
+            commentary_available=commentary_available,
         )
 
     async def cmd_think(self, update: Update, context: Any):
@@ -3821,24 +3811,9 @@ class FlexibleAgentRuntime:
     def _commentary_menu_text(self) -> str:
         backend = getattr(getattr(self, "backend_manager", None), "current_backend", None)
         effort = str(getattr(backend, "effort", "unknown") or "unknown").upper()
-        return setting_card(
-            "🌿",
-            "HER commentary",
-            current=f"<b>{status_label(self._commentary)}</b>",
-            facts=[
-                f"<b>HER effort</b> · <code>{html.escape(effort)}</code>",
-                "<b>Medium</b> · persona acknowledgement only",
-                "<b>High+</b> · acknowledgement plus persona progress updates",
-                "<b>Long tasks</b> · first update around 90s; then 3m target / 5m maximum",
-                "<b>Independent</b> · does not change /think or /verbose",
-                "<b>Saved</b> · workspace setting",
-            ],
-            consequence=(
-                "HER sends concise, persona-consistent progress messages without exposing raw reasoning."
-                if self._commentary
-                else "HER acknowledgements and routine persona progress messages are hidden."
-            ),
-            action="Use /commentary on, /commentary off, or the buttons below.",
+        return runtime_menu_views.her_commentary_text(
+            enabled=self._commentary,
+            effort=effort,
         )
 
     async def cmd_commentary(self, update: Update, context: Any):
@@ -7404,8 +7379,10 @@ class FlexibleAgentRuntime:
     def _make_stream_callback(self, event_queue: asyncio.Queue | None = None,
                               think_buffer: list | None = None,
                               audit_collector: AuditTelemetryCollector | None = None):
-        """Route progress to verbose and reasoning/commentary to think."""
+        """Present explicit owners; retain legacy kind routing for old adapters."""
         from adapters.stream_events import (
+            DELIVERY_REASONING,
+            DELIVERY_TECHNICAL,
             KIND_COMMENTARY,
             KIND_ERROR,
             KIND_FILE_EDIT,
@@ -7415,6 +7392,7 @@ class FlexibleAgentRuntime:
             KIND_THINKING,
             KIND_TOOL_END,
             KIND_TOOL_START,
+            legacy_delivery_class,
         )
         verbose_kinds = {
             KIND_ERROR,
@@ -7434,14 +7412,24 @@ class FlexibleAgentRuntime:
                 # Best-effort hot path: audit telemetry must not disrupt stream delivery.
                 with suppress(Exception):
                     await audit_collector.record(event)
-            if event_queue is not None and event.kind in verbose_kinds:
+            explicit_owner = str(getattr(event, "delivery_class", "") or "")
+            owner = explicit_owner or legacy_delivery_class(event.kind)
+            if (
+                event_queue is not None
+                and owner == DELIVERY_TECHNICAL
+                and event.kind in verbose_kinds
+            ):
                 try:
                     event_queue.put_nowait(event)
                 except asyncio.QueueFull:
                     self.logger.debug(f"Stream event queue full, dropping: {event.summary[:40]!r}")
             # Always track thinking volume for token estimation (CLI backends only;
             # OpenRouter gets real counts from response.usage)
-            if event.kind == KIND_THINKING and _engine != "openrouter-api":
+            if (
+                owner == DELIVERY_REASONING
+                and event.kind == KIND_THINKING
+                and _engine != "openrouter-api"
+            ):
                 raw = event.summary or ""
                 if raw and raw not in ("Thinking...",):
                     self._thinking_chars_this_req += len(raw)
@@ -7451,9 +7439,7 @@ class FlexibleAgentRuntime:
                         value = detail.split("=", 1)[1].split(";", 1)[0]
                         self._thinking_chars_this_req += max(0, int(value))
             if think_buffer is not None:
-                if event.kind == KIND_COMMENTARY:
-                    if _engine in {"her", "claw-cli"}:
-                        return
+                if not explicit_owner and event.kind == KIND_COMMENTARY:
                     # Commentary is already a complete model-authored update.
                     # Preserve it verbatim instead of folding it into the short
                     # provider-reasoning chunk accumulator.
@@ -7464,7 +7450,7 @@ class FlexibleAgentRuntime:
                     if commentary:
                         think_buffer.append(commentary)
                     return
-                if event.kind != KIND_THINKING:
+                if owner != DELIVERY_REASONING or event.kind != KIND_THINKING:
                     return
                 # Provider deltas already encode their own word boundaries.
                 # Never trim, deduplicate, or invent separators between them.
@@ -7978,6 +7964,12 @@ class FlexibleAgentRuntime:
                     request_id=item.request_id,
                     purpose="bg-response",
                 )
+                her_message_router = getattr(item, "_her_message_router", None)
+                if her_message_router is not None:
+                    her_message_router.record_final_delivery(
+                        visible_text,
+                        delivered=True,
+                    )
                 await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
                 self._schedule_audit_followup(
                     item,

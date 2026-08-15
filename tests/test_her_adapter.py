@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -20,8 +21,8 @@ from adapters.her import (
     ClawProviderSecretMissing,
     ClawTaskResult,
     ClawTimeoutError,
-    _HERCommentaryController,
-    _build_claw_commentary_lease,
+    _HERStreamCadenceController,
+    _build_claw_technical_lease,
     _build_claw_incomplete_report,
     _claw_incomplete_persona_facts,
     _claw_jsonl_to_stream_events,
@@ -45,6 +46,9 @@ from adapters.her import (
 from adapters.claw_cli import ClawCLIAdapter
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
+    DELIVERY_FINAL,
+    DELIVERY_TECHNICAL,
+    DELIVERY_USER_COMMENTARY,
     KIND_ACKNOWLEDGEMENT,
     KIND_COMMENTARY,
     KIND_PROGRESS,
@@ -67,7 +71,7 @@ def _write_exe(path: Path, body: str) -> Path:
     return path
 
 
-def test_claw_replan_emits_neutral_commentary_without_guessing_persona():
+def test_claw_replan_without_model_commentary_remains_technical():
     prompt = """
     你的名字是 Sunny。
     称呼用户为「爸爸」。
@@ -88,13 +92,32 @@ def test_claw_replan_emits_neutral_commentary_without_guessing_persona():
         commentary_prompt=prompt,
     )
 
-    commentary = next(event for event in events if event.kind == KIND_COMMENTARY)
-    assert commentary.summary.startswith("HER 进度：")
-    assert "爸爸" not in commentary.summary
-    assert "Sunny" not in commentary.summary
-    assert "定位失败原因" in commentary.summary
-    assert "运行针对性回归测试" in commentary.summary
-    assert "☀️" not in commentary.summary
+    assert all(event.kind != KIND_COMMENTARY for event in events)
+    plan = events[0]
+    assert plan.kind == KIND_PROGRESS
+    assert plan.delivery_class == DELIVERY_TECHNICAL
+    assert plan.origin == "her_planner"
+
+
+def test_claw_replan_emits_only_model_authored_persona_commentary():
+    events = _claw_jsonl_to_stream_events(
+        {
+            "kind": "task_plan",
+            "phase": "replan",
+            "revision": 2,
+            "frame": {
+                "active_goal": "修复任务",
+                "acknowledgement": "Sunny 已确认第一阶段结果，接下来会核验修复。☀️",
+            },
+        },
+        request_id="req-persona",
+    )
+
+    [commentary] = [event for event in events if event.kind == KIND_COMMENTARY]
+    assert commentary.summary.startswith("Sunny 已确认")
+    assert commentary.delivery_class == DELIVERY_USER_COMMENTARY
+    assert commentary.event_id == "req-persona:commentary:replan:2"
+    assert commentary.provenance == "model_authored"
 
 
 def test_claw_initial_task_plan_does_not_duplicate_acknowledgement_as_commentary():
@@ -160,19 +183,18 @@ def test_semantic_compaction_lifecycle_maps_to_bounded_verbose_progress(
 
 
 @pytest.mark.asyncio
-async def test_claw_commentary_lease_emits_neutral_update_and_stops_cleanly():
+async def test_claw_technical_lease_emits_neutral_update_and_stops_cleanly():
     received = []
 
     async def callback(event):
         received.append(event)
 
     prompt = "你的名字是 Sunny。称呼用户为「爸爸」。\n- **Emoji:** ☀️"
-    controller = _HERCommentaryController(
+    controller = _HERStreamCadenceController(
         callback,
         prompt=prompt,
         progress_enabled=True,
         first_update_s=0.01,
-        min_gap_s=0.01,
         target_interval_s=0.02,
         hard_interval_s=0.03,
         activity_grace_s=0.001,
@@ -186,8 +208,10 @@ async def test_claw_commentary_lease_emits_neutral_update_and_stops_cleanly():
     await lease_task
 
     assert len(received) == 1
-    assert received[0].kind == KIND_COMMENTARY
-    assert received[0].summary == _build_claw_commentary_lease(prompt)
+    assert received[0].kind == KIND_PROGRESS
+    assert received[0].delivery_class == DELIVERY_TECHNICAL
+    assert received[0].origin == "her_runtime"
+    assert received[0].summary == _build_claw_technical_lease(prompt)
     assert received[0].summary.startswith("HER 仍在处理")
     assert "爸爸" not in received[0].summary
     assert "Sunny" not in received[0].summary
@@ -195,51 +219,39 @@ async def test_claw_commentary_lease_emits_neutral_update_and_stops_cleanly():
 
 
 @pytest.mark.asyncio
-async def test_claw_commentary_lease_prefers_pending_persona_milestone():
+async def test_claw_cadence_does_not_dedupe_distinct_commentary_ids_by_text():
     received = []
 
     async def callback(event):
         received.append(event)
 
-    controller = _HERCommentaryController(
+    controller = _HERStreamCadenceController(
         callback,
         prompt="You are Sunny.",
         progress_enabled=True,
-        first_update_s=0.02,
-        min_gap_s=0.02,
-        target_interval_s=0.04,
-        hard_interval_s=0.06,
-        activity_grace_s=0.001,
     )
-    lease_task = asyncio.create_task(controller.run())
-    acknowledgement = StreamEvent(
-        kind=KIND_ACKNOWLEDGEMENT,
-        summary="Sunny will inspect the request.",
-    )
-    milestone = StreamEvent(
+    first = StreamEvent(
         kind=KIND_COMMENTARY,
         summary="Sunny has completed the inspection and will run the focused check next.",
+        event_id="req-commentary:replan:1",
     )
-    await controller.forward(acknowledgement)
-    await controller.forward(milestone)
-    for _ in range(30):
-        if len(received) >= 2:
-            break
-        await asyncio.sleep(0.005)
-    controller.close()
-    await lease_task
+    second = replace(first, event_id="req-commentary:replan:2")
 
-    assert received == [acknowledgement, milestone]
+    await controller.forward(first)
+    await controller.forward(second)
+    controller.close()
+
+    assert received == [first, second]
 
 
 @pytest.mark.asyncio
-async def test_medium_claw_controller_forwards_ack_but_suppresses_progress_commentary():
+async def test_medium_claw_controller_trusts_source_classified_commentary():
     received = []
 
     async def callback(event):
         received.append(event)
 
-    controller = _HERCommentaryController(
+    controller = _HERStreamCadenceController(
         callback,
         prompt="You are Sunny.",
         progress_enabled=False,
@@ -254,7 +266,10 @@ async def test_medium_claw_controller_forwards_ack_but_suppresses_progress_comme
     )
     controller.close()
 
-    assert [event.kind for event in received] == [KIND_ACKNOWLEDGEMENT]
+    assert [event.kind for event in received] == [
+        KIND_ACKNOWLEDGEMENT,
+        KIND_COMMENTARY,
+    ]
 
 
 def test_claw_max_iterations_builds_chinese_verified_fallback_report():
@@ -2064,11 +2079,21 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     assert adapter._session_id == "stream-session"
     assert adapter.capabilities.supports_thinking_stream is True
     assert adapter.capabilities.supports_answer_stream is True
+    assert events
+    assert all(event.event_id for event in events)
+    assert all(event.delivery_class for event in events)
     assert KIND_THINKING in [event.kind for event in events]
     assert KIND_ACKNOWLEDGEMENT in [event.kind for event in events]
+    acknowledgement = next(
+        event for event in events if event.kind == KIND_ACKNOWLEDGEMENT
+    )
+    assert acknowledgement.event_id == "req-stream:ack:initial"
+    assert acknowledgement.delivery_class == DELIVERY_USER_COMMENTARY
     assert any(
         event.kind == KIND_PROGRESS
         and event.summary == "HER permission required for bash"
+        and event.delivery_class == "control"
+        and event.required is True
         and "private command" not in event.detail
         for event in events
     )
@@ -2105,6 +2130,11 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
         for event in events
     )
     assert KIND_TEXT_DELTA in [event.kind for event in events]
+    assert all(
+        event.delivery_class == "internal"
+        for event in events
+        if event.kind == KIND_TEXT_DELTA
+    )
     assert KIND_TOOL_START in [event.kind for event in events]
     assert KIND_TOOL_END in [event.kind for event in events]
     assert (
@@ -2254,6 +2284,78 @@ async def test_claw_adapter_stream_json_emits_actual_thinking_delta(tmp_path):
         and event.detail
         == "thinking_chars=0;redacted=true;source=reasoning_details.encrypted"
         for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_claw_direct_response_acknowledgement_is_final_only(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys
+        if "--help" in sys.argv:
+            print("Usage: claw [--output-format text|json|stream-json] prompt [--stdin] [TEXT]")
+        elif sys.argv[1] == "version":
+            print(json.dumps({"kind": "version", "version": "0.1.0", "git_sha": "fake"}))
+        else:
+            answer = ("Hello from the configured Persona. " * 40).strip()
+            for event in [
+                {"kind": "run_started", "model": "deepseek/test"},
+                {"kind": "task_acknowledgement", "text": answer},
+                {"kind": "task_plan", "phase": "initial", "frame": {
+                    "active_goal": "answer directly",
+                    "direct_response": True,
+                    "remaining_work": [],
+                }},
+                {"kind": "run_finished", "message": answer,
+                 "model": "deepseek/test", "iterations": 0,
+                 "completion_status": "completed", "stop_reason": "end_turn",
+                 "provider_stop_reason": "end_turn", "tool_uses": [], "tool_results": [],
+                 "usage": {"input_tokens": 4, "output_tokens": 7}},
+            ]:
+                print(json.dumps(event), flush=True)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={
+            "claw_binary_path": str(fake),
+            "permission_mode": "read-only",
+            "effort": "medium",
+        },
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response(
+        "hello",
+        "req-direct",
+        on_stream_event=collect,
+    )
+
+    assert response.is_success is True
+    expected = ("Hello from the configured Persona. " * 40).strip()
+    assert len(expected) > 500
+    assert response.text == expected
+    acknowledgements = [
+        event for event in events if event.kind == KIND_ACKNOWLEDGEMENT
+    ]
+    assert len(acknowledgements) == 1
+    assert acknowledgements[0].event_id == "req-direct:final"
+    assert acknowledgements[0].delivery_class == DELIVERY_FINAL
+    assert acknowledgements[0].required is True
+    assert acknowledgements[0].summary == expected
+    assert all(
+        event.delivery_class != DELIVERY_USER_COMMENTARY
+        for event in acknowledgements
     )
 
 

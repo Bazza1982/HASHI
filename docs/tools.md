@@ -55,9 +55,9 @@ Five execution modes:
 - `/retry` — stop stale execution, reset context, restore recent handoff continuity, and rerun the last request; see [RETRY_RESEND_COMMANDS.md](RETRY_RESEND_COMMANDS.md)
 - `/model` — switch model (inline keyboard), then optionally choose or keep effort when the model supports it
 - `/mode [fixed|flex|wrapper|audit|dual-brain]` — switch execution mode; `/mode memory+` only enables Memory+ and keeps the current mode
-- `/think [on|off]` — show model-authored interim commentary plus genuine provider-returned reasoning chunks or explicit provider-redaction notices; independent of `/verbose` and `/typing`
-- `/commentary [on|off]` — HER only: control model-authored Persona acknowledgements plus High+ milestone and neutral lease updates; independent of `/think`, `/verbose`, and raw reasoning
-- `/verbose [on|off]` — show a temporary progress card with timing, progress, and available tool-result summaries; reasoning and answer drafts are excluded
+- `/think [on|off]` — show the current backend's reasoning presentation; for HER this is only genuine provider-returned reasoning chunks or explicit provider-redaction notices, independent of `/verbose` and `/typing`
+- `/commentary [on|off]` — HER only: show explicitly model-authored Persona acknowledgements and interim reports once each; independent of `/think`, `/verbose`, and raw reasoning
+- `/verbose [on|off]` — show a temporary technical activity card with planning, tools, tests, validation, retries, and runtime status; Persona speech, reasoning, and answer drafts are excluded
 - `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
 - `/stream` and `/preview` — retired compatibility commands that point to the display controls above; Telegram answers are delivered only when complete
 - `/skill` — browse, toggle, and run skills (inline keyboard)
@@ -479,7 +479,11 @@ Recommended protocol for Windows UI work:
 ## Important Behavior Notes
 - Bridge owns continuity; backends are treated as stateless.
 - Backend capabilities are not identical — session model, file handling, tool use, and streaming vary per backend.
-- `/think` accepts only backend-native interim commentary and genuine provider reasoning. It never treats generic start, busy, progress, tool, or answer-delta events as either. HER acknowledgements and bounded progress updates use `/commentary` instead and never enter `/think`. If the current backend exposes neither commentary nor reasoning, `/think on` remains quiet.
+- `/think` follows each non-HER backend's existing presentation rules. For HER,
+  it accepts only genuine provider reasoning or an explicit provider-redaction
+  notice. HER acknowledgement/commentary, generic progress, tools, final text,
+  and answer deltas never enter the HER think buffer. If HER exposes no
+  reasoning, `/think on` remains quiet.
 - `/handoff` restores continuity from bridge-owned transcript history, not CLI resume state.
 - Model and effort changes at runtime are not automatically persisted back to `agents.json`.
 - Backend-specific behaviors must be labeled as such, not described as universal.
@@ -500,4 +504,25 @@ Recommended protocol for Windows UI work:
 
 Assistant answer deltas remain available to local activity observers, but they are never displayed as Telegram previews. Codex commentary is kept distinct from both generic progress and private/provider reasoning, then routed to `/think` as Codex's user-visible substitute. Long commentary is split across Telegram messages rather than truncated. `/typing` is backend-independent.
 
-HER `/commentary` is enabled by default as a durable workspace preference. Medium effort sends only the model-authored Persona acknowledgement. High and above also send bounded TaskFrame milestone updates. When no new model-authored milestone exists, the first long wait receives a clearly neutral HER runtime lease around 90 seconds, followed by a three-minute target and five-minute hard maximum. Synthetic milestones and leases never infer identity from prompt text. The lease survives background detach and stops with task completion or cancellation. On non-HER backends, `/commentary` reports that the setting is unavailable and changes nothing.
+HER `/commentary` is enabled by default as a durable workspace preference.
+Effort controls which commentary events HER generates; the display router does
+not repeat that effort decision. Medium may generate the initial model-authored
+Persona acknowledgement. High and above may additionally generate a
+model-authored Replan or progress report when something material changes. Every
+such event carries one stable identity and is sent as its own durable message at
+most once. A deterministic TaskFrame summary or neutral long-wait lease is
+technical telemetry, not Persona speech, and therefore belongs only to
+`/verbose`. On non-HER backends, `/commentary` reports that the setting is
+unavailable and changes nothing.
+
+HER assigns every stream event exactly one presentation owner. `/verbose`
+accepts only `technical`, `/commentary` only `user_commentary`, and `/think`
+only `reasoning`. Final answers, direct responses, required permission/control
+messages, fatal errors, and feature-owned final results use mandatory lanes and
+remain visible when all three optional switches are off. Raw events are written
+to audit and bounded local activity before presentation filtering. HER
+`/commentary` changes apply to future commentary events in the active request.
+The `/verbose` and `/think` presenter resources are selected when a request
+starts, so changing either setting takes full effect on the next request.
+Suppressed or delivered events are never replayed merely because a switch later
+changes.
