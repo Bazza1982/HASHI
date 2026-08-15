@@ -234,6 +234,20 @@ replan、provider capacity、工具次数和无新增证据等安全断路器。
 
 ## 12. 实施切片
 
+### 2026-08-15 实施检查点
+
+- ✅ Slice 1 已实现：正式 effort 注册、严格 plan/result contract、最多 10 个
+  read-only isolated workers、DAG、有限 retry、durable Run Ledger、usage 聚合及
+  单一 `BackendResponse`。
+- ✅ Slice 2 已实现首个可运行版本：persistent Primary planning checkpoint、有限
+  plan correction、required-task 检查、Primary Assembly，以及内部 final/
+  acknowledgement 防泄漏。
+- 🟡 Slice 3 已实现 interaction receipt、稳定 `interaction_id`、Primary session
+  内问题渲染、isolated-resume 绑定和 late-result cancellation fence；进程崩溃后从
+  ledger 恢复同一个未完成 run 尚未实现。
+- ⏳ Slice 4 与 Slice 5 尚未开始；因此 write subtask 继续 fail closed，尚未完成
+  live canary，也不能把当前检查点称为完整 Ultra 发布。
+
 ### Slice 1 — Contract 与只读核心
 
 - 注册 `ultra` effort，但不向底层 Claw 传递该值；

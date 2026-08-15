@@ -20,6 +20,7 @@ from typing import Any, Mapping
 
 from adapters import her_habits as _her_habits
 from adapters import her_persona as _her_persona
+from adapters import her_ultra as _her_ultra
 from adapters import stream_events as _stream_events
 from adapters.base import BackendCapabilities, BackendResponse, BaseBackend, TokenUsage
 from adapters.stream_events import (
@@ -122,8 +123,11 @@ CLAW_EXECUTION_EFFORT_ITERATIONS = {
     "max": 384,
     "max+": 512,
 }
+HER_EXECUTION_EFFORTS = frozenset(
+    {*CLAW_EXECUTION_EFFORT_ITERATIONS, _her_ultra.HER_ULTRA_EFFORT}
+)
 
-HER_COMMENTARY_EFFORTS = frozenset({"high", "xhigh", "max", "max+"})
+HER_COMMENTARY_EFFORTS = frozenset({"high", "xhigh", "max", "max+", "ultra"})
 HER_COMMENTARY_FIRST_UPDATE_S = 90.0
 HER_COMMENTARY_TARGET_INTERVAL_S = 180.0
 HER_COMMENTARY_HARD_INTERVAL_S = 300.0
@@ -2193,9 +2197,7 @@ class HERAdapter(BaseBackend):
         self.logger = logging.getLogger(f"Backend.HER.{self.config.name}")
         requested_effort = str(self._extra.get("effort") or "high").strip().lower()
         self.effort = (
-            requested_effort
-            if requested_effort in CLAW_EXECUTION_EFFORT_ITERATIONS
-            else "high"
+            requested_effort if requested_effort in HER_EXECUTION_EFFORTS else "high"
         )
         # ``current_proc`` remains a compatibility view for status surfaces.
         # The registry is authoritative because foreground, Dream, Meditation,
@@ -2214,6 +2216,7 @@ class HERAdapter(BaseBackend):
             self.config.workspace_dir / "backend_state" / "claw_session.json"
         )
         self._persistent_session_lock = asyncio.Lock()
+        self._ultra_runs: dict[str, _her_ultra.HERUltraOrchestrator] = {}
         self._gateway_context_path: Path | None = None
         self._gateway_config_home: Path | None = None
         self._habit_store_instance: _her_habits.HERHabitStore | None = None
@@ -3324,10 +3327,27 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
             return self._env_from_provider(provider_name)
         return self._env_from_agent_extra()
 
+    def _single_agent_effort(self) -> str:
+        """Return the inner Claw effort; ``ultra`` never reaches the CLI."""
+
+        if self.effort != _her_ultra.HER_ULTRA_EFFORT:
+            return self.effort
+        raw = self._extra.get("ultra")
+        raw = raw if isinstance(raw, Mapping) else {}
+        requested = str(raw.get("primary_inner_effort") or "max+").strip().lower()
+        if requested not in CLAW_EXECUTION_EFFORT_ITERATIONS:
+            self.logger.warning(
+                "Ignoring invalid HER Ultra primary_inner_effort=%r; using max+.",
+                requested,
+            )
+            return "max+"
+        return requested
+
     def _max_tool_iterations(self) -> int:
+        inner_effort = self._single_agent_effort()
         raw_max_iterations = self._extra.get(
             "max_tool_iterations",
-            CLAW_EXECUTION_EFFORT_ITERATIONS.get(self.effort, 96),
+            CLAW_EXECUTION_EFFORT_ITERATIONS.get(inner_effort, 96),
         )
         try:
             max_iterations = int(raw_max_iterations)
@@ -3340,10 +3360,11 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
         return min(512, max(8, max_iterations))
 
     def _task_env(self) -> dict[str, str]:
+        inner_effort = self._single_agent_effort()
         env = self._resolve_task_env()
         env["CLAW_MAX_TOOL_ITERATIONS"] = str(self._max_tool_iterations())
-        env["CLAW_TASK_PLANNING"] = "0" if self.effort == "low" else "1"
-        env["CLAW_EXECUTION_EFFORT"] = self.effort
+        env["CLAW_TASK_PLANNING"] = "0" if inner_effort == "low" else "1"
+        env["CLAW_EXECUTION_EFFORT"] = inner_effort
         if self._gateway_config_home is not None:
             env["CLAW_CONFIG_HOME"] = str(self._gateway_config_home)
             project_root = Path(__file__).resolve().parents[1]
@@ -3522,6 +3543,7 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
             return False
 
     async def handle_new_session(self) -> bool:
+        self._cancel_ultra_runs("new_session")
         self._session_id = None
         self._persist_session_identity()
         self.logger.info(
@@ -3650,7 +3672,333 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
                 )
             return stopped
 
+    def _ultra_config(self) -> _her_ultra.HERUltraConfig:
+        raw = self._extra.get("ultra")
+        if raw is not None and not isinstance(raw, Mapping):
+            raise _her_ultra.HERUltraContractError(
+                "HER Ultra configuration must be an object"
+            )
+        config = _her_ultra.HERUltraConfig.from_mapping(
+            raw if isinstance(raw, Mapping) else {},
+            primary_model=self._claw_model(),
+            allowed_models=(self._claw_model(),),
+        )
+        if config.primary_model != self._claw_model():
+            raise _her_ultra.HERUltraContractError(
+                "HER Ultra primary_model must match the active HER model"
+            )
+        return config
+
+    def _ultra_authority(self) -> _her_ultra.HERUltraAuthorityEnvelope:
+        configured_tools = self._allowed_tools()
+        # ``*`` records inherited, unrestricted tool selection.  Filesystem
+        # and mutation authority are still reduced to read-only for Slice 1.
+        allowed_tools = tuple(configured_tools) if configured_tools else ("*",)
+        return _her_ultra.HERUltraAuthorityEnvelope.build(
+            permission_mode="read-only",
+            access_root=str(self.effective_workdir),
+            allowed_tools=allowed_tools,
+            write_enabled=False,
+        )
+
+    @staticmethod
+    def _ultra_task_env(effort: str) -> dict[str, str]:
+        normalized = str(effort or "high").strip().lower()
+        iterations = CLAW_EXECUTION_EFFORT_ITERATIONS.get(normalized, 96)
+        return {
+            "CLAW_EXECUTION_EFFORT": normalized,
+            "CLAW_MAX_TOOL_ITERATIONS": str(iterations),
+            "CLAW_TASK_PLANNING": "0" if normalized == "low" else "1",
+        }
+
+    @staticmethod
+    def _ultra_invocation_result(
+        result: ClawTaskResult,
+    ) -> _her_ultra.HERUltraInvocationResult:
+        usage_data = result.json_data.get("usage") or {}
+        usage_data = usage_data if isinstance(usage_data, Mapping) else {}
+        stream_usage = _stream_json_usage(result.stdout)
+        thinking_tokens = int(
+            usage_data.get("thinking_tokens")
+            or (usage_data.get("completion_tokens_details") or {}).get(
+                "reasoning_tokens"
+            )
+            or stream_usage.get("thinking_tokens")
+            or 0
+        )
+        incomplete = _claw_run_is_incomplete(result)
+        return _her_ultra.HERUltraInvocationResult(
+            text=result.text,
+            is_success=not incomplete,
+            error=(
+                "HER internal task stopped before completion: "
+                f"{result.stop_reason or result.completion_status or 'incomplete'}"
+                if incomplete
+                else ""
+            ),
+            error_type="incomplete" if incomplete else "",
+            retryable=False,
+            session_id=result.session_id or "",
+            model=result.model,
+            input_tokens=int(usage_data.get("input_tokens") or 0),
+            output_tokens=int(usage_data.get("output_tokens") or 0),
+            thinking_tokens=thinking_tokens,
+            tool_call_count=len(result.tool_uses),
+            tool_loop_count=result.iterations or 0,
+            duration_ms=result.duration_ms,
+            cost_usd=None,
+        )
+
+    @staticmethod
+    def _ultra_error_invocation(
+        exc: BaseException,
+    ) -> _her_ultra.HERUltraInvocationResult:
+        parsed = getattr(exc, "parsed_error", None)
+        parsed = parsed if isinstance(parsed, Mapping) else {}
+        retryable = isinstance(exc, ClawTimeoutError) or bool(parsed.get("retryable"))
+        error_type = str(
+            parsed.get("error_kind")
+            or parsed.get("error_type")
+            or ("timeout" if isinstance(exc, ClawTimeoutError) else type(exc).__name__)
+        )
+        return _her_ultra.HERUltraInvocationResult(
+            text="",
+            is_success=False,
+            error=str(exc),
+            error_type=error_type,
+            retryable=retryable,
+        )
+
+    def _cancel_ultra_runs(self, reason: str) -> None:
+        for orchestrator in tuple(self._ultra_runs.values()):
+            orchestrator.cancel(reason)
+
+    async def _generate_ultra_response(
+        self,
+        prompt: str,
+        request_id: str,
+        *,
+        is_retry: bool,
+        on_stream_event: StreamCallback,
+    ) -> BackendResponse:
+        try:
+            config = self._ultra_config()
+            authority = self._ultra_authority()
+        except _her_ultra.HERUltraContractError as exc:
+            return BackendResponse(
+                text="",
+                duration_ms=0,
+                error=str(exc),
+                is_success=False,
+                stream_metadata={
+                    "claw_completion_status": "failed",
+                    "claw_stop_reason": "invalid_ultra_config",
+                    "claw_execution_effort": _her_ultra.HER_ULTRA_EFFORT,
+                },
+            )
+        if not config.enabled:
+            return BackendResponse(
+                text="",
+                duration_ms=0,
+                error="HER Ultra effort is disabled by Agent configuration.",
+                is_success=False,
+                stream_metadata={
+                    "claw_completion_status": "failed",
+                    "claw_stop_reason": "ultra_disabled",
+                    "claw_execution_effort": _her_ultra.HER_ULTRA_EFFORT,
+                },
+            )
+        if request_id in self._ultra_runs:
+            return BackendResponse(
+                text="",
+                duration_ms=0,
+                error=f"HER Ultra request is already running: {request_id}",
+                is_success=False,
+                stream_metadata={
+                    "claw_completion_status": "failed",
+                    "claw_stop_reason": "duplicate_request_id",
+                    "claw_execution_effort": _her_ultra.HER_ULTRA_EFFORT,
+                },
+            )
+
+        inherited_tools = (
+            None if authority.allowed_tools == ("*",) else list(authority.allowed_tools)
+        )
+
+        async def forward_primary_event(event: StreamEvent) -> None:
+            if on_stream_event is None:
+                return
+            if event.kind == KIND_ACKNOWLEDGEMENT or event.delivery_class in {
+                DELIVERY_FINAL,
+                DELIVERY_CONTROL,
+            }:
+                return
+            await on_stream_event(event)
+
+        async def invoke_primary(
+            spec: _her_ultra.HERUltraPrimaryExecutionSpec,
+        ) -> _her_ultra.HERUltraInvocationResult:
+            try:
+                result = await self._run_task_async(
+                    spec.prompt,
+                    resume=spec.resume_session_id or None,
+                    request_id=spec.request_id,
+                    on_stream_event=(
+                        forward_primary_event
+                        if spec.phase in {"assembly", "direct_response", "interaction"}
+                        else None
+                    ),
+                    track_session_identity=False,
+                    permission_mode_override="read-only",
+                    allowed_tools_override=inherited_tools,
+                    task_env_overrides=self._ultra_task_env(spec.effort),
+                    model_override=spec.model,
+                    cwd_override=self.effective_workdir,
+                )
+            except asyncio.CancelledError:
+                raise
+            except (ClawError, ValueError) as exc:
+                return self._ultra_error_invocation(exc)
+            return self._ultra_invocation_result(result)
+
+        async def invoke_worker(
+            spec: _her_ultra.HERUltraWorkerExecutionSpec,
+        ) -> _her_ultra.HERUltraInvocationResult:
+            worker_tools = (
+                None if spec.allowed_tools == ("*",) else list(spec.allowed_tools)
+            )
+            try:
+                result = await self._run_task_async(
+                    spec.prompt,
+                    resume=None,
+                    request_id=spec.request_id,
+                    on_stream_event=None,
+                    track_session_identity=False,
+                    permission_mode_override=spec.permission_mode,
+                    allowed_tools_override=worker_tools,
+                    task_env_overrides=self._ultra_task_env(spec.effort),
+                    model_override=spec.model,
+                    cwd_override=Path(spec.workspace),
+                )
+            except asyncio.CancelledError:
+                raise
+            except (ClawError, ValueError) as exc:
+                return self._ultra_error_invocation(exc)
+            return self._ultra_invocation_result(result)
+
+        orchestrator = _her_ultra.HERUltraOrchestrator(
+            config=config,
+            ledger_root=self.config.workspace_dir / "backend_state" / "her_ultra_runs",
+            primary_executor=invoke_primary,
+            worker_executor=invoke_worker,
+            on_stream_event=on_stream_event,
+        )
+        self._ultra_runs[request_id] = orchestrator
+        session_mode_enabled = self._session_mode and not self._ephemeral_session()
+        session_scope = self._request_session_scope(request_id)
+        resume_session_id = self._request_resume_session(request_id)
+        isolated_resume = (
+            session_scope == HER_SESSION_SCOPE_ISOLATED_RESUME
+            and bool(resume_session_id)
+        )
+        persistent_session = (
+            session_mode_enabled and session_scope == HER_SESSION_SCOPE_PERSISTENT
+        )
+
+        async def execute(initial_session_id: str) -> _her_ultra.HERUltraOutcome:
+            return await orchestrator.run(
+                authoritative_goal=prompt,
+                parent_request_id=request_id,
+                authority=authority,
+                initial_primary_session_id=initial_session_id,
+            )
+
+        try:
+            if persistent_session:
+                async with self._persistent_session_lock:
+                    previous_session = self._session_id or ""
+                    outcome = await execute(previous_session)
+                    if outcome.status in {"completed", "incomplete"}:
+                        self._session_id = outcome.primary_session_id or None
+                        self._persist_session_identity()
+                    else:
+                        self._quarantine_persistent_session(
+                            request_id,
+                            _her_ultra.HERUltraError(
+                                outcome.error or f"Ultra run {outcome.status}"
+                            ),
+                        )
+            else:
+                initial_session = resume_session_id if isolated_resume else ""
+                outcome = await execute(initial_session or "")
+        except asyncio.CancelledError:
+            orchestrator.cancel("caller_cancelled")
+            raise
+        finally:
+            if self._ultra_runs.get(request_id) is orchestrator:
+                self._ultra_runs.pop(request_id, None)
+
+        completion_status = (
+            "incomplete" if outcome.status == "incomplete" else outcome.status
+        )
+        stop_reason = {
+            "completed": "end_turn",
+            "incomplete": "requires_user_input",
+            "cancelled": "cancelled",
+            "failed": "backend_error",
+        }.get(outcome.status, outcome.status)
+        ultra_metadata = {
+            "run_id": outcome.run_id,
+            "status": outcome.status,
+            "plan_revision": outcome.plan_revision,
+            "subtask_count": outcome.subtask_count,
+            "completed_subtasks": outcome.completed_subtasks,
+            "max_concurrent_subagents": config.max_concurrent_subagents,
+            "pending_interaction": dict(outcome.pending_interaction)
+            if outcome.pending_interaction is not None
+            else None,
+        }
+        stream_metadata = {
+            "claw_completion_status": completion_status,
+            "claw_stop_reason": stop_reason,
+            "claw_execution_effort": _her_ultra.HER_ULTRA_EFFORT,
+            "claw_inner_execution_effort": config.primary_inner_effort,
+            "claw_max_iterations": CLAW_EXECUTION_EFFORT_ITERATIONS[
+                config.primary_inner_effort
+            ],
+            "her_session_scope": session_scope,
+            "her_session_id": outcome.primary_session_id,
+            "her_model": config.primary_model,
+            "her_resumed_session": bool(
+                (persistent_session and previous_session) or isolated_resume
+            ),
+            "her_ultra": ultra_metadata,
+            "her_retry": bool(is_retry),
+        }
+        pending_kind = str(
+            (outcome.pending_interaction or {}).get("kind") or ""
+        ).lower()
+        if pending_kind == "continuation":
+            stream_metadata["recommended_action"] = "continue"
+        return BackendResponse(
+            text=outcome.text,
+            duration_ms=outcome.duration_ms,
+            error=outcome.error or None,
+            is_success=outcome.is_success,
+            stop_reason=stop_reason,
+            usage=TokenUsage(
+                input_tokens=outcome.input_tokens,
+                output_tokens=outcome.output_tokens,
+                thinking_tokens=outcome.thinking_tokens,
+            ),
+            cost_usd=outcome.cost_usd,
+            tool_call_count=outcome.tool_call_count,
+            tool_loop_count=outcome.tool_loop_count,
+            stream_metadata=stream_metadata,
+        )
+
     async def shutdown(self):
+        self._cancel_ultra_runs("shutdown")
         current_task = asyncio.current_task()
         pending_dreams = [
             task
@@ -3709,6 +4057,14 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
                     origin="her_runtime",
                     phase="initial",
                 )
+            )
+
+        if self.effort == _her_ultra.HER_ULTRA_EFFORT:
+            return await self._generate_ultra_response(
+                prompt,
+                request_id,
+                is_retry=is_retry,
+                on_stream_event=on_stream_event,
             )
 
         habit_config = self._habit_meditation_config()
@@ -4089,9 +4445,13 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
         permission_mode_override: str | None = None,
         allowed_tools_override: list[str] | None = None,
         task_env_overrides: Mapping[str, str] | None = None,
+        model_override: str | None = None,
+        cwd_override: Path | None = None,
     ) -> ClawTaskResult:
         if self._binary is None:
             raise ClawBinaryNotFound("HER binary not initialized")
+        task_model = str(model_override or self._claw_model()).strip()
+        task_cwd = Path(cwd_override or self.effective_workdir)
         permission_mode = permission_mode_override or self._permission_mode()
         allowed_tools = (
             self._allowed_tools()
@@ -4100,7 +4460,7 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
         )
         args = build_claw_task_args(
             prompt,
-            self._claw_model(),
+            task_model,
             permission_mode=permission_mode,
             resume=resume,
             allowed_tools=allowed_tools,
@@ -4138,17 +4498,21 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
         async with self._active_process_lock:
             if self._stopping_active_processes:
                 raise ClawCommandError(
-                    "HER execution rejected while Agent stop is in progress"
+                    "HER execution rejected while Agent stop is in progress",
+                    returncode=1,
                 )
             existing = self._active_processes.get(request_id)
             if existing is not None and existing.returncode is None:
-                raise ClawCommandError(f"HER request is already running: {request_id}")
+                raise ClawCommandError(
+                    f"HER request is already running: {request_id}",
+                    returncode=1,
+                )
             proc = await asyncio.create_subprocess_exec(
                 *command,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.effective_workdir),
+                cwd=str(task_cwd),
                 env=task_env,
                 **extra_kwargs,
             )
@@ -4283,9 +4647,9 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
             )
         return ClawTaskResult(
             text=str(parsed.get("message") or ""),
-            model=str(parsed.get("model") or self._claw_model()),
+            model=str(parsed.get("model") or task_model),
             permission_mode=permission_mode,
-            cwd=str(self.effective_workdir),
+            cwd=str(task_cwd),
             returncode=proc.returncode or 0,
             duration_ms=duration_ms,
             stdout=stdout,

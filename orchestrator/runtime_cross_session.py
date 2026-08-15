@@ -215,6 +215,41 @@ def _pending_interaction(
     status: str,
     metadata: Mapping[str, Any],
 ) -> dict[str, Any] | None:
+    ultra = metadata.get("her_ultra")
+    structured = (
+        ultra.get("pending_interaction") if isinstance(ultra, Mapping) else None
+    )
+    if isinstance(structured, Mapping):
+        kind = str(structured.get("kind") or "").strip().lower()
+        interaction_id = str(structured.get("interaction_id") or "").strip()
+        if kind == "choice":
+            raw_labels = structured.get("labels")
+            raw_labels = raw_labels if isinstance(raw_labels, (list, tuple)) else []
+            labels = sorted(
+                {
+                    str(label).strip().upper()
+                    for label in raw_labels
+                    if str(label).strip()
+                }
+            )
+            if labels:
+                pending = {"kind": "choice", "labels": labels}
+                if interaction_id:
+                    pending["interaction_id"] = interaction_id
+                return pending
+        if kind == "continuation":
+            pending = {
+                "kind": "continuation",
+                "token": str(structured.get("token") or "CONTINUE").upper(),
+            }
+            if interaction_id:
+                pending["interaction_id"] = interaction_id
+            return pending
+        if kind in {"confirmation", "question"}:
+            pending = {"kind": "question"}
+            if interaction_id:
+                pending["interaction_id"] = interaction_id
+            return pending
     labels = _choice_labels(assistant_text)
     if labels:
         return {"kind": "choice", "labels": labels}

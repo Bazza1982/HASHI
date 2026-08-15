@@ -61,11 +61,12 @@ def test_grok_cli_exposes_reasoning_effort_with_medium_default():
 
 
 def test_her_exposes_agentic_execution_effort_with_high_default():
-    expected = ["low", "medium", "high", "xhigh", "max", "max+"]
+    expected = ["low", "medium", "high", "xhigh", "max", "max+", "ultra"]
     assert get_available_efforts("her", "deepseek/deepseek-v4-pro") == expected
     assert normalize_effort("her", None, "deepseek/deepseek-v4-pro") == "high"
     assert normalize_effort("her", "max", "deepseek/deepseek-v4-pro") == "max"
     assert normalize_effort("her", "max+", "deepseek/deepseek-v4-pro") == "max+"
+    assert normalize_effort("her", "ultra", "deepseek/deepseek-v4-pro") == "ultra"
 
 
 def test_xai_api_models_are_available_to_gateway_catalog():
