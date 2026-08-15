@@ -27,6 +27,13 @@ HABIT_AUDIT_FORMAT = "her-habit-audit-v1"
 HABIT_MEDITATION_ENV = "HASHI_HER_HABIT_MEDITATION"
 MAX_MEDITATION_ATTEMPTS = 3
 MAX_HABIT_NOTIFICATION_ATTEMPTS = 3
+HABIT_TITLE_MAX_CHARS = 48
+HABIT_TITLE_MAX_WORDS = 10
+HABIT_METADATA_MAX_CHARS = 400
+HABIT_METADATA_MAX_WORDS = 60
+HABIT_BODY_MAX_CHARS = 2_000
+HABIT_BODY_MAX_WORDS = 250
+HABIT_SHORT_REFERENCE_MIN_CHARS = 8
 # HER requires at least one valid name when --allowedTools is present. Keep the
 # Meditation subprocess read-only and expose only the least-capable standard
 # filesystem tool; the prompt still instructs the model not to call it.
@@ -217,6 +224,7 @@ class HERHabit:
     title: str
     metadata: str
     body: str
+    protected: bool
     created_at: str
     updated_at: str
 
@@ -227,11 +235,17 @@ class HERHabit:
         habit_id = str(payload.get("id") or "").strip().casefold()
         if not _HABIT_ID_RE.fullmatch(habit_id):
             raise ValueError("invalid HER habit id")
-        title = _clean_text(payload.get("title"), limit=160)
-        metadata = _clean_text(payload.get("metadata"), limit=2_000)
-        body = _clean_text(payload.get("body"), limit=8_000)
+        # Legacy records can exceed the compact write contract.  Keep them
+        # fully readable; every later content mutation must canonicalise all
+        # fields through the strict validator below.
+        title = _clean_unbounded_text(payload.get("title"))
+        metadata = _clean_unbounded_text(payload.get("metadata"))
+        body = _clean_unbounded_text(payload.get("body"))
         if not title or not metadata or not body:
             raise ValueError("HER habit requires title, metadata, and body")
+        protected = payload.get("protected", False)
+        if not isinstance(protected, bool):
+            raise ValueError("HER habit protected flag must be a boolean")
         created_at = _clean_text(payload.get("created_at"), limit=80) or _utc_now()
         updated_at = _clean_text(payload.get("updated_at"), limit=80) or created_at
         return cls(
@@ -239,17 +253,19 @@ class HERHabit:
             title=title,
             metadata=metadata,
             body=body,
+            protected=protected,
             created_at=created_at,
             updated_at=updated_at,
         )
 
-    def to_payload(self) -> dict[str, str]:
+    def to_payload(self) -> dict[str, Any]:
         return {
             "format": HABIT_FORMAT,
             "id": self.habit_id,
             "title": self.title,
             "metadata": self.metadata,
             "body": self.body,
+            "protected": self.protected,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -261,8 +277,8 @@ class HERHabitChange:
 
     operation: str
     habit_id: str
-    before: dict[str, str] | None
-    after: dict[str, str] | None
+    before: dict[str, Any] | None
+    after: dict[str, Any] | None
 
     @property
     def title(self) -> str:
@@ -289,6 +305,10 @@ class HERHabitResetResult:
 def _clean_text(value: Any, *, limit: int) -> str:
     text = str(value or "").replace("\x00", "").strip()
     return text[:limit].rstrip()
+
+
+def _clean_unbounded_text(value: Any) -> str:
+    return str(value or "").replace("\x00", "").strip()
 
 
 def contains_secret_like_text(value: Any) -> bool:
@@ -356,15 +376,18 @@ def _validated_action_text(
     *,
     field: str,
     limit: int,
+    word_limit: int | None = None,
     required: bool = True,
 ) -> str:
     if not isinstance(value, str):
         raise MeditationValidationError(f"{field} must be a string")
-    text = _clean_text(value, limit=limit + 1)
+    text = _clean_unbounded_text(value)
     if required and not text:
         raise MeditationValidationError(f"{field} must not be empty")
     if len(text) > limit:
         raise MeditationValidationError(f"{field} exceeds {limit} characters")
+    if word_limit is not None and len(text.split()) > word_limit:
+        raise MeditationValidationError(f"{field} exceeds {word_limit} words")
     if contains_secret_like_text(text):
         raise MeditationValidationError(f"{field} contains secret-like content")
     return text
@@ -413,6 +436,63 @@ def _tokenize(text: str) -> Counter[str]:
         tokens.extend(chars)
         tokens.extend("".join(chars[index : index + 2]) for index in range(len(chars) - 1))
     return Counter(tokens)
+
+
+def _habit_reference_digest(habit_id: str) -> str:
+    return hashlib.sha256(habit_id.encode("utf-8")).hexdigest().upper()
+
+
+def habit_short_references(habits: list[HERHabit]) -> dict[str, str]:
+    """Return stable collision-expanded references for the current catalogue."""
+
+    digests = {
+        habit.habit_id: _habit_reference_digest(habit.habit_id)
+        for habit in habits
+    }
+    references: dict[str, str] = {}
+    for habit_id, digest in digests.items():
+        width = HABIT_SHORT_REFERENCE_MIN_CHARS
+        while width < len(digest) and any(
+            other_id != habit_id and other_digest.startswith(digest[:width])
+            for other_id, other_digest in digests.items()
+        ):
+            width += 1
+        references[habit_id] = f"H-{digest[:width]}"
+    return references
+
+
+def resolve_habit_reference(
+    habits: list[HERHabit],
+    reference: str,
+) -> HERHabit | None:
+    """Resolve one-based list position, stable short reference, or full ID."""
+
+    token = str(reference or "").strip()
+    if not token:
+        return None
+    if token.isdecimal():
+        index = int(token)
+        return habits[index - 1] if 1 <= index <= len(habits) else None
+
+    normalized = token.casefold()
+    full_matches = [habit for habit in habits if habit.habit_id == normalized]
+    if len(full_matches) == 1:
+        return full_matches[0]
+
+    if not normalized.startswith("h-"):
+        return None
+    prefix = normalized[2:]
+    if (
+        len(prefix) < HABIT_SHORT_REFERENCE_MIN_CHARS
+        or not re.fullmatch(r"[0-9a-f]+", prefix)
+    ):
+        return None
+    matches = [
+        habit
+        for habit in habits
+        if _habit_reference_digest(habit.habit_id).casefold().startswith(prefix)
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 class HERHabitStore:
@@ -493,7 +573,7 @@ class HERHabitStore:
                 raw_action.get("habit_id") or raw_action.get("id") or ""
             ).strip().casefold()
             if operation == "create":
-                title = _clean_text(raw_action.get("title"), limit=160)
+                title = _clean_unbounded_text(raw_action.get("title"))
                 digest = hashlib.sha256(
                     f"{idempotency_key}\0{index}\0{title}".encode()
                 ).hexdigest()[:12]
@@ -514,12 +594,14 @@ class HERHabitStore:
         *,
         max_actions: int,
         idempotency_key: str | None = None,
+        allow_protected: bool = False,
     ) -> list[str]:
         """Apply Meditation's bounded create/update/delete decisions directly."""
         outcomes, _changes = self.apply_actions_with_changes(
             actions,
             max_actions=max_actions,
             idempotency_key=idempotency_key,
+            allow_protected=allow_protected,
         )
         return outcomes
 
@@ -531,6 +613,7 @@ class HERHabitStore:
         idempotency_key: str | None = None,
         audit_context: Mapping[str, Any] | None = None,
         action_baseline: list[Mapping[str, Any]] | None = None,
+        allow_protected: bool = False,
     ) -> tuple[list[str], list[HERHabitChange]]:
         """Apply actions and return both compatibility outcomes and rich changes."""
 
@@ -545,7 +628,7 @@ class HERHabitStore:
                 else None
             )
             baseline_supplied = baseline_entry is not None and "before" in baseline_entry
-            baseline_before: dict[str, str] | None = None
+            baseline_before: dict[str, Any] | None = None
             if baseline_supplied and isinstance(baseline_entry.get("before"), Mapping):
                 try:
                     baseline_before = HERHabit.from_payload(
@@ -563,7 +646,7 @@ class HERHabitStore:
                 if operation == "create":
                     stable_id = None
                     if idempotency_key:
-                        title = _clean_text(raw_action.get("title"), limit=160)
+                        title = _clean_unbounded_text(raw_action.get("title"))
                         digest = hashlib.sha256(
                             f"{idempotency_key}\0{index}\0{title}".encode()
                         ).hexdigest()[:12]
@@ -590,7 +673,10 @@ class HERHabitStore:
                         raw_action.get("habit_id") or raw_action.get("id") or ""
                     ).strip().casefold()
                     before = self.get(habit_id)
-                    after = self._update(raw_action)
+                    after = self._update(
+                        raw_action,
+                        allow_protected=allow_protected,
+                    )
                     logical_before = (
                         baseline_before
                         if baseline_supplied
@@ -616,6 +702,7 @@ class HERHabitStore:
                     habit_id = self._archive(
                         raw_action,
                         allow_already_archived=bool(idempotency_key),
+                        allow_protected=allow_protected,
                     )
                     outcome = f"deleted:{habit_id}"
                     logical_before = (
@@ -634,7 +721,12 @@ class HERHabitStore:
                         )
                 else:
                     raise ValueError(f"unsupported operation: {operation or '<empty>'}")
-            except (ValueError, FileNotFoundError, FileExistsError) as exc:
+            except (
+                ValueError,
+                FileNotFoundError,
+                FileExistsError,
+                PermissionError,
+            ) as exc:
                 outcome = f"ignored:{operation or 'unknown'}:{type(exc).__name__}"
                 if self.logger is not None:
                     self.logger.warning(
@@ -675,6 +767,7 @@ class HERHabitStore:
         self,
         *,
         audit_context: Mapping[str, Any] | None = None,
+        allow_protected: bool = False,
     ) -> tuple[list[str], list[HERHabitChange]]:
         habits = self.load()
         if not habits:
@@ -686,6 +779,7 @@ class HERHabitStore:
             ],
             max_actions=len(habits),
             audit_context=audit_context,
+            allow_protected=allow_protected,
         )
 
     def _create(
@@ -695,19 +789,31 @@ class HERHabitStore:
         habit_id: str | None = None,
     ) -> HERHabit:
         now = _utc_now()
-        title = _validated_action_text(action.get("title"), field="title", limit=160)
+        title = _validated_action_text(
+            action.get("title"),
+            field="title",
+            limit=HABIT_TITLE_MAX_CHARS,
+            word_limit=HABIT_TITLE_MAX_WORDS,
+        )
         metadata = _validated_action_text(
             action.get("metadata"),
             field="metadata",
-            limit=2_000,
+            limit=HABIT_METADATA_MAX_CHARS,
+            word_limit=HABIT_METADATA_MAX_WORDS,
         )
-        body = _validated_action_text(action.get("body"), field="body", limit=8_000)
+        body = _validated_action_text(
+            action.get("body"),
+            field="body",
+            limit=HABIT_BODY_MAX_CHARS,
+            word_limit=HABIT_BODY_MAX_WORDS,
+        )
         habit_id = habit_id or f"{_slug(title)}-{uuid.uuid4().hex[:8]}"
         habit = HERHabit(
             habit_id=habit_id,
             title=title,
             metadata=metadata,
             body=body,
+            protected=False,
             created_at=now,
             updated_at=now,
         )
@@ -725,26 +831,50 @@ class HERHabitStore:
         self._write(habit)
         return habit
 
-    def _update(self, action: Mapping[str, Any]) -> HERHabit:
+    def _update(
+        self,
+        action: Mapping[str, Any],
+        *,
+        allow_protected: bool = False,
+    ) -> HERHabit:
         habit_id = str(action.get("habit_id") or action.get("id") or "").strip().casefold()
         if not _HABIT_ID_RE.fullmatch(habit_id):
             raise ValueError("update requires a valid habit_id")
         existing = next((habit for habit in self.load() if habit.habit_id == habit_id), None)
         if existing is None:
             raise FileNotFoundError(habit_id)
+        if existing.protected and not allow_protected:
+            raise PermissionError(f"protected HER habit: {habit_id}")
         title = existing.title
         metadata = existing.metadata
         body = existing.body
         if "title" in action:
-            title = _validated_action_text(action.get("title"), field="title", limit=160)
+            title = _clean_unbounded_text(action.get("title"))
         if "metadata" in action:
-            metadata = _validated_action_text(
-                action.get("metadata"),
-                field="metadata",
-                limit=2_000,
-            )
+            metadata = _clean_unbounded_text(action.get("metadata"))
         if "body" in action:
-            body = _validated_action_text(action.get("body"), field="body", limit=8_000)
+            body = _clean_unbounded_text(action.get("body"))
+        # Validate the complete replacement, including untouched legacy fields.
+        # This prevents an update from carrying oversized historical patches
+        # forward under the compact contract.
+        title = _validated_action_text(
+            title,
+            field="title",
+            limit=HABIT_TITLE_MAX_CHARS,
+            word_limit=HABIT_TITLE_MAX_WORDS,
+        )
+        metadata = _validated_action_text(
+            metadata,
+            field="metadata",
+            limit=HABIT_METADATA_MAX_CHARS,
+            word_limit=HABIT_METADATA_MAX_WORDS,
+        )
+        body = _validated_action_text(
+            body,
+            field="body",
+            limit=HABIT_BODY_MAX_CHARS,
+            word_limit=HABIT_BODY_MAX_WORDS,
+        )
         if (title, metadata, body) == (
             existing.title,
             existing.metadata,
@@ -756,6 +886,7 @@ class HERHabitStore:
             title=title,
             metadata=metadata,
             body=body,
+            protected=existing.protected,
             created_at=existing.created_at,
             updated_at=_utc_now(),
         )
@@ -767,6 +898,7 @@ class HERHabitStore:
         action: Mapping[str, Any],
         *,
         allow_already_archived: bool = False,
+        allow_protected: bool = False,
     ) -> str:
         habit_id = str(action.get("habit_id") or action.get("id") or "").strip().casefold()
         if not _HABIT_ID_RE.fullmatch(habit_id):
@@ -778,11 +910,68 @@ class HERHabitStore:
             ):
                 return habit_id
             raise FileNotFoundError(habit_id)
+        existing = self.get(habit_id)
+        if existing is None:
+            raise FileNotFoundError(habit_id)
+        if existing.protected and not allow_protected:
+            raise PermissionError(f"protected HER habit: {habit_id}")
         self.archive_root.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         archive_name = f"{habit_id}.{stamp}-{uuid.uuid4().hex[:8]}.json"
         os.replace(source, self.archive_root / archive_name)
         return habit_id
+
+    def set_protected(
+        self,
+        habit_id: str,
+        protected: bool,
+        *,
+        audit_context: Mapping[str, Any] | None = None,
+    ) -> HERHabitChange | None:
+        """Persist a user-controlled protection flag without rewriting content."""
+
+        normalized = str(habit_id or "").strip().casefold()
+        if not _HABIT_ID_RE.fullmatch(normalized):
+            raise ValueError("protection requires a valid habit_id")
+        existing = self.get(normalized)
+        if existing is None:
+            raise FileNotFoundError(normalized)
+        if existing.protected is bool(protected):
+            return None
+        updated = HERHabit(
+            habit_id=existing.habit_id,
+            title=existing.title,
+            metadata=existing.metadata,
+            body=existing.body,
+            protected=bool(protected),
+            created_at=existing.created_at,
+            updated_at=_utc_now(),
+        )
+        self._write(updated)
+        change = HERHabitChange(
+            operation="protected" if protected else "unprotected",
+            habit_id=existing.habit_id,
+            before=existing.to_payload(),
+            after=updated.to_payload(),
+        )
+        try:
+            append_habit_audit(
+                self.workspace_dir,
+                "habit_protection_changed",
+                agent_id=self.workspace_dir.name,
+                habit_id=existing.habit_id,
+                before=existing.to_payload(),
+                after=updated.to_payload(),
+                context=dict(audit_context or {}),
+            )
+        except Exception as exc:  # noqa: BLE001 - audit cannot undo a committed flag
+            if self.logger is not None:
+                self.logger.warning(
+                    "HER Habit protection audit append failed: habit=%s error=%s",
+                    existing.habit_id,
+                    type(exc).__name__,
+                )
+        return change
 
     def _write(self, habit: HERHabit) -> None:
         destination = self.root / f"{habit.habit_id}.json"
@@ -1470,9 +1659,10 @@ def _habit_catalog(habits: list[HERHabit], *, limit: int) -> str:
     for habit in habits:
         block = (
             f"ID: {habit.habit_id}\n"
-            f"Title: {redact_bounded_text(habit.title, limit=160)}\n"
-            f"Metadata: {redact_bounded_text(habit.metadata, limit=2_000)}\n"
-            f"Body: {redact_bounded_text(habit.body, limit=8_000)}"
+            f"Protected: {'yes' if habit.protected else 'no'}\n"
+            f"Title: {redact_bounded_text(habit.title, limit=HABIT_TITLE_MAX_CHARS)}\n"
+            f"Metadata: {redact_bounded_text(habit.metadata, limit=HABIT_METADATA_MAX_CHARS)}\n"
+            f"Body: {redact_bounded_text(habit.body, limit=HABIT_BODY_MAX_CHARS)}"
         )
         if used + len(block) > limit:
             blocks.append("...[catalog bounded]...")
@@ -1509,10 +1699,12 @@ Purpose: decide whether this single run taught the agent a concrete, reusable wa
 
 Habit rules:
 - A Habit belongs only to this agent. Do not add project/backend/task scope fields.
-- A Habit has a short title, compact natural-language metadata for fast future search, and an actionable body.
+- A Habit has a title of at most {HABIT_TITLE_MAX_WORDS} words/{HABIT_TITLE_MAX_CHARS} characters, metadata of at most {HABIT_METADATA_MAX_WORDS} words/{HABIT_METADATA_MAX_CHARS} characters, and a body of at most {HABIT_BODY_MAX_WORDS} words/{HABIT_BODY_MAX_CHARS} characters.
 - If a real learning event occurred, create or update immediately; there is no candidate/promotion/confidence/evaluation lifecycle.
 - Prefer updating an existing Habit when it already covers the lesson.
-- Delete an existing Habit only when this run gives clear evidence that it is wrong or harmful.
+- An update must replace obsolete wording with one complete current instruction. Never append UPDATE, CORRECTION, FURTHER CONFIRMATION, or PRECEDENCE repair notes while retaining contradicted text.
+- Never update or delete a Habit marked Protected: yes. Protection is controlled only by the user.
+- Delete an unprotected existing Habit only when this run gives clear evidence that it is wrong or harmful.
 - It is valid and often correct to return no actions. Never manufacture a Habit merely because Meditation ran.
 - Return at most {config.max_actions} actions.
 
@@ -1606,12 +1798,17 @@ def parse_meditation_actions(
                     f"actions[{index}].habit_id is invalid"
                 )
             action["habit_id"] = habit_id.strip().casefold()
-        for field, limit in (("title", 160), ("metadata", 2_000), ("body", 8_000)):
+        for field, limit, word_limit in (
+            ("title", HABIT_TITLE_MAX_CHARS, HABIT_TITLE_MAX_WORDS),
+            ("metadata", HABIT_METADATA_MAX_CHARS, HABIT_METADATA_MAX_WORDS),
+            ("body", HABIT_BODY_MAX_CHARS, HABIT_BODY_MAX_WORDS),
+        ):
             if field in raw_action:
                 action[field] = _validated_action_text(
                     raw_action[field],
                     field=f"actions[{index}].{field}",
                     limit=limit,
+                    word_limit=word_limit,
                 )
         if operation == "update" and not any(
             field in action for field in ("title", "metadata", "body")
