@@ -2110,6 +2110,83 @@ async def test_claw_adapter_shutdown_stops_all_concurrent_her_processes(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_her_adapter_shutdown_reaps_request_during_semantic_compaction(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw-compaction",
+        """
+        #!/usr/bin/env python3
+        import json, sys, time
+        if sys.argv[1] == "version":
+            print(json.dumps({"kind": "version", "version": "0.1.0"}))
+        elif sys.argv[1] in {"doctor", "status"}:
+            print(json.dumps({"kind": sys.argv[1], "ok": True}))
+        elif "--help" in sys.argv:
+            print("--output-format stream-json prompt --stdin")
+        else:
+            sys.stdin.read()
+            print(json.dumps({
+                "kind": "run_started",
+                "session_id": "compaction-stop-session",
+                "model": "deepseek/test",
+            }), flush=True)
+            print(json.dumps({
+                "kind": "semantic_compaction",
+                "status": "started",
+                "session_id": "compaction-stop-session",
+                "trigger_phase": "pre_provider",
+                "estimated_input_tokens": 351000,
+                "timeout_seconds": 3595,
+                "timeout_source": "user override",
+                "original_context_unchanged": True,
+                "will_continue": True,
+            }), flush=True)
+            time.sleep(20)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={
+            "claw_binary_path": str(fake),
+            "permission_mode": "read-only",
+            "idle_timeout_sec": 30,
+            "hard_timeout_sec": 60,
+        },
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    assert await adapter.initialize() is True
+    task = asyncio.create_task(
+        adapter.generate_response(
+            "trigger compaction",
+            "req-compaction-stop",
+            on_stream_event=collect,
+        )
+    )
+    for _ in range(100):
+        if any("semantic_compaction started" in event.summary for event in events):
+            break
+        await asyncio.sleep(0.02)
+
+    assert any("semantic_compaction started" in event.summary for event in events)
+    process = adapter._active_processes["req-compaction-stop"]
+
+    await adapter.shutdown()
+    response = await task
+
+    assert response.is_success is False
+    assert process.returncode is not None
+    assert adapter._active_processes == {}
+    assert adapter.current_proc is None
+
+
+@pytest.mark.asyncio
 async def test_claw_adapter_enforces_idle_timeout_and_logs_effective_policy(tmp_path, caplog):
     fake = _write_exe(
         tmp_path / "claw",
