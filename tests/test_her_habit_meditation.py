@@ -10,9 +10,13 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from adapters import her_habits as habits
 from adapters.her import ClawCommandError, ClawTaskResult, ClawTimeoutError, HERAdapter
 from adapters.her_habits import (
+    HABIT_BODY_MAX_CHARS,
+    HABIT_METADATA_MAX_CHARS,
     HABIT_MEDITATION_ENV,
+    HABIT_TITLE_MAX_CHARS,
     MAX_MEDITATION_ATTEMPTS,
     MEDITATION_ALLOWED_TOOLS,
     HabitMeditationConfig,
@@ -21,7 +25,9 @@ from adapters.her_habits import (
     MeditationValidationError,
     attach_habits_to_prompt,
     build_observable_trace,
+    habit_short_references,
     parse_meditation_actions,
+    resolve_habit_reference,
 )
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "max+")
@@ -234,6 +240,147 @@ def test_store_updates_and_recoverably_archives_habits(tmp_path):
     assert outcomes == [f"updated:{habit_id}", f"deleted:{habit_id}"]
     assert store.load() == []
     assert len(list((tmp_path / "habits" / "archive").glob(f"{habit_id}.*.json"))) == 1
+
+
+def test_compact_limits_reject_without_truncation_and_legacy_records_remain_readable(
+    tmp_path,
+):
+    store = HERHabitStore(tmp_path)
+    oversized_title = "x" * (HABIT_TITLE_MAX_CHARS + 1)
+
+    outcomes = store.apply_actions(
+        [
+            {
+                "operation": "create",
+                "title": oversized_title,
+                "metadata": "Relevant compact metadata.",
+                "body": "Apply the compact behaviour.",
+            }
+        ],
+        max_actions=1,
+    )
+
+    assert outcomes == ["ignored:create:MeditationValidationError"]
+    assert store.load() == []
+
+    store.root.mkdir(parents=True)
+    legacy_payload = {
+        "format": "her-habit-v1",
+        "id": "legacy-long-habit",
+        "title": "L" * (HABIT_TITLE_MAX_CHARS + 20),
+        "metadata": "M" * (HABIT_METADATA_MAX_CHARS + 20),
+        "body": "B" * (HABIT_BODY_MAX_CHARS + 20),
+        "created_at": "2026-08-01T00:00:00+00:00",
+        "updated_at": "2026-08-01T00:00:00+00:00",
+    }
+    (store.root / "legacy-long-habit.json").write_text(
+        json.dumps(legacy_payload),
+        encoding="utf-8",
+    )
+    legacy = store.get("legacy-long-habit")
+    assert legacy is not None
+    assert legacy.title == legacy_payload["title"]
+    assert legacy.protected is False
+
+    [partial_update] = store.apply_actions(
+        [
+            {
+                "operation": "update",
+                "habit_id": legacy.habit_id,
+                "body": "A compact replacement body.",
+            }
+        ],
+        max_actions=1,
+    )
+    assert partial_update == "ignored:update:MeditationValidationError"
+    assert store.get(legacy.habit_id).title == legacy_payload["title"]
+
+    [canonical_update] = store.apply_actions(
+        [
+            {
+                "operation": "update",
+                "habit_id": legacy.habit_id,
+                "title": "Use compact canonical habits",
+                "metadata": "Relevant when an older Habit exceeds the active contract.",
+                "body": "Replace the complete record with concise current behaviour.",
+            }
+        ],
+        max_actions=1,
+    )
+    assert canonical_update == f"updated:{legacy.habit_id}"
+
+
+def test_protected_habit_blocks_automatic_update_and_archive(tmp_path):
+    store = HERHabitStore(tmp_path)
+    habit_id = _seed_habit(store)
+    change = store.set_protected(habit_id, True)
+
+    assert change is not None
+    assert store.get(habit_id).protected is True
+    outcomes = store.apply_actions(
+        [
+            {
+                "operation": "update",
+                "habit_id": habit_id,
+                "body": "Automatic writers must not apply this change.",
+            },
+            {"operation": "delete", "habit_id": habit_id},
+        ],
+        max_actions=2,
+    )
+
+    assert outcomes == [
+        "ignored:update:PermissionError",
+        "ignored:delete:PermissionError",
+    ]
+    assert store.get(habit_id).protected is True
+    assert store.archived_count() == 0
+
+    [manual_delete] = store.apply_actions(
+        [{"operation": "delete", "habit_id": habit_id}],
+        max_actions=1,
+        allow_protected=True,
+    )
+    assert manual_delete == f"deleted:{habit_id}"
+
+
+def test_habit_references_support_number_full_id_and_collision_expansion(
+    tmp_path,
+    monkeypatch,
+):
+    store = HERHabitStore(tmp_path)
+    first_id = _seed_habit(store)
+    [second_outcome] = store.apply_actions(
+        [
+            {
+                "operation": "create",
+                "title": "Validate references before mutation",
+                "metadata": "Relevant when a user selects a Habit from the list.",
+                "body": "Resolve the displayed reference against the current catalogue.",
+            }
+        ],
+        max_actions=1,
+    )
+    second_id = second_outcome.split(":", 1)[1]
+    catalogue = sorted(store.load(), key=lambda habit: habit.habit_id)
+
+    assert resolve_habit_reference(catalogue, "1") == catalogue[0]
+    assert resolve_habit_reference(catalogue, catalogue[1].habit_id) == catalogue[1]
+
+    monkeypatch.setattr(
+        habits,
+        "_habit_reference_digest",
+        lambda habit_id: (
+            "AAAAAAAA1" + "0" * 55
+            if habit_id == first_id
+            else "AAAAAAAA2" + "0" * 55
+        ),
+    )
+    references = habit_short_references(catalogue)
+    assert references[first_id] == "H-AAAAAAAA1"
+    assert references[second_id] == "H-AAAAAAAA2"
+    assert resolve_habit_reference(catalogue, "H-AAAAAAAA") is None
+    assert resolve_habit_reference(catalogue, references[first_id]).habit_id == first_id
 
 
 def test_no_actions_do_not_create_a_habit_directory(tmp_path):

@@ -174,6 +174,13 @@ def _sorted_habits(store: _her_habits.HERHabitStore) -> list[_her_habits.HERHabi
     )
 
 
+def _resolve_reference(
+    habits: list[_her_habits.HERHabit],
+    reference: str,
+) -> _her_habits.HERHabit | None:
+    return _her_habits.resolve_habit_reference(habits, reference)
+
+
 def _bounded_offset(offset: int, total: int) -> int:
     if total <= 0:
         return 0
@@ -273,6 +280,7 @@ def _home_view(
     habits = _sorted_habits(store)
     offset = _bounded_offset(offset, len(habits))
     page = habits[offset : offset + HABIT_PAGE_SIZE]
+    short_references = _her_habits.habit_short_references(habits)
     status = _control_status(runtime, adapter)
     pending = len(journal.pending_jobs(limit=10_000))
     pending_notifications = len(journal.pending_notifications(limit=10_000))
@@ -306,20 +314,23 @@ def _home_view(
         lines.append("No active Habits are stored for this agent.")
     else:
         for index, habit in enumerate(page, start=offset + 1):
+            lock_marker = "🔒 " if habit.protected else ""
             lines.append(
-                f"<code>{index}</code> · <b>{html.escape(_short(habit.title, 58))}</b>"
+                f"<code>{index}</code> · {lock_marker}<b>{html.escape(_short(habit.title, 58))}</b>"
             )
             lines.append(
-                f"   <code>{html.escape(habit.habit_id)}</code> · updated "
+                f"   <code>{html.escape(short_references[habit.habit_id])}</code> · "
+                f"<code>{html.escape(habit.habit_id)}</code> · updated "
                 f"<code>{html.escape(habit.updated_at)}</code>"
             )
     lines.extend(
         [
             "",
             "<b>Use</b>",
-            "<code>/habit view &lt;habit-id&gt;</code> · view details",
+            "<code>/habit view &lt;number|short-ref|habit-id&gt;</code> · view details",
             "<code>/habit on|off|default</code> · control learning",
-            "<code>/habit delete &lt;habit-id&gt;</code> · archive one Habit",
+            "<code>/habit protect|unprotect &lt;reference&gt;</code> · control automatic changes",
+            "<code>/habit delete &lt;reference&gt;</code> · archive one Habit",
             "<code>/habit delete all</code> · archive every active Habit",
             "<code>/habit reset</code> · snapshot and clear all Habit state",
         ]
@@ -393,7 +404,10 @@ def _detail_view(
     habit: _her_habits.HERHabit,
     *,
     offset: int,
+    habits: list[_her_habits.HERHabit] | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
+    catalogue = habits or [habit]
+    short_reference = _her_habits.habit_short_references(catalogue)[habit.habit_id]
     title = _html_short(habit.title, 500)
     metadata = _html_short(habit.metadata, 600)
     body = _html_short(habit.body, 1_500)
@@ -401,8 +415,9 @@ def _detail_view(
         [
             card_title("🧠", "HER Habit detail"),
             "",
-            "<b>Current</b> · <b>ACTIVE</b>",
+            f"<b>Current</b> · <b>ACTIVE</b> · <b>{'PROTECTED 🔒' if habit.protected else 'UNPROTECTED'}</b>",
             "<b>Scope</b> · this agent · <code>her</code> only",
+            f"<b>Reference</b> · <code>{html.escape(short_reference)}</code>",
             f"<b>ID</b> · <code>{html.escape(habit.habit_id)}</code>",
             f"<b>Created</b> · <code>{html.escape(habit.created_at)}</code>",
             f"<b>Updated</b> · <code>{html.escape(habit.updated_at)}</code>",
@@ -436,6 +451,14 @@ def _detail_view(
                 ],
                 [
                     InlineKeyboardButton(
+                        "Unprotect" if habit.protected else "Protect",
+                        callback_data=(
+                            f"habit:{'unprotect' if habit.protected else 'protect'}:{token}:{offset}"
+                        ),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
                         BACK_LABEL, callback_data=f"habit:home:{offset}"
                     ),
                     InlineKeyboardButton(
@@ -454,6 +477,7 @@ def _full_detail_text(habit: _her_habits.HERHabit) -> str:
             f"ID: {habit.habit_id}",
             f"Created: {habit.created_at}",
             f"Updated: {habit.updated_at}",
+            f"Protected: {'yes' if habit.protected else 'no'}",
             "",
             "WHEN RELEVANT",
             habit.metadata,
@@ -508,6 +532,56 @@ def _delete_confirm_view(
                 [
                     InlineKeyboardButton(
                         "← Keep Habit", callback_data=f"habit:view:{token}:{offset}"
+                    )
+                ],
+            ]
+        ),
+    )
+
+
+def _protection_confirm_view(
+    habit: _her_habits.HERHabit,
+    *,
+    protected: bool,
+    offset: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    token = _habit_token(habit.habit_id)
+    version_token = _habit_version_token(habit)
+    action = "Protect" if protected else "Unprotect"
+    consequence = (
+        "Dream and automatic Meditation will no longer rewrite or archive this Habit. "
+        "It remains available to relevant HER Planning."
+        if protected
+        else (
+            "Dream and automatic Meditation may rewrite or archive this Habit when their "
+            "validated evidence supports a change."
+        )
+    )
+    return (
+        confirm_card(
+            "🔒" if protected else "🔓",
+            f"{action} HER Habit",
+            target=(
+                f"<code>{html.escape(habit.habit_id)}</code> · "
+                f"{html.escape(habit.title)}"
+            ),
+            consequence=consequence,
+        ),
+        InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        action,
+                        callback_data=(
+                            f"habit:confirm_{'protect' if protected else 'unprotect'}:"
+                            f"{version_token}:{offset}"
+                        ),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "← Keep current protection",
+                        callback_data=f"habit:view:{token}:{offset}",
                     )
                 ],
             ]
@@ -854,7 +928,8 @@ async def cmd_habit(runtime: Any, update: Any, context: Any) -> None:
         )
         return
     if len(args) == 2 and lowered[0] == "view":
-        habit = store.get(args[1])
+        habits = _sorted_habits(store)
+        habit = _resolve_reference(habits, args[1])
         if habit is None:
             await _reply_view(
                 runtime,
@@ -870,7 +945,47 @@ async def cmd_habit(runtime: Any, update: Any, context: Any) -> None:
             habit=habit.to_payload(),
             context=_audit_context(runtime, update, source="command"),
         )
-        await _reply_view(runtime, update, _detail_view(habit, offset=0))
+        await _reply_view(
+            runtime,
+            update,
+            _detail_view(habit, offset=0, habits=habits),
+        )
+        return
+    if len(args) == 2 and lowered[0] in {"protect", "unprotect"}:
+        habits = _sorted_habits(store)
+        habit = _resolve_reference(habits, args[1])
+        if habit is None:
+            await _reply_view(
+                runtime,
+                update,
+                _home_view(
+                    runtime,
+                    adapter,
+                    notice="❌ Habit reference not found; no state changed.",
+                ),
+            )
+            return
+        desired = lowered[0] == "protect"
+        if habit.protected is desired:
+            await _reply_view(
+                runtime,
+                update,
+                _home_view(
+                    runtime,
+                    adapter,
+                    notice=(
+                        "ℹ️ That Habit is already protected."
+                        if desired
+                        else "ℹ️ That Habit is already unprotected."
+                    ),
+                ),
+            )
+            return
+        await _reply_view(
+            runtime,
+            update,
+            _protection_confirm_view(habit, protected=desired, offset=0),
+        )
         return
     if lowered[:1] == ["delete"]:
         if len(args) == 2 and lowered[1] == "all":
@@ -891,7 +1006,7 @@ async def cmd_habit(runtime: Any, update: Any, context: Any) -> None:
             )
             return
         if len(args) == 2:
-            habit = store.get(args[1])
+            habit = _resolve_reference(_sorted_habits(store), args[1])
             if habit is None:
                 await _reply_view(
                     runtime,
@@ -971,12 +1086,22 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         await query.answer()
         return
-    if action in {"view", "full", "delete", "confirm_delete"}:
+    habit_actions = {
+        "view",
+        "full",
+        "delete",
+        "protect",
+        "unprotect",
+        "confirm_delete",
+        "confirm_protect",
+        "confirm_unprotect",
+    }
+    if action in habit_actions:
         token = parts[2] if len(parts) > 2 else ""
         offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
         habit = (
             _resolve_version_token(habits, token)
-            if action == "confirm_delete"
+            if action.startswith("confirm_")
             else _resolve_token(habits, token)
         )
         if habit is None:
@@ -988,8 +1113,12 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
             )
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
             await query.answer(
-                "Habit changed; confirm deletion again."
-                if action == "confirm_delete"
+                (
+                    "Habit changed; confirm deletion again."
+                    if action == "confirm_delete"
+                    else "Habit changed; confirm the protection change again."
+                )
+                if action.startswith("confirm_")
                 else "Habit not found.",
                 show_alert=True,
             )
@@ -1002,7 +1131,7 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
                 habit=habit.to_payload(),
                 context=context_fields,
             )
-            text, markup = _detail_view(habit, offset=offset)
+            text, markup = _detail_view(habit, offset=offset, habits=habits)
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
             await query.answer()
             return
@@ -1025,6 +1154,24 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
             await query.answer()
             return
+        if action in {"protect", "unprotect"}:
+            desired = action == "protect"
+            if habit.protected is desired:
+                await query.answer(
+                    "Habit is already protected."
+                    if desired
+                    else "Habit is already unprotected.",
+                    show_alert=True,
+                )
+                return
+            text, markup = _protection_confirm_view(
+                habit,
+                protected=desired,
+                offset=offset,
+            )
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+            await query.answer()
+            return
         if _mutation_busy(runtime, adapter):
             await query.answer(
                 "HER is busy; try again when the current work finishes.",
@@ -1032,11 +1179,47 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
             )
             return
         lock = adapter._habit_execution_lock
+        if action in {"confirm_protect", "confirm_unprotect"}:
+            desired = action == "confirm_protect"
+            async with lock:
+                change = store.set_protected(
+                    habit.habit_id,
+                    desired,
+                    audit_context=context_fields,
+                )
+            _append_audit(
+                runtime,
+                "habit_command_protection_completed",
+                target=habit.to_payload(),
+                requested="protect" if desired else "unprotect",
+                change=change.to_payload() if change is not None else None,
+                context=context_fields,
+            )
+            if change is None:
+                await query.answer(
+                    "Habit protection already has that value.",
+                    show_alert=True,
+                )
+                return
+            text, markup = _home_view(
+                runtime,
+                adapter,
+                offset=offset,
+                notice=(
+                    f"✅ Protected <code>{html.escape(habit.habit_id)}</code>."
+                    if desired
+                    else f"✅ Unprotected <code>{html.escape(habit.habit_id)}</code>."
+                ),
+            )
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+            await query.answer("Habit protected." if desired else "Habit unprotected.")
+            return
         async with lock:
             outcomes, changes = store.apply_actions_with_changes(
                 [{"operation": "delete", "habit_id": habit.habit_id}],
                 max_actions=1,
                 audit_context=context_fields,
+                allow_protected=True,
             )
         _append_audit(
             runtime,
@@ -1092,7 +1275,10 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
         context_fields = _audit_context(runtime, update, source="callback")
         lock = adapter._habit_execution_lock
         async with lock:
-            outcomes, changes = store.archive_all(audit_context=context_fields)
+            outcomes, changes = store.archive_all(
+                audit_context=context_fields,
+                allow_protected=True,
+            )
         _append_audit(
             runtime,
             "habit_command_delete_all_completed",

@@ -221,20 +221,152 @@ async def test_habit_menu_escapes_content_and_controls_agent_override(tmp_path):
     )
 
 
-def test_habit_detail_bounds_escaped_html_to_telegram_limit(tmp_path):
-    store = HERHabitStore(tmp_path)
-    [outcome] = store.apply_actions(
+@pytest.mark.asyncio
+async def test_number_and_short_reference_open_the_displayed_habit(tmp_path):
+    runtime = FakeRuntime(tmp_path)
+    store = runtime.backend_manager.current_backend._her_habit_store()
+    _seed_habit(store, "First compact Habit")
+    _seed_habit(store, "Second compact Habit")
+    catalogue = runtime_her_habits._sorted_habits(store)
+    expected = catalogue[0]
+    short_reference = runtime_her_habits._her_habits.habit_short_references(
+        catalogue
+    )[expected.habit_id]
+
+    await runtime_her_habits.cmd_habit(
+        runtime,
+        _command_update(),
+        SimpleNamespace(args=["view", "1"]),
+    )
+    assert expected.habit_id in runtime.replies[-1]["text"]
+    assert short_reference in runtime.replies[-1]["text"]
+
+    await runtime_her_habits.cmd_habit(
+        runtime,
+        _command_update(),
+        SimpleNamespace(args=["view", short_reference]),
+    )
+    assert expected.habit_id in runtime.replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_protect_and_unprotect_require_versioned_confirmation(tmp_path):
+    runtime = FakeRuntime(tmp_path)
+    store = runtime.backend_manager.current_backend._her_habit_store()
+    habit_id = _seed_habit(store, "Preserve confirmed user workflow")
+
+    await runtime_her_habits.cmd_habit(
+        runtime,
+        _command_update(),
+        SimpleNamespace(args=["protect", "1"]),
+    )
+    protect_data = _callback_data(
+        runtime.replies[-1]["reply_markup"],
+        "habit:confirm_protect:",
+    )
+    protect_update, protect_query = _callback_update(protect_data)
+    await runtime_her_habits.callback_habit(
+        runtime,
+        protect_update,
+        SimpleNamespace(),
+    )
+
+    protected = store.get(habit_id)
+    assert protected is not None and protected.protected is True
+    assert "Protected" in protect_query.edits[-1]["text"]
+    short_reference = runtime_her_habits._her_habits.habit_short_references(
+        [protected]
+    )[habit_id]
+
+    await runtime_her_habits.cmd_habit(
+        runtime,
+        _command_update(),
+        SimpleNamespace(args=["unprotect", short_reference]),
+    )
+    unprotect_data = _callback_data(
+        runtime.replies[-1]["reply_markup"],
+        "habit:confirm_unprotect:",
+    )
+    unprotect_update, _unprotect_query = _callback_update(unprotect_data)
+    await runtime_her_habits.callback_habit(
+        runtime,
+        unprotect_update,
+        SimpleNamespace(),
+    )
+    assert store.get(habit_id).protected is False
+
+    audit_rows = [
+        json.loads(line)
+        for line in (tmp_path / "backend_state" / "her_habit_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    protection_events = [
+        row for row in audit_rows if row["event"] == "habit_command_protection_completed"
+    ]
+    assert [row["requested"] for row in protection_events] == [
+        "protect",
+        "unprotect",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stale_protection_confirmation_cannot_change_habit(tmp_path):
+    runtime = FakeRuntime(tmp_path)
+    store = runtime.backend_manager.current_backend._her_habit_store()
+    habit_id = _seed_habit(store, "Confirm current Habit version")
+    await runtime_her_habits.cmd_habit(
+        runtime,
+        _command_update(),
+        SimpleNamespace(args=["protect", habit_id]),
+    )
+    stale_confirmation = _callback_data(
+        runtime.replies[-1]["reply_markup"],
+        "habit:confirm_protect:",
+    )
+    store.apply_actions(
         [
             {
-                "operation": "create",
-                "title": "<" * 160,
-                "metadata": "&" * 2_000,
-                "body": ">" * 8_000,
+                "operation": "update",
+                "habit_id": habit_id,
+                "body": "The Habit changed after confirmation was rendered.",
             }
         ],
         max_actions=1,
     )
-    habit = store.get(outcome.split(":", 1)[1])
+
+    callback_update, query = _callback_update(stale_confirmation)
+    await runtime_her_habits.callback_habit(
+        runtime,
+        callback_update,
+        SimpleNamespace(),
+    )
+
+    assert store.get(habit_id).protected is False
+    assert query.answers[-1] == (
+        "Habit changed; confirm the protection change again.",
+        True,
+    )
+
+
+def test_habit_detail_bounds_escaped_html_to_telegram_limit(tmp_path):
+    store = HERHabitStore(tmp_path)
+    store.root.mkdir(parents=True)
+    (store.root / "legacy-oversized.json").write_text(
+        json.dumps(
+            {
+                "format": "her-habit-v1",
+                "id": "legacy-oversized",
+                "title": "<" * 160,
+                "metadata": "&" * 2_000,
+                "body": ">" * 8_000,
+                "created_at": "2026-08-01T00:00:00+00:00",
+                "updated_at": "2026-08-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    habit = store.get("legacy-oversized")
 
     text, _markup = runtime_her_habits._detail_view(habit, offset=0)
 
