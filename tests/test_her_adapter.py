@@ -1917,6 +1917,7 @@ async def test_her_task_runner_applies_meditation_safety_overrides(tmp_path):
             "model": "deepseek/test",
             "session_id": "meditation-session",
             "argv": sys.argv[1:],
+            "cwd": os.getcwd(),
             "planning": os.environ.get("CLAW_TASK_PLANNING"),
             "iterations": os.environ.get("CLAW_MAX_TOOL_ITERATIONS"),
         }))
@@ -1934,6 +1935,8 @@ async def test_her_task_runner_applies_meditation_safety_overrides(tmp_path):
     )
     adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
     adapter._binary = fake
+    worker_cwd = tmp_path / "worker"
+    worker_cwd.mkdir()
 
     result = await adapter._run_task_async(
         "Meditate on bounded evidence.",
@@ -1946,16 +1949,21 @@ async def test_her_task_runner_applies_meditation_safety_overrides(tmp_path):
             "CLAW_TASK_PLANNING": "0",
             "CLAW_MAX_TOOL_ITERATIONS": "8",
         },
+        model_override="deepseek/worker",
+        cwd_override=worker_cwd,
     )
 
     args = result.json_data["argv"]
     assert result.permission_mode == "read-only"
     assert args[args.index("--permission-mode") + 1] == "read-only"
+    assert args[args.index("--model") + 1] == "deepseek/worker"
     assert args[args.index("--allowedTools") + 1] == "read_file"
     assert "--dangerously-skip-permissions" not in args
     assert "--resume" not in args
     assert result.json_data["planning"] == "0"
     assert result.json_data["iterations"] == "8"
+    assert result.json_data["cwd"] == str(worker_cwd)
+    assert result.cwd == str(worker_cwd)
 
 
 @pytest.mark.asyncio

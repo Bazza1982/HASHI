@@ -4723,8 +4723,8 @@ class FlexibleAgentRuntime:
         available = self._get_available_efforts()
         current = self._get_current_effort() or (available[0] if available else "n/a")
         consequence = (
-            "For HER, effort controls the maximum agentic execution iterations "
-            "rather than provider reasoning depth. Higher levels allow longer work."
+            "For HER, low through max+ control one Agent's execution budget; ultra runs "
+            "HER-private coordinated multi-agent work with up to ten concurrent sub-agents. None changes provider reasoning depth."
             if self.config.active_backend == "her"
             else "This optional step controls reasoning depth. If no selection is made, the current value remains active."
         )
@@ -4915,7 +4915,7 @@ class FlexibleAgentRuntime:
 
         current_effort = self._get_current_effort() or available[0]
         consequence = (
-            "For HER, higher effort permits more agentic execution iterations; it does not change provider reasoning depth."
+            "For HER, low through max+ increase one Agent's execution budget; ultra uses HER-private coordinated multi-agent execution with up to ten concurrent sub-agents. It does not change provider reasoning depth."
             if self.config.active_backend == "her"
             else "Higher effort may improve difficult work but takes longer and can use more tokens."
         )

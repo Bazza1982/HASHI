@@ -120,6 +120,52 @@ def test_scheduler_choice_receipt_is_persisted_and_injected(tmp_path):
     assert "read-only context" in sections[0][1]
 
 
+def test_ultra_structured_choice_receipt_does_not_depend_on_rendered_text(tmp_path):
+    runtime = _runtime(tmp_path)
+    item = _item(request_id="req-ultra-choice")
+    response = _response(
+        "哥哥，您想先做哪一项？",
+        session_id="ultra-primary-session",
+        completion="incomplete",
+        stop_reason="requires_user_input",
+    )
+    response.stream_metadata["her_ultra"] = {
+        "run_id": "run-choice",
+        "status": "incomplete",
+        "pending_interaction": {
+            "interaction_id": "run-choice:interaction:1",
+            "kind": "choice",
+            "labels": ["A", "B", "C"],
+        },
+    }
+
+    receipt = runtime_cross_session.record_turn_result(
+        runtime,
+        item,
+        assistant_text=response.text,
+        response=response,
+        delivered=True,
+        completion_path="foreground",
+    )
+
+    assert receipt is not None
+    assert receipt["pending_interaction"] == {
+        "kind": "choice",
+        "labels": ["A", "B", "C"],
+        "interaction_id": "run-choice:interaction:1",
+    }
+    reply = _item(request_id="req-ultra-reply", source="text", prompt="B")
+    _begin(runtime, reply)
+    bound_prompt = runtime_cross_session.prepare_reply_binding(
+        runtime, reply, reply.prompt
+    )
+    assert "authoritative referent resolution" in bound_prompt
+    assert reply._cross_session_receipt["reply_kind"] == "choice"
+    assert runtime.current_request_meta["resume_session_id"] == (
+        "ultra-primary-session"
+    )
+
+
 def test_active_receipt_is_not_trimmed_out_by_recent_completed_receipts(tmp_path):
     runtime = _runtime(tmp_path)
     for index in range(runtime_cross_session.MAX_CONTEXT_RECEIPTS):
