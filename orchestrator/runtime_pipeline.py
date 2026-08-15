@@ -10,6 +10,7 @@ import hashlib as _hashlib
 from telegram.error import RetryAfter
 
 from orchestrator.runtime_common import _md_to_html, _print_final_response, _safe_excerpt
+from orchestrator import runtime_cross_session
 from orchestrator import runtime_retry
 from orchestrator import telegram_delivery_failover
 from orchestrator import telegram_stream_policy
@@ -26,6 +27,7 @@ EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
 
 HER_SESSION_SCOPE_PERSISTENT = "persistent"
 HER_SESSION_SCOPE_ISOLATED = "isolated_per_run"
+HER_SESSION_SCOPE_ISOLATED_RESUME = "isolated_resume"
 
 
 def request_meta_for(runtime, request_id: str) -> dict[str, Any]:
@@ -42,7 +44,11 @@ def request_meta_for(runtime, request_id: str) -> dict[str, Any]:
 
 def _resolve_her_session_scope(runtime, item) -> str:
     explicit = str(getattr(item, "session_scope", None) or "").strip().lower()
-    if explicit in {HER_SESSION_SCOPE_PERSISTENT, HER_SESSION_SCOPE_ISOLATED}:
+    if explicit in {
+        HER_SESSION_SCOPE_PERSISTENT,
+        HER_SESSION_SCOPE_ISOLATED,
+        HER_SESSION_SCOPE_ISOLATED_RESUME,
+    }:
         return explicit
     if str(getattr(runtime.config, "active_backend", "") or "") != "her":
         return HER_SESSION_SCOPE_PERSISTENT
@@ -184,23 +190,34 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
 async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPrompt:
     effective_prompt = runtime._consume_session_primer(item)
     backend = runtime.backend_manager.current_backend
-    effective_prompt = runtime_retry.prepare_interrupted_task_continuation(
-        runtime,
-        item,
-        effective_prompt,
-        backend=str(getattr(runtime.config, "active_backend", "") or ""),
+    effective_prompt = runtime_cross_session.prepare_reply_binding(
+        runtime, item, effective_prompt
     )
+    request_meta = request_meta_for(runtime, item.request_id)
+    if not request_meta.get("cross_session_receipt"):
+        effective_prompt = runtime_retry.prepare_interrupted_task_continuation(
+            runtime,
+            item,
+            effective_prompt,
+            backend=str(getattr(runtime.config, "active_backend", "") or ""),
+        )
+        request_meta = request_meta_for(runtime, item.request_id)
     supports_sessions = bool(
         getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
     )
-    session_id = getattr(backend, "_session_id", None)
-    request_meta = request_meta_for(runtime, item.request_id)
+    resume_session_id = str(request_meta.get("resume_session_id") or "").strip()
+    session_id = resume_session_id or getattr(backend, "_session_id", None)
     session_scope = str(request_meta.get("session_scope") or HER_SESSION_SCOPE_PERSISTENT)
     incremental = (
-        runtime.backend_manager.agent_mode == "fixed"
-        and supports_sessions
+        supports_sessions
         and session_id is not None
-        and session_scope == HER_SESSION_SCOPE_PERSISTENT
+        and (
+            bool(resume_session_id)
+            or (
+                runtime.backend_manager.agent_mode == "fixed"
+                and session_scope == HER_SESSION_SCOPE_PERSISTENT
+            )
+        )
     )
     continuity_enabled = is_memory_plus_enabled(runtime.workspace_dir)
     extra_sections = runtime._workzone_prompt_section()
@@ -967,13 +984,22 @@ async def handle_empty_success_response(runtime, item) -> None:
     runtime._mark_error(err_msg)
     if runtime._should_buffer_during_transfer(item.request_id):
         runtime._record_suppressed_transfer_result(item, success=False, error=err_msg)
+    delivered = False
     if not item.silent and not runtime._should_buffer_during_transfer(item.request_id):
-        await runtime.send_long_message(
+        _elapsed, chunk_count = await runtime.send_long_message(
             chat_id=item.chat_id,
             text=err_msg,
             request_id=item.request_id,
             purpose="error",
         )
+        delivered = chunk_count > 0
+    runtime_cross_session.record_turn_result(
+        runtime,
+        item,
+        error=err_msg,
+        delivered=delivered,
+        completion_path="foreground",
+    )
     await runtime._notify_request_listeners(
         item.request_id,
         {
@@ -1221,6 +1247,14 @@ async def handle_backend_error(
             queue_wait_s=queue_wait_s,
             backend_elapsed_s=backend_elapsed_s,
         )
+        runtime_cross_session.record_turn_result(
+            runtime,
+            item,
+            response=response,
+            error=soft_msg,
+            delivered=False,
+            completion_path="foreground",
+        )
         return
 
     runtime._mark_error(err_msg)
@@ -1238,6 +1272,14 @@ async def handle_backend_error(
         },
     )
     if item.silent:
+        runtime_cross_session.record_turn_result(
+            runtime,
+            item,
+            response=response,
+            error=err_msg,
+            delivered=False,
+            completion_path="foreground",
+        )
         return
     runtime.error_logger.error(
         f"Flex Backend error for {item.request_id} "
@@ -1246,8 +1288,24 @@ async def handle_backend_error(
     if runtime._should_retry_codex_scheduler_failure(item, err_msg):
         runtime._schedule_codex_scheduler_retry(item)
     if not item.deliver_to_telegram:
+        runtime_cross_session.record_turn_result(
+            runtime,
+            item,
+            response=response,
+            error=err_msg,
+            delivered=False,
+            completion_path="foreground",
+        )
         return
     if runtime._should_buffer_during_transfer(item.request_id):
+        runtime_cross_session.record_turn_result(
+            runtime,
+            item,
+            response=response,
+            error=err_msg,
+            delivered=False,
+            completion_path="foreground",
+        )
         return
     send_elapsed_s, chunk_count = await runtime.send_long_message(
         chat_id=item.chat_id,
@@ -1263,6 +1321,14 @@ async def handle_backend_error(
         f"chunks={chunk_count})"
     )
     runtime._log_maintenance(item, "send_error", error_excerpt=_safe_excerpt(err_msg, 200))
+    runtime_cross_session.record_turn_result(
+        runtime,
+        item,
+        response=response,
+        error=err_msg,
+        delivered=chunk_count > 0,
+        completion_path="foreground",
+    )
 
 
 async def handle_success_delivery(
@@ -1292,6 +1358,14 @@ async def handle_success_delivery(
             except Exception:
                 pass
         runtime._record_suppressed_transfer_result(item, success=True, text=visible_text)
+        runtime_cross_session.record_turn_result(
+            runtime,
+            item,
+            assistant_text=visible_text,
+            response=response,
+            delivered=False,
+            completion_path="foreground",
+        )
         return
     runtime_retry.remember_output(runtime, item, visible_text)
     persist_success_memory(
@@ -1304,6 +1378,14 @@ async def handle_success_delivery(
         session_reset_source=session_reset_source,
     )
     if not item.deliver_to_telegram:
+        runtime_cross_session.record_turn_result(
+            runtime,
+            item,
+            assistant_text=visible_text,
+            response=response,
+            delivered=False,
+            completion_path="foreground",
+        )
         return
 
     response_text = visible_text
@@ -1350,6 +1432,17 @@ async def handle_success_delivery(
             ),
             error=stream_finalization.error,
         )
+    runtime_cross_session.record_turn_result(
+        runtime,
+        item,
+        assistant_text=response_text,
+        response=response,
+        delivered=bool(
+            stream_finalization.final_delivered
+            or (stream_finalization.fallback_required and chunk_count > 0)
+        ),
+        completion_path="foreground",
+    )
     await runtime._send_voice_reply(item.chat_id, response_text, item.request_id)
     runtime._schedule_audit_followup(
         item,

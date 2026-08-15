@@ -12,7 +12,12 @@ import types
 import pytest
 from telegram.error import RetryAfter
 
-from orchestrator import runtime_pipeline, runtime_retry, telegram_stream_policy
+from orchestrator import (
+    runtime_cross_session,
+    runtime_pipeline,
+    runtime_retry,
+    telegram_stream_policy,
+)
 from orchestrator import telegram_delivery_failover as failover
 from adapters.stream_events import (
     DELIVERY_CONTROL,
@@ -433,6 +438,79 @@ async def test_build_turn_prompt_binds_bare_continue_to_persisted_stopped_task()
     assert "You can continue now" in prompt.effective_prompt
     assert runtime.current_request_meta["resumed_interrupted_task"]["request_id"] == "req-original"
     assert continuation._resumed_interrupted_task["prompt"] == original_item.prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["fixed", "flex"])
+async def test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_task(mode):
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.agent_mode = mode
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id="primary-session",
+        _claw_model=lambda: "local/deepseek-v4-pro",
+        persistent_session_busy=False,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    runtime_retry.remember_interrupted_task(
+        runtime,
+        {
+            "request_id": "req-stopped",
+            "chat_id": 123,
+            "prompt": "Older primary-session task",
+            "source": "text",
+            "summary": "Older task",
+        },
+        backend="her",
+    )
+    scheduler_item = _item(
+        request_id="req-scheduler",
+        source="scheduler",
+        prompt="Run the newer scheduled task",
+        summary="Cron Task [newer]",
+    )
+    scheduler_response = SimpleNamespace(
+        is_success=True,
+        stop_reason="max_iterations",
+        stream_metadata={
+            "claw_completion_status": "incomplete",
+            "claw_stop_reason": "max_iterations",
+            "recommended_action": "continue",
+            "her_session_scope": "isolated_per_run",
+            "her_session_id": "scheduler-session",
+            "her_model": "local/deepseek-v4-pro",
+        },
+    )
+    runtime_cross_session.record_turn_result(
+        runtime,
+        scheduler_item,
+        assistant_text="Newer scheduler task is incomplete. CONTINUE.",
+        response=scheduler_response,
+        delivered=True,
+        completion_path="foreground",
+    )
+    continuation = _item(
+        request_id="req-continue",
+        prompt="continue.",
+        summary="Continue",
+    )
+    runtime_pipeline.begin_queue_item(runtime, continuation)
+
+    prompt = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        continuation,
+        is_bridge_request=False,
+    )
+
+    assert "HASHI cross-session reply binding" in prompt.effective_prompt
+    assert "Newer scheduler task is incomplete" in prompt.effective_prompt
+    assert "HASHI /stop continuation" not in prompt.effective_prompt
+    assert runtime.current_request_meta["session_scope"] == "isolated_resume"
+    assert runtime.current_request_meta["resume_session_id"] == "scheduler-session"
+    assert prompt.incremental is True
 
 
 @pytest.mark.asyncio
@@ -1905,6 +1983,51 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat():
     assert runtime.audit_followups[0]["audit_collector"] == "audit"
     assert runtime.hchat_routes == [("req-1", "visible text")]
     assert runtime.maintenance_events[-1][0] == "send_success"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_delivery_persists_cross_session_receipt_after_send():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    item = _item(
+        request_id="req-scheduler",
+        source="scheduler",
+        prompt="Run scheduled work",
+        summary="Cron Task [scheduled-work]",
+    )
+    response = SimpleNamespace(
+        text="core incomplete report",
+        is_success=True,
+        stop_reason="max_iterations",
+        stream_metadata={
+            "claw_completion_status": "incomplete",
+            "claw_stop_reason": "max_iterations",
+            "recommended_action": "continue",
+            "her_session_scope": "isolated_per_run",
+            "her_session_id": "scheduler-session",
+            "her_model": "local/deepseek-v4-pro",
+        },
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        response,
+        visible_text="Visible incomplete report. CONTINUE.",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    receipt = runtime_cross_session.load_receipts(runtime)[0]
+    assert receipt["delivered"] is True
+    assert receipt["status"] == "incomplete"
+    assert receipt["session_id"] == "scheduler-session"
+    assert receipt["active"] is True
 
 
 @pytest.mark.asyncio

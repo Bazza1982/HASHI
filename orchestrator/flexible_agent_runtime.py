@@ -38,6 +38,7 @@ from orchestrator.browser_mode import (
 )
 from orchestrator.exp_mode import build_exp_task_prompt, get_exp_usage_text
 from orchestrator import runtime_control
+from orchestrator import runtime_cross_session
 from orchestrator import runtime_delivery
 from orchestrator import runtime_lifecycle
 from orchestrator import runtime_long
@@ -864,7 +865,8 @@ class FlexibleAgentRuntime:
             is_bridge_request=is_bridge_request,
             metadata=metadata,
         )
-        return sections + runtime_scheduler_recovery.context_section(self, item.source)
+        sections += runtime_scheduler_recovery.context_section(self, item.source)
+        return sections + runtime_cross_session.context_section(self, item)
 
     def _schedule_post_turn_observers(
         self,
@@ -7757,8 +7759,13 @@ class FlexibleAgentRuntime:
                 registry.pop(item.request_id, None)
             return
 
+        receipt_text = ""
+        receipt_response = None
+        receipt_error = ""
+        receipt_delivered = False
         try:
             if task.cancelled():
+                receipt_error = "background_task_cancelled"
                 self._mark_error(f"Background task cancelled: {item.summary}")
                 self.logger.warning(f"Background task {item.request_id} was cancelled.")
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
@@ -7780,16 +7787,18 @@ class FlexibleAgentRuntime:
                         "summary": item.summary,
                     },
                 )
-                await self.send_long_message(
+                _elapsed, chunk_count = await self.send_long_message(
                     item.chat_id,
                     f"⚠️ Background task [{item.summary}] was cancelled before completing.",
                     request_id=item.request_id,
                     purpose="bg-cancelled",
                 )
+                receipt_delivered = chunk_count > 0
                 return
 
             exc = task.exception()
             if exc:
+                receipt_error = str(exc)
                 self._mark_error(str(exc))
                 self.error_logger.error(f"Background task {item.request_id} raised: {exc}")
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
@@ -7811,20 +7820,23 @@ class FlexibleAgentRuntime:
                         "summary": item.summary,
                     },
                 )
-                await self.send_long_message(
+                _elapsed, chunk_count = await self.send_long_message(
                     item.chat_id,
                     f"⚠️ Background task error ({self.config.active_backend}): {exc}",
                     request_id=item.request_id,
                     purpose="bg-error",
                 )
+                receipt_delivered = chunk_count > 0
                 return
 
             response = task.result()
+            receipt_response = response
 
             if response.is_success and response.text:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
                 self._mark_success()
                 visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
+                receipt_text = visible_text
                 runtime_retry.clear_completed_interrupted_task(self, item)
                 safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
                 self._append_core_transcript(
@@ -7964,6 +7976,7 @@ class FlexibleAgentRuntime:
                     request_id=item.request_id,
                     purpose="bg-response",
                 )
+                receipt_delivered = chunk_count > 0
                 her_message_router = getattr(item, "_her_message_router", None)
                 if her_message_router is not None:
                     her_message_router.record_final_delivery(
@@ -7985,6 +7998,7 @@ class FlexibleAgentRuntime:
                 )
             else:
                 err_msg = response.error or "Unknown error"
+                receipt_error = err_msg
                 self._mark_error(err_msg)
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 self._notify_right_brain_interrupted(
@@ -8010,19 +8024,25 @@ class FlexibleAgentRuntime:
                     return
                 self.error_logger.error(f"Background task {item.request_id} failed: {err_msg}")
                 clipped = err_msg if len(err_msg) <= 3000 else err_msg[:2800].rstrip() + "\n\n[truncated]"
-                await self.send_long_message(
+                _elapsed, chunk_count = await self.send_long_message(
                     item.chat_id,
                     f"⚠️ Background task error ({self.config.active_backend}): {clipped}",
                     request_id=item.request_id,
                     purpose="bg-error",
                 )
+                receipt_delivered = chunk_count > 0
 
         except Exception as e:
+            receipt_error = str(e)
             self._mark_error(str(e))
             self.error_logger.exception(
                 f"Unhandled error in _on_background_complete for {item.request_id}: {e}"
             )
         finally:
+            runtime_cross_session.record_turn_result(
+                self, item, assistant_text=receipt_text, response=receipt_response,
+                error=receipt_error, delivered=receipt_delivered, completion_path="background",
+            )
             getattr(self, "_background_request_ids", set()).discard(item.request_id)
             registry = getattr(self, "_request_meta_by_id", None)
             if isinstance(registry, dict):
