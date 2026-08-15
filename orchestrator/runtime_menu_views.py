@@ -202,6 +202,84 @@ def model_menu_text(
     )
 
 
+def thinking_output_text(
+    *,
+    enabled: bool,
+    her_backend: bool,
+    reasoning_available: bool,
+    commentary_available: bool,
+) -> str:
+    """Render backend-aware reasoning ownership without growing the runtime."""
+
+    commentary_fact = (
+        "<b>HER Persona commentary</b> · <code>OWNED BY /commentary</code>"
+        if her_backend
+        else (
+            "<b>Model commentary</b> · "
+            f"<code>{'AVAILABLE' if commentary_available else 'NOT EXPOSED'}</code>"
+        )
+    )
+    if enabled and her_backend:
+        consequence = (
+            "For HER, shows genuine provider-returned reasoning only; "
+            "Persona reports stay under /commentary."
+        )
+    elif enabled:
+        consequence = (
+            "Shows model-authored interim commentary and genuine "
+            "provider-returned reasoning when available."
+        )
+    elif her_backend:
+        consequence = (
+            "HER provider reasoning is hidden; /commentary and /verbose are unaffected."
+        )
+    else:
+        consequence = (
+            "Model commentary and provider reasoning are hidden. "
+            "Progress and typing are unaffected."
+        )
+    return setting_card(
+        "💭",
+        "Thinking output",
+        current=f"<b>{status_label(enabled)}</b>",
+        facts=[
+            "<b>Provider reasoning</b> · "
+            f"<code>{'AVAILABLE' if reasoning_available else 'NOT EXPOSED'}</code>",
+            commentary_fact,
+            "<b>Saved</b> · workspace setting",
+        ],
+        consequence=consequence,
+        action="Changes apply immediately and persist across reboot.",
+    )
+
+
+def her_commentary_text(*, enabled: bool, effort: str) -> str:
+    """Render the HER-only Persona commentary ownership contract."""
+
+    return setting_card(
+        "🌿",
+        "HER commentary",
+        current=f"<b>{status_label(enabled)}</b>",
+        facts=[
+            f"<b>HER effort</b> · <code>{html.escape(effort)}</code>",
+            "<b>Medium</b> · may emit the model-authored Persona acknowledgement",
+            "<b>High+</b> · may also emit model-authored material progress/Replan reports",
+            "<b>Delivery</b> · one durable message per stable event identity",
+            "<b>Neutral runtime leases</b> · technical /verbose only",
+            "<b>Independent</b> · does not change /think or /verbose",
+            "<b>Saved</b> · workspace setting",
+        ],
+        consequence=(
+            "HER shows only explicit model-authored Persona reports here; "
+            "technical telemetry and provider reasoning stay separate."
+            if enabled
+            else "Optional HER Persona acknowledgements and interim reports are "
+            "hidden; final and required control messages remain visible."
+        ),
+        action="Use /commentary on, /commentary off, or the buttons below.",
+    )
+
+
 def claw_provider_menu_text(
     *,
     current_provider: str | None,

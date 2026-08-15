@@ -237,6 +237,31 @@ thinking, tool, and usage events, but HASHI remains responsible for deciding whi
 events are visible and how final delivery is promoted. Encrypted or provider-redacted
 reasoning must never be reconstructed or exposed.
 
+Every mapped HER event carries a stable logical `event_id` and one explicit
+presentation owner: `technical`, `user_commentary`, `reasoning`, `final`,
+`control`, or `internal`. It also retains bounded origin, phase, revision,
+required-delivery, and provenance metadata. Raw audit and bounded local activity
+publication happen before display filtering. A request-scoped delivery ledger
+then suppresses replay by event identity and dispatches the event to exactly one
+owner:
+
+- `/verbose` accepts only technical planning, tool, test, validation, retry,
+  compaction, session, and runtime telemetry;
+- `/commentary` accepts only explicit model-authored Persona acknowledgement or
+  interim-report events;
+- `/think` accepts only genuine provider-returned reasoning or explicit
+  provider-redaction notices;
+- final and required control events use mandatory lanes outside all three
+  optional switches.
+
+Effort controls event generation, never a second presentation gate. A direct
+TaskFrame acknowledgement is buffered until the initial frame establishes
+whether `direct_response=true`; direct answers are classified as `final` and
+delivered once by the existing post-generation final lane, never first as
+commentary. Deterministic TaskFrame summaries and neutral runtime leases are
+technical telemetry rather than guessed Persona speech. The configured
+`system_md` remains the only Persona source.
+
 Provider reasoning deltas are an exact byte-fragment contract. HER must preserve
 leading, trailing, and whitespace-only fragments from the provider stream; HASHI
 concatenates those raw fragments without trimming or guessing token boundaries. This

@@ -15,6 +15,10 @@ from telegram.error import RetryAfter
 from orchestrator import runtime_pipeline, runtime_retry, telegram_stream_policy
 from orchestrator import telegram_delivery_failover as failover
 from adapters.stream_events import (
+    DELIVERY_CONTROL,
+    DELIVERY_FINAL,
+    DELIVERY_TECHNICAL,
+    DELIVERY_USER_COMMENTARY,
     KIND_ACKNOWLEDGEMENT,
     KIND_COMMENTARY,
     KIND_PROGRESS,
@@ -701,6 +705,10 @@ async def test_medium_claw_sends_one_visible_task_acknowledgement():
     event = StreamEvent(
         kind=KIND_ACKNOWLEDGEMENT,
         summary="I will inspect the requested logs and report only the findings.",
+        event_id="req-1:ack:initial",
+        delivery_class=DELIVERY_USER_COMMENTARY,
+        origin="her_planner",
+        phase="initial",
     )
     await feedback.on_stream_event(event)
     await feedback.on_stream_event(event)
@@ -734,9 +742,25 @@ async def test_medium_claw_acknowledgement_composes_with_request_activity():
         audit_collector=None,
     )
 
-    await feedback.on_stream_event(StreamEvent(kind=KIND_PROGRESS, summary="Task started"))
     await feedback.on_stream_event(
-        StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary="I will inspect the requested logs.")
+        StreamEvent(
+            kind=KIND_PROGRESS,
+            summary="Task started",
+            event_id="req-1:technical:start",
+            delivery_class=DELIVERY_TECHNICAL,
+            origin="her_runtime",
+            phase="initial",
+        )
+    )
+    await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT,
+            summary="I will inspect the requested logs.",
+            event_id="req-1:ack:initial",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_planner",
+            phase="initial",
+        )
     )
 
     assert published == [
@@ -771,7 +795,15 @@ async def test_high_her_commentary_delivers_independently_of_think_and_verbose()
 
     assert feedback.on_stream_event is not None
     await feedback.on_stream_event(
-        StreamEvent(kind=KIND_COMMENTARY, summary="Sunny is still checking the verified results. ☀️")
+        StreamEvent(
+            kind=KIND_COMMENTARY,
+            summary="Sunny is still checking the verified results. ☀️",
+            event_id="req-1:commentary:replan:1",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_planner",
+            phase="replan",
+            revision=1,
+        )
     )
 
     assert len(sent) == 1
@@ -800,17 +832,32 @@ async def test_her_commentary_off_suppresses_acknowledgement_and_progress_live()
     )
 
     await feedback.on_stream_event(
-        StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary="Sunny will inspect the request. ☀️")
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT,
+            summary="Sunny will inspect the request. ☀️",
+            event_id="req-1:ack:initial",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_planner",
+            phase="initial",
+        )
     )
     await feedback.on_stream_event(
-        StreamEvent(kind=KIND_COMMENTARY, summary="Sunny has a verified update. ☀️")
+        StreamEvent(
+            kind=KIND_COMMENTARY,
+            summary="Sunny has a verified update. ☀️",
+            event_id="req-1:commentary:replan:1",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_planner",
+            phase="replan",
+            revision=1,
+        )
     )
 
     assert sent == []
 
 
 @pytest.mark.asyncio
-async def test_medium_her_does_not_deliver_periodic_commentary():
+async def test_her_router_trusts_emitted_commentary_without_rechecking_effort():
     runtime = _runtime()
     runtime.config.active_backend = "her"
     runtime.backend_manager.current_backend.effort = "medium"
@@ -830,18 +877,35 @@ async def test_medium_her_does_not_deliver_periodic_commentary():
     )
 
     await feedback.on_stream_event(
-        StreamEvent(kind=KIND_COMMENTARY, summary="Sunny has a progress update. ☀️")
+        StreamEvent(
+            kind=KIND_COMMENTARY,
+            summary="Sunny has a progress update. ☀️",
+            event_id="req-1:commentary:replan:1",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_planner",
+            phase="replan",
+            revision=1,
+        )
     )
     await feedback.on_stream_event(
-        StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary="Sunny will inspect the request. ☀️")
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT,
+            summary="Sunny will inspect the request. ☀️",
+            event_id="req-1:ack:initial",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_planner",
+            phase="initial",
+        )
     )
 
-    assert len(sent) == 1
-    assert sent[0][2]["_purpose"] == "task_acknowledgement"
+    assert [entry[2]["_purpose"] for entry in sent] == [
+        "task_commentary",
+        "task_acknowledgement",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_non_deliverable_her_activity_disables_persona_lease():
+async def test_non_deliverable_her_activity_persists_without_presentation():
     runtime = _runtime()
     runtime.config.active_backend = "her"
     runtime.backend_manager.current_backend.effort = "high"
@@ -859,11 +923,56 @@ async def test_non_deliverable_her_activity_disables_persona_lease():
     )
 
     assert feedback.on_stream_event is not None
-    assert getattr(feedback.on_stream_event, "her_commentary_delivery_enabled") is False
+    assert feedback.her_message_router is not None
     await feedback.on_stream_event(
-        StreamEvent(kind=KIND_COMMENTARY, summary="This stays local and is not delivered.")
+        StreamEvent(
+            kind=KIND_COMMENTARY,
+            summary="This stays local and is not delivered.",
+            event_id="req-1:commentary:replan:1",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_planner",
+            phase="replan",
+            revision=1,
+        )
     )
     assert published == [("req-1", KIND_COMMENTARY)]
+
+
+@pytest.mark.asyncio
+async def test_required_her_control_is_visible_with_all_optional_channels_off():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.current_backend.effort = "high"
+    runtime._commentary = False
+    runtime._verbose = False
+    runtime._think = False
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+    sent = []
+
+    async def _send_text(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+    await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_PROGRESS,
+            summary="HER permission required for browser control",
+            event_id="req-1:control:permission:1",
+            delivery_class=DELIVERY_CONTROL,
+            origin="her_runtime",
+            phase="execution",
+            required=True,
+        )
+    )
+
+    assert len(sent) == 1
+    assert sent[0][2]["_purpose"] == "her_control"
 
 
 @pytest.mark.asyncio
@@ -1796,6 +1905,58 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat():
     assert runtime.audit_followups[0]["audit_collector"] == "audit"
     assert runtime.hchat_routes == [("req-1", "visible text")]
     assert runtime.maintenance_events[-1][0] == "send_success"
+
+
+@pytest.mark.asyncio
+async def test_her_direct_response_stream_event_is_not_sent_before_final_delivery():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.current_backend.effort = "medium"
+    runtime._commentary = True
+    runtime._verbose = False
+    runtime._think = False
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+    item = _item(prompt="hello")
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        item,
+        audit_active=False,
+        audit_collector=None,
+    )
+    await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT,
+            summary="complete direct answer",
+            event_id="req-1:final",
+            delivery_class=DELIVERY_FINAL,
+            origin="her_planner",
+            phase="finalization",
+            required=True,
+        )
+    )
+
+    assert not hasattr(runtime, "sent_message")
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        SimpleNamespace(text="complete direct answer"),
+        visible_text="complete direct answer",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+        her_message_router=feedback.her_message_router,
+    )
+
+    assert runtime.sent_message["text"] == "complete direct answer"
+    records = feedback.her_message_router.ledger.snapshot()
+    assert [record["status"] for record in records if record["event_id"] == "req-1:final"] == [
+        "delivered"
+    ]
 
 
 @pytest.mark.asyncio

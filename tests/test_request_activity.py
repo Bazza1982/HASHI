@@ -24,6 +24,13 @@ def test_request_activity_tracks_lifecycle_and_stream_events() -> None:
             current=12,
             total=20,
             unit="pages",
+            event_id="req-0001:reasoning:1",
+            delivery_class="reasoning",
+            origin="provider",
+            phase="execution",
+            revision=2,
+            required=False,
+            provenance="provider_returned",
             timestamp=12.0,
         ),
     )
@@ -44,6 +51,13 @@ def test_request_activity_tracks_lifecycle_and_stream_events() -> None:
     assert result["events"][2]["current"] == 12.0
     assert result["events"][2]["total"] == 20.0
     assert result["events"][2]["unit"] == "pages"
+    assert result["events"][2]["event_id"] == "req-0001:reasoning:1"
+    assert result["events"][2]["delivery_class"] == "reasoning"
+    assert result["events"][2]["origin"] == "provider"
+    assert result["events"][2]["phase"] == "execution"
+    assert result["events"][2]["revision"] == 2.0
+    assert result["events"][2]["required"] is False
+    assert result["events"][2]["provenance"] == "provider_returned"
 
 
 def test_request_activity_poll_uses_sequence_cursor() -> None:

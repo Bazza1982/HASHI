@@ -125,6 +125,7 @@ class InteractiveFeedback:
     stream_callback: Any | None
     think_flush_task: asyncio.Task | None
     on_stream_event: Any | None
+    her_message_router: Any | None
 
 
 def begin_queue_item(runtime, item) -> QueueItemStart:
@@ -576,86 +577,112 @@ def wrap_her_persona_stream(
     backend,
     delivery_requested: bool,
     delivery_blocked: bool = False,
+    audit_collector=None,
+    activity_store=None,
 ):
-    """Deliver HER acknowledgement/commentary independently of think/verbose."""
-    from adapters.stream_events import KIND_ACKNOWLEDGEMENT, KIND_COMMENTARY
+    """Create the sole HER presentation router after audit/activity persistence."""
+    from adapters.stream_events import KIND_ACKNOWLEDGEMENT
+    from orchestrator.her_message_router import HERDeliveryJournal, HERMessageRouter
 
     normalized_backend = str(backend_name or "").strip().lower()
-    effort = str(getattr(backend, "effort", "low") or "low").strip().lower()
-    acknowledgement_supported = effort != "low"
-    commentary_supported = effort in {"high", "xhigh", "max", "max+"}
-    eligible = (
-        normalized_backend in {"her", "claw-cli"}
-        and delivery_requested
-        and not delivery_blocked
-        and acknowledgement_supported
-    )
-    if normalized_backend in {"her", "claw-cli"}:
-        runtime.logger.info(
-            f"HER acknowledgement policy and persona commentary: request={item.request_id} "
-            f"eligible={eligible} enabled={bool(getattr(runtime, '_commentary', True))} "
-            f"effort={effort} acknowledgement={acknowledgement_supported} "
-            f"periodic={commentary_supported} delivery_requested={delivery_requested} "
-            f"blocked={delivery_blocked}"
-        )
-    if not eligible:
+    if normalized_backend not in {"her", "claw-cli"}:
         return presentation_callback
 
-    acknowledgement_sent = False
+    effort = str(getattr(backend, "effort", "low") or "low").strip().lower()
+    runtime.logger.info(
+        f"HER acknowledgement policy and message router: request={item.request_id} "
+        f"commentary={bool(getattr(runtime, '_commentary', True))} "
+        f"verbose={bool(getattr(runtime, '_verbose', False))} "
+        f"think={bool(getattr(runtime, '_think', False))} effort={effort} "
+        f"delivery_requested={delivery_requested} blocked={delivery_blocked}"
+    )
 
-    async def _deliver(text: str, *, purpose: str) -> None:
+    async def _send_event(event, *, purpose: str):
+        text = str(getattr(event, "summary", "") or "").strip()
+        if not text:
+            return
         runtime.logger.info(
-            f"HER persona delivery started: request={item.request_id} "
+            f"HER message delivery started: request={item.request_id} "
             f"purpose={purpose} text_len={len(text)}"
         )
-        try:
-            if hasattr(runtime, "_send_text"):
-                await runtime._send_text(
-                    item.chat_id,
-                    text,
-                    _request_id=item.request_id,
-                    _purpose=purpose,
-                )
-            else:
-                await runtime.send_long_message(
-                    item.chat_id,
-                    text,
-                    request_id=item.request_id,
-                    purpose=purpose,
-                )
-            label = "acknowledgement" if purpose == "task_acknowledgement" else "commentary"
-            runtime.logger.info(
-                f"HER {label} delivered: request={item.request_id} "
-                f"purpose={purpose} text_len={len(text)}"
+        if hasattr(runtime, "_send_text") and len(text) <= 3_500:
+            result = await runtime._send_text(
+                item.chat_id,
+                text,
+                _request_id=item.request_id,
+                _purpose=purpose,
             )
-        except Exception as exc:
-            runtime.logger.warning(
-                f"HER persona delivery failed: request={item.request_id} "
-                f"purpose={purpose} error_type={type(exc).__name__}"
+        else:
+            result = await runtime.send_long_message(
+                item.chat_id,
+                text,
+                request_id=item.request_id,
+                purpose=purpose,
             )
+        label = "acknowledgement" if purpose == "task_acknowledgement" else purpose
+        runtime.logger.info(
+            f"HER {label} delivered: request={item.request_id} "
+            f"purpose={purpose} text_len={len(text)}"
+        )
+        return result
 
-    async def _her_persona_callback(event):
-        nonlocal acknowledgement_sent
-        kind = getattr(event, "kind", None)
-        text = str(getattr(event, "summary", "") or "").strip()
-        commentary_enabled = bool(getattr(runtime, "_commentary", True))
-        if (
-            commentary_enabled
-            and kind == KIND_ACKNOWLEDGEMENT
-            and text
-            and not acknowledgement_sent
-        ):
-            acknowledgement_sent = True
-            await _deliver(text, purpose="task_acknowledgement")
-        elif commentary_enabled and commentary_supported and kind == KIND_COMMENTARY and text:
-            await _deliver(text, purpose="task_commentary")
-        if callable(presentation_callback):
-            result = presentation_callback(event)
-            if inspect.isawaitable(result):
-                await result
+    async def _commentary_presenter(event):
+        purpose = (
+            "task_acknowledgement"
+            if getattr(event, "kind", None) == KIND_ACKNOWLEDGEMENT
+            else "task_commentary"
+        )
+        return await _send_event(event, purpose=purpose)
 
-    setattr(_her_persona_callback, "her_commentary_delivery_enabled", True)
-    return _her_persona_callback
+    async def _control_presenter(event):
+        return await _send_event(event, purpose="her_control")
+
+    async def _persist_event(event):
+        if audit_collector is not None:
+            try:
+                await audit_collector.record(event)
+            except Exception as exc:
+                runtime.logger.warning(
+                    f"HER audit stream event dropped: request={item.request_id} "
+                    f"error_type={type(exc).__name__}"
+                )
+        if activity_store is not None:
+            activity_store.publish_stream(item.request_id, event)
+
+    delivery_journal = HERDeliveryJournal(
+        runtime.workspace_dir / "backend_state" / "her_delivery_events.jsonl",
+        request_id=item.request_id,
+    )
+
+    def _record_durable_delivery(record):
+        if record.get("delivery_class") in {
+            "user_commentary",
+            "final",
+            "control",
+        }:
+            delivery_journal(record)
+
+    router = HERMessageRouter(
+        request_id=item.request_id,
+        logger=runtime.logger,
+        technical_presenter=presentation_callback,
+        reasoning_presenter=presentation_callback,
+        commentary_presenter=_commentary_presenter,
+        control_presenter=_control_presenter,
+        verbose_enabled=lambda: bool(getattr(runtime, "_verbose", False)),
+        think_enabled=lambda: bool(getattr(runtime, "_think", False)),
+        commentary_enabled=lambda: bool(getattr(runtime, "_commentary", True)),
+        persist_event=_persist_event,
+        ledger_observer=_record_durable_delivery,
+        delivery_requested=delivery_requested,
+        delivery_blocked=delivery_blocked,
+    )
+
+    async def callback(event):
+        await router.route(event)
+
+    setattr(callback, "her_message_router", router)
+    return callback
 
 
 async def setup_interactive_feedback(
@@ -682,6 +709,10 @@ async def setup_interactive_feedback(
     verbose_delivery_enabled = delivery_requested and runtime._verbose and not delivery_blocked
     think_delivery_enabled = delivery_requested and runtime._think and not delivery_blocked
     backend = runtime.backend_manager.current_backend
+    normalized_backend = str(
+        getattr(runtime.config, "active_backend", "") or ""
+    ).strip().lower()
+    is_her_backend = normalized_backend in {"her", "claw-cli"}
 
     if delivery_requested:
         runtime.logger.info(
@@ -753,7 +784,7 @@ async def setup_interactive_feedback(
             stream_callback = runtime._make_stream_callback(
                 event_queue=stream_queue,
                 think_buffer=runtime._think_buffer if think_delivery_enabled else None,
-                audit_collector=audit_collector,
+                audit_collector=None if is_her_backend else audit_collector,
             )
             escalation_task = asyncio.create_task(
                 runtime._streaming_display_loop(
@@ -773,14 +804,16 @@ async def setup_interactive_feedback(
         if stream_callback is None:
             stream_callback = runtime._make_stream_callback(
                 think_buffer=runtime._think_buffer,
-                audit_collector=audit_collector,
+                audit_collector=None if is_her_backend else audit_collector,
             )
         think_flush_task = asyncio.create_task(
             runtime._thinking_flush_loop(item.chat_id, stop_typing)
         )
 
-    if stream_callback is None and audit_active:
+    if stream_callback is None and audit_active and not is_her_backend:
         stream_callback = runtime._make_stream_callback(audit_collector=audit_collector)
+
+    activity_store = getattr(runtime, "request_activity", None)
 
     stream_callback = wrap_her_persona_stream(
         runtime,
@@ -790,16 +823,15 @@ async def setup_interactive_feedback(
         backend=backend,
         delivery_requested=delivery_requested,
         delivery_blocked=delivery_blocked,
+        audit_collector=audit_collector if is_her_backend else None,
+        activity_store=activity_store if is_her_backend else None,
     )
+    her_message_router = getattr(stream_callback, "her_message_router", None)
 
-    # Local clients can observe the exact verbose/thinking events intentionally
-    # emitted by the backend even when Telegram presentation is disabled.  The
-    # activity store is bounded and credential-redacted by construction.
-    her_commentary_delivery_enabled = bool(
-        getattr(stream_callback, "her_commentary_delivery_enabled", False)
-    )
-    activity_store = getattr(runtime, "request_activity", None)
-    if activity_store is not None:
+    # Local clients can observe the exact backend events and their presentation
+    # ownership even when Telegram presentation is disabled.  The activity
+    # store is bounded and credential-redacted by construction.
+    if activity_store is not None and not is_her_backend:
         presentation_callback = stream_callback
 
         async def _activity_callback(event):
@@ -809,11 +841,6 @@ async def setup_interactive_feedback(
                 if inspect.isawaitable(result):
                     await result
 
-        setattr(
-            _activity_callback,
-            "her_commentary_delivery_enabled",
-            her_commentary_delivery_enabled,
-        )
         stream_callback = _activity_callback
 
     on_stream_event = stream_callback if (not item.silent or audit_active or activity_store is not None) else None
@@ -827,6 +854,7 @@ async def setup_interactive_feedback(
         stream_callback=stream_callback,
         think_flush_task=think_flush_task,
         on_stream_event=on_stream_event,
+        her_message_router=her_message_router,
     )
 
 
@@ -1251,6 +1279,7 @@ async def handle_success_delivery(
     backend_elapsed_s: float,
     audit_collector,
     answer_stream_state: StreamedAnswerState | None = None,
+    her_message_router=None,
 ) -> None:
     runtime_retry.clear_completed_interrupted_task(runtime, item)
     if runtime._should_buffer_during_transfer(item.request_id):
@@ -1312,6 +1341,15 @@ async def handle_success_delivery(
         )
     else:
         send_elapsed_s, chunk_count = 0.0, 0
+    if her_message_router is not None:
+        her_message_router.record_final_delivery(
+            response_text,
+            delivered=bool(
+                stream_finalization.final_delivered
+                or stream_finalization.fallback_required
+            ),
+            error=stream_finalization.error,
+        )
     await runtime._send_voice_reply(item.chat_id, response_text, item.request_id)
     runtime._schedule_audit_followup(
         item,

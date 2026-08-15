@@ -143,6 +143,7 @@ async def process_queue(runtime: Any) -> None:
                             text="⏳ Still running in the background — I'll notify you here when done! 📬",
                         )
                 setattr(item, "_audit_collector", audit_collector)
+                setattr(item, "_her_message_router", feedback.her_message_router)
                 runtime._register_background_task(generation.generation_task, item)
                 runtime.logger.info(
                     f"Detached {item.request_id} to background "
@@ -235,6 +236,7 @@ async def process_queue(runtime: Any) -> None:
                         backend_elapsed_s=backend_elapsed,
                         audit_collector=audit_collector,
                         answer_stream_state=feedback.answer_stream_state,
+                        her_message_router=feedback.her_message_router,
                     )
             else:
                 from orchestrator.runtime_control import consume_user_interrupt

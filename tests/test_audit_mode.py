@@ -176,6 +176,11 @@ async def test_telemetry_collector_keeps_raw_events_for_audit():
             kind=KIND_THINKING,
             summary="Need to inspect adapter mapping.",
             detail="thinking_chars=32;source=reasoning",
+            event_id="req-audit:reasoning:1",
+            delivery_class="reasoning",
+            origin="provider",
+            phase="execution",
+            provenance="provider_returned",
         )
     )
     await collector.record(
@@ -194,6 +199,9 @@ async def test_telemetry_collector_keeps_raw_events_for_audit():
     assert data["thinking_sources"] == ["reasoning", "reasoning_details.encrypted"]
     assert data["action_event_count"] == 1
     assert data["observable_actions"][0]["detail"] == "rm -rf /tmp/example"
+    assert data["observable_thinking"][0]["event_id"] == "req-audit:reasoning:1"
+    assert data["observable_thinking"][0]["delivery_class"] == "reasoning"
+    assert data["observable_thinking"][0]["provenance"] == "provider_returned"
 
 
 @pytest.mark.asyncio

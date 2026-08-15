@@ -114,6 +114,7 @@ class AuditTelemetryCollector:
     """Collect raw backend stream events without sharing think-display dedupe state."""
 
     max_events: int = 400
+    max_summary_chars: int = 4000
     max_detail_chars: int = 4000
     events: list[dict[str, Any]] = field(default_factory=list)
 
@@ -126,10 +127,21 @@ class AuditTelemetryCollector:
         self.events.append(
             {
                 "kind": str(getattr(event, "kind", "") or ""),
-                "summary": str(getattr(event, "summary", "") or ""),
+                "summary": str(getattr(event, "summary", "") or "")[
+                    : self.max_summary_chars
+                ],
                 "detail": detail,
                 "tool_name": str(getattr(event, "tool_name", "") or ""),
                 "file_path": str(getattr(event, "file_path", "") or ""),
+                "event_id": str(getattr(event, "event_id", "") or ""),
+                "delivery_class": str(
+                    getattr(event, "delivery_class", "") or ""
+                ),
+                "origin": str(getattr(event, "origin", "") or ""),
+                "phase": str(getattr(event, "phase", "") or ""),
+                "revision": getattr(event, "revision", None),
+                "required": bool(getattr(event, "required", False)),
+                "provenance": str(getattr(event, "provenance", "") or ""),
                 "timestamp": float(getattr(event, "timestamp", 0.0) or 0.0),
             }
         )

@@ -88,9 +88,9 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("reboot", "cmd_reboot", "Hot restart agents", "execution"),
     CommandSpec("resend", "cmd_resend", "Replay previous model or Bridge output", "execution"),
     CommandSpec("retry", "cmd_retry", "Reset context and rerun last prompt", "execution"),
-    CommandSpec("verbose", "cmd_verbose", "Show progress and tool summaries", "session"),
+    CommandSpec("verbose", "cmd_verbose", "Show technical execution telemetry", "session"),
     CommandSpec("think", "cmd_think", "Show commentary and provider reasoning", "session"),
-    CommandSpec("commentary", "cmd_commentary", "Control HER persona progress updates", "session"),
+    CommandSpec("commentary", "cmd_commentary", "Show HER Persona interim reports", "session"),
     CommandSpec("typing", "cmd_typing", "Control Telegram typing indicators", "session"),
     CommandSpec(
         "stream",
