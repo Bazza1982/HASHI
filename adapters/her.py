@@ -53,7 +53,7 @@ PERMISSION_MODE_RANK = {"read-only": 0, "workspace-write": 1, "danger-full-acces
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OLLAMA_DUMMY_API_KEY = "__ollama_dummy__"
 HER_DISPLAY_NAME = "HASHI Engine Runtime (HER)"
-HER_VERSION = "0.1.0-hashi.19"
+HER_VERSION = "0.1.0-hashi.20"
 PACKAGED_CLAW_RUNTIME = "hashi-her"
 PACKAGED_CLAW_MANIFEST_VERSION = 1
 CLAW_RUNTIME_POLICIES = {"prefer-packaged", "require-packaged", "system-only"}
@@ -1475,15 +1475,58 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
         )
     if kind == "semantic_compaction":
         status = str(event.get("status") or "unknown")
-        reason = str(event.get("reason") or "")
+        reason = redact_secret_text(str(event.get("reason") or ""))[:500]
+        removed = int(event.get("removed_message_count") or 0)
+        timeout_seconds = int(event.get("timeout_seconds") or 0)
+        timeout_source = str(event.get("timeout_source") or "unknown")
+        elapsed_ms = int(event.get("elapsed_ms") or 0)
+        estimated_tokens = int(event.get("estimated_input_tokens") or 0)
+        trigger_phase = str(event.get("trigger_phase") or "unknown")
+        request_id = str(event.get("request_id") or "")
+        session_id = str(event.get("session_id") or "")
+        unchanged = bool(event.get("original_context_unchanged"))
+        will_continue = bool(event.get("will_continue"))
+        token_label = (
+            f"~{estimated_tokens / 1000:.0f}K tokens"
+            if estimated_tokens >= 1000
+            else f"~{estimated_tokens} tokens"
+        )
+        if status == "started":
+            summary = (
+                "🧠 semantic_compaction started"
+                f" · {token_label} · budget {timeout_seconds}s ({timeout_source})"
+                f" · {trigger_phase}"
+            )
+        elif status == "completed":
+            summary = (
+                "✅ semantic_compaction completed"
+                f" · removed {removed} · elapsed {elapsed_ms / 1000:.1f}s"
+                " · raw history retained"
+            )
+        elif status == "failed":
+            context_state = (
+                "original context unchanged" if unchanged else "context state unknown"
+            )
+            continuation = "continuing" if will_continue else "cannot continue"
+            summary = (
+                "⚠️ semantic_compaction failed"
+                f" · {context_state} · {continuation}"
+                f" · {reason or 'unknown reason'}"
+            )
+        else:
+            summary = f"HER semantic compaction {status}"
         return StreamEvent(
             kind=KIND_PROGRESS,
-            summary=f"HER semantic compaction {status}"[:500],
+            summary=summary[:500],
             detail=(
-                f"removed={int(event.get('removed_message_count') or 0)};"
-                f"timeout_seconds={int(event.get('timeout_seconds') or 0)};"
-                f"reason={reason}"
-            )[:2000],
+                f"request_id={request_id};session_id={session_id};"
+                f"trigger_phase={trigger_phase};"
+                f"estimated_input_tokens={estimated_tokens};"
+                f"removed={removed};timeout_seconds={timeout_seconds};"
+                f"timeout_source={timeout_source};elapsed_ms={elapsed_ms};"
+                f"original_context_unchanged={str(unchanged).lower()};"
+                f"will_continue={str(will_continue).lower()};reason={reason}"
+            )[:4000],
         )
     if kind == "terminal_diagnostic":
         classification = str(event.get("classification") or "unknown")
@@ -3559,6 +3602,23 @@ class HERAdapter(BaseBackend):
         task_env = self._task_env()
         if task_env_overrides:
             task_env.update({str(key): str(value) for key, value in task_env_overrides.items()})
+        # Semantic compaction shares HASHI's existing /timeout policy. Inject
+        # the effective request values after internal task overrides so
+        # maintenance cannot silently create a competing timeout contract.
+        task_env.update(
+            {
+                "CLAW_SEMANTIC_COMPACTION_IDLE_TIMEOUT_SECONDS": str(
+                    self.IDLE_TIMEOUT_SEC
+                ),
+                "CLAW_SEMANTIC_COMPACTION_IDLE_TIMEOUT_SOURCE": self._timeout_source(
+                    "idle_timeout_sec"
+                ),
+                "CLAW_REQUEST_HARD_TIMEOUT_SECONDS": str(self.HARD_TIMEOUT_SEC),
+                "CLAW_REQUEST_HARD_TIMEOUT_SOURCE": self._timeout_source(
+                    "hard_timeout_sec"
+                ),
+            }
+        )
         async with self._active_process_lock:
             if self._stopping_active_processes:
                 raise ClawCommandError(
@@ -3796,6 +3856,9 @@ class HERAdapter(BaseBackend):
                 except json.JSONDecodeError:
                     self.logger.warning("Ignoring non-JSON HER stream line: %r", line[:200])
                     continue
+                if event.get("kind") == "semantic_compaction":
+                    event.setdefault("request_id", request_id)
+                    event.setdefault("session_id", self._session_id or "")
                 self._persist_control_event(request_id, event)
                 self._persist_stream_diagnostic_event(request_id, event)
                 if event.get("kind") == "run_started" and track_session_identity:
@@ -3858,10 +3921,21 @@ class HERAdapter(BaseBackend):
                     )
                 elif kind == "semantic_compaction":
                     self.logger.info(
-                        "HER semantic compaction: status=%s removed=%s timeout_seconds=%s reason=%s",
+                        "HER semantic compaction: request=%s session=%s status=%s "
+                        "trigger_phase=%s estimated_input_tokens=%s removed=%s "
+                        "timeout_seconds=%s timeout_source=%s elapsed_ms=%s "
+                        "original_context_unchanged=%s will_continue=%s reason=%s",
+                        event.get("request_id") or request_id,
+                        event.get("session_id") or "unknown",
                         event.get("status") or "unknown",
+                        event.get("trigger_phase") or "unknown",
+                        event.get("estimated_input_tokens") or 0,
                         event.get("removed_message_count") or 0,
                         event.get("timeout_seconds") or 0,
+                        event.get("timeout_source") or "unknown",
+                        event.get("elapsed_ms") or 0,
+                        bool(event.get("original_context_unchanged")),
+                        bool(event.get("will_continue")),
                         str(event.get("reason") or "")[:1000],
                     )
                 elif kind == "terminal_diagnostic":
@@ -3935,12 +4009,13 @@ class HERAdapter(BaseBackend):
                 stream_log.write(b"\n")
 
     def _persist_control_event(self, request_id: str, event: Mapping[str, Any]) -> None:
-        """Correlate raw max control records with their HASHI request."""
+        """Correlate control and compaction records with their HASHI request."""
         if str(event.get("kind") or "") not in {
             "task_plan",
             "independent_review",
             "control_invocation",
             "max_plus_checkpoint",
+            "semantic_compaction",
         }:
             return
         path = self.config.workspace_dir / "claw_control_events.jsonl"

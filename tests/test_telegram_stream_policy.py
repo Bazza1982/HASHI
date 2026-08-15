@@ -427,6 +427,77 @@ async def test_verbose_stream_display_obeys_shared_edit_budget(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_her_compaction_start_and_failure_are_both_visible_with_verbose(tmp_path):
+    edits = []
+
+    class Bot:
+        async def edit_message_text(self, **kwargs):
+            edits.append(kwargs)
+
+    runtime = SimpleNamespace(
+        name="sunny",
+        workspace_dir=tmp_path / "workspaces" / "sunny",
+        config=SimpleNamespace(
+            active_backend="her",
+            extra={
+                "telegram_stream_enabled": True,
+                "answer_stream_edit_interval_s": 0.01,
+                "answer_stream_max_edits": 5,
+            },
+        ),
+        telegram_connected=True,
+        app=SimpleNamespace(bot=Bot()),
+        telegram_logger=SimpleNamespace(info=lambda _message: None, warning=lambda _message: None),
+    )
+    runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+    event_queue = asyncio.Queue(maxsize=200)
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        FlexibleAgentRuntime._streaming_display_loop(
+            runtime,
+            123,
+            SimpleNamespace(message_id=77),
+            "req-compaction",
+            stop_event,
+            event_queue,
+        )
+    )
+
+    await event_queue.put(
+        StreamEvent(
+            kind=KIND_PROGRESS,
+            summary=(
+                "🧠 semantic_compaction started · ~351K tokens "
+                "· budget 3595s (user override) · post_tool"
+            ),
+        )
+    )
+    for _ in range(30):
+        if edits:
+            break
+        await asyncio.sleep(0.01)
+    await event_queue.put(
+        StreamEvent(
+            kind=KIND_PROGRESS,
+            summary=(
+                "⚠️ semantic_compaction failed · original context unchanged "
+                "· continuing · provider call timed out"
+            ),
+        )
+    )
+    for _ in range(30):
+        if len(edits) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    stop_event.set()
+    await task
+
+    assert any("semantic_compaction started" in edit["text"] for edit in edits)
+    assert any("semantic_compaction failed" in edit["text"] for edit in edits)
+    assert any("original context unchanged" in edit["text"] for edit in edits)
+
+
+@pytest.mark.asyncio
 async def test_verbose_and_think_receive_disjoint_event_classes():
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.config = SimpleNamespace(active_backend="codex-cli")

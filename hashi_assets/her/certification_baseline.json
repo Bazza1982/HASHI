@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "runtime_version": "0.1.0-hashi.19",
+  "runtime_version": "0.1.0-hashi.20",
   "upstream_runtime": "Claw 0.1.3-hashi.33",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "79be4613e37d03781713253a04aa64aedf3f1902",
+  "source_commit": "5ed5b30ef2ab0f80ab6d4fd08a1b7b64e77faf05",
   "rust_workspace": {
     "command": [
       "cargo",
@@ -21,6 +21,47 @@
       "-D",
       "warnings"
     ],
-    "expected_upstream_diagnostics": []
+    "expected_upstream_diagnostics": [
+      {"package": "api", "path": "crates/api/src/client.rs", "line": 17, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/client.rs", "line": 24, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/http_client.rs", "line": 123, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/http_client.rs", "line": 149, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/http_client.rs", "line": 158, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 44, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 160, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 586, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 599, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 638, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 662, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 669, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 674, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 697, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 733, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 742, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 758, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 767, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/anthropic.rs", "line": 1313, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/mod.rs", "line": 685, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/openai_compat.rs", "line": 142, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/openai_compat.rs", "line": 356, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/openai_compat.rs", "line": 369, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/openai_compat.rs", "line": 495, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/openai_compat.rs", "line": 541, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/openai_compat.rs", "line": 652, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/openai_compat.rs", "line": 764, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/openai_compat.rs", "line": 1129, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/openai_compat.rs", "line": 1137, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/openai_compat.rs", "line": 1535, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/openai_compat.rs", "line": 1692, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/providers/openai_compat.rs", "line": 1811, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/sse.rs", "line": 28, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/sse.rs", "line": 41, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/sse.rs", "line": 53, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/sse.rs", "line": 82, "lint": "result_large_err"},
+      {"package": "api", "path": "crates/api/src/sse.rs", "line": 90, "lint": "result_large_err"},
+      {"package": "runtime", "path": "crates/runtime/src/trident.rs", "line": 720, "lint": "needless_borrows_for_generic_args"},
+      {"package": "runtime", "path": "crates/runtime/src/trident.rs", "line": 751, "lint": "needless_borrows_for_generic_args"},
+      {"package": "runtime", "path": "crates/runtime/src/trident.rs", "line": 753, "lint": "needless_borrows_for_generic_args"}
+    ]
   }
 }
