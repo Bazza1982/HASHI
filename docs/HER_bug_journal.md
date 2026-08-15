@@ -67,8 +67,52 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260814-029` | Fixed — live verification pending | P2 | HIGH/XHIGH shared checkpoints reviewed stale task frames without current tool evidence and repeated the same divergence review | `high_effort_reserves_turns_for_review_and_validation`; `high_effort_deduplicates_repeated_unplanned_tool_reviews` |
 | `HER-20260814-030` | Verified | P1 | fixed-mode planner saw only the incremental current prompt, not the persistent session view used by the primary agent | `fixed_session_planner_sees_resumed_options_at_every_planning_effort`; `medium_plus_plans_replans_and_reports_non_blocking_tool_divergence` |
 | `HER-20260814-031` | Verified | P1 | long fixed sessions could make the planner answer as the conversational agent instead of returning TaskFrame JSON | `planner_request_preserves_session_prefix_and_appends_nonpersistent_control`; fixed-session direct-response effort matrix |
+| `HER-20260815-032` | Fixed — live verification pending | P0 | isolated scheduler choices and CONTINUE checkpoints were absent from the primary conversation context | `test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_task`; `test_her_isolated_continuation_resumes_exact_checkpoint_without_replacing_primary` |
 
 ## Historical entries
+
+### HER-20260815-032 — isolated scheduler replies were absent from primary context
+
+- **Status:** Fixed — live verification pending
+- **Severity:** P0
+- **Expected:** every scheduler-owned turn leaves a durable, no-op receipt that is
+  injected into the next primary turn in fixed and flex modes. A short reply such as
+  `CONTINUE`, `A`, or `comment A, C` binds to the newest delivered unresolved prompt,
+  and an isolated HER checkpoint resumes without replacing the primary session.
+- **Actual:** scheduler turns intentionally ran in `isolated_per_run`, but their
+  completion report existed only in Telegram and the isolated HER session. The main
+  session could therefore resolve the user's short reply against an older question or
+  A/B/C choice from its own history.
+- **User-visible impact:** the agent could continue the wrong task or apply a selected
+  option to the wrong proposal, including an unintended externally visible action.
+- **Root cause:** scheduler session isolation was introduced without a corresponding
+  cross-session completion receipt, context injection path, or deterministic reply
+  binding. Existing continuation recovery covered `/stop` only.
+- **Fix:** HASHI now journals bounded scheduler/isolated completion receipts atomically,
+  injects them as read-only context in both modes, tracks pending continuation/choice/
+  question ownership, and supersedes stale prompts when a newer scheduler or primary
+  interaction is delivered. Matching HER replies resume the exact isolated session;
+  incompatible-model fallbacks remain isolated rather than entering the primary
+  session. Failed continuation attempts retain the last retryable checkpoint.
+- **Known-bad HASHI checkpoint:** `cdf1036d`.
+- **Fix commit:** `d99dc1ad`.
+- **Regression tests:** `tests/test_runtime_cross_session.py`; fixed/flex pipeline
+  precedence, foreground/background delivery persistence, and exact HER checkpoint
+  resume tests in the affected runtime and adapter suites.
+- **Automated verification:** targeted affected suites passed `246/246`; the complete
+  HASHI test directory reported `2146 passed, 6 failed, 3 skipped`. The six failures
+  match the pre-existing five packaged-HER debug-lab contracts and one legacy media
+  payload assertion. Ruff, Python compilation, diff checks, and the 8059-line active
+  runtime architecture ratchet passed (`8058` lines).
+- **Required live retest:** reboot one test agent, run an isolated scheduled turn that
+  ends with `CONTINUE`, resume it from the primary chat, then repeat with overlapping
+  primary and scheduler A/B/C prompts and prove the newest delivered prompt owns the
+  reply without changing the primary HER session ID.
+- **Remaining risk:** running agents have not loaded `d99dc1ad`; live provider and
+  Telegram delivery evidence is pending.
+- **Secrets/redaction checked:** yes; the entry contains no private task text or
+  credentials.
+- **Recurrence count:** 0
 
 ### HER-20260814-031 — long fixed sessions displaced the planner protocol
 
