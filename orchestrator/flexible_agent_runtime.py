@@ -236,6 +236,12 @@ class FlexibleAgentRuntime:
         self._verbose = telegram_stream_policy.get_display_preference(self, "verbose")
         # The same JSON survives sessions, runtime recreation, and host reboot.
         self._think = telegram_stream_policy.get_display_preference(self, "think")
+        # HER persona updates are deliberately independent from think/verbose.
+        self._commentary = telegram_stream_policy.get_display_preference(
+            self,
+            "commentary",
+            default=True,
+        )
         # Load persisted Telegram notification preference (.notify_on presence = audible, absence = silent)
         self._notify_enabled: bool = (self.workspace_dir / ".notify_on").exists()
         self._think_buffer: list[str] = []
@@ -2026,7 +2032,8 @@ class FlexibleAgentRuntime:
         await query.answer()
 
     # ── toggle callback ──────────────────────────────────────────────────────────
-    # Handles: tgl:verbose:on/off, tgl:think:on/off, tgl:typing:on/off,
+    # Handles: tgl:verbose:on/off, tgl:think:on/off, tgl:commentary:on/off,
+    #          tgl:typing:on/off,
     #          tgl:mode:fixed/flex,
     #          tgl:retry:response/prompt, tgl:whisper:small/medium/large,
     #          tgl:active:on/off/<minutes>, tgl:reboot:min/max/same/<name>
@@ -2070,6 +2077,22 @@ class FlexibleAgentRuntime:
                 reply_markup=self._think_keyboard(),
             )
             await query.answer(f"Think {status_label(self._think)}")
+
+        elif target == "commentary":
+            if not self._commentary_available():
+                await query.edit_message_text(
+                    self._commentary_unavailable_text(),
+                    parse_mode="HTML",
+                )
+                await query.answer("HER commentary is unavailable for this backend")
+                return
+            self._set_commentary_enabled(value == "on")
+            await query.edit_message_text(
+                self._commentary_menu_text(),
+                parse_mode="HTML",
+                reply_markup=self._commentary_keyboard(),
+            )
+            await query.answer(f"Commentary {status_label(self._commentary)}")
 
         elif target == "typing":
             enabled = value == "on"
@@ -3701,6 +3724,99 @@ class FlexibleAgentRuntime:
             self._think_menu_text(),
             parse_mode="HTML",
             reply_markup=self._think_keyboard(),
+        )
+
+    def _commentary_available(self) -> bool:
+        return str(getattr(self.config, "active_backend", "") or "").lower() in {
+            "her",
+            "claw-cli",
+        }
+
+    def _set_commentary_enabled(self, enabled: bool) -> None:
+        self._commentary = bool(enabled)
+        marker = self.workspace_dir / ".commentary_off"
+        if self._commentary:
+            marker.unlink(missing_ok=True)
+        else:
+            marker.touch()
+        telegram_stream_policy.set_display_preference(
+            self,
+            "commentary",
+            self._commentary,
+        )
+
+    def _commentary_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                selected_label("On", self._commentary),
+                callback_data="tgl:commentary:on",
+            ),
+            InlineKeyboardButton(
+                selected_label("Off", not self._commentary),
+                callback_data="tgl:commentary:off",
+            ),
+        ]])
+
+    def _commentary_unavailable_text(self) -> str:
+        backend = str(getattr(self.config, "active_backend", "unknown") or "unknown")
+        return setting_card(
+            "🌿",
+            "HER commentary",
+            current="<b>UNAVAILABLE</b>",
+            facts=[
+                "<b>Availability</b> · <code>HER ONLY</code>",
+                f"<b>Current backend</b> · <code>{html.escape(backend)}</code>",
+            ],
+            consequence=(
+                "This switch is available only for the HER backend. The current backend "
+                "continues to follow its own commentary, reasoning, and display rules."
+            ),
+            action="Nothing was changed.",
+        )
+
+    def _commentary_menu_text(self) -> str:
+        backend = getattr(getattr(self, "backend_manager", None), "current_backend", None)
+        effort = str(getattr(backend, "effort", "unknown") or "unknown").upper()
+        return setting_card(
+            "🌿",
+            "HER commentary",
+            current=f"<b>{status_label(self._commentary)}</b>",
+            facts=[
+                f"<b>HER effort</b> · <code>{html.escape(effort)}</code>",
+                "<b>Medium</b> · persona acknowledgement only",
+                "<b>High+</b> · acknowledgement plus persona progress updates",
+                "<b>Long tasks</b> · first update around 90s; then 3m target / 5m maximum",
+                "<b>Independent</b> · does not change /think or /verbose",
+                "<b>Saved</b> · workspace setting",
+            ],
+            consequence=(
+                "HER sends concise, persona-consistent progress messages without exposing raw reasoning."
+                if self._commentary
+                else "HER acknowledgements and routine persona progress messages are hidden."
+            ),
+            action="Use /commentary on, /commentary off, or the buttons below.",
+        )
+
+    async def cmd_commentary(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if not self._commentary_available():
+            await self._reply_text(
+                update,
+                self._commentary_unavailable_text(),
+                parse_mode="HTML",
+            )
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        if args and args[0] in {"on", "true", "1"}:
+            self._set_commentary_enabled(True)
+        elif args and args[0] in {"off", "false", "0"}:
+            self._set_commentary_enabled(False)
+        await self._reply_text(
+            update,
+            self._commentary_menu_text(),
+            parse_mode="HTML",
+            reply_markup=self._commentary_keyboard(),
         )
 
     def _typing_keyboard(self) -> InlineKeyboardMarkup:
@@ -7292,6 +7408,8 @@ class FlexibleAgentRuntime:
                         self._thinking_chars_this_req += max(0, int(value))
             if think_buffer is not None:
                 if event.kind == KIND_COMMENTARY:
+                    if _engine in {"her", "claw-cli"}:
+                        return
                     # Commentary is already a complete model-authored update.
                     # Preserve it verbatim instead of folding it into the short
                     # provider-reasoning chunk accumulator.

@@ -64,6 +64,7 @@ from orchestrator.runtime_common import (
 from orchestrator import runtime_nudge
 from orchestrator import runtime_menu_views
 from orchestrator import runtime_retry
+from orchestrator import runtime_pipeline
 from orchestrator import runtime_timeout
 from orchestrator import runtime_scheduler_recovery
 from orchestrator import runtime_workzone
@@ -125,6 +126,11 @@ class BridgeAgentRuntime:
         self.last_error_at: datetime | None = None
         self.last_error_summary: str | None = None
         self._think = telegram_stream_policy.get_display_preference(self, "think")
+        self._commentary = telegram_stream_policy.get_display_preference(
+            self,
+            "commentary",
+            default=True,
+        )
         self._think_buffer: list[str] = []
         self._openrouter_think_chunk: str = ""
         self._last_openrouter_think_snippet: str | None = None
@@ -1435,6 +1441,8 @@ class BridgeAgentRuntime:
                     _logger.debug(f"Stream event queue full, dropping: {event.summary[:40]!r}")
             if think_buffer is not None:
                 if event.kind == KIND_COMMENTARY:
+                    if _engine in {"her", "claw-cli"}:
+                        return
                     if self._openrouter_think_chunk:
                         think_buffer.append(self._openrouter_think_chunk)
                         self._openrouter_think_chunk = ""
@@ -1995,7 +2003,12 @@ class BridgeAgentRuntime:
                     _stream_queue = None
                     _stream_callback = None
                     _think_flush_task = None
-                    _use_stream = self._verbose or self._think
+                    _her_persona_stream = (
+                        str(self.config.engine or "").lower() in {"her", "claw-cli"}
+                        and str(getattr(self.backend, "effort", "low") or "low").lower()
+                        != "low"
+                    )
+                    _use_stream = self._verbose or self._think or _her_persona_stream
                     if _use_stream:
                         if self._verbose:
                             _stream_queue = asyncio.Queue(maxsize=200)
@@ -2003,6 +2016,14 @@ class BridgeAgentRuntime:
                             event_queue=_stream_queue,
                             think_buffer=self._think_buffer if self._think else None,
                         )
+                    _stream_callback = runtime_pipeline.wrap_her_persona_stream(
+                        self,
+                        item,
+                        _stream_callback,
+                        backend_name=self.config.engine,
+                        backend=self.backend,
+                        delivery_requested=True,
+                    )
                     if self._verbose and placeholder is not None:
                         escalation_task = asyncio.create_task(
                             self._streaming_display_loop(
@@ -4520,6 +4541,83 @@ class BridgeAgentRuntime:
             parse_mode="HTML",
         )
 
+    def _commentary_available(self) -> bool:
+        return str(getattr(self.config, "engine", "") or "").lower() in {
+            "her",
+            "claw-cli",
+        }
+
+    def _set_commentary_enabled(self, enabled: bool) -> None:
+        self._commentary = bool(enabled)
+        marker = self.config.workspace_dir / ".commentary_off"
+        if self._commentary:
+            marker.unlink(missing_ok=True)
+        else:
+            marker.touch()
+        telegram_stream_policy.set_display_preference(
+            self,
+            "commentary",
+            self._commentary,
+        )
+
+    def _commentary_unavailable_text(self) -> str:
+        backend = str(getattr(self.config, "engine", "unknown") or "unknown")
+        return setting_card(
+            "🌿",
+            "HER commentary",
+            current="<b>UNAVAILABLE</b>",
+            facts=[
+                "<b>Availability</b> · <code>HER ONLY</code>",
+                f"<b>Current backend</b> · <code>{html.escape(backend)}</code>",
+            ],
+            consequence=(
+                "This switch is available only for the HER backend. The current backend "
+                "continues to follow its own commentary, reasoning, and display rules."
+            ),
+            action="Nothing was changed.",
+        )
+
+    def _commentary_menu_text(self) -> str:
+        effort = str(getattr(self.backend, "effort", "unknown") or "unknown").upper()
+        return setting_card(
+            "🌿",
+            "HER commentary",
+            current=f"<b>{status_label(self._commentary)}</b>",
+            facts=[
+                f"<b>HER effort</b> · <code>{html.escape(effort)}</code>",
+                "<b>Medium</b> · persona acknowledgement only",
+                "<b>High+</b> · acknowledgement plus persona progress updates",
+                "<b>Long tasks</b> · first update around 90s; then 3m target / 5m maximum",
+                "<b>Independent</b> · does not change /think or /verbose",
+                "<b>Saved</b> · workspace setting",
+            ],
+            consequence=(
+                "HER sends concise, persona-consistent progress messages without exposing raw reasoning."
+                if self._commentary
+                else "HER acknowledgements and routine persona progress messages are hidden."
+            ),
+            action="Use /commentary on or /commentary off.",
+        )
+
+    async def cmd_commentary(self, update, context):
+        if update.effective_user.id != self.global_config.authorized_id:
+            return
+        if not self._commentary_available():
+            await update.message.reply_text(
+                self._commentary_unavailable_text(),
+                parse_mode="HTML",
+            )
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        if args and args[0] in {"on", "true", "1"}:
+            self._set_commentary_enabled(True)
+        elif args and args[0] in {"off", "false", "0"}:
+            self._set_commentary_enabled(False)
+        await update.message.reply_text(
+            self._commentary_menu_text(),
+            parse_mode="HTML",
+        )
+
     async def cmd_typing(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
             return
@@ -4792,6 +4890,7 @@ class BridgeAgentRuntime:
             BotCommand("skill", "Browse and run skills"),
             BotCommand("exp", "Run a task with the EXP guidebook"),
             BotCommand("think", "Show commentary and reasoning [on|off]"),
+            BotCommand("commentary", "Control HER persona updates [on|off]"),
             BotCommand("verbose", "Show progress and tool summaries [on|off]"),
             BotCommand("typing", "Control Telegram typing indicators [on|off]"),
             BotCommand("jobs", "Show cron and heartbeat jobs"),
@@ -4856,6 +4955,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CommandHandler("resend", self.cmd_resend))
         self.app.add_handler(CommandHandler("retry", self.cmd_retry))
         self.app.add_handler(CommandHandler("think", self.cmd_think))
+        self.app.add_handler(CommandHandler("commentary", self.cmd_commentary))
         self.app.add_handler(CommandHandler("verbose", self.cmd_verbose))
         self.app.add_handler(CommandHandler("typing", self.cmd_typing))
         self.app.add_handler(CommandHandler("credit", self.cmd_credit))

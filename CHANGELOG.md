@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HER persona commentary control** — added a default-on, workspace-persisted
+  `/commentary` switch that is independent from `/think` and `/verbose`.
+  Medium effort keeps the opening persona acknowledgement; High and above also
+  deliver persona milestone updates and a background-safe 90-second-first,
+  three-minute-target, five-minute-maximum lease. Other backends report the
+  command as HER-only without changing their settings.
 - **Native Windows HER `0.1.0-hashi.19` package** — built the Windows x86-64
   runtime from the same pinned clean source as Linux `.19`, embedded the exact
   source SHA, and passed native version, doctor, status, and stdin-capability

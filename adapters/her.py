@@ -21,6 +21,7 @@ from adapters import her_habits as _her_habits
 from adapters import stream_events as _stream_events
 from adapters.base import BackendCapabilities, BackendResponse, BaseBackend, TokenUsage
 from adapters.stream_events import (
+    KIND_COMMENTARY,
     KIND_ERROR,
     KIND_PROGRESS,
     KIND_TEXT_DELTA,
@@ -106,6 +107,13 @@ CLAW_EXECUTION_EFFORT_ITERATIONS = {
     "max": 384,
     "max+": 512,
 }
+
+HER_COMMENTARY_EFFORTS = frozenset({"high", "xhigh", "max", "max+"})
+HER_COMMENTARY_FIRST_UPDATE_S = 90.0
+HER_COMMENTARY_MIN_GAP_S = 90.0
+HER_COMMENTARY_TARGET_INTERVAL_S = 180.0
+HER_COMMENTARY_HARD_INTERVAL_S = 300.0
+HER_COMMENTARY_ACTIVITY_GRACE_S = 30.0
 
 _CLAW_INCOMPLETE_STATUSES = {"incomplete"}
 _CLAW_INCOMPLETE_STOP_REASONS = {"budget_exhausted", "max_iterations", "no_final_text"}
@@ -395,6 +403,218 @@ def _claw_persona_emoji(prompt: str) -> str:
         prompt,
     )
     return _claw_clean_persona_value(match.group(1), max_chars=8) if match else ""
+
+
+def _claw_commentary_items(value: Any, *, limit: int = 2) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for raw_item in value:
+        item = " ".join(str(raw_item).split()).strip()
+        if item:
+            items.append(item[:180])
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _claw_uses_chinese(*values: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for value in values for char in value)
+
+
+def _build_claw_task_commentary(frame: Mapping[str, Any], *, prompt: str) -> str:
+    """Render a TaskFrame milestone with the configured agent persona."""
+    completed = _claw_commentary_items(frame.get("completed"))
+    remaining = _claw_commentary_items(frame.get("remaining_work"))
+    failures = _claw_commentary_items(frame.get("failures"), limit=1)
+    next_action = " ".join(str(frame.get("next_action") or "").split()).strip()[:180]
+    if not any((completed, remaining, failures, next_action)):
+        return ""
+
+    persona_name = _claw_persona_name(prompt)
+    address = _claw_persona_address(prompt)
+    emoji = _claw_persona_emoji(prompt)
+    try:
+        frame_text = json.dumps(frame, ensure_ascii=False)
+    except (TypeError, ValueError):
+        frame_text = ""
+    use_chinese = _claw_uses_chinese(prompt, frame_text)
+
+    if use_chinese:
+        greeting = f"{address}，" if address else ""
+        speaker = persona_name or "我"
+        if completed:
+            more = f"等 {len(completed)} 项" if len(completed) > 1 else ""
+            opening = f"{greeting}{speaker}来报个进度：已经完成「{completed[0]}」{more}。"
+        elif failures:
+            opening = f"{greeting}{speaker}来报个进度：处理中遇到「{failures[0]}」。"
+        else:
+            opening = f"{greeting}{speaker}来报个进度：任务仍在处理中。"
+        if next_action:
+            follow_up = f"接下来会继续「{next_action}」。"
+        elif remaining:
+            follow_up = f"接下来会继续处理「{remaining[0]}」。"
+        else:
+            follow_up = "目前正在收尾；有可确认的结果后会马上向您汇报。"
+        if failures and completed:
+            follow_up = f"目前还需要处理「{failures[0]}」；{follow_up}"
+        return f"{opening}{follow_up}{emoji}"[:500]
+
+    greeting = f"{address}, " if address else ""
+    speaker = persona_name or "I"
+    if completed:
+        more = f" and {len(completed) - 1} other item" if len(completed) > 1 else ""
+        if len(completed) > 2:
+            more += "s"
+        verb = "have" if speaker == "I" else "has"
+        opening = f'{greeting}{speaker} {verb} a progress update: completed “{completed[0]}”{more}.'
+    elif failures:
+        opening = f'{greeting}{speaker} has a progress update: “{failures[0]}” needs attention.'
+    else:
+        opening = f"{greeting}{speaker} has a progress update: the task is still in progress."
+    if next_action:
+        follow_up = f' Next, {speaker} will continue with “{next_action}”.'
+    elif remaining:
+        follow_up = f' Next, {speaker} will continue with “{remaining[0]}”.'
+    else:
+        verb = "am" if speaker == "I" else "is"
+        follow_up = (
+            f" {speaker} {verb} wrapping up and will report as soon as there is a confirmed result."
+        )
+    return f"{opening}{follow_up}{emoji}"[:500]
+
+
+def _build_claw_commentary_lease(prompt: str) -> str:
+    """Return a persona-safe lease update without inventing task progress."""
+    persona_name = _claw_persona_name(prompt)
+    address = _claw_persona_address(prompt)
+    emoji = _claw_persona_emoji(prompt)
+    if _claw_uses_chinese(prompt):
+        greeting = f"{address}，" if address else ""
+        speaker = persona_name or "我"
+        return (
+            f"{greeting}{speaker}还在继续处理这项任务，目前仍在运行中。"
+            f"暂时没有新的、可确认的结果；一有可靠进展，{speaker}就马上向您汇报。{emoji}"
+        )[:500]
+    greeting = f"{address}, " if address else ""
+    speaker = persona_name or "I"
+    verb = "am" if speaker == "I" else "is"
+    return (
+        f"{greeting}{speaker} {verb} still working on this task. There is no new confirmed result "
+        f"to report yet; I will update you as soon as there is reliable progress. {emoji}"
+    ).strip()[:500]
+
+
+class _HERCommentaryController:
+    """Prefer milestone commentary while enforcing a bounded visible lease."""
+
+    def __init__(
+        self,
+        callback,
+        *,
+        prompt: str,
+        progress_enabled: bool,
+        first_update_s: float = HER_COMMENTARY_FIRST_UPDATE_S,
+        min_gap_s: float = HER_COMMENTARY_MIN_GAP_S,
+        target_interval_s: float = HER_COMMENTARY_TARGET_INTERVAL_S,
+        hard_interval_s: float = HER_COMMENTARY_HARD_INTERVAL_S,
+        activity_grace_s: float = HER_COMMENTARY_ACTIVITY_GRACE_S,
+    ) -> None:
+        self._callback = callback
+        self._prompt = prompt
+        self.progress_enabled = bool(progress_enabled)
+        self._first_update_s = max(0.01, float(first_update_s))
+        self._min_gap_s = max(0.0, float(min_gap_s))
+        self._target_interval_s = max(0.01, float(target_interval_s))
+        self._hard_interval_s = max(self._target_interval_s, float(hard_interval_s))
+        self._activity_grace_s = max(0.0, float(activity_grace_s))
+        now = time.monotonic()
+        self._last_visible_at = now
+        self._last_activity_at = now
+        self._last_summary = ""
+        self._has_progress_update = False
+        self._pending_commentary: StreamEvent | None = None
+        self._closed = False
+        self._changed = asyncio.Event()
+        self._emit_lock = asyncio.Lock()
+
+    async def forward(self, event: StreamEvent) -> None:
+        now = time.monotonic()
+        self._last_activity_at = now
+        self._changed.set()
+        if event.kind == KIND_ACKNOWLEDGEMENT:
+            async with self._emit_lock:
+                self._last_visible_at = time.monotonic()
+                self._last_summary = (event.summary or "").strip()
+                await self._callback(event)
+            return
+        if event.kind != KIND_COMMENTARY:
+            await self._callback(event)
+            return
+        if not self.progress_enabled or not (event.summary or "").strip():
+            return
+        if (event.summary or "").strip() == self._last_summary:
+            return
+        if now - self._last_visible_at < self._min_gap_s:
+            self._pending_commentary = event
+            return
+        await self._emit(event, allow_repeat=False)
+
+    async def _emit(self, event: StreamEvent, *, allow_repeat: bool) -> None:
+        async with self._emit_lock:
+            if self._closed:
+                return
+            summary = (event.summary or "").strip()
+            if not summary or (not allow_repeat and summary == self._last_summary):
+                return
+            self._last_visible_at = time.monotonic()
+            self._last_summary = summary
+            self._has_progress_update = True
+            self._pending_commentary = None
+            self._changed.set()
+            await self._callback(event)
+
+    async def run(self) -> None:
+        if not self.progress_enabled:
+            return
+        while not self._closed:
+            self._changed.clear()
+            now = time.monotonic()
+            if not self._has_progress_update:
+                target_deadline = self._last_visible_at + self._first_update_s
+                hard_deadline = target_deadline
+            else:
+                target_deadline = self._last_visible_at + self._target_interval_s
+                hard_deadline = self._last_visible_at + self._hard_interval_s
+
+            deadline = target_deadline
+            if now >= target_deadline and now < hard_deadline:
+                recent_activity_until = self._last_activity_at + self._activity_grace_s
+                deadline = min(max(now, recent_activity_until), hard_deadline)
+
+            if now < deadline:
+                try:
+                    await asyncio.wait_for(self._changed.wait(), timeout=deadline - now)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            if self._closed:
+                break
+            if self._pending_commentary is not None:
+                await self._emit(self._pending_commentary, allow_repeat=False)
+                continue
+            await self._emit(
+                StreamEvent(
+                    kind=KIND_COMMENTARY,
+                    summary=_build_claw_commentary_lease(self._prompt),
+                    detail="HER persona commentary lease",
+                ),
+                allow_repeat=True,
+            )
+
+    def close(self) -> None:
+        self._closed = True
+        self._changed.set()
 
 
 def _build_claw_incomplete_report(result: ClawTaskResult, *, prompt: str) -> tuple[str, dict[str, Any]]:
@@ -1306,7 +1526,11 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
     return StreamEvent(kind=KIND_PROGRESS, summary=f"HER event: {kind}"[:200])
 
 
-def _claw_jsonl_to_stream_events(event: Mapping[str, Any]) -> list[StreamEvent]:
+def _claw_jsonl_to_stream_events(
+    event: Mapping[str, Any],
+    *,
+    commentary_prompt: str = "",
+) -> list[StreamEvent]:
     """Expand one HER JSONL record into user-visible verbose activities."""
     events: list[StreamEvent] = []
     primary = _claw_jsonl_to_stream_event(event)
@@ -1347,6 +1571,17 @@ def _claw_jsonl_to_stream_events(event: Mapping[str, Any]) -> list[StreamEvent]:
     frame = event.get("frame") if isinstance(event.get("frame"), Mapping) else {}
     assurance = frame.get("assurance") if isinstance(frame.get("assurance"), Mapping) else {}
     phase = str(event.get("phase") or "update")
+
+    if phase != "initial":
+        commentary = _build_claw_task_commentary(frame, prompt=commentary_prompt)
+        if commentary:
+            events.append(
+                StreamEvent(
+                    kind=KIND_COMMENTARY,
+                    summary=commentary,
+                    detail=f"HER task plan phase={phase}"[:1000],
+                )
+            )
 
     def _items(name: str) -> list[str]:
         value = assurance.get(name)
@@ -2853,13 +3088,33 @@ class HERAdapter(BaseBackend):
                 self.effort,
             )
 
+        commentary_controller: _HERCommentaryController | None = None
+        commentary_task: asyncio.Task | None = None
+        request_stream_callback = on_stream_event
+        if on_stream_event is not None:
+            commentary_delivery_enabled = bool(
+                getattr(on_stream_event, "her_commentary_delivery_enabled", True)
+            )
+            commentary_controller = _HERCommentaryController(
+                on_stream_event,
+                prompt=prompt,
+                progress_enabled=(
+                    not silent
+                    and commentary_delivery_enabled
+                    and self.effort in HER_COMMENTARY_EFFORTS
+                ),
+            )
+            request_stream_callback = commentary_controller.forward
+            if commentary_controller.progress_enabled:
+                commentary_task = asyncio.create_task(commentary_controller.run())
+
         async def execute_request() -> ClawTaskResult:
             if not persistent_session:
                 return await self._run_task_async(
                     task_prompt,
                     resume=None,
                     request_id=request_id,
-                    on_stream_event=on_stream_event,
+                    on_stream_event=request_stream_callback,
                     track_session_identity=False,
                 )
 
@@ -2870,7 +3125,7 @@ class HERAdapter(BaseBackend):
                         task_prompt,
                         resume=previous,
                         request_id=request_id,
-                        on_stream_event=on_stream_event,
+                        on_stream_event=request_stream_callback,
                         track_session_identity=True,
                     )
                 except (asyncio.CancelledError, Exception) as exc:
@@ -2921,6 +3176,20 @@ class HERAdapter(BaseBackend):
             if habit_config.enabled:
                 self._record_failed_turn_meditation_skip(request_id=request_id, exc=exc)
             return BackendResponse(text="", duration_ms=self._duration_ms(started), error=str(exc), is_success=False)
+        finally:
+            if commentary_controller is not None:
+                commentary_controller.close()
+            if commentary_task is not None:
+                commentary_task.cancel()
+                try:
+                    await commentary_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    self.logger.warning(
+                        "HER commentary lease stopped after callback failure: %s",
+                        type(exc).__name__,
+                    )
 
         if on_stream_event is not None:
             for tool in result.tool_uses:
@@ -3127,6 +3396,7 @@ class HERAdapter(BaseBackend):
                 command,
                 request_id,
                 on_stream_event,
+                commentary_prompt=prompt,
                 track_session_identity=track_session_identity,
                 activity_state=activity_state,
             )
@@ -3286,6 +3556,7 @@ class HERAdapter(BaseBackend):
         request_id: str,
         on_stream_event: StreamCallback = None,
         *,
+        commentary_prompt: str = "",
         track_session_identity: bool = True,
         activity_state: list[float] | None = None,
     ) -> tuple[bytes, bytes]:
@@ -3401,7 +3672,10 @@ class HERAdapter(BaseBackend):
                         redact_secret_text(str(event.get("output_preview") or ""))[:1000],
                     )
                 if on_stream_event is not None:
-                    for stream_event in _claw_jsonl_to_stream_events(event):
+                    for stream_event in _claw_jsonl_to_stream_events(
+                        event,
+                        commentary_prompt=commentary_prompt,
+                    ):
                         await on_stream_event(stream_event)
 
         async def read_stderr() -> None:

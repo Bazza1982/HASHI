@@ -16,6 +16,7 @@ from orchestrator import runtime_pipeline, runtime_retry, telegram_stream_policy
 from orchestrator import telegram_delivery_failover as failover
 from adapters.stream_events import (
     KIND_ACKNOWLEDGEMENT,
+    KIND_COMMENTARY,
     KIND_PROGRESS,
     KIND_REVIEW,
     KIND_TEXT_DELTA,
@@ -744,6 +745,125 @@ async def test_medium_claw_acknowledgement_composes_with_request_activity():
     ]
     assert len(sent) == 1
     assert sent[0][2]["_purpose"] == "task_acknowledgement"
+
+
+@pytest.mark.asyncio
+async def test_high_her_commentary_delivers_independently_of_think_and_verbose():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.current_backend.effort = "high"
+    runtime._commentary = True
+    runtime._think = False
+    runtime._verbose = False
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+    sent = []
+
+    async def _send_text(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.on_stream_event is not None
+    await feedback.on_stream_event(
+        StreamEvent(kind=KIND_COMMENTARY, summary="Sunny is still checking the verified results. ☀️")
+    )
+
+    assert len(sent) == 1
+    assert sent[0][0] == 123
+    assert sent[0][2]["_purpose"] == "task_commentary"
+
+
+@pytest.mark.asyncio
+async def test_her_commentary_off_suppresses_acknowledgement_and_progress_live():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.current_backend.effort = "high"
+    runtime._commentary = False
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+    sent = []
+
+    async def _send_text(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    await feedback.on_stream_event(
+        StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary="Sunny will inspect the request. ☀️")
+    )
+    await feedback.on_stream_event(
+        StreamEvent(kind=KIND_COMMENTARY, summary="Sunny has a verified update. ☀️")
+    )
+
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_medium_her_does_not_deliver_periodic_commentary():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.current_backend.effort = "medium"
+    runtime._commentary = True
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+    sent = []
+
+    async def _send_text(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    await feedback.on_stream_event(
+        StreamEvent(kind=KIND_COMMENTARY, summary="Sunny has a progress update. ☀️")
+    )
+    await feedback.on_stream_event(
+        StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary="Sunny will inspect the request. ☀️")
+    )
+
+    assert len(sent) == 1
+    assert sent[0][2]["_purpose"] == "task_acknowledgement"
+
+
+@pytest.mark.asyncio
+async def test_non_deliverable_her_activity_disables_persona_lease():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.current_backend.effort = "high"
+    runtime._commentary = True
+    published = []
+    runtime.request_activity = SimpleNamespace(
+        publish_stream=lambda request_id, event: published.append((request_id, event.kind))
+    )
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(deliver_to_telegram=False),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.on_stream_event is not None
+    assert getattr(feedback.on_stream_event, "her_commentary_delivery_enabled") is False
+    await feedback.on_stream_event(
+        StreamEvent(kind=KIND_COMMENTARY, summary="This stays local and is not delivered.")
+    )
+    assert published == [("req-1", KIND_COMMENTARY)]
 
 
 @pytest.mark.asyncio
