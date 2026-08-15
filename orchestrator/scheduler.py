@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -58,11 +58,54 @@ def _fallback_supports_schedule(schedule: str) -> bool:
     if len(parts) != 5 or parts[2] != "*" or parts[3] != "*" or parts[4] != "*":
         return False
     try:
-        int(parts[0])
-        int(parts[1])
-        return True
+        minute = int(parts[0])
+        hour = int(parts[1])
+        return 0 <= minute <= 59 and 0 <= hour <= 23
     except (TypeError, ValueError):
         return False
+
+
+def validate_cron_schedule(schedule: str) -> tuple[bool, str | None]:
+    """Validate one five-field schedule against the active scheduler capability."""
+
+    value = str(schedule or "").strip()
+    if len(value.split()) != 5:
+        return False, "Cron schedule must contain exactly five fields."
+    if HAS_CRONITER:
+        try:
+            croniter(value, datetime.now().astimezone()).get_next(datetime)
+            return True, None
+        except (ValueError, KeyError) as exc:
+            return False, f"Invalid cron schedule: {exc}"
+    if _fallback_supports_schedule(value):
+        return True, None
+    return (
+        False,
+        "This runtime lacks croniter and supports only fixed daily minute/hour schedules.",
+    )
+
+
+def next_cron_occurrence(
+    schedule: str,
+    *,
+    now: datetime | None = None,
+) -> datetime:
+    """Return the next local occurrence or raise for an unsupported schedule."""
+
+    current = now or datetime.now().astimezone()
+    valid, error = validate_cron_schedule(schedule)
+    if not valid:
+        raise ValueError(error or "unsupported cron schedule")
+    if HAS_CRONITER:
+        return croniter(schedule, current).get_next(datetime)
+    minute_text, hour_text, *_rest = schedule.split()
+    candidate = current.replace(
+        hour=int(hour_text),
+        minute=int(minute_text),
+        second=0,
+        microsecond=0,
+    )
+    return candidate if candidate > current else candidate + timedelta(days=1)
 
 
 def _should_fire(schedule: str, last_run_ts: float, now_dt: datetime) -> float | None:
@@ -864,6 +907,21 @@ class TaskScheduler:
             if not exported:
                 scheduler_logger.info(f"No transcript entries to export for {agent_name}")
             return True
+        if action in {"her:dream", "skill:dream"}:
+            return await self._run_scheduler_action(
+                rt.invoke_her_dream(
+                    task_id=task_id,
+                    scheduled_for=(
+                        scheduled_for.astimezone().isoformat(timespec="minutes")
+                        if scheduled_for is not None
+                        else None
+                    ),
+                ),
+                task_kind="Cron",
+                task_id=task_id,
+                agent_name=agent_name,
+                timeout_s=SCHEDULER_SKILL_TIMEOUT_S,
+            )
         if action.startswith("skill:"):
             skill_id = action.split(":", 1)[1]
             args = recovery_header + (cron.get("args", "") or cron.get("prompt", ""))

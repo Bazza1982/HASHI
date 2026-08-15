@@ -1922,6 +1922,62 @@ async def test_claw_adapter_shutdown_kills_running_process(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_claw_adapter_shutdown_stops_all_concurrent_her_processes(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys, time
+        if sys.argv[1] == "version":
+            print(json.dumps({"kind": "version", "version": "0.1.0"}))
+        elif "--help" in sys.argv:
+            print("--output-format stream-json prompt --stdin")
+        else:
+            sys.stdin.read()
+            time.sleep(20)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={
+            "claw_binary_path": str(fake),
+            "permission_mode": "read-only",
+            "idle_timeout_sec": 30,
+            "hard_timeout_sec": 60,
+        },
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    assert await adapter.initialize() is True
+
+    foreground = asyncio.create_task(
+        adapter.generate_response("foreground", "req-foreground")
+    )
+    isolated = asyncio.create_task(
+        adapter.run_habit_dream_model("dream", request_id="req-dream")
+    )
+    for _ in range(100):
+        if len(adapter._active_processes) == 2:
+            break
+        await asyncio.sleep(0.02)
+    assert set(adapter._active_processes) == {"req-foreground", "req-dream"}
+
+    await adapter.shutdown()
+    foreground_result, isolated_result = await asyncio.gather(
+        foreground,
+        isolated,
+        return_exceptions=True,
+    )
+
+    assert foreground_result.is_success is False
+    assert isinstance(isolated_result, (ClawCommandError, ClawJsonError))
+    assert adapter._active_processes == {}
+    assert adapter.current_proc is None
+
+
+@pytest.mark.asyncio
 async def test_claw_adapter_enforces_idle_timeout_and_logs_effective_policy(tmp_path, caplog):
     fake = _write_exe(
         tmp_path / "claw",

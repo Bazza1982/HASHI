@@ -34,10 +34,14 @@ The default is disabled. Configuration is resolved in this order:
 The HER-only command surface is:
 
 - `/habit` — open the status, list, and action menu;
-- `/habit view <habit-id>` — inspect the complete active record;
+- `/habit view <reference>` — inspect a record by current list number, stable
+  `H-...` short reference, or full Habit ID;
 - `/habit on|off` — persist an agent-local operational override;
 - `/habit default` — remove that override and return to configured defaults;
-- `/habit delete <habit-id>` — confirm and move one record to the recoverable archive;
+- `/habit delete <reference>` — confirm and move one record to the recoverable archive;
+- `/habit protect <reference>` / `/habit unprotect <reference>` — confirm a
+  user-controlled lock change; protected records remain readable and retrievable
+  but cannot be changed by automatic Meditation or Dream maintenance;
 - `/habit delete all` — confirm and archive all active records;
 - `/habit reset` — confirm, create a recoverable snapshot, then clear active,
   archived, and Meditation job state while preserving the switch and audit log.
@@ -228,19 +232,44 @@ Recoverable reset snapshots live at:
 workspaces/<agent>/backend_state/her_habit_resets/<snapshot-id>/
 ```
 
-## Dream remains separate
+New and updated content is rejected rather than truncated when it exceeds the
+compact contract: title 48 characters/10 words, metadata 400 characters/60
+words, or body 2,000 characters/250 words. Existing over-limit records remain
+readable until their next canonical content replacement.
 
-`/skill dream` remains available for nightly, multi-run memory reflection. It
-does not read or write HER Habit files. Future Dream work may be designed later,
-but this implementation does not prescribe any relationship between Dream and
-Habit.
+## HER Habit Dream
+
+`/dream` is the HER-only whole-catalogue maintenance companion to per-run
+Meditation. It can run manually or through an agent-local validated cron
+schedule. Its isolated tool-free HER analysis may propose at most five closed
+operation groups: combine, rewrite, recoverable archive, or report a protected
+conflict. HASHI validates and commits the proposal; the model never writes
+Habit files.
+
+Before a commit, Dream verifies a catalogue fingerprint under the Habit write
+lock and retries stale analysis once. Every attempt, raw output, validation,
+before-state snapshot, transaction manifest, report fact, and full or partial
+undo is retained under:
+
+```text
+workspaces/<agent>/backend_state/her_habit_dream/
+```
+
+Interrupted commits and undo transactions roll back on HER initialization.
+Scheduled no-change, skip, and failure results are still delivered. On a
+non-HER backend Dream neither reads dormant Habits nor invokes another backend.
+`/skill dream` and legacy `skill:dream` schedules are compatibility-routed to
+the native command; the former generic memory/`AGENT.md` writer is fail-closed
+and existing legacy Dream files remain untouched historical data.
 
 ## Ownership checklist
 
 Before enabling `habit_meditation.enabled` for an agent:
 
 1. verify the active HER adapter declares `habit_pipeline_owner=adapter`;
-2. verify one foreground prompt and one adapter job journal are produced for an
+2. do not treat legacy Dream snapshots or general memory as HER Habit Dream
+   state;
+3. verify one foreground prompt and one adapter job journal are produced for an
    eligible request;
-3. capture a real create/update/delete, no-change, failure/retry, and Verbose
+4. capture a real create/update/delete, no-change, failure/retry, and Verbose
    notification smoke after loading the checkpoint.

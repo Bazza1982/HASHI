@@ -351,6 +351,114 @@ class SkillManager:
                 return job
         return None
 
+    def upsert_cron_job(
+        self,
+        *,
+        task_id: str,
+        agent_name: str,
+        schedule: str,
+        action: str,
+        enabled: bool,
+        note: str,
+    ) -> dict[str, Any]:
+        """Create or update one owned fixed-wall-clock cron definition."""
+
+        tasks = self._load_tasks()
+        crons = tasks.setdefault("crons", [])
+        existing = next((job for job in crons if job.get("id") == task_id), None)
+        if existing is not None and existing.get("agent") != agent_name:
+            raise ValueError(f"Cron task {task_id} belongs to another agent")
+        job = existing if existing is not None else {"id": task_id}
+        job.update(
+            {
+                "agent": agent_name,
+                "enabled": bool(enabled),
+                "schedule": str(schedule).strip(),
+                "action": str(action).strip(),
+                "note": str(note).strip(),
+                "updated_at": self._now(),
+            }
+        )
+        job.pop("time", None)
+        if existing is None:
+            job["created_at"] = job["updated_at"]
+            crons.append(job)
+        self._save_tasks(tasks)
+        return dict(job)
+
+    def migrate_legacy_dream_cron(
+        self,
+        *,
+        agent_name: str,
+        new_task_id: str,
+        backend_is_her: bool,
+    ) -> dict[str, Any]:
+        """Retire enabled generic Dream jobs without touching legacy data."""
+
+        tasks = self._load_tasks()
+        crons = tasks.setdefault("crons", [])
+        legacy_id = f"dream-{agent_name}-nightly"
+        legacy_jobs = [
+            job
+            for job in crons
+            if job.get("agent") == agent_name
+            and (
+                job.get("id") == legacy_id
+                or job.get("action") == "skill:dream"
+            )
+        ]
+        enabled_legacy = [job for job in legacy_jobs if bool(job.get("enabled"))]
+        canonical = next((job for job in crons if job.get("id") == new_task_id), None)
+        changed = False
+        created = False
+        now = self._now()
+
+        if enabled_legacy and backend_is_her and canonical is None:
+            source = enabled_legacy[0]
+            schedule = str(source.get("schedule") or "").strip()
+            if not schedule:
+                legacy_time = str(source.get("time") or "01:30").strip()
+                parts = legacy_time.split(":", 1)
+                if len(parts) == 2 and all(part.isdigit() for part in parts):
+                    schedule = f"{int(parts[1])} {int(parts[0])} * * *"
+                else:
+                    schedule = "30 1 * * *"
+            canonical = {
+                "id": new_task_id,
+                "agent": agent_name,
+                "enabled": True,
+                "schedule": schedule,
+                "action": "her:dream",
+                "note": f"[HER Dream] Habit maintenance for {agent_name}",
+                "created_at": now,
+                "updated_at": now,
+                "migrated_from": str(source.get("id") or legacy_id),
+            }
+            crons.append(canonical)
+            changed = True
+            created = True
+
+        for job in legacy_jobs:
+            if job.get("enabled"):
+                job["enabled"] = False
+                job["updated_at"] = now
+                job["migration_note"] = (
+                    f"Migrated to {new_task_id}."
+                    if backend_is_her
+                    else "Disabled because HER Dream requires the HER backend."
+                )
+                changed = True
+
+        if changed:
+            self._save_tasks(tasks)
+        return {
+            "changed": changed,
+            "created": created,
+            "legacy_enabled_count": len(enabled_legacy),
+            "backend_is_her": bool(backend_is_her),
+            "new_job": dict(canonical) if canonical is not None else None,
+        }
+
     def describe_jobs(self, kind: str, agent_name: str | None = None) -> str:
         jobs = self.list_jobs(kind, agent_name=agent_name)
         title = "Cron Jobs" if kind == "cron" else "Nudge Jobs" if kind == "nudge" else "Heartbeat Jobs"

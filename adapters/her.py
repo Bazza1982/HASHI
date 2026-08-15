@@ -1929,7 +1929,14 @@ class HERAdapter(BaseBackend):
             if requested_effort in CLAW_EXECUTION_EFFORT_ITERATIONS
             else "high"
         )
+        # ``current_proc`` remains a compatibility view for status surfaces.
+        # The registry is authoritative because foreground, Dream, Meditation,
+        # and other isolated HER executions can overlap within one Agent.
         self.current_proc = None
+        self._active_processes: dict[str, asyncio.subprocess.Process] = {}
+        self._active_process_lock = asyncio.Lock()
+        self._active_process_shutdown_lock = asyncio.Lock()
+        self._stopping_active_processes = False
         self._binary: Path | None = None
         self._binary_resolution: ClawBinaryResolution | None = None
         self._supports_stream_json = False
@@ -1941,11 +1948,15 @@ class HERAdapter(BaseBackend):
         self._gateway_config_home: Path | None = None
         self._habit_store_instance: _her_habits.HERHabitStore | None = None
         self._habit_journal_instance: _her_habits.HERMeditationJournal | None = None
+        self._habit_dream_journal_instance: Any | None = None
         # Primary execution never waits for Meditation.  The Meditation lock
         # serializes only the agent's independent snapshot-processing queue;
         # the short store lock protects atomic Habit mutations.
         self._habit_execution_lock = asyncio.Lock()
         self._habit_meditation_execution_lock = asyncio.Lock()
+        self._habit_dream_execution_lock = asyncio.Lock()
+        self._habit_dream_run_lock = asyncio.Lock()
+        self._habit_dream_tasks: set[asyncio.Task] = set()
         self._habit_meditation_tasks: set[asyncio.Task] = set()
         self._habit_meditation_job_ids: set[str] = set()
         self._habit_notification_tasks: set[asyncio.Task] = set()
@@ -2173,6 +2184,44 @@ class HERAdapter(BaseBackend):
                 logger=self.logger,
             )
         return self._habit_journal_instance
+
+    def _her_dream_journal(self):
+        if self._habit_dream_journal_instance is None:
+            from adapters.her_dream import HERDreamJournal
+
+            self._habit_dream_journal_instance = HERDreamJournal(
+                self.config.workspace_dir,
+                logger=self.logger,
+            )
+        return self._habit_dream_journal_instance
+
+    async def run_habit_dream_model(
+        self,
+        prompt: str,
+        *,
+        request_id: str,
+        timeout_seconds: float = 600.0,
+    ) -> ClawTaskResult:
+        """Run isolated, tool-free HER analysis without owning foreground state."""
+
+        async with self._habit_dream_execution_lock:
+            return await asyncio.wait_for(
+                self._run_task_async(
+                    prompt,
+                    resume=None,
+                    request_id=request_id,
+                    on_stream_event=None,
+                    track_session_identity=False,
+                    permission_mode_override="read-only",
+                    allowed_tools_override=[],
+                    task_env_overrides={
+                        "CLAW_TASK_PLANNING": "0",
+                        "CLAW_MAX_TOOL_ITERATIONS": "8",
+                        "CLAW_EXECUTION_EFFORT": "low",
+                    },
+                ),
+                timeout=max(30.0, float(timeout_seconds)),
+            )
 
     def _habit_notification_context(
         self,
@@ -2973,6 +3022,17 @@ class HERAdapter(BaseBackend):
             self.capabilities.supports_thinking_stream = self._supports_stream_json
             self.capabilities.supports_answer_stream = self._supports_stream_json
             self._load_session_identity()
+            from adapters.her_dream import recover_interrupted_runs
+
+            recovered_dreams = recover_interrupted_runs(
+                store=self._her_habit_store(),
+                journal=self._her_dream_journal(),
+            )
+            if recovered_dreams:
+                self.logger.warning(
+                    "Recovered %d interrupted HER Habit Dream commit(s).",
+                    recovered_dreams,
+                )
             self._resume_pending_habit_meditations()
             self._resume_pending_habit_notifications()
             if not self._supports_stream_json:
@@ -3011,13 +3071,128 @@ class HERAdapter(BaseBackend):
             self._ephemeral_session(),
         )
 
+    def _refresh_current_process(self) -> None:
+        request_id = next(reversed(self._active_processes), None)
+        self.current_proc = (
+            self._active_processes[request_id]
+            if request_id is not None
+            else None
+        )
+
+    async def _unregister_active_process(
+        self,
+        request_id: str,
+        proc: asyncio.subprocess.Process,
+    ) -> None:
+        async with self._active_process_lock:
+            if self._active_processes.get(request_id) is not proc:
+                return
+            self._active_processes.pop(request_id, None)
+            self._refresh_current_process()
+            remaining = len(self._active_processes)
+        self.logger.info(
+            "HER subprocess exited: request=%s pid=%s returncode=%s active=%d",
+            request_id,
+            proc.pid,
+            proc.returncode,
+            remaining,
+        )
+
+    async def _stop_active_process(
+        self,
+        request_id: str,
+        proc: asyncio.subprocess.Process,
+        *,
+        reason: str,
+    ) -> bool:
+        self.logger.warning(
+            "Stopping HER execution: request=%s pid=%s reason=%s",
+            request_id,
+            proc.pid,
+            reason,
+        )
+        await self.force_kill_process_tree(
+            proc,
+            logger=self.logger,
+            reason=f"{reason}:{request_id}",
+        )
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            self.logger.error(
+                "HER execution did not exit after forced stop: request=%s pid=%s",
+                request_id,
+                proc.pid,
+            )
+        return proc.returncode is not None
+
+    async def _stop_all_active_processes(self, *, reason: str) -> int:
+        """Stop every HER execution owned by this Agent adapter and await exit."""
+
+        async with self._active_process_shutdown_lock:
+            async with self._active_process_lock:
+                self._stopping_active_processes = True
+                active = list(self._active_processes.items())
+            try:
+                await asyncio.gather(
+                    *(
+                        self._stop_active_process(
+                            request_id,
+                            proc,
+                            reason=reason,
+                        )
+                        for request_id, proc in active
+                    ),
+                    return_exceptions=True,
+                )
+            finally:
+                async with self._active_process_lock:
+                    for request_id, proc in active:
+                        if (
+                            self._active_processes.get(request_id) is proc
+                            and proc.returncode is not None
+                        ):
+                            self._active_processes.pop(request_id, None)
+                    self._refresh_current_process()
+                    remaining = [
+                        request_id
+                        for request_id, proc in active
+                        if self._active_processes.get(request_id) is proc
+                    ]
+                    self._stopping_active_processes = False
+
+            stopped = len(active) - len(remaining)
+            if remaining:
+                self.logger.error(
+                    "HER stop-all left executions registered: requests=%s",
+                    ",".join(remaining),
+                )
+            if active:
+                self.logger.warning(
+                    "HER stop-all completed: stopped=%d total=%d reason=%s",
+                    stopped,
+                    len(active),
+                    reason,
+                )
+            return stopped
+
     async def shutdown(self):
+        current_task = asyncio.current_task()
+        pending_dreams = [
+            task
+            for task in self._habit_dream_tasks
+            if task is not current_task and not task.done()
+        ]
         pending_meditations = list(self._habit_meditation_tasks)
         pending_notifications = list(self._habit_notification_tasks)
+        for task in pending_dreams:
+            task.cancel()
         for task in pending_meditations:
             task.cancel()
         for task in pending_notifications:
             task.cancel()
+        if pending_dreams:
+            await asyncio.gather(*pending_dreams, return_exceptions=True)
         if pending_meditations:
             await asyncio.gather(*pending_meditations, return_exceptions=True)
         if pending_notifications:
@@ -3026,13 +3201,8 @@ class HERAdapter(BaseBackend):
         self._habit_meditation_job_ids.clear()
         self._habit_notification_tasks.clear()
         self._habit_notification_job_ids.clear()
-        if self.current_proc:
-            await self.force_kill_process_tree(
-                self.current_proc,
-                logger=self.logger,
-                reason="shutdown",
-            )
-        self.current_proc = None
+        self._habit_dream_tasks.clear()
+        await self._stop_all_active_processes(reason="shutdown")
 
     async def generate_response(
         self,
@@ -3389,17 +3559,34 @@ class HERAdapter(BaseBackend):
         task_env = self._task_env()
         if task_env_overrides:
             task_env.update({str(key): str(value) for key, value in task_env_overrides.items()})
-        proc = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(self.effective_workdir),
-            env=task_env,
-            **extra_kwargs,
-        )
-        if track_session_identity:
+        async with self._active_process_lock:
+            if self._stopping_active_processes:
+                raise ClawCommandError(
+                    "HER execution rejected while Agent stop is in progress"
+                )
+            existing = self._active_processes.get(request_id)
+            if existing is not None and existing.returncode is None:
+                raise ClawCommandError(
+                    f"HER request is already running: {request_id}"
+                )
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.effective_workdir),
+                env=task_env,
+                **extra_kwargs,
+            )
+            self._active_processes[request_id] = proc
             self.current_proc = proc
+            active_count = len(self._active_processes)
+        self.logger.info(
+            "HER subprocess started: request=%s pid=%s active=%d",
+            request_id,
+            proc.pid,
+            active_count,
+        )
         activity_state = [time.time()]
         self._touch_activity()
         communication_task = asyncio.create_task(
@@ -3477,8 +3664,7 @@ class HERAdapter(BaseBackend):
             await asyncio.gather(communication_task, return_exceptions=True)
             raise
         finally:
-            if self.current_proc is proc:
-                self.current_proc = None
+            await self._unregister_active_process(request_id, proc)
 
         duration_ms = self._duration_ms(started)
         secret_values = [task_env.get(key, "") for key in SECRET_ENV_KEYS]
