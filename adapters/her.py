@@ -70,6 +70,7 @@ PACKAGED_CLAW_MANIFEST_VERSION = 1
 CLAW_RUNTIME_POLICIES = {"prefer-packaged", "require-packaged", "system-only"}
 HER_SESSION_SCOPE_PERSISTENT = "persistent"
 HER_SESSION_SCOPE_ISOLATED = "isolated_per_run"
+HER_SESSION_SCOPE_ISOLATED_RESUME = "isolated_resume"
 HER_DIAGNOSTIC_MAX_CHARS = 8192
 SECRET_ENV_KEYS = {
     "OPENAI_API_KEY",
@@ -2259,9 +2260,14 @@ class HERAdapter(BaseBackend):
             .strip()
             .lower()
         )
-        if raw == HER_SESSION_SCOPE_ISOLATED:
+        if raw in {HER_SESSION_SCOPE_ISOLATED, HER_SESSION_SCOPE_ISOLATED_RESUME}:
             return raw
         return HER_SESSION_SCOPE_PERSISTENT
+
+    def _request_resume_session(self, request_id: str) -> str | None:
+        value = self._runtime_request_meta(request_id).get("resume_session_id")
+        session_id = str(value or "").strip()
+        return session_id or None
 
     def _load_session_identity(self) -> None:
         if self._ephemeral_session() or not self._session_mode:
@@ -3714,6 +3720,11 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
             )
         session_mode_enabled = self._session_mode and not self._ephemeral_session()
         session_scope = self._request_session_scope(request_id)
+        resume_session_id = self._request_resume_session(request_id)
+        isolated_resume = (
+            session_scope == HER_SESSION_SCOPE_ISOLATED_RESUME
+            and bool(resume_session_id)
+        )
         persistent_session = (
             session_mode_enabled and session_scope == HER_SESSION_SCOPE_PERSISTENT
         )
@@ -3766,6 +3777,14 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
                 cadence_task = asyncio.create_task(cadence_controller.run())
 
         async def execute_request() -> ClawTaskResult:
+            if isolated_resume:
+                return await self._run_task_async(
+                    task_prompt,
+                    resume=resume_session_id,
+                    request_id=request_id,
+                    on_stream_event=request_stream_callback,
+                    track_session_identity=False,
+                )
             if not persistent_session:
                 return await self._run_task_async(
                     task_prompt,
@@ -3873,11 +3892,17 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
                         )
                     )
         usage_data = result.json_data.get("usage") or {}
-        if result.session_id and not persistent_session:
+        if result.session_id and session_scope == HER_SESSION_SCOPE_ISOLATED:
             self.logger.info(
                 "HER session checkpoint ignored for isolated request: request=%s scope=%s",
                 request_id,
                 session_scope,
+            )
+        elif result.session_id and isolated_resume:
+            self.logger.info(
+                "HER isolated continuation checkpoint returned: request=%s session=%s",
+                request_id,
+                result.session_id,
             )
         tool_errors = sum(
             1
@@ -3990,6 +4015,9 @@ IMMUTABLE INCOMPLETE-REPORT CONTRACT (quoted, read-only)
                 "claw_execution_effort": self.effort,
                 "claw_max_iterations": self._max_tool_iterations(),
                 "her_session_scope": session_scope,
+                "her_session_id": result.session_id or "",
+                "her_model": result.model,
+                "her_resumed_session": bool(isolated_resume),
                 **(
                     {
                         "her_habit_meditation": True,

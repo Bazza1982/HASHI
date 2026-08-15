@@ -10,6 +10,7 @@ import pytest
 
 sys.modules.setdefault("edge_tts", types.SimpleNamespace(Communicate=object))
 
+from orchestrator import runtime_cross_session
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
 
@@ -145,6 +146,55 @@ async def test_pending_scheduler_recovery_is_injected_into_next_user_turn():
             "PENDING RECOVERY BATCHES\n- task_id=hourly-hello missed_count=7",
         )
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["fixed", "flex"])
+async def test_completed_scheduler_turn_is_injected_for_fixed_and_flex_modes(
+    tmp_path,
+    mode,
+):
+    runtime = _runtime()
+    runtime.name = "momo"
+    runtime.workspace_dir = tmp_path
+    runtime.config = SimpleNamespace(active_backend="her", workspace_dir=tmp_path)
+    runtime.backend_manager = SimpleNamespace(
+        agent_mode=mode,
+        current_backend=SimpleNamespace(
+            _claw_model=lambda: "local/deepseek-v4-pro",
+        ),
+    )
+    scheduler_item = _item("scheduler")
+    scheduler_item.summary = "Cron Task [engagement]"
+    response = SimpleNamespace(
+        is_success=True,
+        stop_reason="max_iterations",
+        stream_metadata={
+            "claw_completion_status": "incomplete",
+            "claw_stop_reason": "max_iterations",
+            "recommended_action": "continue",
+            "her_session_scope": "isolated_per_run",
+            "her_session_id": "scheduler-session",
+            "her_model": "local/deepseek-v4-pro",
+        },
+    )
+    runtime_cross_session.record_turn_result(
+        runtime,
+        scheduler_item,
+        assistant_text="Scheduler task paused. CONTINUE.",
+        response=response,
+        delivered=True,
+        completion_path="foreground",
+    )
+
+    sections = await runtime._build_pre_turn_context_sections(
+        _item("text"),
+        "What just happened?",
+        is_bridge_request=False,
+    )
+
+    assert sections[-1][0] == "CROSS-SESSION TURN RECEIPTS"
+    assert "Scheduler task paused" in sections[-1][1]
 
 
 @pytest.mark.asyncio

@@ -28,7 +28,7 @@ from orchestrator.memory_plus_mode import (
     set_memory_plus_enabled,
 )
 from orchestrator.runtime_common import QueuedRequest
-from orchestrator import telegram_stream_policy
+from orchestrator import runtime_cross_session, telegram_stream_policy
 from orchestrator.wrapper_mode import DEFAULT_WRAPPER_STYLE_SLOT_TEXT
 
 
@@ -2152,6 +2152,10 @@ async def test_background_bypass_source_does_not_wrap(tmp_path):
     assert listener_payloads[0]["wrapper_used"] is False
     assert sent[0]["text"] == "core raw"
     assert voices[0]["text"] == "core raw"
+    receipt = runtime_cross_session.load_receipts(runtime)[0]
+    assert receipt["completion_path"] == "background"
+    assert receipt["assistant_text"] == "core raw"
+    assert receipt["delivered"] is True
 
 
 @pytest.mark.asyncio

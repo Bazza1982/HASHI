@@ -1750,6 +1750,52 @@ async def test_her_isolated_turn_runs_while_background_persistent_turn_is_unfini
 
 
 @pytest.mark.asyncio
+async def test_her_isolated_continuation_resumes_exact_checkpoint_without_replacing_primary(
+    tmp_path,
+):
+    runtime = SimpleNamespace(
+        _request_meta_by_id={
+            "req-continue": {
+                "session_scope": "isolated_resume",
+                "resume_session_id": "session-scheduler",
+            },
+        },
+        current_request_meta=None,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+        _hashi_runtime=runtime,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = tmp_path / "hashi-her"
+    adapter._session_id = "session-main"
+    calls = []
+
+    async def run_task(prompt, *, resume, request_id, track_session_identity, **kwargs):
+        calls.append((request_id, resume, track_session_identity))
+        return _concurrency_task_result(
+            tmp_path,
+            text="continued scheduler result",
+            session_id="session-scheduler-next",
+        )
+
+    adapter._run_task_async = run_task
+
+    response = await adapter.generate_response("continue", "req-continue")
+
+    assert response.is_success is True
+    assert calls == [("req-continue", "session-scheduler", False)]
+    assert adapter._session_id == "session-main"
+    assert response.stream_metadata["her_session_scope"] == "isolated_resume"
+    assert response.stream_metadata["her_session_id"] == "session-scheduler-next"
+    assert response.stream_metadata["her_resumed_session"] is True
+
+
+@pytest.mark.asyncio
 async def test_her_failure_persists_structured_error_and_redacted_stderr(tmp_path):
     fake = _write_exe(
         tmp_path / "hashi-her",
