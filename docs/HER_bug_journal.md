@@ -95,7 +95,8 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   incompatible-model fallbacks remain isolated rather than entering the primary
   session. Failed continuation attempts retain the last retryable checkpoint.
 - **Known-bad HASHI checkpoint:** `cdf1036d`.
-- **Fix commit:** `d99dc1ad`.
+- **Fix commits:** `d99dc1ad`, `98009ea1` (a primary question ending in an
+  emoji now also retires an older scheduler prompt).
 - **Regression tests:** `tests/test_runtime_cross_session.py`; fixed/flex pipeline
   precedence, foreground/background delivery persistence, and exact HER checkpoint
   resume tests in the affected runtime and adapter suites.
@@ -108,8 +109,13 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   ends with `CONTINUE`, resume it from the primary chat, then repeat with overlapping
   primary and scheduler A/B/C prompts and prove the newest delivered prompt owns the
   reply without changing the primary HER session ID.
-- **Remaining risk:** running agents have not loaded `d99dc1ad`; live provider and
-  Telegram delivery evidence is pending.
+- **Activation check:** Momo loaded both fixes through `/reboot min` at 17:56 AEST,
+  restored its existing primary HER checkpoint, started its queue processor, and
+  returned online with Telegram connected. The 17:00 scheduler result was backfilled
+  as one mode-`0600` receipt; the newer 17:02 primary question correctly made it
+  inactive while retaining it for context injection.
+- **Remaining risk:** no fresh post-fix scheduled turn and real short-reply canary has
+  run yet; live provider and Telegram binding evidence is pending.
 - **Secrets/redaction checked:** yes; the entry contains no private task text or
   credentials.
 - **Recurrence count:** 0
