@@ -393,6 +393,35 @@ def _validated_action_text(
     return text
 
 
+def validate_habit_content(
+    title: Any,
+    metadata: Any,
+    body: Any,
+) -> tuple[str, str, str]:
+    """Validate one complete compact Habit content replacement."""
+
+    return (
+        _validated_action_text(
+            title,
+            field="title",
+            limit=HABIT_TITLE_MAX_CHARS,
+            word_limit=HABIT_TITLE_MAX_WORDS,
+        ),
+        _validated_action_text(
+            metadata,
+            field="metadata",
+            limit=HABIT_METADATA_MAX_CHARS,
+            word_limit=HABIT_METADATA_MAX_WORDS,
+        ),
+        _validated_action_text(
+            body,
+            field="body",
+            limit=HABIT_BODY_MAX_CHARS,
+            word_limit=HABIT_BODY_MAX_WORDS,
+        ),
+    )
+
+
 def _atomic_write_json(destination: Path, payload: Mapping[str, Any]) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(
@@ -789,23 +818,10 @@ class HERHabitStore:
         habit_id: str | None = None,
     ) -> HERHabit:
         now = _utc_now()
-        title = _validated_action_text(
+        title, metadata, body = validate_habit_content(
             action.get("title"),
-            field="title",
-            limit=HABIT_TITLE_MAX_CHARS,
-            word_limit=HABIT_TITLE_MAX_WORDS,
-        )
-        metadata = _validated_action_text(
             action.get("metadata"),
-            field="metadata",
-            limit=HABIT_METADATA_MAX_CHARS,
-            word_limit=HABIT_METADATA_MAX_WORDS,
-        )
-        body = _validated_action_text(
             action.get("body"),
-            field="body",
-            limit=HABIT_BODY_MAX_CHARS,
-            word_limit=HABIT_BODY_MAX_WORDS,
         )
         habit_id = habit_id or f"{_slug(title)}-{uuid.uuid4().hex[:8]}"
         habit = HERHabit(
@@ -857,24 +873,7 @@ class HERHabitStore:
         # Validate the complete replacement, including untouched legacy fields.
         # This prevents an update from carrying oversized historical patches
         # forward under the compact contract.
-        title = _validated_action_text(
-            title,
-            field="title",
-            limit=HABIT_TITLE_MAX_CHARS,
-            word_limit=HABIT_TITLE_MAX_WORDS,
-        )
-        metadata = _validated_action_text(
-            metadata,
-            field="metadata",
-            limit=HABIT_METADATA_MAX_CHARS,
-            word_limit=HABIT_METADATA_MAX_WORDS,
-        )
-        body = _validated_action_text(
-            body,
-            field="body",
-            limit=HABIT_BODY_MAX_CHARS,
-            word_limit=HABIT_BODY_MAX_WORDS,
-        )
+        title, metadata, body = validate_habit_content(title, metadata, body)
         if (title, metadata, body) == (
             existing.title,
             existing.metadata,

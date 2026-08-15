@@ -1467,6 +1467,10 @@ class FlexibleAgentRuntime:
             await self._reply_text(update_or_query, text, parse_mode="HTML", reply_markup=markup)
 
     async def invoke_scheduler_skill(self, skill_id: str, args: str, task_id: str) -> tuple[bool, str | None]:
+        if str(skill_id or "").casefold() == "dream":
+            # Legacy scheduled Dream jobs must never reach the retired generic
+            # memory/AGENT.md writer. Route them through native HER Dream.
+            return await self.invoke_her_dream(task_id=task_id)
         if not self.skill_manager:
             message = f"Scheduler skill invocation requested without skill manager: {skill_id}"
             self.error_logger.error(message)
@@ -1517,6 +1521,18 @@ class FlexibleAgentRuntime:
             silent=False,
         )
         return True, f"Scheduled prompt skill queued: {skill.id}"
+
+    async def invoke_her_dream(
+        self,
+        *,
+        task_id: str,
+        scheduled_for: str | None = None,
+    ) -> tuple[bool, str | None]:
+        from orchestrator import runtime_her_dream
+
+        return await runtime_her_dream.invoke_scheduled(
+            self, task_id=task_id, scheduled_for=scheduled_for
+        )
 
     def get_typing_placeholder(self) -> tuple[str, str | None]:
         extra = self.config.extra or {}
@@ -2675,6 +2691,18 @@ class FlexibleAgentRuntime:
 
         await runtime_her_habits.callback_habit(self, update, context)
 
+    async def cmd_dream(self, update, context):
+        # Keep Dream implementation HER-local and hot-reloadable, matching the
+        # adapter-owned /habit command boundary.
+        from orchestrator import runtime_her_dream
+
+        await runtime_her_dream.cmd_dream(self, update, context)
+
+    async def callback_dream(self, update, context):
+        from orchestrator import runtime_her_dream
+
+        await runtime_her_dream.callback_dream(self, update, context)
+
     async def _deliver_her_habit_notification(self, job):
         from orchestrator import runtime_her_habits
 
@@ -3310,11 +3338,23 @@ class FlexibleAgentRuntime:
     async def cmd_skill(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
+        args = list(context.args or [])
+        if args and args[0].strip().casefold() == "dream":
+            # Transition compatibility: /skill dream uses the native /dream
+            # command and can no longer execute the legacy cross-backend writer.
+            from orchestrator import runtime_her_dream
+
+            await runtime_her_dream.cmd_dream(
+                self,
+                update,
+                context,
+                args_override=args[1:],
+            )
+            return
         if not self.skill_manager:
             await self._reply_text(update, "Skill system is not configured.")
             return
 
-        args = list(context.args or [])
         if not args:
             grouped = self._skills_by_type()
             count = sum(len(items) for items in grouped.values())
@@ -3567,6 +3607,10 @@ class FlexibleAgentRuntime:
                 purpose="skill-job-run",
             )
             return False, "Transcript export is only implemented for fixed agents."
+        if action in {"her:dream", "skill:dream"}:
+            return await self.invoke_her_dream(
+                task_id=str(job.get("id") or "manual"),
+            )
         if action.startswith("skill:"):
             return await self.invoke_scheduler_skill(
                 skill_id=action.split(":", 1)[1],
