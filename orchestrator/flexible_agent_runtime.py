@@ -62,7 +62,7 @@ from remote.runtime_identity import read_runtime_claim
 from orchestrator import runtime_session
 from orchestrator import runtime_status
 from orchestrator import runtime_timeout
-from orchestrator import runtime_transfer
+from orchestrator import runtime_transfer, runtime_turn_context
 from orchestrator import runtime_workspace
 from orchestrator import runtime_wrapper
 from orchestrator import runtime_workzone
@@ -677,6 +677,7 @@ class FlexibleAgentRuntime:
         )
         runtime_delivery_order.register_turn(self, item)
         runtime_cross_session.capture_reply_target(self, item)
+        runtime_turn_context.capture_at_enqueue(self, item)
         self.request_activity.start(
             item.request_id,
             source=item.source,

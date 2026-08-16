@@ -16,6 +16,7 @@ from orchestrator import (
     runtime_cross_session,
     runtime_delivery_order,
     runtime_retry,
+    runtime_turn_context,
     telegram_delivery_failover,
     telegram_stream_policy,
 )
@@ -309,6 +310,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     )
     continuity_enabled = is_memory_plus_enabled(runtime.workspace_dir)
     extra_sections = runtime._workzone_prompt_section()
+    extra_sections += runtime_turn_context.context_section(runtime, item)
     pre_turn_builder = runtime._build_pre_turn_context_sections
     pre_turn_kwargs = {"is_bridge_request": is_bridge_request}
     if "metadata" in inspect.signature(pre_turn_builder).parameters:

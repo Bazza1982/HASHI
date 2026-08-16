@@ -1,11 +1,18 @@
 # HER Conversation Continuity, Planning and Release-Certification Fix Plan
 
-Status: implemented and fully certified; Momo ordinary/FIFO/MCP and r2 Ultra canaries passed;
-controlled rollout pending explicit authorization
+Status: original `.22` scope implemented and certified; post-certification TaskFrame context
+recurrence `HER-20260816-033` fixed in source, development rebuild/live verification pending
 Scope: HASHI1 Python runtime, native HER runtime, scheduler bridge and HER packaging
 Supersedes: the earlier conversation-continuity-only version of this document
 Primary incidents: Sunny continuity regression and Lily High-effort planning loop, 2026-08-16
 Target release: a newly certified `0.1.0-hashi.22`; rejected `.21` must remain inactive
+
+Post-certification addendum: `.22` source integration reintroduced the previously verified
+`HER-20260814-030` planner/executor context split. The bounded replacement contract is documented
+in [HER_TASKFRAME_CANONICAL_TURN_CONTEXT.md](HER_TASKFRAME_CANONICAL_TURN_CONTEXT.md). It preserves
+the immediate delivered dialogue, enqueue-time reply target and model/effort transition without
+restoring an unbounded planner transcript. This addendum is not part of the certified `.22`
+binary; it requires a development `/rebuild` and the next release certification.
 
 ## 1. Executive decision
 

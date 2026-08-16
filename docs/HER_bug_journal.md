@@ -68,8 +68,63 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260814-030` | Verified | P1 | fixed-mode planner saw only the incremental current prompt, not the persistent session view used by the primary agent | `fixed_session_planner_sees_resumed_options_at_every_planning_effort`; `medium_plus_plans_replans_and_reports_non_blocking_tool_divergence` |
 | `HER-20260814-031` | Verified | P1 | long fixed sessions could make the planner answer as the conversational agent instead of returning TaskFrame JSON | `planner_request_preserves_session_prefix_and_appends_nonpersistent_control`; fixed-session direct-response effort matrix |
 | `HER-20260815-032` | Fixed — live verification pending | P0 | isolated scheduler choices and CONTINUE checkpoints were absent from the primary conversation context | `test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_task`; `test_her_isolated_continuation_resumes_exact_checkpoint_without_replacing_primary` |
+| `HER-20260816-033` | Fixed in source — rebuild/live verification pending | P1 | TaskFrame again saw only `A` while the primary executor saw and completed the previous option | `task_checkpoint_receives_immediate_previous_dialogue_context`; `tests/test_runtime_turn_context.py` |
 
 ## Historical entries
+
+### HER-20260816-033 — TaskFrame and executor again resolved different turns
+
+- **Status:** Fixed in source — rebuild/live verification pending
+- **Severity:** P1
+- **Recurrence of:** `HER-20260814-030`
+- **Discovered:** 2026-08-16 AEST during a deliberate HER model-switch test
+- **Provider / model / mode / effort:** direct DeepSeek; persistent HER session;
+  `deepseek-v4-pro` changed to `deepseek-v4-flash`; `xhigh`
+- **Expected:** one user turn has one enqueue-time reply target and one resolved
+  goal shared by TaskFrame and primary execution.
+- **Actual:** TaskFrame received only current `A`, reported no clear task and
+  planned no tools. The primary executor received the persistent session,
+  resolved `A` as the complete Wiki pipeline, and completed it successfully.
+- **User-visible impact:** the Agent first appeared to lose continuity while an
+  internal second line still understood and completed the task. Planning and
+  execution audit records contradicted each other.
+- **Root cause:** the integrated Rust source at `6c7fd961` reconstructed every
+  task checkpoint from `active_goal` alone and explicitly delegated semantic
+  resolution to the primary executor. That superseded the previously verified
+  `.18/.19` session-sharing fix. HASHI also did not provide TaskFrame with its
+  transport-owned visible delivery order or model/effort transition.
+- **Fix:** HASHI now freezes a bounded `hashi-turn-context-v1` envelope when a
+  direct request enters the queue. It contains the latest final dialogue
+  actually delivered before enqueue, the frozen cross-session target when
+  present, and current/previous model and effort. Native HER supplies the
+  bounded previous user/assistant pair plus current request to TaskFrame and
+  supplies the same canonical metadata to execution. Cold HASHI restarts fall
+  back to the immediate completed pair in the persistent HER session; a known
+  pending earlier direct turn cannot be captured retroactively. Obvious
+  unresolved short-choice frames stop before tools, including at Max/Max+.
+- **Regression tests:** `tests/test_runtime_turn_context.py`;
+  `task_checkpoint_receives_immediate_previous_dialogue_context`;
+  `hashi_enqueue_context_overrides_newer_session_history_for_referent_resolution`;
+  `hashi_cold_start_context_uses_persistent_session_fallback`;
+  `short_choice_frame_must_resolve_against_supplied_previous_dialogue`.
+- **Automated verification:** complete HASHI Python suite passed with `2297
+  passed, 2 skipped`; all Rust workspace/all-target tests passed; runtime
+  library Clippy with warnings denied, Ruff, Python compilation and
+  `git diff --check` passed. Workspace-wide all-target Clippy still reaches
+  pre-existing diagnostics outside this change and is not claimed as a clean
+  certification result. Offline `/rebuild` and live provider evidence remain
+  pending.
+- **Required live retest:** on an idle test Agent, `/rebuild`; establish one
+  persistent A/B turn; deliberately switch Pro to Flash and effort; send only
+  `A`; prove the first TaskFrame, acknowledgement, tool plan and final execution
+  resolve the same option. Repeat with a cron result delivered both before and
+  after enqueue.
+- **Remaining risk:** the current source fix is not present in certified `.22`;
+  production packaging and cross-platform certification remain pending.
+- **Secrets/redaction checked:** yes; the envelope is bounded, process-local on
+  the HASHI side, and the documented examples contain no private task content or
+  credentials.
+- **Recurrence count:** 1
 
 ### HER-20260815-032 — isolated scheduler replies were absent from primary context
 
@@ -218,7 +273,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   second turn. The first-attempt planner and final response both resolved the preserved
   option as blue `ORCHID-WB-MAX-731` without a duplicated HASHI history prompt, tool
   call, write, reset, or timeout.
-- **Recurrence count:** 0
+- **Recurrence count:** 1 (`HER-20260816-033`)
 
 ### HER-20260814-029 — assurance checkpoints could not see current execution evidence
 
