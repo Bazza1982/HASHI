@@ -1,21 +1,21 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-her",
-  "version": "0.1.0-hashi.21",
+  "version": "0.1.0-hashi.20",
   "display_name": "HASHI Engine Runtime (HER)",
   "upstream_runtime": "Claw",
   "upstream_version": "0.1.3-hashi.33",
   "license": "MIT",
   "license_file": "CLAW_LICENSE",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "45ff403aeecd3ea9f72279be488f60a2df0f88df",
-  "source_branch": "main",
-  "build_date": "2026-08-16",
-  "notes": "HER 0.1.0-hashi.21 restores live assistant and provider reasoning event streaming used by HASHI's user-visible Primary Agent commentary renderer. This is a Linux x86-64 hotfix package; the Windows package remains on the previously certified 0.1.0-hashi.20 binary.",
+  "source_commit": "5ed5b30ef2ab0f80ab6d4fd08a1b7b64e77faf05",
+  "source_branch": "agent/remove-token-budget-fix-reasoning-stream",
+  "build_date": "2026-08-15",
+  "notes": "HER 0.1.0-hashi.20 makes semantic compaction capacity-driven and request-aware: its provider deadline inherits HASHI's effective idle timeout, is capped by remaining hard time with cleanup grace, never interrupts a selected tool, and fails open without mutating active context. The current turn stays verbatim, complete pre-compaction history remains recoverable, lifecycle events carry correlated timeout and continuation evidence, and completed answers are not held behind maintenance. Linux and Windows x86-64 packages are built from the same clean source commit; the Windows package passed native version, doctor, status, and stdin-capability smokes.",
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.0-hashi.21/linux-x86_64/hashi-her",
-      "sha256": "456470bfa70dc52f41483187e6855ac4daf1a248726942b159dad008399f0723",
+      "path": "releases/0.1.0-hashi.20/linux-x86_64/hashi-her",
+      "sha256": "3c601931478d645c17c9317a6975dcba0944ff48731d2991d70b3af4ffa59167",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-her"
     },

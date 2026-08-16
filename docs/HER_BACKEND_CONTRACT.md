@@ -1,8 +1,7 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for Linux HER `0.1.0-hashi.21` commentary hotfix; the Windows
-package remains on certified HER `0.1.0-hashi.20`. Earlier unreleased integration checkpoint
-recorded in
+Status: active for certified HER `0.1.0-hashi.20`; earlier unreleased integration
+checkpoint recorded in
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
 
 HER is derived from the MIT-licensed Claw runtime. The upstream copyright and
