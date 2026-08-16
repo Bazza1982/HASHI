@@ -23,11 +23,11 @@ is accepted only as a migration alias.
 
 | Platform | Runtime | Source | Status |
 | --- | --- | --- | --- |
-| Linux x86-64 | `0.1.0-hashi.20` | `5ed5b30ef2ab0f80ab6d4fd08a1b7b64e77faf05` | Current certified HASHI1 package |
+| Linux x86-64 | `0.1.0-hashi.21` | `45ff403aeecd3ea9f72279be488f60a2df0f88df` | Current HASHI1 commentary hotfix package |
 | Windows x86-64 | `0.1.0-hashi.20` | `5ed5b30ef2ab0f80ab6d4fd08a1b7b64e77faf05` | Native build and local-command smoke certified |
 
-The certified Linux `.20` SHA-256 digest is
-`3c601931478d645c17c9317a6975dcba0944ff48731d2991d70b3af4ffa59167`.
+The Linux `.21` SHA-256 digest is
+`456470bfa70dc52f41483187e6855ac4daf1a248726942b159dad008399f0723`.
 The native Windows `.20` SHA-256 digest is
 `5463a3d006edcb61a6d066d9b1441046602b03fbb37e207988315a073d8ef3b6`.
 Its embedded Git SHA is the same pinned source commit, and native `version`,
