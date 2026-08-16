@@ -55,7 +55,7 @@ def _load_secrets() -> dict:
 def _load_agents_json() -> dict:
     p = ROOT / "agents.json"
     if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(p.read_text(encoding="utf-8-sig"))
     print("Error: agents.json not found", file=sys.stderr)
     sys.exit(1)
 
