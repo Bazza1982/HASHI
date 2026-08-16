@@ -1,6 +1,7 @@
 # HER Conversation Continuity, Planning and Release-Certification Fix Plan
 
-Status: implemented and fully certified; Momo canary and controlled rollout pending
+Status: implemented and fully certified; Momo ordinary/FIFO/MCP and r2 Ultra canaries passed;
+controlled rollout pending explicit authorization
 Scope: HASHI1 Python runtime, native HER runtime, scheduler bridge and HER packaging  
 Supersedes: the earlier conversation-continuity-only version of this document  
 Primary incidents: Sunny continuity regression and Lily High-effort planning loop, 2026-08-16  
@@ -604,3 +605,31 @@ Until implementation starts under this plan:
 - allow documentation/evidence updates only;
 - if a critical live task encounters the loop, stop it and switch effort to `low` only as an
   explicit temporary operational mitigation, not as the code fix.
+
+## 16. `.22` completion record (2026-08-16)
+
+The plan was implemented on the certified `.20` descendant and promoted as
+`0.1.0-hashi.22`. The recovered `.21` multimodal changes are limited to native commits
+`26ec36f` and `9c410a1`; the invalid `.21` source line remains inactive.
+
+The first `.22` candidate passed offline certification and ordinary Momo FIFO/resume/MCP
+canaries, but the live Ultra canary correctly rejected it after three independent CLI workers
+exposed a cross-process managed-session filename collision. That candidate tag is retained for
+audit. Native commit `246b04e9fa28ef0b6f74c2d924ab3697b95197bd` adds process identity to managed session and
+atomic-temp paths while retaining legacy session-ID timestamp parsing. The corrected candidate
+is tagged `her-0.1.0-hashi.22-certified-r2` and packaged by HASHI commit `86bfe45a`.
+
+Final certification and canary evidence:
+
+- Rust workspace: 1,480 passed, 0 failed, 1 ignored;
+- Clippy: exactly 40 pinned upstream diagnostics and no new diagnostic;
+- HASHI Python/Veritas: 2,233 passed, 0 failed, 2 skipped, 23 known warnings;
+- Windows native smokes: version, doctor, status and prompt help all passed;
+- Linux SHA-256: `e6c88b9dd37c9191f9aad0df9fd0cf9bbeb4365778a10153a48b4cf752096c91`;
+- Windows SHA-256: `cd127b283d0bb8aa5db9d1863a617bb84a2c8cd0174ed305c72c5f97b294724d`;
+- Momo r2 Ultra: `ultra-20260816-181432-55931c9a6d77`, three required workers completed
+  on their first attempt with unique PID-namespaced session IDs, zero run errors and terminal
+  marker `MOMO22_R2_ULTRA_PASS`.
+
+Only Momo received the authorized `/reboot min`. No broad HER Agent reload or Sunny runtime
+cleanup was performed, and Aptenra remained unchanged.

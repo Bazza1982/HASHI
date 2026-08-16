@@ -101,6 +101,19 @@
         "status",
         "prompt --help"
       ]
+    },
+    "momo_live_ultra": {
+      "status": "passed",
+      "passed": 3,
+      "failed": 0,
+      "completed_at": "2026-08-16T18:18:04+10:00",
+      "agent": "momo",
+      "request_id": "req-0001",
+      "run_id": "ultra-20260816-181432-55931c9a6d77",
+      "required_workers": 3,
+      "worker_attempts": 3,
+      "run_errors": 0,
+      "terminal_marker": "MOMO22_R2_ULTRA_PASS"
     }
   },
   "known_non_blocking_warnings": [
