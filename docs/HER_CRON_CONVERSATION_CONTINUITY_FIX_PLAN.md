@@ -2,9 +2,9 @@
 
 Status: implemented and fully certified; Momo ordinary/FIFO/MCP and r2 Ultra canaries passed;
 controlled rollout pending explicit authorization
-Scope: HASHI1 Python runtime, native HER runtime, scheduler bridge and HER packaging  
-Supersedes: the earlier conversation-continuity-only version of this document  
-Primary incidents: Sunny continuity regression and Lily High-effort planning loop, 2026-08-16  
+Scope: HASHI1 Python runtime, native HER runtime, scheduler bridge and HER packaging
+Supersedes: the earlier conversation-continuity-only version of this document
+Primary incidents: Sunny continuity regression and Lily High-effort planning loop, 2026-08-16
 Target release: a newly certified `0.1.0-hashi.22`; rejected `.21` must remain inactive
 
 ## 1. Executive decision

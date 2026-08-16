@@ -4,7 +4,7 @@
 //! This bridges the gap where `LaneContext::completed` was a passive bool
 //! that nothing automatically set. Now completion is detected from:
 //! - Agent output shows Finished status
-//! - No errors/blockers present  
+//! - No errors/blockers present
 //! - Tests passed (green status)
 //! - Code pushed (has output file)
 

@@ -1430,7 +1430,7 @@ ANTHROPIC_API_KEY=plain-value
 XAI_API_KEY=\"quoted-value\"
 OPENAI_API_KEY='single-quoted'
 export GROK_API_KEY=exported-value
-   PADDED_KEY  =  padded-value  
+   PADDED_KEY  =  padded-value\u{20}\u{20}
 EMPTY_VALUE=
 NO_EQUALS_LINE
 ";
