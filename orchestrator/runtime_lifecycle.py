@@ -5,7 +5,7 @@ import time
 from contextlib import suppress
 from typing import Any
 
-from orchestrator import runtime_pipeline
+from orchestrator import runtime_delivery_order, runtime_pipeline
 from orchestrator.audit_mode import AuditTelemetryCollector, should_audit_source
 from orchestrator.memory_plus_mode import (
     ensure_memory_plus_observer,
@@ -308,6 +308,8 @@ async def process_queue(runtime: Any) -> None:
                 current_meta = getattr(runtime, "current_request_meta", None)
                 if isinstance(current_meta, dict) and current_meta.get("request_id") == item.request_id:
                     runtime.current_request_meta = None
+                if item.request_id not in background_ids:
+                    await runtime_delivery_order.complete_turn(runtime, item.request_id)
                 runtime.queue.task_done()
             else:
                 runtime.current_request_meta = None
