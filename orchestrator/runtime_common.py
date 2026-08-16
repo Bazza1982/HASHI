@@ -20,6 +20,7 @@ class QueuedRequest:
     skip_memory_injection: bool = False
     session_scope: str | None = None
     queued_monotonic: float = field(default_factory=time.monotonic, repr=False)
+    habit_learning_eligible: bool = True
 
 
 def _safe_excerpt(text: str, limit: int = 160) -> str:

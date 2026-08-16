@@ -346,8 +346,22 @@ def test_begin_queue_item_records_processing_metadata():
     assert runtime.current_request_meta["verbose_at_start"] is False
     assert runtime.current_request_meta["silent"] is False
     assert runtime.current_request_meta["deliver_to_telegram"] is True
+    assert runtime.current_request_meta["habit_learning_eligible"] is True
     assert runtime.is_generating is True
     assert runtime.maintenance_events[0][0] == "processing"
+
+
+def test_begin_queue_item_preserves_explicit_habit_ineligibility():
+    runtime = _runtime()
+    item = _item(habit_learning_eligible=False)
+
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    assert runtime.current_request_meta["habit_learning_eligible"] is False
+    assert (
+        runtime._request_meta_by_id[item.request_id]["habit_learning_eligible"]
+        is False
+    )
 
 
 def test_begin_queue_item_uses_monotonic_queue_age(monkeypatch):

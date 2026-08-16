@@ -30,7 +30,7 @@ from orchestrator.command_ui import (
     setting_card,
     status_label,
 )
-from orchestrator import runtime_audit
+from orchestrator import runtime_audit, runtime_common
 from orchestrator.browser_mode import (
     build_browser_task_prompt,
     get_browser_examples_text,
@@ -613,7 +613,7 @@ class FlexibleAgentRuntime:
                 "scheduler-retry",
                 retry_summary,
                 silent=item.silent,
-                is_retry=True,
+                is_retry=True, habit_learning_eligible=item.habit_learning_eligible,
             )
             if retry_request_id:
                 self.logger.warning(
@@ -658,12 +658,12 @@ class FlexibleAgentRuntime:
         silent: bool = False,
         is_retry: bool = False,
         deliver_to_telegram: bool = True,
-        skip_memory_injection: bool = False,
+        skip_memory_injection: bool = False, habit_learning_eligible: bool = True,
     ):
         if not prompt or not prompt.strip():
             self.error_logger.error(f"Rejected empty prompt from {source} (summary={summary!r})")
             return None
-        item = QueuedRequest(
+        item = runtime_common.QueuedRequest(
             request_id=self.next_request_id(),
             chat_id=chat_id,
             prompt=prompt,
@@ -673,7 +673,7 @@ class FlexibleAgentRuntime:
             silent=silent,
             is_retry=is_retry,
             deliver_to_telegram=deliver_to_telegram,
-            skip_memory_injection=skip_memory_injection,
+            skip_memory_injection=skip_memory_injection, habit_learning_eligible=habit_learning_eligible,
         )
         runtime_delivery_order.register_turn(self, item)
         runtime_cross_session.capture_reply_target(self, item)

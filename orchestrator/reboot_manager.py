@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import logging
 import sys
 
@@ -74,6 +75,10 @@ class RebootManager:
         her = importlib.import_module("adapters.her")
         claw_cli = importlib.import_module("adapters.claw_cli")
         runtime_pipeline = importlib.import_module("orchestrator.runtime_pipeline")
+        runtime_common = importlib.import_module("orchestrator.runtime_common")
+        flexible_runtime = importlib.import_module(
+            "orchestrator.flexible_agent_runtime"
+        )
         tool_registry = importlib.import_module("tools.registry")
         gateway_context = importlib.import_module("tools.gateway.context")
 
@@ -96,6 +101,30 @@ class RebootManager:
         if not callable(getattr(runtime_pipeline, "setup_interactive_feedback", None)):
             raise HotReloadError(
                 "Hot reload contract failed: runtime acknowledgement pipeline unavailable"
+            )
+        queued_request = getattr(runtime_common, "QueuedRequest", None)
+        enqueue_request = getattr(
+            getattr(flexible_runtime, "FlexibleAgentRuntime", None),
+            "enqueue_request",
+            None,
+        )
+        queued_fields = getattr(queued_request, "__dataclass_fields__", {})
+        enqueue_parameters = (
+            inspect.signature(enqueue_request).parameters
+            if callable(enqueue_request)
+            else {}
+        )
+        if (
+            "habit_learning_eligible" not in queued_fields
+            or "habit_learning_eligible" not in enqueue_parameters
+        ):
+            raise HotReloadError(
+                "Hot reload contract failed: habit learning request intake is incomplete"
+            )
+        if getattr(flexible_runtime, "QueuedRequest", None) is not queued_request:
+            raise HotReloadError(
+                "Hot reload contract failed: flexible runtime retained a stale "
+                "QueuedRequest class"
             )
         if getattr(gateway_context, "ToolRegistry", None) is not getattr(
             tool_registry, "ToolRegistry", None

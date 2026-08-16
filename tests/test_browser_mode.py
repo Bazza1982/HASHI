@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 import sys
 
@@ -135,6 +137,33 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.enqueued[0]["source"], "browser:brave")
         self.assertIn("Find recent CSR sources", runtime.enqueued[0]["prompt"])
         self.assertTrue(runtime.enqueued[0]["habit_learning_eligible"])
+
+    async def test_runtime_enqueue_preserves_browser_habit_eligibility(self):
+        runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+        runtime.request_seq = 0
+        runtime.config = SimpleNamespace(active_backend="codex-cli")
+        runtime.queue = asyncio.Queue()
+        runtime.error_logger = SimpleNamespace(error=lambda *_args, **_kwargs: None)
+        runtime.message_logger = SimpleNamespace(info=lambda *_args, **_kwargs: None)
+        runtime.request_activity = SimpleNamespace(
+            start=lambda *_args, **_kwargs: None
+        )
+
+        # The first reboot adopting a schema change can still have the former
+        # directly imported class in this module until the new reload order is
+        # itself live. Enqueue must resolve the refreshed module-owned class.
+        with patch("orchestrator.flexible_agent_runtime.QueuedRequest", object()):
+            request_id = await runtime.enqueue_request(
+                456,
+                "Find recent CSR sources",
+                "browser:brave",
+                "Browser task",
+                habit_learning_eligible=True,
+            )
+
+        item = runtime.queue.get_nowait()
+        self.assertEqual(request_id, "req-0001")
+        self.assertTrue(item.habit_learning_eligible)
 
     async def test_command_without_args_shows_menu(self):
         runtime = _BrowserRuntime()
