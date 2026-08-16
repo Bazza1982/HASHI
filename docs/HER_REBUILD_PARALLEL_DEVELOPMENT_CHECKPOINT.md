@@ -119,7 +119,7 @@ Focused and expanded Python suites:
 Rebuild/Adapter/command focused suite: 162 passed
 Expanded HER integration suite:        358 passed
 Feature-branch HASHI suite:             2237 passed, 3 skipped, 23 warnings
-Final integrated HASHI suite:           2278 passed, 2 skipped, 23 warnings
+Final integrated HASHI suite:           2279 passed, 2 skipped, 23 warnings
 ```
 
 The 23 Python warnings are existing python-telegram-bot `retry_after`
@@ -222,6 +222,12 @@ Candidate SHA-256:       92eb5de29ce95d5c3b5754b962deafb3961b6fb53a784495effa556
 Source workspace match: true
 Result:                  succeeded / adopted / terminal delivered
 ```
+
+A documentation-only commit followed that adoption. The next live job
+(`rebuild-20260816-092231-aca5cfab`) retained fingerprint
+`7bde32d30a79ffa1`, reused the same immutable candidate, launched no Cargo
+build, and succeeded end-to-end in 15 seconds. This closes the false-cache-miss
+case with real host evidence rather than only a unit test.
 
 ## 8. Operator surface
 

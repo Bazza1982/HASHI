@@ -1264,8 +1264,8 @@ stored and independently recalculated binary digests matched exactly. The
 certified `.22` release artefacts remained unchanged; this active selection is
 explicitly labelled development and non-certified.
 
-After primary integration and both live transactions, the final HASHI Python
-suite completed with `2278 passed, 2 skipped, 23 warnings`; the warnings are
+After primary integration and the source-scoped cache correction, the final
+HASHI Python suite completed with `2279 passed, 2 skipped, 23 warnings`; the warnings are
 the existing python-telegram-bot `retry_after` deprecations.
 
 ### 29.2 Source-scoped cache identity correction
@@ -1297,3 +1297,9 @@ End-to-end adoption:              24 seconds
 Final state:                      succeeded / adopted / terminal delivered
 Runtime source workspace match:   true
 ```
+
+After committing only this documentation, job
+`rebuild-20260816-092231-aca5cfab` retained the exact same fingerprint and
+candidate, recorded `candidate_reused=true`, launched no Cargo build, and
+completed the full verify/restart/adopt transaction successfully in 15
+seconds. This is the live acceptance proof for the source-scoped cache rule.
