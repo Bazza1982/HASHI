@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -17,7 +16,7 @@ from adapters.stream_events import (
     KIND_THINKING,
     StreamEvent,
 )
-from orchestrator.her_message_router import HERDeliveryJournal, HERMessageRouter
+from orchestrator.her_message_router import HERMessageRouter
 
 
 def _event(
@@ -53,7 +52,7 @@ def _event(
         (True, True, True),
     ],
 )
-async def test_all_toggle_combinations_route_disjoint_owners_once(
+async def test_all_toggle_combinations_route_directly_to_the_enabled_owner(
     commentary, verbose, think
 ):
     presented = []
@@ -101,14 +100,13 @@ async def test_all_toggle_combinations_route_disjoint_owners_once(
 
     expected = []
     if verbose:
-        expected.append(("technical", "req-matrix:technical:1"))
+        expected.extend([("technical", "req-matrix:technical:1")] * 2)
     if commentary:
-        expected.append(("commentary", "req-matrix:commentary:1"))
+        expected.extend([("commentary", "req-matrix:commentary:1")] * 2)
     if think:
-        expected.append(("reasoning", "req-matrix:reasoning:1"))
+        expected.extend([("reasoning", "req-matrix:reasoning:1")] * 2)
     assert presented == expected
     assert persisted == [event.event_id for event in events for _ in range(2)]
-    assert len({event_id for _, event_id in presented}) == len(presented)
 
 
 @pytest.mark.asyncio
@@ -135,8 +133,7 @@ async def test_required_control_bypasses_all_optional_toggles():
     await router.route(event)
     await router.route(event)
 
-    assert presented == ["req-control:permission:1"]
-    assert router.ledger.snapshot()[0]["status"] == "delivered"
+    assert presented == ["req-control:permission:1"] * 2
 
 
 @pytest.mark.asyncio
@@ -163,14 +160,10 @@ async def test_direct_response_is_deferred_to_mandatory_final_lane():
 
     assert presented == []
     assert router.deferred_final is direct
-    assert router.ledger.snapshot()[0]["status"] == "pending"
-
-    router.record_final_delivery("complete direct answer", delivered=True)
-    assert router.ledger.snapshot()[0]["status"] == "delivered"
 
 
 @pytest.mark.asyncio
-async def test_failed_delivery_retries_same_identity_with_bounded_attempts():
+async def test_presenter_failure_does_not_create_a_second_retry_system():
     attempts = []
 
     async def flaky(event):
@@ -193,13 +186,8 @@ async def test_failed_delivery_retries_same_identity_with_bounded_attempts():
     )
 
     await router.route(event)
-    await router.route(event)
-    await router.route(event)
 
-    assert attempts == [event.event_id, event.event_id]
-    [record] = router.ledger.snapshot()
-    assert record["attempts"] == 2
-    assert record["status"] == "delivered"
+    assert attempts == [event.event_id]
 
 
 @pytest.mark.asyncio
@@ -246,38 +234,31 @@ async def test_missing_delivery_class_is_audited_but_not_presented():
     await router.route(StreamEvent(kind=KIND_PROGRESS, summary="legacy HER event"))
 
     assert order == [("persist", KIND_PROGRESS)]
-    assert router.ledger.snapshot()[0]["status"] == "suppressed"
 
 
 @pytest.mark.asyncio
-async def test_delivery_journal_persists_secret_free_state_transitions(tmp_path):
-    journal_path = tmp_path / "backend_state" / "her_delivery_events.jsonl"
+async def test_persistence_failure_does_not_block_direct_presentation():
+    presented = []
+
+    async def fail_persistence(_event):
+        raise OSError("disk unavailable")
+
     router = HERMessageRouter(
-        request_id="req-journal",
+        request_id="req-persist",
         logger=SimpleNamespace(
             info=lambda _message: None, warning=lambda _message: None
         ),
-        commentary_presenter=lambda _event: SimpleNamespace(message_id=42),
+        commentary_presenter=lambda event: presented.append(event.event_id),
         commentary_enabled=lambda: True,
-        ledger_observer=HERDeliveryJournal(
-            journal_path,
-            request_id="req-journal",
-        ),
+        persist_event=fail_persistence,
     )
     event = _event(
         DELIVERY_USER_COMMENTARY,
-        "req-journal:ack:initial",
+        "req-persist:ack:initial",
         kind=KIND_ACKNOWLEDGEMENT,
         summary="private Persona wording",
     )
 
     await router.route(event)
 
-    records = [
-        json.loads(line)
-        for line in journal_path.read_text(encoding="utf-8").splitlines()
-    ]
-    assert records[-1]["delivery"]["status"] == "delivered"
-    assert records[-1]["delivery"]["message_id"] == "42"
-    assert records[-1]["delivery"]["event_id"] == event.event_id
-    assert "private Persona wording" not in journal_path.read_text(encoding="utf-8")
+    assert presented == [event.event_id]

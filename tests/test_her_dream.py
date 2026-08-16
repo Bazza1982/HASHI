@@ -10,6 +10,7 @@ from adapters.her_dream import (
     DreamValidationError,
     HERDreamJournal,
     StaleDreamState,
+    build_dream_correction_prompt,
     build_dream_prompt,
     catalog_fingerprint,
     commit_dream_proposal,
@@ -75,6 +76,19 @@ def test_dream_prompt_is_her_only_closed_and_redacts_secret_like_authority(tmp_p
     assert "bridge_memory.sqlite" not in prompt
     assert "[REDACTED_SECRET]" in prompt
     assert "secret-value-123456" not in prompt
+    assert "justification <= 500 characters" in prompt
+    assert "aim for <=\n400" in prompt
+
+
+def test_dream_correction_prompt_returns_the_validation_error_to_the_model():
+    prompt = build_dream_correction_prompt(
+        rejected_output='{"groups":[{"reason":"too long"}]}',
+        error=DreamValidationError("groups[0].reason exceeds 500 characters"),
+    )
+
+    assert "groups[0].reason exceeds 500 characters" in prompt
+    assert '"reason":"too long"' in prompt
+    assert "Change only what is needed" in prompt
 
 
 def test_dream_parser_accepts_closed_operations_and_blocks_protected_mutation(tmp_path):

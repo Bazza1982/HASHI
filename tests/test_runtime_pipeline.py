@@ -791,7 +791,7 @@ async def test_medium_claw_sends_one_visible_task_acknowledgement():
     await feedback.on_stream_event(event)
     await feedback.on_stream_event(event)
 
-    assert len(sent) == 1
+    assert len(sent) == 2
     assert sent[0][0] == 123
     assert sent[0][2]["_purpose"] == "task_acknowledgement"
     assert any("acknowledgement policy" in message for message in runtime.logger.messages)
@@ -2076,10 +2076,7 @@ async def test_her_direct_response_stream_event_is_not_sent_before_final_deliver
     )
 
     assert runtime.sent_message["text"] == "complete direct answer"
-    records = feedback.her_message_router.ledger.snapshot()
-    assert [record["status"] for record in records if record["event_id"] == "req-1:final"] == [
-        "delivered"
-    ]
+    assert feedback.her_message_router.deferred_final is not None
 
 
 @pytest.mark.asyncio

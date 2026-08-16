@@ -599,7 +599,7 @@ def wrap_her_persona_stream(
 ):
     """Create the sole HER presentation router after audit/activity persistence."""
     from adapters.stream_events import KIND_ACKNOWLEDGEMENT
-    from orchestrator.her_message_router import HERDeliveryJournal, HERMessageRouter
+    from orchestrator.her_message_router import HERMessageRouter
 
     normalized_backend = str(backend_name or "").strip().lower()
     if normalized_backend not in {"her", "claw-cli"}:
@@ -666,19 +666,6 @@ def wrap_her_persona_stream(
         if activity_store is not None:
             activity_store.publish_stream(item.request_id, event)
 
-    delivery_journal = HERDeliveryJournal(
-        runtime.workspace_dir / "backend_state" / "her_delivery_events.jsonl",
-        request_id=item.request_id,
-    )
-
-    def _record_durable_delivery(record):
-        if record.get("delivery_class") in {
-            "user_commentary",
-            "final",
-            "control",
-        }:
-            delivery_journal(record)
-
     router = HERMessageRouter(
         request_id=item.request_id,
         logger=runtime.logger,
@@ -690,7 +677,6 @@ def wrap_her_persona_stream(
         think_enabled=lambda: bool(getattr(runtime, "_think", False)),
         commentary_enabled=lambda: bool(getattr(runtime, "_commentary", True)),
         persist_event=_persist_event,
-        ledger_observer=_record_durable_delivery,
         delivery_requested=delivery_requested,
         delivery_blocked=delivery_blocked,
     )
@@ -1423,15 +1409,6 @@ async def handle_success_delivery(
         )
     else:
         send_elapsed_s, chunk_count = 0.0, 0
-    if her_message_router is not None:
-        her_message_router.record_final_delivery(
-            response_text,
-            delivered=bool(
-                stream_finalization.final_delivered
-                or stream_finalization.fallback_required
-            ),
-            error=stream_finalization.error,
-        )
     runtime_cross_session.record_turn_result(
         runtime,
         item,

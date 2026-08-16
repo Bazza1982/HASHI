@@ -4,8 +4,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from orchestrator.enterprise import EnterpriseLeaseStore, IdentityService
-from orchestrator.superloop_scheduler import advance_superloops_once
 from orchestrator.superloop_issues import SuperloopIssuesService
+from orchestrator.superloop_scheduler import advance_superloops_once
 from orchestrator.superloop_store import SuperloopStore
 from orchestrator.superloop_taskboard import SuperloopTaskboardService
 from orchestrator.superloop_waits import SuperloopWaitsService
@@ -137,6 +137,43 @@ def test_superloop_scheduler_starts_task_without_wait_when_explicitly_enabled(tm
     state = store.load_loop_state("sl-test-004")
     assert state["current_step"].startswith("task-")
     assert taskboard.list_tasks("sl-test-004")[0]["status"] == "in_progress"
+
+
+def test_superloop_scheduler_isolates_malformed_historical_loop(tmp_path: Path) -> None:
+    store = SuperloopStore(tmp_path / "superloops")
+    for loop_id in ("sl-bad-waits", "sl-good-loop"):
+        store.create_compiled_loop(
+            loop_id=loop_id,
+            loop_state={
+                "loop_id": loop_id,
+                "status": "running",
+                "current_step": None,
+                "scheduler_auto_advance": True,
+                "taskboard_path": f"superloops/loops/{loop_id}/taskboard.json",
+                "waits_path": f"superloops/loops/{loop_id}/waits.json",
+            },
+            taskboard=[],
+            issues=[],
+            waits=[],
+            operator_summary="# summary\n",
+        )
+    (store.loop_dir("sl-bad-waits") / "waits.json").write_text(
+        '{"invalid": "not-a-list"}', encoding="utf-8"
+    )
+    tasks = SuperloopTaskboardService(store)
+    tasks.add_task(
+        "sl-good-loop",
+        title="must still advance",
+        owner_agent="zelda",
+        owner_instance="HASHI1",
+    )
+
+    stats = advance_superloops_once(tmp_path / "superloops")
+
+    assert stats["loops_checked"] == 2
+    assert stats["loops_failed"] == 1
+    assert stats["loops_advanced"] == 1
+    assert store.load_loop_state("sl-good-loop")["current_step"] is not None
 
 
 def test_superloop_scheduler_db_lease_guard_skips_when_held(tmp_path: Path) -> None:

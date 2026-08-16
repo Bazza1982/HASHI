@@ -1725,6 +1725,26 @@ CURRENT AGENT HABITS
 """
 
 
+def build_meditation_correction_prompt(
+    *,
+    rejected_output: str,
+    error: Exception,
+) -> str:
+    """Ask for one local format correction after an otherwise completed pass."""
+
+    return f"""HER HABIT MEDITATION — CORRECT INVALID OUTPUT
+
+Your previous Meditation response could not be applied:
+{redact_bounded_text(str(error), limit=1_000)}
+
+Return the same intended actions as one valid JSON object with only the
+minimum correction needed. Do not add prose or call tools.
+
+REJECTED RESPONSE
+{redact_bounded_text(rejected_output, limit=12_000)}
+"""
+
+
 def parse_meditation_actions(
     text: str,
     *,

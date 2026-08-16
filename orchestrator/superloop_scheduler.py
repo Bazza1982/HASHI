@@ -85,6 +85,7 @@ def _advance_superloops_once_unlocked(superloops_root: Path, now: datetime | Non
     loops_checked = 0
     waits_satisfied = 0
     loops_advanced = 0
+    loops_failed = 0
 
     for loop_dir in sorted(store.loops_dir.glob("sl-*")):
         if not loop_dir.is_dir():
@@ -99,8 +100,16 @@ def _advance_superloops_once_unlocked(superloops_root: Path, now: datetime | Non
             continue
         loops_checked += 1
 
-        wait_ids = waits.pending_wait_ids(loop_id)
-        waits_by_id = {str(wait.get("wait_id")): wait for wait in waits.list_waits(loop_id)}
+        try:
+            wait_ids = waits.pending_wait_ids(loop_id)
+            waits_by_id = {
+                str(wait.get("wait_id")): wait for wait in waits.list_waits(loop_id)
+            }
+        except (OSError, TypeError, ValueError):
+            # One malformed historical loop must not prevent unrelated loops,
+            # waits, or controller nudges from advancing on this scheduler tick.
+            loops_failed += 1
+            continue
         wait_satisfied_this_loop = False
         for wait_id in wait_ids:
             wait_obj = waits_by_id.get(wait_id)
@@ -134,5 +143,6 @@ def _advance_superloops_once_unlocked(superloops_root: Path, now: datetime | Non
         "loops_checked": loops_checked,
         "waits_satisfied": waits_satisfied,
         "loops_advanced": loops_advanced,
+        "loops_failed": loops_failed,
         "lease_skipped": 0,
     }

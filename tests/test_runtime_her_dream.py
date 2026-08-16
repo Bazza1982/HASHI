@@ -61,28 +61,17 @@ class FakeDreamAdapter:
                 raise response
             return SimpleNamespace(text=str(response))
         if "HER PERSONA REPORT RENDERER" in prompt:
-            contract = json.loads(
-                prompt.split("IMMUTABLE REPORT CONTRACT (quoted, read-only)\n", 1)[1]
+            context = json.loads(
+                prompt.split("REPORT CONTEXT (quoted, read-only)\n", 1)[1]
             )
             return SimpleNamespace(
-                text=json.dumps(
-                    {
-                        "report_id": contract["report_id"],
-                        "heading": f"A gentle report · {contract['report_id']}",
-                        "facts": [
-                            {
-                                **item,
-                                "rendered": item["source"],
-                            }
-                            for item in contract["facts"]
-                        ],
-                        "changed_group_numbers": contract["changed_group_numbers"],
-                        "undo_commands": [
-                            {"source": command, "rendered": command}
-                            for command in contract["undo_commands"]
-                        ],
-                        "closing": "Everything remains recoverable.",
-                    }
+                text="\n".join(
+                    [
+                        f"A gentle report · {context['report_id']}",
+                        *context["facts"],
+                        *context["undo_commands"],
+                        "Everything remains recoverable.",
+                    ]
                 )
             )
         return SimpleNamespace(text='{"groups":[]}')
@@ -298,7 +287,9 @@ async def test_non_her_status_does_not_read_habit_bearing_dream_manifests(
 
 
 @pytest.mark.asyncio
-async def test_dream_no_change_uses_persona_fallback_and_advances_cursor(tmp_path):
+async def test_dream_no_change_delivers_persona_text_without_contract_validation(
+    tmp_path,
+):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
     _seed_habit(adapter._store)
@@ -327,15 +318,65 @@ async def test_dream_no_change_uses_persona_fallback_and_advances_cursor(tmp_pat
 
     assert ok is True
     assert manifest is not None and manifest["status"] == "no_change"
-    assert report.startswith("🌙 Dream completed")
-    assert "No eligible Habit changes were found" in report
+    assert report == "not-json"
     assert all(call["write_lock_held"] is False for call in adapter.calls)
     assert "persona-secret-value-123456" not in adapter.calls[-1]["prompt"]
     assert "[REDACTED_SECRET]" in adapter.calls[-1]["prompt"]
     cursor = adapter._journal.read_cursor()
     assert cursor["offset"] == runtime.transcript_log_path.stat().st_size
     audit = adapter._journal.audit_path.read_text(encoding="utf-8")
-    assert "dream_persona_fallback" in audit
+    assert "dream_persona_rendered" in audit
+    assert "delivered_without_content_validation" in audit
+
+
+@pytest.mark.asyncio
+async def test_dream_corrects_one_invalid_proposal_then_commits(tmp_path):
+    runtime = FakeDreamRuntime(tmp_path)
+    adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
+    habit_id = _seed_habit(adapter._store, title="Obsolete Habit")
+    runtime.config.system_md.write_text("Use a warm voice.", encoding="utf-8")
+    adapter.responses = [
+        json.dumps(
+            {
+                "groups": [
+                    {
+                        "operation": "archive",
+                        "habit_id": habit_id,
+                        "reason": "x" * 501,
+                    }
+                ]
+            }
+        ),
+        json.dumps(
+            {
+                "groups": [
+                    {
+                        "operation": "archive",
+                        "habit_id": habit_id,
+                        "reason": "The Habit is obsolete.",
+                    }
+                ]
+            }
+        ),
+        "The obsolete Habit has been archived.",
+    ]
+
+    ok, report, manifest = await runtime_her_dream.execute_dream(
+        runtime,
+        origin="manual",
+    )
+
+    assert ok is True
+    assert report == "The obsolete Habit has been archived."
+    assert manifest is not None and manifest["status"] == "completed"
+    assert adapter._store.get(habit_id) is None
+    assert [call["request_id"] for call in adapter.calls[:2]] == [
+        f"{manifest['run_id']}:analysis:1",
+        f"{manifest['run_id']}:analysis:2",
+    ]
+    assert "exceeds 500 characters" in adapter.calls[1]["prompt"]
+    audit = adapter._journal.audit_path.read_text(encoding="utf-8")
+    assert "dream_validation_retry" in audit
 
 
 @pytest.mark.asyncio
@@ -387,25 +428,11 @@ async def test_dream_complete_body_can_be_rendered_in_configured_persona(tmp_pat
     )
 
     def persona_response(prompt: str, _request_id: str) -> str:
-        contract = json.loads(
-            prompt.split("IMMUTABLE REPORT CONTRACT (quoted, read-only)\n", 1)[1]
-        )
-        [fact] = contract["facts"]
-        return json.dumps(
-            {
-                "report_id": contract["report_id"],
-                "heading": f"陛下，昭君已完成今夜的整理 · {contract['report_id']}",
-                "facts": [
-                    {
-                        **fact,
-                        "rendered": "昭君逐项看过了，目前没有需要调整的 Habit。",
-                    }
-                ],
-                "changed_group_numbers": [],
-                "undo_commands": [],
-                "closing": "一切安稳，陛下可以放心。",
-            },
-            ensure_ascii=False,
+        assert "REPORT CONTEXT" in prompt
+        return (
+            "陛下，昭君已完成今夜的整理。\n\n"
+            "昭君逐项看过了，目前没有需要调整的 Habit。\n"
+            "一切安稳，陛下可以放心。"
         )
 
     adapter.responses = ['{"groups":[]}', persona_response]
@@ -446,7 +473,7 @@ async def test_missing_configured_persona_skips_renderer_and_uses_neutral_report
     assert "MUST NOT BE USED" not in adapter.calls[0]["prompt"]
     audit = adapter._journal.audit_path.read_text(encoding="utf-8")
     assert "system_md_missing" in audit
-    assert "dream_persona_fallback" in audit
+    assert "dream_persona_unavailable" in audit
 
 
 @pytest.mark.asyncio
@@ -491,56 +518,26 @@ async def test_dream_undo_uses_same_configured_system_md_without_editing_it(tmp_
     assert configured.read_bytes() == before
 
 
-def test_persona_report_validator_rejects_fact_id_and_command_tampering():
-    report_id = "D-20260815-120000-ABC123"
-    facts = [
-        "Combined 2 Habits into “Current Rule” — obsolete wording was removed.",
-        "Restored Dream change #2 from run D-20260815-110000-DEF456.",
-    ]
-    commands = [
-        f"/dream undo {report_id}",
-        f"/dream undo {report_id} 2",
-    ]
-    base = {
-        "report_id": report_id,
-        "heading": f"Persona report · {report_id}",
-        "facts": [
-            {"index": index, "source": fact, "rendered": fact}
-            for index, fact in enumerate(facts, start=1)
-        ],
-        "changed_group_numbers": [2],
-        "undo_commands": [
-            {"source": command, "rendered": command} for command in commands
-        ],
-        "closing": "Done.",
-    }
+@pytest.mark.asyncio
+async def test_persona_report_accepts_natural_message_without_exact_echo(tmp_path):
+    adapter = FakeDreamAdapter(tmp_path)
+    adapter.responses = ["A warm, straightforward Persona report."]
+    persona_file = tmp_path / "AGENT.md"
+    persona_file.write_text("Use a warm voice.", encoding="utf-8")
 
-    invalid_payloads = []
-    dropped = json.loads(json.dumps(base))
-    dropped["facts"].pop()
-    invalid_payloads.append(dropped)
-    reordered = json.loads(json.dumps(base))
-    reordered["facts"].reverse()
-    invalid_payloads.append(reordered)
-    altered_id = json.loads(json.dumps(base))
-    altered_id["heading"] = "Persona report · D-20260815-120000-FFFFFF"
-    invalid_payloads.append(altered_id)
-    altered_command = json.loads(json.dumps(base))
-    altered_command["undo_commands"][0]["rendered"] += " 9"
-    invalid_payloads.append(altered_command)
-    invented_id = json.loads(json.dumps(base))
-    invented_id["closing"] = "See D-20260815-120000-FFFFFF."
-    invalid_payloads.append(invented_id)
+    report = await runtime_her_dream._persona_report(
+        adapter,
+        report_type="Dream completion",
+        report_id="D-20260815-120000-ABC123",
+        persona_source=runtime_her_dream.her_persona.load_configured_persona(
+            persona_file
+        ),
+        facts=["Combined two Habits."],
+        changed_group_numbers=[1],
+        undo_commands=["/dream undo D-20260815-120000-ABC123"],
+    )
 
-    for payload in invalid_payloads:
-        with pytest.raises(ValueError):
-            runtime_her_dream._validated_persona_report(
-                json.dumps(payload),
-                report_id=report_id,
-                facts=facts,
-                changed_group_numbers=[2],
-                undo_commands=commands,
-            )
+    assert report == "A warm, straightforward Persona report."
 
 
 @pytest.mark.asyncio
@@ -548,6 +545,7 @@ async def test_dream_retries_once_after_concurrent_habit_change(tmp_path):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
     habit_id = _seed_habit(adapter._store)
+    runtime.config.system_md.write_text("Use a calm voice.", encoding="utf-8")
 
     def first_response(_prompt: str, _request_id: str) -> str:
         adapter._store.apply_actions(
@@ -575,7 +573,7 @@ async def test_dream_retries_once_after_concurrent_habit_change(tmp_path):
     adapter.responses = [
         first_response,
         '{"groups":[]}',
-        '{"intro":"The fresh catalogue is settled.","closing":"No unsafe overwrite occurred."}',
+        "The fresh catalogue is settled; no unsafe overwrite occurred.",
     ]
 
     ok, report, manifest = await runtime_her_dream.execute_dream(
@@ -586,7 +584,7 @@ async def test_dream_retries_once_after_concurrent_habit_change(tmp_path):
     assert ok is True
     assert manifest is not None and manifest["status"] == "no_change"
     assert adapter._store.get(habit_id) is not None
-    assert "No eligible Habit changes" in report
+    assert report.startswith("The fresh catalogue is settled")
     run = adapter._journal.get_run(str(manifest["run_id"]))
     assert len(run["attempts"]) == 2
     assert "dream_stale_retry" in adapter._journal.audit_path.read_text(
