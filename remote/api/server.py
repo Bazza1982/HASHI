@@ -18,9 +18,9 @@ Adapted from Lily Remote (agent/api/server.py) — screen/input endpoints
 replaced with hchat relay and terminal execution.
 """
 
+import asyncio
 import base64
 import hashlib
-import asyncio
 import json
 import logging
 import os
@@ -29,21 +29,29 @@ import re
 import socket
 import subprocess
 import time
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlsplit
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from orchestrator.pathing import instance_runtime_dir
+from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
+
 from ..attachments import AttachmentStore
+from ..audit.logger import get_audit_logger
+from ..local_http import local_http_hosts, local_http_url
 from ..protocol_ack import ack_state_path, load_ack_state, record_protocol_ack
-from ..protocol_outbound import load_outbound_state, outbound_state_path, register_outbound_correlation
+from ..protocol_outbound import (
+    load_outbound_state,
+    outbound_state_path,
+    register_outbound_correlation,
+)
 from ..protocol_router import validate_protocol_envelope
 from ..security.auth import (
     authenticate_request_detailed,
@@ -57,14 +65,9 @@ from ..security.auth import (
     verify_protocol_request,
     verify_token,
 )
-from ..security.shared_token import build_auth_headers
-from ..security.shared_token import load_shared_token
 from ..security.pairing import PairingManager
-from ..terminal.executor import TerminalExecutor, AuthLevel
-from ..audit.logger import get_audit_logger
-from ..local_http import local_http_hosts, local_http_url
-from orchestrator.pathing import instance_runtime_dir
-from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
+from ..security.shared_token import build_auth_headers, load_shared_token
+from ..terminal.executor import AuthLevel, TerminalExecutor
 
 logger = logging.getLogger(__name__)
 

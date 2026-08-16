@@ -9,7 +9,6 @@ from orchestrator.parked_topics import ParkedTopicStore
 from orchestrator.workzone import load_workzone
 from tools.token_tracker import get_summary
 
-
 SYS_PREVIEW_CHARS = 70
 
 

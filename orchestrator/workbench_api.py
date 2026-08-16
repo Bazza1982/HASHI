@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import base64
 import json
@@ -12,15 +13,15 @@ from uuid import uuid4
 
 from aiohttp import web
 
-from orchestrator.agent_overview import build_agent_overview
 from orchestrator.admin_local_testing import (
     execute_local_command,
     supported_commands,
     try_execute_slash_command_text,
 )
+from orchestrator.agent_overview import build_agent_overview
 from orchestrator.conversation_router import ConversationRouter
-from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
+from orchestrator.enterprise.audit_ledger import EnterpriseAuditLedger
 from orchestrator.enterprise.audit_schema import AuditEvent, AuditEventWriter
 from orchestrator.enterprise.auth_providers import load_auth_providers
 from orchestrator.enterprise.capabilities import AgentCapabilityRegistry
@@ -36,8 +37,11 @@ from orchestrator.enterprise.connectors import (
 )
 from orchestrator.enterprise.credentials import ConnectorCredentialStore
 from orchestrator.enterprise.identity import EnterpriseRole, IdentityService
+from orchestrator.enterprise.oidc_exchange import (
+    build_oidc_token_exchange_request,
+    map_oidc_claims,
+)
 from orchestrator.enterprise.oidc_flow import build_oidc_authorization_start
-from orchestrator.enterprise.oidc_exchange import build_oidc_token_exchange_request
 from orchestrator.enterprise.oidc_http import (
     OidcJwksCache,
     exchange_oidc_authorization_code,
@@ -45,11 +49,14 @@ from orchestrator.enterprise.oidc_http import (
 )
 from orchestrator.enterprise.oidc_session import complete_oidc_session
 from orchestrator.enterprise.oidc_token import verify_oidc_id_token
-from orchestrator.enterprise.oidc_exchange import map_oidc_claims
 from orchestrator.enterprise.policy import PolicyEvaluator
 from orchestrator.enterprise.policy_templates import install_default_connector_policy
 from orchestrator.enterprise.routing import agent_project_ids
-from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
+from orchestrator.enterprise.saml import (
+    build_saml_authn_start,
+    validate_saml_assertion,
+    verify_saml_assertion_signature,
+)
 from orchestrator.enterprise.scim import (
     ScimProvisioningService,
     scim_resource_type,
@@ -59,14 +66,9 @@ from orchestrator.enterprise.scim import (
     scim_service_provider_config,
     scim_user_resource,
 )
-from orchestrator.enterprise.saml import (
-    build_saml_authn_start,
-    validate_saml_assertion,
-    verify_saml_assertion_signature,
-)
+from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
 from orchestrator.pathing import resolve_path_value
 from orchestrator.transfer_store import TransferStore
-
 
 _SUPPORTED_CONNECTOR_TYPES = frozenset({"github", "slack", "google_chat", "teams", "feishu"})
 _CONNECTOR_REQUIRED_SCOPES = {
