@@ -9,9 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote, urlencode
 
+import aiohttp
+
+from tools.workbench_client import request_workbench_json, workbench_endpoint
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -401,6 +406,39 @@ def _background_manager_from_context(audit_context: dict | None):
     return manager or getattr(runtime, "background_job_manager", None)
 
 
+async def _background_job_api_request(
+    audit_context: dict | None,
+    method: str,
+    path: str,
+    *,
+    payload: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        base_url, _agent = workbench_endpoint(audit_context)
+        status, body = await request_workbench_json(
+            method,
+            f"{base_url}{path}",
+            payload=payload,
+        )
+    except ValueError as exc:
+        return None, f"Error: {exc}"
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        return (
+            None,
+            (
+                "Error: HASHI Workbench API is unavailable: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        )
+    if status >= 400 or body.get("ok") is False:
+        detail = str(body.get("error") or body.get("message") or "request failed")
+        return (
+            None,
+            f"Error: HASHI BackgroundJob API request failed ({status}): {detail}",
+        )
+    return body, None
+
+
 def _coerce_chat_id(value: Any) -> Any:
     if value is None:
         return None
@@ -411,18 +449,25 @@ def _coerce_chat_id(value: Any) -> Any:
 
 
 def _job_summary(record: Any) -> dict[str, Any]:
+    def value(key: str, default: Any = None) -> Any:
+        if isinstance(record, Mapping):
+            return record.get(key, default)
+        return getattr(record, key, default)
+
+    command = value("command", {}) or {}
+    logs = value("logs", {}) or {}
     return {
-        "job_id": getattr(record, "job_id", None),
-        "state": getattr(record, "state", None),
-        "returncode": getattr(record, "returncode", None),
-        "created_at": getattr(record, "created_at", None),
-        "updated_at": getattr(record, "updated_at", None),
-        "ended_at": getattr(record, "ended_at", None),
-        "error": getattr(record, "error", None),
-        "command": (getattr(record, "command", {}) or {}).get("display"),
-        "stdout_path": (getattr(record, "logs", {}) or {}).get("stdout_path"),
-        "stderr_path": (getattr(record, "logs", {}) or {}).get("stderr_path"),
-        "notification": getattr(record, "notification", None),
+        "job_id": value("job_id"),
+        "state": value("state"),
+        "returncode": value("returncode"),
+        "created_at": value("created_at"),
+        "updated_at": value("updated_at"),
+        "ended_at": value("ended_at"),
+        "error": value("error"),
+        "command": command.get("display") if isinstance(command, Mapping) else command,
+        "stdout_path": logs.get("stdout_path") if isinstance(logs, Mapping) else None,
+        "stderr_path": logs.get("stderr_path") if isinstance(logs, Mapping) else None,
+        "notification": value("notification"),
     }
 
 
@@ -432,10 +477,6 @@ async def execute_background_job_start(
     workspace_dir: Path,
     audit_context: dict | None = None,
 ) -> str:
-    manager = _background_manager_from_context(audit_context)
-    if manager is None:
-        return "Error: BackgroundJobManager is not running in this runtime"
-
     command = str(args.get("command") or "").strip()
     argv = args.get("argv")
     if argv is not None:
@@ -463,8 +504,42 @@ async def execute_background_job_start(
         "tool": "background_job_start",
     }
     max_runtime = int(args.get("max_runtime_seconds") or 4 * 60 * 60)
+    agent = str(args.get("agent") or context.get("agent_name") or "unknown")
+    manager = _background_manager_from_context(audit_context)
+    if manager is None:
+        payload, error = await _background_job_api_request(
+            audit_context,
+            "POST",
+            "/api/background-jobs",
+            payload={
+                "agent": agent,
+                "cwd": str(cwd),
+                "argv": argv,
+                "command": command or None,
+                "origin": origin,
+                "notify_on_complete": bool(args.get("notify_on_complete", True)),
+                "notify_on_failure": bool(args.get("notify_on_failure", True)),
+                "trigger_agent_on_complete": bool(args.get("trigger_agent_on_complete", True)),
+                "trigger_agent_on_failure": bool(args.get("trigger_agent_on_failure", True)),
+                "max_runtime_seconds": max(1, max_runtime),
+            },
+        )
+        if error:
+            return error
+        record = (payload or {}).get("job")
+        if not isinstance(record, dict):
+            return "Error: HASHI BackgroundJob API returned an invalid job record"
+        summary = _job_summary(record)
+        job_id = str(summary.get("job_id") or "")
+        summary["follow_up"] = {
+            "status": f"/bg status {job_id}",
+            "tail": f"/bg tail {job_id}",
+            "cancel": f"/bg cancel {job_id}",
+        }
+        return json.dumps(summary, ensure_ascii=False, indent=2)
+
     record = await manager.start_job(
-        agent=str(args.get("agent") or context.get("agent_name") or "unknown"),
+        agent=agent,
         cwd=cwd,
         argv=argv,
         command=command or None,
@@ -485,12 +560,22 @@ async def execute_background_job_start(
 
 
 async def execute_background_job_status(args: dict, audit_context: dict | None = None) -> str:
-    manager = _background_manager_from_context(audit_context)
-    if manager is None:
-        return "Error: BackgroundJobManager is not running in this runtime"
     job_id = str(args.get("job_id") or "").strip()
     if not job_id:
         return await execute_background_job_list(args, audit_context=audit_context)
+    manager = _background_manager_from_context(audit_context)
+    if manager is None:
+        payload, error = await _background_job_api_request(
+            audit_context,
+            "GET",
+            f"/api/background-jobs/{quote(job_id, safe='')}",
+        )
+        if error:
+            return error
+        record = (payload or {}).get("job")
+        if not isinstance(record, dict):
+            return "Error: HASHI BackgroundJob API returned an invalid job record"
+        return json.dumps(_job_summary(record), ensure_ascii=False, indent=2)
     record = manager.get(job_id)
     if record is None:
         return f"Error: background job not found: {job_id}"
@@ -498,14 +583,27 @@ async def execute_background_job_status(args: dict, audit_context: dict | None =
 
 
 async def execute_background_job_tail(args: dict, audit_context: dict | None = None) -> str:
-    manager = _background_manager_from_context(audit_context)
-    if manager is None:
-        return "Error: BackgroundJobManager is not running in this runtime"
     job_id = str(args.get("job_id") or "").strip()
     if not job_id:
         return "Error: job_id is required"
     stream = str(args.get("stream") or "stdout").strip().lower()
+    if stream not in {"stdout", "stderr"}:
+        return "Error: stream must be stdout or stderr"
     lines = int(args.get("lines") or 80)
+    manager = _background_manager_from_context(audit_context)
+    if manager is None:
+        query = urlencode({"stream": stream, "lines": str(max(1, min(lines, 1000)))})
+        payload, error = await _background_job_api_request(
+            audit_context,
+            "GET",
+            f"/api/background-jobs/{quote(job_id, safe='')}/tail?{query}",
+        )
+        if error:
+            return error
+        text = (payload or {}).get("tail")
+        if not isinstance(text, str):
+            return "Error: HASHI BackgroundJob API returned an invalid tail response"
+        return text or "(no output yet)"
     try:
         text = manager.tail(job_id, stream=stream, lines=max(1, lines))
     except KeyError:
@@ -514,12 +612,22 @@ async def execute_background_job_tail(args: dict, audit_context: dict | None = N
 
 
 async def execute_background_job_cancel(args: dict, audit_context: dict | None = None) -> str:
-    manager = _background_manager_from_context(audit_context)
-    if manager is None:
-        return "Error: BackgroundJobManager is not running in this runtime"
     job_id = str(args.get("job_id") or "").strip()
     if not job_id:
         return "Error: job_id is required"
+    manager = _background_manager_from_context(audit_context)
+    if manager is None:
+        payload, error = await _background_job_api_request(
+            audit_context,
+            "POST",
+            f"/api/background-jobs/{quote(job_id, safe='')}/cancel",
+        )
+        if error:
+            return error
+        record = (payload or {}).get("job")
+        if not isinstance(record, dict):
+            return "Error: HASHI BackgroundJob API returned an invalid job record"
+        return json.dumps(_job_summary(record), ensure_ascii=False, indent=2)
     try:
         record = await manager.cancel(job_id)
     except KeyError:
@@ -528,12 +636,32 @@ async def execute_background_job_cancel(args: dict, audit_context: dict | None =
 
 
 async def execute_background_job_list(args: dict, audit_context: dict | None = None) -> str:
-    manager = _background_manager_from_context(audit_context)
-    if manager is None:
-        return "Error: BackgroundJobManager is not running in this runtime"
     agent = args.get("agent")
     limit = int(args.get("limit") or 20)
-    records = manager.list(agent=str(agent) if agent else None, limit=max(1, min(limit, 100)))
+    bounded_limit = max(1, min(limit, 100))
+    manager = _background_manager_from_context(audit_context)
+    if manager is None:
+        query_values = {"limit": str(bounded_limit)}
+        if agent:
+            query_values["agent"] = str(agent)
+        payload, error = await _background_job_api_request(
+            audit_context,
+            "GET",
+            f"/api/background-jobs?{urlencode(query_values)}",
+        )
+        if error:
+            return error
+        records = (payload or {}).get("jobs")
+        if not isinstance(records, list) or not all(
+            isinstance(record, dict) for record in records
+        ):
+            return "Error: HASHI BackgroundJob API returned an invalid job list"
+        return json.dumps(
+            [_job_summary(record) for record in records],
+            ensure_ascii=False,
+            indent=2,
+        )
+    records = manager.list(agent=str(agent) if agent else None, limit=bounded_limit)
     return json.dumps([_job_summary(record) for record in records], ensure_ascii=False, indent=2)
 
 

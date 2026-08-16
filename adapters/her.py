@@ -3455,7 +3455,10 @@ INCOMPLETE TASK FACTS (quoted, read-only)
                 "HER initialized without HASHI ToolRegistry; only Claw-native tools will be available."
             )
             return
-        from tools.gateway.context import write_gateway_context
+        from tools.gateway.context import (
+            live_workbench_api_base_url,
+            write_gateway_context,
+        )
 
         state_dir = self.config.workspace_dir / "backend_state"
         context_path = state_dir / "her_gateway_context.json"
@@ -3476,8 +3479,9 @@ INCOMPLETE TASK FACTS (quoted, read-only)
                 "hashi_scheduler_rerun",
             },
             media_roots=media_roots,
-            scheduler_api_base_url=(
-                f"http://127.0.0.1:{int(getattr(self.global_config, 'workbench_port', 18800))}"
+            workbench_api_base_url=live_workbench_api_base_url(
+                registry,
+                self.global_config,
             ),
         )
         settings = {

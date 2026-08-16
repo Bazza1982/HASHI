@@ -245,15 +245,21 @@ def test_tool_gateway_settings_disable_unavailable_native_web_search(
     adapter = HERAdapter.__new__(HERAdapter)
     adapter.config = SimpleNamespace(workspace_dir=tmp_path, name="lulu")
     adapter.global_config = SimpleNamespace(base_media_dir=None, workbench_port=18800)
-    adapter.tool_registry = object()
+    adapter.tool_registry = SimpleNamespace(audit_context={})
     adapter.logger = logging.getLogger("test.her.gateway.settings")
     adapter._gateway_context_path = None
     adapter._gateway_config_home = None
     context = SimpleNamespace(agent="lulu", allowed_tools=("web_search",))
 
+    captured = {}
+
+    def fake_write_gateway_context(*_args, **kwargs):
+        captured.update(kwargs)
+        return context
+
     monkeypatch.setattr(
         "tools.gateway.context.write_gateway_context",
-        lambda *_args, **_kwargs: context,
+        fake_write_gateway_context,
     )
 
     adapter._prepare_tool_gateway()
@@ -265,6 +271,7 @@ def test_tool_gateway_settings_disable_unavailable_native_web_search(
     assert settings["permissions"]["deniedTools"] == ["WebSearch"]
     assert "hashi-tools" in settings["mcpServers"]
     assert stat.S_IMODE(settings_path.stat().st_mode) == 0o600
+    assert captured["workbench_api_base_url"] == "http://127.0.0.1:18800"
 
 
 def test_claw_replan_without_model_commentary_remains_technical():
