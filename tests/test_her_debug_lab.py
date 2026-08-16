@@ -15,6 +15,7 @@ from tools.her_debug.lab import (
     _json,
     _optional_file_baseline,
     _resolve_candidate_binary,
+    _runtime_python,
 )
 from tools.her_debug.scripted_provider import (
     EXACT_FINAL_FRAGMENTS,
@@ -24,6 +25,18 @@ from tools.her_debug.scripted_provider import (
 from tools.her_debug.step_state import SequentialStepState, StepProtocolError
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_runtime_python_preserves_external_virtualenv_entrypoint(monkeypatch, tmp_path: Path) -> None:
+    import tools.her_debug.lab as lab_module
+
+    checkout = tmp_path / "clean-checkout"
+    checkout.mkdir()
+    external_python = tmp_path / "shared-venv" / "bin" / "python"
+    monkeypatch.setattr(lab_module, "ROOT", checkout)
+    monkeypatch.setattr(lab_module.sys, "executable", str(external_python))
+
+    assert _runtime_python() == external_python.absolute()
 
 
 def _controller_module():

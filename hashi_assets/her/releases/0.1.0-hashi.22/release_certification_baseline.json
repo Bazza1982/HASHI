@@ -13,7 +13,9 @@
   },
   "hashi_integration": {
     "command": [
-      ".venv/bin/pytest",
+      "{python}",
+      "-m",
+      "pytest",
       "-q",
       "tests",
       "veritas"

@@ -1,6 +1,6 @@
 # HASHI Engine Runtime (HER) Backend Contract
 
-Status: active for certified HER `0.1.0-hashi.20`; earlier unreleased integration
+Status: active for certified HER `0.1.0-hashi.22`; earlier unreleased integration
 checkpoint recorded in
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
 
@@ -17,11 +17,11 @@ not certify a Windows build, another architecture, or a downstream integration.
 
 | Field | Certified value |
 | --- | --- |
-| Package version | `0.1.0-hashi.20` |
-| HER source | `5ed5b30ef2ab0f80ab6d4fd08a1b7b64e77faf05` |
+| Package version | `0.1.0-hashi.22` |
+| HER source | `759cb1abec7ae2dea2756b79206bb67a7d053c14` |
 | Upstream base | Claw `4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d` |
-| Linux target / SHA-256 | `linux-x86_64` / `3c601931478d645c17c9317a6975dcba0944ff48731d2991d70b3af4ffa59167` |
-| Windows target / SHA-256 | `windows-x86_64` / `5463a3d006edcb61a6d066d9b1441046602b03fbb37e207988315a073d8ef3b6` |
+| Linux target / SHA-256 | `linux-x86_64` / `5fc51f4c9e9e90c7f00516d3fd0c3a585c685c1e620a2cc2d2966cb02aa46dea` |
+| Windows target / SHA-256 | `windows-x86_64` / `9c954f60bd1e4948410fb7fd0928dc323235f117e765112ae588c2b8150e2d3b` |
 
 The Linux package passed the full pinned-source certification suite. The Windows
 package was built natively from the same clean source commit and passed native
@@ -43,8 +43,11 @@ name) therefore:
   from `run_finished`;
 - passes `--resume <session_id>` on the next turn in the same backend lifecycle;
 - permits only one writer at a time for that mutable persistent session;
-- runs scheduler requests and requests arriving during a detached persistent turn in
-  isolated sessions with a complete HASHI-owned context snapshot;
+- runs scheduler requests in isolated sessions with a complete HASHI-owned context
+  snapshot, while adjacent direct user turns wait for the persistent-session lock and
+  execute, commit, and deliver FIFO;
+- binds a short direct reply to the latest eligible isolated result already delivered
+  when that reply was enqueued; later scheduler output cannot capture it retroactively;
 - quarantines a persistent session after a failed turn so the next request rebuilds
   from complete HASHI context instead of resuming possibly invalid tool state;
 - clears the Claw identity on `/new` and when a new adapter instance is created;
@@ -72,6 +75,14 @@ or execute a tool instead of returning the required TaskFrame. It is runtime con
 not user intent or new authority, and it is never appended to the persistent session.
 Existing format validation and bounded retries remain fail-safe for providers that
 occasionally return empty or invalid JSON.
+
+Task planning is internal control state. The initial `TaskAcknowledgement` may be
+presented once; later `TaskPlan` revisions remain technical telemetry. Only an explicit
+`TaskCommentary` event may carry model-authored progress. Replans preserve the immutable
+goal and authorization envelope, may not regress verified ledger evidence, use canonical
+tool capabilities from the active registry, and stop after bounded review/no-change
+budgets. Internal parser/reviewer failures are non-actionable technical events unless a
+real permission boundary or user decision is required.
 
 For every Flex turn, the complete canonical turn payload is the user message seen by
 HER's task planner. The authoritative current request is repeated separately as the
@@ -189,12 +200,16 @@ adapter generated under the agent's `backend_state` directory.
   not retained because it may contain server-owned secrets.
 - MCP calls use existing JSON schemas, ToolRegistry permission checks, and tool audit
   records.
+- HASHI scheduler operations use the explicit `hashi_scheduler_*` Gateway namespace;
+  native Claw cron operations remain distinguishable as `claw_local_cron_*`.
+- HASHI repository file operations use `hashi_file_*`; native `read_file`/`write_file`
+  remain scoped to the Claw workspace and cannot stand in for HASHI authority.
 - The gateway stops excessive total calls, repeated identical calls, and consecutive
   error loops with explicit errors instructing the model to report partial progress.
 
 ## Multimedia and media-read contract
 
-HER `.18` can consume model-visible images returned by allowed MCP tools. The
+HER `.22` can consume model-visible images returned by allowed MCP tools. The
 Gateway accepts canonical MCP image content and the reviewed legacy screenshot
 result shapes, then validates MIME type, decoded size, item count, and ordering
 before forwarding provider content. MCP `isError` results remain failures even
@@ -242,10 +257,11 @@ presentation owner: `technical`, `user_commentary`, `reasoning`, `final`,
 `control`, or `internal`. It also retains bounded origin, phase, revision,
 required-delivery, and provenance metadata. Raw audit and bounded local activity
 publication happen before display filtering. The HER message router directly
-dispatches each event to the one owner selected by its delivery class. It does
-not maintain a second request-scoped retry/deduplication ledger; transport
-reliability and final delivery remain owned by the existing runtime sender and
-outbox:
+dispatches each event to the one owner selected by its delivery class. It keeps only a
+request-local set of event IDs already accepted by the existing presenter: persistence
+still records every occurrence, presenter failure remains retryable, and replay after a
+successful presentation is suppressed. Transport reliability and final delivery remain
+owned by the existing runtime sender and outbox:
 
 - `/verbose` accepts only technical planning, tool, test, validation, retry,
   compaction, session, and runtime telemetry;
@@ -275,7 +291,10 @@ assistant tool-call/tool-result sequence. A missing, duplicate, orphaned, or
 interleaved result fails locally as `invalid_session_state`; HER never silently
 reorders or deletes history to make an invalid request appear valid.
 
-Failed `run_finished` events retain redacted `http_status`, `error_type`,
+Every stream-json run that emitted `run_started` emits exactly one final
+`run_finished`, including HTTP/auth and malformed/truncated provider-stream failures.
+Protocol failures identify the last safe event and use a stable public message. Failed
+`run_finished` events retain redacted `http_status`, `error_type`,
 `provider_request_id`, semantic `error_message`, bounded `body_snippet`, and
 `retryable` fields when available. HASHI correlates those fields and bounded
 stderr with its own request ID in `backend_state/her_diagnostics.jsonl`.
@@ -290,6 +309,8 @@ certified binary and its provenance are recorded in:
 
 - `hashi_assets/her/manifest.json`
 - `hashi_assets/her/certification_baseline.json`
+- `hashi_assets/her/releases/0.1.0-hashi.22/certification_evidence.json`
+- `hashi_assets/her/releases/0.1.0-hashi.22/source/her-source.bundle`
 
 A source checkout, PATH binary, or legacy external binary must not silently replace the
 packaged runtime.
@@ -299,15 +320,21 @@ packaged runtime.
 The baseline is deliberately fail-closed:
 
 - every Rust workspace test must pass;
-- the full Rust workspace, including all targets, must pass Clippy with warnings denied;
-- no diagnostic allowlist is active;
-- any new test failure or Clippy diagnostic fails certification.
+- the full Rust workspace and complete HASHI `tests` + `veritas` suite must pass;
+- Clippy runs workspace/all-targets with warnings denied and must match exactly the 40
+  pinned inherited diagnostics; an addition, removal, movement, or lint change fails;
+- Linux and Windows packages must match one manifest, clean source commit, branch,
+  target, embedded provenance, and SHA-256 contract;
+- the certified tag and complete-history source bundle must resolve to that source
+  commit and match their pinned identity;
+- immutable evidence must cover the Debug Lab, Gateway/scheduler, media bridge, and
+  Windows native smoke matrix before promotion.
 
 Run the full certification check with:
 
 ```bash
 python scripts/verify_her_certification.py \
-  --source-root /path/to/claw-code-hashi-4ea31c1
+  --source-root /path/to/her-source-hashi-22
 ```
 
 ## Interrupted-turn continuation
@@ -325,9 +352,8 @@ Passing package and unit certification does not load a running HASHI process.
 Adoption requires an explicit canary `/reboot min`, live provider/media/Habit
 smokes, log review, and only then the intended wider `/reboot max`.
 
-The current open HER gates are:
-
-- capture live image, PDF, audio, screenshot, session-mode, and `/habit` canary
-  evidence after reboot;
-- run a detached-turn plus scheduler concurrency canary against the packaged
-  `.15` runtime before widening rollout.
+The current open HER gate is a Momo-only `/reboot min` canary covering direct
+continuity, isolated scheduler execution, authoritative scheduler/file tools, typed
+failure finalization, commentary idempotency, and one Ultra run. Lily/Sunny or wider
+rollout remains blocked until that canary and its logs are reviewed; `.20` remains the
+rollback target and rejected `.21` remains inactive forensic evidence.

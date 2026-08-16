@@ -23,13 +23,13 @@ is accepted only as a migration alias.
 
 | Platform | Runtime | Source | Status |
 | --- | --- | --- | --- |
-| Linux x86-64 | `0.1.0-hashi.20` | `5ed5b30ef2ab0f80ab6d4fd08a1b7b64e77faf05` | Current certified HASHI1 package |
-| Windows x86-64 | `0.1.0-hashi.20` | `5ed5b30ef2ab0f80ab6d4fd08a1b7b64e77faf05` | Native build and local-command smoke certified |
+| Linux x86-64 | `0.1.0-hashi.22` | `759cb1abec7ae2dea2756b79206bb67a7d053c14` | Current certified HASHI1 package |
+| Windows x86-64 | `0.1.0-hashi.22` | `759cb1abec7ae2dea2756b79206bb67a7d053c14` | Native build and local-command smoke certified |
 
-The certified Linux `.20` SHA-256 digest is
-`3c601931478d645c17c9317a6975dcba0944ff48731d2991d70b3af4ffa59167`.
-The native Windows `.20` SHA-256 digest is
-`5463a3d006edcb61a6d066d9b1441046602b03fbb37e207988315a073d8ef3b6`.
+The certified Linux `.22` SHA-256 digest is
+`5fc51f4c9e9e90c7f00516d3fd0c3a585c685c1e620a2cc2d2966cb02aa46dea`.
+The native Windows `.22` SHA-256 digest is
+`9c954f60bd1e4948410fb7fd0928dc323235f117e765112ae588c2b8150e2d3b`.
 Its embedded Git SHA is the same pinned source commit, and native `version`,
 `doctor`, `status`, and `prompt --help` stdin-capability smokes passed.
 
@@ -44,11 +44,12 @@ python scripts/her_runtime_probe.py --check version
 python scripts/verify_her_certification.py --source-root /path/to/her-source
 ```
 
-The certification command checks the pinned source identity, full Rust
-workspace tests, and workspace/all-target Clippy with warnings denied. Forty
-pre-existing upstream diagnostics are pinned by exact package, path, line and
-lint; any addition, removal or movement fails certification. Runtime adoption
-still requires a canary reboot and live provider/tool/media smoke.
+The certification command checks the certified tag and complete-history source
+bundle, pinned source identity, both packaged binary hashes and embedded provenance,
+full Rust and HASHI integration suites, and workspace/all-target Clippy with warnings
+denied. Forty inherited diagnostics are pinned by exact package, path, line and lint;
+any addition, removal or movement fails certification. Runtime adoption still requires
+a Momo canary reboot and live provider/tool/media/continuity smoke.
 
 See [the active backend contract](../../docs/HER_BACKEND_CONTRACT.md) and the
 [2026-08-13 unreleased checkpoint](../../docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md).

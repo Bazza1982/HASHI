@@ -1,27 +1,33 @@
 {
   "manifest_version": 1,
   "runtime": "hashi-her",
-  "version": "0.1.0-hashi.20",
+  "version": "0.1.0-hashi.22",
   "display_name": "HASHI Engine Runtime (HER)",
   "upstream_runtime": "Claw",
   "upstream_version": "0.1.3-hashi.33",
   "license": "MIT",
   "license_file": "CLAW_LICENSE",
   "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-  "source_commit": "5ed5b30ef2ab0f80ab6d4fd08a1b7b64e77faf05",
-  "source_branch": "agent/remove-token-budget-fix-reasoning-stream",
-  "build_date": "2026-08-15",
-  "notes": "HER 0.1.0-hashi.20 makes semantic compaction capacity-driven and request-aware: its provider deadline inherits HASHI's effective idle timeout, is capped by remaining hard time with cleanup grace, never interrupts a selected tool, and fails open without mutating active context. The current turn stays verbatim, complete pre-compaction history remains recoverable, lifecycle events carry correlated timeout and continuation evidence, and completed answers are not held behind maintenance. Linux and Windows x86-64 packages are built from the same clean source commit; the Windows package passed native version, doctor, status, and stdin-capability smokes.",
+  "source_commit": "759cb1abec7ae2dea2756b79206bb67a7d053c14",
+  "source_branch": "release/her-0.1.0-hashi.22",
+  "build_date": "2026-08-16",
+  "notes": "HER 0.1.0-hashi.22 restores direct-turn FIFO conversation continuity while keeping scheduler runs isolated, makes planning and review bounded and evidence-monotonic, separates technical TaskPlan state from Persona acknowledgement/commentary, makes exact event delivery idempotent, namespaces HASHI scheduler/filesystem authority, restores the certified .21 multimodal streaming delta on the legitimate .20 descendant, and guarantees one typed run_finished terminal event on stream-json failures. Linux and Windows x86-64 packages share one clean source commit and release contract.",
+  "certification_evidence": "releases/0.1.0-hashi.22/certification_evidence.json",
+  "source_bundle": {
+    "path": "releases/0.1.0-hashi.22/source/her-source.bundle",
+    "sha256": "0e142b32af9db8b7b3bfca1c11ae8a5134c74c02e5dcac60e1e0a7eea1ccd9b3",
+    "size_bytes": 22615136
+  },
   "binaries": {
     "linux-x86_64": {
-      "path": "releases/0.1.0-hashi.20/linux-x86_64/hashi-her",
-      "sha256": "3c601931478d645c17c9317a6975dcba0944ff48731d2991d70b3af4ffa59167",
+      "path": "releases/0.1.0-hashi.22/linux-x86_64/hashi-her",
+      "sha256": "5fc51f4c9e9e90c7f00516d3fd0c3a585c685c1e620a2cc2d2966cb02aa46dea",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
       "binary_name": "hashi-her"
     },
     "windows-x86_64": {
-      "path": "releases/0.1.0-hashi.20/windows-x86_64/hashi-her.exe",
-      "sha256": "5463a3d006edcb61a6d066d9b1441046602b03fbb37e207988315a073d8ef3b6",
+      "path": "releases/0.1.0-hashi.22/windows-x86_64/hashi-her.exe",
+      "sha256": "9c954f60bd1e4948410fb7fd0928dc323235f117e765112ae588c2b8150e2d3b",
       "rust_target_triple": "x86_64-pc-windows-msvc",
       "binary_name": "hashi-her.exe"
     }

@@ -70,7 +70,7 @@
       "failed": 0,
       "skipped": 2,
       "warnings": 23,
-      "command": "pytest -q tests veritas"
+      "command": "python -m pytest -q tests veritas"
     },
     "her_debug_lab": {
       "status": "passed",

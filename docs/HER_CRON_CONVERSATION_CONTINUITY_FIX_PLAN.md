@@ -1,6 +1,6 @@
 # HER Conversation Continuity, Planning and Release-Certification Fix Plan
 
-Status: proposed; no implementation started  
+Status: implemented and fully certified; Momo canary and controlled rollout pending
 Scope: HASHI1 Python runtime, native HER runtime, scheduler bridge and HER packaging  
 Supersedes: the earlier conversation-continuity-only version of this document  
 Primary incidents: Sunny continuity regression and Lily High-effort planning loop, 2026-08-16  

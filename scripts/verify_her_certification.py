@@ -75,6 +75,10 @@ def _resolve_inside(root: Path, relative: str, *, label: str) -> Path:
     return path
 
 
+def _probe_linux_version(binary: Path) -> subprocess.CompletedProcess[str]:
+    return _run([str(binary), "version", "--output-format", "json"], PROJECT_ROOT)
+
+
 def _release_inputs(release_dir: Path | None) -> tuple[dict, dict, Path]:
     if release_dir is None:
         manifest = _load_json(MANIFEST_PATH)
@@ -205,6 +209,8 @@ def _verify_release_evidence(
         expected_magic = b"\x7fELF" if platform_key.startswith("linux") else b"MZ"
         if not binary_bytes.startswith(expected_magic):
             raise CertificationError(f"{platform_key} binary has the wrong executable format")
+        if platform_key.startswith("linux") and not os.access(binary, os.X_OK):
+            raise CertificationError(f"{platform_key} binary is not executable")
         for value in (
             manifest["source_commit"],
             manifest["source_branch"],
@@ -220,7 +226,7 @@ def _verify_release_evidence(
         manifest["binaries"]["linux-x86_64"]["path"],
         label="Linux binary",
     )
-    version = _run([str(linux), "version", "--output-format", "json"], PROJECT_ROOT)
+    version = _probe_linux_version(linux)
     if version.returncode != 0:
         raise CertificationError(f"Linux binary version probe failed:\n{version.stdout}")
     try:
@@ -277,7 +283,10 @@ def _verify_hashi_integration(source_root: Path, manifest: dict, baseline: dict)
             "HASHI_HER_SOURCE_ROOT": str(source_root),
         }
     )
-    result = _run(list(integration["command"]), PROJECT_ROOT, env=environment)
+    command = list(integration["command"])
+    if command[0] == "{python}":
+        command[0] = sys.executable
+    result = _run(command, PROJECT_ROOT, env=environment)
     if result.returncode != 0:
         raise CertificationError(f"HASHI integration tests failed:\n{result.stdout}")
 
