@@ -937,13 +937,24 @@ class HERUltraOutcome:
     pending_interaction: Mapping[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class HERUltraCommentaryRender:
+    """Persona-rendered commentary plus bounded renderer provenance."""
+
+    text: str
+    fallback: bool = False
+    error_type: str = ""
+
+
 PrimaryExecutor = Callable[
     [HERUltraPrimaryExecutionSpec], Awaitable[HERUltraInvocationResult]
 ]
 WorkerExecutor = Callable[
     [HERUltraWorkerExecutionSpec], Awaitable[HERUltraInvocationResult]
 ]
-PersonaCommentaryRenderer = Callable[[Mapping[str, Any]], Awaitable[str]]
+PersonaCommentaryRenderer = Callable[
+    [Mapping[str, Any]], Awaitable[str | HERUltraCommentaryRender]
+]
 
 
 class HERUltraOrchestrator:
@@ -1107,6 +1118,8 @@ class HERUltraOrchestrator:
                     "plan_id": plan.plan_id,
                     "subtask_count": len(plan.subtasks),
                     "primary_session_id": primary_session_id,
+                    "source_sha256": "sha256:"
+                    + hashlib.sha256(invocation.text.encode("utf-8")).hexdigest(),
                 },
                 cancellation_generation=generation,
             )
@@ -1620,6 +1633,9 @@ class HERUltraOrchestrator:
                     "result_id": result.result_id,
                     "attempt": attempt,
                     "model": result.model,
+                    "worker_session_id": invocation.session_id,
+                    "source_sha256": "sha256:"
+                    + hashlib.sha256(invocation.text.encode("utf-8")).hexdigest(),
                     "retry_safe": result.retry_safe,
                     "error": result.error,
                     "error_type": result.error_type,
@@ -1751,6 +1767,7 @@ class HERUltraOrchestrator:
         event_id: str,
         phase: str,
         detail: str = "",
+        provenance: str = "",
     ) -> None:
         if self.on_stream_event is None:
             return
@@ -1767,6 +1784,7 @@ class HERUltraOrchestrator:
                 ),
                 origin="her_ultra",
                 phase=phase,
+                provenance=_bounded_text(provenance, 80),
             )
         )
 
@@ -1779,11 +1797,21 @@ class HERUltraOrchestrator:
     ) -> None:
         if self.on_stream_event is None or self.persona_commentary_renderer is None:
             return
+        fallback = False
+        error_type = ""
         try:
-            summary = str(await self.persona_commentary_renderer(dict(facts))).strip()
+            rendered = await self.persona_commentary_renderer(dict(facts))
+            if isinstance(rendered, HERUltraCommentaryRender):
+                summary = str(rendered.text or "").strip()
+                fallback = bool(rendered.fallback)
+                error_type = _bounded_text(rendered.error_type, 120)
+            else:
+                summary = str(rendered or "").strip()
             if not summary:
                 raise ValueError("persona commentary renderer returned no text")
-        except Exception:  # noqa: BLE001 - commentary has an explicit safe fallback
+        except Exception as exc:  # noqa: BLE001 - commentary has an explicit safe fallback
+            fallback = True
+            error_type = type(exc).__name__
             summary = (
                 "[HER neutral fallback] Work is still in progress; "
                 "another update will follow at the next verified stage."
@@ -1793,6 +1821,12 @@ class HERUltraOrchestrator:
             summary,
             event_id=event_id,
             phase=phase,
+            detail=(
+                f"persona_renderer_fallback=true; error_type={error_type or 'unknown'}"
+                if fallback
+                else "persona_renderer_fallback=false"
+            ),
+            provenance=("neutral_fallback" if fallback else "persona_renderer"),
         )
 
     def _planning_prompt(

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -728,11 +729,11 @@ async def test_incomplete_persona_renderer_uses_only_configured_system_md(tmp_pa
     assert "月桂司书" in renderer_prompt
     assert "WRONG FALLBACK PERSONA" not in renderer_prompt
     assert "rigid output" in renderer_prompt
-    audit = (tmp_path / "backend_state" / "her_persona_audit.jsonl").read_text(
-        encoding="utf-8"
-    )
+    audit_path = tmp_path / "backend_state" / "her_persona_audit.jsonl"
+    audit = audit_path.read_text(encoding="utf-8")
     assert "delivered_without_content_validation" in audit
     assert "Fictional Persona" not in audit
+    assert audit_path.stat().st_mode & 0o777 == 0o600
     assert configured.read_bytes() == before
 
 
@@ -2575,6 +2576,8 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
         and record["event"].get("session_id") == "stream-session"
         for record in correlated_controls
     )
+    assert (tmp_path / "claw_exec_events.jsonl").stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / "claw_control_events.jsonl").stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.asyncio
@@ -2757,6 +2760,53 @@ async def test_claw_adapter_shutdown_kills_running_process(tmp_path):
     response = await task
 
     assert response.is_success is False
+
+
+@pytest.mark.asyncio
+async def test_her_idle_timeout_uses_monotonic_clock_when_wall_clock_jumps(
+    tmp_path, monkeypatch
+):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"idle_timeout_sec": 1, "hard_timeout_sec": 30},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter.__new__(HERAdapter)
+    adapter.config = cfg
+    activity_state = [time.monotonic()]
+    task = asyncio.create_task(asyncio.sleep(0.02))
+
+    monkeypatch.setattr("adapters.her.time.time", lambda: 10**12)
+    timeout_kind = await asyncio.wait_for(
+        adapter._wait_for_her_task_with_timeouts(
+            task,
+            started_monotonic=time.perf_counter(),
+            activity_state=activity_state,
+        ),
+        timeout=0.2,
+    )
+
+    assert timeout_kind is None
+
+
+def test_backend_activity_age_prefers_monotonic_clock(tmp_path, monkeypatch):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter.__new__(HERAdapter)
+    adapter.config = cfg
+    adapter.last_activity_at = 1.0
+    adapter.last_activity_monotonic = time.monotonic()
+
+    monkeypatch.setattr("adapters.base.time.time", lambda: 10**12)
+
+    assert adapter._last_activity_age() < 1.0
 
 
 @pytest.mark.asyncio

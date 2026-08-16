@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib as _hashlib
 import inspect
+import json
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-import hashlib as _hashlib
 
 from telegram.error import RetryAfter
 
@@ -28,6 +31,85 @@ EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
 HER_SESSION_SCOPE_PERSISTENT = "persistent"
 HER_SESSION_SCOPE_ISOLATED = "isolated_per_run"
 HER_SESSION_SCOPE_ISOLATED_RESUME = "isolated_resume"
+
+
+def queued_elapsed_s(item) -> float:
+    """Return request age from a process-local clock when available."""
+
+    queued_monotonic = getattr(item, "queued_monotonic", None)
+    if queued_monotonic is not None:
+        return max(0.0, time.monotonic() - float(queued_monotonic))
+    return max(
+        0.0,
+        (datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds(),
+    )
+
+
+def _append_her_message_audit(
+    runtime,
+    item,
+    event,
+    *,
+    status: str,
+    include_text: bool = False,
+    reason: str = "",
+    error_type: str = "",
+) -> None:
+    """Persist one low-volume, user-visible HER message audit record."""
+
+    from adapters.stream_events import DELIVERY_CONTROL, DELIVERY_USER_COMMENTARY
+
+    delivery_class = str(getattr(event, "delivery_class", "") or "")
+    if delivery_class == DELIVERY_CONTROL and not bool(
+        getattr(event, "required", False)
+    ):
+        return
+    if delivery_class not in {DELIVERY_CONTROL, DELIVERY_USER_COMMENTARY}:
+        return
+    text = str(getattr(event, "summary", "") or "").strip()
+    detail = str(getattr(event, "detail", "") or "").strip()
+    if not text:
+        return
+    text_sha256 = _sha256_text(text)
+    record = {
+        "format": "her-message-audit-v1",
+        "recorded_at": time.time(),
+        "agent": str(getattr(runtime, "name", "") or ""),
+        "request_id": str(getattr(item, "request_id", "") or ""),
+        "event_id": str(getattr(event, "event_id", "") or ""),
+        "kind": str(getattr(event, "kind", "") or ""),
+        "delivery_class": delivery_class,
+        "origin": str(getattr(event, "origin", "") or ""),
+        "phase": str(getattr(event, "phase", "") or ""),
+        "revision": getattr(event, "revision", None),
+        "required": bool(getattr(event, "required", False)),
+        "provenance": str(getattr(event, "provenance", "") or ""),
+        "status": str(status or "unknown"),
+        "text_sha256": text_sha256,
+        **({"text": text} if include_text else {}),
+        **({"detail": detail} if include_text and detail else {}),
+        **({"reason": str(reason)} if reason else {}),
+        **({"error_type": str(error_type)} if error_type else {}),
+    }
+    try:
+        path = runtime.workspace_dir / "backend_state" / "her_message_audit.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as audit_log:
+            audit_log.write(
+                json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+            )
+            audit_log.flush()
+            os.fsync(audit_log.fileno())
+        path.chmod(0o600)
+    except Exception as exc:  # noqa: BLE001 - audit must not block presentation
+        runtime.logger.warning(
+            f"HER message audit write failed safely: request={record['request_id']} "
+            f"event_id={record['event_id']} error_type={type(exc).__name__}"
+        )
+
+
+def _sha256_text(text: str) -> str:
+    return "sha256:" + _hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def request_meta_for(runtime, request_id: str) -> dict[str, Any]:
@@ -64,6 +146,7 @@ def _resolve_her_session_scope(runtime, item) -> str:
 class QueueItemStart:
     is_bridge_request: bool
     queued_at: datetime
+    queued_monotonic: float
     queue_wait_s: float
 
 
@@ -80,7 +163,7 @@ class TurnPrompt:
 class BackendGeneration:
     response: Any | None
     detached: bool
-    backend_started: datetime
+    backend_started_monotonic: float
     detach_after_s: float
     generation_task: asyncio.Task | None = None
 
@@ -140,7 +223,11 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         runtime_retry.remember_retryable_prompt(runtime, item)
     is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
     queued_at = datetime.fromisoformat(item.created_at)
-    queue_wait_s = (datetime.now() - queued_at).total_seconds()
+    now_monotonic = time.monotonic()
+    queued_monotonic = float(
+        getattr(item, "queued_monotonic", now_monotonic) or now_monotonic
+    )
+    queue_wait_s = max(0.0, now_monotonic - queued_monotonic)
     runtime.logger.info(
         f"Processing {item.request_id} via {runtime.config.active_backend} "
         f"(source={item.source}, silent={item.silent}, prompt_len={len(item.prompt)}, "
@@ -183,6 +270,7 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
     return QueueItemStart(
         is_bridge_request=is_bridge_request,
         queued_at=queued_at,
+        queued_monotonic=queued_monotonic,
         queue_wait_s=queue_wait_s,
     )
 
@@ -281,7 +369,7 @@ async def run_backend_generation(
         or (extra.get("escalation_thresholds") or [30, 60, 90, 150])[-1]
     )
 
-    backend_started = datetime.now()
+    backend_started_monotonic = time.monotonic()
     current_backend = getattr(runtime.backend_manager, "current_backend", None)
     if runtime.config.active_backend == "openrouter-api" and hasattr(current_backend, "set_reasoning_enabled"):
         current_backend.set_reasoning_enabled(runtime._think or audit_active)
@@ -317,7 +405,7 @@ async def run_backend_generation(
         return BackendGeneration(
             response=response,
             detached=detached,
-            backend_started=backend_started,
+            backend_started_monotonic=backend_started_monotonic,
             detach_after_s=detach_after_s,
             generation_task=generation_task,
         )
@@ -335,7 +423,7 @@ async def run_backend_generation(
     return BackendGeneration(
         response=response,
         detached=False,
-        backend_started=backend_started,
+        backend_started_monotonic=backend_started_monotonic,
         detach_after_s=detach_after_s,
     )
 
@@ -404,9 +492,9 @@ async def cleanup_interactive_feedback(
 
     if placeholder and delete_placeholder:
         try:
-            delete_started = datetime.now()
+            delete_started = time.monotonic()
             await runtime.app.bot.delete_message(chat_id=item.chat_id, message_id=placeholder.message_id)
-            delete_elapsed_s = (datetime.now() - delete_started).total_seconds()
+            delete_elapsed_s = max(0.0, time.monotonic() - delete_started)
             runtime.telegram_logger.info(
                 f"Deleted placeholder for {item.request_id} "
                 f"(elapsed_s={delete_elapsed_s:.2f})"
@@ -449,8 +537,9 @@ async def answer_preview_loop(
     max_edits = policy.max_edits_per_request
     min_chars = int(extra.get("answer_stream_min_chars", 24))
     max_chars = int(extra.get("answer_stream_max_chars", 3400))
-    started = datetime.now()
-    last_edit_at = asyncio.get_running_loop().time()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    last_edit_at = started
     last_rendered_text = ""
     edit_attempts = 0
     chunks: list[str] = []
@@ -476,7 +565,7 @@ async def answer_preview_loop(
         text = "".join(chunks).strip()
         if len(text) > max_chars:
             text = "...\n" + text[-max_chars:]
-        elapsed = int((datetime.now() - started).total_seconds())
+        elapsed = max(0, int(loop.time() - started))
         header = f"✍️ {runtime.name} is replying... ({elapsed}s)\n\n"
         if text:
             if latest_status_visible_with_text:
@@ -617,31 +706,67 @@ def wrap_her_persona_stream(
     async def _send_event(event, *, purpose: str):
         text = str(getattr(event, "summary", "") or "").strip()
         if not text:
-            return
+            return False
         runtime.logger.info(
             f"HER message delivery started: request={item.request_id} "
             f"purpose={purpose} text_len={len(text)}"
         )
-        if hasattr(runtime, "_send_text") and len(text) <= 3_500:
-            result = await runtime._send_text(
-                item.chat_id,
-                text,
-                _request_id=item.request_id,
-                _purpose=purpose,
+        try:
+            if hasattr(runtime, "_send_text") and len(text) <= 3_500:
+                result = await runtime._send_text(
+                    item.chat_id,
+                    text,
+                    _request_id=item.request_id,
+                    _purpose=purpose,
+                )
+                transport_accepted = result is not None
+            else:
+                result = await runtime.send_long_message(
+                    item.chat_id,
+                    text,
+                    request_id=item.request_id,
+                    purpose=purpose,
+                )
+                transport_accepted = bool(
+                    isinstance(result, tuple)
+                    and len(result) >= 2
+                    and int(result[1] or 0) > 0
+                )
+        except Exception as exc:
+            _append_her_message_audit(
+                runtime,
+                item,
+                event,
+                status="failed",
+                reason="sender_exception",
+                error_type=type(exc).__name__,
             )
-        else:
-            result = await runtime.send_long_message(
-                item.chat_id,
-                text,
-                request_id=item.request_id,
-                purpose=purpose,
+            raise
+        if not transport_accepted:
+            _append_her_message_audit(
+                runtime,
+                item,
+                event,
+                status="not_sent",
+                reason="transport_returned_no_receipt",
             )
+            runtime.logger.warning(
+                f"HER message was not accepted by transport: request={item.request_id} "
+                f"purpose={purpose} text_len={len(text)}"
+            )
+            return False
         label = "acknowledgement" if purpose == "task_acknowledgement" else purpose
+        _append_her_message_audit(
+            runtime,
+            item,
+            event,
+            status="transport_accepted",
+        )
         runtime.logger.info(
-            f"HER {label} delivered: request={item.request_id} "
+            f"HER {label} accepted by transport: request={item.request_id} "
             f"purpose={purpose} text_len={len(text)}"
         )
-        return result
+        return True
 
     async def _commentary_presenter(event):
         purpose = (
@@ -655,6 +780,36 @@ def wrap_her_persona_stream(
         return await _send_event(event, purpose="her_control")
 
     async def _persist_event(event):
+        _append_her_message_audit(
+            runtime,
+            item,
+            event,
+            status="generated",
+            include_text=True,
+        )
+        delivery_class = str(getattr(event, "delivery_class", "") or "")
+        suppression_reason = ""
+        if delivery_class == "user_commentary":
+            if not delivery_requested:
+                suppression_reason = "delivery_not_requested"
+            elif delivery_blocked:
+                suppression_reason = "delivery_blocked"
+            elif not bool(getattr(runtime, "_commentary", True)):
+                suppression_reason = "commentary_disabled"
+        elif (
+            delivery_class == "control"
+            and bool(getattr(event, "required", False))
+            and not delivery_requested
+        ):
+            suppression_reason = "delivery_not_requested"
+        if suppression_reason:
+            _append_her_message_audit(
+                runtime,
+                item,
+                event,
+                status="suppressed",
+                reason=suppression_reason,
+            )
         if audit_collector is not None:
             try:
                 await audit_collector.record(event)
@@ -744,14 +899,16 @@ async def setup_interactive_feedback(
                     f"Skipping placeholder for {item.request_id} — delivery blocked"
                 )
             else:
-                placeholder_started = datetime.now()
+                placeholder_started = time.monotonic()
                 placeholder = await runtime.app.bot.send_message(
                     chat_id=item.chat_id,
                     text=placeholder_text,
                     parse_mode=placeholder_parse_mode,
                     disable_notification=disable_notification(runtime),
                 )
-                placeholder_elapsed_s = (datetime.now() - placeholder_started).total_seconds()
+                placeholder_elapsed_s = max(
+                    0.0, time.monotonic() - placeholder_started
+                )
                 runtime.telegram_logger.info(
                     f"Sent placeholder for {item.request_id} "
                     f"(elapsed_s={placeholder_elapsed_s:.2f})"
@@ -1193,6 +1350,7 @@ async def handle_backend_error(
     queue_wait_s: float,
     backend_elapsed_s: float,
     user_interrupt_reason: str | None = None,
+    queued_monotonic: float | None = None,
 ) -> None:
     err_msg = response.error or "Unknown error"
     # /stop, /steer, and /retry intentionally kill the backend process
@@ -1299,7 +1457,11 @@ async def handle_backend_error(
         request_id=item.request_id,
         purpose="error",
     )
-    total_elapsed_s = (datetime.now() - queued_at).total_seconds()
+    total_elapsed_s = (
+        max(0.0, time.monotonic() - queued_monotonic)
+        if queued_monotonic is not None
+        else max(0.0, (datetime.now() - queued_at).total_seconds())
+    )
     runtime.logger.info(
         f"Completed {item.request_id} error delivery via {runtime.config.active_backend} "
         f"(queue_wait_s={queue_wait_s:.2f}, backend_s={backend_elapsed_s:.2f}, "
@@ -1332,6 +1494,7 @@ async def handle_success_delivery(
     audit_collector,
     answer_stream_state: StreamedAnswerState | None = None,
     her_message_router=None,
+    queued_monotonic: float | None = None,
 ) -> None:
     runtime_retry.clear_completed_interrupted_task(runtime, item)
     if runtime._should_buffer_during_transfer(item.request_id):
@@ -1429,7 +1592,11 @@ async def handle_success_delivery(
         audit_collector=audit_collector,
         completion_path="foreground",
     )
-    total_elapsed_s = (datetime.now() - queued_at).total_seconds()
+    total_elapsed_s = (
+        max(0.0, time.monotonic() - queued_monotonic)
+        if queued_monotonic is not None
+        else max(0.0, (datetime.now() - queued_at).total_seconds())
+    )
     runtime.logger.info(
         f"Completed {item.request_id} delivery via {runtime.config.active_backend} "
         f"(queue_wait_s={queue_wait_s:.2f}, backend_s={backend_elapsed_s:.2f}, "

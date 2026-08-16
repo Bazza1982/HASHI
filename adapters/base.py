@@ -80,6 +80,8 @@ class BaseBackend(ABC):
         # epoch-seconds; updated by adapter whenever backend produces output.
         # Used by the runtime escalation loop to detect stalled sub-processes.
         self.last_activity_at: float = 0.0
+        # Process-local monotonic counterpart used for durations and deadlines.
+        self.last_activity_monotonic: float = 0.0
         # cumulative count of output events (stdout lines for CLI, 1 for HTTP).
         # Codex increments this per stdout line; others increment once on start.
         self.output_line_count: int = 0
@@ -154,7 +156,7 @@ class BaseBackend(ABC):
 
     def _timeout_diagnostic(self, timeout_kind: str, *, started_monotonic: float) -> str:
         total_runtime = max(0.0, time.perf_counter() - started_monotonic)
-        last_output_age = max(0.0, time.time() - (self.last_activity_at or time.time()))
+        last_output_age = self._last_activity_age()
         idle_source = self._timeout_source(IDLE_TIMEOUT_KEY).replace(" ", "_")
         hard_source = self._timeout_source(HARD_TIMEOUT_KEY).replace(" ", "_")
         return (
@@ -175,7 +177,7 @@ class BaseBackend(ABC):
             total_runtime = max(0.0, time.perf_counter() - started_monotonic)
             if total_runtime >= self.HARD_TIMEOUT_SEC:
                 return "hard"
-            idle_for = max(0.0, time.time() - (self.last_activity_at or time.time()))
+            idle_for = self._last_activity_age()
             if idle_for >= self.IDLE_TIMEOUT_SEC:
                 return "idle"
             wait_slice = min(
@@ -189,9 +191,22 @@ class BaseBackend(ABC):
                 continue
         return None
 
+    def _last_activity_age(self) -> float:
+        activity_monotonic = float(
+            getattr(self, "last_activity_monotonic", 0.0) or 0.0
+        )
+        if activity_monotonic > 0:
+            return max(0.0, time.monotonic() - activity_monotonic)
+        # Compatibility for a backend instance created before a minimal hot reload.
+        activity_wall = float(getattr(self, "last_activity_at", 0.0) or 0.0)
+        if activity_wall > 0:
+            return max(0.0, time.time() - activity_wall)
+        return 0.0
+
     def _touch_activity(self) -> None:
         """Record that the backend just produced output. Call on every stdout/stderr chunk."""
         self.last_activity_at = time.time()
+        self.last_activity_monotonic = time.monotonic()
         self.output_line_count += 1
 
     @property

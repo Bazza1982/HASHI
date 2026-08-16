@@ -82,13 +82,20 @@ class HERMessageRouter:
         if presenter is None:
             return
         try:
-            await self._call(presenter, event)
+            accepted = await self._call(presenter, event)
         except Exception as exc:
             self._log(
                 "warning",
                 f"HER delivery failed: request={self.request_id} "
                 f"event_id={getattr(event, 'event_id', '')} purpose={purpose} "
                 f"error_type={type(exc).__name__}",
+            )
+            return
+        if accepted is False:
+            self._log(
+                "warning",
+                f"HER delivery not accepted: request={self.request_id} "
+                f"event_id={getattr(event, 'event_id', '')} purpose={purpose}",
             )
             return
         self._log(

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import html
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -18,6 +19,7 @@ class QueuedRequest:
     deliver_to_telegram: bool = True
     skip_memory_injection: bool = False
     session_scope: str | None = None
+    queued_monotonic: float = field(default_factory=time.monotonic, repr=False)
 
 
 def _safe_excerpt(text: str, limit: int = 160) -> str:

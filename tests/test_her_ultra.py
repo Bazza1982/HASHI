@@ -526,6 +526,33 @@ async def test_orchestrator_uses_parallel_workers_and_one_primary_assembly(tmp_p
         "blocked_subtasks": 0,
     }
     assert len({event.event_id for event in events}) == len(events)
+    journal = [
+        json.loads(line)
+        for line in (
+            tmp_path / "run-parallel" / "transitions.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    accepted_plan = next(record for record in journal if record["state"] == "plan_accepted")
+    assert accepted_plan["data"]["source_sha256"].startswith("sha256:")
+    accepted_workers = [
+        record
+        for record in journal
+        if record["entity"].startswith("subtask:")
+        and record["state"] == "completed"
+    ]
+    assert {record["data"]["worker_session_id"] for record in accepted_workers} == {
+        "worker-a",
+        "worker-b",
+        "worker-c",
+    }
+    assert all(
+        record["data"]["source_sha256"].startswith("sha256:")
+        for record in accepted_workers
+    )
+    persona_events = [
+        event for event in events if event.delivery_class == "user_commentary"
+    ]
+    assert all(event.provenance == "persona_renderer" for event in persona_events)
 
 
 @pytest.mark.asyncio
@@ -701,6 +728,8 @@ async def test_persona_commentary_renderer_failure_uses_explicit_neutral_fallbac
     assert len(events) == 1
     assert events[0].delivery_class == "user_commentary"
     assert events[0].summary.startswith("[HER neutral fallback]")
+    assert events[0].provenance == "neutral_fallback"
+    assert "error_type=RuntimeError" in events[0].detail
 
 
 @pytest.mark.asyncio

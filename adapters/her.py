@@ -2499,6 +2499,7 @@ class HERAdapter(BaseBackend):
                 audit_log.write(
                     json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
                 )
+            path.chmod(0o600)
         except OSError as exc:
             logger = getattr(self, "logger", None)
             if logger is not None:
@@ -3842,12 +3843,19 @@ INCOMPLETE TASK FACTS (quoted, read-only)
         persona_guidance = persona_source.model_guidance(limit=12_000)
         chinese_commentary = _claw_uses_chinese(prompt, persona_guidance)
 
-        async def render_persona_commentary(facts: Mapping[str, Any]) -> str:
+        async def render_persona_commentary(
+            facts: Mapping[str, Any],
+        ) -> _her_ultra.HERUltraCommentaryRender:
             if not persona_source.usable:
-                return (
-                    "[HER 中性兜底] 任务仍在进行；到达下一个已确认阶段时会继续汇报。"
-                    if chinese_commentary
-                    else "[HER neutral fallback] Work is still in progress; another update will follow at the next verified stage."
+                return _her_ultra.HERUltraCommentaryRender(
+                    text=(
+                        "[HER 中性兜底] 任务仍在进行；到达下一个已确认阶段时会继续汇报。"
+                        if chinese_commentary
+                        else "[HER neutral fallback] Work is still in progress; another update will follow at the next verified stage."
+                    ),
+                    fallback=True,
+                    error_type=persona_source.unavailable_reason
+                    or "persona_source_unavailable",
                 )
             renderer_prompt = f"""HER ULTRA COMMENTARY RENDERER — INTERNAL, TOOL-FREE
 
@@ -3874,13 +3882,18 @@ RUNTIME FACTS (quoted, read-only)
                 )
                 message = str(rendered.text or "").strip()
                 if message:
-                    return message
-            except Exception:  # noqa: BLE001 - explicit neutral fallback below
-                pass
-            return (
-                "[HER 中性兜底] 任务仍在进行；到达下一个已确认阶段时会继续汇报。"
-                if chinese_commentary
-                else "[HER neutral fallback] Work is still in progress; another update will follow at the next verified stage."
+                    return _her_ultra.HERUltraCommentaryRender(text=message)
+                error_type = "empty_renderer_output"
+            except Exception as exc:  # noqa: BLE001 - explicit neutral fallback below
+                error_type = type(exc).__name__
+            return _her_ultra.HERUltraCommentaryRender(
+                text=(
+                    "[HER 中性兜底] 任务仍在进行；到达下一个已确认阶段时会继续汇报。"
+                    if chinese_commentary
+                    else "[HER neutral fallback] Work is still in progress; another update will follow at the next verified stage."
+                ),
+                fallback=True,
+                error_type=error_type,
             )
 
         async def forward_primary_event(event: StreamEvent) -> None:
@@ -4469,7 +4482,7 @@ RUNTIME FACTS (quoted, read-only)
             total_runtime = max(0.0, time.perf_counter() - started_monotonic)
             if total_runtime >= self.HARD_TIMEOUT_SEC:
                 return "hard"
-            idle_for = max(0.0, time.time() - activity_state[0])
+            idle_for = max(0.0, time.monotonic() - activity_state[0])
             if idle_for >= self.IDLE_TIMEOUT_SEC:
                 return "idle"
             wait_slice = min(
@@ -4491,7 +4504,7 @@ RUNTIME FACTS (quoted, read-only)
         activity_state: list[float],
     ) -> str:
         total_runtime = max(0.0, time.perf_counter() - started_monotonic)
-        last_output_age = max(0.0, time.time() - activity_state[0])
+        last_output_age = max(0.0, time.monotonic() - activity_state[0])
         idle_source = self._timeout_source("idle_timeout_sec").replace(" ", "_")
         hard_source = self._timeout_source("hard_timeout_sec").replace(" ", "_")
         return (
@@ -4597,7 +4610,7 @@ RUNTIME FACTS (quoted, read-only)
             proc.pid,
             active_count,
         )
-        activity_state = [time.time()]
+        activity_state = [time.monotonic()]
         self._touch_activity()
         communication_task = asyncio.create_task(
             self._communicate_stream_json(
@@ -4786,7 +4799,7 @@ RUNTIME FACTS (quoted, read-only)
                 chunks.append(chunk)
                 self._touch_activity()
                 if activity_state is not None:
-                    activity_state[0] = time.time()
+                    activity_state[0] = time.monotonic()
 
         async def write_stdin() -> None:
             if proc.stdin is None:
@@ -4857,7 +4870,7 @@ RUNTIME FACTS (quoted, read-only)
                 self._persist_stream_json_line(line)
                 self._touch_activity()
                 if activity_state is not None:
-                    activity_state[0] = time.time()
+                    activity_state[0] = time.monotonic()
                 try:
                     event = json.loads(line.decode(errors="replace"))
                 except json.JSONDecodeError:
@@ -5078,7 +5091,7 @@ RUNTIME FACTS (quoted, read-only)
                 stderr_chunks.append(line)
                 self._touch_activity()
                 if activity_state is not None:
-                    activity_state[0] = time.time()
+                    activity_state[0] = time.monotonic()
 
         async def write_stdin() -> None:
             if proc.stdin is None:
@@ -5107,6 +5120,7 @@ RUNTIME FACTS (quoted, read-only)
             stream_log.write(line)
             if not line.endswith(b"\n"):
                 stream_log.write(b"\n")
+        path.chmod(0o600)
 
     def _persist_control_event(self, request_id: str, event: Mapping[str, Any]) -> None:
         """Correlate control and compaction records with their HASHI request."""
@@ -5122,6 +5136,7 @@ RUNTIME FACTS (quoted, read-only)
         record = {"request_id": request_id, "event": event}
         with path.open("a", encoding="utf-8") as control_log:
             control_log.write(json.dumps(record, ensure_ascii=False) + "\n")
+        path.chmod(0o600)
         if str(event.get("kind") or "") == "max_plus_checkpoint":
             state_dir = self.config.workspace_dir / "backend_state"
             state_dir.mkdir(parents=True, exist_ok=True)
