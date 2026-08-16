@@ -812,7 +812,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **Reproduction rate:** 1/1 with Ajiao's configured `CLAW_CONFIG_HOME`; 0/1 with an
   empty `CLAW_CONFIG_HOME` control.
 - **Minimal reproduction:** from the HER `rust/` directory, run
-  `CLAW_CONFIG_HOME=/home/lily/projects/hashi2/workspaces/ajiao/backend_state/her_config cargo test -p rusty-claude-cli --test output_format_contract allowed_tools_errors_have_typed_json_and_alias_map_432 -- --exact --nocapture`.
+  `CLAW_CONFIG_HOME=/path/to/bridge-home/workspaces/agent/backend_state/her_config cargo test -p rusty-claude-cli --test output_format_contract allowed_tools_errors_have_typed_json_and_alias_map_432 -- --exact --nocapture`.
 - **Evidence bundle:**
   `superloops/loops/sl-20260811-123616159717-57f4/evidence/HD-002-A002-receipt.json`;
   preserved full-verifier log SHA-256

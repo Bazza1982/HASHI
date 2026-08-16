@@ -1,8 +1,9 @@
 # HASHI
 
 > **Status:** HASHI AAI Enterprise `v0.1.0-alpha.1` is the current enterprise
-> alpha artifact-freeze line. The broader HASHI 4 alpha line continues to cover
-> HER mode and Superloop foundations on top of the v3.2.1 hotfix line.
+> alpha artifact-freeze line. HASHI `v4.0.0-alpha.2` is the current broader
+> platform release candidate, centred on the substantially upgraded HASHI
+> Engine Runtime (HER) and its integrated Rust development workflow.
 > Enterprise `0.1.0a1` resets the enterprise-grade package version line for
 > alpha testing; it is not a production-certified deployment claim.
 >
@@ -121,7 +122,7 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
    can wake the responsible agent after completion to report or decide the next
    step
 19. **Vibe-Coded** — Every line written by AI, reviewed by AI, directed by human vision
-20. **HER Mode Foundation** — `her` provides HASHI Engine Runtime as a scoped backend with provider routing, packaged runtime discovery, checksum-checked manifest metadata, and repo workzone read/write/edit validation
+20. **HASHI Engine Runtime (HER)** — certified cross-platform runtime packages, seven effort levels from direct execution through coordinated multi-agent work, persistent conversation continuity, governed tools/media, and safe source-integrated Rust rebuilding
 21. **Superloop Operational Foundation** — Long-running controller loops use explicit taskboards, waits, issue registers, HChat reply classification, and inbox-drain closeout barriers
 
 HASHI Engine Runtime (HER) is derived from the MIT-licensed Claw runtime. HASHI
@@ -136,10 +137,11 @@ retains and distributes the original Claw copyright and MIT license notice.
   connector MVPs, Workbench enterprise surfaces, and deployment artifacts for
   alpha operator review. Production enterprise-server validation remains
   pending.
-- **v4.0.0-alpha.1** *(current v4 foundation alpha)* — HER mode foundation,
-  packaged HER runtime discovery, provider smoke probe, live momo repo-root
-  read/write/edit validation, and Superloop operational contract. This is the
-  broader platform foundation line, not the enterprise package version line.
+- **v4.0.0-alpha.2** *(current v4 release candidate)* — certified HER `.22`
+  packages, seven task-matched effort levels (`low` through `ultra`), stronger
+  session and delivery continuity, Habit/Media/Tool Gateway integration, and
+  transactional `/rebuild` development adoption. This is the broader platform
+  line, not the enterprise package version line.
 - **v3.2.1** — Workbench API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
 - **v3.2.0** — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
@@ -159,12 +161,41 @@ HASHI currently has two active alpha narratives:
 - **Enterprise AAI `v0.1.0-alpha.1` / package `0.1.0a1`** — the reset
   enterprise-grade update line for governed AAI deployment artifacts and alpha
   operator review.
-- **HASHI `v4.0.0-alpha.1`** — the broader platform foundation line for Claw
-  mode, Superloop operations, and local orchestration evolution.
+- **HASHI `v4.0.0-alpha.2`** — the broader platform release candidate for the
+  upgraded HER backend, Superloop operations, and local orchestration evolution.
 
 Both lines share one repository and one codebase. Personal/local mode remains
 the default smooth path; enterprise features are activated through explicit
 profiles and bootstrap state.
+
+### HER Runtime Upgrade in v4.0.0-alpha.2
+
+HER began as HASHI's integration of the MIT-licensed Claw runtime. It is now a
+substantially extended HASHI backend with a reviewed Rust source component and
+HASHI-owned Python orchestration around it:
+
+- **Seven effort levels** — `low`, `medium`, `high`, `xhigh`, `max`, and
+  `max+` progressively expand one Agent's execution, planning, testing, and
+  review ceiling; `ultra` adds bounded HER-private primary/worker coordination.
+  Effort is a capability ceiling, not a requirement to consume the full budget.
+- **Certified `.22` runtime** — Linux and Windows x86-64 packages are pinned to
+  the same reviewed source identity, checksum metadata, and retained upstream
+  MIT license.
+- **Conversation and delivery correctness** — persistent direct turns,
+  isolated scheduler execution, stable event IDs, explicit commentary
+  ownership, and request-scoped idempotency prevent stale or repeated internal
+  events from becoming duplicate user messages.
+- **Integrated operating capabilities** — Tool Gateway/MCP, secure multimedia,
+  provider/model routing, persistent sessions, and optional agent-local
+  Habit/Meditation learning are part of one HER contract.
+- **Fast Rust development adoption** — `/rebuild` fingerprints integrated HER
+  source, runs an incremental Cargo build and offline verification, stores an
+  immutable development candidate, selects it atomically, and reboots only the
+  affected idle HER Agent. It never overwrites or re-labels a certified package.
+
+See [the v4.0.0-alpha.2 release notes](docs/RELEASE_NOTES_v4.0.0-alpha.2.md),
+[the HER backend contract](docs/HER_BACKEND_CONTRACT.md), and
+[the `/rebuild` contract](docs/HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md).
 
 HASHI 2.x proved that local agents could execute tools, browse, switch backends, run from a TUI, and orchestrate Nagare workflows. HASHI 3.2 turns that foundation into a much broader local agent platform:
 
@@ -1388,8 +1419,8 @@ HASHI AAI Enterprise v0.1.0-alpha.1 is the current **enterprise alpha** line.
 It packages the governed control-plane work for alpha operator review while
 keeping production enterprise-server validation pending.
 
-HASHI v4.0.0-alpha.1 remains the historical **v4 line alpha** for HER mode and
-Superloop foundations.
+HASHI v4.0.0-alpha.2 is the current **v4 platform release candidate**. The
+enterprise package version remains independently frozen at `0.1.0a1`.
 
 **Known Limitations:**
 - **Stability** — Expect edge cases and unexpected behavior
@@ -1415,6 +1446,26 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 ---
 
 ## Release History
+
+### v4.0.0-alpha.2 *(release candidate)* — Advanced HER Runtime (August 2026)
+
+- **Task-matched effort** — seven HER levels from `low` direct execution to
+  bounded `ultra` multi-agent coordination, with adaptive planning, evidence,
+  review, and exact-test ceilings between them
+- **Certified runtime line** — Linux and Windows x86-64 HER
+  `0.1.0-hashi.22` packages share reviewed source provenance and checksum gates
+- **Reliable conversation delivery** — direct-message continuity, scheduler
+  isolation, explicit stream-channel ownership, stable event IDs, and
+  request-scoped idempotency
+- **Integrated HER operations** — Tool Gateway/MCP, secure multimedia,
+  Habit/Meditation, session resume, and provider/model routing
+- **Source-integrated `/rebuild`** — incremental local Rust build, verification,
+  immutable candidate selection, targeted hot adoption, failure reasons, and
+  rollback without changing certified package metadata
+- **Operator visibility and remote access** — canonical Workbench Agent
+  Overview plus authenticated shared-token terminal execution
+- Full scope and alpha limits are recorded in
+  [the release notes](docs/RELEASE_NOTES_v4.0.0-alpha.2.md).
 
 ### Enterprise AAI v0.1.0-alpha.1 *(current enterprise alpha)* — Governed AAI Control Plane (June 2026)
 

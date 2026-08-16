@@ -515,7 +515,7 @@ Suggested context shape:
   "agent": "diaochan",
   "backend": "her",
   "workspace_dir": "workspaces/diaochan",
-  "access_root": "/home/lily/projects/hashi",
+  "access_root": "/path/to/hashi",
   "workzone_dir": null,
   "allowed_tools": ["web_search", "web_fetch", "http_request"],
   "max_loops": 25,

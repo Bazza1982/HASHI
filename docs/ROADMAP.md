@@ -29,8 +29,8 @@ Current version-line interpretation:
 
 - **Enterprise AAI `v0.1.0-alpha.1` / package `0.1.0a1`** is the current
   enterprise alpha artifact-freeze line.
-- **HASHI `v4.0.0-alpha.1`** is the broader platform foundation alpha line for
-  HER mode, Superloop, and local orchestration evolution.
+- **HASHI `v4.0.0-alpha.2`** is the current broader platform release candidate,
+  led by the advanced HER backend and source-integrated Rust workflow.
 
 ---
 
@@ -38,8 +38,8 @@ Current version-line interpretation:
 
 HASHI AAI Enterprise `v0.1.0-alpha.1` is the current enterprise artifact-freeze
 line. It resets the enterprise-grade package version to `0.1.0a1` while the
-broader HASHI 4 alpha line remains the historical Claw/Superloop foundation
-line.
+broader HASHI 4 line advances independently through the advanced HER
+`v4.0.0-alpha.2` release candidate.
 
 This enterprise alpha includes governed profiles, identity/SSO/SCIM primitives,
 policy/approval/audit, connector MVPs, Workbench enterprise surfaces, and
@@ -47,25 +47,35 @@ Compose/Kubernetes/Helm/systemd/SIEM deployment artifacts for alpha operator
 review. It is not production-certified; customer-like enterprise server, IdP,
 SIEM, and Kubernetes/cloud validation remain post-alpha.
 
-## Unreleased HASHI Integration Checkpoint (2026-08-13)
+## v4.0.0-alpha.2 (Current Release Candidate)
 
-Development after the tagged v4 foundation alpha now includes certified HER
-`0.1.0-hashi.13` on Linux, persistent fixed-mode sessions, structured stream
-and incomplete-run handling, the Tool Gateway/MCP bridge, secure multimodal
-media and `media_read`, HER Habit/Meditation implementations, and a reproducible
-HER debug Superloop.
+The development accumulated after the first v4 foundation alpha is now
+consolidated as the `v4.0.0-alpha.2` release candidate:
 
-This is not a new release line. Session ownership and Habit-pipeline ownership
-are code-complete with automated regression coverage, and the initial Nana `.13`
-MAX+ canary is green. Remaining gates are:
+- certified Linux and Windows HER `0.1.0-hashi.22` packages from one reviewed
+  source identity;
+- `low`, `medium`, `high`, `xhigh`, `max`, and `max+` single-Agent effort
+  ceilings plus bounded HER-private `ultra` coordination;
+- persistent direct-conversation ordering, isolated scheduler execution,
+  reply-target snapshots, explicit stream ownership, and idempotent delivery;
+- adaptive TaskFrame planning/review, Tool Gateway/MCP, secure multimedia,
+  session resume, and optional agent-local Habit/Meditation;
+- integrated HER Rust source and transactional `/rebuild` development adoption;
+- canonical Workbench Agent Overview and shared-token-authenticated remote
+  terminal execution.
 
-- complete broader Nana media/Habit validation, then the intended wider reboot;
-- complete live Windows provider/tool/media rollout evidence for the native `.19` package;
-- publish only reviewed HASHI files from a clean checkout.
+Remaining release work is operational rather than an architecture rewrite:
 
-See
-[HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
-for exact artifact identity, evidence, and rollout status.
+- run and record the final Python, Rust, certification, architecture, docs, and
+  publication-hygiene gates;
+- complete the approved live HER canary and inspect post-adoption logs;
+- create the tag and push only after the destination and exact outbound range
+  receive explicit approval.
+
+See [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md) for the delivered scope
+and alpha boundaries. The
+[2026-08-13 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) remains a
+historical record of the earlier `.13` integration state.
 
 ---
 

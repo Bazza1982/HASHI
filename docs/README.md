@@ -8,9 +8,11 @@ This directory contains developer documentation and operational notes for HASHI.
 > alpha target. It is deployment-artifact-ready for alpha testing, with full
 > enterprise-server production validation pending.
 >
-> **Development checkpoint:** the unreleased HASHI `main` integration state,
-> including HER `0.1.0-hashi.13`, is recorded in
-> [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md).
+> **Platform release candidate:** HASHI `v4.0.0-alpha.2` consolidates the
+> advanced HER backend, certified HER `0.1.0-hashi.22`, seven effort levels,
+> conversation/delivery hardening, and the source-integrated `/rebuild`
+> workflow. See
+> [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md).
 >
 > **Changelog:** see [`../CHANGELOG.md`](../CHANGELOG.md) · **Roadmap:** see [ROADMAP.md](ROADMAP.md).
 
@@ -34,8 +36,9 @@ Use these docs by intent:
 - **Understand the long-term route:** read [ROADMAP.md](ROADMAP.md) and
   [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md).
 - **Understand the latest integrated code:** read the
-  [2026-08-13 unreleased checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md),
-  then the HER backend, multimedia, and Habit contracts linked below.
+  [v4.0.0-alpha.2 release candidate notes](RELEASE_NOTES_v4.0.0-alpha.2.md),
+  then the HER backend, effort, rebuild, multimedia, and Habit contracts linked
+  below. The 2026-08-13 checkpoint remains historical integration evidence.
 - **Operate the current alpha artifacts:** read
   [HASHI_ENTERPRISE_DEPLOYMENT.md](HASHI_ENTERPRISE_DEPLOYMENT.md) and the
   enterprise runbooks linked from the readiness review.
@@ -91,7 +94,8 @@ deployment validation continues.
 - [HER_TOOL_GATEWAY_TELEMETRY_PLAN.md](HER_TOOL_GATEWAY_TELEMETRY_PLAN.md) — long-term HER packaging, Tool Gateway/MCP, and structured thinking/token telemetry plan
 - [HER_CODE_MODULE_PLAN.md](HER_CODE_MODULE_PLAN.md) — HER module packaging notes, upstream Claw runtime expectations, and local release-binary evidence
 - [HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md](HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md) — transactional local Rust rebuild, verification, development selection, targeted reboot, and rollback plan
-- [HER_REBUILD_PARALLEL_DEVELOPMENT_CHECKPOINT.md](HER_REBUILD_PARALLEL_DEVELOPMENT_CHECKPOINT.md) — isolated controller implementation status, validation evidence, and deferred Zelda integration boundary
+- [HER_REBUILD_PARALLEL_DEVELOPMENT_CHECKPOINT.md](HER_REBUILD_PARALLEL_DEVELOPMENT_CHECKPOINT.md) — safe takeover, integration, live adoption, cache verification, and preserved Zelda release provenance
+- [HER_ULTRA_EFFORT_LEVEL_PLAN.md](HER_ULTRA_EFFORT_LEVEL_PLAN.md) — implemented HER-private coordinated multi-agent effort above the single-Agent `max+` ceiling
 - [HER_COMPREHENSIVE_TEST_PLAN.md](HER_COMPREHENSIVE_TEST_PLAN.md) — full HER × DeepSeek certification matrix across providers, models, modes, efforts, streaming, continuity, and exit paths
 - [HER_bug_journal.md](HER_bug_journal.md) — permanent HER defect and regression record, seeded with the known 2026-08-11 failures
 - [HER Debug Superloop template](../superloops/templates/her_debug/README.md) — two-stage Flash-before-Pro test/fix/retest controller with Lin Yueru-owned `/nudge` liveness and strict no-fallback gates
@@ -121,6 +125,8 @@ deployment validation continues.
 
 ### Release Notes
 - [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md) — Enterprise AAI v0.1 alpha release notes and known limits
+- [RELEASE_NOTES_v4.0.0-alpha.2.md](RELEASE_NOTES_v4.0.0-alpha.2.md) — current v4 release candidate for advanced HER, seven effort levels, certified `.22`, and `/rebuild`
+- [RELEASE_PREPARATION_v4.0.0-alpha.2.md](RELEASE_PREPARATION_v4.0.0-alpha.2.md) — consolidation, verification, publication-hygiene findings, and remaining tag/push boundary
 - [RELEASE_NOTES_v4.0.0-alpha.1.md](RELEASE_NOTES_v4.0.0-alpha.1.md) — v4 alpha release notes for HER mode and Superloop foundation
 - [RELEASE_NOTES_v1.1.md](RELEASE_NOTES_v1.1.md) — v1.1 release notes
 

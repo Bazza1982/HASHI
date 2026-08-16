@@ -131,6 +131,13 @@ HER effort controls agentic execution length, not provider reasoning depth:
 | `xhigh` | 192 | adaptive plan; optional independent read-only review |
 | `max` | 384 | adaptive plan; optional independent read-only review |
 | `max+` | 512 | same independent review plus optional isolated rerun of exact plan-declared tests |
+| `ultra` | coordinated | HASHI-owned primary/worker orchestration above the single-Agent native ceiling |
+
+`low` through `max+` are native single-Agent execution efforts. `ultra` is a
+HER adapter effort: it uses a bounded primary plan and up to ten concurrent
+isolated worker sessions, then assembles evidence through the primary. The
+adapter assigns ordinary single-Agent efforts to those sessions; it never
+passes `ultra` to the native executable as `CLAW_EXECUTION_EFFORT`.
 
 An explicit `max_tool_iterations` remains an operator override but is bounded to
 8–512. Effort is a capability ceiling, not a quota: the initial plan selects the
