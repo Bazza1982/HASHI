@@ -12952,6 +12952,11 @@ fn build_runtime_with_plugin_state(
         mcp_state,
     } = runtime_plugin_state;
     plugin_registry.initialize()?;
+    let allowed_tools = apply_denied_tool_filter(
+        allowed_tools,
+        feature_config.permission_rules(),
+        &tool_registry,
+    );
     let policy = permission_policy(permission_mode, &feature_config, &tool_registry)
         .map_err(std::io::Error::other)?;
     let (task_assurance_enabled, finalization_reserve) = cli_task_assurance();
@@ -14802,6 +14807,7 @@ impl CliToolExecutor {
         serde_json::to_string_pretty(&self.tool_registry.search(
             &input.query,
             input.max_results.unwrap_or(5),
+            self.allowed_tools.as_ref(),
             pending_mcp_servers,
             mcp_degraded,
         ))
@@ -14914,6 +14920,30 @@ fn permission_policy(
             policy.with_tool_requirement(name, required_permission)
         },
     ))
+}
+
+fn apply_denied_tool_filter(
+    configured_tools: Option<AllowedToolSet>,
+    permission_rules: &runtime::RuntimePermissionRuleConfig,
+    tool_registry: &GlobalToolRegistry,
+) -> Option<AllowedToolSet> {
+    if permission_rules.denied_tools().is_empty() {
+        return configured_tools;
+    }
+
+    let denied_tools = permission_rules
+        .denied_tools()
+        .iter()
+        .map(|name| canonical_allowed_tool_name(name))
+        .collect::<BTreeSet<_>>();
+    let mut effective_tools = configured_tools.unwrap_or_else(|| {
+        tool_registry
+            .canonical_allowed_tool_names()
+            .into_iter()
+            .collect()
+    });
+    effective_tools.retain(|name| !denied_tools.contains(name));
+    Some(effective_tools)
 }
 
 fn image_bytes_match_media_type(media_type: &str, bytes: &[u8]) -> bool {
@@ -15351,8 +15381,9 @@ fn print_help(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::
 #[cfg(test)]
 mod tests {
     use super::{
-        acp_status_json, build_runtime_plugin_state_with_loader, build_runtime_with_plugin_state,
-        classify_error_kind, classify_session_lifecycle_from_panes, collect_session_prompt_history,
+        acp_status_json, apply_denied_tool_filter, build_runtime_plugin_state_with_loader,
+        build_runtime_with_plugin_state, classify_error_kind,
+        classify_session_lifecycle_from_panes, collect_session_prompt_history,
         create_managed_session_handle, describe_tool_progress, filter_tool_specs,
         format_bughunter_report, format_commit_preflight_report, format_commit_skipped_report,
         format_compact_report, format_connected_line, format_cost_report, format_history_timestamp,
@@ -15385,7 +15416,8 @@ mod tests {
     };
     use runtime::{
         load_oauth_credentials, save_oauth_credentials, AssistantEvent, ConfigLoader, ContentBlock,
-        ConversationMessage, MessageRole, OAuthConfig, PermissionMode, Session, ToolExecutor,
+        ConversationMessage, MessageRole, OAuthConfig, PermissionMode, RuntimePermissionRuleConfig,
+        Session, ToolExecutor,
     };
     use serde_json::json;
     use std::fs;
@@ -15396,7 +15428,7 @@ mod tests {
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    use tools::GlobalToolRegistry;
+    use tools::{GlobalToolRegistry, RuntimeToolDefinition};
 
     fn registry_with_plugin_tool() -> GlobalToolRegistry {
         GlobalToolRegistry::with_plugin_tools(vec![PluginTool::new(
@@ -20562,6 +20594,59 @@ UU conflicted.rs",
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(workspace);
         let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn denied_tool_filter_hides_native_search_and_preserves_mcp_search() {
+        let registry = GlobalToolRegistry::builtin()
+            .with_runtime_tools(vec![RuntimeToolDefinition {
+                name: "mcp__hashi-tools__web_search".to_string(),
+                description: Some("Working HASHI Brave web search".to_string()),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": false
+                }),
+                required_permission: PermissionMode::ReadOnly,
+            }])
+            .expect("runtime search tool should register");
+        let rules = RuntimePermissionRuleConfig::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec!["WebSearch".to_string()],
+        );
+
+        let filtered = apply_denied_tool_filter(None, &rules, &registry)
+            .expect("a denied tool should create an effective allow set");
+        assert!(!filtered.contains("web_search"));
+        assert!(filtered.contains("mcp__hashi_tools__web_search"));
+
+        let definitions = registry.definitions(Some(&filtered));
+        assert!(!definitions.iter().any(|tool| tool.name == "WebSearch"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "mcp__hashi-tools__web_search"));
+
+        let mut executor = CliToolExecutor::new(Some(filtered), false, registry, None);
+        let error = executor
+            .execute("WebSearch", r#"{"query":"test"}"#)
+            .expect_err("native WebSearch must remain blocked at execution");
+        assert!(error.to_string().contains("not enabled"));
+
+        let search_output = executor
+            .execute(
+                "ToolSearch",
+                r#"{"query":"select:WebSearch,mcp__hashi-tools__web_search","max_results":5}"#,
+            )
+            .expect("ToolSearch should remain available");
+        let search_json: serde_json::Value =
+            serde_json::from_str(&search_output).expect("search output should be json");
+        assert_eq!(
+            search_json["matches"],
+            json!(["mcp__hashi-tools__web_search"])
+        );
     }
 
     #[test]

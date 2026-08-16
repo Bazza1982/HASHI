@@ -382,18 +382,20 @@ impl GlobalToolRegistry {
         &self,
         query: &str,
         max_results: usize,
+        allowed_tools: Option<&BTreeSet<String>>,
         pending_mcp_servers: Option<Vec<String>>,
         mcp_degraded: Option<McpDegradedReport>,
     ) -> ToolSearchOutput {
         let query = query.trim().to_string();
         let normalized_query = normalize_tool_search_query(&query);
-        let matches = search_tool_specs(&query, max_results.max(1), &self.searchable_tool_specs());
+        let searchable_tools = self.searchable_tool_specs(allowed_tools);
+        let matches = search_tool_specs(&query, max_results.max(1), &searchable_tools);
 
         ToolSearchOutput {
             matches,
             query,
             normalized_query,
-            total_deferred_tools: self.searchable_tool_specs().len(),
+            total_deferred_tools: searchable_tools.len(),
             pending_mcp_servers,
             mcp_degraded,
         }
@@ -415,21 +417,46 @@ impl GlobalToolRegistry {
             .map_err(|error| error.to_string())
     }
 
-    fn searchable_tool_specs(&self) -> Vec<SearchableToolSpec> {
+    fn searchable_tool_specs(
+        &self,
+        allowed_tools: Option<&BTreeSet<String>>,
+    ) -> Vec<SearchableToolSpec> {
         let builtin = deferred_tool_specs()
             .into_iter()
+            .filter(|spec| {
+                allowed_tools
+                    .is_none_or(|allowed| allowed.contains(&canonical_allowed_tool_name(spec.name)))
+            })
             .map(|spec| SearchableToolSpec {
                 name: spec.name.to_string(),
                 description: spec.description.to_string(),
             });
-        let runtime = self.runtime_tools.iter().map(|tool| SearchableToolSpec {
-            name: tool.name.clone(),
-            description: tool.description.clone().unwrap_or_default(),
-        });
-        let plugin = self.plugin_tools.iter().map(|tool| SearchableToolSpec {
-            name: tool.definition().name.clone(),
-            description: tool.definition().description.clone().unwrap_or_default(),
-        });
+        let runtime = self
+            .runtime_tools
+            .iter()
+            .filter(|tool| {
+                allowed_tools.is_none_or(|allowed| {
+                    allowed.contains(&canonical_allowed_tool_name(&tool.name))
+                })
+            })
+            .map(|tool| SearchableToolSpec {
+                name: tool.name.clone(),
+                description: tool.description.clone().unwrap_or_default(),
+            });
+        let plugin = self
+            .plugin_tools
+            .iter()
+            .filter(|tool| {
+                allowed_tools.is_none_or(|allowed| {
+                    allowed.contains(&canonical_allowed_tool_name(
+                        tool.definition().name.as_str(),
+                    ))
+                })
+            })
+            .map(|tool| SearchableToolSpec {
+                name: tool.definition().name.clone(),
+                description: tool.definition().description.clone().unwrap_or_default(),
+            });
         builtin.chain(runtime).chain(plugin).collect()
     }
 }
@@ -4261,7 +4288,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "glob_search",
             "grep_search",
             "WebFetch",
-            "WebSearch",
             "ToolSearch",
             "Skill",
             "StructuredOutput",
@@ -4271,7 +4297,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "glob_search",
             "grep_search",
             "WebFetch",
-            "WebSearch",
             "ToolSearch",
             "Skill",
             "TodoWrite",
@@ -4284,7 +4309,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "glob_search",
             "grep_search",
             "WebFetch",
-            "WebSearch",
             "ToolSearch",
             "TodoWrite",
             "StructuredOutput",
@@ -4296,7 +4320,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "glob_search",
             "grep_search",
             "WebFetch",
-            "WebSearch",
             "ToolSearch",
             "Skill",
             "StructuredOutput",
@@ -4319,7 +4342,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "glob_search",
             "grep_search",
             "WebFetch",
-            "WebSearch",
             "TodoWrite",
             "Skill",
             "ToolSearch",
@@ -5428,6 +5450,18 @@ impl ToolExecutor for SubagentToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+        if tool_name == "ToolSearch" {
+            let search_input = serde_json::from_value::<ToolSearchInput>(value)
+                .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+            return to_pretty_json(GlobalToolRegistry::builtin().search(
+                &search_input.query,
+                search_input.max_results.unwrap_or(5),
+                Some(&self.allowed_tools),
+                None,
+                None,
+            ))
+            .map_err(ToolError::new);
+        }
         execute_tool_with_enforcer(self.enforcer.as_ref(), tool_name, &value)
             .map_err(ToolError::new)
     }
@@ -5609,7 +5643,13 @@ fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
 
 #[allow(clippy::needless_pass_by_value)]
 fn execute_tool_search(input: ToolSearchInput) -> ToolSearchOutput {
-    GlobalToolRegistry::builtin().search(&input.query, input.max_results.unwrap_or(5), None, None)
+    GlobalToolRegistry::builtin().search(
+        &input.query,
+        input.max_results.unwrap_or(5),
+        None,
+        None,
+        None,
+    )
 }
 
 fn deferred_tool_specs() -> Vec<ToolSpec> {
@@ -7900,6 +7940,7 @@ mod tests {
         let search = registry.search(
             "demo echo",
             5,
+            None,
             Some(vec!["pending-server".to_string()]),
             Some(runtime::McpDegradedReport::new(
                 vec!["demo".to_string()],
@@ -9443,21 +9484,45 @@ mod tests {
         assert!(general.contains("bash"));
         assert!(general.contains("write_file"));
         assert!(!general.contains("agent"));
+        assert!(!general.contains("web_search"));
 
         let explore = allowed_tools_for_subagent("Explore");
         assert!(explore.contains("read_file"));
         assert!(explore.contains("grep_search"));
         assert!(!explore.contains("bash"));
+        assert!(!explore.contains("web_search"));
 
         let plan = allowed_tools_for_subagent("Plan");
         assert!(plan.contains("todo_write"));
         assert!(plan.contains("structured_output"));
         assert!(!plan.contains("agent"));
+        assert!(!plan.contains("web_search"));
 
         let verification = allowed_tools_for_subagent("Verification");
         assert!(verification.contains("bash"));
         assert!(verification.contains("power_shell"));
         assert!(!verification.contains("write_file"));
+        assert!(!verification.contains("web_search"));
+    }
+
+    #[test]
+    fn subagent_tool_search_does_not_rediscover_disabled_native_web_search() {
+        let allowed_tools = allowed_tools_for_subagent("Explore");
+        let mut executor = SubagentToolExecutor::new(allowed_tools);
+
+        let output = executor
+            .execute(
+                "ToolSearch",
+                r#"{"query":"select:WebSearch,WebFetch","max_results":5}"#,
+            )
+            .expect("ToolSearch should remain available to subagents");
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(parsed["matches"], json!(["WebFetch"]));
+
+        let error = executor
+            .execute("WebSearch", r#"{"query":"test"}"#)
+            .expect_err("native WebSearch must not execute in a subagent");
+        assert!(error.to_string().contains("not enabled"));
     }
 
     #[test]

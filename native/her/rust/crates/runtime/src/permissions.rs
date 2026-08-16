@@ -172,6 +172,15 @@ impl PermissionPolicy {
     }
 
     #[must_use]
+    pub(crate) fn denied_tool_reason(&self, tool_name: &str) -> Option<String> {
+        let normalized_name = tool_name.to_lowercase();
+        self.denied_tools
+            .iter()
+            .any(|denied| denied == &normalized_name)
+            .then(|| format!("tool '{tool_name}' has been denied by denied_tools configuration"))
+    }
+
+    #[must_use]
     pub fn authorize(
         &self,
         tool_name: &str,
@@ -193,10 +202,8 @@ impl PermissionPolicy {
         // #159: check denied_tools before rule-based evaluation. Tools listed
         // in the denied_tools config are unconditionally denied regardless of
         // permission mode.
-        if self.denied_tools.iter().any(|t| t == tool_name) {
-            return PermissionOutcome::Deny {
-                reason: format!("tool '{tool_name}' has been denied by denied_tools configuration"),
-            };
+        if let Some(reason) = self.denied_tool_reason(tool_name) {
+            return PermissionOutcome::Deny { reason };
         }
 
         if let Some(rule) = Self::find_matching_rule(&self.deny_rules, tool_name, input) {
@@ -633,6 +640,26 @@ mod tests {
 
         let result = policy.authorize("read_file", "{}", None);
         assert_eq!(result, PermissionOutcome::Allow);
+    }
+
+    #[test]
+    fn denied_tools_match_runtime_tool_names_case_insensitively() {
+        let rules = RuntimePermissionRuleConfig::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec!["WebSearch".to_string()],
+        );
+        let policy = PermissionPolicy::new(PermissionMode::Allow).with_permission_rules(&rules);
+
+        assert!(matches!(
+            policy.authorize("WebSearch", r#"{"query":"test"}"#, None),
+            PermissionOutcome::Deny { reason } if reason.contains("denied_tools")
+        ));
+        assert_eq!(
+            policy.authorize("mcp__hashi-tools__web_search", r#"{"query":"test"}"#, None,),
+            PermissionOutcome::Allow
+        );
     }
 
     #[test]

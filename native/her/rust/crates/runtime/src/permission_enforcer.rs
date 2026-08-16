@@ -34,9 +34,29 @@ impl PermissionEnforcer {
         Self { policy }
     }
 
+    fn denied_tool_result(
+        &self,
+        tool_name: &str,
+        required_mode: PermissionMode,
+    ) -> Option<EnforcementResult> {
+        self.policy
+            .denied_tool_reason(tool_name)
+            .map(|reason| EnforcementResult::Denied {
+                tool: tool_name.to_owned(),
+                active_mode: self.policy.active_mode().as_str().to_owned(),
+                required_mode: required_mode.as_str().to_owned(),
+                reason,
+            })
+    }
+
     /// Check whether a tool can be executed under the current permission policy.
     /// Auto-denies when prompting is required but no prompter is provided.
     pub fn check(&self, tool_name: &str, input: &str) -> EnforcementResult {
+        let required_mode = self.policy.required_mode_for(tool_name);
+        if let Some(result) = self.denied_tool_result(tool_name, required_mode) {
+            return result;
+        }
+
         // When the active mode is Prompt, defer to the caller's interactive
         // prompt flow rather than hard-denying (the enforcer has no prompter).
         if self.policy.active_mode() == PermissionMode::Prompt {
@@ -73,6 +93,10 @@ impl PermissionEnforcer {
         input: &str,
         required_mode: PermissionMode,
     ) -> EnforcementResult {
+        if let Some(result) = self.denied_tool_result(tool_name, required_mode) {
+            return result;
+        }
+
         // When the active mode is Prompt, defer to the caller's interactive
         // prompt flow rather than hard-denying.
         if self.policy.active_mode() == PermissionMode::Prompt {
@@ -588,6 +612,33 @@ mod tests {
             }
             other => panic!("expected denied result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn denied_tools_block_static_and_dynamic_checks_even_in_prompt_mode() {
+        let rules = crate::config::RuntimePermissionRuleConfig::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec!["WebSearch".to_string()],
+        );
+        let policy = PermissionPolicy::new(PermissionMode::Prompt)
+            .with_tool_requirement("WebSearch", PermissionMode::DangerFullAccess)
+            .with_permission_rules(&rules);
+        let enforcer = PermissionEnforcer::new(policy);
+
+        assert!(matches!(
+            enforcer.check("WebSearch", r#"{"query":"test"}"#),
+            EnforcementResult::Denied { reason, .. } if reason.contains("denied_tools")
+        ));
+        assert!(matches!(
+            enforcer.check_with_required_mode(
+                "WebSearch",
+                r#"{"query":"test"}"#,
+                PermissionMode::DangerFullAccess,
+            ),
+            EnforcementResult::Denied { reason, .. } if reason.contains("denied_tools")
+        ));
     }
 
     #[test]
