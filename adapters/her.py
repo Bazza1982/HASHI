@@ -3856,12 +3856,15 @@ INCOMPLETE TASK FACTS (quoted, read-only)
     ) -> _her_ultra.HERUltraInvocationResult:
         parsed = getattr(exc, "parsed_error", None)
         parsed = parsed if isinstance(parsed, Mapping) else {}
-        retryable = isinstance(exc, ClawTimeoutError) or bool(parsed.get("retryable"))
         error_type = str(
             parsed.get("error_kind")
             or parsed.get("error_type")
             or ("timeout" if isinstance(exc, ClawTimeoutError) else type(exc).__name__)
         )
+        # A timeout already consumed the configured HER idle/hard budget.
+        # Replaying the identical isolated worker from scratch is not a useful
+        # transient retry and can duplicate unknown side effects.
+        retryable = bool(parsed.get("retryable")) and error_type.lower() != "timeout"
         return _her_ultra.HERUltraInvocationResult(
             text="",
             is_success=False,
@@ -3996,6 +3999,12 @@ RUNTIME FACTS (quoted, read-only)
         async def invoke_primary(
             spec: _her_ultra.HERUltraPrimaryExecutionSpec,
         ) -> _her_ultra.HERUltraInvocationResult:
+            read_only_phases = {
+                "planning",
+                "plan_correction",
+                "assembly",
+                "failure_finalization",
+            }
             try:
                 result = await self._run_task_async(
                     spec.prompt,
@@ -4005,12 +4014,12 @@ RUNTIME FACTS (quoted, read-only)
                     track_session_identity=False,
                     permission_mode_override=(
                         "read-only"
-                        if spec.phase in {"planning", "plan_correction", "assembly"}
+                        if spec.phase in read_only_phases
                         else authority.permission_mode
                     ),
                     allowed_tools_override=(
                         []
-                        if spec.phase in {"planning", "plan_correction", "assembly"}
+                        if spec.phase in read_only_phases
                         else inherited_tools
                     ),
                     task_env_overrides=self._ultra_task_env(spec.effort),
@@ -4110,10 +4119,11 @@ RUNTIME FACTS (quoted, read-only)
         )
         stop_reason = {
             "completed": "end_turn",
-            "incomplete": "requires_user_input",
             "cancelled": "cancelled",
             "failed": "backend_error",
         }.get(outcome.status, outcome.status)
+        if outcome.status == "incomplete" and outcome.pending_interaction is not None:
+            stop_reason = "requires_user_input"
         ultra_metadata = {
             "run_id": outcome.run_id,
             "status": outcome.status,

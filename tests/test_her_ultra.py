@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from adapters.her import ClawCommandError, ClawTaskResult, HERAdapter
+from adapters.her import ClawCommandError, ClawTaskResult, ClawTimeoutError, HERAdapter
 from adapters.her_ultra import (
     HERUltraAuthorityEnvelope,
     HERUltraConfig,
@@ -121,6 +121,20 @@ def _worker_success(
         output_tokens=5,
         duration_ms=2,
     )
+
+
+def test_ultra_worker_timeout_inherits_her_policy_unless_explicitly_configured():
+    assert _config().subagent_timeout_sec is None
+    assert _config(subagent_timeout_sec=900).subagent_timeout_sec == 900
+
+
+def test_her_timeout_is_not_marked_retryable_for_ultra_workers():
+    invocation = HERAdapter._ultra_error_invocation(
+        ClawTimeoutError("HER command was idle", timeout_s=1800)
+    )
+
+    assert invocation.error_type == "timeout"
+    assert invocation.retryable is False
 
 
 def test_extract_json_object_prefers_outer_latest_complete_object():
@@ -605,6 +619,63 @@ async def test_orchestrator_retries_only_transient_retry_safe_worker(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_does_not_retry_a_worker_timeout(tmp_path):
+    goal = "Do not replay timed-out work"
+    request_id = "req-timeout-no-retry"
+    authority = _authority()
+    attempts = 0
+    phases = []
+    plan_payload = _plan_payload(
+        goal=goal,
+        parent_request_id=request_id,
+        authority=authority,
+        subtasks=[_subtask_payload("a")],
+    )
+
+    async def primary(spec):
+        phases.append(spec.phase)
+        if spec.phase == "planning":
+            return HERUltraInvocationResult(
+                text=json.dumps(plan_payload), session_id="primary"
+            )
+        assert spec.phase == "failure_finalization"
+        return HERUltraInvocationResult(
+            text="The worker timed out; the task is incomplete.",
+            session_id="primary",
+        )
+
+    async def worker(_spec):
+        nonlocal attempts
+        attempts += 1
+        return HERUltraInvocationResult(
+            text="",
+            is_success=False,
+            error="worker timed out",
+            error_type="timeout",
+            # Even a provider that labels timeout retryable must not make the
+            # orchestrator replay the same isolated task from scratch.
+            retryable=True,
+        )
+
+    outcome = await HERUltraOrchestrator(
+        config=_config(subagent_retry_limit=3),
+        ledger_root=tmp_path,
+        primary_executor=primary,
+        worker_executor=worker,
+        run_id_factory=lambda: "run-timeout-no-retry",
+    ).run(
+        authoritative_goal=goal,
+        parent_request_id=request_id,
+        authority=authority,
+    )
+
+    assert attempts == 1
+    assert phases == ["planning", "failure_finalization"]
+    assert outcome.status == "incomplete"
+    assert outcome.is_success is True
+
+
+@pytest.mark.asyncio
 async def test_worker_inherits_full_parent_authority_without_subtask_reauthorization(
     tmp_path,
 ):
@@ -756,7 +827,14 @@ async def test_failed_dependency_is_not_dispatched(tmp_path):
             return HERUltraInvocationResult(
                 text=json.dumps(plan_payload), session_id="primary"
             )
-        pytest.fail("assembly must not run when no required worker produced evidence")
+        assert spec.phase == "failure_finalization"
+        assert "No required worker produced usable evidence" in spec.prompt
+        assert '"a"' in spec.prompt and '"b"' in spec.prompt
+        assert "permanent failure" in spec.prompt
+        return HERUltraInvocationResult(
+            text="Both required tasks failed; the work is incomplete.",
+            session_id="primary-final",
+        )
 
     async def worker(spec):
         worker_calls.append(spec.subtask_id)
@@ -781,15 +859,191 @@ async def test_failed_dependency_is_not_dispatched(tmp_path):
         authority=authority,
     )
 
-    assert outcome.is_success is False
-    assert "Primary assembly was not started" in outcome.error
+    assert outcome.is_success is True
+    assert outcome.status == "incomplete"
+    assert outcome.text == "Both required tasks failed; the work is incomplete."
+    assert outcome.error == ""
     assert worker_calls == ["a"]
-    assert primary_phases == ["planning"]
+    assert primary_phases == ["planning", "failure_finalization"]
     state = json.loads(
         (tmp_path / "run-dependency" / "state.json").read_text(encoding="utf-8")
     )
+    assert state["status"] == "incomplete"
+    assert state["primary"]["state"] == "completed"
+    assert state["primary"]["phase"] == "failure_finalization"
+    assert state["primary"]["completion_status"] == "incomplete"
     assert state["subtasks"]["b"]["state"] == "failed"
     assert state["subtasks"]["b"]["failed_dependencies"] == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_required_worker_failure_is_reported_as_incomplete(tmp_path):
+    goal = "Report partial evidence honestly"
+    request_id = "req-partial-required"
+    authority = _authority()
+    plan_payload = _plan_payload(
+        goal=goal,
+        parent_request_id=request_id,
+        authority=authority,
+        subtasks=[_subtask_payload("a"), _subtask_payload("b")],
+    )
+
+    async def primary(spec):
+        if spec.phase == "planning":
+            return HERUltraInvocationResult(
+                text=json.dumps(plan_payload), session_id="primary"
+            )
+        assert spec.phase == "assembly"
+        assert '"completion_status": "incomplete"' in spec.prompt
+        assert '"required_failures": [\n    "b"\n  ]' in spec.prompt
+        return HERUltraInvocationResult(
+            text="Task a completed, but required task b failed.",
+            session_id="primary-final",
+        )
+
+    async def worker(spec):
+        if spec.subtask_id == "a":
+            return _worker_success("a")
+        return HERUltraInvocationResult(
+            text="",
+            is_success=False,
+            error="provider rejected the request",
+            error_type="permanent",
+            retryable=False,
+        )
+
+    outcome = await HERUltraOrchestrator(
+        config=_config(),
+        ledger_root=tmp_path,
+        primary_executor=primary,
+        worker_executor=worker,
+        run_id_factory=lambda: "run-partial-required",
+    ).run(
+        authoritative_goal=goal,
+        parent_request_id=request_id,
+        authority=authority,
+    )
+
+    assert outcome.is_success is True
+    assert outcome.status == "incomplete"
+    assert outcome.completed_subtasks == 1
+    assert outcome.text == "Task a completed, but required task b failed."
+
+
+@pytest.mark.asyncio
+async def test_optional_worker_failure_does_not_make_run_incomplete(tmp_path):
+    goal = "Complete required work"
+    request_id = "req-optional-failure"
+    authority = _authority()
+    plan_payload = _plan_payload(
+        goal=goal,
+        parent_request_id=request_id,
+        authority=authority,
+        subtasks=[
+            _subtask_payload("required"),
+            _subtask_payload("optional", optional=True),
+        ],
+    )
+
+    async def primary(spec):
+        if spec.phase == "planning":
+            return HERUltraInvocationResult(
+                text=json.dumps(plan_payload), session_id="primary"
+            )
+        assert spec.phase == "assembly"
+        assert '"completion_status": "completed"' in spec.prompt
+        assert "optional check failed" in spec.prompt
+        return HERUltraInvocationResult(
+            text="Required work completed; the optional check failed.",
+            session_id="primary-final",
+        )
+
+    async def worker(spec):
+        if spec.subtask_id == "required":
+            return _worker_success("required")
+        return HERUltraInvocationResult(
+            text="",
+            is_success=False,
+            error="optional check failed",
+            error_type="permanent",
+            retryable=False,
+        )
+
+    outcome = await HERUltraOrchestrator(
+        config=_config(),
+        ledger_root=tmp_path,
+        primary_executor=primary,
+        worker_executor=worker,
+        run_id_factory=lambda: "run-optional-failure",
+    ).run(
+        authoritative_goal=goal,
+        parent_request_id=request_id,
+        authority=authority,
+    )
+
+    assert outcome.is_success is True
+    assert outcome.status == "completed"
+    assert outcome.completed_subtasks == 1
+
+
+@pytest.mark.asyncio
+async def test_primary_finalization_failure_returns_deterministic_report(tmp_path):
+    goal = "Always report worker failure"
+    request_id = "req-finalization-fallback"
+    authority = _authority()
+    plan_payload = _plan_payload(
+        goal=goal,
+        parent_request_id=request_id,
+        authority=authority,
+        subtasks=[_subtask_payload("a")],
+    )
+
+    async def primary(spec):
+        if spec.phase == "planning":
+            return HERUltraInvocationResult(
+                text=json.dumps(plan_payload), session_id="primary"
+            )
+        assert spec.phase == "failure_finalization"
+        return HERUltraInvocationResult(
+            text="",
+            is_success=False,
+            error="final renderer unavailable",
+            error_type="provider_unavailable",
+        )
+
+    async def worker(_spec):
+        return HERUltraInvocationResult(
+            text="",
+            is_success=False,
+            error="worker timed out",
+            error_type="timeout",
+            retryable=False,
+        )
+
+    outcome = await HERUltraOrchestrator(
+        config=_config(),
+        ledger_root=tmp_path,
+        primary_executor=primary,
+        worker_executor=worker,
+        run_id_factory=lambda: "run-finalization-fallback",
+    ).run(
+        authoritative_goal=goal,
+        parent_request_id=request_id,
+        authority=authority,
+    )
+
+    assert outcome.is_success is True
+    assert outcome.status == "incomplete"
+    assert outcome.primary_session_id == ""
+    assert "Primary finalization error: final renderer unavailable" in outcome.text
+    assert "- a: failed — worker timed out" in outcome.text
+    state = json.loads(
+        (tmp_path / "run-finalization-fallback" / "state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state["status"] == "incomplete"
+    assert state["primary"]["state"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -1315,6 +1569,90 @@ async def test_her_adapter_ultra_returns_one_response_and_checkpoints_primary(tm
         ).read_text(encoding="utf-8")
     )
     assert state["status"] == "completed"
+    assert state["primary"]["state"] == "completed"
+    assert state["primary"]["phase"] == "assembly"
+    assert state["primary"]["completion_status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_her_adapter_reports_all_worker_failures_without_backend_error(tmp_path):
+    persona_path = tmp_path / "SYSTEM.md"
+    persona_path.write_text("Use the Momo persona.", encoding="utf-8")
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        system_md=persona_path,
+        model="deepseek/deepseek-v4-pro",
+        extra={"effort": "ultra"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = tmp_path / "hashi-her"
+    adapter._session_id = "primary-existing"
+    authority = adapter._ultra_authority()
+    plan = _plan_payload(
+        goal="Investigate one failing worker",
+        parent_request_id="req-ultra-incomplete",
+        authority=authority,
+        subtasks=[_subtask_payload("a")],
+    )
+    calls = []
+
+    async def run_task(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        if prompt.startswith("HER ULTRA COMMENTARY RENDERER"):
+            return _claw_result(
+                "Momo persona progress",
+                model=kwargs.get("model_override") or cfg.model,
+                session_id="persona-commentary",
+            )
+        if prompt.startswith("[HER Ultra Primary Planning Contract]"):
+            return _claw_result(
+                json.dumps(plan),
+                model=kwargs["model_override"],
+                session_id="primary-planned",
+            )
+        if prompt.startswith("[HER Ultra Isolated Sub-agent Task]"):
+            raise ClawCommandError(
+                "provider unavailable",
+                returncode=1,
+                parsed_error={
+                    "error_kind": "provider_unavailable",
+                    "retryable": False,
+                },
+            )
+        assert prompt.startswith(
+            "[HER Ultra Primary Failure Finalization Contract]"
+        )
+        assert kwargs["permission_mode_override"] == "read-only"
+        assert kwargs["allowed_tools_override"] == []
+        return _claw_result(
+            "The required worker failed; the requested work is incomplete.",
+            model=kwargs["model_override"],
+            session_id="primary-final",
+        )
+
+    adapter._run_task_async = run_task
+
+    response = await adapter.generate_response(
+        "Investigate one failing worker",
+        "req-ultra-incomplete",
+    )
+
+    assert response.is_success is True
+    assert response.error is None
+    assert response.text == (
+        "The required worker failed; the requested work is incomplete."
+    )
+    assert response.stop_reason == "incomplete"
+    assert response.stream_metadata["claw_completion_status"] == "incomplete"
+    assert response.stream_metadata["her_ultra"]["status"] == "incomplete"
+    assert response.stream_metadata["her_ultra"]["completed_subtasks"] == 0
+    assert adapter._session_id == "primary-final"
+    assert any(
+        prompt.startswith("[HER Ultra Primary Failure Finalization Contract]")
+        for prompt, _kwargs in calls
+    )
 
 
 def test_her_ultra_effort_maps_cli_environment_to_inner_effort(tmp_path):
@@ -1330,6 +1668,7 @@ def test_her_ultra_effort_maps_cli_environment_to_inner_effort(tmp_path):
     assert adapter.effort == "ultra"
     assert adapter._task_env()["CLAW_EXECUTION_EFFORT"] == "xhigh"
     assert adapter._task_env()["CLAW_MAX_TOOL_ITERATIONS"] == "192"
+    assert adapter._ultra_config().subagent_timeout_sec is None
 
 
 def test_her_ultra_inherits_parent_permission_and_access_root(tmp_path):

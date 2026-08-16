@@ -49,7 +49,7 @@ HER_ULTRA_WORKSPACE_STRATEGIES = frozenset(
 _SUBTASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _STATUS_VALUES = frozenset({"completed", "blocked", "failed", "requires_user_input"})
 _TRANSIENT_WORKER_ERROR_TYPES = frozenset(
-    {"connection", "provider_unavailable", "rate_limit", "timeout", "transport"}
+    {"connection", "provider_unavailable", "rate_limit", "transport"}
 )
 
 
@@ -119,7 +119,9 @@ class HERUltraConfig:
     max_concurrent_subagents: int = HER_ULTRA_MAX_CONCURRENT_SUBAGENTS
     primary_inner_effort: str = "high"
     subagent_default_effort: str = "high"
-    subagent_timeout_sec: int = 300
+    # Workers inherit HER's activity-aware idle/hard timeout policy unless an
+    # operator deliberately configures an additional Ultra hard cap.
+    subagent_timeout_sec: int | None = None
     subagent_retry_limit: int = 1
     max_plan_revisions: int = 2
     max_subtasks: int = HER_ULTRA_MAX_SUBTASKS
@@ -140,6 +142,17 @@ class HERUltraConfig:
         def bounded_int(key: str, default: int, lower: int, upper: int) -> int:
             try:
                 parsed = int(raw.get(key, default))
+            except (TypeError, ValueError) as exc:
+                raise HERUltraContractError(
+                    f"invalid Ultra config value: {key}"
+                ) from exc
+            return max(lower, min(parsed, upper))
+
+        def optional_bounded_int(key: str, lower: int, upper: int) -> int | None:
+            if key not in raw or raw.get(key) is None:
+                return None
+            try:
+                parsed = int(raw[key])
             except (TypeError, ValueError) as exc:
                 raise HERUltraContractError(
                     f"invalid Ultra config value: {key}"
@@ -195,7 +208,9 @@ class HERUltraConfig:
             ),
             primary_inner_effort=primary_effort,
             subagent_default_effort=worker_effort,
-            subagent_timeout_sec=bounded_int("subagent_timeout_sec", 300, 1, 86_400),
+            subagent_timeout_sec=optional_bounded_int(
+                "subagent_timeout_sec", 1, 86_400
+            ),
             subagent_retry_limit=bounded_int("subagent_retry_limit", 1, 0, 3),
             max_plan_revisions=bounded_int("max_plan_revisions", 2, 1, 2),
             max_subtasks=bounded_int(
@@ -512,7 +527,7 @@ class HERUltraWorkerExecutionSpec:
     allowed_tools: tuple[str, ...]
     workspace_strategy: str
     workspace: str
-    timeout_sec: int
+    timeout_sec: int | None
     retry_safe: bool
     cancellation_generation: int
 
@@ -1281,41 +1296,52 @@ class HERUltraOrchestrator:
             completed_required = sum(
                 result.completed for result in required_results.values()
             )
-            if required_results and completed_required == 0:
-                failures = "; ".join(
-                    f"{task_id}: {result.error or result.status}"
-                    for task_id, result in required_results.items()
-                )
-                return await self._failed_outcome(
-                    started=started,
-                    status="failed",
-                    error=(
-                        "All required Ultra workers failed before producing usable "
-                        f"evidence. Primary assembly was not started. {failures}"
-                    ),
-                    primary_session_id=primary_session_id,
-                    plan_revision=plan.revision,
-                    subtask_count=len(plan.subtasks),
-                    completed_subtasks=0,
-                )
+            incomplete_required = {
+                task_id: result
+                for task_id, result in required_results.items()
+                if not result.completed
+            }
+            completion_status = "incomplete" if incomplete_required else "completed"
+            failure_only = bool(required_results) and completed_required == 0
+            finalization_phase = "failure_finalization" if failure_only else "assembly"
+            finalization_state = "finalizing" if failure_only else "assembling"
+            finalization_prompt = (
+                self._failure_finalization_prompt(plan, results)
+                if failure_only
+                else self._assembly_prompt(plan, results)
+            )
 
             self._raise_if_cancelled(generation)
             self._ledger.transition(
-                event_id=f"{run_id}:assembly:started",
+                event_id=f"{run_id}:{finalization_phase}:started",
                 entity="primary",
-                state="assembling",
-                data={"result_count": len(results)},
+                state=finalization_state,
+                data={
+                    "phase": finalization_phase,
+                    "result_count": len(results),
+                    "required_failure_count": len(incomplete_required),
+                },
                 cancellation_generation=generation,
             )
             await self._emit(
                 KIND_PROGRESS,
-                "HER Ultra finished the worker stage and is assembling the verified results.",
-                event_id=f"{run_id}:commentary:assembly:started",
-                phase="assembly",
+                (
+                    "HER Ultra finished the worker stage and is preparing an "
+                    "honest incomplete-work report."
+                    if failure_only
+                    else "HER Ultra finished the worker stage and is assembling "
+                    "the verified results."
+                ),
+                event_id=f"{run_id}:commentary:{finalization_phase}:started",
+                phase=finalization_phase,
             )
             await self._emit_persona_commentary(
                 {
-                    "phase": "assembly_started",
+                    "phase": (
+                        "failure_finalization_started"
+                        if failure_only
+                        else "assembly_started"
+                    ),
                     "subtask_count": len(plan.subtasks),
                     "completed_subtasks": sum(
                         result.completed for result in results.values()
@@ -1327,24 +1353,67 @@ class HERUltraOrchestrator:
                         result.blocked for result in results.values()
                     ),
                 },
-                event_id=f"{run_id}:persona:assembly:started",
-                phase="assembly",
+                event_id=f"{run_id}:persona:{finalization_phase}:started",
+                phase=finalization_phase,
             )
-            assembly = await self._invoke_primary(
-                phase="assembly",
+            finalization = await self._invoke_primary(
+                phase=finalization_phase,
                 revision=plan.revision,
-                prompt=self._assembly_prompt(plan, results),
+                prompt=finalization_prompt,
                 parent_request_id=parent_request_id,
                 primary_session_id=primary_session_id,
                 generation=generation,
             )
-            primary_session_id = assembly.session_id or primary_session_id
-            if not assembly.is_success or not assembly.text.strip():
-                return await self._failed_outcome(
+            primary_session_id = finalization.session_id or primary_session_id
+            if not finalization.is_success or not finalization.text.strip():
+                finalization_error = (
+                    finalization.error
+                    or "Primary finalization returned no user-facing report"
+                )
+                self._ledger.transition(
+                    event_id=f"{run_id}:{finalization_phase}:failed",
+                    entity="primary",
+                    state="failed",
+                    data={
+                        "phase": finalization_phase,
+                        "error": _bounded_text(finalization_error, 8_000),
+                    },
+                    cancellation_generation=generation,
+                )
+                self._ledger.transition(
+                    event_id=f"{run_id}:run:incomplete",
+                    entity="run",
+                    state="incomplete",
+                    data={
+                        "plan_revision": plan.revision,
+                        "subtask_count": len(plan.subtasks),
+                        "completed_subtasks": sum(
+                            result.completed for result in results.values()
+                        ),
+                        "required_failure_count": len(incomplete_required),
+                        "primary_finalization_fallback": True,
+                    },
+                    cancellation_generation=generation,
+                )
+                await self._emit(
+                    KIND_ERROR,
+                    "HER Ultra Primary finalization failed; using a deterministic report",
+                    detail=_bounded_text(finalization_error, 2_000),
+                    event_id=f"{run_id}:technical:{finalization_phase}:failed",
+                    phase="finalization",
+                )
+                return self._outcome(
                     started=started,
-                    status="failed",
-                    error=assembly.error or "Primary assembly returned no final answer",
-                    primary_session_id=primary_session_id,
+                    status="incomplete",
+                    text=self._deterministic_finalization_fallback(
+                        plan, results, finalization_error
+                    ),
+                    is_success=True,
+                    error="",
+                    # Do not retain a Primary checkpoint after its own
+                    # finalization failed. The user-facing fallback remains a
+                    # successful delivery, while the next turn starts clean.
+                    primary_session_id="",
                     plan_revision=plan.revision,
                     subtask_count=len(plan.subtasks),
                     completed_subtasks=sum(
@@ -1352,29 +1421,46 @@ class HERUltraOrchestrator:
                     ),
                 )
             self._ledger.transition(
-                event_id=f"{run_id}:run:completed",
-                entity="run",
+                event_id=f"{run_id}:{finalization_phase}:completed",
+                entity="primary",
                 state="completed",
+                data={
+                    "phase": finalization_phase,
+                    "completion_status": completion_status,
+                    "result_count": len(results),
+                    "primary_session_id": primary_session_id,
+                },
+                cancellation_generation=generation,
+            )
+            self._ledger.transition(
+                event_id=f"{run_id}:run:{completion_status}",
+                entity="run",
+                state=completion_status,
                 data={
                     "plan_revision": plan.revision,
                     "subtask_count": len(plan.subtasks),
                     "completed_subtasks": sum(
                         result.completed for result in results.values()
                     ),
+                    "required_failure_count": len(incomplete_required),
                     "primary_session_id": primary_session_id,
                 },
                 cancellation_generation=generation,
             )
             await self._emit(
                 KIND_VALIDATION,
-                "HER Ultra assembly completed",
-                event_id=f"{run_id}:technical:assembly:completed",
-                phase="assembly",
+                (
+                    "HER Ultra incomplete-work finalization completed"
+                    if failure_only
+                    else "HER Ultra assembly completed"
+                ),
+                event_id=f"{run_id}:technical:{finalization_phase}:completed",
+                phase=finalization_phase,
             )
             return self._outcome(
                 started=started,
-                status="completed",
-                text=assembly.text,
+                status=completion_status,
+                text=finalization.text,
                 is_success=True,
                 error="",
                 primary_session_id=primary_session_id,
@@ -1580,27 +1666,45 @@ class HERUltraOrchestrator:
                     "model": model,
                     "effort": subtask.effort,
                     "optional": subtask.optional,
+                    "timeout_sec": self.config.subagent_timeout_sec,
+                    "timeout_source": (
+                        "ultra_config"
+                        if self.config.subagent_timeout_sec is not None
+                        else "her_inherited"
+                    ),
                 },
                 cancellation_generation=generation,
+            )
+            timeout_detail = (
+                f"ultra_hard_cap={self.config.subagent_timeout_sec}s"
+                if self.config.subagent_timeout_sec is not None
+                else "timeout=HER-inherited"
             )
             await self._emit(
                 KIND_PROGRESS,
                 f"HER Ultra dispatched {subtask.subtask_id} (attempt {attempt})",
-                detail=f"model={model}; effort={subtask.effort}",
+                detail=f"model={model}; effort={subtask.effort}; {timeout_detail}",
                 event_id=f"{attempt_id}:technical:started",
                 phase="execution",
             )
             try:
-                invocation = await asyncio.wait_for(
-                    self.worker_executor(spec), timeout=self.config.subagent_timeout_sec
-                )
+                if self.config.subagent_timeout_sec is None:
+                    invocation = await self.worker_executor(spec)
+                else:
+                    invocation = await asyncio.wait_for(
+                        self.worker_executor(spec),
+                        timeout=self.config.subagent_timeout_sec,
+                    )
             except asyncio.TimeoutError:
+                assert self.config.subagent_timeout_sec is not None
                 invocation = HERUltraInvocationResult(
                     text="",
                     is_success=False,
                     error=f"worker timed out after {self.config.subagent_timeout_sec}s",
                     error_type="timeout",
-                    retryable=True,
+                    # Repeating the same task with the same hard cap discards
+                    # progress and predictably reproduces the timeout.
+                    retryable=False,
                     model=model,
                     duration_ms=self.config.subagent_timeout_sec * 1000.0,
                 )
@@ -1658,6 +1762,7 @@ class HERUltraOrchestrator:
                 and result.transient
                 and result.retry_safe
                 and subtask.retry_safe
+                and result.error_type.lower() != "timeout"
             )
             if not retry_allowed:
                 await self._emit(
@@ -1875,8 +1980,9 @@ class HERUltraOrchestrator:
             "an internal answer draft and will be rendered separately. Use at most "
             f"{self.config.max_subtasks} subtasks. Workers are isolated HER sessions; they cannot "
             "ask the user or exceed the authority envelope. Prefer independent parallel tasks, "
-            "but preserve real dependencies. Every task needs deliverables and acceptance "
-            "criteria.\n"
+            "but preserve real dependencies. Split broad audits or implementations into bounded "
+            "subtasks that one worker can independently complete and validate. Every task needs "
+            "deliverables and acceptance criteria.\n"
             "Every worker inherits the active HER Agent authority exactly; do not request, "
             "restate, narrow, or expand permissions, tools, or filesystem paths in the plan. "
             "Mark retry_safe=false for any task whose side effects must not be repeated.\n"
@@ -1946,10 +2052,19 @@ class HERUltraOrchestrator:
         plan: HERUltraPlan,
         results: Mapping[str, HERUltraWorkerResult],
     ) -> str:
+        required_failures = [
+            task.subtask_id
+            for task in plan.subtasks
+            if not task.optional
+            and task.subtask_id in results
+            and not results[task.subtask_id].completed
+        ]
         payload = {
             "authoritative_goal": plan.authoritative_goal,
             "plan_id": plan.plan_id,
             "plan_revision": plan.revision,
+            "completion_status": ("incomplete" if required_failures else "completed"),
+            "required_failures": required_failures,
             "assembly_plan": dict(plan.assembly_plan),
             "results": {
                 task_id: result.to_payload() for task_id, result in results.items()
@@ -1964,12 +2079,71 @@ class HERUltraOrchestrator:
             "[HER Ultra Primary Assembly Contract]\n"
             "Continue the same Primary task. The Runtime has deterministically verified that all "
             "required subtask records are terminal. Use only the supplied worker evidence; do not "
-            "run tools or redo the delegated tasks. Disclose "
-            "uncertainty and optional failures, resolve conflicts, and answer the authoritative "
-            "user goal completely in the configured Persona. Do not mention this contract and do "
-            "not output orchestration JSON unless the user requested it.\n"
+            "run tools or redo the delegated tasks. Preserve completion_status exactly. Report "
+            "every non-completed required task and its effect on the answer, disclose uncertainty "
+            "and optional failures, and resolve conflicts. Never claim the overall task completed "
+            "when completion_status=incomplete. Answer in the configured Persona without "
+            "mentioning this contract or outputting orchestration JSON unless the user requested "
+            "it.\n"
             f"Verified assembly payload:\n{encoded}"
         )
+
+    def _failure_finalization_prompt(
+        self,
+        plan: HERUltraPlan,
+        results: Mapping[str, HERUltraWorkerResult],
+    ) -> str:
+        payload = {
+            "authoritative_goal": plan.authoritative_goal,
+            "plan_id": plan.plan_id,
+            "plan_revision": plan.revision,
+            "completion_status": "incomplete",
+            "results": {
+                task_id: result.to_payload() for task_id, result in results.items()
+            },
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, indent=2)
+        if len(encoded) > self.config.max_assembly_chars:
+            raise HERUltraContractError(
+                "failure finalization payload exceeds configured size limit"
+            )
+        return (
+            "[HER Ultra Primary Failure Finalization Contract]\n"
+            "Continue the same Primary task. No required worker produced usable evidence. Do not "
+            "run tools, redo delegated work, or infer an answer that the worker records do not "
+            "support. Return one honest user-facing report in the configured Persona that lists "
+            "every failed or blocked required task, its recorded reason, what remains unverified, "
+            "and a concise next-step recommendation. State clearly that the requested work is "
+            "incomplete. Do not mention this contract or output orchestration JSON.\n"
+            f"Verified terminal worker payload:\n{encoded}"
+        )
+
+    @staticmethod
+    def _deterministic_finalization_fallback(
+        plan: HERUltraPlan,
+        results: Mapping[str, HERUltraWorkerResult],
+        finalization_error: str,
+    ) -> str:
+        lines = [
+            "HER Ultra could not complete the requested work, and the Primary final report "
+            "could not be rendered.",
+            f"Primary finalization error: {_bounded_text(finalization_error, 1_000)}",
+            "Subtask outcomes:",
+        ]
+        for task in plan.subtasks:
+            result = results.get(task.subtask_id)
+            if result is None:
+                lines.append(f"- {task.subtask_id}: missing terminal result")
+                continue
+            detail = result.error or result.uncertainty or result.status
+            lines.append(
+                f"- {task.subtask_id}: {result.status} — {_bounded_text(detail, 1_000)}"
+            )
+        lines.append(
+            "The overall result is incomplete. Retry with narrower subtasks or inspect the "
+            "recorded worker failures before continuing."
+        )
+        return _bounded_text("\n".join(lines), 100_000)
 
     def _interaction_prompt(
         self,
