@@ -3161,9 +3161,13 @@ INCOMPLETE TASK FACTS (quoted, read-only)
             prefix = str(configured_prefix).strip().rstrip("/")
             return f"{prefix}/{model}" if prefix else model
 
-        # Current HER uses OPENAI_BASE_URL to select an OpenAI-compatible
-        # provider and forwards its bare model ID unchanged.  Prefixes remain
-        # available as an explicit per-provider compatibility override.
+        # The certified HER runtime uses the local/ route for named
+        # OpenAI-compatible providers and strips that routing prefix before
+        # forwarding the provider-native model ID upstream. OAuth-backed
+        # routes retain their native model form.
+        auth_mode = self._provider_auth_mode(provider)
+        if auth_mode not in {"hashi_oauth", "hashi-xai-oauth", "xai_oauth"}:
+            return f"local/{model}"
         return model
 
     def _permission_mode(self) -> str:
