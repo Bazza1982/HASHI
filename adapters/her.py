@@ -3494,7 +3494,11 @@ INCOMPLETE TASK FACTS (quoted, read-only)
                     "toolCallTimeoutMs": 120_000,
                     "required": True,
                 }
-            }
+            },
+            # Claw's legacy native WebSearch backend is not configured in
+            # HASHI.  Keep it out of the model-visible tool surface so HER
+            # agents consistently use the working HASHI/Brave MCP search.
+            "permissions": {"deniedTools": ["WebSearch"]},
         }
         settings_path = config_home / "settings.json"
         fd, temporary = tempfile.mkstemp(

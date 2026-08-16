@@ -239,6 +239,34 @@ def test_tool_gateway_accepts_legacy_and_current_mcp_list_contracts(
             adapter._validate_tool_gateway()
 
 
+def test_tool_gateway_settings_disable_unavailable_native_web_search(
+    monkeypatch, tmp_path
+):
+    adapter = HERAdapter.__new__(HERAdapter)
+    adapter.config = SimpleNamespace(workspace_dir=tmp_path, name="lulu")
+    adapter.global_config = SimpleNamespace(base_media_dir=None, workbench_port=18800)
+    adapter.tool_registry = object()
+    adapter.logger = logging.getLogger("test.her.gateway.settings")
+    adapter._gateway_context_path = None
+    adapter._gateway_config_home = None
+    context = SimpleNamespace(agent="lulu", allowed_tools=("web_search",))
+
+    monkeypatch.setattr(
+        "tools.gateway.context.write_gateway_context",
+        lambda *_args, **_kwargs: context,
+    )
+
+    adapter._prepare_tool_gateway()
+
+    settings_path = (
+        tmp_path / "backend_state" / "her_config" / "settings.json"
+    )
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert settings["permissions"]["deniedTools"] == ["WebSearch"]
+    assert "hashi-tools" in settings["mcpServers"]
+    assert stat.S_IMODE(settings_path.stat().st_mode) == 0o600
+
+
 def test_claw_replan_without_model_commentary_remains_technical():
     prompt = """
     你的名字是 Sunny。
