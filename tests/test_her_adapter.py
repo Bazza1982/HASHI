@@ -24,13 +24,11 @@ from adapters.her import (
     _HERStreamCadenceController,
     _build_claw_technical_lease,
     _build_claw_incomplete_report,
-    _claw_incomplete_persona_facts,
     _claw_jsonl_to_stream_events,
     _claw_incomplete_response,
     _claw_run_is_incomplete,
     _parse_json_output,
     _parse_stream_json_output,
-    _validated_claw_incomplete_persona_report,
     build_claw_env,
     build_claw_task_args,
     detect_hashi_claw_platform,
@@ -353,7 +351,7 @@ def test_claw_max_iterations_with_recovered_read_failure_recommends_continue():
     "failure_names",
     [("read_file", "read_file"), ("read_file", "glob")],
 )
-def test_claw_max_iterations_with_unresolved_failures_still_recommends_pivot(
+def test_claw_max_iterations_with_unresolved_failures_still_recommends_continue(
     failure_names,
 ):
     result = ClawTaskResult(
@@ -384,8 +382,9 @@ def test_claw_max_iterations_with_unresolved_failures_still_recommends_pivot(
 
     report, metadata = _build_claw_incomplete_report(result, prompt="continue")
 
-    assert "**PIVOT**" in report
-    assert metadata["recommended_action"] == "pivot"
+    assert "**CONTINUE**" in report
+    assert "**PIVOT**" not in report
+    assert metadata["recommended_action"] == "continue"
 
 
 @pytest.mark.parametrize(
@@ -610,28 +609,14 @@ async def test_incomplete_persona_renderer_uses_only_configured_system_md(tmp_pa
     _neutral, metadata = _claw_incomplete_response(
         result, prompt="ignored prompt Persona"
     )
-    facts = _claw_incomplete_persona_facts(result, metadata=metadata)
-    rendered_payload = {
-        "heading": "殿下，月桂司书如实呈上未完成进度。",
-        "facts": [
-            {
-                "index": index,
-                "source": fact,
-                "rendered": f"月桂司书记录：{fact}",
-            }
-            for index, fact in enumerate(facts, start=1)
-        ],
-        "closing": "殿下若准许，下一回合将依建议继续。",
-    }
+    rendered_message = "殿下，本次执行轮数已用尽。月桂司书会从存档继续。"
     adapter = HERAdapter.__new__(HERAdapter)
     adapter.config = SimpleNamespace(
         system_md=configured,
         workspace_dir=tmp_path,
     )
     adapter.run_habit_dream_model = AsyncMock(
-        return_value=SimpleNamespace(
-            text=json.dumps(rendered_payload, ensure_ascii=False)
-        )
+        return_value=SimpleNamespace(text=rendered_message)
     )
 
     report, render_metadata = await adapter._render_incomplete_persona_response(
@@ -640,16 +625,17 @@ async def test_incomplete_persona_renderer_uses_only_configured_system_md(tmp_pa
         metadata=metadata,
     )
 
-    assert report is not None and report.startswith("殿下，月桂司书")
+    assert report == rendered_message
     assert render_metadata["persona_renderer_succeeded"] is True
     [call] = adapter.run_habit_dream_model.await_args_list
     renderer_prompt = call.args[0]
     assert "月桂司书" in renderer_prompt
     assert "WRONG FALLBACK PERSONA" not in renderer_prompt
+    assert "rigid output" in renderer_prompt
     audit = (tmp_path / "backend_state" / "her_persona_audit.jsonl").read_text(
         encoding="utf-8"
     )
-    assert "accepted" in audit
+    assert "delivered_without_content_validation" in audit
     assert "Fictional Persona" not in audit
     assert configured.read_bytes() == before
 
@@ -692,38 +678,6 @@ async def test_incomplete_persona_renderer_missing_source_uses_neutral_without_m
     assert render_metadata["persona_renderer_attempted"] is False
     assert render_metadata["persona_fallback_reason"] == "system_md_missing"
     adapter.run_habit_dream_model.assert_not_awaited()
-
-
-def test_incomplete_persona_validator_rejects_reordered_or_altered_facts():
-    facts = ["Iterations used: 12.", "Recommended action: CONTINUE."]
-    valid = {
-        "heading": "Persona heading",
-        "facts": [
-            {"index": index, "source": fact, "rendered": fact}
-            for index, fact in enumerate(facts, start=1)
-        ],
-        "closing": "Persona closing",
-    }
-    assert "Iterations used" in _validated_claw_incomplete_persona_report(
-        json.dumps(valid),
-        facts=facts,
-    )
-
-    reordered = json.loads(json.dumps(valid))
-    reordered["facts"].reverse()
-    with pytest.raises(ValueError):
-        _validated_claw_incomplete_persona_report(
-            json.dumps(reordered),
-            facts=facts,
-        )
-
-    altered = json.loads(json.dumps(valid))
-    altered["facts"][0]["rendered"] = "Iterations used: 13."
-    with pytest.raises(ValueError):
-        _validated_claw_incomplete_persona_report(
-            json.dumps(altered),
-            facts=facts,
-        )
 
 
 def test_stream_json_parser_accepts_legacy_diagnostics_when_run_finished_exists():

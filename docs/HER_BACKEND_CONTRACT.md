@@ -241,9 +241,11 @@ Every mapped HER event carries a stable logical `event_id` and one explicit
 presentation owner: `technical`, `user_commentary`, `reasoning`, `final`,
 `control`, or `internal`. It also retains bounded origin, phase, revision,
 required-delivery, and provenance metadata. Raw audit and bounded local activity
-publication happen before display filtering. A request-scoped delivery ledger
-then suppresses replay by event identity and dispatches the event to exactly one
-owner:
+publication happen before display filtering. The HER message router directly
+dispatches each event to the one owner selected by its delivery class. It does
+not maintain a second request-scoped retry/deduplication ledger; transport
+reliability and final delivery remain owned by the existing runtime sender and
+outbox:
 
 - `/verbose` accepts only technical planning, tool, test, validation, retry,
   compaction, session, and runtime telemetry;

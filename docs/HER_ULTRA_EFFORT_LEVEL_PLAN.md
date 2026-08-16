@@ -79,27 +79,29 @@ HASHI Runtime
 
 ### 5.1 Primary Planning
 
-Primary 使用当前 HER persistent session 理解完整请求，生成严格 JSON plan。
+Primary 使用当前 HER persistent session 理解完整请求，生成可调度的 JSON plan。
 Planning 返回的 session checkpoint 只属于该 Ultra run，Assembly 必须继续该
 checkpoint；中间 worker 不能替换 Primary session。
 
-简单请求可以返回 `ultra_not_beneficial=true`，由 Primary 直接生成答案，
-但外部 effort 仍记录为 `ultra`。
+简单请求可以在同一份 plan 中返回 `ultra_not_beneficial=true` 和完整人格化
+`direct_response`；Runtime 直接交付该答案，不再调用一次模型重复渲染。
 
 ### 5.2 Contract Validation
 
 模型生成的 plan 在 dispatch 前必须经过确定性校验：
 
-- `authoritative_goal` 与 Runtime 注入值完全一致；
+- authoritative goal、request ID 和 authority 由 Runtime 持有并注入，不要求
+  模型逐字回显；
 - subtask ID 唯一且依赖存在；
 - DAG 无环；
 - required/optional、deliverables 和 acceptance 完整；
 - model/provider 只能来自当前 HER Agent 的允许范围；
 - 权限不能高于 Runtime 提供的 authority envelope；
 - 写入任务声明 workspace strategy、write set 和 retry safety；
-- subtask 数、并发数、replan 和 retry 均在断路器内。
+- subtask 数、并发数、一次 plan correction 和 worker retry 均在断路器内。
 
-无效计划 fail closed，由 Primary 在有限次数内修正，不能带病 dispatch。
+无效计划只允许 Primary 就具体校验错误修正一次，不能带病 dispatch。Provider
+超时或调用失败不是格式错误，不进入 plan correction。
 
 ### 5.3 Worker Fan-out
 
@@ -130,18 +132,13 @@ checkpoint；中间 worker 不能替换 Primary session。
 
 ### 5.4 Evidence 和 Assembly
 
-Sub-agent 结果必须是结构化 JSON，并至少包含：
+Sub-agent 应在自然报告中给出结果、证据、验证、不确定性和未解决事项；结构化
+JSON 仍可使用，但不是成功的前置合同。Runtime 接受非空自然文本，也会宽容读取
+常见 JSON 字段。仅 `requires_user_input` 保留最小结构要求，以便可靠暂停。
 
-- `subtask_id`、`status`、`claims`；
-- `evidence`、`artifacts`、`validation`；
-- `uncertainty`、`unresolved_items`；
-- `retry_safe` 和已知副作用。
-
-缺少结构化结果或必要 evidence 视为 `malformed_output`，不能当作成功。
-
-Primary Assembly 在模型综合前先执行确定性检查：required subtasks、artifact
-存在性、结果版本、冲突、验证结果及 cancellation generation。通过后才把
-有界结果送入 Primary session 完成最终回答。
+Primary Assembly 接收全部终态结果，包括 worker 失败和依赖未执行。它负责基于
+已有证据给出能完成的答案，并明确说明真正缺失的部分；Runtime 不再因为一个
+required worker 失败而在 Assembly 之前丢弃其余成果。
 
 ## 6. HERUltraRunLedger
 
@@ -165,9 +162,12 @@ cancellation_generation / delivery state / error history
 - `/stop` 取消 Primary、所有 active workers、等待中的 retry/replan 和 Assembly。
 - HER 保存 `parent_request_id -> child process/task` 所有权，拒绝旧
   `cancellation_generation` 的迟到结果。
-- read-only 且 transient 的失败可按配置重试。
-- write/run/send 等有副作用任务只有 `retry_safe=true` 且幂等键有效时可重试。
-- required subtask 失败必须有限 replan 或向用户报告；不能静默跳过。
+- transient 失败只有在 Primary 将该 subtask 标记为 `retry_safe=true` 且 Worker
+  结果也确认可重试时，才可按配置重试。
+- write/run/send 等有副作用任务应由 Primary 标记 `retry_safe=false`；Runtime
+  不根据模型声明的动作或工具另建一套权限分类。
+- required subtask 失败仍进入 Primary Assembly，由最终回答说明影响；不能静默
+  冒充完整成功。
 - optional subtask 可有记录地降级，并在最终回答说明影响。
 
 ## 8. Session 与用户交互
@@ -183,15 +183,16 @@ cancellation_generation / delivery state / error history
 
 ## 9. 文件系统与权限
 
-- research/review 默认共享只读 snapshot；
-- mutating subtask 使用独立 Git worktree 或等价 immutable-base snapshot；
-- Sub-agent 返回 patch/commit + validation，不直接合并；
-- Primary 检查 base revision、dirty state 和重叠 write set 后整合；
-- Tool Gateway 的 allowlist、access root、risk/approval 和 secret scope 来自
-  Runtime，不由模型生成的 `allowed_actions` 提权。
-
-第一可运行切片允许 read-only Ultra；在 worktree contract 完成前，任何模型
-生成的 write subtask 必须 fail closed，而不是退化成共享写入。
+- Parent HER Runtime authority 是 Primary 与所有 Sub-agent 的唯一权限上限；
+- 每个 Sub-agent 完整继承 parent permission mode、Tool Gateway allowlist、
+  access root、risk/approval 和 secret scope；
+- planner 不声明或重新申请 `allowed_actions`、`required_permission_mode`、
+  `required_tools` 或 `required_paths`；
+- Worker 使用 Agent 的具体安全 workzone 作为 process cwd；cwd 不缩小或扩大
+  parent access root；
+- Primary 可以在 parent authority 内安排读、写、执行和删除工作，但不能通过
+  Sub-agent 超出用户或 Runtime 已授予的权限；
+- `workspace_strategy` 只描述隔离/调度方式，不是第二套权限系统。
 
 ## 10. 消息与可见性
 
@@ -214,33 +215,32 @@ Sub-agent reasoning 默认只进入有界 audit，不直接展示。系统 timer
 HER_ULTRA_DEFAULTS = {
     "enabled": True,
     "max_concurrent_subagents": 10,
-    "primary_inner_effort": "max+",
+    "primary_inner_effort": "high",
     "subagent_default_effort": "high",
     "subagent_timeout_sec": 300,
     "subagent_retry_limit": 1,
-    "max_plan_revisions": 3,
+    "max_plan_revisions": 2,
     "max_subtasks": 32,
-    "stall_detection_enabled": True,
-    "strict_structured_results": True,
-    "write_tasks_enabled": False,
 }
 ```
 
 `10` 是 Ultra effort 的内部并发硬上限，不是 HASHI 配置 Agent 的产品上限。
 实际并发为 `min(ready subtasks, 10, deployment/provider/resource limit)`。
 
-Ultra 不设置会促使模型提前降低质量的软 token 目标，但仍保留 timeout、retry、
-replan、provider capacity、工具次数和无新增证据等安全断路器。
+Ultra 内部所有 HER 调用关闭底层原生 task planning，避免在 Ultra 的
+decomposition/dispatch/assembly 外再嵌套一层规划和 review。Ultra 不设置会促使
+模型提前降低质量的软 token 目标，但仍保留 timeout、一次安全 worker retry、
+provider capacity 和工具次数等执行边界。
 
 ## 12. 实施切片
 
 ### 2026-08-15 实施检查点
 
-- ✅ Slice 1 已实现：正式 effort 注册、严格 plan/result contract、最多 10 个
+- ✅ Slice 1 已实现：正式 effort 注册、结构化 plan、宽容 worker report、最多 10 个
   read-only isolated workers、DAG、有限 retry、durable Run Ledger、usage 聚合及
   单一 `BackendResponse`。
 - ✅ Slice 2 已实现首个可运行版本：persistent Primary planning checkpoint、有限
-  plan correction、required-task 检查、Primary Assembly，以及内部 final/
+  plan correction、终态结果收集、Primary Assembly，以及内部 final/
   acknowledgement 防泄漏。
 - 🟡 Slice 3 已实现 interaction receipt、稳定 `interaction_id`、Primary session
   内问题渲染、isolated-resume 绑定和 late-result cancellation fence；进程崩溃后从
@@ -292,7 +292,8 @@ Ultra 只有同时满足以下条件才算完成：
 3. 并发峰值不超过 10，依赖顺序正确；
 4. Primary session 不被 worker 污染；
 5. `/stop` 终止整棵 Ultra 执行树且拒绝迟到结果；
-6. 所有 required claims 有 evidence，malformed output fail closed；
+6. Assembly 可看到每个终态 worker 结果；自然文本不会仅因缺少 JSON/evidence
+   字段被误判为失败；
 7. retry 不重复未知副作用；
 8. commentary、verbose、think、final/control ownership 不交叉；
 9. scheduler/Ultra/Primary 的 A/B/C 与 CONTINUE 不串线；

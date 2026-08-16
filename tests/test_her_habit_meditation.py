@@ -18,7 +18,6 @@ from adapters.her_habits import (
     HABIT_MEDITATION_ENV,
     HABIT_TITLE_MAX_CHARS,
     MAX_MEDITATION_ATTEMPTS,
-    MEDITATION_ALLOWED_TOOLS,
     HabitMeditationConfig,
     HERHabitStore,
     HERMeditationJournal,
@@ -881,6 +880,59 @@ async def test_meditation_is_isolated_read_only_and_written_by_the_adapter(tmp_p
     assert adapter._session_id == "main-session"
     habits = adapter._her_habit_store().load()
     assert [habit.title for habit in habits] == ["Recover from permission errors"]
+    assert adapter._her_meditation_journal().get(job_id)["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_meditation_corrects_one_invalid_response_then_applies_it(tmp_path):
+    adapter = _adapter(tmp_path, enabled=True)
+    invalid = json.dumps(
+        {
+            "actions": [
+                {
+                    "operation": "create",
+                    "title": "x" * (HABIT_TITLE_MAX_CHARS + 1),
+                    "metadata": "Relevant after a format mistake.",
+                    "body": "Apply the corrected compact instruction.",
+                }
+            ]
+        }
+    )
+    corrected = json.dumps(
+        {
+            "actions": [
+                {
+                    "operation": "create",
+                    "title": "Correct compact output",
+                    "metadata": "Relevant after a format mistake.",
+                    "body": "Apply the corrected compact instruction.",
+                }
+            ]
+        }
+    )
+    adapter._run_task_async = AsyncMock(
+        side_effect=[_task_result(text=invalid), _task_result(text=corrected)]
+    )
+    config = adapter._habit_meditation_config()
+    job_id = "9" * 32
+    assert adapter._schedule_habit_meditation(
+        job_id=job_id,
+        request_id="request-correct-output",
+        task_prompt="--- CURRENT USER REQUEST — AUTHORITATIVE ---\nDo work.",
+        task_result=_task_result(),
+        config=config,
+    ) is True
+
+    [task] = list(adapter._habit_meditation_tasks)
+    await task
+
+    assert adapter._run_task_async.await_count == 2
+    correction_prompt = adapter._run_task_async.await_args_list[1].args[0]
+    assert "actions[0].title exceeds 48 characters" in correction_prompt
+    assert invalid in correction_prompt
+    assert [habit.title for habit in adapter._her_habit_store().load()] == [
+        "Correct compact output"
+    ]
     assert adapter._her_meditation_journal().get(job_id)["status"] == "completed"
 
 

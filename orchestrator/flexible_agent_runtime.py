@@ -7977,12 +7977,6 @@ class FlexibleAgentRuntime:
                     purpose="bg-response",
                 )
                 receipt_delivered = chunk_count > 0
-                her_message_router = getattr(item, "_her_message_router", None)
-                if her_message_router is not None:
-                    her_message_router.record_final_delivery(
-                        visible_text,
-                        delivered=True,
-                    )
                 await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
                 self._schedule_audit_followup(
                     item,
