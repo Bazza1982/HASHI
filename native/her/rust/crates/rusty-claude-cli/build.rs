@@ -18,19 +18,24 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
 }
 
 fn main() {
-    let git_sha =
-        command_output("git", &["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
-    let git_sha_short = command_output("git", &["rev-parse", "--short=12", "HEAD"])
-        .or_else(|| git_sha.get(..git_sha.len().min(12)).map(str::to_string))
+    // Development rebuild identity follows the integrated HER source tree,
+    // not unrelated HASHI documentation or Python commits. The top-level
+    // pathspec works regardless of this crate's nested working directory.
+    let source_pathspec = ":(top)native/her";
+    let git_sha = command_output("git", &["log", "-1", "--format=%H", "--", source_pathspec])
         .unwrap_or_else(|| "unknown".to_string());
-    let git_dirty = command_output("git", &["status", "--porcelain"])
+    let git_sha_short = git_sha
+        .get(..git_sha.len().min(12))
+        .map(str::to_string)
+        .unwrap_or_else(|| "unknown".to_string());
+    let git_dirty = command_output("git", &["status", "--porcelain", "--", source_pathspec])
         .map(|status| (!status.trim().is_empty()).to_string())
         .unwrap_or_else(|| "false".to_string());
     let git_branch = command_output("git", &["branch", "--show-current"])
         .unwrap_or_else(|| "unknown".to_string());
-    let git_commit_date = command_output("git", &["show", "-s", "--format=%cI", "HEAD"])
+    let git_commit_date = command_output("git", &["show", "-s", "--format=%cI", &git_sha])
         .unwrap_or_else(|| "unknown".to_string());
-    let git_commit_timestamp = command_output("git", &["show", "-s", "--format=%ct", "HEAD"])
+    let git_commit_timestamp = command_output("git", &["show", "-s", "--format=%ct", &git_sha])
         .unwrap_or_else(|| "unknown".to_string());
     let rustc_version =
         command_output("rustc", &["--version"]).unwrap_or_else(|| "unknown".to_string());
@@ -65,7 +70,7 @@ fn main() {
     println!("cargo:rustc-env=BUILD_DATE={build_date}");
 
     // Rerun if git state changes. Paths are relative to this package root.
-    println!("cargo:rerun-if-changed=../../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../../.git/refs");
-    println!("cargo:rerun-if-changed=../../../.git/index");
+    println!("cargo:rerun-if-changed=../../../../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../../../../.git/refs");
+    println!("cargo:rerun-if-changed=../../../../../.git/index");
 }

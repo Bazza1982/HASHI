@@ -465,7 +465,7 @@ def discover_git_source_state(source_root: Path) -> GitSourceState:
     root = Path(source_root).resolve()
     try:
         head_run = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            ["git", "-C", str(root), "log", "-1", "--format=%H", "--", "."],
             check=False,
             capture_output=True,
             text=True,
@@ -497,7 +497,7 @@ def compute_source_fingerprint(
     git = git_state or discover_git_source_state(source_root)
     digest = hashlib.sha256()
     header = {
-        "schema_version": 1,
+        "schema_version": 2,
         "git_head": git.head,
         "git_dirty": git.dirty,
         "target": target,

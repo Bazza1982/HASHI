@@ -5740,7 +5740,12 @@ fn binary_provenance_for(cwd: Option<&Path>) -> BinaryProvenance {
     });
     let target = known_build_metadata(BUILD_TARGET);
     let workspace_git_sha = cwd.and_then(|cwd| {
-        run_git_capture_in(cwd, &["rev-parse", "HEAD"])
+        run_git_capture_in(cwd, &["log", "-1", "--format=%H", "--", ":(top)native/her"])
+            .and_then(|sha| {
+                let sha = sha.trim().to_string();
+                (!sha.is_empty()).then_some(sha)
+            })
+            .or_else(|| run_git_capture_in(cwd, &["rev-parse", "HEAD"]))
             .map(|sha| sha.trim().to_string())
             .filter(|sha| !sha.is_empty())
     });

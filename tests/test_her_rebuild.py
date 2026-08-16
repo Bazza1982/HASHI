@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from orchestrator.her_rebuild import (
     cargo_build_argv,
     compute_source_fingerprint,
     detect_host_target,
+    discover_git_source_state,
     inspect_toolchain,
     preflight_source,
     redact_diagnostics,
@@ -162,6 +164,49 @@ def test_fingerprint_excludes_cargo_target_and_temp_files(tmp_path: Path) -> Non
     (layout.rust_root / "target" / "debug" / "claw").write_bytes(b"binary")
     (layout.rust_root / ".tmp-editor").write_text("scratch", encoding="utf-8")
     assert _fingerprint(layout).digest == first.digest
+
+
+def test_git_source_state_ignores_unrelated_hashi_commits_and_dirty_files(
+    tmp_path: Path,
+) -> None:
+    layout = _source_layout(tmp_path)
+    code_root = layout.source_root.parents[1]
+
+    def git(*args: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(code_root), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout.strip()
+
+    git("init")
+    git("config", "user.email", "rebuild-test@example.invalid")
+    git("config", "user.name", "HER Rebuild Test")
+    git("add", "native/her")
+    git("commit", "-m", "add HER source")
+    source_commit = git("rev-parse", "HEAD")
+
+    readme = code_root / "README.md"
+    readme.write_text("unrelated\n", encoding="utf-8")
+    git("add", "README.md")
+    git("commit", "-m", "docs only")
+
+    clean = discover_git_source_state(layout.source_root)
+    assert clean == GitSourceState(head=source_commit, dirty=False)
+
+    readme.write_text("still unrelated\n", encoding="utf-8")
+    assert discover_git_source_state(layout.source_root) == clean
+
+    layout.cargo_manifest.write_text(
+        layout.cargo_manifest.read_text(encoding="utf-8") + "\n# changed\n",
+        encoding="utf-8",
+    )
+    assert discover_git_source_state(layout.source_root) == GitSourceState(
+        head=source_commit,
+        dirty=True,
+    )
 
 
 def test_fingerprint_includes_target_profile_features_and_toolchain(
