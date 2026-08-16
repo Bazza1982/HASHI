@@ -1007,7 +1007,7 @@ where
                     "task understanding checkpoint returned an invalid task frame; execution stopped before tools",
                 )
             })?;
-            validate_planned_tool_identifiers(&frame, &available_tool_capabilities)?;
+            validate_planned_tool_identifiers(&mut frame, &available_tool_capabilities)?;
             if let Some(previous) = previous {
                 validate_task_frame_transition(
                     previous,
@@ -3657,28 +3657,43 @@ fn canonical_tool_capability(value: &str) -> Option<String> {
 }
 
 fn validate_planned_tool_identifiers(
-    frame: &TaskFrame,
+    frame: &mut TaskFrame,
     available_tool_capabilities: &BTreeSet<String>,
 ) -> Result<(), RuntimeError> {
     let mut seen = BTreeSet::new();
-    for planned in &frame.planned_tools {
-        let canonical = canonical_tool_capability(planned).ok_or_else(|| {
+    for planned in &mut frame.planned_tools {
+        let original = planned.clone();
+        let canonical = canonical_tool_capability(&original).ok_or_else(|| {
             RuntimeError::new(format!(
-                "task frame planned_tools contains non-canonical tool prose `{planned}`"
+                "task frame planned_tools contains non-canonical tool prose `{original}`"
             ))
         })?;
-        if !available_tool_capabilities.is_empty()
-            && !available_tool_capabilities.contains(&canonical)
+        let resolved = if available_tool_capabilities.is_empty()
+            || available_tool_capabilities.contains(&canonical)
         {
+            canonical
+        } else {
+            // HASHI's MCP gateway exposes ordinary registry names such as
+            // `background_job_list` under a provider transport prefix.  A
+            // short TaskFrame alias is same-authority only when the live
+            // runtime registry proves that exact HASHI gateway capability is
+            // available.  This keeps ambiguous local names (for example
+            // `bash`) bound to their local authority when both exist.
+            let hashi_gateway_capability = format!("mcp__hashi_tools__{canonical}");
+            if available_tool_capabilities.contains(&hashi_gateway_capability) {
+                hashi_gateway_capability
+            } else {
+                return Err(RuntimeError::new(format!(
+                    "task frame planned_tools contains unavailable capability `{original}`"
+                )));
+            }
+        };
+        if !seen.insert(resolved.clone()) {
             return Err(RuntimeError::new(format!(
-                "task frame planned_tools contains unavailable capability `{planned}`"
+                "task frame planned_tools contains duplicate canonical capability `{resolved}`"
             )));
         }
-        if !seen.insert(canonical.clone()) {
-            return Err(RuntimeError::new(format!(
-                "task frame planned_tools contains duplicate canonical capability `{canonical}`"
-            )));
-        }
+        *planned = resolved;
     }
     Ok(())
 }
@@ -4628,7 +4643,7 @@ mod tests {
     fn planned_tool_fields_reject_prose_and_aliases_share_one_capability() {
         let mut frame = transition_frame();
         frame.planned_tools = vec!["inspect the logs carefully".to_string()];
-        assert!(super::validate_planned_tool_identifiers(&frame, &BTreeSet::new()).is_err());
+        assert!(super::validate_planned_tool_identifiers(&mut frame, &BTreeSet::new()).is_err());
         assert_eq!(
             super::canonical_tool_capability("Read"),
             super::canonical_tool_capability("read_file")
@@ -4646,20 +4661,49 @@ mod tests {
             super::canonical_tool_capability("hashi_scheduler_run_history")
         );
         assert_ne!(
+            super::canonical_tool_capability("mcp__hashi-tools__background_job_list"),
+            super::canonical_tool_capability("background_job_list")
+        );
+        assert_ne!(
+            super::canonical_tool_capability("mcp__hashi-tools__browser_get_text"),
+            super::canonical_tool_capability("browser_get_text")
+        );
+        assert_ne!(
             super::canonical_tool_capability("read_file"),
             super::canonical_tool_capability("hashi_file_read")
         );
+        assert_ne!(
+            super::canonical_tool_capability("mcp__other-tools__background_job_list"),
+            super::canonical_tool_capability("background_job_list")
+        );
 
         let mut frame = transition_frame();
-        frame.planned_tools = vec!["hashi_scheduler_list".to_string()];
-        let available = BTreeSet::from(["hashi_scheduler_list".to_string()]);
-        super::validate_planned_tool_identifiers(&frame, &available)
+        frame.planned_tools = vec!["background_job_list".to_string()];
+        let available = BTreeSet::from([super::canonical_tool_capability(
+            "mcp__hashi-tools__background_job_list",
+        )
+        .expect("provider-visible HASHI tool should be canonical")]);
+        super::validate_planned_tool_identifiers(&mut frame, &available)
             .expect("registered same-authority capability");
+        assert_eq!(
+            frame.planned_tools,
+            vec!["mcp__hashi_tools__background_job_list".to_string()]
+        );
 
         frame.planned_tools = vec!["hashi_scheduler_rerun".to_string()];
-        let error = super::validate_planned_tool_identifiers(&frame, &available)
+        let error = super::validate_planned_tool_identifiers(&mut frame, &available)
             .expect_err("unavailable capability must not enter the task frame");
         assert!(error.to_string().contains("unavailable capability"));
+
+        let mut ambiguous = transition_frame();
+        ambiguous.planned_tools = vec!["bash".to_string()];
+        let local_bash = super::canonical_tool_capability("bash").expect("local bash");
+        let gateway_bash =
+            super::canonical_tool_capability("mcp__hashi-tools__bash").expect("HASHI gateway bash");
+        let available = BTreeSet::from([local_bash.clone(), gateway_bash]);
+        super::validate_planned_tool_identifiers(&mut ambiguous, &available)
+            .expect("an ambiguous bare name must retain its local authority");
+        assert_eq!(ambiguous.planned_tools, vec![local_bash]);
     }
 
     #[test]
