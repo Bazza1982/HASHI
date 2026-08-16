@@ -11,7 +11,7 @@ import signal
 import stat
 import subprocess
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -29,6 +29,10 @@ _SOURCE_EXCLUDED_DIRS = frozenset(
     {
         ".git",
         ".idea",
+        ".claude",
+        ".claw",
+        ".omc",
+        ".sandbox-home",
         ".vscode",
         "candidates",
         "logs",
@@ -36,6 +40,7 @@ _SOURCE_EXCLUDED_DIRS = frozenset(
         "targets",
     }
 )
+_SOURCE_EXCLUDED_FILES = frozenset({".claw.json", ".clawd-todos.json"})
 _SOURCE_EXCLUDED_SUFFIXES = (
     ".bak",
     ".orig",
@@ -367,7 +372,9 @@ def preflight_source(layout: HERSourceLayout) -> None:
         raise HERRebuildError(
             kind,
             RebuildStage.SOURCE_PREFLIGHT,
-            "Integrated HER source is unavailable or incomplete: " + ", ".join(missing) + ".",
+            "Integrated HER source is unavailable or incomplete: "
+            + ", ".join(missing)
+            + ".",
         )
 
     try:
@@ -417,7 +424,8 @@ def preflight_source(layout: HERSourceLayout) -> None:
         relevant_files = [
             name
             for name in file_names
-            if not name.endswith(_SOURCE_EXCLUDED_SUFFIXES)
+            if name not in _SOURCE_EXCLUDED_FILES
+            and not name.endswith(_SOURCE_EXCLUDED_SUFFIXES)
             and not name.startswith(".tmp-")
         ]
         for name in (*relevant_dirs, *relevant_files):
@@ -444,7 +452,11 @@ def _iter_source_files(layout: HERSourceLayout) -> Iterable[Path]:
         )
         current = Path(current_root)
         for file_name in sorted(file_names):
-            if file_name.endswith(_SOURCE_EXCLUDED_SUFFIXES) or file_name.startswith(".tmp-"):
+            if (
+                file_name in _SOURCE_EXCLUDED_FILES
+                or file_name.endswith(_SOURCE_EXCLUDED_SUFFIXES)
+                or file_name.startswith(".tmp-")
+            ):
                 continue
             yield current / file_name
 
@@ -494,7 +506,9 @@ def compute_source_fingerprint(
         "cargo_version": toolchain.cargo_version,
         "rustc_version": toolchain.rustc_version,
     }
-    digest.update(json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    digest.update(
+        json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
     digest.update(b"\0")
 
     file_count = 0
@@ -581,7 +595,9 @@ def cargo_build_argv(
 def redact_diagnostics(text: str, *, limit: int = 4000) -> str:
     cleaned = text.replace("\x00", "")
     cleaned = _BEARER_TOKEN_RE.sub("Bearer <redacted>", cleaned)
-    cleaned = _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=<redacted>", cleaned)
+    cleaned = _SECRET_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group(1)}=<redacted>", cleaned
+    )
     lines = [line.rstrip() for line in cleaned.splitlines() if line.strip()]
     actionable = [line for line in lines if _ACTIONABLE_LINE_RE.search(line.strip())]
     selected = actionable[:16] if actionable else lines[-24:]
@@ -590,7 +606,11 @@ def redact_diagnostics(text: str, *, limit: int = 4000) -> str:
         return bounded
     head = max(1, limit // 2)
     tail = max(1, limit - head - 42)
-    return bounded[:head].rstrip() + "\n…[build diagnostics truncated]…\n" + bounded[-tail:].lstrip()
+    return (
+        bounded[:head].rstrip()
+        + "\n…[build diagnostics truncated]…\n"
+        + bounded[-tail:].lstrip()
+    )
 
 
 def sha256_file(path: Path) -> str:
@@ -601,10 +621,14 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _atomic_write_json(path: Path, payload: Mapping[str, Any], *, mode: int = 0o600) -> None:
+def _atomic_write_json(
+    path: Path, payload: Mapping[str, Any], *, mode: int = 0o600
+) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}-{time.time_ns()}")
+    temporary = destination.with_name(
+        f".{destination.name}.tmp-{os.getpid()}-{time.time_ns()}"
+    )
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
@@ -654,7 +678,9 @@ async def _run_version_command(
             f"Required Rust toolchain executable is unavailable: {executable}.",
         ) from exc
     try:
-        output, _ = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+        output, _ = await asyncio.wait_for(
+            process.communicate(), timeout=timeout_seconds
+        )
     except asyncio.TimeoutError as exc:
         process.kill()
         await process.wait()
@@ -694,7 +720,9 @@ async def inspect_toolchain(
         raise HERRebuildError(
             FailureKind.TOOLCHAIN_MISSING,
             RebuildStage.SOURCE_PREFLIGHT,
-            "Required Rust toolchain executable(s) unavailable: " + ", ".join(missing) + ".",
+            "Required Rust toolchain executable(s) unavailable: "
+            + ", ".join(missing)
+            + ".",
         )
     cargo_version, rustc_version = await asyncio.gather(
         _run_version_command(cargo_path, environment=clean_environment),
@@ -734,7 +762,12 @@ class HERBuildController:
 
     def expected_binary_path(self, *, target: str) -> Path:
         suffix = ".exe" if target.endswith("windows-msvc") else ""
-        return self.cargo_target_dir / target / self.layout.profile / f"{self.layout.binary_name}{suffix}"
+        return (
+            self.cargo_target_dir
+            / target
+            / self.layout.profile
+            / f"{self.layout.binary_name}{suffix}"
+        )
 
     async def build(
         self,
@@ -743,6 +776,8 @@ class HERBuildController:
         fingerprint: SourceFingerprint,
         toolchain: ToolchainIdentity,
         environment: Mapping[str, str] | None = None,
+        on_process_started: Callable[[int], Awaitable[None] | None] | None = None,
+        on_process_finished: Callable[[], Awaitable[None] | None] | None = None,
     ) -> BuildArtifact:
         preflight_source(self.layout)
         before_build = compute_source_fingerprint(
@@ -770,7 +805,9 @@ class HERBuildController:
         )
         start_kwargs: dict[str, Any] = {}
         if os.name == "nt":
-            start_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            start_kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            )
         else:
             start_kwargs["start_new_session"] = True
 
@@ -797,6 +834,11 @@ class HERBuildController:
                 RebuildStage.BUILDING,
                 f"Cargo could not be started: {type(exc).__name__}: {exc}",
             ) from exc
+
+        if on_process_started is not None:
+            callback_result = on_process_started(process.pid)
+            if isinstance(callback_result, Awaitable):
+                await callback_result
 
         tail = bytearray()
         log_truncated = False
@@ -841,6 +883,10 @@ class HERBuildController:
         finally:
             if not reader_task.done():
                 await reader_task
+            if on_process_finished is not None:
+                callback_result = on_process_finished()
+                if isinstance(callback_result, Awaitable):
+                    await callback_result
 
         finished_wall = utc_now()
         duration = max(0.0, time.monotonic() - started_monotonic)
@@ -896,7 +942,9 @@ class HERBuildController:
             log_truncated=log_truncated,
         )
 
-    async def _terminate_process_tree(self, process: asyncio.subprocess.Process) -> None:
+    async def _terminate_process_tree(
+        self, process: asyncio.subprocess.Process
+    ) -> None:
         if process.returncode is not None:
             return
         try:
@@ -917,6 +965,222 @@ class HERBuildController:
             except ProcessLookupError:
                 pass
             await process.wait()
+
+
+class HERQuickVerifier:
+    """Credential-free candidate checks required before development selection."""
+
+    def __init__(self, *, timeout_seconds: float = 30.0):
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+
+    async def verify(
+        self,
+        binary_path: Path,
+        *,
+        fingerprint: SourceFingerprint,
+        work_root: Path,
+        environment: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        binary = Path(binary_path).resolve()
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            raise HERRebuildError(
+                FailureKind.CANDIDATE_MISSING,
+                RebuildStage.VERIFYING,
+                "Built HER executable is missing or not executable.",
+            )
+        disposable = Path(work_root).resolve()
+        disposable.mkdir(parents=True, exist_ok=True)
+        clean_environment = _allowlisted_environment(environment)
+        clean_environment["HOME"] = str(disposable)
+        clean_environment["USERPROFILE"] = str(disposable)
+        clean_environment["CLAW_CONFIG_DIR"] = str(disposable / "config")
+        checks: dict[str, Any] = {}
+
+        version = await self._json_command(
+            binary,
+            ["version", "--output-format", "json"],
+            cwd=disposable,
+            environment=clean_environment,
+            failure_kind=FailureKind.VERSION_PROBE_FAILED,
+        )
+        provenance = version.get("binary_provenance")
+        reported_target = str(
+            version.get("target")
+            or (provenance.get("target") if isinstance(provenance, Mapping) else "")
+            or ""
+        )
+        if version.get("status") != "ok" or reported_target != fingerprint.target:
+            raise HERRebuildError(
+                FailureKind.CANDIDATE_IDENTITY_MISMATCH,
+                RebuildStage.VERIFYING,
+                "HER version identity does not match the requested development target.",
+                diagnostics=redact_diagnostics(json.dumps(version, ensure_ascii=False)),
+            )
+        checks["version"] = {
+            "status": "passed",
+            "version": version.get("version"),
+            "git_sha": version.get("git_sha"),
+            "target": reported_target,
+            "is_dirty": version.get("is_dirty"),
+        }
+
+        doctor = await self._json_command(
+            binary,
+            ["doctor", "--output-format", "json"],
+            cwd=disposable,
+            environment=clean_environment,
+            failure_kind=FailureKind.QUICK_TEST_FAILED,
+        )
+        if doctor.get("kind") != "doctor" or doctor.get("status") not in {"ok", "warn"}:
+            raise HERRebuildError(
+                FailureKind.QUICK_TEST_FAILED,
+                RebuildStage.VERIFYING,
+                "HER doctor did not return a valid local health report.",
+            )
+        checks["doctor"] = {"status": "passed", "health": doctor.get("status")}
+
+        help_result = await self._command(
+            binary,
+            ["--help"],
+            cwd=disposable,
+            environment=clean_environment,
+            accepted_exit_codes={0},
+            failure_kind=FailureKind.QUICK_TEST_FAILED,
+        )
+        help_text = help_result.decode("utf-8", errors="replace")
+        if "prompt [--stdin]" not in help_text or "stream-json" not in help_text:
+            raise HERRebuildError(
+                FailureKind.STREAM_JSON_PROBE_FAILED,
+                RebuildStage.VERIFYING,
+                "HER help contract does not advertise stdin and stream-json support.",
+            )
+        checks["cli_contract"] = {
+            "status": "passed",
+            "stdin": True,
+            "stream_json": True,
+        }
+
+        stream_output = await self._command(
+            binary,
+            ["--output-format", "stream-json", "prompt", "--stdin"],
+            cwd=disposable,
+            environment=clean_environment,
+            stdin=b"",
+            accepted_exit_codes={1},
+            failure_kind=FailureKind.STREAM_JSON_PROBE_FAILED,
+        )
+        lines = [
+            line
+            for line in stream_output.decode("utf-8", errors="replace").splitlines()
+            if line.strip()
+        ]
+        try:
+            events = [json.loads(line) for line in lines]
+        except json.JSONDecodeError as exc:
+            raise HERRebuildError(
+                FailureKind.STREAM_JSON_PROBE_FAILED,
+                RebuildStage.VERIFYING,
+                "HER stream-json probe emitted invalid JSONL.",
+            ) from exc
+        if not events or events[-1].get("error_kind") != "missing_prompt":
+            raise HERRebuildError(
+                FailureKind.STREAM_JSON_PROBE_FAILED,
+                RebuildStage.VERIFYING,
+                "HER stdin stream-json probe did not return the deterministic missing-prompt event.",
+            )
+        checks["stream_json"] = {"status": "passed", "events": len(events)}
+
+        return {
+            "schema_version": 1,
+            "result": "passed",
+            "verified_at": utc_now(),
+            "binary_path": str(binary),
+            "binary_sha256": sha256_file(binary),
+            "source_fingerprint": fingerprint.digest,
+            "target": fingerprint.target,
+            "isolated_work_root": str(disposable),
+            "checks": checks,
+        }
+
+    async def _json_command(
+        self,
+        binary: Path,
+        arguments: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        failure_kind: FailureKind,
+    ) -> dict[str, Any]:
+        output = await self._command(
+            binary,
+            arguments,
+            cwd=cwd,
+            environment=environment,
+            accepted_exit_codes={0},
+            failure_kind=failure_kind,
+        )
+        try:
+            payload = json.loads(output.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError as exc:
+            raise HERRebuildError(
+                failure_kind,
+                RebuildStage.VERIFYING,
+                f"HER {' '.join(arguments)} probe emitted invalid JSON.",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise HERRebuildError(
+                failure_kind,
+                RebuildStage.VERIFYING,
+                f"HER {' '.join(arguments)} probe did not emit a JSON object.",
+            )
+        return payload
+
+    async def _command(
+        self,
+        binary: Path,
+        arguments: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        accepted_exit_codes: set[int],
+        failure_kind: FailureKind,
+        stdin: bytes | None = None,
+    ) -> bytes:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                str(binary),
+                *arguments,
+                cwd=str(cwd),
+                env=dict(environment),
+                stdin=asyncio.subprocess.PIPE
+                if stdin is not None
+                else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            output, _ = await asyncio.wait_for(
+                process.communicate(stdin), timeout=self.timeout_seconds
+            )
+        except (OSError, asyncio.TimeoutError) as exc:
+            if "process" in locals() and process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise HERRebuildError(
+                failure_kind,
+                RebuildStage.VERIFYING,
+                f"HER {' '.join(arguments)} probe could not complete: {type(exc).__name__}: {exc}",
+            ) from exc
+        if process.returncode not in accepted_exit_codes:
+            raise HERRebuildError(
+                failure_kind,
+                RebuildStage.VERIFYING,
+                f"HER {' '.join(arguments)} probe failed with exit code {process.returncode}.",
+                exit_code=process.returncode,
+                diagnostics=redact_diagnostics(
+                    output.decode("utf-8", errors="replace")
+                ),
+            )
+        return output
 
 
 class CandidateStore:
@@ -962,7 +1226,9 @@ class CandidateStore:
             return existing
 
         self.root.mkdir(parents=True, exist_ok=True)
-        temporary_dir = self.root / f".{candidate_id}.tmp-{os.getpid()}-{time.time_ns()}"
+        temporary_dir = (
+            self.root / f".{candidate_id}.tmp-{os.getpid()}-{time.time_ns()}"
+        )
         temporary_dir.mkdir(mode=0o700)
         try:
             temporary_binary = temporary_dir / binary_name
@@ -974,7 +1240,9 @@ class CandidateStore:
                     "HER candidate digest changed while copying from Cargo output.",
                 )
             if os.name != "nt":
-                temporary_binary.chmod(stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP)
+                temporary_binary.chmod(
+                    stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
+                )
             if not artifact.build_log_path.is_file():
                 raise HERRebuildError(
                     FailureKind.CANDIDATE_MISSING,
@@ -1096,7 +1364,10 @@ class CandidateStore:
                 "HER candidate executable digest does not match candidate metadata.",
             )
         build_log_path = Path(metadata.build_log_path).resolve()
-        if not build_log_path.is_relative_to(candidate_dir) or not build_log_path.is_file():
+        if (
+            not build_log_path.is_relative_to(candidate_dir)
+            or not build_log_path.is_file()
+        ):
             raise HERRebuildError(
                 FailureKind.CANDIDATE_IDENTITY_MISMATCH,
                 RebuildStage.VERIFYING,
@@ -1112,15 +1383,31 @@ class CandidateStore:
                 RebuildStage.VERIFYING,
                 "HER candidate quick-verification evidence is missing or invalid.",
             ) from exc
-        if quick_payload != dict(metadata.quick_verification) or str(
-            quick_payload.get("result", "")
-        ).lower() != "passed":
+        if (
+            quick_payload != dict(metadata.quick_verification)
+            or str(quick_payload.get("result", "")).lower() != "passed"
+        ):
             raise HERRebuildError(
                 FailureKind.QUICK_TEST_FAILED,
                 RebuildStage.VERIFYING,
                 "HER candidate quick-verification evidence does not match candidate metadata.",
             )
         return metadata
+
+    def find_by_fingerprint(self, source_fingerprint: str) -> CandidateMetadata | None:
+        if not self.root.is_dir():
+            return None
+        matches: list[CandidateMetadata] = []
+        for path in sorted(self.root.glob("dev-*")):
+            if not path.is_dir():
+                continue
+            try:
+                candidate = self.read(path.name)
+            except HERRebuildError:
+                continue
+            if candidate.source_fingerprint == source_fingerprint:
+                matches.append(candidate)
+        return max(matches, key=lambda item: item.created_at) if matches else None
 
 
 class DevelopmentSelectionStore:
@@ -1146,6 +1433,53 @@ class DevelopmentSelectionStore:
                 "HER development selection record has an unsupported schema.",
             )
         return payload
+
+    def active_candidate(
+        self, *, target: str | None = None
+    ) -> CandidateMetadata | None:
+        payload = self.read()
+        if payload is None or payload.get("active") is None:
+            return None
+        active = payload["active"]
+        if not isinstance(active, Mapping):
+            raise HERRebuildError(
+                FailureKind.CANDIDATE_IDENTITY_MISMATCH,
+                RebuildStage.ACTIVATING,
+                "HER development selection has an invalid active candidate.",
+            )
+        try:
+            candidate = self.candidates.read(str(active["candidate_id"]))
+        except (KeyError, HERRebuildError) as exc:
+            raise HERRebuildError(
+                FailureKind.CANDIDATE_IDENTITY_MISMATCH,
+                RebuildStage.ACTIVATING,
+                "HER development selection does not resolve to a valid immutable candidate.",
+            ) from exc
+        expected = {
+            "binary_path": candidate.binary_path,
+            "binary_sha256": candidate.binary_sha256,
+            "source_fingerprint": candidate.source_fingerprint,
+            "target": candidate.target,
+            "profile": candidate.profile,
+        }
+        mismatched = [
+            key for key, value in expected.items() if active.get(key) != value
+        ]
+        if mismatched:
+            raise HERRebuildError(
+                FailureKind.CANDIDATE_IDENTITY_MISMATCH,
+                RebuildStage.ACTIVATING,
+                "HER development selection metadata mismatch: "
+                + ", ".join(mismatched)
+                + ".",
+            )
+        if target is not None and candidate.target != target:
+            raise HERRebuildError(
+                FailureKind.CANDIDATE_IDENTITY_MISMATCH,
+                RebuildStage.ACTIVATING,
+                f"HER development candidate target mismatch: expected {target}, got {candidate.target}.",
+            )
+        return candidate
 
     def select(self, candidate_id: str, *, job_id: str) -> dict[str, Any]:
         candidate = self.candidates.read(candidate_id)
@@ -1176,6 +1510,36 @@ class DevelopmentSelectionStore:
                 FailureKind.SELECTION_WRITE_FAILED,
                 RebuildStage.ACTIVATING,
                 f"Could not atomically select HER development candidate: {type(exc).__name__}: {exc}",
+            ) from exc
+        return payload
+
+    def mark_adopted(self, candidate_id: str, *, job_id: str) -> dict[str, Any]:
+        current = self.read()
+        if current is None or not isinstance(current.get("active"), Mapping):
+            raise HERRebuildError(
+                FailureKind.SELECTION_WRITE_FAILED,
+                RebuildStage.POSTCHECK,
+                "HER development selection disappeared before adoption completed.",
+            )
+        if current["active"].get("candidate_id") != candidate_id:
+            raise HERRebuildError(
+                FailureKind.CANDIDATE_IDENTITY_MISMATCH,
+                RebuildStage.POSTCHECK,
+                "HER adopted candidate does not match the active development selection.",
+            )
+        payload = {
+            **current,
+            "adoption_state": "adopted",
+            "adopted_at": utc_now(),
+            "adopting_job_id": job_id,
+        }
+        try:
+            _atomic_write_json(self.selection_path, payload)
+        except OSError as exc:
+            raise HERRebuildError(
+                FailureKind.SELECTION_WRITE_FAILED,
+                RebuildStage.POSTCHECK,
+                f"Could not persist HER development adoption state: {type(exc).__name__}: {exc}",
             ) from exc
         return payload
 
