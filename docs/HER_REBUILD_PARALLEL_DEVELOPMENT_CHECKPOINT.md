@@ -1,171 +1,179 @@
-# HER `/rebuild` Parallel Development Checkpoint
+# HER `/rebuild` Development Takeover and Completion Record
 
 Date: 2026-08-16
 
 Branch: `feature/her-rebuild-command`
 
-Base commit: `7b901be6b69dd02a8ee48dfbee33d02610cb94f3`
+Final Zelda HASHI base: `5776c27882b7e024e442f6c9dcc44901eede0a59`
 
-Status: independent controller foundation implemented; live command and runtime
-adoption intentionally not connected
+Final certified HER source: `246b04e9fa28ef0b6f74c2d924ab3697b95197bd`
 
-## Why this checkpoint is isolated
+Implementation commits:
 
-The primary HASHI worktree is actively being edited on
-`agent/latest-hashi-her`. Its uncommitted changes overlap the HER adapter and
-Tool Gateway. This branch was therefore created in a separate Git worktree from
-the last committed HASHI HEAD.
+- `57eb8ea3` — isolated rebuild controller foundation;
+- `c20cd08d` — integrated Rust source and supervised development rebuild
+  workflow.
 
-No file in the primary worktree was edited, staged, reset or switched while
-creating this checkpoint.
+Status: implementation and offline/transactional canary complete
 
-## Implemented in this branch
+## 1. Safe takeover
 
-### Pure rebuild controller
+The primary HASHI worktree and Zelda's HER source worktree were audited before
+integration.
 
-`orchestrator/her_rebuild.py` now provides independently testable primitives
-for:
+Zelda's final work was fully committed:
 
-- canonical `native/her` source discovery;
-- source/license/provenance/Cargo profile preflight;
-- supported host target detection;
-- deterministic source, toolchain, target, profile and feature fingerprinting;
-- source-change rejection before and after Cargo execution;
-- minimal allowlisted Cargo environment construction;
-- argument-array Cargo invocation with `--locked`;
-- incremental isolated target-directory selection;
-- build timeout, cancellation and process-group termination;
-- bounded local build logs and redacted actionable diagnostics;
-- immutable candidate staging with binary digest verification;
-- candidate-local build and quick-verification evidence;
-- explicit development/non-certified identity;
-- atomic development selection and validated rollback selection.
+- HASHI `.22` package, certification and live evidence ended at `5776c278`;
+- HER source branch `release/her-0.1.0-hashi.22` was clean at certified tag
+  `her-0.1.0-hashi.22-certified-r2`;
+- Linux and Windows certified binaries retained their recorded hashes.
 
-The controller does not alter the certified HER package, manifest or
-certification baseline.
+Before rebasing, the prior feature state was preserved in a Git bundle and the
+untracked older plan copy was archived. The feature branch was then rebased
+onto Zelda's final HASHI commit. No Zelda file was reset, overwritten or
+discarded.
 
-### Durable state and locking
+During final verification, unrelated new changes appeared in the primary HASHI
+worktree under `tools/telegram_send_file_cli.py`. They were not produced,
+staged or modified by this branch and remain outside this work.
 
-`orchestrator/her_rebuild_manager.py` now provides foundations for:
+## 2. Integrated Rust source
 
-- the explicit rebuild state machine;
-- validated one-way transitions;
-- atomic durable job records and a latest-job pointer;
-- same-fingerprint join and different-fingerprint rejection;
-- per-requester origin and idempotent terminal-notification state;
-- interrupted pre-activation recovery;
-- conservative interrupted-rollback handling;
-- cross-process build locking;
-- stale Cargo PID protection and lock metadata.
+The certified source was imported under `native/her` with:
 
-This module deliberately does not yet call `RebootManager`, an Agent runtime or
-a delivery transport.
+- upstream MIT licence;
+- exact source commit, branch and certified tag;
+- certified source-bundle path, size and SHA-256;
+- explicit record of HASHI-local changes;
+- a dedicated `[profile.hashi-dev]` incremental Cargo profile.
 
-### Tests
+Tracked upstream interactive sessions, local sandbox settings and agent
+workflow state were deliberately excluded because they are not build source.
+The production `.22` package remains separate and unchanged.
 
-The first checkpoint covers:
+## 3. Implemented runtime path
 
-- source/profile/host preflight;
-- deterministic and change-sensitive fingerprinting;
-- target/cache exclusions;
-- toolchain/profile/feature identity;
-- toolchain discovery and missing-toolchain failure;
-- secret-free Cargo environment;
-- argument-array build contract;
-- compiler diagnostic redaction;
-- successful, failed and timed-out fake Cargo builds;
-- source mutation during build;
-- immutable candidate evidence and tamper rejection;
-- failed verification rejection;
-- atomic selection and rollback;
-- full state-machine persistence;
-- join/deduplication semantics;
-- per-requester terminal delivery;
-- interrupted job recovery;
-- build-lock exclusion and stale Cargo handling.
-
-Run:
+The finished development transaction is:
 
 ```text
-python -m pytest -q tests/test_her_rebuild.py tests/test_her_rebuild_manager.py
-python -m ruff check orchestrator/her_rebuild.py orchestrator/her_rebuild_manager.py tests/test_her_rebuild.py tests/test_her_rebuild_manager.py
-git diff --check
+authorized /rebuild
+-> source/toolchain fingerprint
+-> same-fingerprint join or single OS build lock
+-> isolated incremental Cargo build
+-> offline candidate verification
+-> immutable candidate and digest evidence
+-> wait for the requesting Agent to become fully idle
+-> atomic development selection
+-> existing targeted hot restart
+-> Adapter adoption and backend health check
+-> success, or one automatic selection/restart rollback
+-> idempotent terminal notification
 ```
 
-Validation recorded for this checkpoint:
+The manager is kernel-owned and intentionally excluded from the hot-manager
+bundle, so it survives the targeted restart it requests.
 
-- rebuild-focused suite: 35 passed;
-- rebuild/reboot/adapter/certification expansion: 153 passed;
-- full HASHI run from this pre-Zelda base: 2212 passed, 3 skipped and 10 failed;
-- four of those failures were reproduced as isolated-worktree environment
-  effects (the tracked `.20` binary lacks an executable Git mode and the
-  worktree has no local `.venv`); targeted reruns recovered them after temporary
-  local test setup;
-- the remaining six failures are existing `.20` native-contract gaps in provider
-  error/stream failure and image-result handling, which are part of Zelda's
-  in-progress `.22` work and do not import or execute the new rebuild modules.
+Cold process interruption is also fail-safe: pre-activation jobs become failed;
+an interrupted selection/adoption is restored before Agents start.
 
-No temporary executable-mode or `.venv` setup was retained in this worktree.
+## 4. Safety boundaries
 
-## Intentionally deferred until Zelda's current work is committed
+- `/reboot` continues to reload Python/config and does not invoke Cargo.
+- `/rebuild` builds only the current host development target.
+- Build environment variables are allowlisted; provider and Telegram secrets
+  are not passed to Cargo or quick probes.
+- Candidates are stored outside the tracked source tree and are immutable after
+  digest recording.
+- A selected development candidate is validated by location, target,
+  executable mode, metadata and SHA-256.
+- An invalid explicit selection fails closed and never falls through to PATH.
+- A build/probe failure leaves the active HER unchanged.
+- A busy Agent causes `activation_deferred`; no force-activation option exists.
+- Only the requesting Agent is automatically restarted in the normal one-user
+  path.
+- Certified package manifests, binaries, evidence and baselines are never
+  changed by this workflow.
 
-Do not connect this branch to the live runtime until it is rebased onto Zelda's
-final HASHI and HER commits.
+## 5. Recorded validation
 
-The deferred integration set includes:
-
-- importing the finalized HER source under `native/her`;
-- adding `[profile.hashi-dev]` to that integrated Rust workspace;
-- real HER quick-verification probes;
-- `adapters/her.py` development-candidate resolution;
-- `HERRebuildManager` kernel ownership and live asyncio coordination;
-- command authorization and `/rebuild`, `/rebuild status`, `/rebuild help`;
-- command registry/menu/help/audit wiring;
-- Agent active-run quiescence;
-- targeted existing `/reboot min` adoption;
-- post-adoption identity/session/Tool Gateway checks;
-- automatic rollback restart;
-- durable Telegram/HChat terminal delivery;
-- real warm Cargo timing and canary evidence.
-
-Likely overlap files include:
+Focused and expanded Python suites:
 
 ```text
-adapters/her.py
-orchestrator/manager_registry.py
-orchestrator/reboot_manager.py
-orchestrator/command_specs.py
-orchestrator/command_registry.py
-main.py
+Rebuild/Adapter/command focused suite: 162 passed
+Expanded HER integration suite:        358 passed
+Full HASHI suite:                       2237 passed, 3 skipped, 23 warnings
 ```
 
-Any Tool Gateway file currently modified in Zelda's primary worktree must be
-treated as owned by that work until her commit is complete.
+The 23 Python warnings are existing python-telegram-bot `retry_after`
+deprecation warnings.
 
-## Safe continuation procedure
+Native Rust CLI:
 
-1. Let Zelda finish and commit the current HASHI and HER `.22` work.
-2. Record the final HASHI commit and final native HER source commit.
-3. Rebase this branch onto the final HASHI commit.
-4. Resolve overlap by preserving Zelda's behavior and adapting the independent
-   controller interface, not by replacing her files wholesale.
-5. Import the exact finalized HER source with license and provenance.
-6. Add the dedicated Cargo profile and run a real controller-only build.
-7. Implement quick verification before adapter selection.
-8. Connect selection, command, quiescence, existing reboot and rollback in that
-   order.
-9. Run focused tests, the HASHI regression suite and a designated development
-   Agent canary.
-10. Keep production certification and package promotion separate from
-    `/rebuild`.
+```text
+cargo test --locked --profile hashi-dev -p rusty-claude-cli
+358 passed, 0 failed
+```
 
-## Current safety statement
+This covers unit, CLI/config, compact output, mock-provider parity,
+output-format/version/doctor/stream-json contracts and resume/session behavior.
+The compiler emitted the existing unused-variable warnings in
+`output_format_contract.rs`; there were no failures.
 
-At this checkpoint:
+Real host development build:
 
-- `/rebuild` is not registered or user-visible;
-- no live Agent can invoke it;
-- no Rust build has been launched against Zelda's source;
-- no HER binary or selection record has been changed;
-- no Agent has been rebooted;
-- Aptenra has not been modified by this branch.
+```text
+Clean first build:     71.734 seconds
+Unchanged-source path: 0.398 seconds
+Candidate ID:          dev-a63e2ab0cf29425c-85e5e5a1b647
+Candidate SHA-256:     85e5e5a1b647ca28eb24b2d09de741202e8fa198e69fbc455a983cc0e26be033
+Embedded Git SHA:      c20cd08da2200b28e25b38c452e797688092af7a
+Source dirty flag:     false
+```
+
+Mandatory offline checks passed for version identity, target, doctor, stdin CLI
+contract and deterministic stream-json framing.
+
+## 6. Canary and rollback evidence
+
+The first controller canary intentionally used a nonexistent target Agent.
+It built and verified the real binary, then correctly ended in
+`activation_deferred`. There was no active development selection and no Agent
+restart.
+
+A separate real resolver drill then:
+
+1. atomically selected the immutable candidate;
+2. resolved it as `development-source-build` even under
+   `require-packaged`;
+3. restored the previous selection;
+4. resolved the certified Linux `.22` package again.
+
+The certified binary hashes remained:
+
+```text
+Linux  e6c88b9dd37c9191f9aad0df9fd0cf9bbeb4365778a10153a48b4cf752096c91
+Windows cd127b283d0bb8aa5db9d1863a617bb84a2c8cd0174ed305c72c5f97b294724d
+```
+
+## 7. Operator surface
+
+```text
+/rebuild
+/rebuild status
+/rebuild status <job-id>
+```
+
+For build-and-verify-only local use, without selection or restart:
+
+```text
+python scripts/her_rebuild_dev.py
+python scripts/her_rebuild_dev.py --status
+```
+
+The command returns an accepted/joined job identity immediately. Cargo runs in
+the background. A material terminal result reports success, deferred
+activation, failure, successful rollback or manual-reconciliation-required
+rollback failure.
+
+The full authoritative design and acceptance criteria remain in
+`HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md`.
