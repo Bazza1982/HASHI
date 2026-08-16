@@ -277,9 +277,10 @@ def _new_requester(
 class HERRebuildJobStore:
     """Durable rebuild state without owning a live Agent or restart implementation."""
 
-    def __init__(self, jobs_root: Path):
+    def __init__(self, jobs_root: Path, *, create_root: bool = True):
         self.root = Path(jobs_root).resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+        if create_root:
+            self.root.mkdir(parents=True, exist_ok=True)
         self._mutex = threading.RLock()
 
     @property
@@ -593,6 +594,46 @@ def cargo_process_exists(pid: int) -> bool:
     return True
 
 
+def _lock_file_handle(handle) -> None:
+    handle.seek(0)
+    if sys.platform == "win32":
+        import msvcrt
+
+        if handle.read(1) == b"":
+            handle.seek(0)
+            handle.write(b"\x00")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file_handle(handle) -> None:
+    handle.seek(0)
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _write_locked_json(handle, payload: Mapping[str, Any]) -> None:
+    encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+    handle.seek(0)
+    handle.truncate(0)
+    handle.write(encoded)
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
 class HERBuildLock:
     """Cross-process build lock with stale Cargo-child protection."""
 
@@ -618,7 +659,7 @@ class HERBuildLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+b")
         try:
-            self._lock_handle(handle)
+            _lock_file_handle(handle)
         except OSError as exc:
             handle.close()
             raise HERRebuildError(
@@ -630,7 +671,7 @@ class HERBuildLock:
         stale = self._read_metadata(handle)
         stale_cargo_pid = _coerce_pid(stale.get("cargo_pid"))
         if stale_cargo_pid and self.pid_probe(stale_cargo_pid):
-            self._unlock_handle(handle)
+            _unlock_file_handle(handle)
             handle.close()
             raise HERRebuildError(
                 FailureKind.STALE_LOCK_UNRECOVERABLE,
@@ -651,7 +692,7 @@ class HERBuildLock:
             )
         except OSError as exc:
             with suppress(Exception):
-                self._unlock_handle(handle)
+                _unlock_file_handle(handle)
             handle.close()
             self._handle = None
             raise HERRebuildError(
@@ -683,7 +724,7 @@ class HERBuildLock:
             metadata["released_at"] = utc_now()
             self._write_metadata(metadata)
         with suppress(Exception):
-            self._unlock_handle(handle)
+            _unlock_file_handle(handle)
         with suppress(Exception):
             handle.close()
         self._handle = None
@@ -708,43 +749,7 @@ class HERBuildLock:
 
     def _write_metadata(self, payload: Mapping[str, Any]) -> None:
         assert self._handle is not None
-        encoded = (
-            json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
-        ).encode("utf-8")
-        self._handle.seek(0)
-        self._handle.truncate(0)
-        self._handle.write(encoded)
-        self._handle.flush()
-        os.fsync(self._handle.fileno())
-
-    @staticmethod
-    def _lock_handle(handle) -> None:
-        handle.seek(0)
-        if sys.platform == "win32":
-            import msvcrt
-
-            if handle.read(1) == b"":
-                handle.seek(0)
-                handle.write(b"\x00")
-                handle.flush()
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-    @staticmethod
-    def _unlock_handle(handle) -> None:
-        handle.seek(0)
-        if sys.platform == "win32":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        _write_locked_json(self._handle, payload)
 
 
 def _coerce_pid(value: Any) -> int | None:
@@ -753,6 +758,78 @@ def _coerce_pid(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+class HERManagerLock:
+    """Process-lifetime ownership for one rebuild state root.
+
+    The OS lock is the authority.  Metadata is diagnostic only, so a dead
+    process cannot strand ownership and PID reuse cannot steal a live lock.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path).resolve()
+        self.manager_id = f"manager-{uuid.uuid4().hex[:12]}"
+        self._handle = None
+
+    @property
+    def acquired(self) -> bool:
+        return self._handle is not None
+
+    def acquire(self) -> None:
+        if self.acquired:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            _lock_file_handle(handle)
+        except OSError as exc:
+            handle.close()
+            raise HERRebuildError(
+                FailureKind.BUILD_LOCK_BUSY,
+                RebuildStage.SOURCE_PREFLIGHT,
+                "Another live HER rebuild manager already owns this state root.",
+            ) from exc
+        try:
+            _write_locked_json(
+                handle,
+                {
+                    "schema_version": 1,
+                    "manager_id": self.manager_id,
+                    "owner_pid": os.getpid(),
+                    "acquired_at": utc_now(),
+                },
+            )
+        except OSError as exc:
+            with suppress(Exception):
+                _unlock_file_handle(handle)
+            handle.close()
+            raise HERRebuildError(
+                FailureKind.INTERNAL_ERROR,
+                RebuildStage.SOURCE_PREFLIGHT,
+                f"Could not persist HER manager ownership: {type(exc).__name__}: {exc}",
+            ) from exc
+        self._handle = handle
+
+    def release(self) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        with suppress(Exception):
+            _write_locked_json(
+                handle,
+                {
+                    "schema_version": 1,
+                    "manager_id": self.manager_id,
+                    "owner_pid": os.getpid(),
+                    "released_at": utc_now(),
+                },
+            )
+        with suppress(Exception):
+            _unlock_file_handle(handle)
+        with suppress(Exception):
+            handle.close()
+        self._handle = None
 
 
 class HERRebuildManager:
@@ -773,20 +850,38 @@ class HERRebuildManager:
         self.state_root = (
             Path(kernel.paths.bridge_home).resolve() / "state" / "her_rebuild"
         )
-        self.layout = HERSourceLayout.from_code_root(kernel.paths.code_root)
-        self.jobs = HERRebuildJobStore(self.state_root / "jobs")
-        self.candidates = CandidateStore(self.state_root / "candidates")
-        self.selection = DevelopmentSelectionStore(
-            self.state_root / "development-selection.json",
-            candidates_root=self.state_root / "candidates",
-        )
-        self.controller = HERBuildController(self.layout, state_root=self.state_root)
-        self.verifier = HERQuickVerifier()
-        self.idle_timeout_seconds = max(0.0, float(idle_timeout_seconds))
-        self.idle_poll_seconds = max(0.05, float(idle_poll_seconds))
-        self._submit_lock = asyncio.Lock()
-        self._tasks: dict[str, asyncio.Task[None]] = {}
-        self.jobs.recover_nonterminal()
+        self._manager_lock = HERManagerLock(self.state_root / "manager.lock")
+        self._manager_lock.acquire()
+        try:
+            self.layout = HERSourceLayout.from_code_root(kernel.paths.code_root)
+            self.jobs = HERRebuildJobStore(self.state_root / "jobs")
+            self.candidates = CandidateStore(self.state_root / "candidates")
+            self.selection = DevelopmentSelectionStore(
+                self.state_root / "development-selection.json",
+                candidates_root=self.state_root / "candidates",
+            )
+            self.controller = HERBuildController(
+                self.layout, state_root=self.state_root
+            )
+            self.verifier = HERQuickVerifier()
+            self.idle_timeout_seconds = max(0.0, float(idle_timeout_seconds))
+            self.idle_poll_seconds = max(0.05, float(idle_poll_seconds))
+            self._submit_lock = asyncio.Lock()
+            self._tasks: dict[str, asyncio.Task[None]] = {}
+            self.jobs.recover_nonterminal()
+        except BaseException:
+            self._manager_lock.release()
+            raise
+
+    def close(self) -> None:
+        """Release manager ownership after every submitted task is terminal."""
+        if any(not task.done() for task in self._tasks.values()):
+            raise RuntimeError("cannot close HER rebuild manager with active tasks")
+        self._manager_lock.release()
+
+    def __del__(self) -> None:
+        with suppress(Exception):
+            self._manager_lock.release()
 
     def reconcile_before_agent_startup(self) -> list[RebuildJobRecord]:
         """Fail safe after a cold kernel interruption, before any Agent starts."""
@@ -1107,9 +1202,11 @@ class HERRebuildManager:
         runtime = self._runtime(agent_name)
         if runtime is None:
             return
-        engine = str(
-            getattr(getattr(runtime, "config", None), "active_backend", "") or ""
-        ).strip().lower()
+        engine = (
+            str(getattr(getattr(runtime, "config", None), "active_backend", "") or "")
+            .strip()
+            .lower()
+        )
         if engine != "her":
             raise HERRebuildError(
                 FailureKind.REBOOT_REJECTED,

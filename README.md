@@ -197,7 +197,9 @@ HASHI-owned Python orchestration around it:
 - **Fast Rust development adoption** — `/rebuild` fingerprints integrated HER
   source, runs an incremental Cargo build and offline verification, stores an
   immutable development candidate, selects it atomically, and reboots only the
-  affected idle HER Agent. It never overwrites or re-labels a certified package.
+  affected idle HER Agent. Process-lifetime manager ownership prevents a second
+  coordinator from corrupting an active job, and every status path is
+  side-effect-free. It never overwrites or re-labels a certified package.
 
 See [the v4.0.0-alpha.2 release notes](docs/RELEASE_NOTES_v4.0.0-alpha.2.md),
 [the HER backend contract](docs/HER_BACKEND_CONTRACT.md), and

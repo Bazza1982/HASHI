@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -21,6 +23,7 @@ from orchestrator.her_rebuild_manager import (
     HERRebuildJobStore,
     HERRebuildManager,
 )
+from scripts import her_rebuild_dev
 
 
 def _create(store: HERRebuildJobStore, *, fingerprint: str = "a" * 64):
@@ -260,6 +263,129 @@ def test_recovery_defers_interrupted_rollback_for_startup_reconciliation(
     recovered = store.recover_nonterminal()
     assert recovered == []
     assert store.get(created.job_id).state == RebuildStage.ROLLING_BACK
+
+
+async def test_offline_status_is_strictly_read_only_during_active_build(
+    tmp_path: Path, capsys
+) -> None:
+    bridge_home = tmp_path / "home"
+    store = HERRebuildJobStore(bridge_home / "state" / "her_rebuild" / "jobs")
+    created = _create(store)
+    store.transition(created.job_id, RebuildStage.SOURCE_PREFLIGHT)
+    store.transition(created.job_id, RebuildStage.WAITING_FOR_BUILD_LOCK)
+    store.transition(created.job_id, RebuildStage.BUILDING)
+    job_path = store._job_path(created.job_id)
+    before = job_path.read_bytes()
+
+    exit_code = await her_rebuild_dev._run(
+        SimpleNamespace(bridge_home=bridge_home, status="latest")
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["job_id"] == created.job_id
+    assert payload["state"] == RebuildStage.BUILDING.value
+    assert job_path.read_bytes() == before
+    assert store.get(created.job_id).state == RebuildStage.BUILDING
+
+
+async def test_offline_status_does_not_create_state_when_no_job_exists(
+    tmp_path: Path, capsys
+) -> None:
+    bridge_home = tmp_path / "absent-home"
+
+    exit_code = await her_rebuild_dev._run(
+        SimpleNamespace(bridge_home=bridge_home, status="latest")
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == {"status": "not_found"}
+    assert not bridge_home.exists()
+
+
+def test_second_manager_cannot_recover_a_live_managers_job(tmp_path: Path) -> None:
+    code_root = tmp_path / "hashi"
+    code_root.mkdir()
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(code_root=code_root, bridge_home=tmp_path / "home"),
+        runtimes=[],
+    )
+    first = HERRebuildManager(kernel)
+    created = first.jobs.create(
+        source_fingerprint="a" * 64,
+        target_agent="lily",
+        actor_id="owner",
+        origin={"chat_id": "1"},
+    )
+    first.jobs.transition(created.job_id, RebuildStage.SOURCE_PREFLIGHT)
+    first.jobs.transition(created.job_id, RebuildStage.WAITING_FOR_BUILD_LOCK)
+    first.jobs.transition(created.job_id, RebuildStage.BUILDING)
+
+    try:
+        with pytest.raises(HERRebuildError) as caught:
+            HERRebuildManager(kernel)
+        assert caught.value.failure_kind == FailureKind.BUILD_LOCK_BUSY
+        assert first.jobs.get(created.job_id).state == RebuildStage.BUILDING
+    finally:
+        first.close()
+
+    replacement = HERRebuildManager(kernel)
+    try:
+        recovered = replacement.jobs.get(created.job_id)
+        assert recovered.state == RebuildStage.FAILED
+        assert recovered.error == "kernel_restarted_during_rebuild"
+    finally:
+        replacement.close()
+
+
+def test_manager_ownership_lock_excludes_a_second_process(tmp_path: Path) -> None:
+    code_root = tmp_path / "hashi"
+    bridge_home = tmp_path / "home"
+    code_root.mkdir()
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(code_root=code_root, bridge_home=bridge_home),
+        runtimes=[],
+    )
+    manager = HERRebuildManager(kernel)
+    created = manager.jobs.create(
+        source_fingerprint="a" * 64,
+        target_agent="lily",
+        actor_id="owner",
+        origin={"chat_id": "1"},
+    )
+    manager.jobs.transition(created.job_id, RebuildStage.SOURCE_PREFLIGHT)
+    manager.jobs.transition(created.job_id, RebuildStage.WAITING_FOR_BUILD_LOCK)
+    manager.jobs.transition(created.job_id, RebuildStage.BUILDING)
+    probe = f"""
+from types import SimpleNamespace
+from orchestrator.her_rebuild import HERRebuildError
+from orchestrator.her_rebuild_manager import HERRebuildManager
+kernel = SimpleNamespace(
+    paths=SimpleNamespace(code_root={str(code_root)!r}, bridge_home={str(bridge_home)!r}),
+    runtimes=[],
+)
+try:
+    HERRebuildManager(kernel)
+except HERRebuildError as exc:
+    print(exc.failure_kind.value)
+    raise SystemExit(0)
+raise SystemExit(2)
+"""
+
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=Path(__file__).resolve().parents[1],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == FailureKind.BUILD_LOCK_BUSY.value
+        assert manager.jobs.get(created.job_id).state == RebuildStage.BUILDING
+    finally:
+        manager.close()
 
 
 def test_manager_reconciles_interrupted_selection_before_agent_startup(
