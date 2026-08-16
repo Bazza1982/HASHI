@@ -16,6 +16,15 @@ from orchestrator.memory_plus_mode import (
 from orchestrator.wrapper_mode import SESSION_RESET_SOURCE
 
 
+def background_status_text(runtime: Any) -> str:
+    """Return the Agent-owned status template, if one is configured."""
+
+    extra = getattr(getattr(runtime, "config", None), "extra", None) or {}
+    return str(
+        extra.get("background_status_text") or extra.get("typing_message") or ""
+    ).strip()
+
+
 async def initialize(runtime: Any) -> bool:
     runtime.logger.info(f"Initializing flex agent '{runtime.name}'...")
     result = await runtime.backend_manager.initialize_active_backend()
@@ -136,12 +145,14 @@ async def process_queue(runtime: Any) -> None:
                         with suppress(asyncio.CancelledError):
                             await feedback.answer_preview_task
                 if feedback.placeholder:
-                    with suppress(Exception):
-                        await runtime.app.bot.edit_message_text(
-                            chat_id=item.chat_id,
-                            message_id=feedback.placeholder.message_id,
-                            text="⏳ Still running in the background — I'll notify you here when done! 📬",
-                        )
+                    status_text = background_status_text(runtime)
+                    if status_text:
+                        with suppress(Exception):
+                            await runtime.app.bot.edit_message_text(
+                                chat_id=item.chat_id,
+                                message_id=feedback.placeholder.message_id,
+                                text=status_text,
+                            )
                 setattr(item, "_audit_collector", audit_collector)
                 setattr(item, "_her_message_router", feedback.her_message_router)
                 runtime._register_background_task(generation.generation_task, item)
