@@ -65,10 +65,23 @@ def test_hot_manager_install_preserves_existing_stable_manager(tmp_path):
     kernel = _kernel(tmp_path)
     existing = object()
     kernel.her_rebuild_manager = existing
-    bundle = {
-        spec.attribute: object() for spec in manager_registry.HOT_MANAGER_SPECS
-    }
+    upgraded = []
 
-    manager_registry.install_hot_manager_bundle(kernel, bundle)
+    class FakeStableManager:
+        @classmethod
+        def upgrade_existing(cls, candidate):
+            upgraded.append(candidate)
+            return candidate
+
+    bundle = {spec.attribute: object() for spec in manager_registry.HOT_MANAGER_SPECS}
+
+    manager_registry.install_hot_manager_bundle(
+        kernel,
+        bundle,
+        module_loader=lambda _name: SimpleNamespace(
+            HERRebuildManager=FakeStableManager
+        ),
+    )
 
     assert kernel.her_rebuild_manager is existing
+    assert upgraded == [existing]

@@ -199,7 +199,9 @@ HASHI-owned Python orchestration around it:
   immutable development candidate, selects it atomically, and reboots only the
   affected idle HER Agent. Process-lifetime manager ownership prevents a second
   coordinator from corrupting an active job, and every status path is
-  side-effect-free. It never overwrites or re-labels a certified package.
+  side-effect-free. `/reboot` upgrades this stable coordinator in place without
+  losing active jobs or tasks. It never overwrites or re-labels a certified
+  package.
 
 See [the v4.0.0-alpha.2 release notes](docs/RELEASE_NOTES_v4.0.0-alpha.2.md),
 [the HER backend contract](docs/HER_BACKEND_CONTRACT.md), and

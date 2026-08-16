@@ -96,15 +96,19 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   recovery. After the real owner exits, the OS releases the lock and the next
   owner retains the intended interrupted-job recovery behavior. Offline
   `--status` now reads `HERRebuildJobStore` directly with directory creation
-  disabled; it never constructs a manager or writes state.
+  disabled; it never constructs a manager or writes state. During `/reboot`,
+  the stable Manager is upgraded in place to the reloaded class: its jobs,
+  candidates and active tasks remain intact while an older instance acquires
+  the new ownership lock. No full process restart is required.
 - **Regression tests:** byte-identical active job across concurrent status;
   absent-state status creates no directory; second manager rejected in-process;
   second Python process rejected by the OS lock; replacement manager after
   owner exit still performs cold-start recovery; existing build, verification,
-  adoption, rollback and notification tests retained.
-- **Automated verification:** rebuild-focused suite passed `43/43` before the
-  cross-process addition; complete HASHI suite passed `2301 passed, 2 skipped`
-  after the final implementation. Ruff, Python compilation and
+  adoption, rollback and notification tests retained; manager-registry hot
+  migration preserves the same instance and an active task by identity.
+- **Automated verification:** rebuild/registry/reboot-focused suite passed
+  `61/61`; complete HASHI suite passed `2302 passed, 2 skipped` after the final
+  hot-migration implementation. Ruff, Python compilation and
   `git diff --check` passed for the changed surfaces.
 - **Platform boundary:** Linux/WSL OS-lock behavior was exercised locally. The
   same helper uses the existing Windows `msvcrt` byte-range lock path already
