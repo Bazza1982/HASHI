@@ -1,13 +1,13 @@
 # HER `/rebuild` Command Implementation Plan
 
-Status: implementation in progress; isolated controller foundation implemented
+Status: implemented and verified on `feature/her-rebuild-command`
 
-Implementation checkpoint: the pure controller, immutable candidate/selection
-primitives, durable job state, per-requester notification state, build lock and
-their focused tests are implemented on `feature/her-rebuild-command`. Live
-command registration, integrated Rust source, Adapter resolution and reboot
-adoption remain intentionally deferred until the concurrent HASHI/HER repair is
-committed and this branch is rebased. See
+Implementation commits: `57eb8ea3` (isolated foundation) and `c20cd08d`
+(integrated source, command, resolver, adoption and rollback), based on Zelda's
+final certified `.22` HASHI commit `5776c278` and HER source commit
+`246b04e9fa28ef0b6f74c2d924ab3697b95197bd`.
+
+The implementation checkpoint and takeover evidence are recorded in
 `HER_REBUILD_PARALLEL_DEVELOPMENT_CHECKPOINT.md`.
 
 Owner: HASHI
@@ -1177,3 +1177,56 @@ planning repairs remain the immediate behavioral fixes. Deliver in this order:
 This prevents the rebuild feature from being confused with the behavioral fix,
 while making every later Rust repair materially faster to compile, adopt and
 verify.
+
+## 29. Implementation and verification record
+
+Completed on 2026-08-16:
+
+- rebased the isolated branch onto Zelda's final `.22` HASHI certification;
+- imported the exact certified Rust source under `native/her`, retaining the
+  MIT licence and explicit upstream/bundle provenance;
+- excluded upstream interactive session, sandbox and agent-workflow state that
+  is not build source;
+- added the dedicated incremental `hashi-dev` Cargo profile;
+- registered authorized `/rebuild` and `/rebuild status` through the shared
+  dynamic command registry;
+- added `scripts/her_rebuild_dev.py` as the build-and-verify-only offline entry
+  using the same durable manager/controller path without selection or restart;
+- added a kernel-owned manager that survives its own targeted Agent reboot;
+- implemented source/toolchain fingerprinting, same-fingerprint join, OS build
+  lock, Cargo PID tracking, bounded logs and credential-free environment;
+- implemented offline version, target, doctor, stdin and stream-json checks;
+- implemented immutable candidate storage and explicit
+  `development-source-build` Adapter resolution;
+- implemented active-run quiescence, deferred activation, targeted existing
+  hot restart, adoption identity/health checks, one automatic rollback and
+  cold-start transaction reconciliation;
+- retained idempotent terminal notification state and startup retry;
+- left the certified `.22` manifest, binaries and certification evidence
+  byte-for-byte unchanged.
+
+Recorded host evidence:
+
+```text
+First clean development build: 71.734 seconds
+Unchanged candidate reuse:       0.398 seconds
+Candidate:                       dev-a63e2ab0cf29425c-85e5e5a1b647
+Candidate SHA-256:               85e5e5a1b647ca28eb24b2d09de741202e8fa198e69fbc455a983cc0e26be033
+Embedded HASHI source commit:    c20cd08da2200b28e25b38c452e797688092af7a
+Offline quick verification:      passed
+Development resolver canary:     passed
+Atomic rollback to packaged .22: passed
+Rust CLI tests:                  358 passed
+HASHI Python tests:              2237 passed, 3 skipped
+```
+
+The first controller canary deliberately targeted a nonexistent Agent and
+ended as `activation_deferred`. This proves that a verified candidate is
+retained without writing the active selection or interrupting any real Agent.
+The resolver drill then selected that immutable candidate, verified its
+development identity, atomically restored the prior selection and proved the
+Adapter returned to certified packaged `.22`.
+
+Production release promotion remains outside `/rebuild`: a development
+candidate never edits `hashi_assets/her/manifest.json`, a release manifest,
+certification evidence or certified binary.
