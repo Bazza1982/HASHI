@@ -119,9 +119,13 @@ checkpoint；中间 worker 不能替换 Primary session。
   "permission_mode": "read-only",
   "allowed_tools": ["Read", "Grep", "Bash"],
   "workspace_strategy": "shared_read_only",
-  "timeout_sec": 300
+  "timeout_sec": null
 }
 ```
+
+`timeout_sec=null` 表示继承 Agent 当前 HER 的 activity-aware idle/hard timeout。
+只有管理员显式配置 Ultra hard cap 时，该字段才为具体秒数；Primary planner
+不控制或扩大运行时 timeout 权限。
 
 并发执行不得修改共享 Adapter 的 model、provider、effort、cwd 或 environment。
 底层 invocation 必须接受 per-call override，并使用层级 ID：
@@ -217,7 +221,7 @@ HER_ULTRA_DEFAULTS = {
     "max_concurrent_subagents": 10,
     "primary_inner_effort": "high",
     "subagent_default_effort": "high",
-    "subagent_timeout_sec": 300,
+    "subagent_timeout_sec": None,
     "subagent_retry_limit": 1,
     "max_plan_revisions": 2,
     "max_subtasks": 32,
@@ -229,8 +233,9 @@ HER_ULTRA_DEFAULTS = {
 
 Ultra 内部所有 HER 调用关闭底层原生 task planning，避免在 Ultra 的
 decomposition/dispatch/assembly 外再嵌套一层规划和 review。Ultra 不设置会促使
-模型提前降低质量的软 token 目标，但仍保留 timeout、一次安全 worker retry、
-provider capacity 和工具次数等执行边界。
+模型提前降低质量的软 token 目标，但仍继承 HER timeout，并保留一次针对
+connection/transport/provider/rate-limit 的 side-effect-safe worker retry、provider
+capacity 和工具次数等执行边界。Timeout 不会用相同预算从头盲目重跑。
 
 ## 12. 实施切片
 
