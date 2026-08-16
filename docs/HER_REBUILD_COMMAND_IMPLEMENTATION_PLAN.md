@@ -272,6 +272,11 @@ The status response must explicitly distinguish:
 - active development HER;
 - rolled-back development HER.
 
+Every status surface is strictly read-only. In particular, the offline
+`scripts/her_rebuild_dev.py --status` path reads `HERRebuildJobStore` directly;
+it must not construct a coordinator, run startup recovery, acquire manager or
+build ownership, create an absent state directory, or rewrite a job record.
+
 ### 7.3 `/rebuild help`
 
 May be an alias of the no-argument help card during implementation, but it must
@@ -354,6 +359,15 @@ Add a kernel-level `HERRebuildManager` with responsibility for:
 - post-adoption validation;
 - durable state and final notification.
 
+Exactly one live `HERRebuildManager` may own a rebuild state root. The manager
+holds a process-lifetime OS file lock from construction until shutdown. A
+second process is rejected before it can inspect active jobs or invoke startup
+recovery. When the owning process actually exits, the operating system releases
+the lock; only the next successful owner may classify pre-activation jobs as
+interrupted and reconcile any interrupted adoption state. Lock-file PID and
+manager-ID fields are diagnostic metadata—the OS lock, not PID reuse or a
+heartbeat timeout, is authoritative.
+
 The slash-command handler should be shared through the hot-reloadable command
 registry so flexible and fixed runtimes do not gain separate implementations.
 It only authenticates, captures the reply target and submits/queries the
@@ -391,14 +405,19 @@ reload or a retry cannot deliver the same terminal notice twice.
 
 ## 10. Build lock and concurrency
 
-HER source and Cargo caches are process-wide resources. Protect them with both:
+HER coordination, source and Cargo caches are process-wide resources. Protect
+them with all three layers:
 
-1. an in-process `asyncio.Lock`; and
-2. an OS-visible lock file scoped to the HASHI instance/source root.
+1. one process-lifetime manager ownership lock per rebuild state root;
+2. an in-process `asyncio.Lock`; and
+3. an OS-visible Cargo build lock scoped to the HASHI instance/source root.
 
 Rules:
 
 - Only one Cargo HER build runs per source root and host target.
+- A second live manager cannot recover, fail, join or mutate the first
+  manager's jobs.
+- Status readers never acquire ownership and never mutate durable state.
 - Two requests for the same source fingerprint share one build job and may each
   receive their own authorized adoption result.
 - A request for a different fingerprint does not silently join an older build.
@@ -941,6 +960,10 @@ Update:
 - live PID lock is not stolen;
 - stale lock is recovered only after process validation;
 - restart marks interrupted nonterminal build safely.
+- concurrent offline `--status` preserves the byte-identical active job record;
+- status against an absent state root creates no files or directories;
+- a second live manager is rejected before recovery, while a replacement after
+  owner exit still performs the intended interrupted-job recovery.
 
 ### 23.5 Quick verification
 

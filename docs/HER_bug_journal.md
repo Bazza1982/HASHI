@@ -69,8 +69,50 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260814-031` | Verified | P1 | long fixed sessions could make the planner answer as the conversational agent instead of returning TaskFrame JSON | `planner_request_preserves_session_prefix_and_appends_nonpersistent_control`; fixed-session direct-response effort matrix |
 | `HER-20260815-032` | Fixed — live verification pending | P0 | isolated scheduler choices and CONTINUE checkpoints were absent from the primary conversation context | `test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_task`; `test_her_isolated_continuation_resumes_exact_checkpoint_without_replacing_primary` |
 | `HER-20260816-033` | Fixed in source — rebuild/live verification pending | P1 | TaskFrame again saw only `A` while the primary executor saw and completed the previous option | `task_checkpoint_receives_immediate_previous_dialogue_context`; `tests/test_runtime_turn_context.py` |
+| `HER-20260816-034` | Verified | P1 | offline `--status` constructed a second rebuild manager and falsely failed an active build as a kernel restart | `test_offline_status_is_strictly_read_only_during_active_build`; `test_manager_ownership_lock_excludes_a_second_process` |
 
 ## Historical entries
+
+### HER-20260816-034 — rebuild status observer falsely became a restart owner
+
+- **Status:** Verified
+- **Severity:** P1
+- **Discovered:** 2026-08-16 AEST during post-commit offline verification
+- **Expected:** every status path is side-effect-free; one live kernel-owned
+  manager exclusively owns recovery and mutation for its rebuild state root.
+- **Actual:** `scripts/her_rebuild_dev.py --status` constructed a new
+  `HERRebuildManager`. Manager construction automatically ran
+  `recover_nonterminal()`, so the observer rewrote another process's active
+  `building` job to `failed` with `kernel_restarted_during_rebuild`.
+- **User-visible impact:** an operator checking status could receive a false
+  failure, terminate the authoritative job record and force a redundant rebuild.
+  The selected HER and certified package were not changed.
+- **Root cause:** startup recovery used manager construction itself as evidence
+  of a cold kernel restart. There was no process-lifetime coordinator ownership
+  lock, and the offline status helper unnecessarily constructed the mutating
+  coordinator before reading the job store.
+- **Fix:** one OS-held `HERManagerLock` now owns each rebuild state root for the
+  coordinator's process lifetime. A second live process is rejected before
+  recovery. After the real owner exits, the OS releases the lock and the next
+  owner retains the intended interrupted-job recovery behavior. Offline
+  `--status` now reads `HERRebuildJobStore` directly with directory creation
+  disabled; it never constructs a manager or writes state.
+- **Regression tests:** byte-identical active job across concurrent status;
+  absent-state status creates no directory; second manager rejected in-process;
+  second Python process rejected by the OS lock; replacement manager after
+  owner exit still performs cold-start recovery; existing build, verification,
+  adoption, rollback and notification tests retained.
+- **Automated verification:** rebuild-focused suite passed `43/43` before the
+  cross-process addition; complete HASHI suite passed `2301 passed, 2 skipped`
+  after the final implementation. Ruff, Python compilation and
+  `git diff --check` passed for the changed surfaces.
+- **Platform boundary:** Linux/WSL OS-lock behavior was exercised locally. The
+  same helper uses the existing Windows `msvcrt` byte-range lock path already
+  covered by the cross-platform rebuild-lock contract; Windows CI remains part
+  of the release matrix.
+- **Secrets/redaction checked:** yes; lock metadata contains only schema,
+  manager ID, PID and timestamps.
+- **Recurrence count:** 0
 
 ### HER-20260816-033 — TaskFrame and executor again resolved different turns
 

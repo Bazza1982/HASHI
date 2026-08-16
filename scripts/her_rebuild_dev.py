@@ -14,8 +14,11 @@ CODE_ROOT = Path(__file__).resolve().parents[1]
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
-from orchestrator.her_rebuild import RebuildStage
-from orchestrator.her_rebuild_manager import HERRebuildManager
+from orchestrator.her_rebuild import RebuildStage  # noqa: E402
+from orchestrator.her_rebuild_manager import (  # noqa: E402
+    HERRebuildJobStore,
+    HERRebuildManager,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -55,34 +58,45 @@ def _render(record) -> dict:
 
 async def _run(arguments: argparse.Namespace) -> int:
     bridge_home = arguments.bridge_home.expanduser().resolve()
-    kernel = SimpleNamespace(
-        paths=SimpleNamespace(code_root=CODE_ROOT, bridge_home=bridge_home),
-        runtimes=[],
-    )
-    manager = HERRebuildManager(kernel, idle_timeout_seconds=0)
     if arguments.status:
-        record = manager.get(None if arguments.status == "latest" else arguments.status)
+        jobs = HERRebuildJobStore(
+            bridge_home / "state" / "her_rebuild" / "jobs", create_root=False
+        )
+        record = (
+            jobs.latest()
+            if arguments.status == "latest"
+            else jobs.get(arguments.status)
+        )
         if record is None:
             print(json.dumps({"status": "not_found"}, sort_keys=True))
             return 1
         print(json.dumps(_render(record), indent=2, sort_keys=True))
         return 0
 
-    record, joined = await manager.submit(
-        target_agent="offline-verification",
-        actor_id="local-operator",
-        origin={"channel": "local-offline"},
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(code_root=CODE_ROOT, bridge_home=bridge_home),
+        runtimes=[],
     )
-    completed = await manager.wait(record.job_id)
-    payload = _render(completed)
-    payload["joined_existing_build"] = joined
-    payload["offline_only"] = True
-    print(json.dumps(payload, indent=2, sort_keys=True))
-    return (
-        0
-        if completed.state in {RebuildStage.ACTIVATION_DEFERRED, RebuildStage.SUCCEEDED}
-        else 1
-    )
+    manager = HERRebuildManager(kernel, idle_timeout_seconds=0)
+    try:
+        record, joined = await manager.submit(
+            target_agent="offline-verification",
+            actor_id="local-operator",
+            origin={"channel": "local-offline"},
+        )
+        completed = await manager.wait(record.job_id)
+        payload = _render(completed)
+        payload["joined_existing_build"] = joined
+        payload["offline_only"] = True
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return (
+            0
+            if completed.state
+            in {RebuildStage.ACTIVATION_DEFERRED, RebuildStage.SUCCEEDED}
+            else 1
+        )
+    finally:
+        manager.close()
 
 
 def main() -> int:
