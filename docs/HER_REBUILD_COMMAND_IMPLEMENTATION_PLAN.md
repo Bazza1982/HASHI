@@ -1230,3 +1230,40 @@ Adapter returned to certified packaged `.22`.
 Production release promotion remains outside `/rebuild`: a development
 candidate never edits `hashi_assets/her/manifest.json`, a release manifest,
 certification evidence or certified binary.
+
+### 29.1 Primary-branch live adoption
+
+The completed feature was integrated into `agent/latest-hashi-her` after
+Zelda's `.22` work. Commit `2175e0bb` added the first-hot-reload bridge for an
+already-running pre-feature kernel: a missing stable rebuild manager is
+constructed transactionally during `/reboot`, while an existing manager is
+preserved across the targeted restart that it supervises. A live non-HER Agent
+is rejected before Cargo starts, with an instruction to switch that Agent to
+HER; the offline build-only target remains supported.
+
+The live Sunny canary then passed on the primary branch:
+
+```text
+Initial /reboot min:              Sunny offline -> online in about 5 seconds
+Job:                              rebuild-20260816-090741-d3151617
+Fingerprint:                      0ee10120fd7564e02d22f856b4a868e7ac014b9791dd60eb16f34051c195e7e4
+Candidate:                        dev-0ee10120fd7564e0-61c151ebf1ec
+Candidate SHA-256:                61c151ebf1eca6b1ad46739f3ad1f78dad616cc45451d53ae324b5c29a6a17d1
+Embedded HASHI source commit:     2175e0bb34d9c46b73aeee6157624587efef0ad4
+Cargo build time:                 65.171 seconds
+End-to-end first adoption:        81 seconds
+Quick checks:                     version, doctor, CLI/stdin, stream-json
+Final state:                      succeeded / adopted
+Terminal notification:            delivered
+```
+
+An immediate second `/rebuild` used the same fingerprint and immutable
+candidate. It recorded `candidate_reused=true`, launched no Cargo process and
+completed verification, targeted restart and adoption in 15 seconds. The
+stored and independently recalculated binary digests matched exactly. The
+certified `.22` release artefacts remained unchanged; this active selection is
+explicitly labelled development and non-certified.
+
+After primary integration and both live transactions, the final HASHI Python
+suite completed with `2278 passed, 2 skipped, 23 warnings`; the warnings are
+the existing python-telegram-bot `retry_after` deprecations.

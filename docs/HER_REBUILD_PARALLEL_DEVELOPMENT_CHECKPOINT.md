@@ -2,7 +2,9 @@
 
 Date: 2026-08-16
 
-Branch: `feature/her-rebuild-command`
+Development branch: `feature/her-rebuild-command`
+
+Integrated branch: `agent/latest-hashi-her`
 
 Final Zelda HASHI base: `5776c27882b7e024e442f6c9dcc44901eede0a59`
 
@@ -14,7 +16,14 @@ Implementation commits:
 - `c20cd08d` — integrated Rust source and supervised development rebuild
   workflow.
 
-Status: implementation and offline/transactional canary complete
+Primary integration commits:
+
+- `96aa4fe1` — isolated rebuild controller foundation;
+- `6c7fd961` — integrated Rust source and supervised development rebuild;
+- `bf8766ca` — verification documentation;
+- `2175e0bb` — first-hot-reload stable-manager adoption and non-HER guard.
+
+Status: implementation, primary integration and live HER adoption complete
 
 ## 1. Safe takeover
 
@@ -33,9 +42,13 @@ untracked older plan copy was archived. The feature branch was then rebased
 onto Zelda's final HASHI commit. No Zelda file was reset, overwritten or
 discarded.
 
-During final verification, unrelated new changes appeared in the primary HASHI
-worktree under `tools/telegram_send_file_cli.py`. They were not produced,
-staged or modified by this branch and remain outside this work.
+During final verification, a concurrent live request changed
+`tools/telegram_send_file_cli.py` to accept a UTF-8 BOM. The original backup
+was first checked byte-for-byte against the prior Git version and moved to the
+ignored takeover archive. The valid one-line change was preserved in its own
+commit (`c9dfeb53`) before this feature was integrated. No concurrent file was
+overwritten or discarded, and the primary worktree was clean before every
+feature cherry-pick.
 
 ## 2. Integrated Rust source
 
@@ -71,7 +84,10 @@ authorized /rebuild
 ```
 
 The manager is kernel-owned and intentionally excluded from the hot-manager
-bundle, so it survives the targeted restart it requests.
+bundle, so it survives the targeted restart it requests. The manager registry
+also installs it when an already-running pre-feature kernel performs its first
+`/reboot`; a cold process restart is not required merely to expose the new
+command.
 
 Cold process interruption is also fail-safe: pre-activation jobs become failed;
 an interrupted selection/adoption is restored before Agents start.
@@ -91,6 +107,7 @@ an interrupted selection/adoption is restored before Agents start.
 - A busy Agent causes `activation_deferred`; no force-activation option exists.
 - Only the requesting Agent is automatically restarted in the normal one-user
   path.
+- A live Agent using a backend other than HER is rejected before Cargo starts.
 - Certified package manifests, binaries, evidence and baselines are never
   changed by this workflow.
 
@@ -101,7 +118,8 @@ Focused and expanded Python suites:
 ```text
 Rebuild/Adapter/command focused suite: 162 passed
 Expanded HER integration suite:        358 passed
-Full HASHI suite:                       2237 passed, 3 skipped, 23 warnings
+Feature-branch HASHI suite:             2237 passed, 3 skipped, 23 warnings
+Final integrated HASHI suite:           2278 passed, 2 skipped, 23 warnings
 ```
 
 The 23 Python warnings are existing python-telegram-bot `retry_after`
@@ -155,7 +173,37 @@ Linux  e6c88b9dd37c9191f9aad0df9fd0cf9bbeb4365778a10153a48b4cf752096c91
 Windows cd127b283d0bb8aa5db9d1863a617bb84a2c8cd0174ed305c72c5f97b294724d
 ```
 
-## 7. Operator surface
+## 7. Primary live canary
+
+The running HASHI kernel initially predated `/rebuild`. A local authorized
+`/reboot min` against idle Sunny rebuilt the hot managers, installed the new
+stable rebuild manager and returned Sunny to HER/online in about five seconds.
+`/rebuild status` then proved that the dynamic command and durable manager were
+available without a cold kernel restart.
+
+The first real primary-branch `/rebuild` produced:
+
+```text
+Job:                    rebuild-20260816-090741-d3151617
+Source fingerprint:     0ee10120fd7564e02d22f856b4a868e7ac014b9791dd60eb16f34051c195e7e4
+Cargo build:             65.171 seconds
+End-to-end transaction:  81 seconds
+Candidate:               dev-0ee10120fd7564e0-61c151ebf1ec
+Candidate SHA-256:       61c151ebf1eca6b1ad46739f3ad1f78dad616cc45451d53ae324b5c29a6a17d1
+Embedded Git SHA:        2175e0bb34d9c46b73aeee6157624587efef0ad4
+Result:                  succeeded / adopted / terminal delivered
+```
+
+The persisted selection points to that immutable candidate and labels it
+`development_build=true`, `production_certified=false`. Independent SHA-256
+calculation matched the stored digest. Version identity, target, doctor,
+stdin/CLI and stream-json checks all passed.
+
+The second same-source job (`rebuild-20260816-090952-a2852392`) recorded
+`candidate_reused=true`, launched no Cargo process and completed the complete
+verification/restart/adoption transaction in 15 seconds.
+
+## 8. Operator surface
 
 ```text
 /rebuild
