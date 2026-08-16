@@ -421,6 +421,8 @@ class _HERStreamCadenceController:
         self._last_activity_at = now
         self._has_progress_update = False
         self._lease_revision = 0
+        self._pending_commentary: StreamEvent | None = None
+        self._last_material_fingerprint = ""
         self._closed = False
         self._changed = asyncio.Event()
         self._emit_lock = asyncio.Lock()
@@ -440,17 +442,50 @@ class _HERStreamCadenceController:
         if not (event.summary or "").strip():
             return
         if not self.progress_enabled:
-            # Source-classified model commentary has already passed HER's
-            # generation policy.  Never repeat the effort decision here.
-            await self._callback(event)
+            await self._callback(
+                replace(
+                    event,
+                    delivery_class=DELIVERY_INTERNAL,
+                    required=False,
+                    detail=(
+                        f"{event.detail};" if event.detail else ""
+                    )
+                    + "suppressed_reason=effort_progress_disabled",
+                )
+            )
             return
-        # HER decides whether to generate this event; delivery identity, rather
-        # than matching prose, decides whether it is a replay.
-        async with self._emit_lock:
-            self._last_visible_at = time.monotonic()
-            self._has_progress_update = True
-            self._changed.set()
-            await self._callback(event)
+        fingerprint = self._material_fingerprint(event)
+        if fingerprint and fingerprint == self._last_material_fingerprint:
+            await self._callback(
+                replace(
+                    event,
+                    delivery_class=DELIVERY_INTERNAL,
+                    required=False,
+                    detail=(
+                        f"{event.detail};" if event.detail else ""
+                    )
+                    + "suppressed_reason=unchanged_material_progress",
+                )
+            )
+            return
+        self._pending_commentary = event
+        self._changed.set()
+
+    @staticmethod
+    def _material_fingerprint(event: StreamEvent) -> str:
+        payload = {
+            "summary": " ".join((event.summary or "").split()),
+            "detail": str(event.detail or "").strip(),
+            "phase": str(event.phase or "").strip(),
+            "current": event.current,
+            "total": event.total,
+            "unit": str(event.unit or "").strip(),
+            "tool_name": str(event.tool_name or "").strip(),
+            "file_path": str(event.file_path or "").strip(),
+        }
+        return hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
 
     async def _emit(self, event: StreamEvent) -> None:
         async with self._emit_lock:
@@ -461,6 +496,8 @@ class _HERStreamCadenceController:
                 return
             self._last_visible_at = time.monotonic()
             self._has_progress_update = True
+            if event.kind == KIND_COMMENTARY:
+                self._last_material_fingerprint = self._material_fingerprint(event)
             self._changed.set()
             await self._callback(event)
 
@@ -490,6 +527,11 @@ class _HERStreamCadenceController:
                 continue
             if self._closed:
                 break
+            if self._pending_commentary is not None:
+                commentary = self._pending_commentary
+                self._pending_commentary = None
+                await self._emit(commentary)
+                continue
             self._lease_revision += 1
             await self._emit(
                 StreamEvent(

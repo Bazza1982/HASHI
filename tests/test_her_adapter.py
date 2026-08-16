@@ -48,6 +48,7 @@ from adapters.registry import get_backend_class
 from adapters.stream_events import (
     DELIVERY_CONTROL,
     DELIVERY_FINAL,
+    DELIVERY_INTERNAL,
     DELIVERY_TECHNICAL,
     DELIVERY_USER_COMMENTARY,
     KIND_ACKNOWLEDGEMENT,
@@ -346,16 +347,23 @@ async def test_claw_technical_lease_emits_neutral_update_and_stops_cleanly():
 
 
 @pytest.mark.asyncio
-async def test_claw_cadence_does_not_dedupe_distinct_commentary_ids_by_text():
+async def test_claw_cadence_coalesces_pending_commentary_to_newest_event():
     received = []
+    delivered = asyncio.Event()
 
     async def callback(event):
         received.append(event)
+        if event.kind == KIND_COMMENTARY:
+            delivered.set()
 
     controller = _HERStreamCadenceController(
         callback,
         prompt="You are Sunny.",
         progress_enabled=True,
+        first_update_s=0.01,
+        target_interval_s=0.02,
+        hard_interval_s=0.03,
+        activity_grace_s=0,
     )
     first = StreamEvent(
         kind=KIND_COMMENTARY,
@@ -364,15 +372,18 @@ async def test_claw_cadence_does_not_dedupe_distinct_commentary_ids_by_text():
     )
     second = replace(first, event_id="req-commentary:replan:2")
 
+    cadence_task = asyncio.create_task(controller.run())
     await controller.forward(first)
     await controller.forward(second)
+    await asyncio.wait_for(delivered.wait(), timeout=1)
     controller.close()
+    await cadence_task
 
-    assert received == [first, second]
+    assert received == [second]
 
 
 @pytest.mark.asyncio
-async def test_medium_claw_controller_trusts_source_classified_commentary():
+async def test_medium_claw_controller_audits_but_suppresses_progress_commentary():
     received = []
 
     async def callback(event):
@@ -397,6 +408,49 @@ async def test_medium_claw_controller_trusts_source_classified_commentary():
         KIND_ACKNOWLEDGEMENT,
         KIND_COMMENTARY,
     ]
+    assert received[1].delivery_class == DELIVERY_INTERNAL
+    assert "suppressed_reason=effort_progress_disabled" in received[1].detail
+
+
+@pytest.mark.asyncio
+async def test_claw_cadence_suppresses_unchanged_material_revision_after_delivery():
+    received = []
+    first_delivered = asyncio.Event()
+
+    async def callback(event):
+        received.append(event)
+        if event.delivery_class == DELIVERY_USER_COMMENTARY:
+            first_delivered.set()
+
+    controller = _HERStreamCadenceController(
+        callback,
+        prompt="You are Sunny.",
+        progress_enabled=True,
+        first_update_s=0.01,
+        target_interval_s=0.02,
+        hard_interval_s=0.03,
+        activity_grace_s=0,
+    )
+    cadence_task = asyncio.create_task(controller.run())
+    first = StreamEvent(
+        kind=KIND_COMMENTARY,
+        summary="Sunny has completed the inspection.",
+        event_id="req-commentary:replan:1",
+        delivery_class=DELIVERY_USER_COMMENTARY,
+        phase="execution",
+        revision=1,
+    )
+    second = replace(first, event_id="req-commentary:replan:2", revision=2)
+
+    await controller.forward(first)
+    await asyncio.wait_for(first_delivered.wait(), timeout=1)
+    await controller.forward(second)
+    controller.close()
+    await cadence_task
+
+    assert received[0] == first
+    assert received[1].delivery_class == DELIVERY_INTERNAL
+    assert "suppressed_reason=unchanged_material_progress" in received[1].detail
 
 
 def test_claw_max_iterations_builds_chinese_verified_fallback_report():

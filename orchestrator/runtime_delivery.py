@@ -9,8 +9,8 @@ from typing import Any
 from telegram import constants
 from telegram.error import RetryAfter
 
+from orchestrator import runtime_delivery_order, telegram_delivery_failover
 from orchestrator.runtime_common import _md_to_html
-from orchestrator import telegram_delivery_failover
 from orchestrator.telegram_notifications import disable_notification
 
 
@@ -87,6 +87,7 @@ async def send_long_message(
     delivery_mode: str = "final_delivery",
 ):
     """Send a message to Telegram with safe chunking."""
+    await runtime_delivery_order.wait_for_turn(runtime, request_id)
     if not runtime.telegram_connected:
         runtime.logger.info(
             f"Telegram disconnected — skipping send for {request_id or 'unknown'} "

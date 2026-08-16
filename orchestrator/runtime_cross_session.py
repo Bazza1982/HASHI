@@ -22,7 +22,9 @@ MAX_CONTEXT_RESPONSE_CHARS = 8_000
 HER_SESSION_SCOPE_ISOLATED = "isolated_per_run"
 HER_SESSION_SCOPE_ISOLATED_RESUME = "isolated_resume"
 
-_DIRECT_REPLY_SOURCES = frozenset({"text", "voice", "telegram"})
+_DIRECT_REPLY_SOURCES = frozenset(
+    {"telegram", "text", "voice", "voice_transcript"}
+)
 _SKIP_CONTEXT_SOURCES = frozenset(
     {
         "startup",
@@ -506,6 +508,34 @@ def _matching_receipt(runtime: Any, item: Any) -> tuple[dict[str, Any] | None, s
     return None, ""
 
 
+def capture_reply_target(runtime: Any, item: Any) -> dict[str, str] | None:
+    """Freeze the eligible isolated reply target at user-message enqueue time."""
+    if bool(_value(item, "_cross_session_target_captured", False)):
+        attached = _value(item, "_cross_session_receipt", None)
+        return dict(attached) if isinstance(attached, Mapping) else None
+
+    receipt, reply_kind = _matching_receipt(runtime, item)
+    try:
+        setattr(item, "_cross_session_target_captured", True)
+    except Exception:
+        pass
+    if receipt is None:
+        return None
+
+    binding = {
+        "receipt_id": str(receipt.get("receipt_id") or ""),
+        "request_id": str(receipt.get("request_id") or ""),
+        "reply_kind": reply_kind,
+        "session_id": str(receipt.get("session_id") or ""),
+    }
+    try:
+        setattr(item, "_cross_session_receipt", binding)
+        setattr(item, "_cross_session_receipt_snapshot", dict(receipt))
+    except Exception:
+        pass
+    return binding
+
+
 def _can_resume_exact_session(runtime: Any, receipt: Mapping[str, Any]) -> bool:
     if not _uses_her_backend(runtime):
         return False
@@ -526,17 +556,15 @@ def _uses_her_backend(runtime: Any) -> bool:
 
 
 def prepare_reply_binding(runtime: Any, item: Any, effective_prompt: str) -> str:
-    """Bind a referent-free user reply to the newest delivered isolated turn."""
-    receipt, reply_kind = _matching_receipt(runtime, item)
-    if receipt is None:
+    """Apply only the isolated reply target captured when the message arrived."""
+    if not bool(_value(item, "_cross_session_target_captured", False)):
+        capture_reply_target(runtime, item)
+    binding = _value(item, "_cross_session_receipt", None)
+    receipt = _value(item, "_cross_session_receipt_snapshot", None)
+    if not isinstance(binding, Mapping) or not isinstance(receipt, Mapping):
         return effective_prompt
-
-    binding = {
-        "receipt_id": str(receipt.get("receipt_id") or ""),
-        "request_id": str(receipt.get("request_id") or ""),
-        "reply_kind": reply_kind,
-        "session_id": str(receipt.get("session_id") or ""),
-    }
+    binding = dict(binding)
+    reply_kind = str(binding.get("reply_kind") or "")
     meta = _request_meta(runtime, str(_value(item, "request_id", "") or ""))
     if meta:
         meta["cross_session_receipt"] = binding
@@ -545,11 +573,6 @@ def prepare_reply_binding(runtime: Any, item: Any, effective_prompt: str) -> str
             if _can_resume_exact_session(runtime, receipt):
                 meta["session_scope"] = HER_SESSION_SCOPE_ISOLATED_RESUME
                 meta["resume_session_id"] = binding["session_id"]
-    try:
-        setattr(item, "_cross_session_receipt", binding)
-    except Exception:
-        pass
-
     logger = getattr(runtime, "logger", None)
     if logger is not None:
         logger.info(

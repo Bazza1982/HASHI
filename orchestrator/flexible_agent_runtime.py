@@ -40,6 +40,7 @@ from orchestrator.exp_mode import build_exp_task_prompt, get_exp_usage_text
 from orchestrator import runtime_control
 from orchestrator import runtime_cross_session
 from orchestrator import runtime_delivery
+from orchestrator import runtime_delivery_order
 from orchestrator import runtime_lifecycle
 from orchestrator import runtime_long
 from orchestrator import runtime_media
@@ -674,6 +675,8 @@ class FlexibleAgentRuntime:
             deliver_to_telegram=deliver_to_telegram,
             skip_memory_injection=skip_memory_injection,
         )
+        runtime_delivery_order.register_turn(self, item)
+        runtime_cross_session.capture_reply_target(self, item)
         self.request_activity.start(
             item.request_id,
             source=item.source,
@@ -7753,6 +7756,7 @@ class FlexibleAgentRuntime:
     async def _on_background_complete(self, task: asyncio.Task, item: QueuedRequest) -> None:
         """Called when a background generate_response task finishes."""
         if self.is_shutting_down:
+            await runtime_delivery_order.complete_turn(self, item.request_id)
             getattr(self, "_background_request_ids", set()).discard(item.request_id)
             registry = getattr(self, "_request_meta_by_id", None)
             if isinstance(registry, dict):
@@ -7764,6 +7768,7 @@ class FlexibleAgentRuntime:
         receipt_error = ""
         receipt_delivered = False
         try:
+            await runtime_delivery_order.wait_for_turn(self, item.request_id)
             if task.cancelled():
                 receipt_error = "background_task_cancelled"
                 self._mark_error(f"Background task cancelled: {item.summary}")
@@ -8041,6 +8046,7 @@ class FlexibleAgentRuntime:
             registry = getattr(self, "_request_meta_by_id", None)
             if isinstance(registry, dict):
                 registry.pop(item.request_id, None)
+            await runtime_delivery_order.complete_turn(self, item.request_id)
 
     async def process_queue(self):
         await runtime_lifecycle.process_queue(self)

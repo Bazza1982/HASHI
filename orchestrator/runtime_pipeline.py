@@ -12,15 +12,18 @@ from typing import Any
 
 from telegram.error import RetryAfter
 
-from orchestrator.runtime_common import _md_to_html, _print_final_response, _safe_excerpt
-from orchestrator import runtime_cross_session
-from orchestrator import runtime_retry
-from orchestrator import telegram_delivery_failover
-from orchestrator import telegram_stream_policy
+from orchestrator import (
+    runtime_cross_session,
+    runtime_delivery_order,
+    runtime_retry,
+    telegram_delivery_failover,
+    telegram_stream_policy,
+)
 from orchestrator.memory_plus_mode import (
     extract_memory_plus_update_details,
     is_memory_plus_enabled,
 )
+from orchestrator.runtime_common import _md_to_html, _print_final_response, _safe_excerpt
 from orchestrator.telegram_notifications import disable_notification
 
 EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
@@ -701,6 +704,7 @@ def wrap_her_persona_stream(
     )
 
     async def _send_event(event, *, purpose: str):
+        await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
         text = str(getattr(event, "summary", "") or "").strip()
         if not text:
             return False
@@ -1116,6 +1120,7 @@ async def finalize_streamed_answer(
 
 
 async def handle_empty_success_response(runtime, item) -> None:
+    await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
     err_msg = EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE
     runtime.logger.warning(
         f"Backend {runtime.config.active_backend} returned success with empty text for "
@@ -1349,6 +1354,7 @@ async def handle_backend_error(
     user_interrupt_reason: str | None = None,
     queued_monotonic: float | None = None,
 ) -> None:
+    await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
     err_msg = response.error or "Unknown error"
     # /stop, /steer, and /retry intentionally kill the backend process
     # (e.g. exit -9 / SIGKILL).
@@ -1493,6 +1499,7 @@ async def handle_success_delivery(
     her_message_router=None,
     queued_monotonic: float | None = None,
 ) -> None:
+    await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
     runtime_retry.clear_completed_interrupted_task(runtime, item)
     if runtime._should_buffer_during_transfer(item.request_id):
         if answer_stream_state is not None and answer_stream_state.placeholder is not None:

@@ -319,6 +319,82 @@ def test_choice_reply_uses_newest_delivered_choice_set(tmp_path):
     assert [receipt["active"] for receipt in receipts] == [False, True]
 
 
+def test_reply_target_is_frozen_at_enqueue_before_later_scheduler_delivery(tmp_path):
+    runtime = _runtime(tmp_path)
+    reply = _item(
+        request_id="req-reply",
+        source="text",
+        prompt="continue",
+        summary="Continue",
+    )
+
+    assert runtime_cross_session.capture_reply_target(runtime, reply) is None
+
+    scheduler_item = _item(request_id="req-later-scheduler")
+    visible = "Task incomplete. CONTINUE from the saved session."
+    runtime_cross_session.record_turn_result(
+        runtime,
+        scheduler_item,
+        assistant_text=visible,
+        response=_response(
+            visible,
+            session_id="later-session",
+            completion="incomplete",
+            stop_reason="max_iterations",
+            recommendation="continue",
+        ),
+        delivered=True,
+        completion_path="background",
+    )
+    _begin(runtime, reply)
+
+    prompt = runtime_cross_session.prepare_reply_binding(runtime, reply, reply.prompt)
+
+    assert prompt == "continue"
+    assert "cross_session_receipt" not in runtime.current_request_meta
+
+
+def test_reply_target_captured_at_enqueue_survives_later_scheduler_delivery(tmp_path):
+    runtime = _runtime(tmp_path)
+    first_item = _item(request_id="req-first-scheduler")
+    first_text = "Reply with a letter:\nA — First visible action"
+    runtime_cross_session.record_turn_result(
+        runtime,
+        first_item,
+        assistant_text=first_text,
+        response=_response(first_text, session_id="first-session"),
+        delivered=True,
+        completion_path="background",
+    )
+    reply = _item(
+        request_id="req-reply",
+        source="text",
+        prompt="A",
+        summary="A",
+    )
+
+    binding = runtime_cross_session.capture_reply_target(runtime, reply)
+
+    second_item = _item(request_id="req-second-scheduler")
+    second_text = "Reply with a letter:\nA — Later action"
+    runtime_cross_session.record_turn_result(
+        runtime,
+        second_item,
+        assistant_text=second_text,
+        response=_response(second_text, session_id="second-session"),
+        delivered=True,
+        completion_path="background",
+    )
+    _begin(runtime, reply)
+    prompt = runtime_cross_session.prepare_reply_binding(runtime, reply, reply.prompt)
+
+    assert binding is not None
+    assert binding["request_id"] == "req-first-scheduler"
+    assert "First visible action" in prompt
+    assert "Later action" not in prompt
+    assert runtime.current_request_meta["resume_session_id"] == "first-session"
+
+
 def test_newer_primary_choice_prevents_stale_scheduler_choice_binding(tmp_path):
     runtime = _runtime(tmp_path)
     scheduler_item = _item()
