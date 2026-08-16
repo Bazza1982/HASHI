@@ -388,6 +388,45 @@ raise SystemExit(2)
         manager.close()
 
 
+def test_existing_stable_manager_hot_upgrade_preserves_live_state(
+    tmp_path: Path,
+) -> None:
+    code_root = tmp_path / "hashi"
+    code_root.mkdir()
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(code_root=code_root, bridge_home=tmp_path / "home"),
+        runtimes=[],
+    )
+    manager = HERRebuildManager(kernel)
+    manager._manager_lock.release()
+    del manager._manager_lock
+    legacy_class = type("LegacyHERRebuildManager", (), {})
+    manager.__class__ = legacy_class
+    created = manager.jobs.create(
+        source_fingerprint="a" * 64,
+        target_agent="lily",
+        actor_id="owner",
+        origin={"chat_id": "1"},
+    )
+    active_task = SimpleNamespace(done=lambda: False)
+    manager._tasks[created.job_id] = active_task
+
+    upgraded = HERRebuildManager.upgrade_existing(manager)
+    owner_lock = upgraded._manager_lock
+    upgraded_again = HERRebuildManager.upgrade_existing(upgraded)
+
+    assert upgraded is manager
+    assert upgraded.__class__ is HERRebuildManager
+    assert upgraded.jobs.get(created.job_id).state == RebuildStage.ACCEPTED
+    assert upgraded._tasks[created.job_id] is active_task
+    assert owner_lock.acquired is True
+    assert upgraded_again is upgraded
+    assert upgraded_again._manager_lock is owner_lock
+
+    upgraded._tasks.clear()
+    upgraded.close()
+
+
 def test_manager_reconciles_interrupted_selection_before_agent_startup(
     tmp_path: Path, monkeypatch
 ) -> None:

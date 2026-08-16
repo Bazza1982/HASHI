@@ -80,7 +80,12 @@ def build_hot_manager_bundle(
     return bundle
 
 
-def install_hot_manager_bundle(kernel, bundle: dict[str, object]) -> None:
+def install_hot_manager_bundle(
+    kernel,
+    bundle: dict[str, object],
+    *,
+    module_loader: Callable[[str], ModuleType] = importlib.import_module,
+) -> None:
     expected = {spec.attribute for spec in HOT_MANAGER_SPECS}
     if set(bundle) != expected:
         missing = sorted(expected - set(bundle))
@@ -88,14 +93,25 @@ def install_hot_manager_bundle(kernel, bundle: dict[str, object]) -> None:
         raise ValueError(f"Invalid manager bundle; missing={missing}, extra={extra}")
 
     # Construct every missing stable manager before mutating the hot bundle.
-    # An existing instance is never replaced: an in-flight /rebuild owns state
-    # and tasks that must outlive the targeted /reboot it requests.
+    # Existing instances are upgraded in place: an in-flight /rebuild owns
+    # state and tasks that must outlive the targeted /reboot it requests.
     stable_additions: dict[str, object] = {}
     for spec in STABLE_MANAGER_SPECS:
-        if hasattr(kernel, spec.attribute):
-            continue
-        module = importlib.import_module(spec.module)
+        module = module_loader(spec.module)
         manager_class = getattr(module, spec.class_name)
+        existing = getattr(kernel, spec.attribute, None)
+        if existing is not None:
+            upgrader = getattr(manager_class, "upgrade_existing", None)
+            if not callable(upgrader):
+                raise TypeError(
+                    f"Stable manager {spec.attribute!r} does not support hot upgrade"
+                )
+            upgraded = upgrader(existing)
+            if upgraded is not existing:
+                raise ValueError(
+                    f"Stable manager {spec.attribute!r} hot upgrade replaced its instance"
+                )
+            continue
         stable_additions[spec.attribute] = _construct_manager(
             spec,
             manager_class,

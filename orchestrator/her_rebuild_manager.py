@@ -839,6 +839,47 @@ class HERRebuildManager:
     restart cannot destroy the task that requested it.
     """
 
+    @classmethod
+    def upgrade_existing(cls, manager: Any) -> HERRebuildManager:
+        """Adopt reloaded code without replacing live jobs or asyncio tasks."""
+        required = (
+            "state_root",
+            "jobs",
+            "candidates",
+            "selection",
+            "controller",
+            "verifier",
+            "_submit_lock",
+            "_tasks",
+        )
+        missing = [name for name in required if not hasattr(manager, name)]
+        if missing:
+            raise HERRebuildError(
+                FailureKind.INTERNAL_ERROR,
+                RebuildStage.SOURCE_PREFLIGHT,
+                f"Existing HER rebuild manager cannot be hot-upgraded; missing={missing}",
+            )
+
+        owner_lock = getattr(manager, "_manager_lock", None)
+        installed_lock = False
+        if not bool(getattr(owner_lock, "acquired", False)):
+            owner_lock = HERManagerLock(Path(manager.state_root) / "manager.lock")
+            owner_lock.acquire()
+            manager._manager_lock = owner_lock
+            installed_lock = True
+        try:
+            manager.__class__ = cls
+        except (AttributeError, TypeError) as exc:
+            if installed_lock:
+                owner_lock.release()
+                del manager._manager_lock
+            raise HERRebuildError(
+                FailureKind.INTERNAL_ERROR,
+                RebuildStage.SOURCE_PREFLIGHT,
+                f"Existing HER rebuild manager class migration failed: {type(exc).__name__}: {exc}",
+            ) from exc
+        return manager
+
     def __init__(
         self,
         kernel: Any,

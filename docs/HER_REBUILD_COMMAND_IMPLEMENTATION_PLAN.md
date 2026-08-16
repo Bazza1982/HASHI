@@ -368,6 +368,16 @@ interrupted and reconcile any interrupted adoption state. Lock-file PID and
 manager-ID fields are diagnostic metadata—the OS lock, not PID reuse or a
 heartbeat timeout, is authoritative.
 
+The stable Manager survives `/reboot`, but its code is not allowed to become
+stale. After project modules reload, the manager registry invokes the reloaded
+class's `upgrade_existing()` hook on the same live object. The migration is
+idempotent: it preserves the job store, candidates, selections, notification
+state, submission lock and all in-flight asyncio tasks; acquires the new owner
+lock when an older instance lacks it; then adopts the reloaded class contract
+without constructing a second coordinator. Consequently this Python lifecycle
+repair is adoptable through ordinary `/reboot`; a full process `/restart` is
+not required.
+
 The slash-command handler should be shared through the hot-reloadable command
 registry so flexible and fixed runtimes do not gain separate implementations.
 It only authenticates, captures the reply target and submits/queries the
@@ -964,6 +974,8 @@ Update:
 - status against an absent state root creates no files or directories;
 - a second live manager is rejected before recovery, while a replacement after
   owner exit still performs the intended interrupted-job recovery.
+- `/reboot` upgrades the existing stable Manager in place, retains an in-flight
+  task by identity and does not construct a competing coordinator.
 
 ### 23.5 Quick verification
 
