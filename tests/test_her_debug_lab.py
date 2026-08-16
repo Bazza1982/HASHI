@@ -10,10 +10,18 @@ import pytest
 
 from tools.her_debug.cleanup import CleanupGuard, UnsafeCleanupTarget
 from tools.her_debug.evidence import EvidenceCollector
-from tools.her_debug.lab import HerDebugLab, _optional_file_baseline
-from tools.her_debug.scripted_provider import EXACT_FINAL_FRAGMENTS, EXACT_REASONING_FRAGMENTS, ScriptedProvider
+from tools.her_debug.lab import (
+    HerDebugLab,
+    _json,
+    _optional_file_baseline,
+    _resolve_candidate_binary,
+)
+from tools.her_debug.scripted_provider import (
+    EXACT_FINAL_FRAGMENTS,
+    EXACT_REASONING_FRAGMENTS,
+    ScriptedProvider,
+)
 from tools.her_debug.step_state import SequentialStepState, StepProtocolError
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -85,6 +93,38 @@ def test_optional_operator_baseline_is_clone_portable_and_content_free(tmp_path:
     assert baseline["present"] is True
     assert len(str(baseline["sha256"])) == 64
     assert "do-not-copy" not in json.dumps(baseline)
+
+
+def test_debug_lab_reads_windows_utf8_bom_json(tmp_path: Path) -> None:
+    path = tmp_path / "agents.json"
+    path.write_text('\ufeff{"agents": []}\n', encoding="utf-8")
+
+    assert _json(path) == {"agents": []}
+
+
+def test_debug_lab_prefers_staged_candidate_and_records_its_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged = tmp_path / "hashi-her"
+    staged.write_bytes(b"staged candidate")
+    monkeypatch.setenv("HASHI_HER_STAGED_BINARY", str(staged))
+    monkeypatch.delenv("HASHI_HER_STAGED_SHA256", raising=False)
+    manifest = {
+        "binaries": {
+            "linux-x86_64": {
+                "path": "releases/active/linux-x86_64/hashi-her",
+                "sha256": "0" * 64,
+            }
+        }
+    }
+
+    candidate = _resolve_candidate_binary(manifest)
+
+    assert candidate.path == staged.resolve()
+    assert candidate.selection == "staged_environment"
+    assert candidate.sha256 == "8143c85d18fc42e62d559f75df23c59b3439ccbd0be50316bd4523716bd06d47"
+    assert candidate.expected_sha256 is None
 
 
 def test_evidence_collector_redacts_keys_values_and_key_like_strings(tmp_path: Path) -> None:
