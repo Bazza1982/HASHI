@@ -296,6 +296,42 @@ def test_manager_reconciles_interrupted_selection_before_agent_startup(
     assert reconciled[0].details["cold_start_reconciled"] is True
 
 
+async def test_submit_rejects_live_non_her_target_before_toolchain_probe(
+    tmp_path: Path, monkeypatch
+) -> None:
+    code_root = tmp_path / "hashi"
+    code_root.mkdir()
+    runtime = SimpleNamespace(
+        name="lily",
+        config=SimpleNamespace(active_backend="codex-cli"),
+    )
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(code_root=code_root, bridge_home=tmp_path / "home"),
+        runtimes=[runtime],
+    )
+    manager = HERRebuildManager(kernel)
+    probed = False
+
+    async def unexpected_probe():
+        nonlocal probed
+        probed = True
+
+    monkeypatch.setattr(
+        "orchestrator.her_rebuild_manager.inspect_toolchain", unexpected_probe
+    )
+
+    with pytest.raises(HERRebuildError) as caught:
+        await manager.submit(
+            target_agent="lily",
+            actor_id="owner",
+            origin={"chat_id": "123"},
+        )
+
+    assert caught.value.failure_kind == FailureKind.REBOOT_REJECTED
+    assert "switch that Agent to HER" in str(caught.value)
+    assert probed is False
+
+
 async def test_manager_builds_verifies_adopts_and_notifies_transactionally(
     tmp_path: Path,
 ) -> None:

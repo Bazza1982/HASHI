@@ -841,6 +841,7 @@ class HERRebuildManager:
         origin: Mapping[str, Any],
     ) -> tuple[RebuildJobRecord, bool]:
         async with self._submit_lock:
+            self._assert_target_uses_her(target_agent)
             target = detect_host_target()
             toolchain = await inspect_toolchain()
             fingerprint = compute_source_fingerprint(
@@ -1095,6 +1096,27 @@ class HERRebuildManager:
             ),
             None,
         )
+
+    def _assert_target_uses_her(self, agent_name: str) -> None:
+        """Reject live non-HER targets before spending time in Cargo.
+
+        A missing runtime remains valid for the offline build-only entry point;
+        its verified candidate is retained with activation deferred.  A live
+        Agent, however, can only prove adoption when HER is its active backend.
+        """
+        runtime = self._runtime(agent_name)
+        if runtime is None:
+            return
+        engine = str(
+            getattr(getattr(runtime, "config", None), "active_backend", "") or ""
+        ).strip().lower()
+        if engine != "her":
+            raise HERRebuildError(
+                FailureKind.REBOOT_REJECTED,
+                RebuildStage.SOURCE_PREFLIGHT,
+                f"Target Agent {agent_name!r} uses backend {engine or 'unknown'!r}; "
+                "switch that Agent to HER before running /rebuild.",
+            )
 
     @staticmethod
     def _backend(runtime: Any) -> Any | None:

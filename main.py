@@ -45,11 +45,6 @@ class UniversalOrchestrator:
             self,
             build_hot_manager_bundle(self, _handler),
         )
-        # Deliberately kernel-owned rather than part of the hot-manager bundle:
-        # the coordinator must survive the targeted restart it requests.
-        from orchestrator.her_rebuild_manager import HERRebuildManager
-
-        self.her_rebuild_manager = HERRebuildManager(self)
         self.workbench_api = None
         self.api_gateway = None
         self.scheduler = None
