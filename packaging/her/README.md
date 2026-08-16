@@ -23,13 +23,14 @@ is accepted only as a migration alias.
 
 | Platform | Runtime | Source | Status |
 | --- | --- | --- | --- |
-| Linux x86-64 | `0.1.0-hashi.22` | `759cb1abec7ae2dea2756b79206bb67a7d053c14` | Current certified HASHI1 package |
-| Windows x86-64 | `0.1.0-hashi.22` | `759cb1abec7ae2dea2756b79206bb67a7d053c14` | Native build and local-command smoke certified |
+| Linux x86-64 | `0.1.0-hashi.22` | `246b04e9fa28ef0b6f74c2d924ab3697b95197bd` | Current certified HASHI1 package |
+| Windows x86-64 | `0.1.0-hashi.22` | `246b04e9fa28ef0b6f74c2d924ab3697b95197bd` | Native build and local-command smoke certified |
 
-The certified Linux `.22` SHA-256 digest is
-`5fc51f4c9e9e90c7f00516d3fd0c3a585c685c1e620a2cc2d2966cb02aa46dea`.
+The selected revision is certified by tag
+`her-0.1.0-hashi.22-certified-r2`. The certified Linux `.22` SHA-256 digest is
+`e6c88b9dd37c9191f9aad0df9fd0cf9bbeb4365778a10153a48b4cf752096c91`.
 The native Windows `.22` SHA-256 digest is
-`9c954f60bd1e4948410fb7fd0928dc323235f117e765112ae588c2b8150e2d3b`.
+`cd127b283d0bb8aa5db9d1863a617bb84a2c8cd0174ed305c72c5f97b294724d`.
 Its embedded Git SHA is the same pinned source commit, and native `version`,
 `doctor`, `status`, and `prompt --help` stdin-capability smokes passed.
 

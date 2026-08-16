@@ -24,6 +24,28 @@ def test_her_certification_baseline_matches_packaged_manifest():
     assert HER_VERSION == manifest["version"]
 
 
+def test_active_her_identity_docs_match_packaged_manifest():
+    root = PROJECT_ROOT / "hashi_assets" / "her"
+    manifest = _load(root / "manifest.json")
+    evidence = _load(root / manifest["certification_evidence"])
+    identity_values = {
+        manifest["version"],
+        manifest["source_commit"],
+        evidence["source"]["certified_tag"],
+        *(row["sha256"] for row in manifest["binaries"].values()),
+    }
+
+    for relative_path in (
+        Path("packaging/her/README.md"),
+        Path("docs/HER_BACKEND_CONTRACT.md"),
+    ):
+        contents = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
+        for value in identity_values:
+            assert value in contents, (
+                f"{relative_path} is missing active HER identity {value}"
+            )
+
+
 def test_packaged_her_binaries_match_manifest_digests():
     root = PROJECT_ROOT / "hashi_assets" / "her"
     manifest = _load(root / "manifest.json")

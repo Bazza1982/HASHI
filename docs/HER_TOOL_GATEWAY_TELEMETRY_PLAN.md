@@ -1,10 +1,10 @@
 # HASHI Engine Runtime (HER) Tool Gateway And Telemetry Plan
 
-Status: active implementation for packaged HER `0.1.0-hashi.19`; remaining telemetry and
-platform-specific live rollout work is tracked below
+Status: active maintenance record for certified HER `0.1.0-hashi.22`; the original
+`.19` implementation milestones remain below as dated history
 Owner: HASHI
 Created: 2026-05-23
-Updated: 2026-08-14
+Updated: 2026-08-16
 
 HER is derived from the MIT-licensed Claw runtime. Upstream Claw names are
 retained below only for source, protocol, environment, and license references.
@@ -24,22 +24,23 @@ Related docs:
 The original problem and architecture sections below are retained as the design
 record. They are no longer a description of the pre-Gateway runtime:
 
-- packaged Linux and Windows x86-64 HER `0.1.0-hashi.19` binaries are pinned by
+- packaged Linux and Windows x86-64 HER `0.1.0-hashi.22` binaries are pinned by
   manifest, source provenance, target triple, and SHA-256;
 - the per-agent owner-only GatewayContext and required MCP stdio server are
   implemented around the canonical ToolRegistry, including permission checks,
   audit, argument validation, loop guards, and Browser tools;
 - `stream-json`, session ID capture/resume, structured tool/progress/usage
   events, exact reasoning fragments, and incomplete-run diagnostics are active;
-- `.10` preserves canonical MCP images, and the HASHI Gateway also normalizes
-  the reviewed legacy screenshot result shapes;
+- the current `.22` line retains `.10`'s canonical MCP image support, and the
+  HASHI Gateway also normalizes the reviewed legacy screenshot result shapes;
 - `media_read` supplies bounded image/PDF/audio/video content without storing
   raw base64 in normal session output.
 
 Session-mode control for Flex/composed turns and adapter-owned Habit-pipeline
-mutual exclusion are implemented with regression coverage. Remaining gates are
-live post-reboot multimedia/Habit/session evidence, complete reasoning-token
-source persistence, and platform-specific live rollout evidence.
+mutual exclusion are implemented with regression coverage. Certification evidence now
+includes cross-layer media and the Momo r2 Ultra canary. Remaining items in this plan
+are telemetry completeness and route- or platform-specific live evidence not already
+recorded; they do not downgrade the selected `.22` package's certification status.
 
 ## Decision
 
