@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from datetime import datetime
+from time import monotonic
 from typing import Any
 
 from telegram import constants
@@ -94,7 +94,7 @@ async def send_long_message(
         )
         return 0.0, 0
 
-    send_started = datetime.now()
+    send_started = monotonic()
     tg_max_len = 4096
     chunk_count = 0
 
@@ -163,12 +163,12 @@ async def send_long_message(
             disable_notification=disable_notification(runtime),
         )
         if not sent:
-            return (datetime.now() - send_started).total_seconds(), 0
+            return max(0.0, monotonic() - send_started), 0
         runtime.telegram_logger.info(
             f"Sent Telegram message for request_id={request_id or '<none>'} "
             f"(purpose=error, chunks=1, text_len={len(msg)})"
         )
-        return (datetime.now() - send_started).total_seconds(), 1
+        return max(0.0, monotonic() - send_started), 1
 
     html = _md_to_html(text)
 
@@ -221,12 +221,12 @@ async def send_long_message(
     if len(html) <= tg_max_len:
         chunk_count = 1
         if not await _send_chunk(text, html, chunk_count):
-            return (datetime.now() - send_started).total_seconds(), 0
+            return max(0.0, monotonic() - send_started), 0
         runtime.telegram_logger.info(
             f"Sent Telegram message for request_id={request_id or '<none>'} "
             f"(purpose={purpose}, chunks={chunk_count}, text_len={len(text)})"
         )
-        return (datetime.now() - send_started).total_seconds(), chunk_count
+        return max(0.0, monotonic() - send_started), chunk_count
 
     raw_chunks, html_chunks = [], []
     raw_remain, html_remain = text, html
@@ -249,12 +249,12 @@ async def send_long_message(
 
     for chunk_count, (rc, hc) in enumerate(zip(raw_chunks, html_chunks), start=1):
         if not await _send_chunk(rc, hc, chunk_count):
-            return (datetime.now() - send_started).total_seconds(), chunk_count - 1
+            return max(0.0, monotonic() - send_started), chunk_count - 1
     runtime.telegram_logger.info(
         f"Sent Telegram message for request_id={request_id or '<none>'} "
         f"(purpose={purpose}, chunks={chunk_count}, text_len={len(text)})"
     )
-    return (datetime.now() - send_started).total_seconds(), chunk_count
+    return max(0.0, monotonic() - send_started), chunk_count
 
 
 async def typing_loop(runtime: Any, chat_id: int, stop_event: asyncio.Event):

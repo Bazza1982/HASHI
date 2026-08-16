@@ -90,6 +90,23 @@ async def test_send_long_message_sends_html_by_default(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_send_long_message_elapsed_uses_monotonic_clock(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    ticks = iter((100.0, 100.25))
+    monkeypatch.setattr(runtime_delivery, "monotonic", lambda: next(ticks))
+
+    elapsed, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="hello",
+        request_id="req-monotonic",
+    )
+
+    assert chunks == 1
+    assert elapsed == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
 async def test_send_long_message_respects_notify_on(tmp_path):
     runtime = _runtime(tmp_path)
     runtime._notify_enabled = True

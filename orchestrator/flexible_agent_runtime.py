@@ -7156,7 +7156,7 @@ class FlexibleAgentRuntime:
             events: Optional[int] = None
             if backend is not None:
                 if getattr(backend, "last_activity_at", 0) > 0:
-                    idle_s = int(time.time() - backend.last_activity_at)
+                    idle_s = int(backend._last_activity_age())
                 line_count = getattr(backend, "output_line_count", 0)
                 if line_count > 0:
                     events = line_count
@@ -7257,7 +7257,7 @@ class FlexibleAgentRuntime:
         HEARTBEAT_INTERVAL = display_policy.heartbeat_interval_s
         MAX_EDITS = display_policy.max_edits_per_request
         last_edit_at = 0.0
-        started = time.time()
+        started = time.monotonic()
         last_heartbeat_at = started
         dirty = False
         edit_attempts = 0
@@ -7278,7 +7278,7 @@ class FlexibleAgentRuntime:
         }
 
         def _build_display() -> str:
-            elapsed = int(time.time() - started)
+            elapsed = max(0, int(time.monotonic() - started))
             return _streaming_status_to_html(
                 self.name,
                 engine,
@@ -7309,7 +7309,7 @@ class FlexibleAgentRuntime:
                     text=text,
                     parse_mode="HTML",
                 )
-                last_edit_at = time.time()
+                last_edit_at = time.monotonic()
                 dirty = False
             except Exception as exc:
                 if isinstance(exc, RetryAfter):
@@ -7330,10 +7330,10 @@ class FlexibleAgentRuntime:
                         f"Streaming display disabled for {request_id}: {exc}"
                     )
                 elif "message to edit not found" in str(exc).lower() or "message is not modified" in str(exc).lower():
-                    last_edit_at = time.time()
+                    last_edit_at = time.monotonic()
                     dirty = False
                 else:
-                    last_edit_at = time.time()
+                    last_edit_at = time.monotonic()
                     dirty = False
                     self.telegram_logger.warning(
                         f"Streaming display edit failed for {request_id}: {exc}"
@@ -7359,7 +7359,7 @@ class FlexibleAgentRuntime:
 
                 dirty = True
             except asyncio.TimeoutError:
-                now = time.time()
+                now = time.monotonic()
                 if (now - last_heartbeat_at) >= HEARTBEAT_INTERVAL:
                     heartbeat = f"📊 Still working... ({int(now - started)}s)"
                     if buffer and buffer[-1].startswith("📊 Still working..."):
@@ -7369,12 +7369,12 @@ class FlexibleAgentRuntime:
                     last_heartbeat_at = now
                     dirty = True
 
-            now = time.time()
+            now = time.monotonic()
             if dirty and (now - last_edit_at) >= MIN_EDIT_INTERVAL:
                 await _edit_placeholder()
 
         if buffer:
-            elapsed = int(time.time() - started)
+            elapsed = max(0, int(time.monotonic() - started))
             buffer.append(f"✅ Done ({elapsed}s)")
             await _edit_placeholder()
 
@@ -7968,7 +7968,7 @@ class FlexibleAgentRuntime:
                 self.handoff_builder.refresh_recent_context()
                 self.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
                 _print_final_response(self.name, visible_text)
-                total_s = (datetime.now() - datetime.fromisoformat(item.created_at)).total_seconds()
+                total_s = runtime_pipeline.queued_elapsed_s(item)
                 await self._send_wrapper_verbose_trace(item, safe_core_raw, visible_text, wrapper_result)
                 send_elapsed_s, chunk_count = await self.send_long_message(
                     chat_id=item.chat_id,

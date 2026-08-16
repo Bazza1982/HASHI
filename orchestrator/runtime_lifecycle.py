@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
-from datetime import datetime
 from typing import Any
 
 from orchestrator import runtime_pipeline
@@ -88,6 +88,7 @@ async def process_queue(runtime: Any) -> None:
             queue_start = runtime_pipeline.begin_queue_item(runtime, item)
             is_bridge_request = queue_start.is_bridge_request
             queued_at = queue_start.queued_at
+            queued_monotonic = queue_start.queued_monotonic
             queue_wait_s = queue_start.queue_wait_s
             remote_backend_block = runtime._remote_backend_block_reason(item.source)
             if remote_backend_block:
@@ -132,7 +133,7 @@ async def process_queue(runtime: Any) -> None:
                 audit_active=audit_active,
             )
             response = generation.response
-            backend_started = generation.backend_started
+            backend_started_monotonic = generation.backend_started_monotonic
 
             if generation.detached:
                 if feedback.stop_typing and feedback.typing_task:
@@ -163,7 +164,9 @@ async def process_queue(runtime: Any) -> None:
                 runtime._log_maintenance(item, "bg_detached", detach_after_s=generation.detach_after_s)
                 continue
 
-            backend_elapsed = (datetime.now() - backend_started).total_seconds()
+            backend_elapsed = max(
+                0.0, time.monotonic() - backend_started_monotonic
+            )
             runtime_pipeline.log_backend_finished(
                 runtime,
                 item,
@@ -248,6 +251,7 @@ async def process_queue(runtime: Any) -> None:
                         audit_collector=audit_collector,
                         answer_stream_state=feedback.answer_stream_state,
                         her_message_router=feedback.her_message_router,
+                        queued_monotonic=queued_monotonic,
                     )
             else:
                 from orchestrator.runtime_control import consume_user_interrupt
@@ -273,6 +277,7 @@ async def process_queue(runtime: Any) -> None:
                     queue_wait_s=queue_wait_s,
                     backend_elapsed_s=backend_elapsed,
                     user_interrupt_reason=interrupt_reason,
+                    queued_monotonic=queued_monotonic,
                 )
 
         except asyncio.CancelledError:

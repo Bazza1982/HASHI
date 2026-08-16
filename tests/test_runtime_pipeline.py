@@ -350,6 +350,24 @@ def test_begin_queue_item_records_processing_metadata():
     assert runtime.maintenance_events[0][0] == "processing"
 
 
+def test_begin_queue_item_uses_monotonic_queue_age(monkeypatch):
+    runtime = _runtime()
+    item = _item(queued_monotonic=40.0)
+    monkeypatch.setattr(runtime_pipeline.time, "monotonic", lambda: 42.5)
+
+    start = runtime_pipeline.begin_queue_item(runtime, item)
+
+    assert start.queued_monotonic == 40.0
+    assert start.queue_wait_s == pytest.approx(2.5)
+
+
+def test_queued_elapsed_uses_monotonic_clock(monkeypatch):
+    item = _item(queued_monotonic=40.0)
+    monkeypatch.setattr(runtime_pipeline.time, "monotonic", lambda: 43.0)
+
+    assert runtime_pipeline.queued_elapsed_s(item) == pytest.approx(3.0)
+
+
 @pytest.mark.asyncio
 async def test_build_turn_prompt_collects_context_sections_and_updates_audit_state():
     runtime = _runtime()
@@ -785,6 +803,7 @@ async def test_medium_claw_sends_one_visible_task_acknowledgement():
 
     async def _send_text(chat_id, text, **kwargs):
         sent.append((chat_id, text, kwargs))
+        return SimpleNamespace(message_id=len(sent))
 
     runtime._send_text = _send_text
     feedback = await runtime_pipeline.setup_interactive_feedback(
@@ -810,7 +829,98 @@ async def test_medium_claw_sends_one_visible_task_acknowledgement():
     assert sent[0][0] == 123
     assert sent[0][2]["_purpose"] == "task_acknowledgement"
     assert any("acknowledgement policy" in message for message in runtime.logger.messages)
-    assert any("acknowledgement delivered" in message for message in runtime.logger.messages)
+    assert any(
+        "acknowledgement accepted by transport" in message
+        for message in runtime.logger.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_her_message_audit_preserves_exact_commentary_and_transport_status():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.current_backend.effort = "ultra"
+    exact_text = "了解しました。計画の作成を開始しますね。\n次の確認段階で報告します。"
+
+    async def _send_text(_chat_id, _text, **_kwargs):
+        return SimpleNamespace(message_id=91)
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+    await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_COMMENTARY,
+            summary=exact_text,
+            event_id="ultra-run:persona:planning:started",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_ultra",
+            phase="planning",
+            provenance="persona_renderer",
+            detail="persona_renderer_fallback=false",
+        )
+    )
+
+    audit_path = runtime.workspace_dir / "backend_state" / "her_message_audit.jsonl"
+    records = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["status"] for record in records] == [
+        "generated",
+        "transport_accepted",
+    ]
+    assert records[0]["text"] == exact_text
+    assert records[0]["text_sha256"] == records[1]["text_sha256"]
+    assert records[0]["provenance"] == "persona_renderer"
+    assert records[0]["detail"] == "persona_renderer_fallback=false"
+    assert audit_path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_her_message_audit_does_not_report_missing_transport_receipt_as_sent():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.current_backend.effort = "high"
+
+    async def _send_text(_chat_id, _text, **_kwargs):
+        return None
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+    await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_COMMENTARY,
+            summary="Still working.",
+            event_id="req-1:commentary:1",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_planner",
+            phase="execution",
+        )
+    )
+
+    records = [
+        json.loads(line)
+        for line in (
+            runtime.workspace_dir / "backend_state" / "her_message_audit.jsonl"
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [record["status"] for record in records] == ["generated", "not_sent"]
+    assert not any(
+        "task_commentary accepted by transport" in message
+        for message in runtime.logger.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -947,6 +1057,23 @@ async def test_her_commentary_off_suppresses_acknowledgement_and_progress_live()
     )
 
     assert sent == []
+    records = [
+        json.loads(line)
+        for line in (
+            runtime.workspace_dir / "backend_state" / "her_message_audit.jsonl"
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [record["status"] for record in records] == [
+        "generated",
+        "suppressed",
+        "generated",
+        "suppressed",
+    ]
+    assert {record.get("reason") for record in records if record["status"] == "suppressed"} == {
+        "commentary_disabled"
+    }
 
 
 @pytest.mark.asyncio
