@@ -15,7 +15,11 @@ import pytest
 from PIL import Image
 
 from adapters.claw_cli import ClawCLIAdapter
-from tools.gateway.context import load_gateway_context, write_gateway_context
+from tools.gateway.context import (
+    live_workbench_api_base_url,
+    load_gateway_context,
+    write_gateway_context,
+)
 from tools.gateway.mcp_stdio import (
     ToolGateway,
     _bridge_legacy_screenshot_output,
@@ -59,6 +63,40 @@ def test_gateway_context_is_owner_only_and_reconstructs_registry(tmp_path):
     assert "global_config" not in loaded.audit
 
 
+def test_gateway_context_uses_running_workbench_bind_host(tmp_path):
+    global_config = SimpleNamespace(api_host="127.0.0.1", workbench_port=18800)
+    server = SimpleNamespace(
+        bind_host="10.255.255.254",
+        global_config=global_config,
+    )
+    runtime = SimpleNamespace(
+        orchestrator=SimpleNamespace(workbench_api=server),
+    )
+    registry = ToolRegistry(
+        allowed_tools=["background_job_list"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={"agent_name": "momo", "_runtime": runtime},
+    )
+
+    base_url = live_workbench_api_base_url(registry, global_config)
+    assert base_url == "http://10.255.255.254:18800"
+
+    context_path = tmp_path / "live-workbench-context.json"
+    write_gateway_context(
+        registry,
+        context_path,
+        workbench_api_base_url=base_url,
+    )
+    loaded = load_gateway_context(context_path)
+    rebuilt = loaded.build_registry()
+    assert loaded.schema_version == 4
+    assert loaded.workbench_api_base_url == base_url
+    assert rebuilt.audit_context["workbench_api_base_url"] == base_url
+    assert "_runtime" not in loaded.audit
+
+
 def test_gateway_namespaces_hashi_filesystem_and_hides_unqualified_authorities(tmp_path):
     gateway = ToolGateway(load_gateway_context(_write_context(_registry(tmp_path), tmp_path)))
 
@@ -77,6 +115,25 @@ def test_gateway_context_rejects_group_readable_secret_snapshot(tmp_path):
 
     with pytest.raises(PermissionError, match="owner-only"):
         load_gateway_context(path)
+
+
+def test_gateway_context_loads_schema_v3_scheduler_endpoint_as_workbench_compat(tmp_path):
+    path = tmp_path / "legacy-context.json"
+    write_gateway_context(
+        _registry(tmp_path),
+        path,
+        workbench_api_base_url="http://127.0.0.1:18800",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 3
+    payload.pop("workbench_api_base_url")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o600)
+
+    loaded = load_gateway_context(path)
+    registry = loaded.build_registry()
+
+    assert registry.audit_context["workbench_api_base_url"] == "http://127.0.0.1:18800"
 
 
 def test_mcp_lsp_frame_round_trip():
@@ -122,7 +179,7 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
             "hashi_scheduler_run_history",
             "hashi_scheduler_rerun",
         },
-        scheduler_api_base_url="http://127.0.0.1:18800",
+        workbench_api_base_url="http://10.255.255.254:18800",
     )
     gateway = ToolGateway(load_gateway_context(context_path))
     calls = []
@@ -145,7 +202,7 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
     assert '"authority": "HASHI Scheduler"' in listed["content"][0]["text"]
     assert calls[-1] == (
         "GET",
-        "http://127.0.0.1:18800/api/agents/momo/scheduler/jobs?kind=cron",
+        "http://10.255.255.254:18800/api/agents/momo/scheduler/jobs?kind=cron",
         None,
     )
 
@@ -161,7 +218,7 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
     assert rerun["isError"] is False
     assert calls[-1] == (
         "POST",
-        "http://127.0.0.1:18800/api/agents/momo/jobs/run",
+        "http://10.255.255.254:18800/api/agents/momo/jobs/run",
         {
             "kind": "cron",
             "job_id": "daily",
@@ -169,6 +226,119 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
             "authorization": "explicit_user_authorization",
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_gateway_background_jobs_use_serialized_workbench_api(tmp_path, monkeypatch):
+    registry = ToolRegistry(
+        allowed_tools=[
+            "background_job_start",
+            "background_job_status",
+            "background_job_tail",
+            "background_job_cancel",
+            "background_job_list",
+        ],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={"agent_name": "momo"},
+    )
+    context_path = tmp_path / "background-context.json"
+    write_gateway_context(
+        registry,
+        context_path,
+        workbench_api_base_url="http://10.255.255.254:18800",
+    )
+    gateway = ToolGateway(load_gateway_context(context_path))
+    calls = []
+    record = {
+        "job_id": "job-http",
+        "state": "running",
+        "returncode": None,
+        "created_at": "2026-08-17T09:00:00Z",
+        "updated_at": "2026-08-17T09:00:00Z",
+        "ended_at": None,
+        "error": None,
+        "command": {"display": "python wiki.py"},
+        "logs": {"stdout_path": "/tmp/stdout", "stderr_path": "/tmp/stderr"},
+        "notification": {"delivered": False},
+    }
+
+    async def fake_request(method, url, *, payload=None, timeout_seconds=30):
+        calls.append((method, url, payload, timeout_seconds))
+        if url.endswith("/tail?stream=stdout&lines=25"):
+            return 200, {"ok": True, "tail": "wiki completed"}
+        if url.endswith("/cancel"):
+            return 200, {"ok": True, "job": {**record, "state": "cancelled"}}
+        if url.endswith("/job-http"):
+            return 200, {"ok": True, "job": record}
+        if method == "POST":
+            return 201, {"ok": True, "job": record}
+        return 200, {"ok": True, "jobs": [record]}
+
+    monkeypatch.setattr("tools.builtins.request_workbench_json", fake_request)
+
+    started = await gateway.call(
+        "background_job_start",
+        {"command": "python wiki.py", "cwd": "."},
+        "bg-start",
+    )
+    status = await gateway.call(
+        "background_job_status",
+        {"job_id": "job-http"},
+        "bg-status",
+    )
+    tail = await gateway.call(
+        "background_job_tail",
+        {"job_id": "job-http", "lines": 25},
+        "bg-tail",
+    )
+    cancelled = await gateway.call(
+        "background_job_cancel",
+        {"job_id": "job-http"},
+        "bg-cancel",
+    )
+    listed = await gateway.call(
+        "background_job_list",
+        {"agent": "momo", "limit": 5},
+        "bg-list",
+    )
+
+    assert all(
+        result["isError"] is False
+        for result in (started, status, tail, cancelled, listed)
+    )
+    assert '"job_id": "job-http"' in started["content"][0]["text"]
+    assert "wiki completed" in tail["content"][0]["text"]
+    assert '"state": "cancelled"' in cancelled["content"][0]["text"]
+    assert calls[0][0:2] == (
+        "POST",
+        "http://10.255.255.254:18800/api/background-jobs",
+    )
+    assert calls[-1][0:2] == (
+        "GET",
+        "http://10.255.255.254:18800/api/background-jobs?limit=5&agent=momo",
+    )
+    assert calls[0][2]["agent"] == "momo"
+    assert calls[0][2]["cwd"] == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_gateway_background_jobs_report_missing_workbench_context(tmp_path):
+    registry = ToolRegistry(
+        allowed_tools=["background_job_list"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={"agent_name": "momo"},
+    )
+    gateway = ToolGateway(load_gateway_context(_write_context(registry, tmp_path)))
+
+    result = await gateway.call("background_job_list", {}, "bg-list")
+
+    assert result["isError"] is True
+    assert "Workbench API is unavailable in this gateway context" in result["content"][0]["text"]
+    assert "BackgroundJobManager is not running" not in result["content"][0]["text"]
 
 
 def _write_context(registry: ToolRegistry, tmp_path: Path) -> Path:

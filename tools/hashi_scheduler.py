@@ -4,48 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Mapping
-from urllib.parse import quote, urlencode, urlparse
+from collections.abc import Mapping
+from typing import Any
+from urllib.parse import quote, urlencode
 
 import aiohttp
 
+from tools.workbench_client import request_workbench_json, workbench_endpoint
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_request_json = request_workbench_json
 
 
 def _scheduler_endpoint(audit_context: Mapping[str, Any] | None) -> tuple[str, str]:
-    context = audit_context or {}
-    agent = str(context.get("agent_name") or "").strip()
-    raw_base_url = str(context.get("scheduler_api_base_url") or "").strip().rstrip("/")
-    if not agent:
-        raise ValueError("HASHI Scheduler agent identity is unavailable")
-    if not raw_base_url:
-        raise ValueError("HASHI Scheduler API is unavailable in this gateway context")
-    parsed = urlparse(raw_base_url)
-    if parsed.scheme != "http" or str(parsed.hostname or "").casefold() not in _LOOPBACK_HOSTS:
-        raise ValueError("HASHI Scheduler API must use an HTTP loopback endpoint")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ValueError("HASHI Scheduler API endpoint is malformed")
-    return raw_base_url, agent
-
-
-async def _request_json(
-    method: str,
-    url: str,
-    *,
-    payload: dict[str, Any] | None = None,
-) -> tuple[int, dict[str, Any]]:
-    timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.request(method, url, json=payload) as response:
-            try:
-                body = await response.json()
-            except (aiohttp.ContentTypeError, json.JSONDecodeError):
-                text = (await response.text()).strip()
-                body = {"ok": False, "error": text or "non-JSON scheduler response"}
-            if not isinstance(body, dict):
-                body = {"ok": False, "error": "invalid scheduler response shape"}
-            return response.status, body
+    return workbench_endpoint(audit_context, require_agent=True)
 
 
 def _render_result(status: int, payload: dict[str, Any]) -> str:
@@ -103,7 +74,9 @@ async def execute_hashi_scheduler_tool(
                 "job_id": str(args.get("job_id") or "").strip(),
                 "limit": str(int(args.get("limit") or 10)),
             }
-            query = urlencode({key: value for key, value in query_values.items() if value})
+            query = urlencode(
+                {key: value for key, value in query_values.items() if value}
+            )
             status, payload = await _request_json(
                 "GET",
                 f"{base_url}/api/agents/{encoded_agent}/scheduler/runs?{query}",
