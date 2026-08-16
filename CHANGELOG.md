@@ -9,7 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No changes recorded after the v4.0.0-alpha.2 release-candidate cut._
+
+## [4.0.0-alpha.2] - 2026-08-16 (Release Candidate)
+
 ### Added
+
+- **Advanced HASHI Engine Runtime** — consolidated the substantial HER
+  evolution beyond the original Claw-derived backend: persistent sessions,
+  adaptive TaskFrame planning, bounded review and exact-test assurance, Tool
+  Gateway/MCP, secure multimedia, Habit/Meditation, and explicit finalization
+  contracts under one HASHI-owned adapter boundary.
+- **Seven HER effort levels** — exposed task-matched `low`, `medium`, `high`,
+  `xhigh`, `max`, and `max+` single-Agent ceilings plus bounded HER-private
+  `ultra` primary/worker coordination. Effort controls agentic execution scope,
+  not provider reasoning depth, and never requires a simple task to exhaust the
+  selected ceiling.
+- **Certified HER `0.1.0-hashi.22` packages** — selected Linux and Windows
+  x86-64 artifacts from the same reviewed source identity with embedded
+  provenance, platform metadata, SHA-256 verification, retained MIT licence,
+  and complete execution/session contracts. The rejected `.21` remains
+  unselected forensic evidence.
+- **Source-integrated HER `/rebuild`** — vendored the reviewed Rust source under
+  `native/her` and added source-scoped fingerprinting, single-flight
+  incremental Cargo builds, offline verification, immutable development
+  candidates, atomic selection, idle-Agent targeted reboot, health checks,
+  rollback, durable job status, and explicit failure reasons. Certified
+  package metadata and binaries are never changed by this command.
+- **Canonical Workbench Agent Overview** — added a read-only, no-store API view
+  of Agent status, workzone, usage, prompt-slot previews, and governed
+  parked-topic summaries.
+- **Shared-token remote terminal authentication** — signed shared-token/HMAC
+  requests can use the terminal execution endpoint alongside paired bearer
+  authentication; missing and tampered signatures remain rejected.
 
 - **HER message-channel ownership and idempotent delivery** — HER stream events
   now carry stable event IDs, explicit `technical`, `user_commentary`,

@@ -59,7 +59,6 @@ agent: engine=her provider=xai model=grok-4.5
 | `hashi.py` | `auth xai status\|login\|logout` |
 | `orchestrator/commands/xai_auth.py` | `/xaiauth` status |
 | `tests/test_hashi_xai_oauth.py` | Unit tests |
-| `docs/examples/xishi_claw_xai_backend.json` | Trial backend snippet for Xishi |
 
 ## Configuration (ready; `client_id` required for live login)
 
@@ -117,9 +116,9 @@ Telegram (status only): `/xaiauth`
 
 ## Trial agent
 
-**Xishi** is the designated trial agent (existing backends untouched). Example backend entry:
-
-See [examples/xishi_claw_xai_backend.json](examples/xishi_claw_xai_backend.json).
+**Xishi** is the designated trial agent (existing backends untouched). A live
+Agent snippet is intentionally not shipped because `agents.json` is
+instance-local; use the redacted configuration shape above.
 
 After a successful login:
 

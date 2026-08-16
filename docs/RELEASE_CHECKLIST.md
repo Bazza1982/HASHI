@@ -3,7 +3,9 @@
 ## HASHI Bridge
 
 - Static compile: `python3 -m py_compile main.py orchestrator/*.py`
-- Full test suite: `pytest`
+- Full test suite: `pytest -q --ignore=workspaces` (equivalent to bare
+  `pytest` in a clean checkout; prevents local ignored Agent workspaces from
+  being collected as duplicate repositories)
 - Architecture boundaries:
   - `python scripts/check_protected_core_changes.py --validate-manifest`
   - `python scripts/check_protected_core_changes.py --base main` (or
@@ -29,16 +31,23 @@
   - `docs/HASHI_CORE_SLIMMING_PLAN.md` reflects latest implementation and validation status
   - `CHANGELOG.md` records structural changes and residual notes
 - HER mode gates:
+  - release scope names HASHI `v4.0.0-alpha.2` separately from Enterprise AAI
+    `v0.1.0-alpha.1` / package `0.1.0a1`
   - Manifest review confirms runtime version, source commit, platform target,
     executable path, SHA-256, upstream license, and certification baseline all
     describe the same artifact
+  - the selected Linux and Windows x86-64 entries are both
+    `0.1.0-hashi.22`, share the reviewed source identity, and the rejected
+    `.21` forensic artifact is not selectable
   - `python scripts/her_runtime_probe.py --check version` resolves the packaged
     HER binary and returns a successful version diagnostic
   - `python scripts/verify_her_certification.py --source-root <pinned-her-source>`
     passes full Rust workspace tests plus workspace/all-target Clippy with
     warnings denied
   - `python -m pytest -q tests/test_her_adapter.py tests/test_her_certification_baseline.py tests/test_her_runtime_probe.py tests/test_tool_gateway_mcp.py tests/test_media_read.py tests/test_runtime_media.py`
-  - `python -m pytest -q tests/test_her_habit_meditation.py tests/test_runtime_her_habits.py tests/test_flexible_backend_state.py tests/test_runtime_pipeline.py`
+  - `python -m pytest -q tests/test_her_habit_meditation.py tests/test_runtime_her_habits.py tests/test_flexible_backend_state.py tests/test_runtime_pipeline.py tests/test_runtime_cross_session.py`
+  - `python -m pytest -q tests/test_her_ultra.py tests/test_her_rebuild.py tests/test_her_rebuild_manager.py tests/test_reboot_manager.py`
+  - `python -m pytest -q tests/test_agent_overview.py tests/test_remote_shared_token.py`
   - `python -m pytest -q tests/test_her_debug_lab.py tests/test_her_debug_restart_guard.py tests/test_her_debug_superloop_template.py`
   - `python -m py_compile adapters/her.py adapters/her_habits.py orchestrator/runtime_her_habits.py tools/media_read.py tools/gateway/mcp_stdio.py`
   - Fixed mode proves incremental resume only after a HER session ID exists;
@@ -46,6 +55,14 @@
     pass `--resume`
   - The HER adapter is the one active Habit/Meditation owner and request-scoped
     eligibility prevents internal or ephemeral work from entering `/habit`
+  - all seven HER effort choices are exposed only where supported; `ultra`
+    remains adapter-owned and is never passed to the native executable as a
+    single-process effort
+  - `/rebuild` proves source-scoped fingerprints, unchanged-source candidate
+    reuse, incremental changed-source builds, offline verification, atomic
+    selection, targeted adoption, failure preservation, and rollback
+  - `/rebuild` candidates remain explicitly development-only and do not alter
+    the certified manifest, baseline, release binaries, or version
   - At least one live `her` canary after `/reboot min` validates provider/model
     selection, fixed-mode continuation, repo-root read/write/edit, `media_read`
     for image/PDF/audio, canonical and legacy screenshot image results,
@@ -53,8 +70,8 @@
     behavior before release notes claim those capabilities
   - `/reboot max` and wider rollout happen only after the canary is green and
     logs contain no unexplained HER, Gateway, media, Habit, or reload errors
-  - Certification is platform-specific. A Linux `.13` result must not be used
-    to claim Windows `.13` parity
+  - Certification is platform-specific. Linux `.22` evidence must not be used
+    as a substitute for native Windows `.22` command and package evidence
 - Superloop alpha gates:
   - `python -m pytest tests/test_superloop_store.py tests/test_superloop_taskboard.py tests/test_superloop_waits.py tests/test_superloop_runner.py tests/test_superloop_scheduler.py tests/test_superloop_compiler.py tests/test_superloop_issues.py tests/test_superloop_commands.py tests/test_superloop_recording.py tests/test_superloop_nagare_adapter.py -q`
   - Taskboards use `task_id`, not `id`, and every in-progress or next-action task resolves to a real task
@@ -79,6 +96,13 @@
     private media/cache content, local operator notes, or unrelated user edits
   - generated binaries are included only when their provenance, platform,
     checksum, license, and release purpose are reviewed
+  - scan the exact outbound range for private-key blocks, access-token formats,
+    credentials in assignments/URLs, personal filesystem roots, live chat or
+    account identifiers, private IP/host records, and tracked local runtime
+    state; review every match rather than publishing on pattern count alone
+  - `git ls-files` contains no live `.env`, `secrets.json`, private key,
+    workspace transcript, bridge log, local candidate, rebuild state, or
+    operator backup file
 - Documentation:
   - `README.md`, `CHANGELOG.md`, `docs/README.md`, active contracts, known
     issues, and release notes agree on released versus unreleased status

@@ -1,11 +1,14 @@
 # HER `/rebuild` Command Implementation Plan
 
-Status: implemented and verified on `feature/her-rebuild-command`
+Status: implemented, live-verified, and consolidated for
+`v4.0.0-alpha.2` release preparation
 
-Implementation commits: `57eb8ea3` (isolated foundation) and `c20cd08d`
-(integrated source, command, resolver, adoption and rollback), based on Zelda's
-final certified `.22` HASHI commit `5776c278` and HER source commit
-`246b04e9fa28ef0b6f74c2d924ab3697b95197bd`.
+The original isolated implementation remains preserved on
+`feature/her-rebuild-command`. The consolidated HASHI line contains
+`96aa4fe1` (controller foundation), `6c7fd961` (integrated source, command,
+resolver, adoption, and rollback), `2175e0bb` (hot-adoption stability), and
+`ccf3f669` (source-scoped build identity), based on the final certified `.22`
+HASHI work and its reviewed HER source provenance.
 
 The implementation checkpoint and takeover evidence are recorded in
 `HER_REBUILD_PARALLEL_DEVELOPMENT_CHECKPOINT.md`.
