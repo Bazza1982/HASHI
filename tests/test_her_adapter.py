@@ -502,6 +502,31 @@ def test_claw_max_iterations_does_not_deliver_dangling_tool_markup():
     assert metadata["fallback_report_generated"] is True
 
 
+def test_claw_max_iterations_blocks_deepseek_single_bar_dsml_markup():
+    result = ClawTaskResult(
+        text='<｜DSML｜tool_calls>\n<｜DSML｜invoke name="bash">',
+        model="deepseek/test",
+        permission_mode="read-only",
+        cwd="/workspace",
+        returncode=0,
+        duration_ms=10,
+        stdout="",
+        stderr="",
+        json_data={},
+        tool_uses=[],
+        tool_results=[],
+        session_id="session-1",
+        iterations=31,
+        completion_status="incomplete",
+        stop_reason="max_iterations",
+    )
+
+    response, metadata = _claw_incomplete_response(result, prompt="请继续")
+
+    assert "DSML" not in response
+    assert metadata["persona_render_required"] is True
+
+
 def test_claw_max_iterations_without_model_final_uses_sunny_persona_and_receipt_counts():
     result = ClawTaskResult(
         text="",

@@ -698,7 +698,9 @@ def _claw_incomplete_response(
     """Preserve a safe model closing; otherwise return the neutral evidence report."""
     report, metadata = _build_claw_incomplete_report(result, prompt=prompt)
     model_text = str(result.text or "").strip()
-    dangling_tool_markup = any(
+    dangling_tool_markup = (
+        "DSML" in model_text and ("tool_calls" in model_text or "invoke name=" in model_text)
+    ) or any(
         marker in model_text
         for marker in (
             "<｜｜DSML｜｜tool_calls>",
