@@ -5120,7 +5120,8 @@ RUNTIME FACTS (quoted, read-only)
             stream_log.write(line)
             if not line.endswith(b"\n"):
                 stream_log.write(b"\n")
-        path.chmod(0o600)
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
 
     def _persist_control_event(self, request_id: str, event: Mapping[str, Any]) -> None:
         """Correlate control and compaction records with their HASHI request."""
@@ -5136,7 +5137,8 @@ RUNTIME FACTS (quoted, read-only)
         record = {"request_id": request_id, "event": event}
         with path.open("a", encoding="utf-8") as control_log:
             control_log.write(json.dumps(record, ensure_ascii=False) + "\n")
-        path.chmod(0o600)
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
         if str(event.get("kind") or "") == "max_plus_checkpoint":
             state_dir = self.config.workspace_dir / "backend_state"
             state_dir.mkdir(parents=True, exist_ok=True)

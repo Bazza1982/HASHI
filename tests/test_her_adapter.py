@@ -71,6 +71,26 @@ def _write_exe(path: Path, body: str) -> Path:
     return path
 
 
+def test_private_raw_log_chmod_failure_does_not_break_persistence(
+    monkeypatch, tmp_path
+):
+    adapter = HERAdapter.__new__(HERAdapter)
+    adapter.config = SimpleNamespace(workspace_dir=tmp_path)
+
+    def reject_chmod(_path, _mode):
+        raise OSError("permission hardening unavailable")
+
+    monkeypatch.setattr(Path, "chmod", reject_chmod)
+    adapter._persist_stream_json_line(b'{"kind":"run_started"}')
+    adapter._persist_control_event(
+        "req-chmod",
+        {"kind": "control_invocation", "gate": "planning"},
+    )
+
+    assert "run_started" in (tmp_path / "claw_exec_events.jsonl").read_text()
+    assert "req-chmod" in (tmp_path / "claw_control_events.jsonl").read_text()
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [
