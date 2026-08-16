@@ -1,8 +1,8 @@
 """Direct presentation router for HASHI Engine Runtime stream events.
 
 Persistence is best effort and presentation is handled once by the owner of the
-event's delivery class.  Transport reliability belongs to the runtime sender;
-this router intentionally does not maintain a second request-scoped ledger.
+event's delivery class.  A request-local accepted-ID set makes presentation
+idempotent without creating a second durable delivery or retry system.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ class HERMessageRouter:
         self.delivery_requested = bool(delivery_requested)
         self.delivery_blocked = bool(delivery_blocked)
         self.deferred_final: StreamEvent | None = None
+        self._accepted_event_ids: set[str] = set()
 
     async def _call(self, callback: Presenter | None, event: StreamEvent) -> Any:
         if callback is None:
@@ -78,9 +79,17 @@ class HERMessageRouter:
         *,
         purpose: str,
         presenter: Presenter | None,
-    ) -> None:
+    ) -> bool:
         if presenter is None:
-            return
+            return False
+        event_id = str(getattr(event, "event_id", "") or "").strip()
+        if event_id and event_id in self._accepted_event_ids:
+            self._log(
+                "info",
+                f"HER delivery replay suppressed: request={self.request_id} "
+                f"event_id={event_id} purpose={purpose}",
+            )
+            return False
         try:
             accepted = await self._call(presenter, event)
         except Exception as exc:
@@ -90,19 +99,22 @@ class HERMessageRouter:
                 f"event_id={getattr(event, 'event_id', '')} purpose={purpose} "
                 f"error_type={type(exc).__name__}",
             )
-            return
+            return False
         if accepted is False:
             self._log(
                 "warning",
                 f"HER delivery not accepted: request={self.request_id} "
                 f"event_id={getattr(event, 'event_id', '')} purpose={purpose}",
             )
-            return
+            return False
+        if event_id:
+            self._accepted_event_ids.add(event_id)
         self._log(
             "info",
             f"HER delivery accepted: request={self.request_id} "
             f"event_id={getattr(event, 'event_id', '')} purpose={purpose}",
         )
+        return True
 
     async def route(self, event: StreamEvent) -> None:
         """Hand one stream event to exactly one presentation owner."""
