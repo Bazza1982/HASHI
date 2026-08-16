@@ -28,6 +28,15 @@ _LEGACY_SCREENSHOT_TOOLS = {
     "desktop_screenshot",
     "windows_screenshot",
 }
+_GATEWAY_EXPOSED_TOOL_NAMES = {
+    "file_read": "hashi_file_read",
+    "file_write": "hashi_file_write",
+    "file_list": "hashi_file_list",
+    "apply_patch": "hashi_apply_patch",
+}
+_GATEWAY_INTERNAL_TOOL_NAMES = {
+    exposed: internal for internal, exposed in _GATEWAY_EXPOSED_TOOL_NAMES.items()
+}
 _LEGACY_SCREENSHOT_PATTERN = re.compile(
     r"(?P<data_url>data:(?P<mime>image/[a-z0-9.+-]+);base64,"
     r"(?P<data_payload>[A-Za-z0-9+/=]*))|"
@@ -147,10 +156,18 @@ class ToolGateway:
         definitions = []
         for definition in self.registry.get_tool_definitions():
             function = definition["function"]
+            internal_name = function["name"]
+            exposed_name = _GATEWAY_EXPOSED_TOOL_NAMES.get(internal_name, internal_name)
+            description = function.get("description", "")
+            if internal_name in _GATEWAY_EXPOSED_TOOL_NAMES:
+                description = (
+                    f"HASHI filesystem authority (access_root scoped; distinct from Claw-local "
+                    f"workspace tools). {description}"
+                )
             definitions.append(
                 {
-                    "name": function["name"],
-                    "description": function.get("description", ""),
+                    "name": exposed_name,
+                    "description": description,
                     "inputSchema": function.get("parameters") or {"type": "object"},
                 }
             )
@@ -195,7 +212,8 @@ class ToolGateway:
                 True,
             )
 
-        result = await self.registry.execute(name, arguments, tool_call_id=call_id)
+        internal_name = _GATEWAY_INTERNAL_TOOL_NAMES.get(name, name)
+        result = await self.registry.execute(internal_name, arguments, tool_call_id=call_id)
         if not result.is_error and self._reports_state_change(result.output):
             self.fingerprints[fingerprint] = 0
         else:
@@ -204,7 +222,7 @@ class ToolGateway:
         content = result.content
         bridge_error = False
         if content is None:
-            content, bridge_error = _bridge_legacy_screenshot_output(name, result.output)
+            content, bridge_error = _bridge_legacy_screenshot_output(internal_name, result.output)
         return self._result(
             result.output,
             result.is_error or bridge_error,

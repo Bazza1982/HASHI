@@ -3431,8 +3431,17 @@ INCOMPLETE TASK FACTS (quoted, read-only)
         context = write_gateway_context(
             registry,
             context_path,
-            additional_allowed_tools={"media_read"},
+            additional_allowed_tools={
+                "media_read",
+                "hashi_scheduler_list",
+                "hashi_scheduler_status",
+                "hashi_scheduler_run_history",
+                "hashi_scheduler_rerun",
+            },
             media_roots=media_roots,
+            scheduler_api_base_url=(
+                f"http://127.0.0.1:{int(getattr(self.global_config, 'workbench_port', 18800))}"
+            ),
         )
         settings = {
             "mcpServers": {

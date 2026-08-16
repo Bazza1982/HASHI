@@ -203,6 +203,11 @@ def test_recovery_replay_is_safe_by_default_and_questions_are_not_actions():
 
     assert scheduler_module.scheduler_recovery.replayable_count(item) == 1
     assert scheduler_module.scheduler_recovery.parse_reply("How many were missed?", [batch]) is None
+    for ordinary_reply in ("继续", "可以", "ok", "yes", "一起做完"):
+        assert (
+            scheduler_module.scheduler_recovery.parse_reply(ordinary_reply, [batch])
+            is None
+        )
     assert scheduler_module.scheduler_recovery.parse_reply("全部补跑", [batch]) == {"action": "all"}
     assert scheduler_module.scheduler_recovery.parse_reply("补跑 3 次", [batch]) == {
         "action": "partial",

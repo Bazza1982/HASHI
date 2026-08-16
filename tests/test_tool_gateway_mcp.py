@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import json
+import os
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +37,16 @@ def _registry(tmp_path: Path) -> ToolRegistry:
     )
 
 
+def _her_e2e_runtime_provider() -> dict[str, str]:
+    staged_binary = os.environ.get("HASHI_HER_STAGED_BINARY", "").strip()
+    if staged_binary:
+        return {
+            "runtime_policy": "system-only",
+            "binary_path": staged_binary,
+        }
+    return {"runtime_policy": "require-packaged"}
+
+
 def test_gateway_context_is_owner_only_and_reconstructs_registry(tmp_path):
     path = tmp_path / "context.json"
     context = write_gateway_context(_registry(tmp_path), path)
@@ -46,6 +57,17 @@ def test_gateway_context_is_owner_only_and_reconstructs_registry(tmp_path):
     loaded = load_gateway_context(path)
     assert loaded.build_registry().is_allowed("browser_click")
     assert "global_config" not in loaded.audit
+
+
+def test_gateway_namespaces_hashi_filesystem_and_hides_unqualified_authorities(tmp_path):
+    gateway = ToolGateway(load_gateway_context(_write_context(_registry(tmp_path), tmp_path)))
+
+    definitions = {item["name"]: item for item in gateway.tool_definitions()}
+
+    assert "hashi_file_read" in definitions
+    assert "file_read" not in definitions
+    assert "CronList" not in definitions
+    assert "access_root scoped" in definitions["hashi_file_read"]["description"]
 
 
 def test_gateway_context_rejects_group_readable_secret_snapshot(tmp_path):
@@ -85,6 +107,68 @@ async def test_mcp_lists_hashi_browser_tools_and_validates_arguments(tmp_path):
     )
     assert invalid["result"]["isError"] is True
     assert "invalid arguments" in invalid["result"]["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, monkeypatch):
+    registry = _registry(tmp_path)
+    context_path = tmp_path / "scheduler-context.json"
+    write_gateway_context(
+        registry,
+        context_path,
+        additional_allowed_tools={
+            "hashi_scheduler_list",
+            "hashi_scheduler_status",
+            "hashi_scheduler_run_history",
+            "hashi_scheduler_rerun",
+        },
+        scheduler_api_base_url="http://127.0.0.1:18800",
+    )
+    gateway = ToolGateway(load_gateway_context(context_path))
+    calls = []
+
+    async def fake_request(method, url, *, payload=None):
+        calls.append((method, url, payload))
+        return 200, {"ok": True, "jobs": [{"job_id": "daily"}]}
+
+    monkeypatch.setattr("tools.hashi_scheduler._request_json", fake_request)
+
+    names = {item["name"] for item in gateway.tool_definitions()}
+    assert {
+        "hashi_scheduler_list",
+        "hashi_scheduler_status",
+        "hashi_scheduler_run_history",
+        "hashi_scheduler_rerun",
+    } <= names
+    listed = await gateway.call("hashi_scheduler_list", {"kind": "cron"}, "list-1")
+    assert listed["isError"] is False
+    assert '"authority": "HASHI Scheduler"' in listed["content"][0]["text"]
+    assert calls[-1] == (
+        "GET",
+        "http://127.0.0.1:18800/api/agents/momo/scheduler/jobs?kind=cron",
+        None,
+    )
+
+    rerun = await gateway.call(
+        "hashi_scheduler_rerun",
+        {
+            "kind": "cron",
+            "job_id": "daily",
+            "authorization": "explicit_user_authorization",
+        },
+        "run-1",
+    )
+    assert rerun["isError"] is False
+    assert calls[-1] == (
+        "POST",
+        "http://127.0.0.1:18800/api/agents/momo/jobs/run",
+        {
+            "kind": "cron",
+            "job_id": "daily",
+            "requested_by": "hashi_tool_gateway",
+            "authorization": "explicit_user_authorization",
+        },
+    )
 
 
 def _write_context(registry: ToolRegistry, tmp_path: Path) -> Path:
@@ -195,10 +279,10 @@ async def test_gateway_stops_identical_retry_loop(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway.registry, "execute", successful_execute)
     arguments = {"path": "README.md"}
     for number in range(gateway.context.max_identical_calls):
-        result = await gateway.call("file_read", arguments, str(number))
+        result = await gateway.call("hashi_file_read", arguments, str(number))
         assert result["isError"] is False
 
-    stopped = await gateway.call("file_read", arguments, "last")
+    stopped = await gateway.call("hashi_file_read", arguments, "last")
     assert stopped["isError"] is True
     assert "repeated identical call" in stopped["content"][0]["text"]
 
@@ -252,7 +336,7 @@ def test_packaged_claw_calls_hashi_tool_gateway_and_returns_answer(tmp_path):
                                             "active_goal": "Read probe.txt with the HASHI file tool and answer.",
                                             "success_criteria": ["report the file content"],
                                             "planned_actions": ["read probe.txt", "report the result"],
-                                            "planned_tools": ["mcp__hashi-tools__file_read"],
+                                            "planned_tools": ["mcp__hashi-tools__hashi_file_read"],
                                             "do_not_do": ["do not modify the file"],
                                             "assurance": {
                                                 "review_strategy": ["review tool evidence before answering"],
@@ -289,7 +373,7 @@ def test_packaged_claw_calls_hashi_tool_gateway_and_returns_answer(tmp_path):
                                             "id": "call-1",
                                             "type": "function",
                                             "function": {
-                                                "name": "mcp__hashi-tools__file_read",
+                                                "name": "mcp__hashi-tools__hashi_file_read",
                                                 "arguments": json.dumps({"path": "probe.txt"}),
                                             },
                                         }
@@ -317,7 +401,7 @@ def test_packaged_claw_calls_hashi_tool_gateway_and_returns_answer(tmp_path):
         project_root = Path(__file__).resolve().parents[1]
         global_config = SimpleNamespace(
             project_root=project_root,
-            claw_providers={"runtime_policy": "require-packaged"},
+            claw_providers=_her_e2e_runtime_provider(),
         )
         cfg = SimpleNamespace(
             name="probe",
@@ -368,10 +452,13 @@ def test_packaged_claw_calls_hashi_tool_gateway_and_returns_answer(tmp_path):
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
     requested_tool_names = [tool["function"]["name"] for tool in requests[1].get("tools", [])]
-    assert "mcp__hashi-tools__file_read" in requested_tool_names, requested_tool_names
+    assert "mcp__hashi-tools__hashi_file_read" in requested_tool_names, requested_tool_names
     assert payload["message"] == "gateway result received"
     assert payload["session_id"]
-    assert any(tool.get("name") == "mcp__hashi-tools__file_read" for tool in payload["tool_uses"])
+    assert any(
+        tool.get("name") == "mcp__hashi-tools__hashi_file_read"
+        for tool in payload["tool_uses"]
+    )
     assert len(requests) == 3
     final_messages = requests[2]["messages"]
     assert any("browser gateway works" in str(message) for message in final_messages), final_messages
@@ -486,7 +573,7 @@ def test_packaged_her_bridges_media_read_image_into_provider_vision_input(tmp_pa
         global_config = SimpleNamespace(
             project_root=project_root,
             base_media_dir=tmp_path / "media",
-            claw_providers={"runtime_policy": "require-packaged"},
+            claw_providers=_her_e2e_runtime_provider(),
         )
         cfg = SimpleNamespace(
             name="probe",

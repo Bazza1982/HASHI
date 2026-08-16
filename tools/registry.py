@@ -27,6 +27,12 @@ TOOL_TIERS: dict[str, list[str]] = {
     ],
     "web": ["web_search", "web_fetch", "http_request", "xai_imagine"],
     "communication": ["telegram_send"],
+    "scheduler": [
+        "hashi_scheduler_list",
+        "hashi_scheduler_status",
+        "hashi_scheduler_run_history",
+        "hashi_scheduler_rerun",
+    ],
     "browser": [
         "browser_session", "browser_screenshot", "browser_get_text",
         "browser_get_html", "browser_click", "browser_react", "browser_fill", "browser_type_text",
@@ -551,6 +557,15 @@ class ToolRegistry:
 
         if tool_name == "web_fetch":
             return await execute_web_fetch(arguments)
+
+        if tool_name.startswith("hashi_scheduler_"):
+            from tools.hashi_scheduler import execute_hashi_scheduler_tool
+
+            return await execute_hashi_scheduler_tool(
+                tool_name,
+                arguments,
+                audit_context=self.audit_context,
+            )
 
         if tool_name.startswith("browser_"):
             from tools.browser import (
