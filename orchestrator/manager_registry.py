@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import importlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Callable, Literal
-
+from typing import Literal
 
 ManagerConstructor = Literal["empty", "paths", "kernel", "kernel_console", "skill"]
 
@@ -29,6 +29,20 @@ HOT_MANAGER_SPECS: tuple[ManagerSpec, ...] = (
     ManagerSpec("shutdown_manager", "orchestrator.shutdown_manager", "ShutdownManager", "kernel"),
     ManagerSpec("startup_manager", "orchestrator.startup_manager", "StartupManager", "kernel_console"),
     ManagerSpec("whatsapp_manager", "orchestrator.whatsapp_manager", "WhatsAppManager", "kernel"),
+)
+
+# These coordinators must survive the restart they supervise.  They are
+# installed once for a new kernel and are deliberately excluded from the hot
+# bundle rebuilt on every /reboot.  Keeping the manifest here also lets an
+# already-running pre-feature kernel acquire a newly-added stable manager on
+# its first hot reload.
+STABLE_MANAGER_SPECS: tuple[ManagerSpec, ...] = (
+    ManagerSpec(
+        "her_rebuild_manager",
+        "orchestrator.her_rebuild_manager",
+        "HERRebuildManager",
+        "kernel",
+    ),
 )
 
 
@@ -72,5 +86,25 @@ def install_hot_manager_bundle(kernel, bundle: dict[str, object]) -> None:
         missing = sorted(expected - set(bundle))
         extra = sorted(set(bundle) - expected)
         raise ValueError(f"Invalid manager bundle; missing={missing}, extra={extra}")
+
+    # Construct every missing stable manager before mutating the hot bundle.
+    # An existing instance is never replaced: an in-flight /rebuild owns state
+    # and tasks that must outlive the targeted /reboot it requests.
+    stable_additions: dict[str, object] = {}
+    for spec in STABLE_MANAGER_SPECS:
+        if hasattr(kernel, spec.attribute):
+            continue
+        module = importlib.import_module(spec.module)
+        manager_class = getattr(module, spec.class_name)
+        stable_additions[spec.attribute] = _construct_manager(
+            spec,
+            manager_class,
+            kernel,
+            console_handler=None,
+        )
+
     for spec in HOT_MANAGER_SPECS:
         setattr(kernel, spec.attribute, bundle[spec.attribute])
+    for spec in STABLE_MANAGER_SPECS:
+        if spec.attribute in stable_additions:
+            setattr(kernel, spec.attribute, stable_additions[spec.attribute])
