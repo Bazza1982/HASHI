@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import sys
 import threading
@@ -14,10 +16,21 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.her_rebuild import (
+    CandidateMetadata,
+    CandidateStore,
+    DevelopmentSelectionStore,
     FailureKind,
+    HERBuildController,
+    HERQuickVerifier,
     HERRebuildError,
+    HERSourceLayout,
     RebuildStage,
+    compute_source_fingerprint,
+    detect_host_target,
+    inspect_toolchain,
 )
+
+logger = logging.getLogger("BridgeU.HERRebuild")
 
 TERMINAL_STATES = frozenset(
     {
@@ -39,9 +52,7 @@ ALLOWED_TRANSITIONS: Mapping[RebuildStage, frozenset[RebuildStage]] = {
     RebuildStage.WAITING_FOR_BUILD_LOCK: frozenset(
         {RebuildStage.BUILDING, RebuildStage.FAILED}
     ),
-    RebuildStage.BUILDING: frozenset(
-        {RebuildStage.VERIFYING, RebuildStage.FAILED}
-    ),
+    RebuildStage.BUILDING: frozenset({RebuildStage.VERIFYING, RebuildStage.FAILED}),
     RebuildStage.VERIFYING: frozenset(
         {RebuildStage.CANDIDATE_READY, RebuildStage.FAILED}
     ),
@@ -56,7 +67,11 @@ ALLOWED_TRANSITIONS: Mapping[RebuildStage, frozenset[RebuildStage]] = {
         }
     ),
     RebuildStage.ACTIVATING: frozenset(
-        {RebuildStage.REBOOT_REQUESTED, RebuildStage.FAILED}
+        {
+            RebuildStage.REBOOT_REQUESTED,
+            RebuildStage.ROLLING_BACK,
+            RebuildStage.FAILED,
+        }
     ),
     RebuildStage.REBOOT_REQUESTED: frozenset(
         {RebuildStage.ADOPTING, RebuildStage.ROLLING_BACK}
@@ -90,7 +105,9 @@ def new_rebuild_job_id() -> str:
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}-{time.time_ns()}")
+    temporary = destination.with_name(
+        f".{destination.name}.tmp-{os.getpid()}-{time.time_ns()}"
+    )
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
@@ -137,7 +154,9 @@ class RebuildTransition:
         return cls(
             state=RebuildStage(str(payload["state"])),
             at=str(payload["at"]),
-            detail=str(payload["detail"]) if payload.get("detail") is not None else None,
+            detail=str(payload["detail"])
+            if payload.get("detail") is not None
+            else None,
         )
 
 
@@ -321,9 +340,7 @@ class HERRebuildJobStore:
         with self._mutex:
             active = self.active()
             matching = [
-                item
-                for item in active
-                if item.source_fingerprint == source_fingerprint
+                item for item in active if item.source_fingerprint == source_fingerprint
             ]
             if matching:
                 matching.sort(key=lambda item: item.created_at, reverse=True)
@@ -448,7 +465,9 @@ class HERRebuildJobStore:
                     *current.transitions,
                     RebuildTransition(state=state, at=now, detail=detail),
                 ),
-                candidate_id=(candidate_id if candidate_id is not None else current.candidate_id),
+                candidate_id=(
+                    candidate_id if candidate_id is not None else current.candidate_id
+                ),
                 failure_kind=failure_kind,
                 error=error,
                 exit_code=exit_code,
@@ -470,8 +489,12 @@ class HERRebuildJobStore:
             if current is None:
                 raise KeyError(job_id)
             if not current.is_terminal:
-                raise ValueError("terminal notification cannot be recorded before terminal state")
-            actual_requester_id = requester_id or str(current.requesters[0]["requester_id"])
+                raise ValueError(
+                    "terminal notification cannot be recorded before terminal state"
+                )
+            actual_requester_id = requester_id or str(
+                current.requesters[0]["requester_id"]
+            )
             found = False
             requesters = []
             for item in current.requesters:
@@ -514,19 +537,8 @@ class HERRebuildJobStore:
                 RebuildStage.REBOOT_REQUESTED,
                 RebuildStage.ADOPTING,
                 RebuildStage.POSTCHECK,
+                RebuildStage.ROLLING_BACK,
             }:
-                continue
-            if record.state == RebuildStage.ROLLING_BACK:
-                recovered.append(
-                    self.transition(
-                        record.job_id,
-                        RebuildStage.ROLLBACK_FAILED,
-                        detail=reason,
-                        failure_kind=FailureKind.INTERNAL_ERROR,
-                        error=reason,
-                        details={"interrupted": True, "manual_reconciliation_required": True},
-                    )
-                )
                 continue
             recovered.append(
                 self.transition(
@@ -574,7 +586,9 @@ def cargo_process_exists(pid: int) -> bool:
             ]
         except OSError:
             return True
-        return any(Path(argument).name in {"cargo", "cargo.exe"} for argument in arguments[:2])
+        return any(
+            Path(argument).name in {"cargo", "cargo.exe"} for argument in arguments[:2]
+        )
     # On hosts without /proc, a live recorded PID is treated conservatively.
     return True
 
@@ -694,7 +708,9 @@ class HERBuildLock:
 
     def _write_metadata(self, payload: Mapping[str, Any]) -> None:
         assert self._handle is not None
-        encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        encoded = (
+            json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
+        ).encode("utf-8")
         self._handle.seek(0)
         self._handle.truncate(0)
         self._handle.write(encoded)
@@ -737,3 +753,490 @@ def _coerce_pid(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+class HERRebuildManager:
+    """Kernel-owned `/rebuild` transaction coordinator.
+
+    The instance deliberately sits outside the hot-manager bundle so an Agent
+    restart cannot destroy the task that requested it.
+    """
+
+    def __init__(
+        self,
+        kernel: Any,
+        *,
+        idle_timeout_seconds: float = 120.0,
+        idle_poll_seconds: float = 1.0,
+    ):
+        self.kernel = kernel
+        self.state_root = (
+            Path(kernel.paths.bridge_home).resolve() / "state" / "her_rebuild"
+        )
+        self.layout = HERSourceLayout.from_code_root(kernel.paths.code_root)
+        self.jobs = HERRebuildJobStore(self.state_root / "jobs")
+        self.candidates = CandidateStore(self.state_root / "candidates")
+        self.selection = DevelopmentSelectionStore(
+            self.state_root / "development-selection.json",
+            candidates_root=self.state_root / "candidates",
+        )
+        self.controller = HERBuildController(self.layout, state_root=self.state_root)
+        self.verifier = HERQuickVerifier()
+        self.idle_timeout_seconds = max(0.0, float(idle_timeout_seconds))
+        self.idle_poll_seconds = max(0.05, float(idle_poll_seconds))
+        self._submit_lock = asyncio.Lock()
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self.jobs.recover_nonterminal()
+
+    def reconcile_before_agent_startup(self) -> list[RebuildJobRecord]:
+        """Fail safe after a cold kernel interruption, before any Agent starts."""
+        reconciled: list[RebuildJobRecord] = []
+        for record in self.jobs.active():
+            if record.state not in {
+                RebuildStage.ACTIVATING,
+                RebuildStage.REBOOT_REQUESTED,
+                RebuildStage.ADOPTING,
+                RebuildStage.POSTCHECK,
+                RebuildStage.ROLLING_BACK,
+            }:
+                continue
+            try:
+                if record.state != RebuildStage.ROLLING_BACK:
+                    record = self.jobs.transition(
+                        record.job_id,
+                        RebuildStage.ROLLING_BACK,
+                        detail="cold kernel restart interrupted candidate adoption",
+                        failure_kind=FailureKind.INTERNAL_ERROR,
+                        error="cold kernel restart interrupted candidate adoption",
+                    )
+                self.selection.restore_previous(job_id=record.job_id)
+                reconciled.append(
+                    self.jobs.transition(
+                        record.job_id,
+                        RebuildStage.ROLLED_BACK,
+                        detail="previous HER restored before Agent startup",
+                        failure_kind=FailureKind.INTERNAL_ERROR,
+                        error="candidate adoption was interrupted by a cold kernel restart",
+                        details={"cold_start_reconciled": True},
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - startup must persist manual-recovery state
+                reconciled.append(
+                    self.jobs.transition(
+                        record.job_id,
+                        RebuildStage.ROLLBACK_FAILED,
+                        detail=str(exc),
+                        failure_kind=FailureKind.ROLLBACK_SELECTION_FAILED,
+                        error=f"cold-start HER rollback failed: {type(exc).__name__}: {exc}",
+                        details={"manual_reconciliation_required": True},
+                    )
+                )
+        return reconciled
+
+    async def submit(
+        self,
+        *,
+        target_agent: str,
+        actor_id: str,
+        origin: Mapping[str, Any],
+    ) -> tuple[RebuildJobRecord, bool]:
+        async with self._submit_lock:
+            target = detect_host_target()
+            toolchain = await inspect_toolchain()
+            fingerprint = compute_source_fingerprint(
+                self.layout,
+                toolchain=toolchain,
+                target=target,
+            )
+            record, joined = self.jobs.accept_or_join(
+                source_fingerprint=fingerprint.digest,
+                target_agent=target_agent,
+                actor_id=actor_id,
+                origin=origin,
+            )
+            if not joined:
+                task = asyncio.create_task(
+                    self._run(
+                        record.job_id, fingerprint=fingerprint, toolchain=toolchain
+                    ),
+                    name=f"her-rebuild:{record.job_id}",
+                )
+                self._tasks[record.job_id] = task
+                task.add_done_callback(
+                    lambda _task, job_id=record.job_id: self._tasks.pop(job_id, None)
+                )
+            return record, joined
+
+    def latest(self) -> RebuildJobRecord | None:
+        return self.jobs.latest()
+
+    def get(self, job_id: str | None = None) -> RebuildJobRecord | None:
+        return self.jobs.get(job_id) if job_id else self.jobs.latest()
+
+    async def wait(self, job_id: str) -> RebuildJobRecord | None:
+        task = self._tasks.get(job_id)
+        if task is not None:
+            await asyncio.shield(task)
+        return self.jobs.get(job_id)
+
+    async def retry_pending_notifications(self) -> int:
+        retried = 0
+        for record in self.jobs.list():
+            if record.is_terminal and not record.terminal_notification_delivered:
+                await self._notify_terminal(record.job_id)
+                retried += 1
+        return retried
+
+    async def _run(self, job_id: str, *, fingerprint: Any, toolchain: Any) -> None:
+        selected = False
+        candidate: CandidateMetadata | None = None
+        try:
+            self.jobs.transition(job_id, RebuildStage.SOURCE_PREFLIGHT)
+            self.jobs.transition(job_id, RebuildStage.WAITING_FOR_BUILD_LOCK)
+            build_lock = HERBuildLock(
+                self.state_root / "build.lock",
+                source_fingerprint=fingerprint.digest,
+            )
+            with build_lock:
+                cached = self.candidates.find_by_fingerprint(fingerprint.digest)
+                self.jobs.transition(
+                    job_id,
+                    RebuildStage.BUILDING,
+                    detail="reusing immutable candidate"
+                    if cached
+                    else "cargo build started",
+                    details={"candidate_reused": bool(cached)},
+                )
+                if cached is None:
+                    artifact = await self.controller.build(
+                        job_id=job_id,
+                        fingerprint=fingerprint,
+                        toolchain=toolchain,
+                        on_process_started=build_lock.set_cargo_pid,
+                        on_process_finished=lambda: build_lock.set_cargo_pid(None),
+                    )
+                    binary_path = artifact.binary_path
+                else:
+                    artifact = None
+                    binary_path = Path(cached.binary_path)
+
+                self.jobs.transition(job_id, RebuildStage.VERIFYING)
+                verification = await self.verifier.verify(
+                    binary_path,
+                    fingerprint=fingerprint,
+                    work_root=self.state_root / "verification" / job_id,
+                )
+                candidate = (
+                    cached
+                    if cached is not None
+                    else self.candidates.stage(
+                        artifact,
+                        toolchain=toolchain,
+                        quick_verification=verification,
+                    )
+                )
+
+            self.jobs.transition(
+                job_id,
+                RebuildStage.CANDIDATE_READY,
+                candidate_id=candidate.candidate_id,
+                details={
+                    "binary_sha256": candidate.binary_sha256,
+                    "build_duration_seconds": candidate.build_duration_seconds,
+                    "target": candidate.target,
+                },
+            )
+            self.jobs.transition(job_id, RebuildStage.WAITING_FOR_AGENT_IDLE)
+            target_agents = self._target_agents(job_id)
+            if not await self._wait_for_idle(target_agents):
+                self.jobs.transition(
+                    job_id,
+                    RebuildStage.ACTIVATION_DEFERRED,
+                    detail="target Agent remained busy; candidate retained",
+                    failure_kind=FailureKind.ACTIVATION_DEFERRED,
+                    error="Verified candidate is ready but activation was deferred until a later /rebuild.",
+                    details={"current_her_unchanged": True},
+                )
+                return
+
+            self.jobs.transition(job_id, RebuildStage.ACTIVATING)
+            self.selection.select(candidate.candidate_id, job_id=job_id)
+            selected = True
+            self.jobs.transition(job_id, RebuildStage.REBOOT_REQUESTED)
+            for agent_name in target_agents:
+                reboot_ok = await self.kernel.reboot_manager.hot_restart(
+                    {"mode": "min", "agent_name": agent_name, "agent_number": None}
+                )
+                if not reboot_ok:
+                    raise HERRebuildError(
+                        FailureKind.AGENT_RESTART_FAILED,
+                        RebuildStage.REBOOT_REQUESTED,
+                        f"Target Agent {agent_name!r} did not restart successfully.",
+                    )
+
+            self.jobs.transition(job_id, RebuildStage.ADOPTING)
+            self._assert_adopted(target_agents, candidate)
+            self.jobs.transition(job_id, RebuildStage.POSTCHECK)
+            await self._postcheck(target_agents, candidate)
+            self.selection.mark_adopted(candidate.candidate_id, job_id=job_id)
+            self.jobs.transition(
+                job_id,
+                RebuildStage.SUCCEEDED,
+                detail="development HER adopted and postcheck passed",
+            )
+        except asyncio.CancelledError:
+            raise
+        except HERRebuildError as exc:
+            await self._handle_failure(job_id, exc, selected=selected)
+        except Exception as exc:  # noqa: BLE001 - transaction boundary classifies unexpected failures
+            wrapped = HERRebuildError(
+                FailureKind.INTERNAL_ERROR,
+                self.jobs.get(job_id).state
+                if self.jobs.get(job_id)
+                else RebuildStage.FAILED,
+                f"Unexpected HER rebuild failure: {type(exc).__name__}: {exc}",
+            )
+            await self._handle_failure(job_id, wrapped, selected=selected)
+        finally:
+            await self._notify_terminal(job_id)
+
+    async def _handle_failure(
+        self,
+        job_id: str,
+        error: HERRebuildError,
+        *,
+        selected: bool,
+    ) -> None:
+        record = self.jobs.get(job_id)
+        if record is None or record.is_terminal:
+            return
+        if not selected or record.state not in {
+            RebuildStage.REBOOT_REQUESTED,
+            RebuildStage.ADOPTING,
+            RebuildStage.POSTCHECK,
+        }:
+            self.jobs.transition(
+                job_id,
+                RebuildStage.FAILED,
+                detail=str(error),
+                failure_kind=error.failure_kind,
+                error=str(error),
+                exit_code=error.exit_code,
+                details={
+                    "diagnostics": error.diagnostics,
+                    "current_her_unchanged": not selected,
+                },
+            )
+            return
+
+        self.jobs.transition(
+            job_id,
+            RebuildStage.ROLLING_BACK,
+            detail=str(error),
+            failure_kind=error.failure_kind,
+            error=str(error),
+            exit_code=error.exit_code,
+        )
+        try:
+            self.selection.restore_previous(job_id=job_id)
+            rollback_ok = True
+            for agent_name in self._target_agents(job_id):
+                rollback_ok = (
+                    bool(
+                        await self.kernel.reboot_manager.hot_restart(
+                            {
+                                "mode": "min",
+                                "agent_name": agent_name,
+                                "agent_number": None,
+                            }
+                        )
+                    )
+                    and rollback_ok
+                )
+            if not rollback_ok:
+                raise RuntimeError(
+                    "one or more target Agents failed the rollback restart"
+                )
+            self.jobs.transition(
+                job_id,
+                RebuildStage.ROLLED_BACK,
+                detail="candidate rejected; previous HER restored",
+                failure_kind=error.failure_kind,
+                error=str(error),
+                details={"rollback_succeeded": True},
+            )
+        except Exception as rollback_error:  # noqa: BLE001 - rollback must report every failure mode
+            self.jobs.transition(
+                job_id,
+                RebuildStage.ROLLBACK_FAILED,
+                detail=str(rollback_error),
+                failure_kind=FailureKind.ROLLBACK_RESTART_FAILED,
+                error=f"{error}; rollback failed: {rollback_error}",
+                details={"manual_reconciliation_required": True},
+            )
+
+    def _target_agents(self, job_id: str) -> list[str]:
+        record = self.jobs.get(job_id)
+        if record is None:
+            return []
+        names = [
+            str(item.get("target_agent") or "").strip() for item in record.requesters
+        ]
+        return list(dict.fromkeys(name for name in names if name)) or [
+            record.target_agent
+        ]
+
+    def _runtime(self, agent_name: str) -> Any | None:
+        return next(
+            (
+                item
+                for item in getattr(self.kernel, "runtimes", [])
+                if item.name == agent_name
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _backend(runtime: Any) -> Any | None:
+        manager = getattr(runtime, "backend_manager", None)
+        return (
+            getattr(manager, "current_backend", None)
+            if manager is not None
+            else getattr(runtime, "backend", None)
+        )
+
+    def _runtime_idle(self, agent_name: str) -> bool:
+        runtime = self._runtime(agent_name)
+        if runtime is None or not getattr(runtime, "startup_success", False):
+            return False
+        queue = getattr(runtime, "queue", None)
+        background = getattr(runtime, "_background_tasks", set())
+        backend = self._backend(runtime)
+        active_processes = getattr(backend, "_active_processes", {}) if backend else {}
+        return not any(
+            (
+                bool(getattr(runtime, "is_generating", False)),
+                bool(queue is not None and not queue.empty()),
+                bool(getattr(runtime, "current_request_meta", None)),
+                any(not task.done() for task in background),
+                bool(active_processes),
+            )
+        )
+
+    async def _wait_for_idle(self, agent_names: list[str]) -> bool:
+        deadline = time.monotonic() + self.idle_timeout_seconds
+        while True:
+            if all(self._runtime_idle(name) for name in agent_names):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(self.idle_poll_seconds)
+
+    def _assert_adopted(
+        self,
+        agent_names: list[str],
+        candidate: CandidateMetadata,
+    ) -> None:
+        for agent_name in agent_names:
+            runtime = self._runtime(agent_name)
+            backend = self._backend(runtime) if runtime is not None else None
+            resolution = getattr(backend, "_binary_resolution", None)
+            binary = getattr(backend, "_binary", None)
+            if (
+                backend is None
+                or getattr(resolution, "source", None) != "development-source-build"
+                or Path(binary).resolve() != Path(candidate.binary_path).resolve()
+            ):
+                raise HERRebuildError(
+                    FailureKind.ADAPTER_INITIALIZATION_FAILED,
+                    RebuildStage.ADOPTING,
+                    f"Target Agent {agent_name!r} did not adopt the selected HER candidate.",
+                )
+
+    async def _postcheck(
+        self,
+        agent_names: list[str],
+        candidate: CandidateMetadata,
+    ) -> None:
+        for agent_name in agent_names:
+            runtime = self._runtime(agent_name)
+            if runtime is None or not getattr(runtime, "backend_ready", False):
+                raise HERRebuildError(
+                    FailureKind.POSTCHECK_HEALTH_FAILED,
+                    RebuildStage.POSTCHECK,
+                    f"Target Agent {agent_name!r} is not backend-ready after adoption.",
+                )
+        await self.verifier.verify(
+            Path(candidate.binary_path),
+            fingerprint=self._fingerprint_from_candidate(candidate),
+            work_root=self.state_root / "postcheck" / candidate.candidate_id,
+        )
+
+    @staticmethod
+    def _fingerprint_from_candidate(candidate: CandidateMetadata) -> Any:
+        from orchestrator.her_rebuild import SourceFingerprint
+
+        return SourceFingerprint(
+            digest=candidate.source_fingerprint,
+            git_head=candidate.source_git_head,
+            dirty=candidate.source_dirty,
+            file_count=0,
+            source_bytes=0,
+            target=candidate.target,
+            profile=candidate.profile,
+            features=candidate.features,
+            cargo_version=candidate.cargo_version,
+            rustc_version=candidate.rustc_version,
+        )
+
+    async def _notify_terminal(self, job_id: str) -> None:
+        record = self.jobs.get(job_id)
+        if record is None or not record.is_terminal:
+            return
+        for requester in record.requesters:
+            if requester.get("terminal_delivered"):
+                continue
+            requester_id = str(requester["requester_id"])
+            event_id = str(
+                requester.get("terminal_event_id")
+                or f"{job_id}:terminal:{requester_id}"
+            )
+            delivered = False
+            try:
+                origin = dict(requester.get("origin", {}))
+                chat_id = origin.get("chat_id")
+                runtime = self._runtime(str(requester.get("target_agent") or ""))
+                if runtime is not None and chat_id is not None:
+                    await runtime.send_long_message(
+                        int(chat_id),
+                        self.format_result(record),
+                        request_id=event_id,
+                        purpose="her-rebuild-terminal",
+                    )
+                    delivered = True
+            except Exception:
+                logger.exception(
+                    "Failed to deliver terminal HER rebuild event %s", event_id
+                )
+            self.jobs.mark_notification(
+                job_id,
+                requester_id=requester_id,
+                event_id=event_id,
+                delivered=delivered,
+            )
+
+    @staticmethod
+    def format_result(record: RebuildJobRecord) -> str:
+        duration = (
+            record.details.get("build_duration_seconds") if record.details else None
+        )
+        duration_text = (
+            f" · build {float(duration):.1f}s" if duration is not None else ""
+        )
+        if record.state == RebuildStage.SUCCEEDED:
+            return f"✅ HER rebuild succeeded · {record.job_id}{duration_text} · candidate {record.candidate_id}"
+        if record.state == RebuildStage.ACTIVATION_DEFERRED:
+            return f"⏸️ HER rebuild verified but activation was deferred · {record.job_id} · run /rebuild again when the Agent is idle."
+        if record.state == RebuildStage.ROLLED_BACK:
+            return f"↩️ HER rebuild failed and the previous runtime was restored · {record.job_id} · {record.error or 'postcheck failed'}"
+        return f"❌ HER rebuild failed · {record.job_id} · {record.failure_kind.value if record.failure_kind else 'unknown'} · {record.error or 'no details'}"

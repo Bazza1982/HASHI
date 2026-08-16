@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "component": "HASHI Execution Runtime (HER)",
+  "license": "MIT",
+  "imported_at": "2026-08-16",
+  "imported_release": "0.1.0-hashi.22",
+  "source": {
+    "repository": "https://github.com/Bazza1982/claw-code.git",
+    "branch": "release/her-0.1.0-hashi.22",
+    "tag": "her-0.1.0-hashi.22-certified-r2",
+    "commit": "246b04e9fa28ef0b6f74c2d924ab3697b95197bd"
+  },
+  "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
+  "certified_source_bundle": {
+    "path": "hashi_assets/her/releases/0.1.0-hashi.22/source/her-source.bundle",
+    "sha256": "246cd7588e181513f6767c7dce0c266e6ac91ff9ca2c5773bbaf9999b4062a1c",
+    "size_bytes": 22616108
+  },
+  "hashi_local_changes": [
+    "Added the Cargo profile `hashi-dev` for supervised incremental development builds.",
+    "Excluded tracked upstream interactive session, local sandbox, and agent-workflow state that is not part of the Rust build source."
+  ],
+  "excluded_upstream_development_artifacts": [
+    "rust/.claude/sessions/",
+    "rust/.claw/sessions/",
+    "rust/.claw.json",
+    "rust/.clawd-todos.json",
+    "rust/.omc/",
+    "rust/.sandbox-home/"
+  ]
+}

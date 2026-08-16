@@ -86,6 +86,7 @@ def test_runtime_command_registry_loads_external_private_commands(monkeypatch, t
 
     commands = {command.name: command for command in load_runtime_commands()}
 
+    assert commands["rebuild"].description == "Rebuild and safely reload HER"
     assert "private_sample" in commands
     assert any(command.command == "private_sample" for command in runtime_bot_commands())
 

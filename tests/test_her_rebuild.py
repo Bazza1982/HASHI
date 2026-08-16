@@ -14,6 +14,7 @@ from orchestrator.her_rebuild import (
     FailureKind,
     GitSourceState,
     HERBuildController,
+    HERQuickVerifier,
     HERRebuildError,
     HERSourceLayout,
     SourceFingerprint,
@@ -94,8 +95,14 @@ def _fingerprint(
 
 
 def test_detect_host_target_supports_linux_and_windows_x64() -> None:
-    assert detect_host_target(system="Linux", machine="x86_64") == "x86_64-unknown-linux-gnu"
-    assert detect_host_target(system="Windows", machine="AMD64") == "x86_64-pc-windows-msvc"
+    assert (
+        detect_host_target(system="Linux", machine="x86_64")
+        == "x86_64-unknown-linux-gnu"
+    )
+    assert (
+        detect_host_target(system="Windows", machine="AMD64")
+        == "x86_64-pc-windows-msvc"
+    )
 
 
 def test_detect_host_target_rejects_unsupported_host() -> None:
@@ -133,7 +140,9 @@ def test_preflight_rejects_integrated_source_symlink(tmp_path: Path) -> None:
     assert caught.value.failure_kind == FailureKind.SOURCE_INVALID
 
 
-def test_fingerprint_is_deterministic_and_tracks_relevant_source(tmp_path: Path) -> None:
+def test_fingerprint_is_deterministic_and_tracks_relevant_source(
+    tmp_path: Path,
+) -> None:
     layout = _source_layout(tmp_path)
     first = _fingerprint(layout)
     second = _fingerprint(layout)
@@ -155,7 +164,9 @@ def test_fingerprint_excludes_cargo_target_and_temp_files(tmp_path: Path) -> Non
     assert _fingerprint(layout).digest == first.digest
 
 
-def test_fingerprint_includes_target_profile_features_and_toolchain(tmp_path: Path) -> None:
+def test_fingerprint_includes_target_profile_features_and_toolchain(
+    tmp_path: Path,
+) -> None:
     layout = _source_layout(tmp_path)
     base = _fingerprint(layout)
     windows = _fingerprint(layout, target="x86_64-pc-windows-msvc")
@@ -300,6 +311,7 @@ print("SECRET_PRESENT", "OPENAI_API_KEY" in os.environ)
         target="x86_64-unknown-linux-gnu",
     )
     controller = HERBuildController(layout, state_root=tmp_path / "state")
+    process_events = []
     artifact = await controller.build(
         job_id="rebuild-test-success",
         fingerprint=fingerprint,
@@ -309,12 +321,65 @@ print("SECRET_PRESENT", "OPENAI_API_KEY" in os.environ)
             "HOME": str(tmp_path),
             "OPENAI_API_KEY": "must-not-pass",
         },
+        on_process_started=lambda pid: process_events.append(("started", pid)),
+        on_process_finished=lambda: process_events.append(("finished", None)),
     )
     assert artifact.binary_path.read_bytes() == b"fake-her-binary"
     log = artifact.build_log_path.read_text(encoding="utf-8")
     assert "Finished fake HER build" in log
     assert "SECRET_PRESENT False" in log
     assert "must-not-pass" not in log
+    assert process_events[0][0] == "started"
+    assert process_events[0][1] > 0
+    assert process_events[-1] == ("finished", None)
+
+
+async def test_quick_verifier_checks_local_identity_doctor_and_stream_json(
+    tmp_path: Path,
+) -> None:
+    binary = _fake_cargo_script(
+        tmp_path / "claw",
+        body="""import json
+import sys
+
+args = sys.argv[1:]
+if args == ["version", "--output-format", "json"]:
+    print(json.dumps({"status": "ok", "kind": "version", "version": "test", "git_sha": "abc", "target": "x86_64-unknown-linux-gnu", "is_dirty": True}))
+elif args == ["doctor", "--output-format", "json"]:
+    print(json.dumps({"status": "warn", "kind": "doctor"}))
+elif args == ["--help"]:
+    print("prompt [--stdin] TEXT; --output-format text|json|stream-json")
+elif args == ["--output-format", "stream-json", "prompt", "--stdin"]:
+    print(json.dumps({"status": "error", "error_kind": "missing_prompt"}))
+    raise SystemExit(1)
+else:
+    raise SystemExit(9)
+""",
+    )
+    fingerprint = SourceFingerprint(
+        digest="d" * 64,
+        git_head="a" * 40,
+        dirty=True,
+        file_count=1,
+        source_bytes=1,
+        target="x86_64-unknown-linux-gnu",
+        profile="hashi-dev",
+        features=(),
+        cargo_version="cargo test",
+        rustc_version="rustc test",
+    )
+
+    result = await HERQuickVerifier().verify(
+        binary,
+        fingerprint=fingerprint,
+        work_root=tmp_path / "isolated",
+        environment={"PATH": os.environ.get("PATH", ""), "OPENAI_API_KEY": "private"},
+    )
+
+    assert result["result"] == "passed"
+    assert result["checks"]["version"]["target"] == fingerprint.target
+    assert result["checks"]["doctor"]["health"] == "warn"
+    assert result["checks"]["stream_json"]["events"] == 1
 
 
 async def test_build_controller_reports_compiler_failure_without_secret(
@@ -376,7 +441,9 @@ time.sleep(30)
     assert caught.value.failure_kind == FailureKind.CARGO_TIMEOUT
 
 
-async def test_build_controller_rejects_source_change_during_build(tmp_path: Path) -> None:
+async def test_build_controller_rejects_source_change_during_build(
+    tmp_path: Path,
+) -> None:
     layout = _source_layout(tmp_path)
     main_rs = layout.rust_root / "crates" / "rusty-claude-cli" / "src" / "main.rs"
     fake_cargo = _fake_cargo_script(
@@ -524,7 +591,9 @@ def test_candidate_staging_is_immutable_and_digest_verified(tmp_path: Path) -> N
     assert candidate.production_certified is False
     assert sha256_file(Path(candidate.binary_path)) == candidate.binary_sha256
     assert Path(candidate.build_log_path).parent == Path(candidate.candidate_dir)
-    assert Path(candidate.build_log_path).read_text(encoding="utf-8") == "build complete\n"
+    assert (
+        Path(candidate.build_log_path).read_text(encoding="utf-8") == "build complete\n"
+    )
     quick_path = Path(candidate.candidate_dir) / "quick-verification.json"
     assert json.loads(quick_path.read_text(encoding="utf-8")) == {"result": "passed"}
     assert (
@@ -535,6 +604,7 @@ def test_candidate_staging_is_immutable_and_digest_verified(tmp_path: Path) -> N
         ).candidate_id
         == candidate.candidate_id
     )
+    assert store.find_by_fingerprint(candidate.source_fingerprint) == candidate
 
     candidate_binary = Path(candidate.binary_path)
     candidate_binary.chmod(0o755)
@@ -574,6 +644,9 @@ def test_selection_is_atomic_and_retains_rollback_candidate(tmp_path: Path) -> N
     selected_first = selection.select(first.candidate_id, job_id="rebuild-one")
     assert selected_first["active"]["candidate_id"] == first.candidate_id
     assert selected_first["previous"] is None
+    assert selection.active_candidate(target=first.target) == first
+    adopted = selection.mark_adopted(first.candidate_id, job_id="rebuild-one")
+    assert adopted["adoption_state"] == "adopted"
 
     second_binary = first_artifact.binary_path
     second_binary.write_bytes(b"second-her")
