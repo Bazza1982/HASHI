@@ -18,9 +18,12 @@ from tools.registry import ToolRegistry
 
 from .cleanup import CleanupGuard, UnsafeCleanupTarget
 from .evidence import EvidenceCollector
-from .scripted_provider import EXACT_FINAL_FRAGMENTS, EXACT_REASONING_FRAGMENTS, ScriptedProvider
+from .scripted_provider import (
+    EXACT_FINAL_FRAGMENTS,
+    EXACT_REASONING_FRAGMENTS,
+    ScriptedProvider,
+)
 from .step_state import SequentialStepState, StepProtocolError
-
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LAB_ROOT = ROOT / "workspaces" / "ajiao" / "her_test_lab"
@@ -37,7 +40,9 @@ def _runtime_python() -> Path:
 
 
 def _json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    # Windows editors and PowerShell may persist UTF-8 JSON with a BOM.  The
+    # lab reads operator-owned configuration but always writes canonical UTF-8.
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def _write_json(path: Path, payload: Any, *, mode: int | None = None) -> None:
@@ -112,6 +117,66 @@ class RunLayout:
     gateway_context: Path
 
 
+@dataclass(frozen=True)
+class CandidateBinary:
+    path: Path
+    sha256: str
+    selection: str
+    expected_sha256: str | None
+    release_version: str | None
+
+
+def _candidate_release_version(path: Path) -> str | None:
+    releases_root = (ROOT / "hashi_assets" / "her" / "releases").resolve()
+    try:
+        relative = path.resolve().relative_to(releases_root)
+    except ValueError:
+        return None
+    return relative.parts[0] if len(relative.parts) >= 3 else None
+
+
+def _resolve_candidate_binary(manifest: dict[str, Any], *, explicit: Path | None = None) -> CandidateBinary:
+    active_row = manifest["binaries"]["linux-x86_64"]
+    active_path = (ROOT / "hashi_assets" / "her" / active_row["path"]).resolve()
+    staged_value = str(os.environ.get("HASHI_HER_STAGED_BINARY") or "").strip()
+    expected_hash: str | None = None
+    if explicit is not None:
+        path = Path(explicit).expanduser().resolve()
+        selection = "explicit"
+    elif staged_value:
+        path = Path(staged_value).expanduser().resolve()
+        selection = "staged_environment"
+        expected_hash = str(os.environ.get("HASHI_HER_STAGED_SHA256") or "").strip() or None
+    else:
+        path = active_path
+        selection = "active_manifest"
+        expected_hash = str(active_row["sha256"])
+    if path == active_path:
+        expected_hash = str(active_row["sha256"])
+    if not path.is_file():
+        raise FileNotFoundError(f"HER candidate binary not found: {path}")
+    actual_hash = _sha256(path)
+    if expected_hash is not None and actual_hash != expected_hash:
+        raise RuntimeError(f"HER candidate binary hash mismatch for {selection}")
+    return CandidateBinary(
+        path=path,
+        sha256=actual_hash,
+        selection=selection,
+        expected_sha256=expected_hash,
+        release_version=_candidate_release_version(path),
+    )
+
+
+def _binary_provenance(binary: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(_command([str(binary), "version", "--output-format", "json"], ROOT))
+    except (json.JSONDecodeError, RuntimeError) as exc:
+        raise RuntimeError(f"HER candidate did not provide valid version provenance: {binary}") from exc
+    if not isinstance(payload, dict):
+        raise TypeError(f"HER candidate version provenance was not an object: {binary}")
+    return payload
+
+
 class HerDebugLab:
     def __init__(self, lab_root: Path = DEFAULT_LAB_ROOT):
         self.root = Path(lab_root)
@@ -128,7 +193,13 @@ class HerDebugLab:
         else:
             _write_json(marker, expected)
 
-    def create_run(self, run_id: str | None = None, *, target_steps: int = 3) -> RunLayout:
+    def create_run(
+        self,
+        run_id: str | None = None,
+        *,
+        target_steps: int = 3,
+        candidate: CandidateBinary | None = None,
+    ) -> RunLayout:
         self.initialize()
         if run_id is None:
             run_id = f"her-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:6]}"
@@ -203,14 +274,16 @@ class HerDebugLab:
                 }
             },
         )
-        baseline = self.capture_baseline(layout)
+        baseline = self.capture_baseline(layout, candidate=candidate)
         _write_json(layout.root / "baseline.json", baseline)
         EvidenceCollector(layout.evidence).write_json("lab_created.json", {"run_id": run_id, "baseline": baseline})
         return layout
 
-    def capture_baseline(self, layout: RunLayout) -> dict[str, Any]:
+    def capture_baseline(self, layout: RunLayout, *, candidate: CandidateBinary | None = None) -> dict[str, Any]:
         manifest = _json(ROOT / "hashi_assets" / "her" / "manifest.json")
-        binary = ROOT / "hashi_assets" / "her" / manifest["binaries"]["linux-x86_64"]["path"]
+        candidate = candidate or _resolve_candidate_binary(manifest)
+        binary = candidate.path
+        provenance = _binary_provenance(binary)
         hashi_commit = _command(["git", "rev-parse", "HEAD"], ROOT)
         hashi_dirty = bool(_command(["git", "status", "--porcelain"], ROOT))
         configured_source = str(os.environ.get("HASHI_HER_SOURCE_ROOT") or "").strip()
@@ -219,12 +292,12 @@ class HerDebugLab:
         source_commit = (
             _command(["git", "rev-parse", "HEAD"], source_root)
             if source_checkout and source_root is not None
-            else manifest.get("source_commit")
+            else (provenance.get("git_sha") or manifest.get("source_commit"))
         )
         source_dirty = (
             bool(_command(["git", "status", "--porcelain"], source_root))
             if source_checkout and source_root is not None
-            else None
+            else provenance.get("is_dirty")
         )
         ajiao_state = _optional_file_baseline(ROOT / "workspaces" / "ajiao" / "state.json")
         ajiao_preferences = _optional_file_baseline(
@@ -235,7 +308,7 @@ class HerDebugLab:
         provider_rows = {}
         for name, row in (config.get("global", {}).get("claw_providers", {}).get("providers", {}) or {}).items():
             provider_rows[name] = {"base_url": row.get("base_url"), "status": row.get("status")}
-        binary_hash = _sha256(binary)
+        binary_hash = candidate.sha256
         candidate_material = json.dumps(
             {"hashi_commit": hashi_commit, "source_commit": source_commit, "package_sha256": binary_hash},
             sort_keys=True,
@@ -246,11 +319,16 @@ class HerDebugLab:
             "hashi_commit": hashi_commit,
             "hashi_dirty": hashi_dirty,
             "python_version": sys.version.split()[0],
-            "her_version": manifest.get("version"),
+            "her_version": candidate.release_version or manifest.get("version"),
+            "active_manifest_version": manifest.get("version"),
             "her_source_commit": source_commit,
             "her_source_dirty": source_dirty,
             "package_sha256": binary_hash,
             "manifest_package_sha256": manifest["binaries"]["linux-x86_64"]["sha256"],
+            "candidate_selection": candidate.selection,
+            "candidate_expected_sha256": candidate.expected_sha256,
+            "candidate_matches_active_manifest": binary_hash == manifest["binaries"]["linux-x86_64"]["sha256"],
+            "binary_provenance": provenance,
             "candidate_hash": hashlib.sha256(candidate_material).hexdigest(),
             "providers": provider_rows,
             "agents_config_present": config_path.is_file(),
@@ -355,17 +433,11 @@ class HerDebugLab:
         timeout_seconds: int = 45,
         max_iterations: int | None = None,
     ) -> dict[str, Any]:
-        layout = self.create_run(target_steps=target_steps)
         manifest = _json(ROOT / "hashi_assets" / "her" / "manifest.json")
-        if binary is None:
-            binary = ROOT / "hashi_assets" / "her" / manifest["binaries"]["linux-x86_64"]["path"]
-        binary = Path(binary).resolve()
-        if not binary.is_file():
-            raise FileNotFoundError(f"HER candidate binary not found: {binary}")
-        expected_hash = manifest["binaries"]["linux-x86_64"]["sha256"]
-        actual_hash = _sha256(binary)
-        if actual_hash != expected_hash:
-            raise RuntimeError("HER candidate binary does not match the active manifest")
+        candidate = _resolve_candidate_binary(manifest, explicit=binary)
+        binary = candidate.path
+        actual_hash = candidate.sha256
+        layout = self.create_run(target_steps=target_steps, candidate=candidate)
 
         private_canary = f"HER_DEBUG_PRIVATE_CANARY_{layout.run_id}"
         collector = EvidenceCollector(layout.evidence, forbidden_values=[private_canary])
