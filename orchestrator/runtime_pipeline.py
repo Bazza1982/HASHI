@@ -136,9 +136,6 @@ def _resolve_her_session_scope(runtime, item) -> str:
         return HER_SESSION_SCOPE_PERSISTENT
     if str(item.source or "").strip().lower().startswith("scheduler"):
         return HER_SESSION_SCOPE_ISOLATED
-    backend = getattr(getattr(runtime, "backend_manager", None), "current_backend", None)
-    if bool(getattr(backend, "persistent_session_busy", False)):
-        return HER_SESSION_SCOPE_ISOLATED
     return HER_SESSION_SCOPE_PERSISTENT
 
 

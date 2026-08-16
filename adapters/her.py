@@ -1374,8 +1374,26 @@ def _her_stream_delivery(
         return DELIVERY_INTERNAL, False, "provider_returned"
     if kind == "permission_required":
         return DELIVERY_CONTROL, True, "runtime_control"
+    actionability = str(event.get("actionability") or "").strip().lower()
+    explicit_user_action = event.get("user_action_required")
+    user_action_required = (
+        explicit_user_action is True
+        or str(explicit_user_action or "").strip().lower() in {"1", "true", "yes", "on"}
+        or actionability
+        in {
+            "user_action_required",
+            "requires_user",
+            "permission_required",
+            "missing_user_decision",
+            "terminal_actionable_blocker",
+        }
+    )
+    if user_action_required:
+        return DELIVERY_CONTROL, True, "runtime_control"
     if kind == "error" or event.get("type") == "error" or event.get("error"):
-        return DELIVERY_CONTROL, True, "runtime_error"
+        return DELIVERY_TECHNICAL, False, "runtime_error"
+    if mapped.kind == KIND_ERROR:
+        return DELIVERY_TECHNICAL, False, "runtime_error"
     return DELIVERY_TECHNICAL, False, "runtime_observed"
 
 
@@ -1777,25 +1795,6 @@ def _claw_jsonl_to_stream_events(
         frame.get("assurance") if isinstance(frame.get("assurance"), Mapping) else {}
     )
     phase = str(event.get("phase") or "update")
-
-    if phase != "initial":
-        # Replan commentary is accepted only when the planning model authored it.
-        # A deterministic TaskFrame summary remains technical and must never
-        # impersonate the configured Agent Persona.
-        commentary = str(
-            event.get("commentary")
-            or frame.get("commentary")
-            or frame.get("acknowledgement")
-            or ""
-        ).strip()
-        if commentary:
-            events.append(
-                StreamEvent(
-                    kind=KIND_COMMENTARY,
-                    summary=commentary,
-                    detail=f"HER model-authored task plan phase={phase}"[:1000],
-                )
-            )
 
     def _items(name: str) -> list[str]:
         value = assurance.get(name)

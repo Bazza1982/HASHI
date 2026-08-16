@@ -46,6 +46,7 @@ from adapters.her import (
 from adapters.claw_cli import ClawCLIAdapter
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
+    DELIVERY_CONTROL,
     DELIVERY_FINAL,
     DELIVERY_TECHNICAL,
     DELIVERY_USER_COMMENTARY,
@@ -189,7 +190,7 @@ def test_claw_replan_without_model_commentary_remains_technical():
     assert plan.origin == "her_planner"
 
 
-def test_claw_replan_emits_only_model_authored_persona_commentary():
+def test_claw_task_plan_never_reuses_acknowledgement_as_commentary():
     events = _claw_jsonl_to_stream_events(
         {
             "kind": "task_plan",
@@ -203,11 +204,47 @@ def test_claw_replan_emits_only_model_authored_persona_commentary():
         request_id="req-persona",
     )
 
-    [commentary] = [event for event in events if event.kind == KIND_COMMENTARY]
-    assert commentary.summary.startswith("Sunny 已确认")
+    assert all(event.kind != KIND_COMMENTARY for event in events)
+    assert events[0].delivery_class == DELIVERY_TECHNICAL
+
+
+def test_claw_explicit_task_commentary_is_user_visible():
+    events = _claw_jsonl_to_stream_events(
+        {
+            "kind": "task_commentary",
+            "phase": "execution",
+            "revision": 2,
+            "text": "Sunny 已完成日志核验，正在运行最后一项测试。☀️",
+        },
+        request_id="req-persona",
+    )
+
+    [commentary] = events
+    assert commentary.kind == KIND_COMMENTARY
     assert commentary.delivery_class == DELIVERY_USER_COMMENTARY
-    assert commentary.event_id == "req-persona:commentary:replan:2"
+    assert commentary.event_id == "req-persona:commentary:execution:2:0"
     assert commentary.provenance == "model_authored"
+
+
+def test_claw_internal_error_is_technical_unless_user_action_is_required():
+    [internal] = _claw_jsonl_to_stream_events(
+        {"kind": "error", "error": "planner response was invalid JSON"},
+        request_id="req-error",
+    )
+    [actionable] = _claw_jsonl_to_stream_events(
+        {
+            "kind": "error",
+            "error": "approval is required",
+            "user_action_required": True,
+        },
+        request_id="req-error",
+        source_index=2,
+    )
+
+    assert internal.delivery_class == DELIVERY_TECHNICAL
+    assert internal.required is False
+    assert actionable.delivery_class == DELIVERY_CONTROL
+    assert actionable.required is True
 
 
 def test_claw_initial_task_plan_does_not_duplicate_acknowledgement_as_commentary():

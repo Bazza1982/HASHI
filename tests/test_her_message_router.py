@@ -52,7 +52,7 @@ def _event(
         (True, True, True),
     ],
 )
-async def test_all_toggle_combinations_route_directly_to_the_enabled_owner(
+async def test_all_toggle_combinations_present_each_event_id_once(
     commentary, verbose, think
 ):
     presented = []
@@ -100,11 +100,11 @@ async def test_all_toggle_combinations_route_directly_to_the_enabled_owner(
 
     expected = []
     if verbose:
-        expected.extend([("technical", "req-matrix:technical:1")] * 2)
+        expected.append(("technical", "req-matrix:technical:1"))
     if commentary:
-        expected.extend([("commentary", "req-matrix:commentary:1")] * 2)
+        expected.append(("commentary", "req-matrix:commentary:1"))
     if think:
-        expected.extend([("reasoning", "req-matrix:reasoning:1")] * 2)
+        expected.append(("reasoning", "req-matrix:reasoning:1"))
     assert presented == expected
     assert persisted == [event.event_id for event in events for _ in range(2)]
 
@@ -133,7 +133,7 @@ async def test_required_control_bypasses_all_optional_toggles():
     await router.route(event)
     await router.route(event)
 
-    assert presented == ["req-control:permission:1"] * 2
+    assert presented == ["req-control:permission:1"]
 
 
 @pytest.mark.asyncio
@@ -163,7 +163,7 @@ async def test_direct_response_is_deferred_to_mandatory_final_lane():
 
 
 @pytest.mark.asyncio
-async def test_presenter_failure_does_not_create_a_second_retry_system():
+async def test_presenter_failure_allows_exact_event_retry_until_accepted():
     attempts = []
 
     async def flaky(event):
@@ -186,8 +186,39 @@ async def test_presenter_failure_does_not_create_a_second_retry_system():
     )
 
     await router.route(event)
+    await router.route(event)
+    await router.route(event)
 
-    assert attempts == [event.event_id]
+    assert attempts == [event.event_id, event.event_id]
+
+
+@pytest.mark.asyncio
+async def test_presenter_non_acceptance_allows_exact_event_retry_until_accepted():
+    attempts = []
+
+    def eventually_accept(event):
+        attempts.append(event.event_id)
+        return len(attempts) > 1
+
+    router = HERMessageRouter(
+        request_id="req-not-accepted",
+        logger=SimpleNamespace(
+            info=lambda _message: None, warning=lambda _message: None
+        ),
+        commentary_presenter=eventually_accept,
+        commentary_enabled=lambda: True,
+    )
+    event = _event(
+        DELIVERY_USER_COMMENTARY,
+        "req-not-accepted:commentary:1",
+        kind=KIND_COMMENTARY,
+    )
+
+    await router.route(event)
+    await router.route(event)
+    await router.route(event)
+
+    assert attempts == [event.event_id, event.event_id]
 
 
 @pytest.mark.asyncio

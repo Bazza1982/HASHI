@@ -414,7 +414,7 @@ async def test_scheduler_her_turn_uses_isolated_full_context_session():
 
 
 @pytest.mark.asyncio
-async def test_new_her_turn_isolated_while_persistent_background_turn_is_busy():
+async def test_new_direct_her_turn_waits_for_busy_persistent_session():
     runtime = _runtime()
     runtime.config.active_backend = "her"
     runtime.backend_manager.agent_mode = "fixed"
@@ -435,8 +435,8 @@ async def test_new_her_turn_isolated_while_persistent_background_turn_is_busy():
         is_bridge_request=False,
     )
 
-    assert runtime.current_request_meta["session_scope"] == "isolated_per_run"
-    assert prompt.incremental is False
+    assert runtime.current_request_meta["session_scope"] == "persistent"
+    assert prompt.incremental is True
 
 
 @pytest.mark.asyncio
@@ -795,7 +795,7 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
 
 
 @pytest.mark.asyncio
-async def test_medium_claw_sends_one_visible_task_acknowledgement():
+async def test_medium_claw_sends_each_task_acknowledgement_event_once():
     runtime = _runtime()
     runtime.config.active_backend = "her"
     runtime.backend_manager.current_backend.effort = "medium"
@@ -825,7 +825,7 @@ async def test_medium_claw_sends_one_visible_task_acknowledgement():
     await feedback.on_stream_event(event)
     await feedback.on_stream_event(event)
 
-    assert len(sent) == 2
+    assert len(sent) == 1
     assert sent[0][0] == 123
     assert sent[0][2]["_purpose"] == "task_acknowledgement"
     assert any("acknowledgement policy" in message for message in runtime.logger.messages)
