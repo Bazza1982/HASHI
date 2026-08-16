@@ -36,7 +36,9 @@ def _runtime_python() -> Path:
         # Keep the virtual-environment entrypoint path; resolving its symlink would
         # bypass pyvenv.cfg discovery and silently fall back to the system Python.
         return candidate.absolute()
-    return Path(sys.executable).resolve()
+    # A clean certification worktree may deliberately use a virtual environment
+    # from another checkout.  Preserve that entrypoint for the same reason.
+    return Path(sys.executable).absolute()
 
 
 def _json(path: Path) -> Any:
