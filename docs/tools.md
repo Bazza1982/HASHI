@@ -65,6 +65,7 @@ Five execution modes:
 - `/nudge [list]` — show idle continuation jobs. `/nudge <minutes> <exit condition>` creates an idle-only continuation job; `/nudge max <id-fragment> <+100|-100|number|unlimited>` adjusts the optional fire limit. Telegram nudge panels also include `Max -100`, `Max +100`, and `Max ∞` buttons.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]` — control native bridge-owned voice replies
 - `/reboot [min|max|number|help]` — preflight and hot-reload Python code, rebuild managers, restart selected agents, and warm-recreate Workbench/API gateway/scheduler/watchers; the process lock and live WhatsApp transport remain intact
+- `/rebuild [status [job-id]]` — authorized-owner HER development workflow: fingerprint integrated Rust source, run/reuse a supervised incremental Cargo build, verify an immutable candidate, wait for this Agent to become idle, adopt it through targeted hot restart, and automatically roll back on adoption failure; it never promotes or edits the certified HER package
 - Alias: `/usercomputer`
 
 **Backend configuration:**

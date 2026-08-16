@@ -567,6 +567,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/focus` | Narrow execution back to the original task and keep working until it is complete or genuinely blocked |
 | `/recall [count]` | Remove all queued requests, or up to the newest positive `count`, without interrupting the active task |
 | `/reboot [min\|max\|#]` | Hot restart agents |
+| `/rebuild [status [job-id]]` | Incrementally build, verify and safely adopt integrated HER Rust changes without modifying the certified package |
 | `/restart` | Hard restart this HASHI instance through WatchTower supervision |
 | `/status [full]` | Show agent status, backend info |
 | `/memory [status\|on\|pause\|plus on\|plus off]` | Control normal memory injection and the independent Memory+ continuity layer |
