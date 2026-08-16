@@ -3431,7 +3431,23 @@ INCOMPLETE TASK FACTS (quoted, read-only)
             ),
             None,
         )
-        if not server or not server.get("valid"):
+        # HER <= hashi.20 reported per-server validity, while hashi.21's
+        # successful list contract reports only the top-level status and the
+        # configured server entries.  Accept either success shape, but keep
+        # malformed or explicitly invalid configurations fail-closed.
+        list_valid = (
+            status.get("status") == "ok"
+            and status.get("config_load_error") is None
+            and isinstance(status.get("configured_servers"), int)
+            and status["configured_servers"] > 0
+        )
+        legacy_server_valid = list_valid and server and server.get("valid") is True
+        current_server_valid = (
+            list_valid
+            and server
+            and "valid" not in server
+        )
+        if not (legacy_server_valid or current_server_valid):
             raise ClawProviderConfigError(
                 f"HER required HASHI Tool Gateway is invalid: {status.get('invalid_servers') or status}"
             )
