@@ -35,6 +35,10 @@ FOUNDATION_PHASES = {
     "adapters.stream_io": 0,
     "orchestrator.flexible_backend_registry": 0,
     "orchestrator.command_specs": 0,
+    # QueuedRequest is imported at module scope by both agent runtimes and
+    # request-pipeline consumers. Reload it first so a hot reboot cannot bind
+    # a new enqueue method to the previous dataclass constructor.
+    "orchestrator.runtime_common": 0,
     "orchestrator.runtime_defaults": 0,
     "orchestrator.workspace_state": 0,
     "adapters.base": 1,

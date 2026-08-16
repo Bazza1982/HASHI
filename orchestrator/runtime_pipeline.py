@@ -247,6 +247,9 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         "verbose_at_start": bool(getattr(runtime, "_verbose", False)),
         "silent": bool(item.silent),
         "deliver_to_telegram": bool(item.deliver_to_telegram),
+        "habit_learning_eligible": bool(
+            getattr(item, "habit_learning_eligible", True)
+        ),
         "session_scope": _resolve_her_session_scope(runtime, item),
     }
     runtime.current_request_meta = request_meta

@@ -160,6 +160,31 @@ def test_reload_project_modules_loads_stream_policy_before_flexible_runtime(monk
     assert status_idx < runtime_idx
 
 
+def test_reload_project_modules_loads_runtime_common_before_consumers(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    module_names = [
+        "orchestrator.flexible_agent_runtime",
+        "orchestrator.runtime_common",
+        "orchestrator.runtime_pipeline",
+    ]
+    reloaded = []
+
+    for name in module_names:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+
+    def fake_reload(module):
+        reloaded.append(module.__name__)
+        return module
+
+    monkeypatch.setattr("orchestrator.reboot_manager.importlib.reload", fake_reload)
+
+    manager.reload_project_modules()
+
+    common_idx = reloaded.index("orchestrator.runtime_common")
+    assert common_idx < reloaded.index("orchestrator.flexible_agent_runtime")
+    assert common_idx < reloaded.index("orchestrator.runtime_pipeline")
+
+
 def test_reload_project_modules_loads_tool_registry_before_gateway_context(monkeypatch):
     manager = RebootManager(kernel=object(), console_handler=None)
     module_names = [
@@ -219,6 +244,15 @@ def test_validate_agent_runtime_contract_rejects_stale_her_facade(monkeypatch):
     monkeypatch.setattr(claw_cli, "HERAdapter", object())
 
     with pytest.raises(HotReloadError, match="stale HER adapter class"):
+        manager.validate_agent_runtime_contract()
+
+
+def test_validate_agent_runtime_contract_rejects_stale_queued_request(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+
+    monkeypatch.setattr("orchestrator.flexible_agent_runtime.QueuedRequest", object())
+
+    with pytest.raises(HotReloadError, match="stale QueuedRequest class"):
         manager.validate_agent_runtime_contract()
 
 
