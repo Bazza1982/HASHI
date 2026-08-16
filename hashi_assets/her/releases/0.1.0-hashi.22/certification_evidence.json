@@ -1,15 +1,18 @@
 {
   "schema_version": 1,
   "certification_status": "candidate_complete",
+  "certification_revision": 2,
   "release_version": "0.1.0-hashi.22",
-  "created_at": "2026-08-16T17:11:00+10:00",
+  "created_at": "2026-08-16T18:04:45+10:00",
   "source": {
     "certified_base_source_commit": "5ed5b30ef2ab0f80ab6d4fd08a1b7b64e77faf05",
     "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
-    "source_commit": "759cb1abec7ae2dea2756b79206bb67a7d053c14",
+    "source_commit": "246b04e9fa28ef0b6f74c2d924ab3697b95197bd",
     "source_branch": "release/her-0.1.0-hashi.22",
-    "certified_tag": "her-0.1.0-hashi.22-certified",
-    "tag_object": "5770654993f2fca823b8c91d2ff7f6999a3b41a5",
+    "certified_tag": "her-0.1.0-hashi.22-certified-r2",
+    "tag_object": "bb15e6b709a5eae0feae7b5fb362b42c8d7b58a2",
+    "supersedes_certified_tag": "her-0.1.0-hashi.22-certified",
+    "runtime_race_fix_commit": "246b04e9fa28ef0b6f74c2d924ab3697b95197bd",
     "working_tree_clean": true,
     "recovered_rejected_21_deltas": [
       "26ec36f",
@@ -17,8 +20,8 @@
     ],
     "bundle": {
       "path": "releases/0.1.0-hashi.22/source/her-source.bundle",
-      "sha256": "0e142b32af9db8b7b3bfca1c11ae8a5134c74c02e5dcac60e1e0a7eea1ccd9b3",
-      "size_bytes": 22615136,
+      "sha256": "246cd7588e181513f6767c7dce0c266e6ac91ff9ca2c5773bbaf9999b4062a1c",
+      "size_bytes": 22616108,
       "verify_status": "passed",
       "complete_history": true
     }
@@ -26,18 +29,18 @@
   "artifacts": {
     "linux-x86_64": {
       "path": "releases/0.1.0-hashi.22/linux-x86_64/hashi-her",
-      "sha256": "5fc51f4c9e9e90c7f00516d3fd0c3a585c685c1e620a2cc2d2966cb02aa46dea",
+      "sha256": "e6c88b9dd37c9191f9aad0df9fd0cf9bbeb4365778a10153a48b4cf752096c91",
       "rust_target_triple": "x86_64-unknown-linux-gnu",
-      "embedded_source_commit": "759cb1abec7ae2dea2756b79206bb67a7d053c14",
+      "embedded_source_commit": "246b04e9fa28ef0b6f74c2d924ab3697b95197bd",
       "embedded_source_branch": "release/her-0.1.0-hashi.22",
       "provenance_dirty": false,
       "rustc": "rustc 1.95.0 (59807616e 2026-04-14)"
     },
     "windows-x86_64": {
       "path": "releases/0.1.0-hashi.22/windows-x86_64/hashi-her.exe",
-      "sha256": "9c954f60bd1e4948410fb7fd0928dc323235f117e765112ae588c2b8150e2d3b",
+      "sha256": "cd127b283d0bb8aa5db9d1863a617bb84a2c8cd0174ed305c72c5f97b294724d",
       "rust_target_triple": "x86_64-pc-windows-msvc",
-      "embedded_source_commit": "759cb1abec7ae2dea2756b79206bb67a7d053c14",
+      "embedded_source_commit": "246b04e9fa28ef0b6f74c2d924ab3697b95197bd",
       "embedded_source_branch": "release/her-0.1.0-hashi.22",
       "provenance_dirty": false,
       "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)"
@@ -46,7 +49,7 @@
   "validations": {
     "rust_workspace": {
       "status": "passed",
-      "passed": 1479,
+      "passed": 1480,
       "failed": 0,
       "ignored": 1,
       "command": "cargo test --workspace"
