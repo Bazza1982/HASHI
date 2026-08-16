@@ -64,13 +64,12 @@ consolidated as the `v4.0.0-alpha.2` release candidate:
 - canonical Workbench Agent Overview and shared-token-authenticated remote
   terminal execution.
 
-Remaining release work is operational rather than an architecture rewrite:
-
-- run and record the final Python, Rust, certification, architecture, docs, and
-  publication-hygiene gates;
-- complete the approved live HER canary and inspect post-adoption logs;
-- create the tag and push only after the destination and exact outbound range
-  receive explicit approval.
+The final local Python, Rust, certification, architecture, documentation,
+publication-hygiene, and approved live HER canary gates are recorded as passed.
+Remaining work is the publication boundary: review the final `main` tip and exact
+outbound range, then create the tag and push only after the destination and operation
+receive explicit approval. Wider runtime rollout remains a separate operator-controlled
+deployment action, not an unfinished `.22` certification gate.
 
 See [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md) for the delivered scope
 and alpha boundaries. The

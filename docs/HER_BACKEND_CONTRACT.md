@@ -18,10 +18,11 @@ not certify a Windows build, another architecture, or a downstream integration.
 | Field | Certified value |
 | --- | --- |
 | Package version | `0.1.0-hashi.22` |
-| HER source | `759cb1abec7ae2dea2756b79206bb67a7d053c14` |
+| HER source | `246b04e9fa28ef0b6f74c2d924ab3697b95197bd` |
+| Certified tag | `her-0.1.0-hashi.22-certified-r2` |
 | Upstream base | Claw `4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d` |
-| Linux target / SHA-256 | `linux-x86_64` / `5fc51f4c9e9e90c7f00516d3fd0c3a585c685c1e620a2cc2d2966cb02aa46dea` |
-| Windows target / SHA-256 | `windows-x86_64` / `9c954f60bd1e4948410fb7fd0928dc323235f117e765112ae588c2b8150e2d3b` |
+| Linux target / SHA-256 | `linux-x86_64` / `e6c88b9dd37c9191f9aad0df9fd0cf9bbeb4365778a10153a48b4cf752096c91` |
+| Windows target / SHA-256 | `windows-x86_64` / `cd127b283d0bb8aa5db9d1863a617bb84a2c8cd0174ed305c72c5f97b294724d` |
 
 The Linux package passed the full pinned-source certification suite. The Windows
 package was built natively from the same clean source commit and passed native
@@ -359,8 +360,9 @@ Passing package and unit certification does not load a running HASHI process.
 Adoption requires an explicit canary `/reboot min`, live provider/media/Habit
 smokes, log review, and only then the intended wider `/reboot max`.
 
-The current open HER gate is a Momo-only `/reboot min` canary covering direct
+The certified r2 package completed its Momo `/reboot min` canary, including direct
 continuity, isolated scheduler execution, authoritative scheduler/file tools, typed
-failure finalization, commentary idempotency, and one Ultra run. Lily/Sunny or wider
-rollout remains blocked until that canary and its logs are reviewed; `.20` remains the
-rollback target and rejected `.21` remains inactive forensic evidence.
+failure finalization, commentary idempotency, and an Ultra run with three required
+workers and zero run errors. Wider Agent adoption remains an explicit operator rollout
+action rather than an outstanding certification gate. `.20` remains the previous
+known-good rollback release, and rejected `.21` remains inactive forensic evidence.
