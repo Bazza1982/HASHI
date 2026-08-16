@@ -18,6 +18,7 @@ from adapters.her import (
     ClawCommandError,
     ClawJsonError,
     ClawPackagedRuntimeError,
+    ClawProviderConfigError,
     ClawProviderSecretMissing,
     ClawTaskResult,
     ClawTimeoutError,
@@ -67,6 +68,76 @@ def _write_exe(path: Path, body: str) -> Path:
     path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (
+            {
+                "status": "ok",
+                "configured_servers": 1,
+                "config_load_error": None,
+                "servers": [{"name": "hashi-tools", "valid": True}],
+            },
+            True,
+        ),
+        (
+            {
+                "status": "ok",
+                "configured_servers": 1,
+                "config_load_error": None,
+                "servers": [{"name": "hashi-tools", "required": True}],
+            },
+            True,
+        ),
+        (
+            {
+                "status": "error",
+                "configured_servers": 1,
+                "config_load_error": "invalid settings",
+                "servers": [{"name": "hashi-tools", "required": True}],
+            },
+            False,
+        ),
+        (
+            {
+                "status": "ok",
+                "configured_servers": 1,
+                "config_load_error": None,
+                "servers": [{"name": "hashi-tools", "valid": False}],
+            },
+            False,
+        ),
+    ],
+)
+def test_tool_gateway_accepts_legacy_and_current_mcp_list_contracts(
+    monkeypatch, tmp_path, status, expected
+):
+    adapter = HERAdapter.__new__(HERAdapter)
+    adapter.config = SimpleNamespace(workspace_dir=tmp_path, extra={})
+    adapter._gateway_context_path = tmp_path / "context.json"
+    adapter._gateway_config_home = tmp_path / "config"
+    adapter._binary = tmp_path / "hashi-her"
+    adapter.logger = logging.getLogger("test.her.gateway")
+    adapter._task_env = dict
+
+    registry = SimpleNamespace(get_tool_definitions=lambda: [{"name": "probe"}])
+    context = SimpleNamespace(build_registry=lambda: registry)
+    monkeypatch.setattr("tools.gateway.context.load_gateway_context", lambda _path: context)
+    monkeypatch.setattr(
+        "adapters.her.run_claw_json_command",
+        lambda *_args, **_kwargs: SimpleNamespace(json_data=status),
+    )
+
+    if expected:
+        adapter._validate_tool_gateway()
+    else:
+        with pytest.raises(
+            ClawProviderConfigError,
+            match="required HASHI Tool Gateway is invalid",
+        ):
+            adapter._validate_tool_gateway()
 
 
 def test_claw_replan_without_model_commentary_remains_technical():
