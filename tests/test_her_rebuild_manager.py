@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from orchestrator.her_rebuild import FailureKind, HERRebuildError, RebuildStage
+from orchestrator.her_rebuild import (
+    BuildArtifact,
+    FailureKind,
+    HERRebuildError,
+    RebuildStage,
+    SourceFingerprint,
+    ToolchainIdentity,
+)
 from orchestrator.her_rebuild_manager import (
     HERBuildLock,
     HERRebuildJobStore,
+    HERRebuildManager,
 )
 
 
@@ -40,7 +51,9 @@ def _advance_to_success(store: HERRebuildJobStore, job_id: str):
         record = store.transition(
             job_id,
             state,
-            candidate_id="candidate-one" if state == RebuildStage.CANDIDATE_READY else None,
+            candidate_id="candidate-one"
+            if state == RebuildStage.CANDIDATE_READY
+            else None,
         )
     return record
 
@@ -227,7 +240,9 @@ def test_recovery_marks_pre_activation_job_failed(tmp_path: Path) -> None:
     assert recovered[0].details == {"interrupted": True}
 
 
-def test_recovery_marks_interrupted_rollback_as_manual_failure(tmp_path: Path) -> None:
+def test_recovery_defers_interrupted_rollback_for_startup_reconciliation(
+    tmp_path: Path,
+) -> None:
     store = HERRebuildJobStore(tmp_path / "jobs")
     created = _create(store)
     for state in (
@@ -243,12 +258,142 @@ def test_recovery_marks_interrupted_rollback_as_manual_failure(tmp_path: Path) -
     ):
         store.transition(created.job_id, state)
     recovered = store.recover_nonterminal()
-    assert len(recovered) == 1
-    assert recovered[0].state == RebuildStage.ROLLBACK_FAILED
-    assert recovered[0].details["manual_reconciliation_required"] is True
+    assert recovered == []
+    assert store.get(created.job_id).state == RebuildStage.ROLLING_BACK
 
 
-def test_build_lock_excludes_a_second_owner_and_releases_cleanly(tmp_path: Path) -> None:
+def test_manager_reconciles_interrupted_selection_before_agent_startup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    code_root = tmp_path / "hashi"
+    code_root.mkdir()
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(code_root=code_root, bridge_home=tmp_path / "home")
+    )
+    manager = HERRebuildManager(kernel)
+    created = manager.jobs.create(
+        source_fingerprint="a" * 64,
+        target_agent="lily",
+        actor_id="owner",
+        origin={"chat_id": "1"},
+    )
+    for state in (
+        RebuildStage.SOURCE_PREFLIGHT,
+        RebuildStage.WAITING_FOR_BUILD_LOCK,
+        RebuildStage.BUILDING,
+        RebuildStage.VERIFYING,
+        RebuildStage.CANDIDATE_READY,
+        RebuildStage.WAITING_FOR_AGENT_IDLE,
+        RebuildStage.ACTIVATING,
+    ):
+        manager.jobs.transition(created.job_id, state)
+    monkeypatch.setattr(manager.selection, "restore_previous", lambda **_kwargs: None)
+
+    reconciled = manager.reconcile_before_agent_startup()
+
+    assert len(reconciled) == 1
+    assert reconciled[0].state == RebuildStage.ROLLED_BACK
+    assert reconciled[0].details["cold_start_reconciled"] is True
+
+
+async def test_manager_builds_verifies_adopts_and_notifies_transactionally(
+    tmp_path: Path,
+) -> None:
+    code_root = tmp_path / "hashi"
+    code_root.mkdir()
+    backend = SimpleNamespace(
+        _active_processes={}, _binary=None, _binary_resolution=None
+    )
+    runtime = SimpleNamespace(
+        name="lily",
+        startup_success=True,
+        backend_ready=True,
+        queue=asyncio.Queue(),
+        is_generating=False,
+        current_request_meta=None,
+        _background_tasks=set(),
+        backend=backend,
+        send_long_message=AsyncMock(),
+    )
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(code_root=code_root, bridge_home=tmp_path / "home"),
+        runtimes=[runtime],
+    )
+    manager = HERRebuildManager(kernel, idle_timeout_seconds=0)
+    fingerprint = SourceFingerprint(
+        digest="a" * 64,
+        git_head="b" * 40,
+        dirty=False,
+        file_count=1,
+        source_bytes=1,
+        target="x86_64-unknown-linux-gnu",
+        profile="hashi-dev",
+        features=(),
+        cargo_version="cargo test",
+        rustc_version="rustc test",
+    )
+    toolchain = ToolchainIdentity(
+        cargo_path="cargo",
+        cargo_version=fingerprint.cargo_version,
+        rustc_path="rustc",
+        rustc_version=fingerprint.rustc_version,
+    )
+    cargo_output = tmp_path / "cargo-output" / "claw"
+    cargo_output.parent.mkdir()
+    cargo_output.write_bytes(b"development-her")
+    cargo_output.chmod(0o755)
+    build_log = tmp_path / "build.log"
+    build_log.write_text("ok\n", encoding="utf-8")
+    artifact = BuildArtifact(
+        job_id="placeholder",
+        fingerprint=fingerprint,
+        binary_path=cargo_output,
+        build_log_path=build_log,
+        build_started_at="2026-08-16T00:00:00+00:00",
+        build_finished_at="2026-08-16T00:00:01+00:00",
+        build_duration_seconds=1.0,
+        cargo_argv=("cargo", "build"),
+        diagnostics="",
+        log_truncated=False,
+    )
+
+    async def fake_build(**kwargs):
+        kwargs["on_process_started"](4242)
+        kwargs["on_process_finished"]()
+        return artifact
+
+    async def fake_verify(binary_path, **_kwargs):
+        return {"schema_version": 1, "result": "passed", "binary": str(binary_path)}
+
+    manager.controller = SimpleNamespace(build=fake_build)
+    manager.verifier = SimpleNamespace(verify=fake_verify)
+
+    async def hot_restart(_request):
+        candidate = manager.selection.active_candidate(target=fingerprint.target)
+        backend._binary = Path(candidate.binary_path)
+        backend._binary_resolution = SimpleNamespace(source="development-source-build")
+        return True
+
+    kernel.reboot_manager = SimpleNamespace(hot_restart=hot_restart)
+    record = manager.jobs.create(
+        source_fingerprint=fingerprint.digest,
+        target_agent="lily",
+        actor_id="owner",
+        origin={"chat_id": "123"},
+    )
+
+    await manager._run(record.job_id, fingerprint=fingerprint, toolchain=toolchain)
+
+    completed = manager.jobs.get(record.job_id)
+    assert completed.state == RebuildStage.SUCCEEDED
+    assert completed.terminal_notification_delivered is True
+    assert manager.selection.read()["adoption_state"] == "adopted"
+    runtime.send_long_message.assert_awaited_once()
+
+
+def test_build_lock_excludes_a_second_owner_and_releases_cleanly(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "her-build.lock"
     first = HERBuildLock(path, source_fingerprint="a" * 64)
     second = HERBuildLock(path, source_fingerprint="a" * 64)

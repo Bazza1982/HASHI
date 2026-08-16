@@ -45,6 +45,11 @@ class UniversalOrchestrator:
             self,
             build_hot_manager_bundle(self, _handler),
         )
+        # Deliberately kernel-owned rather than part of the hot-manager bundle:
+        # the coordinator must survive the targeted restart it requests.
+        from orchestrator.her_rebuild_manager import HERRebuildManager
+
+        self.her_rebuild_manager = HERRebuildManager(self)
         self.workbench_api = None
         self.api_gateway = None
         self.scheduler = None
@@ -246,9 +251,18 @@ class UniversalOrchestrator:
             f"config={self.paths.config_path}"
         )
 
+        reconciled_rebuilds = self.her_rebuild_manager.reconcile_before_agent_startup()
+        if reconciled_rebuilds:
+            bridge_logger.warning(
+                "Reconciled %s interrupted HER rebuild transaction(s) before Agent startup.",
+                len(reconciled_rebuilds),
+            )
+
         startup_ok, wa_cfg = await self.startup_manager.start_initial_agents(global_cfg, agent_configs, secrets)
         if not startup_ok:
             return
+
+        await self.her_rebuild_manager.retry_pending_notifications()
 
         main_logger.info("Universal Orchestrator is online. Awaiting messages.")
 

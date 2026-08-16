@@ -920,6 +920,40 @@ def _packaged_claw_roots(global_config: Any | None = None) -> list[Path]:
     return unique
 
 
+def _resolve_development_claw_binary(
+    global_config: Any | None = None,
+) -> ClawBinaryResolution | None:
+    """Resolve only an explicitly selected, validated `/rebuild` candidate."""
+    bridge_home = getattr(global_config, "bridge_home", None)
+    if not bridge_home:
+        return None
+    state_root = Path(bridge_home).expanduser().resolve() / "state" / "her_rebuild"
+    selection_path = state_root / "development-selection.json"
+    if not selection_path.exists():
+        return None
+    platform = detect_hashi_claw_platform()
+    try:
+        from orchestrator.her_rebuild import DevelopmentSelectionStore
+
+        candidate = DevelopmentSelectionStore(
+            selection_path,
+            candidates_root=state_root / "candidates",
+        ).active_candidate(target=platform.rust_target_triple)
+    except Exception as exc:  # noqa: BLE001 - selected development runtime must fail closed
+        raise ClawPackagedRuntimeError(
+            "Selected HER development runtime is invalid; refusing silent fallback "
+            f"({type(exc).__name__}: {exc})"
+        ) from exc
+    if candidate is None:
+        return None
+    return ClawBinaryResolution(
+        path=Path(candidate.binary_path).resolve(),
+        source="development-source-build",
+        platform=platform,
+        manifest_path=selection_path,
+    )
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1110,6 +1144,9 @@ def discover_claw_binary(
 ) -> ClawBinaryResolution:
     """Resolve an executable HER binary without requiring Cargo."""
     policy = _claw_runtime_policy(global_config, agent_config)
+    development = _resolve_development_claw_binary(global_config)
+    if development is not None:
+        return development
     early_candidates: list[tuple[str, str | os.PathLike[str]]] = []
     if configured_path:
         early_candidates.append(("configured", configured_path))

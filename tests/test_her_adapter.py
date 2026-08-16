@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import stat
-import textwrap
 import asyncio
 import hashlib
 import json
 import logging
+import stat
+import textwrap
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from adapters.claw_cli import ClawCLIAdapter
 from adapters.her import (
     ClawBinaryNotFound,
     ClawCommandError,
@@ -23,12 +24,13 @@ from adapters.her import (
     ClawProviderSecretMissing,
     ClawTaskResult,
     ClawTimeoutError,
-    _HERStreamCadenceController,
-    _build_claw_technical_lease,
+    HERAdapter,
     _build_claw_incomplete_report,
-    _claw_jsonl_to_stream_events,
+    _build_claw_technical_lease,
     _claw_incomplete_response,
+    _claw_jsonl_to_stream_events,
     _claw_run_is_incomplete,
+    _HERStreamCadenceController,
     _parse_json_output,
     _parse_stream_json_output,
     build_claw_env,
@@ -41,9 +43,7 @@ from adapters.her import (
     run_claw_doctor,
     run_claw_json_command,
     run_claw_task,
-    HERAdapter,
 )
-from adapters.claw_cli import ClawCLIAdapter
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
     DELIVERY_CONTROL,
@@ -71,6 +71,80 @@ def _write_exe(path: Path, body: str) -> Path:
     path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
+
+
+def _write_development_selection(
+    bridge_home: Path, binary_body: str = "#!/bin/sh\nexit 0\n"
+) -> Path:
+    from adapters.her import detect_hashi_claw_platform
+
+    state_root = bridge_home / "state" / "her_rebuild"
+    candidate_id = "dev-test-candidate"
+    candidate_dir = state_root / "candidates" / candidate_id
+    candidate_dir.mkdir(parents=True)
+    binary = candidate_dir / (
+        "claw.exe" if detect_hashi_claw_platform().system == "windows" else "claw"
+    )
+    binary.write_text(binary_body, encoding="utf-8")
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    build_log = candidate_dir / "build.log"
+    build_log.write_text("test build\n", encoding="utf-8")
+    verification = {"schema_version": 1, "result": "passed"}
+    (candidate_dir / "quick-verification.json").write_text(
+        json.dumps(verification), encoding="utf-8"
+    )
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    target = detect_hashi_claw_platform().rust_target_triple
+    metadata = {
+        "schema_version": 1,
+        "candidate_id": candidate_id,
+        "job_id": "rebuild-test",
+        "development_build": True,
+        "production_certified": False,
+        "source_fingerprint": "a" * 64,
+        "source_git_head": "b" * 40,
+        "source_dirty": False,
+        "target": target,
+        "profile": "hashi-dev",
+        "features": [],
+        "cargo_version": "cargo test",
+        "rustc_version": "rustc test",
+        "build_started_at": "2026-08-16T00:00:00+00:00",
+        "build_finished_at": "2026-08-16T00:00:01+00:00",
+        "build_duration_seconds": 1.0,
+        "binary_name": binary.name,
+        "binary_sha256": digest,
+        "binary_size": binary.stat().st_size,
+        "candidate_dir": str(candidate_dir.resolve()),
+        "binary_path": str(binary.resolve()),
+        "build_log_path": str(build_log.resolve()),
+        "quick_verification": verification,
+        "created_at": "2026-08-16T00:00:01+00:00",
+    }
+    (candidate_dir / "candidate.json").write_text(
+        json.dumps(metadata), encoding="utf-8"
+    )
+    selection = {
+        "schema_version": 1,
+        "active": {
+            "candidate_id": candidate_id,
+            "candidate_path": str(candidate_dir.resolve()),
+            "binary_path": str(binary.resolve()),
+            "binary_sha256": digest,
+            "source_fingerprint": "a" * 64,
+            "target": target,
+            "profile": "hashi-dev",
+            "development_build": True,
+            "production_certified": False,
+        },
+        "previous": None,
+        "selected_at": "2026-08-16T00:00:01+00:00",
+        "selecting_job_id": "rebuild-test",
+        "adoption_state": "selected_not_yet_adopted",
+    }
+    selection_path = state_root / "development-selection.json"
+    selection_path.write_text(json.dumps(selection), encoding="utf-8")
+    return binary
 
 
 def test_private_raw_log_chmod_failure_does_not_break_persistence(
@@ -147,7 +221,9 @@ def test_tool_gateway_accepts_legacy_and_current_mcp_list_contracts(
 
     registry = SimpleNamespace(get_tool_definitions=lambda: [{"name": "probe"}])
     context = SimpleNamespace(build_registry=lambda: registry)
-    monkeypatch.setattr("tools.gateway.context.load_gateway_context", lambda _path: context)
+    monkeypatch.setattr(
+        "tools.gateway.context.load_gateway_context", lambda _path: context
+    )
     monkeypatch.setattr(
         "adapters.her.run_claw_json_command",
         lambda *_args, **_kwargs: SimpleNamespace(json_data=status),
@@ -1050,6 +1126,51 @@ def test_find_claw_binary_uses_packaged_runtime_before_env(tmp_path):
         )
         == packaged.resolve()
     )
+
+
+def test_find_claw_binary_explicit_development_selection_precedes_packaged(tmp_path):
+    _write_packaged_claw(tmp_path / "hashi_assets" / "her")
+    development = _write_development_selection(tmp_path)
+    global_cfg = SimpleNamespace(
+        project_root=tmp_path,
+        bridge_home=tmp_path,
+        claw_providers={"runtime_policy": "require-packaged"},
+    )
+
+    resolved = discover_claw_binary(global_config=global_cfg, env={"PATH": ""})
+
+    assert resolved.path == development.resolve()
+    assert resolved.source == "development-source-build"
+    assert resolved.manifest_path == (
+        tmp_path / "state" / "her_rebuild" / "development-selection.json"
+    )
+
+
+def test_find_claw_binary_invalid_development_selection_fails_closed(tmp_path):
+    packaged = _write_packaged_claw(tmp_path / "hashi_assets" / "her")
+    development = _write_development_selection(tmp_path)
+    development.write_text("tampered", encoding="utf-8")
+    global_cfg = SimpleNamespace(project_root=tmp_path, bridge_home=tmp_path)
+
+    with pytest.raises(ClawPackagedRuntimeError, match="refusing silent fallback"):
+        discover_claw_binary(global_config=global_cfg, env={"PATH": ""})
+
+    assert packaged.is_file()
+
+
+def test_find_claw_binary_empty_development_selection_uses_packaged(tmp_path):
+    packaged = _write_packaged_claw(tmp_path / "hashi_assets" / "her")
+    state_root = tmp_path / "state" / "her_rebuild"
+    state_root.mkdir(parents=True)
+    (state_root / "development-selection.json").write_text(
+        json.dumps({"schema_version": 1, "active": None}), encoding="utf-8"
+    )
+    global_cfg = SimpleNamespace(project_root=tmp_path, bridge_home=tmp_path)
+
+    resolved = discover_claw_binary(global_config=global_cfg, env={"PATH": ""})
+
+    assert resolved.path == packaged.resolve()
+    assert resolved.source == "packaged"
 
 
 def test_find_claw_binary_checksum_mismatch_falls_back_to_env(tmp_path):
@@ -2817,17 +2938,14 @@ async def test_claw_direct_response_acknowledgement_is_final_only(tmp_path):
     expected = ("Hello from the configured Persona. " * 40).strip()
     assert len(expected) > 500
     assert response.text == expected
-    acknowledgements = [
-        event for event in events if event.kind == KIND_ACKNOWLEDGEMENT
-    ]
+    acknowledgements = [event for event in events if event.kind == KIND_ACKNOWLEDGEMENT]
     assert len(acknowledgements) == 1
     assert acknowledgements[0].event_id == "req-direct:final"
     assert acknowledgements[0].delivery_class == DELIVERY_FINAL
     assert acknowledgements[0].required is True
     assert acknowledgements[0].summary == expected
     assert all(
-        event.delivery_class != DELIVERY_USER_COMMENTARY
-        for event in acknowledgements
+        event.delivery_class != DELIVERY_USER_COMMENTARY for event in acknowledgements
     )
 
 
