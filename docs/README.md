@@ -90,6 +90,8 @@ deployment validation continues.
 - [her_multimedia_multimodal_plan.md](her_multimedia_multimodal_plan.md) — implemented HER media bridge, security limits, compatibility paths, and remaining live rollout matrix
 - [HER_TOOL_GATEWAY_TELEMETRY_PLAN.md](HER_TOOL_GATEWAY_TELEMETRY_PLAN.md) — long-term HER packaging, Tool Gateway/MCP, and structured thinking/token telemetry plan
 - [HER_CODE_MODULE_PLAN.md](HER_CODE_MODULE_PLAN.md) — HER module packaging notes, upstream Claw runtime expectations, and local release-binary evidence
+- [HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md](HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md) — transactional local Rust rebuild, verification, development selection, targeted reboot, and rollback plan
+- [HER_REBUILD_PARALLEL_DEVELOPMENT_CHECKPOINT.md](HER_REBUILD_PARALLEL_DEVELOPMENT_CHECKPOINT.md) — isolated controller implementation status, validation evidence, and deferred Zelda integration boundary
 - [HER_COMPREHENSIVE_TEST_PLAN.md](HER_COMPREHENSIVE_TEST_PLAN.md) — full HER × DeepSeek certification matrix across providers, models, modes, efforts, streaming, continuity, and exit paths
 - [HER_bug_journal.md](HER_bug_journal.md) — permanent HER defect and regression record, seeded with the known 2026-08-11 failures
 - [HER Debug Superloop template](../superloops/templates/her_debug/README.md) — two-stage Flash-before-Pro test/fix/retest controller with Lin Yueru-owned `/nudge` liveness and strict no-fallback gates
