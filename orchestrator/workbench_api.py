@@ -5,6 +5,7 @@ import json
 import mimetypes
 import socket
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -309,6 +310,18 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/admin/commands/{name}", self.handle_admin_commands)
         self.app.router.add_post("/api/admin/command", self.handle_admin_command)
         self.app.router.add_post("/api/agents/{name}/command", self.handle_agent_command)
+        self.app.router.add_get(
+            "/api/agents/{name}/scheduler/jobs",
+            self.handle_agent_scheduler_jobs,
+        )
+        self.app.router.add_get(
+            "/api/agents/{name}/scheduler/status",
+            self.handle_agent_scheduler_status,
+        )
+        self.app.router.add_get(
+            "/api/agents/{name}/scheduler/runs",
+            self.handle_agent_scheduler_runs,
+        )
         self.app.router.add_post("/api/agents/{name}/jobs/run", self.handle_agent_run_job)
         self.app.router.add_post("/api/background-jobs", self.handle_background_jobs_start)
         self.app.router.add_get("/api/background-jobs", self.handle_background_jobs_list)
@@ -3276,6 +3289,220 @@ class WorkbenchApiServer:
         result["agent"] = agent_name
         return web.json_response(result, status=status_code)
 
+    def _task_scheduler(self):
+        kernel = getattr(self.orchestrator, "kernel", None)
+        return getattr(self.orchestrator, "scheduler", None) or getattr(
+            kernel, "scheduler", None
+        )
+
+    @staticmethod
+    def _scheduler_job_kind_from_summary(summary: str) -> tuple[str, str]:
+        value = str(summary or "").strip()
+        for label, kind in (
+            ("Cron Task [", "cron"),
+            ("Cron Recovery [", "cron"),
+            ("Heartbeat Task [", "heartbeat"),
+            ("Heartbeat Recovery [", "heartbeat"),
+            ("Nudge Task [", "nudge"),
+        ):
+            if value.startswith(label) and value.endswith("]"):
+                return kind, value[len(label) : -1]
+        return "", ""
+
+    @staticmethod
+    def _scheduler_last_run_at(value) -> str | None:
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(value)).astimezone().isoformat()
+            except (OSError, OverflowError, ValueError):
+                return None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+    def _scheduler_job_record(self, *, agent_name: str, kind: str, job: dict) -> dict:
+        task_id = str(job.get("id") or "")
+        scheduler = self._task_scheduler()
+        state = getattr(scheduler, "state", {}) if scheduler is not None else {}
+        state_key = {"cron": "crons", "heartbeat": "heartbeats", "nudge": "nudges"}[kind]
+        last_run = (state.get(state_key) or {}).get(task_id) if isinstance(state, dict) else None
+        pending_recovery = []
+        recovery_batches = (
+            (state.get("recovery_batches") or {}) if isinstance(state, dict) else {}
+        )
+        for batch in recovery_batches.values():
+            if not isinstance(batch, dict) or batch.get("agent") != agent_name:
+                continue
+            if batch.get("status") not in {"pending", "running"}:
+                continue
+            for item in batch.get("items") or []:
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("task_id") or "") == task_id
+                    and str(item.get("kind") or "") == kind
+                ):
+                    pending_recovery.append(
+                        {
+                            "batch_id": batch.get("batch_id"),
+                            "status": batch.get("status"),
+                            "missed_count": item.get("missed_count", 1),
+                            "replayable_count": min(
+                                max(1, int(item.get("missed_count", 1) or 1)),
+                                max(1, int(item.get("replay_limit", 1) or 1)),
+                                len(item.get("due_at") or []) or 1,
+                            ),
+                        }
+                    )
+        return {
+            "kind": kind,
+            "job_id": task_id,
+            "enabled": bool(job.get("enabled", False)),
+            "job": dict(job),
+            "last_run": last_run,
+            "last_run_at": self._scheduler_last_run_at(last_run),
+            "pending_recovery": pending_recovery,
+        }
+
+    async def handle_agent_scheduler_jobs(self, request):
+        """List this agent's authoritative HASHI Scheduler jobs."""
+        agent_name = request.match_info.get("name")
+        runtime = self._runtime_map().get(agent_name)
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        skill_manager = getattr(runtime, "skill_manager", None)
+        if skill_manager is None:
+            return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
+
+        kind = str(request.query.get("kind") or "all").strip().lower()
+        if kind not in {"all", "cron", "heartbeat", "nudge"}:
+            return web.json_response(
+                {"ok": False, "error": "kind must be all, cron, heartbeat, or nudge"},
+                status=400,
+            )
+        enabled_filter = request.query.get("enabled")
+        if enabled_filter is not None and enabled_filter not in {"true", "false"}:
+            return web.json_response(
+                {"ok": False, "error": "enabled must be true or false"}, status=400
+            )
+        enabled = None if enabled_filter is None else enabled_filter == "true"
+
+        kinds = ("cron", "heartbeat", "nudge") if kind == "all" else (kind,)
+        records = []
+        for job_kind in kinds:
+            for job in skill_manager.list_jobs(job_kind, agent_name=agent_name):
+                if enabled is not None and bool(job.get("enabled", False)) != enabled:
+                    continue
+                records.append(
+                    self._scheduler_job_record(
+                        agent_name=agent_name,
+                        kind=job_kind,
+                        job=job,
+                    )
+                )
+        return web.json_response(
+            {
+                "ok": True,
+                "authority": "HASHI Scheduler",
+                "agent": agent_name,
+                "jobs": records,
+                "count": len(records),
+            }
+        )
+
+    async def handle_agent_scheduler_status(self, request):
+        """Return one authoritative job definition and persisted scheduler state."""
+        agent_name = request.match_info.get("name")
+        runtime = self._runtime_map().get(agent_name)
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        kind = str(request.query.get("kind") or "").strip().lower()
+        job_id = str(request.query.get("job_id") or "").strip()
+        if kind not in {"cron", "heartbeat", "nudge"}:
+            return web.json_response(
+                {"ok": False, "error": "kind must be cron, heartbeat, or nudge"}, status=400
+            )
+        if not job_id:
+            return web.json_response({"ok": False, "error": "job_id is required"}, status=400)
+        skill_manager = getattr(runtime, "skill_manager", None)
+        if skill_manager is None:
+            return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
+        job = skill_manager.get_job(kind, job_id)
+        if not job or job.get("agent") != agent_name:
+            return web.json_response({"ok": False, "error": "job not found for agent"}, status=404)
+        return web.json_response(
+            {
+                "ok": True,
+                "authority": "HASHI Scheduler",
+                "agent": agent_name,
+                "status": self._scheduler_job_record(
+                    agent_name=agent_name,
+                    kind=kind,
+                    job=job,
+                ),
+            }
+        )
+
+    async def handle_agent_scheduler_runs(self, request):
+        """Return recent scheduler execution receipts for this agent."""
+        from orchestrator import runtime_cross_session
+
+        agent_name = request.match_info.get("name")
+        runtime = self._runtime_map().get(agent_name)
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        kind = str(request.query.get("kind") or "all").strip().lower()
+        job_id = str(request.query.get("job_id") or "").strip()
+        if kind not in {"all", "cron", "heartbeat", "nudge"}:
+            return web.json_response(
+                {"ok": False, "error": "kind must be all, cron, heartbeat, or nudge"},
+                status=400,
+            )
+        try:
+            limit = max(1, min(50, int(request.query.get("limit") or 10)))
+        except (TypeError, ValueError):
+            return web.json_response({"ok": False, "error": "limit must be an integer"}, status=400)
+
+        runs = []
+        for receipt in reversed(runtime_cross_session.load_receipts(runtime)):
+            if not str(receipt.get("source") or "").startswith("scheduler"):
+                continue
+            receipt_kind, receipt_job_id = self._scheduler_job_kind_from_summary(
+                str(receipt.get("summary") or "")
+            )
+            if not receipt_kind:
+                continue
+            if kind != "all" and receipt_kind != kind:
+                continue
+            if job_id and receipt_job_id != job_id:
+                continue
+            runs.append(
+                {
+                    "kind": receipt_kind,
+                    "job_id": receipt_job_id,
+                    "request_id": receipt.get("request_id"),
+                    "source": receipt.get("source"),
+                    "status": receipt.get("status"),
+                    "completion_status": receipt.get("completion_status"),
+                    "stop_reason": receipt.get("stop_reason"),
+                    "delivered": bool(receipt.get("delivered")),
+                    "created_at": receipt.get("created_at"),
+                    "updated_at": receipt.get("updated_at"),
+                    "result": receipt.get("assistant_text"),
+                    "error": receipt.get("error"),
+                }
+            )
+            if len(runs) >= limit:
+                break
+        return web.json_response(
+            {
+                "ok": True,
+                "authority": "HASHI Scheduler",
+                "agent": agent_name,
+                "runs": runs,
+                "count": len(runs),
+            }
+        )
+
     async def handle_agent_run_job(self, request):
         """Run one cron/heartbeat job immediately for a specific agent."""
         agent_name = request.match_info.get("name")
@@ -3290,6 +3517,13 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error": "kind must be cron or heartbeat"}, status=400)
         if not job_id:
             return web.json_response({"ok": False, "error": "job_id is required"}, status=400)
+        if payload.get("requested_by") == "hashi_tool_gateway" and payload.get(
+            "authorization"
+        ) != "explicit_user_authorization":
+            return web.json_response(
+                {"ok": False, "error": "explicit single-job authorization is required"},
+                status=403,
+            )
 
         skill_manager = getattr(runtime, "skill_manager", None)
         if skill_manager is None:

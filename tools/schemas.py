@@ -1530,7 +1530,117 @@ BACKGROUND_JOB_TOOL_SCHEMAS = [
     },
 ]
 
+HASHI_SCHEDULER_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "hashi_scheduler_list",
+            "description": (
+                "List jobs from the authoritative HASHI Scheduler for this agent. "
+                "This is not the Claw-local cron store."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["all", "cron", "heartbeat", "nudge"],
+                        "description": "Job kind to list. Default all.",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Optional enabled-state filter.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hashi_scheduler_status",
+            "description": (
+                "Read one job's definition, last-run state, and pending recovery state "
+                "from the authoritative HASHI Scheduler."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["cron", "heartbeat", "nudge"],
+                    },
+                    "job_id": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "job_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hashi_scheduler_run_history",
+            "description": (
+                "Read recent isolated execution receipts for this agent's authoritative "
+                "HASHI Scheduler jobs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["all", "cron", "heartbeat", "nudge"],
+                        "description": "Optional job-kind filter. Default all.",
+                    },
+                    "job_id": {"type": "string", "minLength": 1},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "Maximum receipts to return. Default 10.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hashi_scheduler_rerun",
+            "description": (
+                "Queue exactly one named HASHI Scheduler job for this agent. Call only "
+                "after the user explicitly authorizes that exact rerun; bare continue, "
+                "yes, okay, or similar conversation does not authorize recovery or rerun."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["cron", "heartbeat"],
+                    },
+                    "job_id": {"type": "string", "minLength": 1},
+                    "authorization": {
+                        "type": "string",
+                        "enum": ["explicit_user_authorization"],
+                        "description": (
+                            "Required assertion that the current user request explicitly "
+                            "authorized this exact single-job rerun."
+                        ),
+                    },
+                },
+                "required": ["kind", "job_id", "authorization"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
 TOOL_SCHEMAS.extend(BACKGROUND_JOB_TOOL_SCHEMAS)
+TOOL_SCHEMAS.extend(HASHI_SCHEDULER_TOOL_SCHEMAS)
 TOOL_SCHEMAS.extend(WINDOWS_USE_TOOL_SCHEMAS)
 TOOL_SCHEMAS.extend(DESKTOP_TOOL_SCHEMAS)
 

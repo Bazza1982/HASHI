@@ -11,7 +11,7 @@ from tools.registry import ToolRegistry
 from tools.schemas import ALL_TOOL_NAMES
 
 
-CONTEXT_SCHEMA_VERSION = 2
+CONTEXT_SCHEMA_VERSION = 3
 
 _TOOL_SECRET_KEYS = {
     "web_search": {"brave_api_key"},
@@ -50,6 +50,7 @@ class GatewayContext:
     access_root: str
     media_roots: list[str]
     allowed_tools: list[str]
+    scheduler_api_base_url: str = ""
     max_calls: int = 100
     max_identical_calls: int = 3
     max_consecutive_errors: int = 5
@@ -66,6 +67,7 @@ class GatewayContext:
         backend: str = "her",
         additional_allowed_tools: set[str] | None = None,
         media_roots: list[Path] | None = None,
+        scheduler_api_base_url: str = "",
     ) -> "GatewayContext":
         audit = _json_safe(registry.audit_context or {}) or {}
         required_secret_keys = set()
@@ -92,6 +94,7 @@ class GatewayContext:
                 for root in (media_roots if media_roots is not None else registry.media_roots)
             ],
             allowed_tools=sorted(allowed_tools),
+            scheduler_api_base_url=str(scheduler_api_base_url or "").strip().rstrip("/"),
             max_calls=max(1, int(registry.max_loops) * 4),
             max_identical_calls=max(
                 1,
@@ -108,6 +111,9 @@ class GatewayContext:
         )
 
     def build_registry(self) -> ToolRegistry:
+        audit = dict(self.audit)
+        if self.scheduler_api_base_url:
+            audit["scheduler_api_base_url"] = self.scheduler_api_base_url
         return ToolRegistry(
             allowed_tools=self.allowed_tools,
             access_root=Path(self.access_root),
@@ -116,7 +122,7 @@ class GatewayContext:
             tool_options=self.tool_options,
             max_loops=max(1, self.max_calls // 4),
             agents_config=self.agents_config,
-            audit_context=self.audit,
+            audit_context=audit,
             media_roots=[Path(root) for root in self.media_roots],
         )
 
@@ -127,11 +133,13 @@ def write_gateway_context(
     *,
     additional_allowed_tools: set[str] | None = None,
     media_roots: list[Path] | None = None,
+    scheduler_api_base_url: str = "",
 ) -> GatewayContext:
     context = GatewayContext.from_registry(
         registry,
         additional_allowed_tools=additional_allowed_tools,
         media_roots=media_roots,
+        scheduler_api_base_url=scheduler_api_base_url,
     )
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
