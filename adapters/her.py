@@ -1236,6 +1236,28 @@ def _parse_stream_json_output(text: str, *, command: list[str]) -> dict[str, Any
     return final
 
 
+def _last_stream_json_error(*streams: str) -> dict[str, Any] | None:
+    """Return the last structured terminal error from HER stdout or stderr."""
+
+    last_error: dict[str, Any] | None = None
+    for text in streams:
+        for raw_line in str(text or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and (
+                event.get("kind") == "error"
+                or event.get("type") == "error"
+                or event.get("error")
+            ):
+                last_error = event
+    return last_error
+
+
 def _stream_json_usage(text: str) -> dict[str, Any]:
     usage = ClawThinkingStreamUsage()
     legacy_summary_chars = 0
@@ -1925,11 +1947,21 @@ def run_claw_json_command(
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
     stdout = redact_secret_text(completed.stdout, secret_values)
     stderr = redact_secret_text(completed.stderr, secret_values)
-    output = stdout.strip() or stderr.strip()
-    parsed = _parse_json_output(output, command=command) if output else {}
-
     if completed.returncode != 0:
-        message = parsed.get("error") if isinstance(parsed, dict) else None
+        parsed = _last_stream_json_error(stdout, stderr)
+        if parsed is None:
+            output = stdout.strip() or stderr.strip()
+            try:
+                parsed = _parse_json_output(output, command=command) if output else {}
+            except ClawJsonError:
+                parsed = {}
+        message = (
+            parsed.get("error_message")
+            or parsed.get("error")
+            or parsed.get("message")
+            if isinstance(parsed, dict)
+            else None
+        )
         raise ClawCommandError(
             message or f"HER command exited with code {completed.returncode}",
             returncode=completed.returncode,
@@ -1937,6 +1969,9 @@ def run_claw_json_command(
             stderr=stderr,
             parsed_error=parsed if parsed else None,
         )
+
+    output = stdout.strip() or stderr.strip()
+    parsed = _parse_json_output(output, command=command) if output else {}
 
     return ClawCommandResult(
         command=command,
@@ -2052,15 +2087,13 @@ def build_claw_task_args(
         args.append("--dangerously-skip-permissions")
     if resume:
         args.extend(["--resume", resume])
-    # Fresh prompts support explicit stdin transport, which keeps large task
-    # content out of argv.  The packaged HER CLI's resumed-prompt grammar is
-    # different: ``--resume SESSION prompt TEXT``.  Passing ``--stdin`` there
-    # makes the CLI treat that literal flag as TEXT and ignore the real prompt
-    # on stdin, so resumed turns must use the supported positional form.
+    # Fresh prompts are supplied as the process stdin with no positional
+    # command. Current HER recognizes a non-TTY pipe as a one-shot prompt in
+    # every permission mode; ``prompt --stdin`` is only a literal prompt in
+    # read-only/workspace-write mode. Resumed turns use the CLI's distinct
+    # ``--resume SESSION prompt TEXT`` grammar and cannot consume prompt stdin.
     if resume:
         args.extend(["prompt", prompt])
-    else:
-        args.extend(["prompt", "--stdin"])
     return args
 
 
@@ -3128,12 +3161,9 @@ INCOMPLETE TASK FACTS (quoted, read-only)
             prefix = str(configured_prefix).strip().rstrip("/")
             return f"{prefix}/{model}" if prefix else model
 
-        # HER uses the upstream Claw transport protocol. Bare models on named
-        # OpenAI-compatible profiles need Claw's local/ routing prefix; the
-        # upstream API still receives the original bare model identifier.
-        auth_mode = self._provider_auth_mode(provider)
-        if auth_mode not in {"hashi_oauth", "hashi-xai-oauth", "xai_oauth"}:
-            return f"local/{model}"
+        # Current HER uses OPENAI_BASE_URL to select an OpenAI-compatible
+        # provider and forwards its bare model ID unchanged.  Prefixes remain
+        # available as an explicit per-provider compatibility override.
         return model
 
     def _permission_mode(self) -> str:
@@ -4647,11 +4677,35 @@ RUNTIME FACTS (quoted, read-only)
         stdout = redact_secret_text(stdout_data.decode(errors="replace"), secret_values)
         stderr = redact_secret_text(stderr_data.decode(errors="replace"), secret_values)
         output = stdout.strip() or stderr.strip()
-        parsed = (
-            _parse_stream_json_output(output, command=command)
-            if self._supports_stream_json
-            else (_parse_json_output(output, command=command) if output else {})
-        )
+        try:
+            parsed = (
+                _parse_stream_json_output(output, command=command)
+                if self._supports_stream_json
+                else (_parse_json_output(output, command=command) if output else {})
+            )
+        except ClawJsonError as exc:
+            if proc.returncode == 0:
+                raise
+            parsed_error = _last_stream_json_error(stdout, stderr) or {}
+            self._persist_command_failure(
+                request_id=request_id,
+                returncode=proc.returncode or 1,
+                parsed_error=parsed_error,
+                stderr=stderr,
+                resume=resume,
+            )
+            message = (
+                parsed_error.get("error_message")
+                or parsed_error.get("error")
+                or parsed_error.get("message")
+            )
+            raise ClawCommandError(
+                str(message or exc),
+                returncode=proc.returncode or 1,
+                stdout=stdout,
+                stderr=stderr,
+                parsed_error=parsed_error or None,
+            ) from exc
         protocol_non_json_line_count = int(
             parsed.get("_protocol_non_json_line_count") or 0
         )

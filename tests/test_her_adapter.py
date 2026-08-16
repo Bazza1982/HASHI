@@ -1147,6 +1147,7 @@ def test_run_claw_json_command_raises_for_non_zero_json_error(tmp_path):
         """
         #!/usr/bin/env python3
         import json, sys
+        print("runtime startup diagnostic")
         print(json.dumps({"error": "bad key", "kind": "api_http_error"}), file=sys.stderr)
         raise SystemExit(1)
         """,
@@ -1205,7 +1206,8 @@ def test_run_claw_task_builds_safe_one_shot_command(tmp_path):
         assert "read-only" in sys.argv
         assert "--allowedTools" in sys.argv
         assert "read,glob" in sys.argv
-        assert "--stdin" in sys.argv
+        assert "--stdin" not in sys.argv
+        assert "prompt" not in sys.argv
         assert "inspect" not in sys.argv
         assert sys.stdin.read() == "inspect"
         print(json.dumps({
@@ -1277,7 +1279,8 @@ def test_build_claw_task_args_accepts_stream_json():
     assert args[args.index("--output-format") + 1] == "stream-json"
     assert "--allowedTools" not in args
     assert "hello" not in args
-    assert args[-2:] == ["prompt", "--stdin"]
+    assert "prompt" not in args
+    assert "--stdin" not in args
 
 
 def test_run_claw_task_streams_large_prompt_over_stdin(tmp_path):
@@ -1406,7 +1409,7 @@ def test_claw_provider_env_resolves_secret_and_base_url(tmp_path):
     assert adapter._task_env()["OPENAI_API_KEY"] == "provider-secret"
 
 
-def test_explicit_deepseek_provider_translates_bare_model_for_claw_runtime(tmp_path):
+def test_explicit_deepseek_provider_preserves_bare_model_for_current_her(tmp_path):
     cfg = SimpleNamespace(
         name="test",
         workspace_dir=tmp_path,
@@ -1427,6 +1430,30 @@ def test_explicit_deepseek_provider_translates_bare_model_for_claw_runtime(tmp_p
     adapter = ClawCLIAdapter(cfg, global_cfg, api_key=None)
 
     assert adapter._provider_and_model() == ("deepseek", "deepseek-v4-flash")
+    assert adapter._claw_model() == "deepseek-v4-flash"
+
+
+def test_explicit_provider_model_prefix_remains_available_for_legacy_runtime(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek:deepseek-v4-flash",
+        extra={"provider": "deepseek"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    global_cfg = SimpleNamespace(
+        claw_providers={
+            "providers": {
+                "deepseek": {
+                    "base_url": "https://deepseek.invalid/v1",
+                    "secret": "deepseek_api_key",
+                    "claw_model_prefix": "local",
+                }
+            }
+        }
+    )
+    adapter = ClawCLIAdapter(cfg, global_cfg, api_key=None)
+
     assert adapter._claw_model() == "local/deepseek-v4-flash"
 
 
@@ -2014,6 +2041,62 @@ async def test_her_failure_persists_structured_error_and_redacted_stderr(tmp_pat
     assert failure["parsed_error"]["provider_request_id"] == "provider-req-123"
     assert failure["stderr"] == "Authorization: Bearer <redacted>\n"
     assert "secret-token" not in json.dumps(records)
+
+
+@pytest.mark.asyncio
+async def test_her_early_stream_failure_uses_stderr_error_and_persists_it(tmp_path):
+    fake = _write_exe(
+        tmp_path / "hashi-her",
+        """
+        #!/usr/bin/env python3
+        import json, sys
+        print(json.dumps({"kind": "run_started", "model": "bad/model"}))
+        print("INFO provider startup", file=sys.stderr)
+        print(json.dumps({
+            "kind": "api_http_error",
+            "type": "error",
+            "error": "unsupported model",
+            "exit_code": 1,
+        }), file=sys.stderr)
+        raise SystemExit(1)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="bad/model",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = fake
+    adapter._supports_stream_json = True
+
+    with pytest.raises(ClawCommandError) as raised:
+        await adapter._run_task_async(
+            "prompt",
+            resume=None,
+            request_id="req-early-error",
+        )
+
+    assert str(raised.value) == "unsupported model"
+    assert raised.value.returncode == 1
+    assert raised.value.parsed_error == {
+        "kind": "api_http_error",
+        "type": "error",
+        "error": "unsupported model",
+        "exit_code": 1,
+    }
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "backend_state" / "her_diagnostics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    failure = next(record for record in records if record["kind"] == "command_failure")
+    assert failure["request_id"] == "req-early-error"
+    assert failure["parsed_error"] == raised.value.parsed_error
+    assert "INFO provider startup" in failure["stderr"]
 
 
 @pytest.mark.asyncio
