@@ -1267,3 +1267,33 @@ explicitly labelled development and non-certified.
 After primary integration and both live transactions, the final HASHI Python
 suite completed with `2278 passed, 2 skipped, 23 warnings`; the warnings are
 the existing python-telegram-bot `retry_after` deprecations.
+
+### 29.2 Source-scoped cache identity correction
+
+Final acceptance review found that fingerprint schema v1 included the whole
+HASHI repository `HEAD`. That was safe but overly broad: a documentation-only
+commit could create a new fingerprint even though every Cargo input was
+unchanged. Fingerprint schema v2 now uses the latest commit affecting
+`native/her` plus dirty state restricted to that subtree. File-content hashing,
+Cargo lock/manifest inputs, target, profile, features and toolchain identity
+remain mandatory inputs.
+
+Rust build provenance uses the same source-scoped revision. Runtime provenance
+uses the `native/her` revision when the checkout contains integrated HER, and
+falls back to the repository `HEAD` for ordinary standalone Git workspaces.
+This keeps `workspace_match` meaningful without recompiling HER after unrelated
+HASHI Python or documentation commits.
+
+The source-scoped live canary passed:
+
+```text
+Job:                              rebuild-20260816-092112-7e7199c5
+Fingerprint:                      7bde32d30a79ffa15e697ea58a2f6f5013bbb507b3f3d67477600c05b8420982
+Candidate:                        dev-7bde32d30a79ffa1-92eb5de29ce9
+Candidate SHA-256:                92eb5de29ce95d5c3b5754b962deafb3961b6fb53a784495effa556bc7e01722
+HER source revision:              ccf3f669b11e049a17186eaba1bbc02d393a683f
+Incremental Cargo build:          9.534 seconds
+End-to-end adoption:              24 seconds
+Final state:                      succeeded / adopted / terminal delivered
+Runtime source workspace match:   true
+```

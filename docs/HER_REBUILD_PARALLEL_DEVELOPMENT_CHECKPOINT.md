@@ -203,6 +203,26 @@ The second same-source job (`rebuild-20260816-090952-a2852392`) recorded
 `candidate_reused=true`, launched no Cargo process and completed the complete
 verification/restart/adoption transaction in 15 seconds.
 
+Final review then narrowed cache identity from whole-repository `HEAD` to the
+`native/her` source revision and dirty state. This prevents an unrelated HASHI
+documentation or Python commit from creating a false Rust rebuild miss. The
+new rule is covered by a temporary-Git-repository regression test that commits
+HER, commits and dirties an unrelated README, and proves the HER source state
+is unchanged until a native source file changes.
+
+The source-scoped implementation (`ccf3f669`) was itself rebuilt and adopted:
+
+```text
+Job:                    rebuild-20260816-092112-7e7199c5
+Fingerprint:            7bde32d30a79ffa15e697ea58a2f6f5013bbb507b3f3d67477600c05b8420982
+Incremental Cargo:       9.534 seconds
+End-to-end transaction:  24 seconds
+Candidate:               dev-7bde32d30a79ffa1-92eb5de29ce9
+Candidate SHA-256:       92eb5de29ce95d5c3b5754b962deafb3961b6fb53a784495effa556bc7e01722
+Source workspace match: true
+Result:                  succeeded / adopted / terminal delivered
+```
+
 ## 8. Operator surface
 
 ```text
