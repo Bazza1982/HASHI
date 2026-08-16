@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "certification_status": "candidate_complete",
+  "release_version": "0.1.0-hashi.22",
+  "created_at": "2026-08-16T17:11:00+10:00",
+  "source": {
+    "certified_base_source_commit": "5ed5b30ef2ab0f80ab6d4fd08a1b7b64e77faf05",
+    "upstream_commit": "4ea31c1bc91c4e9bcbd67d51c550c01e127e6d0d",
+    "source_commit": "759cb1abec7ae2dea2756b79206bb67a7d053c14",
+    "source_branch": "release/her-0.1.0-hashi.22",
+    "certified_tag": "her-0.1.0-hashi.22-certified",
+    "tag_object": "5770654993f2fca823b8c91d2ff7f6999a3b41a5",
+    "working_tree_clean": true,
+    "recovered_rejected_21_deltas": [
+      "26ec36f",
+      "9c410a1"
+    ],
+    "bundle": {
+      "path": "releases/0.1.0-hashi.22/source/her-source.bundle",
+      "sha256": "0e142b32af9db8b7b3bfca1c11ae8a5134c74c02e5dcac60e1e0a7eea1ccd9b3",
+      "size_bytes": 22615136,
+      "verify_status": "passed",
+      "complete_history": true
+    }
+  },
+  "artifacts": {
+    "linux-x86_64": {
+      "path": "releases/0.1.0-hashi.22/linux-x86_64/hashi-her",
+      "sha256": "5fc51f4c9e9e90c7f00516d3fd0c3a585c685c1e620a2cc2d2966cb02aa46dea",
+      "rust_target_triple": "x86_64-unknown-linux-gnu",
+      "embedded_source_commit": "759cb1abec7ae2dea2756b79206bb67a7d053c14",
+      "embedded_source_branch": "release/her-0.1.0-hashi.22",
+      "provenance_dirty": false,
+      "rustc": "rustc 1.95.0 (59807616e 2026-04-14)"
+    },
+    "windows-x86_64": {
+      "path": "releases/0.1.0-hashi.22/windows-x86_64/hashi-her.exe",
+      "sha256": "9c954f60bd1e4948410fb7fd0928dc323235f117e765112ae588c2b8150e2d3b",
+      "rust_target_triple": "x86_64-pc-windows-msvc",
+      "embedded_source_commit": "759cb1abec7ae2dea2756b79206bb67a7d053c14",
+      "embedded_source_branch": "release/her-0.1.0-hashi.22",
+      "provenance_dirty": false,
+      "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)"
+    }
+  },
+  "validations": {
+    "rust_workspace": {
+      "status": "passed",
+      "passed": 1479,
+      "failed": 0,
+      "ignored": 1,
+      "command": "cargo test --workspace"
+    },
+    "native_cli": {
+      "status": "passed",
+      "passed": 358,
+      "failed": 0,
+      "command": "cargo test -p rusty-claude-cli"
+    },
+    "clippy_baseline": {
+      "status": "passed",
+      "expected_diagnostics": 40,
+      "actual_diagnostics": 40,
+      "failed": 0,
+      "command": "cargo clippy --workspace --all-targets -- -D warnings"
+    },
+    "hashi_python": {
+      "status": "passed",
+      "passed": 2233,
+      "failed": 0,
+      "skipped": 2,
+      "warnings": 23,
+      "command": "pytest -q tests veritas"
+    },
+    "her_debug_lab": {
+      "status": "passed",
+      "passed": 17,
+      "failed": 0
+    },
+    "gateway_scheduler": {
+      "status": "passed",
+      "passed": 23,
+      "failed": 0
+    },
+    "cross_layer_media": {
+      "status": "passed",
+      "passed": 1,
+      "failed": 0,
+      "scope": "staged Linux binary through HASHI MCP image bridge"
+    },
+    "windows_native_smokes": {
+      "status": "passed",
+      "passed": 4,
+      "failed": 0,
+      "checks": [
+        "version",
+        "doctor",
+        "status",
+        "prompt --help"
+      ]
+    }
+  },
+  "known_non_blocking_warnings": [
+    "23 Python warnings are existing python-telegram-bot retry_after deprecation notices.",
+    "Windows doctor reports expected missing-auth, missing-tmux and namespace-unavailable warnings with zero failures.",
+    "Clippy retains exactly 40 pinned upstream diagnostics and no new diagnostic."
+  ]
+}
