@@ -185,6 +185,12 @@ HASHI-owned Python orchestration around it:
   isolated scheduler execution, stable event IDs, explicit commentary
   ownership, and request-scoped idempotency prevent stale or repeated internal
   events from becoming duplicate user messages.
+- **Canonical TaskFrame context (next development candidate)** — HASHI freezes
+  the immediate delivered dialogue and model/effort transition at enqueue time;
+  TaskFrame planning and primary execution consume the same bounded referent,
+  so `A`, `continue`, and similar replies cannot split into two internal goals.
+  This post-`.22` source hardening requires `/rebuild` or the next certified
+  package before a running Agent can use it.
 - **Integrated operating capabilities** — Tool Gateway/MCP, secure multimedia,
   provider/model routing, persistent sessions, and optional agent-local
   Habit/Meditation learning are part of one HER contract.
@@ -195,7 +201,8 @@ HASHI-owned Python orchestration around it:
 
 See [the v4.0.0-alpha.2 release notes](docs/RELEASE_NOTES_v4.0.0-alpha.2.md),
 [the HER backend contract](docs/HER_BACKEND_CONTRACT.md), and
-[the `/rebuild` contract](docs/HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md).
+[the `/rebuild` contract](docs/HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md), and
+[the TaskFrame canonical-context contract](docs/HER_TASKFRAME_CANONICAL_TURN_CONTEXT.md).
 
 HASHI 2.x proved that local agents could execute tools, browse, switch backends, run from a TUI, and orchestrate Nagare workflows. HASHI 3.2 turns that foundation into a much broader local agent platform:
 

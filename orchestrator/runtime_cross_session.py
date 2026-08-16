@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
-from orchestrator import runtime_retry
+from orchestrator import runtime_retry, runtime_turn_context
 
 
 STATE_VERSION = 1
@@ -342,6 +342,12 @@ def record_turn_result(
     completion_path: str,
 ) -> dict[str, Any] | None:
     """Persist a no-op receipt for a turn outside the primary backend session."""
+    if delivered:
+        runtime_turn_context.record_delivered_turn(
+            runtime,
+            item,
+            assistant_text or error,
+        )
     metadata = _stream_metadata(response)
     status, completion_status, stop_reason = _completion_status(response, error)
     pending = _pending_interaction(
