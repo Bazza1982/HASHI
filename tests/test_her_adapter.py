@@ -1409,7 +1409,7 @@ def test_claw_provider_env_resolves_secret_and_base_url(tmp_path):
     assert adapter._task_env()["OPENAI_API_KEY"] == "provider-secret"
 
 
-def test_explicit_deepseek_provider_preserves_bare_model_for_current_her(tmp_path):
+def test_explicit_deepseek_provider_translates_bare_model_for_certified_her(tmp_path):
     cfg = SimpleNamespace(
         name="test",
         workspace_dir=tmp_path,
@@ -1430,10 +1430,10 @@ def test_explicit_deepseek_provider_preserves_bare_model_for_current_her(tmp_pat
     adapter = ClawCLIAdapter(cfg, global_cfg, api_key=None)
 
     assert adapter._provider_and_model() == ("deepseek", "deepseek-v4-flash")
-    assert adapter._claw_model() == "deepseek-v4-flash"
+    assert adapter._claw_model() == "local/deepseek-v4-flash"
 
 
-def test_explicit_provider_model_prefix_remains_available_for_legacy_runtime(tmp_path):
+def test_explicit_provider_model_prefix_overrides_certified_runtime_default(tmp_path):
     cfg = SimpleNamespace(
         name="test",
         workspace_dir=tmp_path,
@@ -1447,14 +1447,14 @@ def test_explicit_provider_model_prefix_remains_available_for_legacy_runtime(tmp
                 "deepseek": {
                     "base_url": "https://deepseek.invalid/v1",
                     "secret": "deepseek_api_key",
-                    "claw_model_prefix": "local",
+                    "claw_model_prefix": "openai",
                 }
             }
         }
     )
     adapter = ClawCLIAdapter(cfg, global_cfg, api_key=None)
 
-    assert adapter._claw_model() == "local/deepseek-v4-flash"
+    assert adapter._claw_model() == "openai/deepseek-v4-flash"
 
 
 def test_openrouter_model_slug_is_preserved_for_claw_runtime(tmp_path):
