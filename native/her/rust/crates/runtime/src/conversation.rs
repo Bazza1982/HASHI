@@ -66,6 +66,10 @@ const MAX_PLUS_REVIEW_MAX_REVISIONS: usize = 5;
 const DEFAULT_MAX_PLUS_TIME_BUDGET: Duration = Duration::from_secs(1_500);
 const MAX_TASK_FRAME_FORMAT_ATTEMPTS: usize = 3;
 const MAX_INDEPENDENT_REVIEW_FORMAT_ATTEMPTS: usize = 3;
+// Independent review is advisory, so a stalled reviewer must eventually yield
+// to the primary Agent's retained answer instead of consuming the turn's much
+// larger execution deadline.
+const MAX_INDEPENDENT_REVIEW_HARD_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_REVIEW_EVIDENCE_CHARS: usize = 120_000;
 const MAX_REVIEW_TOOL_RESULT_CHARS: usize = 12_000;
 const MAX_REVIEW_AUTHORITATIVE_GOAL_CHARS: usize = 8_000;
@@ -239,6 +243,23 @@ pub struct IndependentReview {
     pub evidence_refs: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinalReviewStatus {
+    Pass,
+    Concerns,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalReviewSummary {
+    pub status: FinalReviewStatus,
+    #[serde(default)]
+    pub reviewed_gates: Vec<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
 struct IndependentReviewInput<'a> {
     gate: &'a str,
     revision_round: usize,
@@ -403,10 +424,11 @@ pub enum RuntimeStreamEvent {
         revision: usize,
         text: String,
     },
-    /// A complete, model-authored user update that preceded tool use in an
-    /// execution turn. Text deltas remain internal while streaming; this event
-    /// is emitted once, only after the provider turn completed successfully and
-    /// before any requested tool is executed.
+    /// A complete, model-authored user update that preceded task-advancing tool
+    /// use in an execution turn. Text deltas remain internal while streaming;
+    /// this event is emitted once, only after the provider turn completed
+    /// successfully and before any requested tool is executed. Text paired only
+    /// with finalization metadata tools remains an internal final candidate.
     AssistantCommentary {
         iteration: usize,
         text: String,
@@ -575,6 +597,9 @@ pub struct TurnSummary {
     /// An internal planning failure that was reported but did not block the
     /// task-performing agent from running.
     pub planning_error: Option<String>,
+    /// The non-blocking independent review attached to the delivered final
+    /// answer. This is present only for Max and Max+ finalization.
+    pub final_review: Option<FinalReviewSummary>,
 }
 
 /// Whether a turn reached a normal model stop or preserved unfinished work at
@@ -1150,7 +1175,7 @@ where
                 ],
                 messages: vec![ConversationMessage::user_text(&artifact)],
                 allow_tools: false,
-                timeout: None,
+                timeout: Some(MAX_INDEPENDENT_REVIEW_HARD_TIMEOUT),
             };
             let request_system_prompt = request.system_prompt.clone();
             let events = match self.api_client.stream(request) {
@@ -1418,6 +1443,9 @@ where
         let mut max_testing_revision_round = 0;
         let mut max_final_claim_revision_round = 0;
         let mut max_agent_owned_finalization_due = false;
+        let mut held_final_candidate: Option<ConversationMessage> = None;
+        let mut final_review: Option<FinalReviewSummary> = None;
+        let mut reviewed_final_gates = Vec::new();
         let mut max_plus_time_budget_exhausted = false;
         let mut next_compaction_trigger_phase = "pre_provider";
         let mut compacted_before_task_frame = false;
@@ -1703,6 +1731,7 @@ where
                 task_checkpoint: task_frame.clone(),
                 pending_interaction: None,
                 planning_error,
+                final_review: None,
             };
             self.record_turn_completed(&summary);
             return Ok(summary);
@@ -1939,7 +1968,7 @@ where
                 iteration_system_prompt.push(feedback);
             }
             if max_agent_owned_finalization_due {
-                iteration_system_prompt.push("AGENT-OWNED FINALIZATION: The independent review feedback budget is exhausted. The reviewer is advisory and must not replace your answer. Tools are disabled for this call. Produce the best honest user-visible final response yourself, grounded in the raw evidence already available. Address supported reviewer concerns, disclose unresolved uncertainty, and do not claim unsupported success.".to_string());
+                iteration_system_prompt.push("AGENT-OWNED FINALIZATION: Independent final review is advisory and cannot veto or reopen the task. Tools are disabled for this one wording-only revision. Produce the best honest user-visible final response yourself, grounded in the raw evidence already available. Address supported reviewer concerns in your normal persona and language, disclose unresolved uncertainty, and do not claim unsupported success. The runtime will attach the compact review status note; do not emit a separate reviewer message.".to_string());
             }
             if pending_user_finalization_due {
                 iteration_system_prompt.push(format!(
@@ -1991,30 +2020,48 @@ where
             if is_finalization_iteration {
                 reached_execution_budget = true;
             }
-            let events = match self
+            let assistant_result = match self
                 .api_client
                 .stream_observed(request, observer.as_deref_mut())
             {
-                Ok(events) => events,
+                Ok(events) => {
+                    if let Some(reason) = events.iter().rev().find_map(|event| match event {
+                        AssistantEvent::ProviderStopReason(reason) => Some(reason.clone()),
+                        _ => None,
+                    }) {
+                        provider_stop_reason = Some(reason);
+                    }
+                    build_assistant_message(events)
+                }
+                Err(error) => Err(error),
+            };
+            let (mut assistant_message, usage, turn_prompt_cache_events) = match assistant_result {
+                Ok(result) => result,
+                Err(error)
+                    if max_agent_owned_finalization_due && held_final_candidate.is_some() =>
+                {
+                    self.record_control_fallback(
+                        "independent_review",
+                        "final_rewrite",
+                        1,
+                        &format!(
+                            "tool-free final wording revision failed; retained the reviewed candidate: {error}"
+                        ),
+                    );
+                    self.emit_pending_control_events(observer.as_deref_mut());
+                    (
+                        held_final_candidate
+                            .clone()
+                            .expect("guarded final candidate must exist"),
+                        None,
+                        Vec::new(),
+                    )
+                }
                 Err(error) => {
                     self.record_turn_failed(iterations, &error);
                     return Err(error);
                 }
             };
-            if let Some(reason) = events.iter().rev().find_map(|event| match event {
-                AssistantEvent::ProviderStopReason(reason) => Some(reason.clone()),
-                _ => None,
-            }) {
-                provider_stop_reason = Some(reason);
-            }
-            let (mut assistant_message, usage, turn_prompt_cache_events) =
-                match build_assistant_message(events) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        self.record_turn_failed(iterations, &error);
-                        return Err(error);
-                    }
-                };
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
             }
@@ -2029,6 +2076,29 @@ where
                     _ => None,
                 })
                 .collect::<Vec<_>>();
+            if max_agent_owned_finalization_due {
+                // Independent final review may influence wording once, but it
+                // may never reopen execution. Ignore any tool proposal from
+                // this tool-disabled call and retain the reviewed candidate if
+                // the replacement is not a usable user-visible answer.
+                assistant_message
+                    .blocks
+                    .retain(|block| !matches!(block, ContentBlock::ToolUse { .. }));
+                pending_tool_uses.clear();
+                let revised_text = user_visible_text(&assistant_message);
+                if revised_text.trim().is_empty() || contains_dangling_tool_markup(&revised_text) {
+                    if let Some(candidate) = held_final_candidate.clone() {
+                        self.record_control_fallback(
+                            "independent_review",
+                            "final_rewrite",
+                            1,
+                            "tool-free final wording revision had no usable visible answer; retained the reviewed candidate",
+                        );
+                        self.emit_pending_control_events(observer.as_deref_mut());
+                        assistant_message = candidate;
+                    }
+                }
+            }
             if let Some((ask_id, _, ask_input)) = pending_tool_uses
                 .iter()
                 .find(|(_, name, _)| name == "AskUserQuestion")
@@ -2106,6 +2176,7 @@ where
                 .any(|(_, name, _)| name == "AskUserQuestion");
             if !pending_tool_uses.is_empty()
                 && !asks_user
+                && !pending_tools_are_finalization_only(&pending_tool_uses)
                 && !proposed_text.trim().is_empty()
                 && !contains_dangling_tool_markup(&proposed_text)
             {
@@ -2138,8 +2209,8 @@ where
                     "execution_evidence"
                 };
                 if max_execution_reviewed_tool_count != Some(tool_results.len()) {
-                    let (review, review_cache_events) =
-                        match self.run_independent_review(IndependentReviewInput {
+                    let (review, review_cache_events, review_unavailable) = match self
+                        .run_independent_review(IndependentReviewInput {
                             gate: execution_gate,
                             revision_round: max_execution_revision_round,
                             authoritative_goal: &authoritative_goal,
@@ -2149,20 +2220,23 @@ where
                             tool_results: &tool_results,
                             proposed_answer: Some(&assistant_message),
                         }) {
-                            Ok(result) => result,
-                            Err(error) => {
-                                self.record_control_fallback(
-                                    "independent_review",
-                                    execution_gate,
-                                    max_execution_revision_round,
-                                    &error.to_string(),
-                                );
-                                (
-                                    failed_independent_review(execution_gate, &error),
-                                    Vec::new(),
-                                )
-                            }
-                        };
+                        Ok((review, cache_events)) => (review, cache_events, None),
+                        Err(error) => {
+                            self.record_control_fallback(
+                                "independent_review",
+                                execution_gate,
+                                max_execution_revision_round,
+                                &error.to_string(),
+                            );
+                            let public_reason = public_review_unavailable_reason(&error);
+                            (
+                                failed_independent_review(execution_gate, &error),
+                                Vec::new(),
+                                Some(public_reason),
+                            )
+                        }
+                    };
+                    push_unique(&mut reviewed_final_gates, execution_gate.to_string());
                     self.emit_pending_control_events(observer.as_deref_mut());
                     prompt_cache_events.extend(review_cache_events);
                     if let Some(observer) = observer.as_deref_mut() {
@@ -2194,21 +2268,20 @@ where
                         }
                         IndependentReviewDecision::Revise | IndependentReviewDecision::Block => {
                             execution_review_unresolved = true;
-                            if !is_finalization_iteration {
-                                if max_execution_revision_round
-                                    < self.effective_review_revision_limit()
-                                {
-                                    max_execution_revision_round += 1;
-                                    max_review_feedback_due =
-                                        Some(independent_review_feedback(execution_gate, &review));
-                                } else {
-                                    max_review_feedback_due =
-                                        Some(independent_review_finalization_feedback(
-                                            execution_gate,
-                                            &review,
-                                        ));
-                                    max_agent_owned_finalization_due = true;
-                                }
+                            final_review = Some(build_final_review_summary(
+                                &reviewed_final_gates,
+                                &review,
+                                review_unavailable.as_deref(),
+                            ));
+                            if !is_finalization_iteration && review_unavailable.is_none() {
+                                max_execution_revision_round += 1;
+                                held_final_candidate = Some(assistant_message.clone());
+                                max_review_feedback_due =
+                                    Some(independent_review_finalization_feedback(
+                                        execution_gate,
+                                        &review,
+                                    ));
+                                max_agent_owned_finalization_due = true;
                                 continue;
                             }
                         }
@@ -2216,8 +2289,8 @@ where
                 }
                 let mut testing_review_unresolved = false;
                 if self.max_plus_enabled && !execution_review_unresolved {
-                    let (review, review_cache_events) =
-                        match self.run_independent_review(IndependentReviewInput {
+                    let (review, review_cache_events, review_unavailable) = match self
+                        .run_independent_review(IndependentReviewInput {
                             gate: "testing",
                             revision_round: max_testing_revision_round,
                             authoritative_goal: &authoritative_goal,
@@ -2227,17 +2300,23 @@ where
                             tool_results: &tool_results,
                             proposed_answer: Some(&assistant_message),
                         }) {
-                            Ok(result) => result,
-                            Err(error) => {
-                                self.record_control_fallback(
-                                    "independent_review",
-                                    "testing",
-                                    max_testing_revision_round,
-                                    &error.to_string(),
-                                );
-                                (failed_independent_review("testing", &error), Vec::new())
-                            }
-                        };
+                        Ok((review, cache_events)) => (review, cache_events, None),
+                        Err(error) => {
+                            self.record_control_fallback(
+                                "independent_review",
+                                "testing",
+                                max_testing_revision_round,
+                                &error.to_string(),
+                            );
+                            let public_reason = public_review_unavailable_reason(&error);
+                            (
+                                failed_independent_review("testing", &error),
+                                Vec::new(),
+                                Some(public_reason),
+                            )
+                        }
+                    };
+                    push_unique(&mut reviewed_final_gates, "testing".to_string());
                     self.emit_pending_control_events(observer.as_deref_mut());
                     prompt_cache_events.extend(review_cache_events);
                     if let Some(observer) = observer.as_deref_mut() {
@@ -2265,20 +2344,18 @@ where
                         IndependentReviewDecision::Pass => {}
                         IndependentReviewDecision::Revise | IndependentReviewDecision::Block => {
                             testing_review_unresolved = true;
-                            if !is_finalization_iteration {
-                                if max_testing_revision_round
-                                    < self.effective_review_revision_limit()
-                                {
-                                    max_testing_revision_round += 1;
-                                    max_review_feedback_due =
-                                        Some(independent_review_feedback("testing", &review));
-                                } else {
-                                    max_review_feedback_due =
-                                        Some(independent_review_finalization_feedback(
-                                            "testing", &review,
-                                        ));
-                                    max_agent_owned_finalization_due = true;
-                                }
+                            final_review = Some(build_final_review_summary(
+                                &reviewed_final_gates,
+                                &review,
+                                review_unavailable.as_deref(),
+                            ));
+                            if !is_finalization_iteration && review_unavailable.is_none() {
+                                max_testing_revision_round += 1;
+                                held_final_candidate = Some(assistant_message.clone());
+                                max_review_feedback_due = Some(
+                                    independent_review_finalization_feedback("testing", &review),
+                                );
+                                max_agent_owned_finalization_due = true;
                                 continue;
                             }
                         }
@@ -2290,8 +2367,8 @@ where
                     } else {
                         "final_claim"
                     };
-                    let (review, review_cache_events) =
-                        match self.run_independent_review(IndependentReviewInput {
+                    let (review, review_cache_events, review_unavailable) = match self
+                        .run_independent_review(IndependentReviewInput {
                             gate: completion_gate,
                             revision_round: max_final_claim_revision_round,
                             authoritative_goal: &authoritative_goal,
@@ -2301,20 +2378,23 @@ where
                             tool_results: &tool_results,
                             proposed_answer: Some(&assistant_message),
                         }) {
-                            Ok(result) => result,
-                            Err(error) => {
-                                self.record_control_fallback(
-                                    "independent_review",
-                                    completion_gate,
-                                    max_final_claim_revision_round,
-                                    &error.to_string(),
-                                );
-                                (
-                                    failed_independent_review(completion_gate, &error),
-                                    Vec::new(),
-                                )
-                            }
-                        };
+                        Ok((review, cache_events)) => (review, cache_events, None),
+                        Err(error) => {
+                            self.record_control_fallback(
+                                "independent_review",
+                                completion_gate,
+                                max_final_claim_revision_round,
+                                &error.to_string(),
+                            );
+                            let public_reason = public_review_unavailable_reason(&error);
+                            (
+                                failed_independent_review(completion_gate, &error),
+                                Vec::new(),
+                                Some(public_reason),
+                            )
+                        }
+                    };
+                    push_unique(&mut reviewed_final_gates, completion_gate.to_string());
                     self.emit_pending_control_events(observer.as_deref_mut());
                     prompt_cache_events.extend(review_cache_events);
                     if let Some(observer) = observer.as_deref_mut() {
@@ -2341,27 +2421,41 @@ where
                         }
                     }
                     match review.decision {
-                        IndependentReviewDecision::Pass => {}
+                        IndependentReviewDecision::Pass => {
+                            final_review = Some(FinalReviewSummary {
+                                status: FinalReviewStatus::Pass,
+                                reviewed_gates: reviewed_final_gates.clone(),
+                                notes: Vec::new(),
+                            });
+                        }
                         IndependentReviewDecision::Revise | IndependentReviewDecision::Block => {
-                            if !is_finalization_iteration {
-                                if max_final_claim_revision_round
-                                    < self.effective_review_revision_limit()
-                                {
-                                    max_final_claim_revision_round += 1;
-                                    max_review_feedback_due =
-                                        Some(independent_review_feedback(completion_gate, &review));
-                                } else {
-                                    max_review_feedback_due =
-                                        Some(independent_review_finalization_feedback(
-                                            completion_gate,
-                                            &review,
-                                        ));
-                                    max_agent_owned_finalization_due = true;
-                                }
+                            final_review = Some(build_final_review_summary(
+                                &reviewed_final_gates,
+                                &review,
+                                review_unavailable.as_deref(),
+                            ));
+                            if !is_finalization_iteration && review_unavailable.is_none() {
+                                max_final_claim_revision_round += 1;
+                                held_final_candidate = Some(assistant_message.clone());
+                                max_review_feedback_due =
+                                    Some(independent_review_finalization_feedback(
+                                        completion_gate,
+                                        &review,
+                                    ));
+                                max_agent_owned_finalization_due = true;
                                 continue;
                             }
                         }
                     }
+                }
+            }
+            if pending_tool_uses.is_empty() && proposed_visible_answer {
+                if let Some(review_summary) = final_review.as_ref() {
+                    append_final_review_note(
+                        &mut assistant_message,
+                        review_summary,
+                        &authoritative_goal,
+                    );
                 }
             }
             self.record_assistant_iteration(
@@ -2680,6 +2774,7 @@ where
             task_checkpoint: task_frame.clone(),
             pending_interaction: pending_user_interaction.clone(),
             planning_error,
+            final_review,
         };
         if self.max_plus_enabled {
             if let (Some(observer), Some(frame)) = (observer, task_frame.as_ref()) {
@@ -3495,7 +3590,7 @@ fn independent_review_feedback(gate: &str, review: &IndependentReview) -> String
 
 fn independent_review_finalization_feedback(gate: &str, review: &IndependentReview) -> String {
     format!(
-        "{}\n\nFINAL ADVISORY ROUND: The review revision budget is exhausted. Do not stop the task and do not wait for another reviewer. The task-performing agent owns the final response. Produce the best evidence-grounded answer yourself, explicitly distinguishing verified results, unresolved concerns, and uncertainty.",
+        "{}\n\nNON-BLOCKING FINAL ADVISORY: Do not continue or reopen task work and do not call tools. The task-performing agent owns the final response. You may revise wording once to reflect supported concerns, verified results, and unresolved uncertainty. The runtime retains the original candidate and will deliver it if this wording-only revision fails.",
         independent_review_feedback(gate, review)
     )
 }
@@ -3519,6 +3614,130 @@ fn failed_independent_review(gate: &str, error: &RuntimeError) -> IndependentRev
         ],
         evidence_refs: vec![format!("runtime {gate} review error")],
     }
+}
+
+fn public_review_unavailable_reason(error: &RuntimeError) -> String {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("invalid verdict") || message.contains("validation") {
+        "reviewer output failed schema validation after the bounded retries".to_string()
+    } else if message.contains("no usable response") {
+        "the reviewer returned no usable response".to_string()
+    } else if message.contains("review failed") {
+        "the independent review provider call failed".to_string()
+    } else {
+        "the independent review runtime could not produce a verdict".to_string()
+    }
+}
+
+fn build_final_review_summary(
+    reviewed_gates: &[String],
+    review: &IndependentReview,
+    unavailable_reason: Option<&str>,
+) -> FinalReviewSummary {
+    if let Some(reason) = unavailable_reason {
+        return FinalReviewSummary {
+            status: FinalReviewStatus::Unavailable,
+            reviewed_gates: reviewed_gates.to_vec(),
+            notes: vec![reason.to_string()],
+        };
+    }
+
+    let mut notes = Vec::new();
+    for finding in &review.findings {
+        push_unique_review_note(&mut notes, &finding.issue);
+    }
+    for missing in &review.missing_evidence {
+        push_unique_review_note(&mut notes, &format!("Missing evidence: {missing}"));
+    }
+    if notes.is_empty() {
+        push_unique_review_note(&mut notes, &review.summary);
+    }
+    notes.truncate(3);
+    FinalReviewSummary {
+        status: FinalReviewStatus::Concerns,
+        reviewed_gates: reviewed_gates.to_vec(),
+        notes,
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn push_unique_review_note(notes: &mut Vec<String>, value: &str) {
+    if notes.len() >= 3 {
+        return;
+    }
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return;
+    }
+    let compact = truncate_chars(&compact, 240);
+    push_unique(notes, compact);
+}
+
+fn append_final_review_note(
+    message: &mut ConversationMessage,
+    review: &FinalReviewSummary,
+    authoritative_goal: &str,
+) {
+    let contains_chinese = authoritative_goal
+        .chars()
+        .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character));
+    let note = match review.status {
+        FinalReviewStatus::Pass if contains_chinese => {
+            "\n\n---\n\n✅ **独立审查：** 在当前可见证据范围内通过。".to_string()
+        }
+        FinalReviewStatus::Pass => {
+            "\n\n---\n\n✅ **Independent review:** Passed within the available evidence."
+                .to_string()
+        }
+        FinalReviewStatus::Concerns => {
+            let items = review
+                .notes
+                .iter()
+                .take(3)
+                .map(|item| format!("- {item}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if contains_chinese {
+                format!(
+                    "\n\n---\n\n⚠️ **独立审查备注（非阻断）：** 以下事项尚未获得独立确认：\n{items}\n\n主任务结果已照常交付；以上仍属于潜在风险或未验证项。"
+                )
+            } else {
+                format!(
+                    "\n\n---\n\n⚠️ **Independent review note (non-blocking):** The following items were not independently confirmed:\n{items}\n\nThe task result was delivered normally; these remain potential risks or unverified items."
+                )
+            }
+        }
+        FinalReviewStatus::Unavailable => {
+            let reason = review.notes.first().map_or(
+                "the reviewer did not produce a valid verdict",
+                String::as_str,
+            );
+            if contains_chinese {
+                let localized_reason = if reason.contains("schema validation") {
+                    "审查器输出在有限重试后仍未通过结构校验"
+                } else if reason.contains("no usable response") {
+                    "审查器未返回可用响应"
+                } else if reason.contains("provider call failed") {
+                    "独立审查服务调用失败"
+                } else {
+                    "独立审查运行时未能形成有效结论"
+                };
+                format!(
+                    "\n\n---\n\nℹ️ **独立审查未完成（非阻断）：** {localized_reason}。主任务结果已照常交付，但未获得完整独立确认。"
+                )
+            } else {
+                format!(
+                    "\n\n---\n\nℹ️ **Independent review unavailable (non-blocking):** {reason}. The task result was delivered normally without complete independent confirmation."
+                )
+            }
+        }
+    };
+    message.blocks.push(ContentBlock::Text { text: note });
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
@@ -3828,6 +4047,13 @@ fn canonical_tool_capability(value: &str) -> Option<String> {
         }
         .to_string(),
     )
+}
+
+fn pending_tools_are_finalization_only(pending_tool_uses: &[(String, String, String)]) -> bool {
+    !pending_tool_uses.is_empty()
+        && pending_tool_uses.iter().all(|(_, name, _)| {
+            canonical_tool_capability(name).as_deref() == Some("structured_output")
+        })
 }
 
 fn validate_planned_tool_identifiers(
@@ -6874,6 +7100,74 @@ mod tests {
     }
 
     #[test]
+    fn final_candidate_with_only_structured_output_is_not_emitted_as_commentary() {
+        struct FinalCandidateApi {
+            execution_calls: usize,
+        }
+
+        impl ApiClient for FinalCandidateApi {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                if !request.allow_tools {
+                    return Ok(vec![
+                        AssistantEvent::TextDelta(
+                            r#"{"acknowledgement":"I will finish the report and preserve its structured receipt.","active_goal":"finish the report","direct_response":false,"success_criteria":["deliver one final report"],"planned_actions":["prepare the final report","record the receipt"],"planned_tools":["StructuredOutput"],"do_not_do":["do not send the final report twice"],"completed":[],"remaining_work":["finish the report"],"failures":[],"next_action":"prepare the final report"}"#.to_string(),
+                        ),
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+                self.execution_calls += 1;
+                if self.execution_calls == 1 {
+                    return Ok(vec![
+                        AssistantEvent::TextDelta("The full final report is complete.".to_string()),
+                        AssistantEvent::ToolUse {
+                            id: "structured-1".to_string(),
+                            name: "StructuredOutput".to_string(),
+                            input: r#"{"status":"complete"}"#.to_string(),
+                        },
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+                Ok(vec![
+                    AssistantEvent::TextDelta("The final report is complete.".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            FinalCandidateApi { execution_calls: 0 },
+            StaticToolExecutor::new().register("StructuredOutput", |_| {
+                Ok(r#"{"status":"recorded"}"#.to_string())
+            }),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_task_planning_enabled(true);
+        let mut observed = Vec::new();
+        let mut observer = |event| observed.push(event);
+
+        let summary = runtime
+            .run_turn_observed("finish the report", None, Some(&mut observer))
+            .expect("finalization metadata should not affect delivery");
+
+        assert_eq!(summary.tool_results.len(), 1);
+        assert_eq!(runtime.api_client_mut().execution_calls, 2);
+        assert_eq!(
+            user_visible_text(summary.assistant_messages.last().expect("final answer")),
+            "The final report is complete."
+        );
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|event| matches!(event, RuntimeStreamEvent::AssistantCommentary { .. }))
+                .count(),
+            0,
+            "a final candidate paired only with StructuredOutput must stay internal"
+        );
+    }
+
+    #[test]
     fn invalid_direct_response_falls_back_to_primary_execution() {
         struct InvalidDirectApi {
             planning_calls: usize,
@@ -7255,13 +7549,14 @@ mod tests {
     }
 
     #[test]
-    fn max_effort_runs_independent_plan_evidence_and_claim_revision_gates() {
+    fn max_final_review_concern_is_nonblocking_and_wording_only() {
         struct MaxReviewApi {
             planning_reviews: usize,
             planning_replans: usize,
             evidence_reviews: usize,
             claim_reviews: usize,
             execution_calls: usize,
+            finalization_calls: usize,
         }
 
         impl ApiClient for MaxReviewApi {
@@ -7271,6 +7566,10 @@ mod tests {
                     .iter()
                     .any(|part| part.contains("MAX-EFFORT INDEPENDENT CRITICAL EVALUATOR"));
                 if is_independent {
+                    assert_eq!(
+                        request.timeout,
+                        Some(super::MAX_INDEPENDENT_REVIEW_HARD_TIMEOUT)
+                    );
                     assert!(request
                         .system_prompt
                         .iter()
@@ -7342,6 +7641,26 @@ mod tests {
                     ]);
                 }
 
+                if request
+                    .system_prompt
+                    .iter()
+                    .any(|part| part.contains("AGENT-OWNED FINALIZATION"))
+                {
+                    self.finalization_calls += 1;
+                    assert!(!request.allow_tools);
+                    assert!(request.system_prompt.iter().any(|part| {
+                        part.contains("NON-BLOCKING FINAL ADVISORY")
+                            && part.contains("do not call tools")
+                    }));
+                    return Ok(vec![
+                        AssistantEvent::TextDelta(
+                            "The available verification failed, so the state remains unverified."
+                                .to_string(),
+                        ),
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+
                 if !request.allow_tools {
                     let revised = request
                         .system_prompt
@@ -7373,7 +7692,7 @@ mod tests {
 
                 self.execution_calls += 1;
                 match self.execution_calls {
-                    1 | 3 => Ok(vec![
+                    1 => Ok(vec![
                         AssistantEvent::ToolUse {
                             id: format!("verify-{}", self.execution_calls),
                             name: "verify".to_string(),
@@ -7383,17 +7702,6 @@ mod tests {
                     ]),
                     2 => Ok(vec![
                         AssistantEvent::TextDelta("Everything is verified.".to_string()),
-                        AssistantEvent::MessageStop,
-                    ]),
-                    4 => Ok(vec![
-                        AssistantEvent::TextDelta("Verified completely.".to_string()),
-                        AssistantEvent::MessageStop,
-                    ]),
-                    5 => Ok(vec![
-                        AssistantEvent::TextDelta(
-                            "The first check failed; the corrective author-specific rerun passed."
-                                .to_string(),
-                        ),
                         AssistantEvent::MessageStop,
                     ]),
                     _ => unreachable!("unexpected execution call"),
@@ -7411,6 +7719,7 @@ mod tests {
                 evidence_reviews: 0,
                 claim_reviews: 0,
                 execution_calls: 0,
+                finalization_calls: 0,
             },
             StaticToolExecutor::new().register("verify", move |_| {
                 let call = verify_calls_for_tool.get();
@@ -7436,20 +7745,34 @@ mod tests {
                 None,
                 Some(&mut observer),
             )
-            .expect("max review revisions should converge");
+            .expect("non-blocking max review should still deliver the agent final");
 
-        assert_eq!(verify_calls.get(), 2);
+        assert_eq!(verify_calls.get(), 1);
         assert_eq!(summary.completion_status, CompletionStatus::Completed);
         assert_eq!(summary.stop_reason, TurnStopReason::EndTurn);
-        assert_eq!(summary.assistant_messages.len(), 3);
-        assert_eq!(
-            super::user_visible_text(summary.assistant_messages.last().expect("final answer")),
-            "The first check failed; the corrective author-specific rerun passed."
-        );
+        assert_eq!(summary.assistant_messages.len(), 2);
+        let final_text =
+            super::user_visible_text(summary.assistant_messages.last().expect("final answer"));
+        assert!(final_text
+            .starts_with("The available verification failed, so the state remains unverified."));
+        assert!(final_text.contains("⚠️ **Independent review note (non-blocking):**"));
+        assert!(final_text.contains("failed verification is presented as success"));
         assert_eq!(runtime.api_client_mut().planning_reviews, 2);
         assert_eq!(runtime.api_client_mut().planning_replans, 3);
-        assert_eq!(runtime.api_client_mut().evidence_reviews, 2);
-        assert_eq!(runtime.api_client_mut().claim_reviews, 2);
+        assert_eq!(runtime.api_client_mut().evidence_reviews, 1);
+        assert_eq!(runtime.api_client_mut().claim_reviews, 0);
+        assert_eq!(runtime.api_client_mut().finalization_calls, 1);
+        assert_eq!(
+            summary.final_review.as_ref(),
+            Some(&super::FinalReviewSummary {
+                status: super::FinalReviewStatus::Concerns,
+                reviewed_gates: vec!["execution_evidence".to_string()],
+                notes: vec![
+                    "failed verification is presented as success".to_string(),
+                    "Missing evidence: passing author-specific verification".to_string(),
+                ],
+            })
+        );
         let acknowledgement_index = observed
             .iter()
             .position(|event| matches!(event, RuntimeStreamEvent::TaskAcknowledgement { .. }))
@@ -7472,7 +7795,7 @@ mod tests {
                 .iter()
                 .filter(|event| matches!(event, RuntimeStreamEvent::IndependentReview { .. }))
                 .count(),
-            6
+            3
         );
         let control_events = observed
             .iter()
@@ -7502,7 +7825,7 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(control_events.len(), 10);
+        assert!(control_events.len() >= 7);
         assert!(control_events.iter().any(
             |(
                 stage,
@@ -7516,14 +7839,14 @@ mod tests {
                 usage,
             )| {
                 stage.as_str() == "independent_review"
-                    && gate.as_str() == "final_claim"
-                    && **revision_round == 1
+                    && gate.as_str() == "execution_evidence"
+                    && **revision_round == 0
                     && **format_attempt == 1
                     && system_prompt
                         .iter()
-                        .any(|part| part.contains("FINAL CLAIM GATE"))
+                        .any(|part| part.contains("EXECUTION EVIDENCE GATE"))
                     && user_message.contains("RAW TOOL RESULT LEDGER")
-                    && raw_output.contains("final claim now matches")
+                    && raw_output.contains("failed verification is presented as success")
                     && outcome.as_str() == "parsed"
                     && usage
                         .is_some_and(|usage| usage.input_tokens == 11 && usage.output_tokens == 7)
@@ -7595,6 +7918,22 @@ mod tests {
             .expect("max+ gates should pass");
 
         assert_eq!(summary.completion_status, CompletionStatus::Completed);
+        assert_eq!(
+            summary.final_review.as_ref(),
+            Some(&super::FinalReviewSummary {
+                status: super::FinalReviewStatus::Pass,
+                reviewed_gates: vec![
+                    "verification".to_string(),
+                    "testing".to_string(),
+                    "completion".to_string(),
+                ],
+                notes: Vec::new(),
+            })
+        );
+        assert!(
+            user_visible_text(summary.assistant_messages.last().expect("final answer"))
+                .contains("✅ **Independent review:** Passed within the available evidence.")
+        );
         assert_eq!(
             runtime.api_client_mut().gates,
             vec!["planning", "verification", "testing", "completion"]
@@ -7824,7 +8163,7 @@ mod tests {
     }
 
     #[test]
-    fn max_effort_returns_agent_owned_final_after_execution_review_exhaustion() {
+    fn max_final_review_rewrite_failure_preserves_candidate_with_warning() {
         struct RejectingMaxReviewApi {
             execution_calls: usize,
             finalization_calls: usize,
@@ -7858,20 +8197,7 @@ mod tests {
                 {
                     self.finalization_calls += 1;
                     assert!(!request.allow_tools);
-                    if self.finalization_calls == 1 {
-                        return Ok(vec![
-                            AssistantEvent::TextDelta(
-                                "<｜DSML｜tool_calls><｜DSML｜invoke name=\"bash\">".to_string(),
-                            ),
-                            AssistantEvent::MessageStop,
-                        ]);
-                    }
-                    return Ok(vec![
-                        AssistantEvent::TextDelta(
-                            "I could not verify the state from the available evidence.".to_string(),
-                        ),
-                        AssistantEvent::MessageStop,
-                    ]);
+                    return Err(RuntimeError::new("final wording provider unavailable"));
                 }
                 if !request.allow_tools {
                     return Ok(vec![
@@ -7903,10 +8229,10 @@ mod tests {
 
         let summary = runtime
             .run_turn("verify state", None)
-            .expect("critic exhaustion should return control to the task agent");
+            .expect("review-related rewrite failure must not block final delivery");
 
-        assert_eq!(runtime.api_client_mut().execution_calls, 4);
-        assert_eq!(runtime.api_client_mut().finalization_calls, 2);
+        assert_eq!(runtime.api_client_mut().execution_calls, 1);
+        assert_eq!(runtime.api_client_mut().finalization_calls, 1);
         assert_eq!(summary.completion_status, CompletionStatus::Completed);
         assert_eq!(summary.stop_reason, TurnStopReason::EndTurn);
         let final_text = super::user_visible_text(
@@ -7915,11 +8241,13 @@ mod tests {
                 .last()
                 .expect("task agent final answer"),
         );
+        assert!(final_text.starts_with("The state is definitely verified."));
+        assert!(final_text.contains("⚠️ **Independent review note (non-blocking):**"));
+        assert!(final_text.contains("unsupported success claim"));
         assert_eq!(
-            final_text,
-            "I could not verify the state from the available evidence."
+            summary.final_review.as_ref().map(|review| review.status),
+            Some(super::FinalReviewStatus::Concerns)
         );
-        assert!(!final_text.contains("definitely verified"));
     }
 
     #[test]
@@ -7986,9 +8314,13 @@ mod tests {
         assert_eq!(runtime.api_client_mut().execution_calls, 1);
         assert_eq!(summary.completion_status, CompletionStatus::Completed);
         assert_eq!(summary.stop_reason, TurnStopReason::EndTurn);
-        assert_eq!(
-            super::user_visible_text(summary.assistant_messages.last().expect("agent answer")),
-            "I need explicit authorization before making that mutation."
+        let final_text =
+            super::user_visible_text(summary.assistant_messages.last().expect("agent answer"));
+        assert!(
+            final_text.starts_with("I need explicit authorization before making that mutation.")
+        );
+        assert!(
+            final_text.contains("✅ **Independent review:** Passed within the available evidence.")
         );
         assert!(!observed.iter().any(|event| matches!(
             event,
@@ -8098,9 +8430,12 @@ mod tests {
         assert_eq!(inspect_calls.get(), 1);
         assert_eq!(summary.completion_status, CompletionStatus::Completed);
         assert_eq!(summary.stop_reason, TurnStopReason::EndTurn);
-        assert_eq!(
-            super::user_visible_text(summary.assistant_messages.last().expect("agent answer")),
-            "I inspected the security state and found one item still uncertain."
+        let final_text =
+            super::user_visible_text(summary.assistant_messages.last().expect("agent answer"));
+        assert!(final_text
+            .starts_with("I inspected the security state and found one item still uncertain."));
+        assert!(
+            final_text.contains("✅ **Independent review:** Passed within the available evidence.")
         );
     }
 
@@ -8176,14 +8511,19 @@ mod tests {
             .run_turn_observed("inspect state", None, Some(&mut observer))
             .expect("invalid critic output should degrade to agent-owned finalization");
 
-        assert_eq!(runtime.api_client_mut().review_calls, 15);
-        assert_eq!(runtime.api_client_mut().execution_calls, 4);
-        assert_eq!(runtime.api_client_mut().finalization_calls, 1);
+        assert_eq!(runtime.api_client_mut().review_calls, 6);
+        assert_eq!(runtime.api_client_mut().execution_calls, 1);
+        assert_eq!(runtime.api_client_mut().finalization_calls, 0);
         assert_eq!(summary.completion_status, CompletionStatus::Completed);
         assert_eq!(summary.stop_reason, TurnStopReason::EndTurn);
+        let final_text =
+            super::user_visible_text(summary.assistant_messages.last().expect("agent answer"));
+        assert!(final_text.starts_with("The available state remains uncertain."));
+        assert!(final_text.contains("ℹ️ **Independent review unavailable (non-blocking):**"));
+        assert!(final_text.contains("failed schema validation"));
         assert_eq!(
-            super::user_visible_text(summary.assistant_messages.last().expect("agent answer")),
-            "I inspected the available state and am reporting it with uncertainty."
+            summary.final_review.as_ref().map(|review| review.status),
+            Some(super::FinalReviewStatus::Unavailable)
         );
         assert!(observed.iter().any(|event| matches!(
             event,

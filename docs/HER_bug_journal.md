@@ -61,7 +61,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260813-023` | Fixed — live verification pending | P2 | runtime and adapter HER Habit pipelines can both process one foreground run | `test_her_adapter_declares_habit_pipeline_ownership`; `test_runtime_intake_ineligibility_disables_adapter_habit_pipeline` |
 | `HER-20260813-024` | Fixed — live verification pending | P1 | post-multimedia adapter runner rejected Meditation isolation overrides before inference | `test_her_task_runner_applies_meditation_safety_overrides` |
 | `HER-20260813-025` | Verified | P2 | HER Debug Lab failed in a clean clone without machine-local Ajiao state | `test_optional_operator_baseline_is_clone_portable_and_content_free`; `tests/test_her_debug_lab.py` |
-| `HER-20260813-026` | Fixed — live verification pending | P1 | MAX+ critic gates could repeatedly delay and then suppress otherwise usable completed work | `max_effort_returns_agent_owned_final_after_execution_review_exhaustion`; `max_plus_trivial_plan_skips_independent_review_gates` |
+| `HER-20260813-026` | Reopened; fixed in source — rebuild/live verification pending | P1 | MAX/MAX+ final review could repeatedly delay or fail delivery of an otherwise usable final | `max_final_review_concern_is_nonblocking_and_wording_only`; `max_final_review_rewrite_failure_preserves_candidate_with_warning` |
 | `HER-20260813-027` | Fixed — live verification pending | P1 | Habit Meditation model work occupied the foreground execution queue and process slot | `test_habit_meditation_model_work_does_not_block_foreground_task`; `test_habit_meditation_uses_low_effort_tool_free_snapshot` |
 | `HER-20260813-028` | Fixed — live verification pending | P1 | max-iteration handling could replace a usable primary-agent final answer with a mechanical incomplete report | `test_claw_incomplete_max_iterations_preserves_normal_final`; `test_claw_incomplete_dangling_tool_markup_uses_deterministic_report` |
 | `HER-20260814-029` | Fixed — live verification pending | P2 | HIGH/XHIGH shared checkpoints reviewed stale task frames without current tool evidence and repeated the same divergence review | `high_effort_reserves_turns_for_review_and_validation`; `high_effort_deduplicates_repeated_unplanned_tool_reviews` |
@@ -77,8 +77,38 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260817-039` | Deployed to Arale — live behavior verification pending | P1 | a legacy effort gate silently demoted every native Persona commentary at `low` and `medium` to internal despite `/commentary on` | `test_medium_adapter_delivers_native_tool_turn_commentary`; corrected low-through-ultra transport matrix |
 | `HER-20260817-040` | Fixed in source — user-managed reboot/live verification pending | P2 | short HER acknowledgement/commentary messages bypassed Markdown rendering and appeared as literal markup in Telegram | `test_her_short_commentary_renders_markdown_before_telegram_delivery`; `test_her_commentary_uses_long_sender_when_rendered_html_exceeds_limit` |
 | `HER-20260818-041` | Fixed in source — online rebuild/live verification pending | P1 | adapter-appended Habit advice entered the authoritative TaskFrame request and fallback `active_goal` | `habit_advice_stays_outside_authoritative_request_when_planning_falls_back`; `test_enabled_feature_plans_and_schedules_meditation_at_every_effort` |
+| `HER-20260818-042` | Fixed in source — rebuild/live verification pending | P2 | a final candidate paired with `StructuredOutput` was delivered first as commentary and then again as final | `final_candidate_with_only_structured_output_is_not_emitted_as_commentary`; commentary-prefix router tests |
 
 ## Historical entries
+
+### HER-20260818-042 — final candidate was duplicated as commentary
+
+- **Status:** Fixed in source — rebuild/live verification pending
+- **Severity:** P2
+- **Expected:** model-authored text preceding a task-advancing tool may become Persona
+  commentary, but a completed final candidate paired only with finalization metadata
+  remains internal until the final lane and is delivered once.
+- **Actual:** Lily produced a complete final report and then called
+  `StructuredOutput`. Native HER classified every visible text-plus-tool turn as
+  `assistant_commentary`, so HASHI delivered the report immediately; after independent
+  review, normal finalization delivered substantially the same report again.
+- **Root cause:** commentary classification tested only for “some non-question tool”
+  and had no semantic boundary between task-advancing tools and finalization-only
+  metadata. Timing between commentary and final was not causal.
+- **Repair:** suppress `AssistantCommentary` when every pending tool canonicalizes to
+  `structured_output`; keep mixed or task-advancing tool turns unchanged. HASHI now
+  adds `💬 ` only at acknowledgement/commentary presentation time, exactly once, while
+  preserving raw audit text and leaving final/control/technical/reasoning lanes
+  unmarked.
+- **Regression tests:** a complete text plus `StructuredOutput` turn proves zero
+  commentary events and one final; ordinary text plus task tool still emits one
+  commentary before tool start. Router tests prove short/long acknowledgement and
+  commentary receive `💬 `, audit text remains byte-for-byte model-authored, and
+  required control does not receive the marker.
+- **Live retest required:** after rebuild, run one commentary-enabled task that ends
+  with `StructuredOutput` and prove the final report appears once, while one ordinary
+  task-tool progress update appears with the `💬 ` prefix.
+- **Recurrence count:** 0
 
 ### HER-20260818-041 — inline Habit advice polluted TaskFrame authority
 
@@ -685,9 +715,9 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   delivered normally.
 - **Recurrence count:** 0
 
-### HER-20260813-026 — MAX+ assurance became a hard completion gate
+### HER-20260813-026 — MAX/MAX+ assurance became a hard completion gate
 
-- **Status:** Fixed — live verification pending
+- **Status:** Reopened; fixed in source — rebuild/live verification pending
 - **Severity:** P1
 - **Expected:** planning chooses task-matched success, validation, and review work;
   critic output helps the primary agent improve but cannot confiscate its result.
@@ -701,9 +731,26 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   primary agent after feedback.
 - **Fixed HER:** `0.1.0-hashi.11` / source `f524b47054e5964b9ddfc61ab28cbfd990dc09af`
   / SHA-256 `93229c2b3aae40eabe5ed4582429a5247a4520ba45b6f1c99eecadecefaa1232`.
+- **Recurrence (2026-08-18):** final evidence/claim gates still used up to three
+  revision rounds at MAX and five at MAX+. A concern could therefore reopen tool work,
+  delay delivery, and make the final wording provider call a new failure point even
+  though the reviewer was documented as advisory.
+- **Recurrence repair:** independent final review now runs only at MAX/MAX+, never
+  XHIGH. A concern permits at most one tool-free primary-Agent wording revision and
+  can never reopen execution. HER retains the reviewed candidate, falls back to it on
+  provider/protocol failure, always delivers the primary final, and appends the same
+  final with a compact pass, concern (up to three items), or reviewer-unavailable note.
+  Each reviewer provider call has a fail-open 90-second hard deadline. The structured
+  CLI result also records `final_review`; no separate reviewer message is emitted.
+- **Recurrence regression tests:**
+  `max_final_review_concern_is_nonblocking_and_wording_only`,
+  `max_final_review_rewrite_failure_preserves_candidate_with_warning`,
+  `max_invalid_review_output_never_replaces_the_task_agent_final_answer`, and
+  `max_plus_emits_hypothesis_checkpoint_and_three_independent_verdicts`.
 - **Live retest required:** one trivial handoff and one multi-tool MAX+ task on the
-  upgraded packaged runtime.
-- **Recurrence count:** 0
+  upgraded packaged runtime, including one forced reviewer failure that still returns
+  the primary final with an unavailable note.
+- **Recurrence count:** 1
 
 ### HER-20260813-027 — Meditation blocked the primary queue
 

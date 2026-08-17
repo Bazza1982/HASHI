@@ -38,14 +38,22 @@ request can still finish quickly at a high configured level.
 | `low` | Direct single-Agent execution without TaskFrame planning |
 | `medium` | Adaptive planning without a review loop |
 | `high` | Adaptive planning with optional self-review |
-| `xhigh` | Adds optional independent read-only review |
-| `max` | Expands the single-Agent execution and assurance ceiling |
+| `xhigh` | Adds deeper self-review and assurance checkpoints; no independent reviewer |
+| `max` | Adds independent read-only planning/final review to the expanded single-Agent ceiling |
 | `max+` | May also rerun exact plan-declared tests in an isolated snapshot |
 | `ultra` | HER-private primary/worker orchestration with a bounded DAG, isolated sessions, evidence assembly, retries, and at most ten concurrent sub-agents |
 
 `low` through `max+` are single-Agent HER efforts. `ultra` is intercepted by
 the HASHI HER adapter and coordinates multiple ordinary HER sessions; the
 native executable never receives `ultra` as a single-process effort value.
+
+MAX and MAX+ final review is non-blocking. It can inform at most one tool-free
+primary-Agent wording revision, but it cannot reopen task work, suppress the final,
+or fail the turn. The reviewed candidate is retained as fallback, and the delivered
+final carries a compact pass, concern, or reviewer-unavailable note. XHIGH retains
+deeper single-Agent assurance without this independent-review protocol. Each independent
+review provider call has a 90-second hard deadline and degrades to the same non-blocking
+reviewer-unavailable note on timeout.
 
 ## Certified HER 0.1.0-hashi.22
 
@@ -76,7 +84,10 @@ User-visible HER events now have explicit ownership and stable event IDs.
 Technical telemetry, reasoning, commentary, control, and final responses use
 separate lanes. Replayed copies of the same event are retained for audit but
 shown to the user only once. Replanning no longer reuses the initial
-acknowledgement as repeated commentary.
+acknowledgement as repeated commentary. HASHI prefixes only acknowledgement and
+commentary presentation with `💬 ` while preserving the original audit text.
+A final candidate paired only with `StructuredOutput` remains on the final lane
+instead of appearing once as commentary and again as final.
 
 ## Integrated `/rebuild` Development Workflow
 

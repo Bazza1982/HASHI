@@ -143,8 +143,8 @@ HER effort controls agentic execution length, not provider reasoning depth:
 | `low` | 12 | no planning; direct execution |
 | `medium` | 32 | adaptive plan; no review loop |
 | `high` | 96 | adaptive plan; optional self-review |
-| `xhigh` | 192 | adaptive plan; optional independent read-only review |
-| `max` | 384 | adaptive plan; optional independent read-only review |
+| `xhigh` | 192 | adaptive plan; deeper self-review and assurance checkpoints; no independent reviewer |
+| `max` | 384 | adaptive plan plus independent read-only planning/final review |
 | `max+` | 512 | same independent review plus optional isolated rerun of exact plan-declared tests |
 | `ultra` | coordinated | HASHI-owned primary/worker orchestration above the single-Agent native ceiling |
 
@@ -183,9 +183,10 @@ Telegram progress messages.
 
 The adaptive task profile records task kind, risk, state-change scope, direct-response
 eligibility, deliverables, material claims, verification mode, testing mode, exact test
-commands where applicable, review mode/targets/triggers, and stop conditions. HIGH may
-select self-review. XHIGH, MAX, and MAX+ may select an independent review, but none is
-mandatory merely because the capability exists.
+commands where applicable, review mode/targets/triggers, and stop conditions. HIGH and
+XHIGH may select progressively deeper self-review and assurance checkpoints. Independent
+review begins at MAX; MAX and MAX+ may select it, but it is not mandatory merely because
+the capability exists.
 
 An independent reviewer starts without the task-performing conversation and receives a
 separate read-only tool registry. It can inspect workspace files, glob/grep results, Git
@@ -194,8 +195,14 @@ inputs and outputs remain addressable by stable evidence IDs; the compact review
 is only an index, and truncation never makes older raw evidence inaccessible. MAX+ may
 also expose a disposable, network-isolated `ReviewRun`, but only for an exact command
 declared in the initial task profile. Reviewer `pass`, `revise`, and `block` verdicts are
-advisory. They trigger primary-agent reconsideration within the planned scope but cannot
-replace its judgment, suppress its final answer, or redefine completion. Provider-returned
+advisory. Final review never reopens task execution, calls tools, vetoes delivery, or
+turns an otherwise usable result into a runtime error. A concern may cause at most one
+tool-free wording revision by the primary Agent; HER retains the reviewed candidate and
+falls back to it if that revision fails. The same final response ends with a compact
+`pass`, non-blocking concern (up to three items), or reviewer-unavailable note. The
+reviewer never sends a second final message and never replaces the primary Agent's
+judgment. Every independent reviewer provider call has a 90-second hard deadline; a
+timeout follows the same reviewer-unavailable, fail-open path. Provider-returned
 encrypted or redacted reasoning is never reconstructed.
 
 HIGH self-review and the shared mid-task replanning checkpoints use the same immutable
@@ -320,7 +327,10 @@ assistant turn contains both visible Persona text and at least one tool request,
 native HER emits that assembled text exactly once as `assistant_commentary`
 before the corresponding `ToolStart`. A tool-free terminal assistant turn stays
 on the final lane, and an `AskUserQuestion` turn is finalized through the
-required user-input lane rather than duplicated as commentary. Harmless
+required user-input lane rather than duplicated as commentary. A visible final
+candidate paired only with finalization metadata such as `StructuredOutput`
+also remains internal until the final lane; it is never sent early as commentary.
+Harmless
 TaskFrame aliases that normalize to the same available tool capability are
 deduplicated in first-seen order; non-tool prose and unavailable capabilities
 remain invalid and planning continues under the last confirmed frame.
@@ -333,7 +343,10 @@ buffered until the initial frame establishes whether `direct_response=true`;
 direct answers are classified as `final` and delivered once by the existing
 post-generation final lane, never first as commentary. Deterministic TaskFrame
 summaries and neutral runtime leases are technical telemetry rather than guessed
-Persona speech. The configured `system_md` remains the only Persona source.
+Persona speech. At presentation time HASHI prefixes acknowledgement and commentary
+with `💬 ` exactly once; the raw audit text is unchanged, and final, control, technical,
+and reasoning lanes never receive this marker from the router. The configured
+`system_md` remains the only Persona source.
 
 Provider reasoning deltas are an exact byte-fragment contract. HER must preserve
 leading, trailing, and whitespace-only fragments from the provider stream; HASHI

@@ -258,7 +258,7 @@ Scheduler is the intended authority.
 | `low` | planning off | not vulnerable to the TaskFrame replan loop; still shares conversation, tool, control and delivery bugs | no TaskPlan or review calls; normal execution and one final answer |
 | `medium` | adaptive planning; no review loop | confirmed live replan commentary/control leakage; periodic replans can waste tokens | one acknowledgement maximum; internal replans only on material evidence/cadence; no review loop |
 | `high` | adaptive planning + optional self-review | confirmed strongest current failure: review churn, authorization drift and repeated commentary | one review per new material trigger; bounded cadence; evidence-monotonic replan; guaranteed finalization |
-| `xhigh` | adaptive planning + optional independent read-only review | same TaskFrame/presentation defects plus planning-review revision paths | hard revision cap; advisory review cannot create commentary or block the primary answer |
+| `xhigh` | adaptive planning + deeper self-review/assurance | same TaskFrame/presentation defects plus deeper checkpoint paths | bounded checkpoints cannot create commentary or block the primary answer |
 | `max` | deeper independent review | structurally vulnerable to every lower-level defect and more review/tool round trips | review only selected targets; no repeated inspection after unchanged evidence |
 | `max+` | max review + one optional isolated exact test rerun | greatest amplification surface across planning, checkpoints, review and test rerun | one exact planned rerun maximum; every stage bounded and non-duplicating |
 | `ultra` | Python orchestrator; native planning disabled inside workers | exact native TaskFrame loop is not nested, but shared router/continuity bugs and outer lifecycle replays still apply | keep inner `CLAW_TASK_PLANNING=0`; test outer commentary IDs, retries and final assembly independently |
@@ -590,7 +590,7 @@ The repair is complete only when all of the following are true:
 - exact replay of an accepted user-visible event ID cannot be presented twice;
 - Medium cannot leak internal replans/format errors as repeated user messages;
 - High review adds evidence or a material correction and cannot loop on unchanged plans;
-- XHigh/Max/Max+ review and test reruns remain within explicit hard bounds;
+- High/XHigh self-review and Max/Max+ independent review/test reruns remain within explicit hard bounds;
 - Ultra keeps native worker planning disabled and does not replay outer lifecycle commentary;
 - replans preserve user authorization and all verified execution evidence;
 - internal planning/reviewer format failures remain audit/technical events;
