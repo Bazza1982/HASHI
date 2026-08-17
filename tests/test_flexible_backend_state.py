@@ -731,6 +731,72 @@ async def test_generate_ephemeral_response_shuts_down_and_preserves_active_backe
     assert manager.config.active_backend == original_active
 
 
+@pytest.mark.asyncio
+async def test_generate_tool_free_ephemeral_response_clears_registry_and_shuts_down(
+    tmp_path,
+    monkeypatch,
+):
+    import adapters.registry
+
+    created = []
+
+    class FakeBackend:
+        def __init__(self, config, global_config, api_key):
+            self.config = config
+            self.tool_registry = object()
+            self.shutdown_called = False
+            created.append(self)
+
+        async def initialize(self):
+            assert self.tool_registry is None
+            return True
+
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+        ):
+            assert self.tool_registry is None
+            return SimpleNamespace(text=prompt, is_success=True, error=None)
+
+        async def shutdown(self):
+            self.shutdown_called = True
+
+    monkeypatch.setattr(adapters.registry, "get_backend_class", lambda engine: FakeBackend)
+    workspace = tmp_path / "agent"
+    manager = _make_manager(workspace)
+    manager.config.allowed_backends.append(
+        {"engine": "openrouter-api", "model": "vendor/model"}
+    )
+
+    response = await manager.generate_tool_free_ephemeral_response(
+        engine="openrouter-api",
+        model="vendor/model",
+        prompt="render Persona status",
+        request_id="req-persona",
+    )
+
+    assert response.text == "render Persona status"
+    assert created[0].tool_registry is None
+    assert created[0].shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_generate_tool_free_ephemeral_response_rejects_cli_backend(tmp_path):
+    manager = _make_manager(tmp_path / "agent")
+
+    with pytest.raises(ValueError, match="not a tool-free API renderer"):
+        await manager.generate_tool_free_ephemeral_response(
+            engine="codex-cli",
+            model="gpt-5.4",
+            prompt="render Persona status",
+            request_id="req-persona",
+        )
+
+
 def test_wrapper_config_survives_manager_reload_and_unrelated_state_saves(tmp_path):
     workspace = tmp_path / "agent"
     manager = _make_manager(workspace)

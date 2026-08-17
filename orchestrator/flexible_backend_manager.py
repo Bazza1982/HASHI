@@ -698,6 +698,42 @@ class FlexibleBackendManager:
         finally:
             await backend.shutdown()
 
+    async def generate_tool_free_ephemeral_response(
+        self,
+        *,
+        engine: str,
+        model: str,
+        prompt: str,
+        request_id: str,
+        silent: bool = True,
+    ):
+        """Run a one-shot API render with no HASHI tool registry attached."""
+
+        engine = canonical_backend_engine(engine)
+        if engine not in {"deepseek-api", "ollama-api", "openrouter-api", "xai-api"}:
+            raise ValueError(f"Backend {engine} is not a tool-free API renderer.")
+        require_level_available(self.privacy_level)
+        require_backend_compatibility(engine, self.privacy_level)
+        backend = self.create_ephemeral_backend(engine, target_model=model)
+        backend.privacy_level = self.privacy_level
+        if hasattr(backend, "tool_registry"):
+            backend.tool_registry = None
+        try:
+            initialized = await backend.initialize()
+            if not initialized:
+                raise RuntimeError(f"Failed to initialize ephemeral backend {engine}.")
+            if hasattr(backend, "tool_registry"):
+                backend.tool_registry = None
+            return await backend.generate_response(
+                prompt,
+                request_id,
+                is_retry=False,
+                silent=silent,
+                on_stream_event=None,
+            )
+        finally:
+            await backend.shutdown()
+
     def _resolve_xai_api_credentials(self) -> dict[str, str] | None:
         api_key = None
         oauth_refresh = None

@@ -18,7 +18,7 @@ Five execution modes:
   - Optional: `display_name`, `emoji`, `typing_message`, `typing_parse_mode`, `effort`, `resume_policy`
   - `access_scope` — filesystem boundary: `"workspace"` (agent dir only), `"project"` (repo root), `"drive"` (full `C:\`)
   - `process_timeout` — hard kill timeout in seconds (default 120)
-  - `background_mode` — detach to background with escalating placeholders (`true`/`false`)
+  - `background_mode` — detach to background with escalating placeholders and an `agent.md`-authored transition status (`true`/`false`)
   - `background_detach_after` — seconds before detaching
   - `escalation_thresholds` — array of seconds for placeholder messages (e.g. `[30, 60, 90, 150]`)
 - **HER tools and permissions:** `her` exposes all upstream Claw-native tools by
