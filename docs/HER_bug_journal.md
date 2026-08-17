@@ -68,7 +68,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260814-030` | Verified | P1 | fixed-mode planner saw only the incremental current prompt, not the persistent session view used by the primary agent | `fixed_session_planner_sees_resumed_options_at_every_planning_effort`; `medium_plus_plans_replans_and_reports_non_blocking_tool_divergence` |
 | `HER-20260814-031` | Verified | P1 | long fixed sessions could make the planner answer as the conversational agent instead of returning TaskFrame JSON | `planner_request_preserves_session_prefix_and_appends_nonpersistent_control`; fixed-session direct-response effort matrix |
 | `HER-20260815-032` | Fixed — live verification pending | P0 | isolated scheduler choices and CONTINUE checkpoints were absent from the primary conversation context | `test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_task`; `test_her_isolated_continuation_resumes_exact_checkpoint_without_replacing_primary` |
-| `HER-20260816-033` | Reopened | P1 | TaskFrame again saw only `A` while the primary executor saw and completed the previous option | `task_checkpoint_receives_immediate_previous_dialogue_context`; `tests/test_runtime_turn_context.py` |
+| `HER-20260816-033` | Fixed in source — reboot/live verification pending | P1 | TaskFrame again saw only `A` while the primary executor saw and completed the previous option | `task_checkpoint_receives_immediate_previous_dialogue_context`; `tests/test_runtime_turn_context.py` |
 | `HER-20260816-034` | Verified | P1 | offline `--status` constructed a second rebuild manager and falsely failed an active build as a kernel restart | `test_offline_status_is_strictly_read_only_during_active_build`; `test_manager_ownership_lock_excludes_a_second_process` |
 | `HER-20260817-035` | Deployed to Arale — live behavior verification pending | P1 | source-integrated `.22` lost native direct-response termination, so completed TaskFrame answers entered primary execution and MAX/MAX+ review loops | `direct_response_finishes_after_one_planning_call_at_every_native_effort`; `invalid_direct_response_falls_back_to_primary_execution`; `test_claw_direct_response_acknowledgement_is_final_only` |
 | `HER-20260817-036` | Deployed to Arale — live behavior verification pending | P2 | pending model-authored Persona commentary shared technical cadence and vanished silently at turn finalization | `test_claw_cadence_technical_activity_does_not_delay_persona_commentary`; `test_claw_cadence_finish_supersedes_only_latest_pending_commentary`; `test_her_effort_commentary_matrix_reaches_transport_receipt` |
@@ -416,7 +416,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 
 ### HER-20260816-033 — TaskFrame and executor again resolved different turns
 
-- **Status:** Reopened
+- **Status:** Fixed in source — reboot/live verification pending
 - **Severity:** P1
 - **Recurrence of:** `HER-20260814-030`
 - **Discovered:** 2026-08-16 AEST during a deliberate HER model-switch test
@@ -482,6 +482,27 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   per chat, recover it before the first post-restart enqueue, use existing Bridge
   turns once for pre-fix workspace compatibility, and clear both states on
   explicit `/new` or `/fresh`. Do not expose TaskFrame to an unbounded transcript.
+- **2026-08-18 fix:** HASHI commit `64cd3c1f` writes the bounded latest delivery
+  only after transport confirmation, atomically restores it at enqueue, and
+  labels the recovery source in `hashi-turn-context-v1`. Existing workspaces
+  without the new state recover one latest complete Bridge exchange and migrate
+  it forward. Explicit fresh-session commands clear both process and durable
+  referent state.
+- **2026-08-18 regression tests:**
+  `test_cold_flex_runtime_recovers_last_confirmed_delivery_from_workspace_state`,
+  `test_first_upgrade_cold_start_recovers_only_latest_bridge_memory_exchange`,
+  and `test_explicit_context_reset_clears_process_and_durable_delivery_state`.
+  Adjacent turn-context, cross-session, delivery, pipeline, session and lifecycle
+  suites passed `204/204`. The complete authoritative suite passed `2392`,
+  skipped `3`, and failed `0` with pytest-asyncio auto mode; Ruff, Python compile
+  and diff checks passed. A raw repository-wide pytest collection still sees
+  duplicate tests in unrelated workspace clones and is not the authoritative
+  suite.
+- **Required recurrence live retest:** activate the Python runtime change, then
+  make the first Flex request after a full Agent restart refer naturally to the
+  last pre-restart topic. The initial TaskFrame acknowledgement and active goal
+  must resolve the same topic as final execution without receiving an unbounded
+  transcript.
 - **Recurrence count:** 2
 
 ### HER-20260815-032 — isolated scheduler replies were absent from primary context

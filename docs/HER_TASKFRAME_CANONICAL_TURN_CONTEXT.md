@@ -1,7 +1,7 @@
 # HER TaskFrame Canonical Turn Context
 
-Status: implemented in HASHI1 source; automated verification passed; development
-rebuild and live provider canary pending
+Status: implemented in HASHI1 source; automated verification passed; Python
+runtime reload and recurrence live canary pending
 
 Owner: HASHI Python Runtime + native HER Rust Runtime
 
@@ -72,6 +72,13 @@ contract. HASHI, rather than HER, knows:
 - whether an earlier direct turn is still pending and therefore has no visible
   final answer yet.
 
+The latest transport-confirmed user/assistant pair is also stored per chat in a
+small private workspace state file. This is not a second conversation history:
+it contains one bounded exchange only, exists solely to rebuild the enqueue
+snapshot after a process restart, and is cleared by explicit `/new` and `/fresh`
+flows. A pre-fix workspace without this state may recover the latest complete
+pair once from the existing Bridge turn store and then migrate forward.
+
 The bounded envelope is injected as a read-only bridge section:
 
 ```json
@@ -108,12 +115,15 @@ to the queued request, so a later scheduler delivery cannot rewrite it.
 
 | State | Meaning | HER behavior |
 | --- | --- | --- |
-| `captured` | a final turn was visible when the request entered the queue | use that exact pair |
+| `captured` | a final turn was visible when the request entered the queue, including a bounded durable recovery after restart | use that exact pair |
 | `captured_no_prior_final` | an earlier direct request was still pending | do not bind to its later final |
-| `unavailable` | HASHI has just restarted or has no process-local delivery record | recover the immediate completed pair from the persistent HER session |
+| `unavailable` | HASHI has no process, durable, compatibility, or frozen cross-session delivery record | recover the immediate completed pair from the persistent HER session when one exists |
 
-The cold-start fallback preserves continuity across `/reboot`. It is not used
-when HASHI positively captured the absence of a visible prior final.
+The durable enqueue recovery preserves Flex continuity across a full runtime
+restart without requiring a persistent HER session. Native session fallback is
+still available when the HASHI envelope genuinely has no previous pair. Neither
+fallback is used when HASHI positively captured the absence of a visible prior
+final.
 
 ## 4. HER-owned planning context
 
@@ -187,7 +197,11 @@ Required deterministic tests cover:
 7. a cold HASHI runtime falls back to the persistent HER immediate pair;
 8. an unresolved short-choice TaskFrame is rejected without stopping the primary
    Agent, which resolves the canonical previous dialogue or asks the user;
-9. a HASHI snapshot outranks misleading newer session history.
+9. a HASHI snapshot outranks misleading newer session history;
+10. the first Flex request after restart recovers the last transport-confirmed
+    pair from bounded workspace state;
+11. a pre-fix workspace recovers only its latest complete Bridge exchange;
+12. explicit `/new` and `/fresh` clear process and durable referent state.
 
 Source verification on 2026-08-16 completed with:
 
@@ -214,5 +228,7 @@ Python changes require `/reboot`. Rust changes require `/rebuild`, which must:
 6. report build, verification, adoption and health results separately.
 
 A successful `/rebuild` is development verification, not release
-certification. The next public package still requires the complete clean-source,
-cross-platform certification and live-canary matrix.
+certification. The native envelope consumer remains unchanged by the durable
+Flex recovery; its Python runtime change requires Agent reload before the new
+enqueue behavior is active. The next public package still requires the complete
+clean-source, cross-platform certification and live-canary matrix.
