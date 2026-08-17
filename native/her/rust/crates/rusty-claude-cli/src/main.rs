@@ -7198,6 +7198,7 @@ struct LiveCli {
 const DEFAULT_CLI_MAX_ITERATIONS: usize = 96;
 const MIN_CLI_MAX_ITERATIONS: usize = 8;
 const MAX_CLI_MAX_ITERATIONS: usize = 512;
+const HER_HABIT_ADVISORY_CONTEXT_ENV: &str = "HASHI_HER_HABIT_ADVISORY_CONTEXT";
 
 fn cli_max_iterations() -> usize {
     std::env::var("CLAW_MAX_TOOL_ITERATIONS")
@@ -7217,6 +7218,13 @@ fn cli_task_planning_enabled() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
+}
+
+fn cli_habit_advisory_context() -> Option<String> {
+    std::env::var(HER_HABIT_ADVISORY_CONTEXT_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn cli_task_assurance() -> (bool, usize) {
@@ -12817,6 +12825,7 @@ fn build_runtime_with_plugin_state(
     )
     .with_max_iterations(cli_max_iterations())
     .with_task_planning_enabled(cli_task_planning_enabled())
+    .with_habit_advisory_context(cli_habit_advisory_context())
     .with_task_assurance(task_assurance_enabled, finalization_reserve)
     .with_max_independent_review(cli_max_independent_review_enabled())
     .with_max_plus(cli_max_plus_enabled())

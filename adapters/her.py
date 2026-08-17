@@ -73,6 +73,11 @@ HER_SESSION_SCOPE_PERSISTENT = "persistent"
 HER_SESSION_SCOPE_ISOLATED = "isolated_per_run"
 HER_SESSION_SCOPE_ISOLATED_RESUME = "isolated_resume"
 HER_DIAGNOSTIC_MAX_CHARS = 8192
+HER_HABIT_ADVISORY_CONTEXT_ENV = getattr(
+    _her_habits,
+    "HABIT_ADVISORY_CONTEXT_ENV",
+    "HASHI_HER_HABIT_ADVISORY_CONTEXT",
+)
 SECRET_ENV_KEYS = {
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -3582,6 +3587,10 @@ INCOMPLETE TASK FACTS (quoted, read-only)
     def _task_env(self) -> dict[str, str]:
         inner_effort = self._single_agent_effort()
         env = self._resolve_task_env()
+        # Habit advice is request-scoped and may only be installed by the
+        # foreground selection path below. Never inherit an ambient or
+        # provider-configured value into unrelated HER requests.
+        env.pop(HER_HABIT_ADVISORY_CONTEXT_ENV, None)
         env["CLAW_MAX_TOOL_ITERATIONS"] = str(self._max_tool_iterations())
         env["CLAW_TASK_PLANNING"] = "0" if inner_effort == "low" else "1"
         env["CLAW_EXECUTION_EFFORT"] = inner_effort
@@ -4422,7 +4431,7 @@ RUNTIME FACTS (quoted, read-only)
         # execution its own durable Meditation identity so a reused req-0001
         # cannot collide with a journal left by an earlier runtime.
         meditation_job_id = uuid.uuid4().hex if habit_config.enabled else None
-        task_prompt = prompt
+        habit_advisory_context = ""
         selected_habit_ids: list[str] = []
         if habit_config.enabled:
             selected_habits = self._her_habit_store().retrieve(
@@ -4430,8 +4439,7 @@ RUNTIME FACTS (quoted, read-only)
                 limit=habit_config.retrieval_limit,
             )
             selected_habit_ids = [habit.habit_id for habit in selected_habits]
-            task_prompt = _her_habits.attach_habits_to_prompt(
-                prompt,
+            habit_advisory_context = _her_habits.render_habit_advisory_context(
                 selected_habits,
             )
             self.logger.info(
@@ -4441,6 +4449,11 @@ RUNTIME FACTS (quoted, read-only)
                 ",".join(selected_habit_ids) or "none",
                 self.effort,
             )
+        foreground_env_overrides = (
+            {HER_HABIT_ADVISORY_CONTEXT_ENV: habit_advisory_context}
+            if habit_advisory_context
+            else None
+        )
 
         cadence_controller: _HERStreamCadenceController | None = None
         cadence_task: asyncio.Task | None = None
@@ -4462,30 +4475,33 @@ RUNTIME FACTS (quoted, read-only)
         async def execute_request() -> ClawTaskResult:
             if isolated_resume:
                 return await self._run_task_async(
-                    task_prompt,
+                    prompt,
                     resume=resume_session_id,
                     request_id=request_id,
                     on_stream_event=request_stream_callback,
                     track_session_identity=False,
+                    task_env_overrides=foreground_env_overrides,
                 )
             if not persistent_session:
                 return await self._run_task_async(
-                    task_prompt,
+                    prompt,
                     resume=None,
                     request_id=request_id,
                     on_stream_event=request_stream_callback,
                     track_session_identity=False,
+                    task_env_overrides=foreground_env_overrides,
                 )
 
             async with self._persistent_session_lock:
                 previous = self._session_id
                 try:
                     result = await self._run_task_async(
-                        task_prompt,
+                        prompt,
                         resume=previous,
                         request_id=request_id,
                         on_stream_event=request_stream_callback,
                         track_session_identity=True,
+                        task_env_overrides=foreground_env_overrides,
                     )
                 except (asyncio.CancelledError, Exception) as exc:
                     self._quarantine_persistent_session(request_id, exc)

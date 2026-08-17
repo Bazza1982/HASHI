@@ -25,6 +25,7 @@ HABIT_FORMAT = "her-habit-v1"
 MEDITATION_JOB_FORMAT = "her-habit-meditation-job-v1"
 HABIT_AUDIT_FORMAT = "her-habit-audit-v1"
 HABIT_MEDITATION_ENV = "HASHI_HER_HABIT_MEDITATION"
+HABIT_ADVISORY_CONTEXT_ENV = "HASHI_HER_HABIT_ADVISORY_CONTEXT"
 MAX_MEDITATION_ATTEMPTS = 3
 MAX_HABIT_NOTIFICATION_ATTEMPTS = 3
 HABIT_TITLE_MAX_CHARS = 48
@@ -1539,9 +1540,9 @@ class HERMeditationJournal:
         self._write(payload)
 
 
-def attach_habits_to_prompt(prompt: str, habits: list[HERHabit]) -> str:
+def render_habit_advisory_context(habits: list[HERHabit]) -> str:
     if not habits:
-        return prompt
+        return ""
     lines = [
         "--- HER INTERNAL HABIT PLANNING CONTEXT ---",
         "The following are this HER agent's own potentially relevant habits, selected using title and metadata.",
@@ -1559,7 +1560,20 @@ def attach_habits_to_prompt(prompt: str, habits: list[HERHabit]) -> str:
             ]
         )
     lines.append("--- END HER INTERNAL HABIT PLANNING CONTEXT ---")
-    return f"{prompt.rstrip()}\n\n" + "\n".join(lines)
+    return "\n".join(lines)
+
+
+def attach_habits_to_prompt(prompt: str, habits: list[HERHabit]) -> str:
+    """Return the legacy inline Habit envelope for compatibility callers.
+
+    Foreground HER execution transports the rendered context through the
+    request-scoped advisory environment channel instead. Keeping this helper
+    avoids breaking older integrations while preventing new TaskFrames from
+    parsing Habit text as part of the authoritative user request.
+    """
+
+    context = render_habit_advisory_context(habits)
+    return f"{prompt.rstrip()}\n\n{context}" if context else prompt
 
 
 def extract_current_request(prompt: str, *, limit: int = 12_000) -> str:
