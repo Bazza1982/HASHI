@@ -493,7 +493,7 @@ def _build_claw_technical_lease(prompt: str) -> str:
 
 
 class _HERStreamCadenceController:
-    """Apply effort-level generation cadence before the presentation router."""
+    """Cadence Persona commentary without coupling it to technical telemetry."""
 
     def __init__(
         self,
@@ -516,9 +516,11 @@ class _HERStreamCadenceController:
         self._hard_interval_s = max(self._target_interval_s, float(hard_interval_s))
         self._activity_grace_s = max(0.0, float(activity_grace_s))
         now = time.monotonic()
-        self._last_visible_at = now
-        self._last_activity_at = now
-        self._has_progress_update = False
+        self._last_commentary_at = now
+        self._has_commentary_update = False
+        self._last_lease_at = now
+        self._last_technical_activity_at = now
+        self._has_lease_update = False
         self._lease_revision = 0
         self._pending_commentary: StreamEvent | None = None
         self._last_material_fingerprint = ""
@@ -528,47 +530,45 @@ class _HERStreamCadenceController:
 
     async def forward(self, event: StreamEvent) -> None:
         now = time.monotonic()
-        self._last_activity_at = now
-        self._changed.set()
         if event.kind == KIND_ACKNOWLEDGEMENT:
             async with self._emit_lock:
-                self._last_visible_at = time.monotonic()
+                self._last_commentary_at = time.monotonic()
+                self._changed.set()
                 await self._callback(event)
             return
         if event.kind != KIND_COMMENTARY:
+            if event.delivery_class == DELIVERY_TECHNICAL:
+                self._last_technical_activity_at = now
+                self._changed.set()
             await self._callback(event)
             return
         if not (event.summary or "").strip():
             return
         if not self.progress_enabled:
-            await self._callback(
-                replace(
-                    event,
-                    delivery_class=DELIVERY_INTERNAL,
-                    required=False,
-                    detail=(
-                        f"{event.detail};" if event.detail else ""
-                    )
-                    + "suppressed_reason=effort_progress_disabled",
-                )
-            )
+            await self._callback(self._suppressed(event, "effort_progress_disabled"))
             return
         fingerprint = self._material_fingerprint(event)
         if fingerprint and fingerprint == self._last_material_fingerprint:
-            await self._callback(
-                replace(
-                    event,
-                    delivery_class=DELIVERY_INTERNAL,
-                    required=False,
-                    detail=(
-                        f"{event.detail};" if event.detail else ""
-                    )
-                    + "suppressed_reason=unchanged_material_progress",
-                )
-            )
+            await self._callback(self._suppressed(event, "unchanged_material_progress"))
             return
+        if self._pending_commentary is not None:
+            displaced = self._pending_commentary
+            self._pending_commentary = None
+            await self._callback(
+                self._suppressed(displaced, "coalesced_by_newer_commentary")
+            )
         self._pending_commentary = event
         self._changed.set()
+
+    @staticmethod
+    def _suppressed(event: StreamEvent, reason: str) -> StreamEvent:
+        detail = f"{event.detail};" if event.detail else ""
+        return replace(
+            event,
+            delivery_class=DELIVERY_INTERNAL,
+            required=False,
+            detail=f"{detail}suppressed_reason={reason}",
+        )
 
     @staticmethod
     def _material_fingerprint(event: StreamEvent) -> str:
@@ -586,53 +586,27 @@ class _HERStreamCadenceController:
             json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
 
-    async def _emit(self, event: StreamEvent) -> None:
+    async def _emit_commentary(self, event: StreamEvent) -> None:
         async with self._emit_lock:
             if self._closed:
                 return
             summary = (event.summary or "").strip()
             if not summary:
                 return
-            self._last_visible_at = time.monotonic()
-            self._has_progress_update = True
-            if event.kind == KIND_COMMENTARY:
-                self._last_material_fingerprint = self._material_fingerprint(event)
+            self._last_commentary_at = time.monotonic()
+            self._has_commentary_update = True
+            self._last_material_fingerprint = self._material_fingerprint(event)
             self._changed.set()
             await self._callback(event)
 
-    async def run(self) -> None:
-        if not self.progress_enabled:
-            return
-        while not self._closed:
-            self._changed.clear()
-            now = time.monotonic()
-            if not self._has_progress_update:
-                target_deadline = self._last_visible_at + self._first_update_s
-                hard_deadline = target_deadline
-            else:
-                target_deadline = self._last_visible_at + self._target_interval_s
-                hard_deadline = self._last_visible_at + self._hard_interval_s
-
-            deadline = target_deadline
-            if now >= target_deadline and now < hard_deadline:
-                recent_activity_until = self._last_activity_at + self._activity_grace_s
-                deadline = min(max(now, recent_activity_until), hard_deadline)
-
-            if now < deadline:
-                try:
-                    await asyncio.wait_for(self._changed.wait(), timeout=deadline - now)
-                except asyncio.TimeoutError:
-                    pass
-                continue
+    async def _emit_lease(self) -> None:
+        async with self._emit_lock:
             if self._closed:
-                break
-            if self._pending_commentary is not None:
-                commentary = self._pending_commentary
-                self._pending_commentary = None
-                await self._emit(commentary)
-                continue
+                return
             self._lease_revision += 1
-            await self._emit(
+            self._last_lease_at = time.monotonic()
+            self._has_lease_update = True
+            await self._callback(
                 StreamEvent(
                     kind=KIND_PROGRESS,
                     summary=_build_claw_technical_lease(self._prompt),
@@ -646,6 +620,76 @@ class _HERStreamCadenceController:
                     revision=self._lease_revision,
                 )
             )
+
+    def _lease_deadline(self, now: float) -> float:
+        interval = (
+            self._target_interval_s if self._has_lease_update else self._first_update_s
+        )
+        target_deadline = self._last_lease_at + interval
+        hard_deadline = (
+            self._last_lease_at + self._hard_interval_s
+            if self._has_lease_update
+            else target_deadline
+        )
+        if now < target_deadline or now >= hard_deadline:
+            return target_deadline
+        recent_activity_until = (
+            self._last_technical_activity_at + self._activity_grace_s
+        )
+        return min(max(now, recent_activity_until), hard_deadline)
+
+    def _commentary_deadline(self) -> float | None:
+        if self._pending_commentary is None:
+            return None
+        interval = (
+            self._target_interval_s
+            if self._has_commentary_update
+            else self._first_update_s
+        )
+        return self._last_commentary_at + interval
+
+    async def run(self) -> None:
+        if not self.progress_enabled:
+            return
+        while not self._closed:
+            self._changed.clear()
+            now = time.monotonic()
+            commentary_deadline = self._commentary_deadline()
+            lease_deadline = self._lease_deadline(now)
+            deadline = min(
+                value
+                for value in (commentary_deadline, lease_deadline)
+                if value is not None
+            )
+
+            if now < deadline:
+                try:
+                    await asyncio.wait_for(self._changed.wait(), timeout=deadline - now)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            if self._closed:
+                break
+            now = time.monotonic()
+            commentary_deadline = self._commentary_deadline()
+            if commentary_deadline is not None and now >= commentary_deadline:
+                commentary = self._pending_commentary
+                self._pending_commentary = None
+                assert commentary is not None
+                await self._emit_commentary(commentary)
+                continue
+            if now >= self._lease_deadline(now):
+                await self._emit_lease()
+
+    async def finish(self, *, pending_reason: str = "superseded_by_final") -> None:
+        """Close without a terminal burst and audit the one coalesced remainder."""
+        async with self._emit_lock:
+            self._closed = True
+            pending = self._pending_commentary
+            self._pending_commentary = None
+            self._changed.set()
+        if pending is not None:
+            await self._callback(self._suppressed(pending, pending_reason))
 
     def close(self) -> None:
         self._closed = True
@@ -4468,13 +4512,16 @@ RUNTIME FACTS (quoted, read-only)
                 return result
 
         started = time.perf_counter()
+        cadence_terminal_reason = "superseded_by_final"
         try:
             result = await execute_request()
         except asyncio.CancelledError as exc:
+            cadence_terminal_reason = "request_cancelled"
             if habit_config.enabled:
                 self._record_failed_turn_meditation_skip(request_id=request_id, exc=exc)
             raise
         except ClawTimeoutError as exc:
+            cadence_terminal_reason = "turn_failed"
             if habit_config.enabled:
                 self._record_failed_turn_meditation_skip(request_id=request_id, exc=exc)
             return BackendResponse(
@@ -4484,6 +4531,7 @@ RUNTIME FACTS (quoted, read-only)
                 is_success=False,
             )
         except ClawCommandError as exc:
+            cadence_terminal_reason = "turn_failed"
             if habit_config.enabled:
                 self._record_failed_turn_meditation_skip(request_id=request_id, exc=exc)
             return BackendResponse(
@@ -4494,6 +4542,7 @@ RUNTIME FACTS (quoted, read-only)
                 stream_metadata={"her_error": self._command_error_metadata(exc)},
             )
         except (ClawError, ValueError) as exc:
+            cadence_terminal_reason = "turn_failed"
             if habit_config.enabled:
                 self._record_failed_turn_meditation_skip(request_id=request_id, exc=exc)
             return BackendResponse(
@@ -4504,7 +4553,16 @@ RUNTIME FACTS (quoted, read-only)
             )
         finally:
             if cadence_controller is not None:
-                cadence_controller.close()
+                try:
+                    await cadence_controller.finish(
+                        pending_reason=cadence_terminal_reason
+                    )
+                except Exception as exc:  # noqa: BLE001 - presentation is fail-open
+                    cadence_controller.close()
+                    self.logger.warning(
+                        "HER stream cadence final audit failed safely: %s",
+                        type(exc).__name__,
+                    )
             if cadence_task is not None:
                 cadence_task.cancel()
                 try:

@@ -2,23 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import tempfile
+import types
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-import sys
-import types
 
 import pytest
 from telegram.error import RetryAfter
 
-from orchestrator import (
-    runtime_cross_session,
-    runtime_pipeline,
-    runtime_retry,
-    telegram_stream_policy,
+from adapters.her import (
+    HER_COMMENTARY_EFFORTS,
+    _claw_jsonl_to_stream_events,
+    _HERStreamCadenceController,
 )
-from orchestrator import telegram_delivery_failover as failover
 from adapters.stream_events import (
     DELIVERY_CONTROL,
     DELIVERY_FINAL,
@@ -31,6 +29,13 @@ from adapters.stream_events import (
     KIND_TEXT_DELTA,
     StreamEvent,
 )
+from orchestrator import (
+    runtime_cross_session,
+    runtime_pipeline,
+    runtime_retry,
+    telegram_stream_policy,
+)
+from orchestrator import telegram_delivery_failover as failover
 
 
 class _Logger:
@@ -1011,6 +1016,152 @@ async def test_high_her_commentary_delivers_independently_of_think_and_verbose()
     assert len(sent) == 1
     assert sent[0][0] == 123
     assert sent[0][2]["_purpose"] == "task_commentary"
+
+
+@pytest.mark.asyncio
+async def test_pending_her_commentary_superseded_by_final_is_audited_not_sent():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.current_backend.effort = "max+"
+    runtime._commentary = True
+    sent = []
+
+    async def _send_text(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+        return SimpleNamespace(message_id=len(sent))
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+    await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_COMMENTARY,
+            summary="Sunny reached a checkpoint that the final answer now replaces. ☀️",
+            detail="suppressed_reason=superseded_by_final",
+            event_id="req-1:commentary:final-pending",
+            delivery_class="internal",
+            origin="her_planner",
+            phase="finalization",
+            revision=3,
+        )
+    )
+
+    assert sent == []
+    records = [
+        json.loads(line)
+        for line in (
+            runtime.workspace_dir / "backend_state" / "her_message_audit.jsonl"
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [record["status"] for record in records] == [
+        "generated",
+        "superseded",
+    ]
+    assert records[-1]["reason"] == "superseded_by_final"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("effort", "expected_purposes"),
+    [
+        ("low", []),
+        ("medium", ["task_acknowledgement"]),
+        ("high", ["task_acknowledgement", "task_commentary"]),
+        ("xhigh", ["task_acknowledgement", "task_commentary"]),
+        ("max", ["task_acknowledgement", "task_commentary"]),
+        ("max+", ["task_acknowledgement", "task_commentary"]),
+        ("ultra", ["task_commentary"]),
+    ],
+)
+async def test_her_effort_commentary_matrix_reaches_transport_receipt(
+    effort, expected_purposes
+):
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.current_backend.effort = effort
+    runtime._commentary = True
+    runtime._think = False
+    runtime._verbose = False
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+    sent = []
+
+    async def _send_text(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+        return SimpleNamespace(message_id=len(sent))
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    if effort == "ultra":
+        await feedback.on_stream_event(
+            StreamEvent(
+                kind=KIND_COMMENTARY,
+                summary="Sunny has accepted the Ultra plan. ☀️",
+                event_id="ultra:persona:plan_accepted",
+                delivery_class=DELIVERY_USER_COMMENTARY,
+                origin="her_ultra",
+                phase="plan_accepted",
+                provenance="persona_renderer",
+            )
+        )
+    elif effort != "low":
+        controller = _HERStreamCadenceController(
+            feedback.on_stream_event,
+            request_id="req-1",
+            prompt="Inspect and report.",
+            progress_enabled=effort in HER_COMMENTARY_EFFORTS,
+            first_update_s=0.001,
+            target_interval_s=0.002,
+            hard_interval_s=0.003,
+            activity_grace_s=0,
+        )
+        cadence_task = (
+            asyncio.create_task(controller.run())
+            if controller.progress_enabled
+            else None
+        )
+        raw_events = [
+            {
+                "kind": "task_acknowledgement",
+                "event_id": "task-acknowledgement:1",
+                "text": "Sunny will inspect the requested evidence. ☀️",
+            },
+            {
+                "kind": "task_commentary",
+                "event_id": "task-commentary:2",
+                "phase": "replan",
+                "revision": 2,
+                "text": "Sunny completed the inspection and is validating it. ☀️",
+            },
+        ]
+        for raw_event in raw_events:
+            for event in _claw_jsonl_to_stream_events(
+                raw_event,
+                request_id="req-1",
+            ):
+                await controller.forward(event)
+        if cadence_task is not None:
+            deadline = asyncio.get_running_loop().time() + 0.2
+            while len(sent) < len(expected_purposes):
+                assert asyncio.get_running_loop().time() < deadline
+                await asyncio.sleep(0.001)
+            await controller.finish()
+            await cadence_task
+        else:
+            await controller.finish()
+
+    assert [entry[2]["_purpose"] for entry in sent] == expected_purposes
 
 
 @pytest.mark.asyncio
