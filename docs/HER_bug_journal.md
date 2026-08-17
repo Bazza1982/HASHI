@@ -72,15 +72,15 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260816-034` | Verified | P1 | offline `--status` constructed a second rebuild manager and falsely failed an active build as a kernel restart | `test_offline_status_is_strictly_read_only_during_active_build`; `test_manager_ownership_lock_excludes_a_second_process` |
 | `HER-20260817-035` | Deployed to Arale — live behavior verification pending | P1 | source-integrated `.22` lost native direct-response termination, so completed TaskFrame answers entered primary execution and MAX/MAX+ review loops | `direct_response_finishes_after_one_planning_call_at_every_native_effort`; `invalid_direct_response_falls_back_to_primary_execution`; `test_claw_direct_response_acknowledgement_is_final_only` |
 | `HER-20260817-036` | Deployed to Arale — live behavior verification pending | P2 | pending model-authored Persona commentary shared technical cadence and vanished silently at turn finalization | `test_claw_cadence_technical_activity_does_not_delay_persona_commentary`; `test_claw_cadence_finish_supersedes_only_latest_pending_commentary`; `test_her_effort_commentary_matrix_reaches_transport_receipt` |
-| `HER-20260817-037` | Deployed to Arale — live behavior verification pending | P2 | primary tool-turn Persona text remained internal `assistant_delta`, so the repaired commentary cadence had no native events to deliver | `complete_tool_bound_text_emits_one_commentary_before_tool_execution`; `test_claw_tool_bound_assistant_commentary_is_user_visible_primary_model_text`; effort transport matrix |
+| `HER-20260817-037` | Verified; delivery follow-up tracked by `HER-20260817-039` | P2 | primary tool-turn Persona text remained internal `assistant_delta`, so the repaired commentary cadence had no native events to deliver | `complete_tool_bound_text_emits_one_commentary_before_tool_execution`; `test_claw_tool_bound_assistant_commentary_is_user_visible_primary_model_text`; effort transport matrix |
 | `HER-20260817-038` | Deployed to Arale — live behavior verification pending | P1 | StreamLake's 504 inside an established SSE stream was hard-coded non-retryable and aborted a resumable Arale turn | `stream_message_marks_embedded_gateway_timeout_as_retryable`; `provider_stream_retries_embedded_504_once_and_returns_only_complete_attempt` |
-| `HER-20260817-039` | Fixed in source — deployment/live verification pending | P1 | a legacy effort gate silently demoted every native Persona commentary at `low` and `medium` to internal despite `/commentary on` | `test_medium_adapter_delivers_native_tool_turn_commentary`; corrected low-through-ultra transport matrix |
+| `HER-20260817-039` | Deployed to Arale — live behavior verification pending | P1 | a legacy effort gate silently demoted every native Persona commentary at `low` and `medium` to internal despite `/commentary on` | `test_medium_adapter_delivers_native_tool_turn_commentary`; corrected low-through-ultra transport matrix |
 
 ## Historical entries
 
 ### HER-20260817-039 — low/medium effort silently suppressed Persona commentary
 
-- **Status:** Fixed in source — deployment/live verification pending
+- **Status:** Deployed to Arale — live behavior verification pending
 - **Severity:** P1
 - **Discovered:** 2026-08-17 AEST in Arale request `req-0001`, a 835-second
   `medium` turn with 17 successful tool calls.
@@ -106,6 +106,16 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   `ultra` events reaching Telegram transport receipts.
 - **Secrets/redaction checked:** yes; the forensic audit contained task text,
   but no task payload or private path has been copied into tests.
+- **Managed adoption:** Python-only commit `93ed8143`; a targeted `/reboot min`
+  was requested only after Arale's foreground task and Habit Meditation had
+  both exited. Arale stopped at 18:23:00, reloaded the current adapter/runtime
+  pipeline, validated the existing 69-tool HER gateway, and returned online
+  with Telegram at 18:23:05; the complete hot-reload postcheck finished at
+  18:23:13 AEST. The unchanged Rust candidate remains commit `99dc906d`, as
+  expected for a presentation-layer-only repair.
+- **Remaining risk:** the next real `medium` multi-tool turn must prove that at
+  least one generated commentary receives a Telegram transport receipt instead
+  of an effort suppression record.
 
 ### HER-20260817-038 — embedded SSE 504 aborted a resumable turn
 
@@ -152,7 +162,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 
 ### HER-20260817-037 — native tool-turn commentary was never produced
 
-- **Status:** Deployed to Arale — live behavior verification pending
+- **Status:** Verified; delivery follow-up tracked by `HER-20260817-039`
 - **Severity:** P2
 - **Recurrence of:** distinct producer-side defect exposed after
   `HER-20260817-036`; the cadence/terminal repair itself remained loaded.
@@ -189,6 +199,9 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   Arale restart, exact binary selection, Tool Gateway validation, Telegram
   reconnection, and managed postcheck.
 - **Remaining risk:** one live multi-tool Arale retest remains.
+  That retest produced native `assistant-commentary:*` audit records, verifying
+  this producer fix; their later presentation suppression is the distinct
+  adapter defect tracked by `HER-20260817-039`.
 
 ### HER-20260817-036 — pending Persona commentary vanished at finalization
 
