@@ -767,15 +767,17 @@ def wrap_her_persona_stream(
         text = str(getattr(event, "summary", "") or "").strip()
         if not text:
             return False
+        rendered_text = _md_to_html(text)
         runtime.logger.info(
             f"HER message delivery started: request={item.request_id} "
             f"purpose={purpose} text_len={len(text)}"
         )
         try:
-            if hasattr(runtime, "_send_text") and len(text) <= 3_500:
+            if hasattr(runtime, "_send_text") and len(rendered_text) <= 3_500:
                 result = await runtime._send_text(
                     item.chat_id,
-                    text,
+                    rendered_text,
+                    parse_mode="HTML",
                     _request_id=item.request_id,
                     _purpose=purpose,
                 )

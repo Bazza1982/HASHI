@@ -946,6 +946,111 @@ async def test_her_message_audit_preserves_exact_commentary_and_transport_status
 
 
 @pytest.mark.asyncio
+async def test_her_short_commentary_renders_markdown_before_telegram_delivery():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.current_backend.effort = "high"
+    exact_text = (
+        "记录 A/B 核对结果：**两份记录都只有 Finance 侧确认，没有 HR 审批人**。\n\n"
+        "- **记录 A**：财务负责人确认数据权限，无任何 HR 人员。\n"
+        "- **记录 B**：财务负责人确认 datasets 1-5；模板虽提到\"需要 HR 确认\"，"
+        "但记录里没有 HR 人员出现。\n\n"
+        "**结论：HR 审批人没有证据，保持清空，不瞎编。** ✅"
+    )
+    sent = []
+
+    async def _send_text(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+        return SimpleNamespace(message_id=92)
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+    await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_COMMENTARY,
+            summary=exact_text,
+            event_id="req-1:persona:execution:evidence",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_primary",
+            phase="execution",
+            provenance="primary_model",
+        )
+    )
+
+    assert len(sent) == 1
+    chat_id, delivered_text, kwargs = sent[0]
+    assert chat_id == 123
+    assert kwargs["parse_mode"] == "HTML"
+    assert kwargs["_purpose"] == "task_commentary"
+    assert "<b>两份记录都只有 Finance 侧确认，没有 HR 审批人</b>" in delivered_text
+    assert "- <b>记录 A</b>：" in delivered_text
+    assert "- <b>记录 B</b>：" in delivered_text
+    assert "<b>结论：HR 审批人没有证据，保持清空，不瞎编。</b>" in delivered_text
+    assert "**" not in delivered_text
+
+    records = [
+        json.loads(line)
+        for line in (
+            runtime.workspace_dir / "backend_state" / "her_message_audit.jsonl"
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert records[0]["text"] == exact_text
+    assert records[0]["text_sha256"] == records[1]["text_sha256"]
+
+
+@pytest.mark.asyncio
+async def test_her_commentary_uses_long_sender_when_rendered_html_exceeds_limit():
+    runtime = _runtime()
+    runtime.config.active_backend = "her"
+    runtime.backend_manager.current_backend.effort = "high"
+    raw_text = "&" * 900
+    short_sender_calls = []
+    long_sender_calls = []
+
+    async def _send_text(*args, **kwargs):
+        short_sender_calls.append((args, kwargs))
+        return SimpleNamespace(message_id=93)
+
+    async def _send_long_message(*args, **kwargs):
+        long_sender_calls.append((args, kwargs))
+        return 0.25, 1
+
+    runtime._send_text = _send_text
+    runtime.send_long_message = _send_long_message
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+    await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_COMMENTARY,
+            summary=raw_text,
+            event_id="req-1:persona:execution:expanded-html",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_primary",
+            phase="execution",
+        )
+    )
+
+    assert short_sender_calls == []
+    assert len(long_sender_calls) == 1
+    assert long_sender_calls[0][0] == (123, raw_text)
+    assert long_sender_calls[0][1] == {
+        "request_id": "req-1",
+        "purpose": "task_commentary",
+    }
+
+
+@pytest.mark.asyncio
 async def test_her_message_audit_does_not_report_missing_transport_receipt_as_sent():
     runtime = _runtime()
     runtime.config.active_backend = "her"
