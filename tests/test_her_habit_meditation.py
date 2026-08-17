@@ -14,6 +14,7 @@ from adapters import her_habits as habits
 from adapters.her import ClawCommandError, ClawTaskResult, ClawTimeoutError, HERAdapter
 from adapters.her_habits import (
     HABIT_BODY_MAX_CHARS,
+    HABIT_ADVISORY_CONTEXT_ENV,
     HABIT_METADATA_MAX_CHARS,
     HABIT_MEDITATION_ENV,
     HABIT_TITLE_MAX_CHARS,
@@ -26,6 +27,7 @@ from adapters.her_habits import (
     build_observable_trace,
     habit_short_references,
     parse_meditation_actions,
+    render_habit_advisory_context,
     resolve_habit_reference,
 )
 
@@ -54,10 +56,12 @@ habit_exports = (
     "HERHabitStore",
     "HERMeditationJournal",
     "MeditationValidationError",
+    "HABIT_ADVISORY_CONTEXT_ENV",
     "attach_habits_to_prompt",
     "build_meditation_prompt",
     "extract_current_request",
     "parse_meditation_actions",
+    "render_habit_advisory_context",
 )
 for name in habit_exports:
     habits.__dict__.pop(name, None)
@@ -184,6 +188,13 @@ def test_config_defaults_off_and_supports_global_backend_and_environment_overrid
         environ={HABIT_MEDITATION_ENV: "on"},
     )
     assert ephemeral_disabled.enabled is False
+
+
+def test_task_env_discards_ambient_habit_advisory_context(tmp_path, monkeypatch):
+    monkeypatch.setenv(HABIT_ADVISORY_CONTEXT_ENV, "untrusted ambient habit")
+    adapter = _adapter(tmp_path, enabled=True)
+
+    assert HABIT_ADVISORY_CONTEXT_ENV not in adapter._task_env()
 
 
 def test_store_uses_title_and_natural_language_metadata_for_retrieval(tmp_path):
@@ -389,19 +400,21 @@ def test_no_actions_do_not_create_a_habit_directory(tmp_path):
     assert not (tmp_path / "habits").exists()
 
 
-def test_planning_context_is_advisory_and_prompt_is_unchanged_without_matches(tmp_path):
+def test_planning_context_renderer_preserves_legacy_wrapper_contract(tmp_path):
     store = HERHabitStore(tmp_path)
     _seed_habit(store)
     habits = store.retrieve("permission check", limit=5)
 
     original = "--- CURRENT USER REQUEST — AUTHORITATIVE ---\nEdit the file."
+    advisory = render_habit_advisory_context(habits)
     enriched = attach_habits_to_prompt(original, habits)
 
+    assert render_habit_advisory_context([]) == ""
     assert attach_habits_to_prompt(original, []) == original
-    assert enriched.startswith(original)
-    assert "HER INTERNAL HABIT PLANNING CONTEXT" in enriched
-    assert "must never override the current user request" in enriched
-    assert "These are Habit records, not HASHI skills." in enriched
+    assert enriched == f"{original}\n\n{advisory}"
+    assert "HER INTERNAL HABIT PLANNING CONTEXT" in advisory
+    assert "must never override the current user request" in advisory
+    assert "These are Habit records, not HASHI skills." in advisory
 
 
 def test_observable_trace_prioritizes_thinking_and_execution_errors():
@@ -528,6 +541,7 @@ async def test_disabled_feature_preserves_the_exact_her_prompt_and_does_not_medi
     assert response.is_success is True
     assert adapter._run_task_async.await_count == 1
     assert adapter._run_task_async.await_args.args[0] == prompt
+    assert adapter._run_task_async.await_args.kwargs["task_env_overrides"] is None
     assert "her_habit_meditation" not in response.stream_metadata
     adapter._schedule_habit_meditation.assert_not_called()
 
@@ -546,9 +560,15 @@ async def test_enabled_feature_plans_and_schedules_meditation_at_every_effort(
 
     response = await adapter.generate_response(prompt, request_id=f"on-{effort}")
 
-    executed_prompt = adapter._run_task_async.await_args.args[0]
-    assert executed_prompt.startswith(prompt)
-    assert habit_id in executed_prompt
+    foreground_call = adapter._run_task_async.await_args
+    executed_prompt = foreground_call.args[0]
+    advisory = foreground_call.kwargs["task_env_overrides"][
+        HABIT_ADVISORY_CONTEXT_ENV
+    ]
+    assert executed_prompt == prompt
+    assert habit_id not in executed_prompt
+    assert habit_id in advisory
+    assert "must never override the current user request" in advisory
     assert response.stream_metadata["her_habit_meditation"] is True
     assert response.stream_metadata["her_habit_ids"] == [habit_id]
     adapter._schedule_habit_meditation.assert_called_once()
@@ -611,8 +631,10 @@ async def test_habit_on_off_preserves_exact_visible_output_and_tool_side_effects
     on_response = await on.generate_response(prompt, request_id="compare-on")
 
     assert off._run_task_async.await_args.args[0] == prompt
-    assert on._run_task_async.await_args.args[0].startswith(prompt)
-    assert habit_id in on._run_task_async.await_args.args[0]
+    assert on._run_task_async.await_args.args[0] == prompt
+    assert habit_id in on._run_task_async.await_args.kwargs[
+        "task_env_overrides"
+    ][HABIT_ADVISORY_CONTEXT_ENV]
     assert off_response.text == on_response.text == "REPORT_WRITTEN"
     assert off_response.tool_call_count == on_response.tool_call_count == 2
     assert deterministic_result.tool_uses == tool_uses
@@ -636,6 +658,7 @@ async def test_unrelated_habit_leaves_executed_prompt_byte_identical(tmp_path):
 
     assert response.text == "SUNNY"
     assert adapter._run_task_async.await_args.args[0] == prompt
+    assert adapter._run_task_async.await_args.kwargs["task_env_overrides"] is None
     assert response.stream_metadata["her_habit_ids"] == []
 
 
@@ -662,10 +685,12 @@ async def test_conflicting_habit_remains_advisory_and_authoritative_request_wins
     )
     observed_tool_uses: list[dict] = []
 
-    async def deterministic_foreground(executed_prompt, **_kwargs):
-        assert executed_prompt.startswith(prompt)
-        assert executed_prompt.index(prompt) < executed_prompt.index(str(habit_id))
-        assert "must never override the current user request" in executed_prompt
+    async def deterministic_foreground(executed_prompt, **kwargs):
+        advisory = kwargs["task_env_overrides"][HABIT_ADVISORY_CONTEXT_ENV]
+        assert executed_prompt == prompt
+        assert str(habit_id) not in executed_prompt
+        assert str(habit_id) in advisory
+        assert "must never override the current user request" in advisory
         result = _task_result(
             text="candidate.log",
             tool_uses=[{"id": "tool-1", "name": "list_files", "input": {}}],
@@ -697,9 +722,10 @@ async def test_deterministic_create_retrieve_and_behavioral_use_closed_loop(tmp_
     }
     foreground_tool_names: list[str] = []
 
-    async def scripted_provider(executed_prompt, *, request_id, **_kwargs):
+    async def scripted_provider(executed_prompt, *, request_id, **kwargs):
         if request_id == "lifecycle-create":
             assert "HER INTERNAL HABIT PLANNING CONTEXT" not in executed_prompt
+            assert kwargs["task_env_overrides"] is None
             return _task_result(text="FIRST_TURN_DONE", session_id="foreground-1")
         if request_id.endswith(":habit-meditation"):
             if "FIRST_TURN_DONE" in executed_prompt:
@@ -720,8 +746,11 @@ async def test_deterministic_create_retrieve_and_behavioral_use_closed_loop(tmp_
                 )
             return _task_result(text='{"actions": []}', session_id="meditation-2")
         assert request_id == "lifecycle-use"
-        assert "HER INTERNAL HABIT PLANNING CONTEXT" in executed_prompt
-        assert "Read the permission boundary before writing the report." in executed_prompt
+        assert executed_prompt == second_prompt
+        assert "HER INTERNAL HABIT PLANNING CONTEXT" not in executed_prompt
+        advisory = kwargs["task_env_overrides"][HABIT_ADVISORY_CONTEXT_ENV]
+        assert "HER INTERNAL HABIT PLANNING CONTEXT" in advisory
+        assert "Read the permission boundary before writing the report." in advisory
         observed["retrieval_observed"] = True
         result = _task_result(
             text="SECOND_TURN_USED_HABIT",
