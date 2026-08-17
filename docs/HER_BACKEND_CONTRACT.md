@@ -303,6 +303,16 @@ that slot without a terminal message burst. When the final answer makes the
 pending update obsolete, HASHI records it as `superseded_by_final`; it must not
 be silently dropped or presented as delivered.
 
+Provider token deltas are not commentary by themselves. Once a complete primary
+assistant turn contains both visible Persona text and at least one tool request,
+native HER emits that assembled text exactly once as `assistant_commentary`
+before the corresponding `ToolStart`. A tool-free terminal assistant turn stays
+on the final lane, and an `AskUserQuestion` turn is finalized through the
+required user-input lane rather than duplicated as commentary. Harmless
+TaskFrame aliases that normalize to the same available tool capability are
+deduplicated in first-seen order; non-tool prose and unavailable capabilities
+remain invalid and planning continues under the last confirmed frame.
+
 Effort controls event generation, never a second presentation gate. A direct
 TaskFrame acknowledgement is buffered until the initial frame establishes
 whether `direct_response=true`; direct answers are classified as `final` and
@@ -316,6 +326,15 @@ leading, trailing, and whitespace-only fragments from the provider stream; HASHI
 concatenates those raw fragments without trimming or guessing token boundaries. This
 prevents both joined words (`Theusersays`) and invented spaces inside words
 (`prov id er`).
+
+An OpenAI-compatible provider may return an error object inside an already
+successful SSE connection. HER derives retryability from its status and timeout
+metadata just as it does for an HTTP error response. One incomplete retryable
+stream may be replayed under the original request deadline. The incomplete
+assistant attempt is never committed to conversation history, and tools are not
+executed until a complete attempt has returned, so the retry cannot duplicate a
+tool side effect. `provider_retry` is technical `/verbose` telemetry; a second
+failure remains a normal backend failure with its structured provider evidence.
 
 Before any OpenAI-compatible provider request, HER validates the translated
 assistant tool-call/tool-result sequence. A missing, duplicate, orphaned, or
