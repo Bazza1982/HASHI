@@ -6,7 +6,13 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator.command_ui import card_title, selected_label, setting_card, status_label
+from orchestrator.command_ui import (
+    card_title,
+    confirm_card,
+    selected_label,
+    setting_card,
+    status_label,
+)
 
 
 def _command(command: str, description: str) -> str:
@@ -72,7 +78,10 @@ def ticket_list_text(
         f"<b>Open</b> · <code>{len(open_tickets)}</code>",
         f"<b>In progress</b> · <code>{len(in_progress_tickets)}</code>",
     ]
-    for heading, tickets in (("OPEN", open_tickets), ("IN PROGRESS", in_progress_tickets)):
+    for heading, tickets in (
+        ("OPEN", open_tickets),
+        ("IN PROGRESS", in_progress_tickets),
+    ):
         if not tickets:
             continue
         lines.extend(["", f"<b>{heading}</b>"])
@@ -429,7 +438,9 @@ def loop_list_text(loops: Iterable[tuple[str, dict[str, Any]]]) -> str:
             else str(job.get("schedule") or "unknown")
         )
         job_id = html.escape(str(job.get("id") or "unknown"))
-        summary = html.escape(str(meta.get("task_summary") or job.get("note") or "")[:90])
+        summary = html.escape(
+            str(meta.get("task_summary") or job.get("note") or "")[:90]
+        )
         reason = html.escape(str(meta.get("stopped_reason") or ""))
         lines.extend(
             [
@@ -462,17 +473,26 @@ def debug_menu_text(*, enabled: bool) -> str:
     )
 
 
-def skills_menu_text(*, count: int, agent_name: str) -> str:
+def skills_menu_text(
+    *,
+    count: int,
+    agent_name: str,
+    enabled_count: int | None = None,
+    invalid_count: int = 0,
+) -> str:
+    enabled_count = count if enabled_count is None else enabled_count
     return setting_card(
         "🧰",
         "Skills",
         current=f"<code>{count}</code> available",
         facts=[
             f"<b>Agent</b> · <code>{html.escape(agent_name)}</code>",
+            f"<b>Enabled here</b> · <code>{enabled_count}/{count}</code>",
+            f"<b>Invalid</b> · <code>{invalid_count}</code>",
             "<b>Format</b> · standard <code>SKILL.md</code> instruction packages",
         ],
         consequence="Skills add focused instructions to a request; Jobs and runtime settings stay on their own control surfaces.",
-        action="Choose a Skill to view its usage and instructions.",
+        action="Choose a Skill to inspect or manage it, or use the maintenance actions below.",
     )
 
 
@@ -480,11 +500,64 @@ def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
     skill_id = str(getattr(skill, "id", "unknown") or "unknown")
     skill_name = str(getattr(skill, "name", skill_id) or skill_id)
     description = str(getattr(skill, "description", "") or "No description.")
+    enabled_method = getattr(manager, "is_skill_enabled", None)
+    enabled = (
+        bool(enabled_method(workspace_dir, skill_id))
+        if callable(enabled_method)
+        else None
+    )
+    source_type = str(getattr(skill, "source_type", "project") or "project")
+    scope = str(getattr(skill, "scope", "project") or "project")
+    source = str(getattr(skill, "source", "") or "")
+    source_labels = {
+        "project": "PROJECT · protected",
+        "installed": "INSTALLED · managed",
+        "linked": "LINKED",
+    }
+    resource_method = getattr(manager, "skill_resource_counts", None)
+    resources = (
+        resource_method(skill)
+        if callable(resource_method)
+        else {"scripts": 0, "references": 0, "assets": 0, "other": 0}
+    )
+    dependency_method = getattr(manager, "skill_dependencies", None)
+    dependencies = dependency_method(skill_id) if callable(dependency_method) else []
     facts = [
         f"<b>ID</b> · <code>{html.escape(skill_id)}</code>",
+        f"<b>Source</b> · <code>{html.escape(source_labels.get(source_type, source_type.upper()))}</code>",
+        f"<b>Scope</b> · <code>{html.escape(scope)}</code>",
         "<b>Format</b> · <code>SKILL.md</code>",
+        (
+            "<b>Resources</b> · "
+            f"scripts <code>{int(resources.get('scripts', 0))}</code> · "
+            f"references <code>{int(resources.get('references', 0))}</code> · "
+            f"assets <code>{int(resources.get('assets', 0))}</code>"
+        ),
+        f"<b>Job references</b> · <code>{len(dependencies)}</code>",
     ]
-    current = "<b>READY</b>"
+    version = str(getattr(skill, "version", "") or "")
+    if version:
+        facts.append(f"<b>Version</b> · <code>{html.escape(version[:120])}</code>")
+    author = str((getattr(skill, "metadata", {}) or {}).get("author") or "")
+    if author:
+        facts.append(f"<b>Author</b> · <code>{html.escape(author[:120])}</code>")
+    license_name = str(getattr(skill, "license", "") or "")
+    if license_name:
+        facts.append(f"<b>License</b> · <code>{html.escape(license_name[:120])}</code>")
+    compatibility = str(getattr(skill, "compatibility", "") or "")
+    if compatibility:
+        facts.append(f"<b>Compatibility</b> · {html.escape(compatibility[:240])}")
+    allowed_tools = str(getattr(skill, "allowed_tools", "") or "")
+    if allowed_tools:
+        facts.append(
+            f"<b>Declared tools</b> · <code>{html.escape(allowed_tools[:180])}</code>"
+        )
+    if source:
+        facts.append(f"<b>Path</b> · <code>{html.escape(source[:240])}</code>")
+    if enabled is None:
+        current = "<b>READY</b>"
+    else:
+        current = f"<b>{'ENABLED' if enabled else 'DISABLED'}</b>"
     usage = f"/skill {skill_id} <request>"
 
     text = setting_card(
@@ -500,6 +573,147 @@ def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
         preview = body if len(body) <= 700 else body[:700].rstrip() + "\n\n[truncated]"
         text += f"\n\n<b>REFERENCE</b>\n<pre>{html.escape(preview)}</pre>"
     return text
+
+
+def skill_validation_text(skill: Any, *, manager: Any) -> str:
+    skill_id = str(getattr(skill, "id", "unknown") or "unknown")
+    validate = getattr(manager, "validate_skill", None)
+    ok, errors = validate(skill_id) if callable(validate) else (True, [])
+    lines = [
+        card_title("🧪", "Skill validation"),
+        "",
+        f"<b>Current</b> · <b>{'VALID' if ok else 'INVALID'}</b>",
+        f"<b>Skill</b> · <code>{html.escape(skill_id)}</code>",
+        "<b>Contract</b> · standard <code>SKILL.md</code> package",
+    ]
+    if errors:
+        lines.extend(["", "<b>ERRORS</b>"])
+        for error in errors[:8]:
+            lines.append(f"• {html.escape(str(error)[:500])}")
+    else:
+        lines.extend(
+            [
+                "",
+                "Frontmatter, package name, directory name, and instruction body are valid.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def skill_invalid_packages_text(errors: Sequence[str]) -> str:
+    lines = [
+        card_title("⚠️", "Invalid Skill packages"),
+        "",
+        f"<b>Current</b> · <code>{len(errors)}</code> invalid",
+        "Invalid packages are skipped and cannot execute.",
+    ]
+    if not errors:
+        lines.extend(["", "✅ No validation errors found."])
+    else:
+        lines.extend(["", "<b>ERRORS</b>"])
+        used = 0
+        for error in errors:
+            rendered = f"• {html.escape(str(error)[:600])}"
+            if used + len(rendered) > 3000:
+                lines.append(
+                    "• Additional errors clipped; run <code>/skill invalid</code> after repairs."
+                )
+                break
+            lines.append(rendered)
+            used += len(rendered)
+    return "\n".join(lines)
+
+
+def skill_install_help_text() -> str:
+    return "\n".join(
+        [
+            card_title("➕", "Install Skill"),
+            "",
+            "<b>Current</b> · <b>READY</b>",
+            "<b>Scope</b> · this HASHI project; enable state remains per agent",
+            "",
+            "The source must be a local standard Skill directory containing <code>SKILL.md</code>.",
+            "Copied packages are recoverable after uninstall; linked packages keep their source files.",
+            "",
+            "<b>Use</b>",
+            _command("/skill install <directory>", "validate and copy a package"),
+            _command(
+                "/skill link <directory>", "validate and link a development package"
+            ),
+        ]
+    )
+
+
+def skill_find_help_text() -> str:
+    return setting_card(
+        "🔎",
+        "Find Skills",
+        current="<b>READY</b>",
+        facts=["<b>Search fields</b> · ID and description"],
+        action=_command("/skill find <text>", "search the current catalog"),
+    )
+
+
+def skill_search_results_text(query: str, skills: Sequence[Any]) -> str:
+    lines = [
+        card_title("🔎", "Skill search"),
+        "",
+        f"<b>Query</b> · <code>{html.escape(query)}</code>",
+        f"<b>Matches</b> · <code>{len(skills)}</code>",
+        "",
+    ]
+    if not skills:
+        lines.append("No matching Skills.")
+    else:
+        for skill in skills[:30]:
+            skill_id = html.escape(str(getattr(skill, "id", "unknown")))
+            description = html.escape(str(getattr(skill, "description", ""))[:160])
+            lines.append(f"• <code>{skill_id}</code> · {description}")
+    return "\n".join(lines)
+
+
+def skill_disable_confirm_text(
+    skill: Any, dependencies: Sequence[dict[str, Any]]
+) -> str:
+    skill_id = str(getattr(skill, "id", "unknown") or "unknown")
+    consequence = "This agent will stop executing the Skill until it is enabled again."
+    if dependencies:
+        labels = ", ".join(
+            html.escape(str(item.get("id") or "unknown")) for item in dependencies[:5]
+        )
+        consequence += f" Enabled Jobs that would be affected: <code>{labels}</code>."
+    return confirm_card(
+        "⏸",
+        "Disable Skill",
+        target=f"<code>{html.escape(skill_id)}</code>",
+        consequence=consequence,
+    )
+
+
+def skill_uninstall_confirm_text(
+    skill: Any, dependencies: Sequence[dict[str, Any]]
+) -> str:
+    skill_id = str(getattr(skill, "id", "unknown") or "unknown")
+    source_type = str(getattr(skill, "source_type", "project") or "project")
+    if dependencies:
+        labels = ", ".join(
+            html.escape(str(item.get("id") or "unknown")) for item in dependencies[:5]
+        )
+        consequence = f"Removal is blocked while Jobs reference this package: <code>{labels}</code>."
+    elif source_type == "linked":
+        consequence = (
+            "This removes only the HASHI link. The source directory is preserved."
+        )
+    else:
+        consequence = (
+            "This removes the active copy and moves it to HASHI's recovery area."
+        )
+    return confirm_card(
+        "🗑️",
+        "Uninstall Skill" if source_type != "linked" else "Unlink Skill",
+        target=f"<code>{html.escape(skill_id)}</code>",
+        consequence=consequence,
+    )
 
 
 def hchat_help_text() -> str:
@@ -556,10 +770,17 @@ def safevoice_menu_text(*, enabled: bool) -> str:
 
 def safevoice_keyboard(*, enabled: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton(selected_label("On", enabled), callback_data="safevoice:set:on"),
-            InlineKeyboardButton(selected_label("Off", not enabled), callback_data="safevoice:set:off"),
-        ]]
+        [
+            [
+                InlineKeyboardButton(
+                    selected_label("On", enabled), callback_data="safevoice:set:on"
+                ),
+                InlineKeyboardButton(
+                    selected_label("Off", not enabled),
+                    callback_data="safevoice:set:off",
+                ),
+            ]
+        ]
     )
 
 
@@ -599,7 +820,9 @@ def timeout_menu_text(
     )
 
 
-def wol_targets_text(targets: Sequence[dict[str, Any]], *, instance_id: str | None) -> str:
+def wol_targets_text(
+    targets: Sequence[dict[str, Any]], *, instance_id: str | None
+) -> str:
     lines = [
         card_title("🪄", "Wake-on-LAN targets"),
         "",
@@ -613,7 +836,10 @@ def wol_targets_text(targets: Sequence[dict[str, Any]], *, instance_id: str | No
             name = html.escape(str(row.get("name") or "unknown"))
             label = html.escape(str(row.get("label") or name))
             description = html.escape(str(row.get("description") or ""))
-            lines.append(f"<code>{name}</code> · <b>{label}</b>" + (f" · {description}" if description else ""))
+            lines.append(
+                f"<code>{name}</code> · <b>{label}</b>"
+                + (f" · {description}" if description else "")
+            )
     else:
         lines.extend(["", "No Wake-on-LAN targets are configured."])
     lines.extend(["", _command("/wol <pc_name>", "send a Wake-on-LAN packet")])

@@ -167,7 +167,8 @@ backend routing, rollover, migration, and writer ownership.
 ## Skills System
 - Skills live under `skills/` as `skills/<kebab-case-name>/SKILL.md` packages.
 - Frontmatter requires standard `name` and `description`; Agent Skills optional metadata fields are accepted, while the Markdown body supplies request instructions.
-- `/skill` no longer exposes action or toggle package types. Cron, heartbeat, nudge, and deterministic automation live under `/jobs`; debug, recall state, and Dream remain runtime controls.
+- `/skill` maintains standard instruction packages with catalog, validation, install/link, per-agent enable/disable, search, rescan, and protected uninstall controls. It does not restore legacy action or toggle package types.
+- Cron, heartbeat, nudge, and deterministic automation remain under `/jobs`; structured Job references block Skill uninstall. Debug, recall state, and Dream remain runtime controls.
 - Native HER/Claw Skill discovery and execution are disabled, so HASHI is the only `/skill` owner.
 - Legacy underscore IDs remain accepted for scheduled-job compatibility while new definitions use kebab-case.
 - Delegation skills: `/skill codex <task>`, `/skill claude <task>`, `/skill gemini <task>` for cross-backend delegation.

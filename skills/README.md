@@ -41,4 +41,16 @@ Control-plane boundaries:
 - `/EXP` remains an independent structured execution system.
 - Native HER/Claw Skill discovery and execution are disabled; HASHI is the only Skill owner.
 
+Lifecycle controls:
+
+- `/skill` opens the catalog with per-agent enabled/disabled state, validation status, source, scope, resources, and structured Job references.
+- `/skill install <directory>` validates and copies a local package into this HASHI project.
+- `/skill link <directory>` validates and links a local development package without copying its source.
+- `/skill enable|disable <name>` changes only the current agent's package state. Disabling a package with enabled Job references requires `--force`.
+- `/skill validate [name]`, `/skill invalid`, `/skill find <text>`, and `/skill rescan` provide maintenance diagnostics.
+- `/skill uninstall <name>` is available only for packages installed or linked through HASHI. Project packages are protected and can only be disabled.
+- Uninstall is blocked while any structured `/jobs` definition references the package. Copied packages move to the local recovery area; linked packages are unlinked without deleting their source.
+
+Install provenance is local runtime state. Packages without a HASHI install/link record are treated as protected project content, so a missing registry can never make repository Skills deletable.
+
 Legacy underscore IDs such as `memory_consolidation` resolve to their kebab-case package during the transition, but new packages and new Jobs definitions must use kebab-case.

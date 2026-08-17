@@ -43,7 +43,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("active", "cmd_active", "Toggle proactive heartbeat"),
     CommandSpec("fyi", "cmd_fyi", "Refresh bridge environment awareness", "session"),
     CommandSpec("debug", "cmd_debug", "Run in strict debug mode", "tools"),
-    CommandSpec("skill", "cmd_skill", "Browse and run skills", "tools"),
+    CommandSpec("skill", "cmd_skill", "Browse, run, and manage skills", "tools"),
     CommandSpec("exp", "cmd_exp", "Run a task with the EXP guidebook", "tools"),
     CommandSpec("backend", "cmd_backend", "View or switch model backend", "models"),
     CommandSpec("handoff", "cmd_handoff", "Fresh session with recent continuity", "everyday"),
