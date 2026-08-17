@@ -513,8 +513,14 @@ model-authored Replan or progress report when something material changes. Every
 such event carries one stable identity and is sent as its own durable message at
 most once. A deterministic TaskFrame summary or neutral long-wait lease is
 technical telemetry, not Persona speech, and therefore belongs only to
-`/verbose`. On non-HER backends, `/commentary` reports that the setting is
-unavailable and changes nothing.
+`/verbose`. Technical activity and lease timing never reset or delay the Persona
+commentary clock. HER retains only the newest material commentary while cadence
+is pending; an older pending update is explicitly recorded as coalesced. Turn
+finalization does not flush a batch of stale commentary. If the final answer
+supersedes the one remaining pending update, its audit status is
+`superseded_by_final`, not silently discarded or falsely delivered. On non-HER
+backends, `/commentary` reports that the setting is unavailable and changes
+nothing.
 
 HER assigns every stream event exactly one presentation owner. `/verbose`
 accepts only `technical`, `/commentary` only `user_commentary`, and `/think`

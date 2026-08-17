@@ -467,7 +467,7 @@ async def test_claw_cadence_coalesces_pending_commentary_to_newest_event():
 
     async def callback(event):
         received.append(event)
-        if event.kind == KIND_COMMENTARY:
+        if event.kind == KIND_COMMENTARY and event.delivery_class != DELIVERY_INTERNAL:
             delivered.set()
 
     controller = _HERStreamCadenceController(
@@ -493,7 +493,108 @@ async def test_claw_cadence_coalesces_pending_commentary_to_newest_event():
     controller.close()
     await cadence_task
 
-    assert received == [second]
+    delivered_commentary = [
+        event
+        for event in received
+        if event.kind == KIND_COMMENTARY and event.delivery_class != DELIVERY_INTERNAL
+    ]
+    assert delivered_commentary == [second]
+    suppressed = next(event for event in received if event.event_id == first.event_id)
+    assert suppressed.delivery_class == DELIVERY_INTERNAL
+    assert "suppressed_reason=coalesced_by_newer_commentary" in suppressed.detail
+
+
+@pytest.mark.asyncio
+async def test_claw_cadence_technical_activity_does_not_delay_persona_commentary():
+    received = []
+    delivered = asyncio.Event()
+
+    async def callback(event):
+        received.append((time.monotonic(), event))
+        if event.kind == KIND_COMMENTARY and event.delivery_class != DELIVERY_INTERNAL:
+            delivered.set()
+
+    controller = _HERStreamCadenceController(
+        callback,
+        prompt="You are Sunny.",
+        progress_enabled=True,
+        first_update_s=0.01,
+        target_interval_s=0.02,
+        hard_interval_s=0.2,
+        activity_grace_s=0.1,
+    )
+    cadence_task = asyncio.create_task(controller.run())
+    await controller.forward(
+        StreamEvent(
+            kind=KIND_COMMENTARY,
+            summary="Sunny has reached a material checkpoint. ☀️",
+            event_id="req-separated:commentary:1",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+        )
+    )
+    started = time.monotonic()
+    for index in range(5):
+        await controller.forward(
+            StreamEvent(
+                kind=KIND_PROGRESS,
+                summary=f"technical event {index}",
+                event_id=f"req-separated:technical:{index}",
+                delivery_class=DELIVERY_TECHNICAL,
+            )
+        )
+        await asyncio.sleep(0.004)
+    await asyncio.wait_for(delivered.wait(), timeout=0.2)
+    await controller.finish()
+    await cadence_task
+
+    commentary_at = next(
+        timestamp
+        for timestamp, event in received
+        if event.kind == KIND_COMMENTARY and event.delivery_class != DELIVERY_INTERNAL
+    )
+    assert commentary_at - started < 0.08
+
+
+@pytest.mark.asyncio
+async def test_claw_cadence_finish_supersedes_only_latest_pending_commentary():
+    received = []
+
+    async def callback(event):
+        received.append(event)
+
+    controller = _HERStreamCadenceController(
+        callback,
+        prompt="You are Sunny.",
+        progress_enabled=True,
+        first_update_s=60,
+        target_interval_s=60,
+        hard_interval_s=60,
+        activity_grace_s=0,
+    )
+    cadence_task = asyncio.create_task(controller.run())
+    first = StreamEvent(
+        kind=KIND_COMMENTARY,
+        summary="Sunny completed the first material step. ☀️",
+        event_id="req-finish:commentary:1",
+        delivery_class=DELIVERY_USER_COMMENTARY,
+    )
+    second = replace(
+        first,
+        summary="Sunny completed the latest material step. ☀️",
+        event_id="req-finish:commentary:2",
+    )
+    await controller.forward(first)
+    await controller.forward(second)
+    await controller.finish(pending_reason="superseded_by_final")
+    await cadence_task
+
+    assert [event.event_id for event in received] == [
+        "req-finish:commentary:1",
+        "req-finish:commentary:2",
+    ]
+    assert all(event.delivery_class == DELIVERY_INTERNAL for event in received)
+    assert "suppressed_reason=coalesced_by_newer_commentary" in received[0].detail
+    assert "suppressed_reason=superseded_by_final" in received[1].detail
 
 
 @pytest.mark.asyncio
@@ -563,8 +664,9 @@ async def test_claw_cadence_suppresses_unchanged_material_revision_after_deliver
     await cadence_task
 
     assert received[0] == first
-    assert received[1].delivery_class == DELIVERY_INTERNAL
-    assert "suppressed_reason=unchanged_material_progress" in received[1].detail
+    suppressed = next(event for event in received if event.event_id == second.event_id)
+    assert suppressed.delivery_class == DELIVERY_INTERNAL
+    assert "suppressed_reason=unchanged_material_progress" in suppressed.detail
 
 
 def test_claw_max_iterations_builds_chinese_verified_fallback_report():
@@ -3021,6 +3123,75 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     )
     assert (tmp_path / "claw_exec_events.jsonl").stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "claw_control_events.jsonl").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_claw_adapter_terminal_final_supersedes_one_pending_commentary(tmp_path):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys
+        if "--help" in sys.argv:
+            print("Usage: claw [--output-format text|json|stream-json] prompt TEXT")
+        elif sys.argv[1] == "version":
+            print(json.dumps({"kind": "version", "version": "0.1.0", "git_sha": "fake"}))
+        else:
+            for event in [
+                {"kind": "run_started", "model": "deepseek/test", "session_id": "commentary-session"},
+                {"kind": "task_acknowledgement", "event_id": "task-acknowledgement:1",
+                 "text": "Sunny will inspect the request. ☀️"},
+                {"kind": "task_plan", "phase": "initial", "revision": 1,
+                 "event_id": "task-plan:1", "frame": {"active_goal": "inspect request"}},
+                {"kind": "task_commentary", "phase": "replan", "revision": 2,
+                 "event_id": "task-commentary:2",
+                 "text": "Sunny completed the inspection and is finalizing. ☀️"},
+                {"kind": "run_finished", "message": "verified final answer", "model": "deepseek/test",
+                 "session_id": "commentary-session", "iterations": 1,
+                 "completion_status": "completed", "stop_reason": "end_turn",
+                 "tool_uses": [], "tool_results": [],
+                 "usage": {"input_tokens": 5, "output_tokens": 7}},
+            ]:
+                print(json.dumps(event), flush=True)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"claw_binary_path": str(fake), "effort": "max+"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    assert await adapter.initialize() is True
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    response = await adapter.generate_response(
+        "inspect request",
+        "req-terminal-commentary",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is True
+    assert response.text == "verified final answer"
+    visible_commentary = [
+        event
+        for event in events
+        if event.kind == KIND_COMMENTARY
+        and event.delivery_class == DELIVERY_USER_COMMENTARY
+    ]
+    assert visible_commentary == []
+    [superseded] = [
+        event
+        for event in events
+        if event.kind == KIND_COMMENTARY
+        and "suppressed_reason=superseded_by_final" in event.detail
+    ]
+    assert superseded.event_id == "task-commentary:2"
+    assert superseded.delivery_class == DELIVERY_INTERNAL
 
 
 @pytest.mark.asyncio

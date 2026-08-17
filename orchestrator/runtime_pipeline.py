@@ -49,6 +49,17 @@ _DANGLING_TOOL_MARKERS = (
 )
 
 
+def _her_event_suppression_reason(event) -> str:
+    if str(getattr(event, "delivery_class", "") or "") != "internal":
+        return ""
+    detail = str(getattr(event, "detail", "") or "")
+    for part in detail.split(";"):
+        key, separator, value = part.strip().partition("=")
+        if separator and key == "suppressed_reason":
+            return value.strip()
+    return ""
+
+
 def _contains_dangling_tool_markup(text: Any) -> bool:
     normalized = str(text or "").lower()
     visible = "\n".join(normalized.split("```")[::2])
@@ -91,16 +102,27 @@ def _append_her_message_audit(
     reason: str = "",
     error_type: str = "",
 ) -> None:
-    """Persist one low-volume, user-visible HER message audit record."""
+    """Persist one low-volume HER user-message lineage audit record."""
 
-    from adapters.stream_events import DELIVERY_CONTROL, DELIVERY_USER_COMMENTARY
+    from adapters.stream_events import (
+        DELIVERY_CONTROL,
+        DELIVERY_USER_COMMENTARY,
+        KIND_COMMENTARY,
+    )
 
     delivery_class = str(getattr(event, "delivery_class", "") or "")
+    suppression_reason = _her_event_suppression_reason(event)
+    suppressed_commentary = getattr(event, "kind", None) == KIND_COMMENTARY and bool(
+        suppression_reason
+    )
     if delivery_class == DELIVERY_CONTROL and not bool(
         getattr(event, "required", False)
     ):
         return
-    if delivery_class not in {DELIVERY_CONTROL, DELIVERY_USER_COMMENTARY}:
+    if (
+        delivery_class not in {DELIVERY_CONTROL, DELIVERY_USER_COMMENTARY}
+        and not suppressed_commentary
+    ):
         return
     text = str(getattr(event, "summary", "") or "").strip()
     detail = str(getattr(event, "detail", "") or "").strip()
@@ -818,6 +840,7 @@ def wrap_her_persona_stream(
         return await _send_event(event, purpose="her_control")
 
     async def _persist_event(event):
+        event_suppression_reason = _her_event_suppression_reason(event)
         _append_her_message_audit(
             runtime,
             item,
@@ -826,8 +849,8 @@ def wrap_her_persona_stream(
             include_text=True,
         )
         delivery_class = str(getattr(event, "delivery_class", "") or "")
-        suppression_reason = ""
-        if delivery_class == "user_commentary":
+        suppression_reason = event_suppression_reason
+        if not suppression_reason and delivery_class == "user_commentary":
             if not delivery_requested:
                 suppression_reason = "delivery_not_requested"
             elif delivery_blocked:
@@ -845,7 +868,11 @@ def wrap_her_persona_stream(
                 runtime,
                 item,
                 event,
-                status="suppressed",
+                status=(
+                    "superseded"
+                    if suppression_reason == "superseded_by_final"
+                    else "suppressed"
+                ),
                 reason=suppression_reason,
             )
         if audit_collector is not None:

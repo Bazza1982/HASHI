@@ -294,6 +294,15 @@ owned by the existing runtime sender and outbox:
 - final and required control events use mandatory lanes outside all three
   optional switches.
 
+Persona commentary cadence and technical lease cadence are independent clocks.
+Tool/runtime activity may postpone a neutral `/verbose` lease, but must never
+delay a model-authored `/commentary` event. At most one material Persona update
+may wait in the cadence slot: a newer update explicitly coalesces the older one.
+Normal completion, failure, cancellation, or budget exhaustion must resolve
+that slot without a terminal message burst. When the final answer makes the
+pending update obsolete, HASHI records it as `superseded_by_final`; it must not
+be silently dropped or presented as delivered.
+
 Effort controls event generation, never a second presentation gate. A direct
 TaskFrame acknowledgement is buffered until the initial frame establishes
 whether `direct_response=true`; direct answers are classified as `final` and

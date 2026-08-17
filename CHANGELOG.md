@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **HER Persona commentary cadence regression** — separated the
+  model-authored Persona commentary clock from `/verbose` technical activity
+  and neutral runtime leases. Pending progress is now a single coalesced slot:
+  newer material commentary supersedes an older pending update, while turn
+  finalization never dumps a burst of stale updates. If the final answer wins
+  the race, the remaining update is explicitly audited as
+  `superseded_by_final` instead of disappearing silently. End-to-end coverage
+  now spans every HER effort from `low` through `ultra`, including transport
+  receipts and terminal supersession.
 - **Native HER direct-response finalization regression** — restored the
   TaskFrame `direct_response` disposition across `medium` through `max+`.
   A validated Persona-authored direct answer now becomes the persisted final
