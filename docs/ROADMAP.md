@@ -254,6 +254,49 @@ Design record:
 
 ## Deferred Research Items
 
+### Telegram Bot API 10.1 Rich Messages
+
+Status: **deferred / wait for stable client-library support**.
+
+Telegram Bot API 10.1 added `sendRichMessage` in June 2026, including native
+GitHub-Flavored Markdown and HTML tables. HASHI currently sends persistent chat
+output through the established `sendMessage` plus basic HTML path; that path
+cannot render Markdown tables, and the installed `python-telegram-bot 22.6`
+release does not expose the new rich-message methods.
+
+Current decision:
+
+- Do not replace or destabilize the proven `sendMessage` path merely to gain
+  early table support.
+- Wait for a stable public `python-telegram-bot` integration, unless a stronger
+  product need later justifies a small audited direct Bot API adapter.
+- Treat valid model-generated Markdown tables as a transport capability gap,
+  not as a model failure.
+
+Future upgrade target:
+
+- Add `sendRichMessage` as an optional Telegram transport capability shared by
+  fixed and flex agents, while retaining `sendMessage` as the universal
+  fallback.
+- Route compact structured content to `rich_message.markdown`; convert
+  narrative or mobile-unfriendly wide tables into readable vertical cards.
+- Preserve delivery ordering, retry/failover, notification policy, exact
+  generated-text audit, transport receipts, and truthful failure reporting.
+- Use persistent `sendRichMessage` first; consider ephemeral
+  `sendRichMessageDraft` streaming only as a separate later enhancement.
+- Add capability probing and end-to-end tests for native table delivery,
+  unsupported-library/API fallback, long-cell adaptation, and Telegram receipt
+  verification before rollout.
+
+Revisit when the Python client exposes Bot API 10.1 Rich Messages through a
+stable public API, or when Telegram table readability becomes important enough
+to justify a maintained direct adapter.
+
+Official reference:
+[Telegram Bot API — Rich Messages](https://core.telegram.org/bots/api#rich-messages).
+
+---
+
 ### Complete Structured Audit Log For Slash Commands
 
 Status: **deferred / revisit later**.
