@@ -198,7 +198,10 @@ def test_skill_detail_escapes_reference_and_reports_standard_package() -> None:
         description="Use <carefully>.",
         body="Never expose A&B.",
     )
-    manager = SimpleNamespace(get_active_toggle_ids=lambda _workspace: {"debug<strict>"})
+    manager = SimpleNamespace(
+        get_active_toggle_ids=lambda _workspace: {"debug<strict>"},
+        skill_usage_stats=lambda _skill_id: {"total": 17, "agents": 3},
+    )
 
     text = runtime_menu_views.skill_detail_text(
         skill,
@@ -209,6 +212,8 @@ def test_skill_detail_escapes_reference_and_reports_standard_package() -> None:
     _assert_standard_card(text, "DEBUG &amp; INSPECT")
     assert "<b>Current</b> · <b>READY</b>" in text
     assert "<b>Format</b> · <code>SKILL.md</code>" in text
+    assert "<b>Uses</b> · <code>17</code> cumulative · <code>3</code> agents" in text
+    assert "<b>Usage log</b> · <code>state/skill_usage.jsonl</code>" in text
     assert "Use &lt;carefully&gt;." in text
     assert "Never expose A&amp;B." in text
     assert "debug&lt;strict&gt;" in text

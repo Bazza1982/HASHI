@@ -52,7 +52,8 @@ def _help_text(runtime) -> str:
         "<code>/skill link &lt;directory&gt;</code> · validate and link",
         "<code>/skill enable|disable &lt;id&gt;</code> · per-agent state",
         "<code>/skill validate [id]</code> · package diagnostics",
-        "<code>/skill uninstall &lt;id&gt;</code> · managed packages only",
+        "<code>/skill delete &lt;id&gt;</code> · recoverably remove any package",
+        "<code>/skill uninstall &lt;id&gt;</code> · alias; linked packages are unlinked",
         "<code>/skill find &lt;text&gt;</code> · search ID and description",
         "<code>/skill rescan</code> · rebuild the visible catalog",
         "",
@@ -193,7 +194,7 @@ async def handle_standard_skill_command(
         return
     if sub in {"uninstall", "unlink", "remove", "delete"}:
         if not rest:
-            await reply("Usage: /skill uninstall <id>")
+            await reply("Usage: /skill delete <id>")
             return
         ok, message, recovery_path = manager.uninstall_skill(rest[0])
         suffix = f" Recovery: {recovery_path}" if recovery_path is not None else ""
@@ -226,4 +227,5 @@ async def handle_standard_skill_command(
         prompt,
         f"skill:{skill.id}",
         f"Skill {skill.id}",
+        skill_id=skill.id,
     )

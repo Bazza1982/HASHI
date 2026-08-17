@@ -91,7 +91,12 @@ def build_skill_action_keyboard(
         ],
     ]
     if manager.can_uninstall_skill(skill):
-        label = "🔗 Unlink" if skill.source_type == "linked" else "🗑️ Uninstall"
+        labels = {
+            "project": "🗑️ Delete",
+            "linked": "🔗 Unlink",
+            "installed": "🗑️ Uninstall",
+        }
+        label = labels.get(skill.source_type, "🗑️ Delete")
         rows.append([InlineKeyboardButton(label, callback_data=f"skill:x:{key}")])
     rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="skill:b:all")])
     return InlineKeyboardMarkup(rows)
@@ -261,7 +266,7 @@ async def handle_skill_callback(runtime, query, data: str) -> bool:
     if action == "x":
         if not manager.can_uninstall_skill(skill):
             await query.answer(
-                "Protected project Skill: disable it instead.",
+                "This Skill source cannot be removed.",
                 show_alert=True,
             )
             return True
@@ -269,9 +274,12 @@ async def handle_skill_callback(runtime, query, data: str) -> bool:
         key = _skill_key(manager, skill)
         rows = []
         if not dependencies:
-            label = (
-                "Unlink Skill" if skill.source_type == "linked" else "Uninstall Skill"
-            )
+            labels = {
+                "project": "Delete Skill",
+                "linked": "Unlink Skill",
+                "installed": "Uninstall Skill",
+            }
+            label = labels.get(skill.source_type, "Delete Skill")
             rows.append([InlineKeyboardButton(label, callback_data=f"skill:xc:{key}")])
         rows.append(
             [InlineKeyboardButton("← Keep Skill", callback_data=f"skill:s:{key}")]

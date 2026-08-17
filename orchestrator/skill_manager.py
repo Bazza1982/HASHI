@@ -7,7 +7,7 @@ import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -68,6 +68,7 @@ class SkillManager:
         )
         self.skill_registry_path = self.project_root / "state" / "skill_registry.json"
         self.skill_recovery_dir = self.project_root / "state" / "skill_recovery"
+        self.skill_usage_path = self.project_root / "state" / "skill_usage.jsonl"
         self._skill_validation_errors: list[str] = []
 
     def _now(self) -> str:
@@ -406,6 +407,151 @@ class SkillManager:
             pass
         return counts
 
+    def record_skill_usage(
+        self,
+        skill_id: str,
+        *,
+        agent: str,
+        request_id: str,
+        source: str,
+        task_id: str | None = None,
+    ) -> str | None:
+        """Append one privacy-bounded Skill invocation event.
+
+        The event intentionally excludes the user prompt and Skill body.  A single
+        ``os.write`` against an ``O_APPEND`` descriptor keeps concurrent agent
+        processes from sharing a read/modify/write counter file.
+        """
+
+        canonical_id = self._canonical_skill_id(skill_id)
+        if not canonical_id or not self.SKILL_NAME_PATTERN.fullmatch(canonical_id):
+            return None
+        invocation_id = f"skill-use-{uuid4().hex}"
+        payload = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "event": "skill_invoked",
+            "invocation_id": invocation_id,
+            "skill_id": canonical_id,
+            "agent": str(agent or "unknown"),
+            "request_id": str(request_id or ""),
+            "source": str(source or "unknown"),
+        }
+        if task_id:
+            payload["task_id"] = str(task_id)
+        encoded = (
+            json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        try:
+            self.skill_usage_path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(
+                self.skill_usage_path,
+                os.O_APPEND | os.O_CREAT | os.O_WRONLY,
+                0o600,
+            )
+            try:
+                written = os.write(descriptor, encoded)
+                if written != len(encoded):
+                    return None
+            finally:
+                os.close(descriptor)
+        except OSError:
+            return None
+        return invocation_id
+
+    def skill_usage_stats(self, skill_id: str) -> dict[str, Any]:
+        """Return cumulative project-wide usage, including legacy token audits."""
+
+        wanted = self._canonical_skill_id(skill_id)
+        total = 0
+        tracked = 0
+        historical = 0
+        by_agent: dict[str, int] = {}
+        last_used_at = ""
+        invocation_ids: set[str] = set()
+
+        def add(record: dict[str, Any], *, legacy: bool) -> None:
+            nonlocal total, tracked, historical, last_used_at
+            total += 1
+            if legacy:
+                historical += 1
+            else:
+                tracked += 1
+            agent = str(record.get("agent") or "unknown")
+            by_agent[agent] = by_agent.get(agent, 0) + 1
+            timestamp = str(record.get("ts") or "")
+            last_used_at = max(last_used_at, timestamp)
+
+        if self.skill_usage_path.is_file():
+            try:
+                with self.skill_usage_path.open("r", encoding="utf-8") as handle:
+                    for raw_line in handle:
+                        try:
+                            record = json.loads(raw_line)
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                        if not isinstance(record, dict):
+                            continue
+                        if record.get("event") != "skill_invoked":
+                            continue
+                        recorded_id = self._canonical_skill_id(
+                            str(record.get("skill_id") or "")
+                        )
+                        if recorded_id != wanted:
+                            continue
+                        invocation_id = str(record.get("invocation_id") or "")
+                        if invocation_id:
+                            invocation_ids.add(invocation_id)
+                        add(record, legacy=False)
+            except OSError:
+                pass
+
+        # Before the dedicated usage ledger existed, successful prompt Skills
+        # were already identifiable through ``source=skill:<id>`` in each
+        # agent's token audit.  Merge those records while excluding new events
+        # linked to an invocation already counted above.
+        workspaces_root = self.project_root / "workspaces"
+        if workspaces_root.is_dir():
+            for audit_path in sorted(workspaces_root.glob("*/token_audit.jsonl")):
+                try:
+                    with audit_path.open("r", encoding="utf-8") as handle:
+                        for raw_line in handle:
+                            try:
+                                record = json.loads(raw_line)
+                            except (json.JSONDecodeError, TypeError):
+                                continue
+                            if not isinstance(record, dict):
+                                continue
+                            linked_invocation = str(
+                                record.get("skill_usage_event_id") or ""
+                            )
+                            if linked_invocation and linked_invocation in invocation_ids:
+                                continue
+                            explicit_id = self._canonical_skill_id(
+                                str(record.get("skill_id") or "")
+                            )
+                            source = str(record.get("source") or "")
+                            legacy_id = (
+                                self._canonical_skill_id(source.split(":", 1)[1])
+                                if source.startswith("skill:")
+                                else ""
+                            )
+                            if explicit_id != wanted and legacy_id != wanted:
+                                continue
+                            if not record.get("agent"):
+                                record["agent"] = audit_path.parent.name
+                            add(record, legacy=True)
+                except OSError:
+                    continue
+
+        return {
+            "total": total,
+            "tracked": tracked,
+            "historical": historical,
+            "agents": len(by_agent),
+            "by_agent": dict(sorted(by_agent.items())),
+            "last_used_at": last_used_at or None,
+        }
+
     def skill_dependencies(
         self,
         skill_id: str,
@@ -450,7 +596,7 @@ class SkillManager:
         return dependencies
 
     def can_uninstall_skill(self, skill: SkillDefinition) -> bool:
-        return skill.source_type in {"installed", "linked"}
+        return skill.source_type in {"project", "installed", "linked"}
 
     def _package_digest(self, package_dir: Path) -> str:
         digest = hashlib.sha256()
@@ -579,7 +725,7 @@ class SkillManager:
         if not self.can_uninstall_skill(skill):
             return (
                 False,
-                f"Skill '{skill.id}' is a protected project package; disable it instead.",
+                f"Skill '{skill.id}' has an unsupported package source.",
                 None,
             )
         dependencies = self.skill_dependencies(skill.id)
@@ -624,6 +770,12 @@ class SkillManager:
 
         if skill.source_type == "linked":
             return True, f"Skill '{skill.id}' unlinked; source files were kept.", None
+        if skill.source_type == "project":
+            return (
+                True,
+                f"Skill '{skill.id}' deleted to the recovery area.",
+                recovery_path,
+            )
         return (
             True,
             f"Skill '{skill.id}' uninstalled to the recovery area.",

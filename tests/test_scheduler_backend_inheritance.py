@@ -70,6 +70,7 @@ async def test_scheduled_prompt_skill_retains_agent_current_backend(tmp_path):
         source="scheduler-skill",
         summary="Skill Task [cron-1]",
         silent=False,
+        skill_id="legacy-pinned-skill",
     )
 
 
@@ -116,4 +117,5 @@ async def test_legacy_scheduled_prompt_skill_retains_agent_current_backend(tmp_p
         source="scheduler-skill",
         summary="Skill Task [cron-1]",
         silent=False,
+        skill_id="legacy-pinned-skill",
     )

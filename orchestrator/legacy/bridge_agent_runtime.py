@@ -242,6 +242,7 @@ class BridgeAgentRuntime:
         is_retry: bool = False,
         deliver_to_telegram: bool = True,
         skip_memory_injection: bool = False,
+        skill_id: str | None = None,
     ):
         if not prompt or not prompt.strip():
             self.error_logger.error(
@@ -260,7 +261,18 @@ class BridgeAgentRuntime:
             is_retry=is_retry,
             deliver_to_telegram=deliver_to_telegram,
             skip_memory_injection=skip_memory_injection,
+            skill_id=skill_id,
         )
+        usage_recorder = getattr(
+            getattr(self, "skill_manager", None), "record_skill_usage", None
+        )
+        if item.skill_id and callable(usage_recorder):
+            item.skill_usage_event_id = usage_recorder(
+                item.skill_id,
+                agent=self.name,
+                request_id=item.request_id,
+                source=item.source,
+            )
         await self.queue.put(item)
         self.message_logger.info(
             f"Queued {item.request_id} from {source} (summary={summary!r})"
@@ -909,6 +921,7 @@ class BridgeAgentRuntime:
             source="scheduler-skill",
             summary=f"Skill Task [{task_id}]",
             silent=False,
+            skill_id=skill.id,
         )
         return True, f"Scheduled prompt skill queued: {skill.id}"
 
@@ -932,6 +945,15 @@ class BridgeAgentRuntime:
             message = f"Scheduler automation Skill is disabled for {self.name}: {skill.id}"
             self.error_logger.error(message)
             return False, message
+        usage_recorder = getattr(self.skill_manager, "record_skill_usage", None)
+        if skill is not None and callable(usage_recorder):
+            usage_recorder(
+                skill.id,
+                agent=self.name,
+                request_id=f"automation-{task_id}",
+                source="scheduler-automation",
+                task_id=task_id,
+            )
         ok, text = await run_automation(
             project_root=self.skill_manager.project_root,
             workspace_dir=self.config.workspace_dir,
@@ -1849,6 +1871,7 @@ class BridgeAgentRuntime:
             "model": self.config.model,
             "source": item.source,
             "summary": item.summary,
+            **runtime_pipeline.skill_usage_audit_fields(item),
             "silent": item.silent,
             "is_retry": item.is_retry,
             "success": response.is_success,
@@ -3482,6 +3505,7 @@ class BridgeAgentRuntime:
             prompt,
             f"skill:{skill.id}",
             f"Skill {skill.id}",
+            skill_id=skill.id,
         )
 
     async def cmd_debug(self, update, context):
@@ -3525,6 +3549,7 @@ class BridgeAgentRuntime:
             prompt,
             f"skill:{skill.id}",
             f"Skill {skill.id}",
+            skill_id=skill.id,
         )
 
     async def cmd_skill(self, update, context):

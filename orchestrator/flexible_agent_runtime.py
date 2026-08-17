@@ -663,6 +663,7 @@ class FlexibleAgentRuntime:
         is_retry: bool = False,
         deliver_to_telegram: bool = True,
         skip_memory_injection: bool = False, habit_learning_eligible: bool = True,
+        skill_id: str | None = None,
     ):
         if not prompt or not prompt.strip():
             self.error_logger.error(f"Rejected empty prompt from {source} (summary={summary!r})")
@@ -678,7 +679,18 @@ class FlexibleAgentRuntime:
             is_retry=is_retry,
             deliver_to_telegram=deliver_to_telegram,
             skip_memory_injection=skip_memory_injection, habit_learning_eligible=habit_learning_eligible,
+            skill_id=skill_id,
         )
+        usage_recorder = getattr(
+            getattr(self, "skill_manager", None), "record_skill_usage", None
+        )
+        if item.skill_id and callable(usage_recorder):
+            item.skill_usage_event_id = usage_recorder(
+                item.skill_id,
+                agent=self.name,
+                request_id=item.request_id,
+                source=item.source,
+            )
         runtime_delivery_order.register_turn(self, item)
         runtime_cross_session.capture_reply_target(self, item)
         runtime_turn_context.capture_at_enqueue(self, item)
@@ -1500,6 +1512,7 @@ class FlexibleAgentRuntime:
             source="scheduler-skill",
             summary=f"Skill Task [{task_id}]",
             silent=False,
+            skill_id=skill.id,
         )
         return True, f"Scheduled prompt skill queued: {skill.id}"
 
@@ -1523,6 +1536,15 @@ class FlexibleAgentRuntime:
             message = f"Scheduler automation Skill is disabled for {self.name}: {skill.id}"
             self.error_logger.error(message)
             return False, message
+        usage_recorder = getattr(self.skill_manager, "record_skill_usage", None)
+        if skill is not None and callable(usage_recorder):
+            usage_recorder(
+                skill.id,
+                agent=self.name,
+                request_id=f"automation-{task_id}",
+                source="scheduler-automation",
+                task_id=task_id,
+            )
         ok, text = await run_automation(
             project_root=self.skill_manager.project_root,
             workspace_dir=self.workspace_dir,
@@ -3301,6 +3323,7 @@ class FlexibleAgentRuntime:
             prompt,
             f"skill:{skill.id}",
             f"Skill {skill.id}",
+            skill_id=skill.id,
         )
 
     async def cmd_debug(self, update: Update, context: Any):
@@ -3346,6 +3369,7 @@ class FlexibleAgentRuntime:
             prompt,
             f"skill:{skill.id}",
             f"Skill {skill.id}",
+            skill_id=skill.id,
         )
 
     async def cmd_skill(self, update: Update, context: Any):
@@ -7848,6 +7872,7 @@ class FlexibleAgentRuntime:
                         "model": self.get_current_model(),
                         "source": item.source,
                         "summary": item.summary,
+                        **runtime_pipeline.skill_usage_audit_fields(item),
                         "silent": item.silent,
                         "is_retry": item.is_retry,
                         "success": response.is_success,

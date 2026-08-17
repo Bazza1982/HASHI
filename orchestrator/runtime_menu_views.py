@@ -510,7 +510,7 @@ def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
     scope = str(getattr(skill, "scope", "project") or "project")
     source = str(getattr(skill, "source", "") or "")
     source_labels = {
-        "project": "PROJECT · protected",
+        "project": "PROJECT · built-in",
         "installed": "INSTALLED · managed",
         "linked": "LINKED",
     }
@@ -522,11 +522,23 @@ def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
     )
     dependency_method = getattr(manager, "skill_dependencies", None)
     dependencies = dependency_method(skill_id) if callable(dependency_method) else []
+    usage_method = getattr(manager, "skill_usage_stats", None)
+    usage_stats = (
+        usage_method(skill_id)
+        if callable(usage_method)
+        else {"total": 0, "agents": 0}
+    )
     facts = [
         f"<b>ID</b> · <code>{html.escape(skill_id)}</code>",
         f"<b>Source</b> · <code>{html.escape(source_labels.get(source_type, source_type.upper()))}</code>",
         f"<b>Scope</b> · <code>{html.escape(scope)}</code>",
         "<b>Format</b> · <code>SKILL.md</code>",
+        (
+            "<b>Uses</b> · "
+            f"<code>{int(usage_stats.get('total', 0))}</code> cumulative · "
+            f"<code>{int(usage_stats.get('agents', 0))}</code> agents"
+        ),
+        "<b>Usage log</b> · <code>state/skill_usage.jsonl</code>",
         (
             "<b>Resources</b> · "
             f"scripts <code>{int(resources.get('scripts', 0))}</code> · "
@@ -704,13 +716,23 @@ def skill_uninstall_confirm_text(
         consequence = (
             "This removes only the HASHI link. The source directory is preserved."
         )
+    elif source_type == "project":
+        consequence = (
+            "This removes the built-in package for every agent and moves it to "
+            "HASHI's recovery area. Usage history is preserved."
+        )
     else:
         consequence = (
             "This removes the active copy and moves it to HASHI's recovery area."
         )
+    titles = {
+        "project": "Delete Skill",
+        "linked": "Unlink Skill",
+        "installed": "Uninstall Skill",
+    }
     return confirm_card(
         "🗑️",
-        "Uninstall Skill" if source_type != "linked" else "Unlink Skill",
+        titles.get(source_type, "Delete Skill"),
         target=f"<code>{html.escape(skill_id)}</code>",
         consequence=consequence,
     )

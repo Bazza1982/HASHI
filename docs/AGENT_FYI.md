@@ -138,7 +138,8 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - Skills live under `skills/<kebab-case-name>/SKILL.md` and contain portable instructions plus optional `scripts/`, `references/`, and `assets/` resources.
 - `name` and `description` are required Agent Skills frontmatter. Standard optional metadata fields are accepted.
 - `/skill` lists, applies, and maintains instruction packages. Per-agent package enable/disable state is lifecycle metadata, not a legacy toggle Skill type.
-- Local packages can be validated and copied or linked. Only HASHI-managed installs/links can be removed; repository packages are protected, and structured Job references block uninstall.
+- Local packages can be validated and copied or linked. Built-in and installed packages can be recoverably deleted, linked packages can be unlinked, and structured Job references block removal.
+- Skill detail cards show cumulative project-wide uses. New invocation metadata is appended without prompts to `state/skill_usage.jsonl`, while older direct invocations are recovered from per-agent `token_audit.jsonl` records.
 - `/jobs` owns cron, heartbeat, nudge, and deterministic automation. Debug, recall state, and Dream are runtime controls; `/EXP` stays independent.
 - Native HER/Claw Skill discovery and execution are disabled. HASHI is the only live Skill owner.
 

@@ -133,7 +133,7 @@ async def test_disable_requires_force_for_enabled_job_and_blocks_execution(
     runtime.enqueue_request.assert_not_awaited()
 
 
-def test_skill_keyboards_use_short_callbacks_and_hide_uninstall_for_project_packages(
+def test_skill_keyboards_use_short_callbacks_and_show_delete_for_project_packages(
     tmp_path: Path,
 ):
     skill_id = "a" * 64
@@ -156,4 +156,23 @@ def test_skill_keyboards_use_short_callbacks_and_hide_uninstall_for_project_pack
     assert callbacks
     assert all(len(callback.encode("utf-8")) <= 64 for callback in callbacks)
     assert "⏸ Disable" in labels
-    assert not any("Uninstall" in label or "Unlink" in label for label in labels)
+    assert "🗑️ Delete" in labels
+
+
+@pytest.mark.asyncio
+async def test_skill_command_attributes_usage_to_the_queued_skill(tmp_path: Path):
+    _write_skill(tmp_path, "measured-skill")
+    manager = SkillManager(tmp_path, tmp_path / "tasks.json")
+    runtime = _runtime(tmp_path, manager)
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=123))
+    _replies, reply = _reply_collector()
+
+    await handle_standard_skill_command(
+        runtime,
+        update,
+        ["measured-skill", "do", "the", "work"],
+        reply,
+    )
+
+    runtime.enqueue_request.assert_awaited_once()
+    assert runtime.enqueue_request.await_args.kwargs["skill_id"] == "measured-skill"

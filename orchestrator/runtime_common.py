@@ -21,6 +21,8 @@ class QueuedRequest:
     session_scope: str | None = None
     queued_monotonic: float = field(default_factory=time.monotonic, repr=False)
     habit_learning_eligible: bool = True
+    skill_id: str | None = None
+    skill_usage_event_id: str | None = None
 
 
 def _safe_excerpt(text: str, limit: int = 160) -> str:
