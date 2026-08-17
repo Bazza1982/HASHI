@@ -26,6 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message remain byte-clean. Ambient advisory values are discarded, Habit text
   cannot enter fallback `active_goal`, and a model-independent invalid-planner
   regression proves the boundary still holds when TaskFrame parsing fails.
+- **HER commentary/final ownership and advisory Max review** — a final candidate
+  paired only with `StructuredOutput` is no longer emitted first as commentary;
+  HASHI prefixes only acknowledgement/commentary presentation with `💬 ` while
+  preserving raw audit text. Independent final review now starts at MAX (not
+  XHIGH), can request at most one tool-free primary-Agent wording revision, and
+  can neither reopen execution nor suppress or error the final. The retained
+  candidate always remains deliverable, review pass/concern/unavailable status
+  is appended to that same final, and every reviewer provider call has a
+  fail-open 90-second hard deadline.
 - **HER native commentary production and transient stream recovery** — complete
   model-authored text that precedes a tool call now becomes one explicit
   Persona commentary event before `ToolStart`; token deltas remain internal and
@@ -120,11 +129,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a private MCP stdio gateway, and added provider/model routing plus HER
   execution budgets through `max+`. Effort is now a capability ceiling: the adaptive
   plan chooses task-matched work and review, so trivial requests do not over-process.
-  XHIGH, MAX, and MAX+ reviewers can directly inspect deliverables through a separate
+  MAX and MAX+ reviewers can directly inspect deliverables through a separate
   read-only workspace/Git tool registry and page immutable raw evidence by stable ID;
   MAX+ may additionally rerun only exact plan-declared tests inside a disposable,
-  network-isolated snapshot. Review remains advisory, and no private token or wall-clock
-  ceiling exists. Direct-response plans now return the planner's complete answer once,
+  network-isolated snapshot. Review remains advisory. No separate overall task token or
+  wall-clock ceiling exists, while each independent reviewer provider call has a
+  fail-open 90-second hard deadline. Direct-response plans now return the planner's complete answer once,
   without a redundant execution generation or terminal semantic-compaction delay. No
   current Windows artifact is packaged or parity-certified. See the
   [unreleased checkpoint](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md).

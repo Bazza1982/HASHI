@@ -41,12 +41,13 @@ described as parity with the certified Linux `.13` package.
   Anthropic and OpenAI-compatible providers.
 - Planning now treats effort as a capability ceiling and records the intended
   deliverables, claims, verification, testing, review targets, and stop conditions.
-  Trivial work exits directly at every planned effort. HIGH can self-review; XHIGH,
-  MAX, and MAX+ can ask an independent reviewer to inspect actual workspace/Git
+  Trivial work exits directly at every planned effort. HIGH and XHIGH can self-review;
+  MAX and MAX+ can ask an independent reviewer to inspect actual workspace/Git
   deliverables with separately enforced read-only tools and page full raw evidence by
   stable ID. MAX+ may rerun only exact plan-declared tests in a disposable,
   network-isolated snapshot. Reviewer feedback remains advisory and cannot discard or
-  suppress the primary agent's final answer. No internal time/token ceiling exists.
+  suppress the primary agent's final answer. There is no separate overall task time/token
+  ceiling; independent reviewer provider calls use a fail-open hard deadline.
 - A direct-response plan contains the complete final answer. HER publishes it once and
   stops without a second execution generation, independent review, tool/test work, or a
   terminal semantic-compaction provider call. Non-direct plans continue through the

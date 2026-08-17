@@ -778,11 +778,14 @@ def wrap_her_persona_stream(
         f"delivery_requested={delivery_requested} blocked={delivery_blocked}"
     )
 
-    async def _send_event(event, *, purpose: str):
+    async def _send_event(event, *, purpose: str, commentary: bool = False):
         await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
-        text = str(getattr(event, "summary", "") or "").strip()
-        if not text:
+        raw_text = str(getattr(event, "summary", "") or "").strip()
+        if not raw_text:
             return False
+        text = raw_text
+        if commentary and not text.startswith("💬"):
+            text = f"💬 {text}"
         rendered_text = _md_to_html(text)
         runtime.logger.info(
             f"HER message delivery started: request={item.request_id} "
@@ -852,7 +855,7 @@ def wrap_her_persona_stream(
             if getattr(event, "kind", None) == KIND_ACKNOWLEDGEMENT
             else "task_commentary"
         )
-        return await _send_event(event, purpose=purpose)
+        return await _send_event(event, purpose=purpose, commentary=True)
 
     async def _control_presenter(event):
         return await _send_event(event, purpose="her_control")

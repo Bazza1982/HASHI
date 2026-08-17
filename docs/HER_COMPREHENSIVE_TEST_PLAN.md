@@ -111,9 +111,9 @@ A successful answer from the wrong route is a failure.
 | `low` | 12 | off | short direct execution |
 | `medium` | 32 | on | adaptive execution plan; no review capability |
 | `high` | 96 | on | optional plan-selected self-review |
-| `xhigh` | 192 | on | optional plan-selected independent read-only review |
-| `max` | 384 | on | optional plan-selected independent read-only review |
-| `max+` | 512 | on | same review plus optional isolated rerun of exact plan-declared tests; no private time or token cap |
+| `xhigh` | 192 | on | deeper self-review and assurance checkpoints; no independent reviewer |
+| `max` | 384 | on | independent read-only planning/final review; final review is non-blocking |
+| `max+` | 512 | on | same review plus optional isolated rerun of exact plan-declared tests; no separate overall task time or token cap |
 
 The test harness must assert the environment passed to HER. It must not infer the
 effort from how long the model appeared to think.
@@ -273,8 +273,8 @@ prove exact edge behavior before any paid API run:
 17. At MEDIUM through MAX+, a direct-response greeting produces one adaptive plan and one
     reply with no second execution generation, terminal semantic compaction, task tools,
     test, self-review, or independent review; LOW replies without a planning call.
-18. HIGH exposes only optional self-review. XHIGH, MAX, and MAX+ expose optional
-    independent review, and the plan may select `none` at every level.
+18. HIGH and XHIGH expose only optional self-review/assurance. Independent review
+    begins at MAX, and the plan may select `none` at every level.
 19. An independent reviewer receives a separate read-only registry, can inspect actual
     source files, Git status/diff/log/show/blame, and file SHA-256, and cannot mutate the
     workspace even when the primary agent can.
@@ -283,7 +283,8 @@ prove exact edge behavior before any paid API run:
     the omitted raw result instead of resending the ledger.
 21. `revise` and `block` verdicts reach the primary agent as advisory feedback. Exhausting
     review revisions still produces an agent-owned, uncertainty-aware final answer; a final
-    reviewer `pass` is not required.
+    reviewer `pass` is not required. Every independent-review provider request carries the
+    90-second hard deadline, and timeout/error/invalid output takes the same fail-open final path.
 22. Only a MAX+ profile that selects `isolated_recheck`, independent review, and exact test
     commands receives `ReviewRun`. Unplanned commands are denied, the source workspace is
     not writable, network is unavailable, and no unsafe fallback runs when isolation is

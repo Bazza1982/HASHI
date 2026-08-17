@@ -890,6 +890,7 @@ async def test_medium_claw_sends_each_task_acknowledgement_event_once():
 
     assert len(sent) == 1
     assert sent[0][0] == 123
+    assert sent[0][1].startswith("💬 ")
     assert sent[0][2]["_purpose"] == "task_acknowledgement"
     assert any(
         "acknowledgement policy" in message for message in runtime.logger.messages
@@ -987,6 +988,7 @@ async def test_her_short_commentary_renders_markdown_before_telegram_delivery():
     assert chat_id == 123
     assert kwargs["parse_mode"] == "HTML"
     assert kwargs["_purpose"] == "task_commentary"
+    assert delivered_text.startswith("💬 ")
     assert "<b>两份记录都只有 Finance 侧确认，没有 HR 审批人</b>" in delivered_text
     assert "- <b>记录 A</b>：" in delivered_text
     assert "- <b>记录 B</b>：" in delivered_text
@@ -1043,7 +1045,7 @@ async def test_her_commentary_uses_long_sender_when_rendered_html_exceeds_limit(
 
     assert short_sender_calls == []
     assert len(long_sender_calls) == 1
-    assert long_sender_calls[0][0] == (123, raw_text)
+    assert long_sender_calls[0][0] == (123, f"💬 {raw_text}")
     assert long_sender_calls[0][1] == {
         "request_id": "req-1",
         "purpose": "task_commentary",
@@ -1515,6 +1517,7 @@ async def test_required_her_control_is_visible_with_all_optional_channels_off():
     )
 
     assert len(sent) == 1
+    assert not sent[0][1].startswith("💬")
     assert sent[0][2]["_purpose"] == "her_control"
 
 
