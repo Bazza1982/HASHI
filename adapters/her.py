@@ -128,7 +128,6 @@ HER_EXECUTION_EFFORTS = frozenset(
     {*CLAW_EXECUTION_EFFORT_ITERATIONS, _her_ultra.HER_ULTRA_EFFORT}
 )
 
-HER_COMMENTARY_EFFORTS = frozenset({"high", "xhigh", "max", "max+", "ultra"})
 HER_COMMENTARY_FIRST_UPDATE_S = 90.0
 HER_COMMENTARY_TARGET_INTERVAL_S = 180.0
 HER_COMMENTARY_HARD_INTERVAL_S = 300.0
@@ -420,9 +419,7 @@ def _claw_compact_execution_ledger(result: ClawTaskResult) -> dict[str, Any]:
             ).strip()
         if not tool_use_id and isinstance(tool_result, Mapping):
             tool_use_id = str(
-                tool_result.get("tool_use_id")
-                or tool_result.get("toolUseId")
-                or ""
+                tool_result.get("tool_use_id") or tool_result.get("toolUseId") or ""
             ).strip()
         if name.strip().lower() == "askuserquestion" and tool_result is not None:
             status = "pending_user_input"
@@ -433,7 +430,9 @@ def _claw_compact_execution_ledger(result: ClawTaskResult) -> dict[str, Any]:
         elif _claw_result_is_error(tool_result):
             status = "failed"
             verification = "failed"
-        elif _claw_tool_is_read_only(name) or _claw_has_explicit_verification(tool_result):
+        elif _claw_tool_is_read_only(name) or _claw_has_explicit_verification(
+            tool_result
+        ):
             status = "succeeded"
             verification = "verified"
         else:
@@ -545,7 +544,7 @@ class _HERStreamCadenceController:
         if not (event.summary or "").strip():
             return
         if not self.progress_enabled:
-            await self._callback(self._suppressed(event, "effort_progress_disabled"))
+            await self._callback(self._suppressed(event, "commentary_cadence_disabled"))
             return
         fingerprint = self._material_fingerprint(event)
         if fingerprint and fingerprint == self._last_material_fingerprint:
@@ -731,9 +730,7 @@ def _build_claw_incomplete_report(
     if execution_limit:
         recommendation = "CONTINUE"
         recommendation_zh = "从已保存的 session 继续；执行轮数耗尽不代表计划需要改变。"
-        recommendation_en = (
-            "Resume the saved session; exhausting execution turns does not require a plan change."
-        )
+        recommendation_en = "Resume the saved session; exhausting execution turns does not require a plan change."
     elif missing or repeated_failure or failed:
         recommendation = "PIVOT"
         recommendation_zh = "改变策略后再继续；不要重复执行未经核验的副作用操作。"
@@ -1554,7 +1551,12 @@ def _her_stream_phase(event: Mapping[str, Any]) -> str:
 
 def _her_stream_origin(event: Mapping[str, Any]) -> str:
     kind = str(event.get("kind") or "")
-    if kind in {"task_acknowledgement", "task_plan", "user_commentary", "task_commentary"}:
+    if kind in {
+        "task_acknowledgement",
+        "task_plan",
+        "user_commentary",
+        "task_commentary",
+    }:
         return "her_planner"
     if kind == "assistant_commentary":
         return "primary_model"
@@ -1635,7 +1637,9 @@ def _her_stream_event_id(
         elif revision is not None:
             suffix = f"{phase}:{revision}"
         else:
-            frame = event.get("frame") if isinstance(event.get("frame"), Mapping) else {}
+            frame = (
+                event.get("frame") if isinstance(event.get("frame"), Mapping) else {}
+            )
             digest = hashlib.sha256(
                 json.dumps(frame, ensure_ascii=False, sort_keys=True).encode("utf-8")
             ).hexdigest()[:16]
@@ -2170,9 +2174,7 @@ def run_claw_json_command(
             except ClawJsonError:
                 parsed = {}
         message = (
-            parsed.get("error_message")
-            or parsed.get("error")
-            or parsed.get("message")
+            parsed.get("error_message") or parsed.get("error") or parsed.get("message")
             if isinstance(parsed, dict)
             else None
         )
@@ -3717,11 +3719,7 @@ INCOMPLETE TASK FACTS (quoted, read-only)
             and status["configured_servers"] > 0
         )
         legacy_server_valid = list_valid and server and server.get("valid") is True
-        current_server_valid = (
-            list_valid
-            and server
-            and "valid" not in server
-        )
+        current_server_valid = list_valid and server and "valid" not in server
         if not (legacy_server_valid or current_server_valid):
             raise ClawProviderConfigError(
                 f"HER required HASHI Tool Gateway is invalid: {status.get('invalid_servers') or status}"
@@ -4171,9 +4169,7 @@ RUNTIME FACTS (quoted, read-only)
                         else authority.permission_mode
                     ),
                     allowed_tools_override=(
-                        []
-                        if spec.phase in read_only_phases
-                        else inherited_tools
+                        [] if spec.phase in read_only_phases else inherited_tools
                     ),
                     task_env_overrides=self._ultra_task_env(spec.effort),
                     model_override=spec.model,
@@ -4226,9 +4222,8 @@ RUNTIME FACTS (quoted, read-only)
         session_mode_enabled = self._session_mode and not self._ephemeral_session()
         session_scope = self._request_session_scope(request_id)
         resume_session_id = self._request_resume_session(request_id)
-        isolated_resume = (
-            session_scope == HER_SESSION_SCOPE_ISOLATED_RESUME
-            and bool(resume_session_id)
+        isolated_resume = session_scope == HER_SESSION_SCOPE_ISOLATED_RESUME and bool(
+            resume_session_id
         )
         persistent_session = (
             session_mode_enabled and session_scope == HER_SESSION_SCOPE_PERSISTENT
@@ -4407,9 +4402,8 @@ RUNTIME FACTS (quoted, read-only)
         session_mode_enabled = self._session_mode and not self._ephemeral_session()
         session_scope = self._request_session_scope(request_id)
         resume_session_id = self._request_resume_session(request_id)
-        isolated_resume = (
-            session_scope == HER_SESSION_SCOPE_ISOLATED_RESUME
-            and bool(resume_session_id)
+        isolated_resume = session_scope == HER_SESSION_SCOPE_ISOLATED_RESUME and bool(
+            resume_session_id
         )
         persistent_session = (
             session_mode_enabled and session_scope == HER_SESSION_SCOPE_PERSISTENT
@@ -4456,11 +4450,14 @@ RUNTIME FACTS (quoted, read-only)
                 on_stream_event,
                 request_id=request_id,
                 prompt=prompt,
-                progress_enabled=self.effort in HER_COMMENTARY_EFFORTS,
+                # Persona commentary is a presentation channel controlled by
+                # /commentary, not an execution-effort feature.  Every native
+                # effort may produce material tool-turn updates; the downstream
+                # message router remains the sole user preference gate.
+                progress_enabled=True,
             )
             request_stream_callback = cadence_controller.forward
-            if cadence_controller.progress_enabled:
-                cadence_task = asyncio.create_task(cadence_controller.run())
+            cadence_task = asyncio.create_task(cadence_controller.run())
 
         async def execute_request() -> ClawTaskResult:
             if isolated_resume:
@@ -5096,8 +5093,7 @@ RUNTIME FACTS (quoted, read-only)
             pending_interaction=dict(parsed["pending_interaction"])
             if isinstance(parsed.get("pending_interaction"), Mapping)
             else None,
-            planning_status=str(parsed.get("planning_status") or "").strip()
-            or None,
+            planning_status=str(parsed.get("planning_status") or "").strip() or None,
             planning_error=str(parsed.get("planning_error") or "").strip() or None,
         )
 
@@ -5389,9 +5385,10 @@ RUNTIME FACTS (quoted, read-only)
                         ]
                         if initial_direct_response is not None:
                             await flush_pending_acknowledgement()
-                    elif kind == "task_plan" and str(
-                        event.get("phase") or "update"
-                    ) == "initial":
+                    elif (
+                        kind == "task_plan"
+                        and str(event.get("phase") or "update") == "initial"
+                    ):
                         initial_direct_response = _her_task_frame_is_direct_response(
                             event
                         )

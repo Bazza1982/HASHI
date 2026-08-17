@@ -13,7 +13,6 @@ import pytest
 from telegram.error import RetryAfter
 
 from adapters.her import (
-    HER_COMMENTARY_EFFORTS,
     _claw_jsonl_to_stream_events,
     _HERStreamCadenceController,
 )
@@ -53,11 +52,17 @@ class _Logger:
 
 
 class _ContextAssembler:
-    def build_prompt_payload(self, prompt, backend, *, extra_sections, inject_memory, incremental):
+    def build_prompt_payload(
+        self, prompt, backend, *, extra_sections, inject_memory, incremental
+    ):
         section_text = "\n".join(f"{key}: {value}" for key, value in extra_sections)
         return {
             "final_prompt": f"{prompt}\n{backend}\n{section_text}",
-            "audit": {"sections": [{"key": key, "chars": len(value)} for key, value in extra_sections]},
+            "audit": {
+                "sections": [
+                    {"key": key, "chars": len(value)} for key, value in extra_sections
+                ]
+            },
         }
 
 
@@ -77,7 +82,9 @@ class _BackendManager:
         self.delay_s = delay_s
         self.calls = []
 
-    async def generate_response(self, final_prompt, request_id, *, is_retry, silent, on_stream_event):
+    async def generate_response(
+        self, final_prompt, request_id, *, is_retry, silent, on_stream_event
+    ):
         import asyncio
 
         self.calls.append(
@@ -174,8 +181,12 @@ def _runtime():
     )
     runtime.name = "zelda"
     runtime.config.telegram_token_key = runtime.name
-    runtime.global_config = SimpleNamespace(project_root=Path(tempfile.mkdtemp(prefix="hashi-pipeline-test-")))
-    runtime.workspace_dir = runtime.global_config.project_root / "workspaces" / runtime.name
+    runtime.global_config = SimpleNamespace(
+        project_root=Path(tempfile.mkdtemp(prefix="hashi-pipeline-test-"))
+    )
+    runtime.workspace_dir = (
+        runtime.global_config.project_root / "workspaces" / runtime.name
+    )
     runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
     runtime.session_id_dt = "session-1"
     runtime.logger = _Logger()
@@ -187,7 +198,9 @@ def _runtime():
     runtime.maintenance_events = []
     runtime._mark_activity = lambda: setattr(runtime, "activity_marked", True)
     runtime._mark_error = lambda error: setattr(runtime, "last_error", error)
-    runtime._log_maintenance = lambda item, event, **fields: runtime.maintenance_events.append((event, fields))
+    runtime._log_maintenance = lambda item, event, **fields: (
+        runtime.maintenance_events.append((event, fields))
+    )
     runtime._safe_excerpt = lambda text, limit: text[:limit]
     runtime.success_marked = False
     runtime.transcripts = []
@@ -211,7 +224,9 @@ def _runtime():
     }
     runtime._thinking_chars_this_req = 12
     runtime.get_current_model = lambda: "gpt-test"
-    runtime._wrapper_audit_fields = lambda wrapper_result: {"wrapper_applied": bool(wrapper_result)}
+    runtime._wrapper_audit_fields = lambda wrapper_result: {
+        "wrapper_applied": bool(wrapper_result)
+    }
     runtime.memory_store = _MemoryStore()
     runtime.handoff_builder = _HandoffBuilder()
     runtime.project_chat_logger = _ProjectChatLogger()
@@ -232,13 +247,17 @@ def _runtime():
 
     runtime.typing_loop = _typing_loop
 
-    async def _escalating_placeholder_loop(chat_id, placeholder, request_id, stop_typing, *, backend):
+    async def _escalating_placeholder_loop(
+        chat_id, placeholder, request_id, stop_typing, *, backend
+    ):
         runtime.escalating_loops.append(request_id)
         await stop_typing.wait()
 
     runtime._escalating_placeholder_loop = _escalating_placeholder_loop
 
-    async def _streaming_display_loop(chat_id, placeholder, request_id, stop_typing, stream_queue, *, backend):
+    async def _streaming_display_loop(
+        chat_id, placeholder, request_id, stop_typing, stream_queue, *, backend
+    ):
         runtime.streaming_loops.append((request_id, stream_queue is not None))
         await stop_typing.wait()
 
@@ -255,18 +274,28 @@ def _runtime():
 
     runtime._make_stream_callback = _make_stream_callback
     runtime.post_turn_calls = []
-    runtime._core_memory_assistant_text = lambda core_raw, visible_text, wrapper_result: f"memory:{visible_text}"
+    runtime._core_memory_assistant_text = (
+        lambda core_raw, visible_text, wrapper_result: f"memory:{visible_text}"
+    )
     runtime._schedule_post_turn_observers = (
-        lambda item, user_text, assistant_text, is_bridge_request: runtime.post_turn_calls.append(
-            (user_text, assistant_text, is_bridge_request)
+        lambda item, user_text, assistant_text, is_bridge_request: (
+            runtime.post_turn_calls.append(
+                (user_text, assistant_text, is_bridge_request)
+            )
         )
     )
-    runtime._strip_transfer_accept_prefix = lambda item, text: text.removeprefix("ACCEPTED:")
+    runtime._strip_transfer_accept_prefix = lambda item, text: text.removeprefix(
+        "ACCEPTED:"
+    )
     runtime._mark_success = lambda: setattr(runtime, "success_marked", True)
     runtime._should_buffer_during_transfer = lambda request_id: False
-    runtime._record_suppressed_transfer_result = lambda item, **fields: setattr(runtime, "suppressed", fields)
+    runtime._record_suppressed_transfer_result = lambda item, **fields: setattr(
+        runtime, "suppressed", fields
+    )
     runtime._should_retry_codex_scheduler_failure = lambda item, error: False
-    runtime._schedule_codex_scheduler_retry = lambda item: setattr(runtime, "retry_scheduled", True)
+    runtime._schedule_codex_scheduler_retry = lambda item: setattr(
+        runtime, "retry_scheduled", True
+    )
 
     async def _send_long_message(**kwargs):
         runtime.sent_message = kwargs
@@ -295,7 +324,9 @@ def _runtime():
 
     runtime._send_voice_reply = _send_voice_reply
     runtime.audit_followups = []
-    runtime._schedule_audit_followup = lambda item, **fields: runtime.audit_followups.append(fields)
+    runtime._schedule_audit_followup = lambda item, **fields: (
+        runtime.audit_followups.append(fields)
+    )
     runtime.hchat_routes = []
 
     async def _hchat_route_reply(item, text):
@@ -307,8 +338,12 @@ def _runtime():
         return f"wrapped:{text}", {"mode": "wrapper"}
 
     runtime._apply_wrapper_to_visible_text = _apply_wrapper_to_visible_text
-    runtime._append_core_transcript = lambda item, **fields: runtime.transcripts.append(fields)
-    runtime._wrapper_listener_fields = lambda core_raw, visible_text, wrapper_result: {"wrapped": True}
+    runtime._append_core_transcript = lambda item, **fields: runtime.transcripts.append(
+        fields
+    )
+    runtime._wrapper_listener_fields = lambda core_raw, visible_text, wrapper_result: {
+        "wrapped": True
+    }
 
     async def _notify_request_listeners(request_id, payload):
         runtime.listener_payloads.append(payload)
@@ -349,8 +384,7 @@ def test_begin_queue_item_preserves_explicit_habit_ineligibility():
 
     assert runtime.current_request_meta["habit_learning_eligible"] is False
     assert (
-        runtime._request_meta_by_id[item.request_id]["habit_learning_eligible"]
-        is False
+        runtime._request_meta_by_id[item.request_id]["habit_learning_eligible"] is False
     )
 
 
@@ -378,7 +412,9 @@ async def test_build_turn_prompt_collects_context_sections_and_updates_audit_sta
     item = _item()
     runtime.current_request_meta = {}
 
-    prompt = await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    prompt = await runtime_pipeline.build_turn_prompt(
+        runtime, item, is_bridge_request=False
+    )
 
     assert prompt.effective_prompt == "primer\nHello"
     assert prompt.extra_sections == [
@@ -413,7 +449,10 @@ async def test_scheduler_her_turn_uses_isolated_full_context_session():
     )
 
     assert runtime.current_request_meta["session_scope"] == "isolated_per_run"
-    assert runtime._request_meta_by_id[item.request_id]["session_scope"] == "isolated_per_run"
+    assert (
+        runtime._request_meta_by_id[item.request_id]["session_scope"]
+        == "isolated_per_run"
+    )
     assert prompt.incremental is False
 
 
@@ -473,13 +512,18 @@ async def test_build_turn_prompt_binds_bare_continue_to_persisted_stopped_task()
     assert "[HASHI /stop continuation" in prompt.effective_prompt
     assert original_item.prompt in prompt.effective_prompt
     assert "You can continue now" in prompt.effective_prompt
-    assert runtime.current_request_meta["resumed_interrupted_task"]["request_id"] == "req-original"
+    assert (
+        runtime.current_request_meta["resumed_interrupted_task"]["request_id"]
+        == "req-original"
+    )
     assert continuation._resumed_interrupted_task["prompt"] == original_item.prompt
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["fixed", "flex"])
-async def test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_task(mode):
+async def test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_task(
+    mode,
+):
     runtime = _runtime()
     runtime.config.active_backend = "her"
     runtime.backend_manager.agent_mode = mode
@@ -567,7 +611,9 @@ async def test_build_turn_prompt_leaves_unrelated_request_unchanged_with_stopped
     item = _item(prompt="Write a new report")
     runtime_pipeline.begin_queue_item(runtime, item)
 
-    prompt = await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    prompt = await runtime_pipeline.build_turn_prompt(
+        runtime, item, is_bridge_request=False
+    )
 
     assert prompt.effective_prompt == "primer\nWrite a new report"
     assert "resumed_interrupted_task" not in runtime.current_request_meta
@@ -575,7 +621,13 @@ async def test_build_turn_prompt_leaves_unrelated_request_unchanged_with_stopped
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("mode", "supports_sessions", "session_id", "expected_profile", "expected_incremental"),
+    (
+        "mode",
+        "supports_sessions",
+        "session_id",
+        "expected_profile",
+        "expected_incremental",
+    ),
     [
         ("fixed", True, "cli-session", "memory_plus_session", True),
         ("flex", False, None, "memory_plus_stateless", False),
@@ -672,7 +724,9 @@ async def test_run_backend_generation_returns_foreground_response():
 async def test_run_backend_generation_detaches_background_task():
     runtime = _runtime()
     runtime.config.extra = {"background_mode": True, "background_detach_after": 0.01}
-    runtime.backend_manager = _BackendManager(response=SimpleNamespace(is_success=True, text="late"), delay_s=0.05)
+    runtime.backend_manager = _BackendManager(
+        response=SimpleNamespace(is_success=True, text="late"), delay_s=0.05
+    )
     item = _item()
 
     generation = await runtime_pipeline.run_backend_generation(
@@ -786,7 +840,12 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
     )
 
     assert runtime.app.bot.sent == [
-        {"chat_id": 123, "text": "typing", "parse_mode": None, "disable_notification": True}
+        {
+            "chat_id": 123,
+            "text": "typing",
+            "parse_mode": None,
+            "disable_notification": True,
+        }
     ]
     assert feedback.placeholder.message_id == 77
     assert feedback.typing_task is not None
@@ -832,7 +891,9 @@ async def test_medium_claw_sends_each_task_acknowledgement_event_once():
     assert len(sent) == 1
     assert sent[0][0] == 123
     assert sent[0][2]["_purpose"] == "task_acknowledgement"
-    assert any("acknowledgement policy" in message for message in runtime.logger.messages)
+    assert any(
+        "acknowledgement policy" in message for message in runtime.logger.messages
+    )
     assert any(
         "acknowledgement accepted by transport" in message
         for message in runtime.logger.messages
@@ -871,8 +932,7 @@ async def test_her_message_audit_preserves_exact_commentary_and_transport_status
 
     audit_path = runtime.workspace_dir / "backend_state" / "her_message_audit.jsonl"
     records = [
-        json.loads(line)
-        for line in audit_path.read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
     ]
     assert [record["status"] for record in records] == [
         "generated",
@@ -940,7 +1000,9 @@ async def test_medium_claw_acknowledgement_composes_with_request_activity():
 
     runtime._send_text = _send_text
     runtime.request_activity = SimpleNamespace(
-        publish_stream=lambda request_id, event: published.append((request_id, event.kind))
+        publish_stream=lambda request_id, event: published.append(
+            (request_id, event.kind)
+        )
     )
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
@@ -1070,8 +1132,8 @@ async def test_pending_her_commentary_superseded_by_final_is_audited_not_sent():
 @pytest.mark.parametrize(
     ("effort", "expected_purposes"),
     [
-        ("low", []),
-        ("medium", ["task_acknowledgement"]),
+        ("low", ["task_commentary"]),
+        ("medium", ["task_acknowledgement", "task_commentary"]),
         ("high", ["task_acknowledgement", "task_commentary"]),
         ("xhigh", ["task_acknowledgement", "task_commentary"]),
         ("max", ["task_acknowledgement", "task_commentary"]),
@@ -1115,12 +1177,12 @@ async def test_her_effort_commentary_matrix_reaches_transport_receipt(
                 provenance="persona_renderer",
             )
         )
-    elif effort != "low":
+    else:
         controller = _HERStreamCadenceController(
             feedback.on_stream_event,
             request_id="req-1",
             prompt="Inspect and report.",
-            progress_enabled=effort in HER_COMMENTARY_EFFORTS,
+            progress_enabled=True,
             first_update_s=0.001,
             target_interval_s=0.002,
             hard_interval_s=0.003,
@@ -1131,20 +1193,24 @@ async def test_her_effort_commentary_matrix_reaches_transport_receipt(
             if controller.progress_enabled
             else None
         )
-        raw_events = [
-            {
-                "kind": "task_acknowledgement",
-                "event_id": "task-acknowledgement:1",
-                "text": "Sunny will inspect the requested evidence. ☀️",
-            },
+        raw_events = []
+        if effort != "low":
+            raw_events.append(
+                {
+                    "kind": "task_acknowledgement",
+                    "event_id": "task-acknowledgement:1",
+                    "text": "Sunny will inspect the requested evidence. ☀️",
+                }
+            )
+        raw_events.append(
             {
                 "kind": "assistant_commentary",
                 "event_id": "assistant-commentary:1",
                 "phase": "execution",
                 "iteration": 1,
                 "text": "Sunny completed the inspection and is validating it. ☀️",
-            },
-        ]
+            }
+        )
         for raw_event in raw_events:
             for event in _claw_jsonl_to_stream_events(
                 raw_event,
@@ -1221,9 +1287,9 @@ async def test_her_commentary_off_suppresses_acknowledgement_and_progress_live()
         "generated",
         "suppressed",
     ]
-    assert {record.get("reason") for record in records if record["status"] == "suppressed"} == {
-        "commentary_disabled"
-    }
+    assert {
+        record.get("reason") for record in records if record["status"] == "suppressed"
+    } == {"commentary_disabled"}
 
 
 @pytest.mark.asyncio
@@ -1282,7 +1348,9 @@ async def test_non_deliverable_her_activity_persists_without_presentation():
     runtime._commentary = True
     published = []
     runtime.request_activity = SimpleNamespace(
-        publish_stream=lambda request_id, event: published.append((request_id, event.kind))
+        publish_stream=lambda request_id, event: published.append(
+            (request_id, event.kind)
+        )
     )
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
@@ -1346,7 +1414,9 @@ async def test_required_her_control_is_visible_with_all_optional_channels_off():
 
 
 @pytest.mark.asyncio
-async def test_setup_interactive_feedback_placeholder_retry_after_records_failover(tmp_path):
+async def test_setup_interactive_feedback_placeholder_retry_after_records_failover(
+    tmp_path,
+):
     runtime = _runtime()
     runtime.name = "kasumi"
     runtime.workspace_dir = tmp_path / "workspaces" / "kasumi"
@@ -1394,7 +1464,9 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
 
 
 @pytest.mark.asyncio
-async def test_setup_interactive_feedback_skips_placeholder_when_delivery_blocked(tmp_path):
+async def test_setup_interactive_feedback_skips_placeholder_when_delivery_blocked(
+    tmp_path,
+):
     runtime = _runtime()
     runtime.name = "kasumi"
     runtime.workspace_dir = tmp_path / "workspaces" / "kasumi"
@@ -1668,7 +1740,10 @@ async def test_answer_preview_stops_after_per_request_edit_budget():
     await task
 
     assert len(runtime.app.bot.edits) == 2
-    assert any("preview budget exhausted" in message for message in runtime.telegram_logger.messages)
+    assert any(
+        "preview budget exhausted" in message
+        for message in runtime.telegram_logger.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -1712,7 +1787,10 @@ async def test_answer_preview_disables_after_retry_after():
     assert runtime.app.bot.edits == []
     assert stream_state.failed is True
     assert "Flood control exceeded" in stream_state.failure_reason
-    assert any("Answer stream preview disabled" in message for message in runtime.telegram_logger.messages)
+    assert any(
+        "Answer stream preview disabled" in message
+        for message in runtime.telegram_logger.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -1818,7 +1896,9 @@ async def test_answer_preview_shows_progress_when_text_delta_absent():
         )
     )
 
-    await event_queue.put(StreamEvent(kind=KIND_PROGRESS, summary="Codex started reasoning"))
+    await event_queue.put(
+        StreamEvent(kind=KIND_PROGRESS, summary="Codex started reasoning")
+    )
     for _ in range(20):
         if runtime.app.bot.edits:
             break
@@ -1856,7 +1936,10 @@ async def test_answer_preview_keeps_review_visible_after_answer_deltas_start():
         StreamEvent(kind=KIND_REVIEW, summary="Review final_claim r1: PASS")
     )
     for _ in range(20):
-        if runtime.app.bot.edits and "Review final_claim" in runtime.app.bot.edits[-1]["text"]:
+        if (
+            runtime.app.bot.edits
+            and "Review final_claim" in runtime.app.bot.edits[-1]["text"]
+        ):
             break
         await asyncio.sleep(0.02)
 
@@ -1870,7 +1953,9 @@ async def test_answer_preview_keeps_review_visible_after_answer_deltas_start():
 @pytest.mark.asyncio
 async def test_legacy_preview_flag_stays_inactive_without_verbose():
     runtime = _runtime()
-    runtime.backend_manager.current_backend.capabilities.supports_thinking_stream = False
+    runtime.backend_manager.current_backend.capabilities.supports_thinking_stream = (
+        False
+    )
     _set_stream_policy(runtime, placeholder=True, preview=True)
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
@@ -1919,7 +2004,9 @@ async def test_verbose_backend_without_reasoning_still_uses_progress_events():
         "telegram_stream_enabled": True,
         "answer_stream_preview": False,
     }
-    runtime.backend_manager.current_backend.capabilities.supports_thinking_stream = False
+    runtime.backend_manager.current_backend.capabilities.supports_thinking_stream = (
+        False
+    )
     _set_stream_policy(runtime, placeholder=True, progress=True, preview=False)
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
@@ -2178,14 +2265,18 @@ def test_persist_success_memory_records_human_exchange_and_handoff():
         ("user", "text", "user text"),
         ("assistant", "codex-cli", "memory:visible text"),
     ]
-    assert runtime.memory_store.exchanges == [("user text", "memory:visible text", "text")]
+    assert runtime.memory_store.exchanges == [
+        ("user text", "memory:visible text", "text")
+    ]
     assert runtime.post_turn_calls == [("user text", "memory:visible text", False)]
     assert runtime.handoff_builder.transcript == [
         ("user", "user text", "text"),
         ("assistant", "visible text", "text"),
     ]
     assert runtime.handoff_builder.refreshed is True
-    assert runtime.project_chat_logger.exchanges == [("user text", "visible text", "text")]
+    assert runtime.project_chat_logger.exchanges == [
+        ("user text", "visible text", "text")
+    ]
 
 
 def test_persist_success_memory_skips_bridge_memory_and_handoff():
@@ -2475,7 +2566,9 @@ async def test_finalize_streamed_answer_skips_promotion_when_delivery_blocked(tm
     assert result.fallback_required is False
     assert result.error == "delivery blocked"
     assert runtime.app.bot.edits == []
-    assert (tmp_path / "workspaces" / "zelda" / "undelivered" / f"{item.request_id}.md").exists()
+    assert (
+        tmp_path / "workspaces" / "zelda" / "undelivered" / f"{item.request_id}.md"
+    ).exists()
 
 
 @pytest.mark.asyncio

@@ -313,13 +313,15 @@ TaskFrame aliases that normalize to the same available tool capability are
 deduplicated in first-seen order; non-tool prose and unavailable capabilities
 remain invalid and planning continues under the last confirmed frame.
 
-Effort controls event generation, never a second presentation gate. A direct
-TaskFrame acknowledgement is buffered until the initial frame establishes
-whether `direct_response=true`; direct answers are classified as `final` and
-delivered once by the existing post-generation final lane, never first as
-commentary. Deterministic TaskFrame summaries and neutral runtime leases are
-technical telemetry rather than guessed Persona speech. The configured
-`system_md` remains the only Persona source.
+Execution effort may shape planning depth and which updates the model elects to
+author, but it is never a second presentation gate. Any explicit Persona
+commentary emitted at `low` through `ultra` follows the same cadence and is
+controlled only by `/commentary`. A direct TaskFrame acknowledgement is
+buffered until the initial frame establishes whether `direct_response=true`;
+direct answers are classified as `final` and delivered once by the existing
+post-generation final lane, never first as commentary. Deterministic TaskFrame
+summaries and neutral runtime leases are technical telemetry rather than guessed
+Persona speech. The configured `system_md` remains the only Persona source.
 
 Provider reasoning deltas are an exact byte-fragment contract. HER must preserve
 leading, trailing, and whitespace-only fragments from the provider stream; HASHI

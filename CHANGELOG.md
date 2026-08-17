@@ -28,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the race, the remaining update is explicitly audited as
   `superseded_by_final` instead of disappearing silently. End-to-end coverage
   now spans every HER effort from `low` through `ultra`, including transport
-  receipts and terminal supersession.
+  receipts and terminal supersession. Removed the legacy `high`-and-above
+  presentation gate: native Persona commentary at `low` or `medium` now follows
+  the same cadence and is controlled only by the explicit `/commentary` switch.
 - **Native HER direct-response finalization regression** — restored the
   TaskFrame `direct_response` disposition across `medium` through `max+`.
   A validated Persona-authored direct answer now becomes the persisted final

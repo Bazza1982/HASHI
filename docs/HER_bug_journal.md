@@ -74,8 +74,38 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260817-036` | Deployed to Arale — live behavior verification pending | P2 | pending model-authored Persona commentary shared technical cadence and vanished silently at turn finalization | `test_claw_cadence_technical_activity_does_not_delay_persona_commentary`; `test_claw_cadence_finish_supersedes_only_latest_pending_commentary`; `test_her_effort_commentary_matrix_reaches_transport_receipt` |
 | `HER-20260817-037` | Deployed to Arale — live behavior verification pending | P2 | primary tool-turn Persona text remained internal `assistant_delta`, so the repaired commentary cadence had no native events to deliver | `complete_tool_bound_text_emits_one_commentary_before_tool_execution`; `test_claw_tool_bound_assistant_commentary_is_user_visible_primary_model_text`; effort transport matrix |
 | `HER-20260817-038` | Deployed to Arale — live behavior verification pending | P1 | StreamLake's 504 inside an established SSE stream was hard-coded non-retryable and aborted a resumable Arale turn | `stream_message_marks_embedded_gateway_timeout_as_retryable`; `provider_stream_retries_embedded_504_once_and_returns_only_complete_attempt` |
+| `HER-20260817-039` | Fixed in source — deployment/live verification pending | P1 | a legacy effort gate silently demoted every native Persona commentary at `low` and `medium` to internal despite `/commentary on` | `test_medium_adapter_delivers_native_tool_turn_commentary`; corrected low-through-ultra transport matrix |
 
 ## Historical entries
+
+### HER-20260817-039 — low/medium effort silently suppressed Persona commentary
+
+- **Status:** Fixed in source — deployment/live verification pending
+- **Severity:** P1
+- **Discovered:** 2026-08-17 AEST in Arale request `req-0001`, a 835-second
+  `medium` turn with 17 successful tool calls.
+- **Expected:** execution effort changes planning/execution depth, not message
+  ownership. When `/commentary on`, any native model-authored Persona update at
+  `low` through `ultra` follows the common commentary cadence to Telegram.
+- **Actual:** native HER generated at least thirteen complete
+  `assistant_commentary` events. The adapter then converted every one to
+  `delivery_class=internal` with
+  `suppressed_reason=effort_progress_disabled`; Telegram therefore received
+  only the initial acknowledgement and final answer.
+- **Root cause:** `HER_COMMENTARY_EFFORTS` retained an obsolete
+  `{high, xhigh, max, max+, ultra}` presentation allowlist. The previous
+  low-through-ultra test encoded that obsolete policy as its expected output,
+  so it proved routing only at allowed efforts and falsely passed the overall
+  contract.
+- **Repair:** remove effort from the presentation decision; always run the
+  native commentary cadence when a stream callback exists; leave `/commentary`
+  as the sole optional user-visibility gate. Low may have no TaskFrame
+  acknowledgement, but a native tool-turn commentary remains deliverable.
+- **Regression tests:** a real fake-CLI `medium` adapter stream proving native
+  commentary crosses the adapter boundary, plus corrected `low` through
+  `ultra` events reaching Telegram transport receipts.
+- **Secrets/redaction checked:** yes; the forensic audit contained task text,
+  but no task payload or private path has been copied into tests.
 
 ### HER-20260817-038 — embedded SSE 504 aborted a resumable turn
 
@@ -167,7 +197,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **Discovered:** 2026-08-17 AEST while tracing a MAX+ Arale turn whose native
   event ledger contained a model-authored `task_commentary` but whose Telegram
   transcript contained no commentary delivery.
-- **Expected:** user-facing Persona commentary follows its own effort-controlled
+- **Expected:** user-facing Persona commentary follows its own effort-independent
   cadence and `/commentary` switch. Technical updates belong to `/verbose`,
   provider reasoning belongs to `/think`, and activity in either channel cannot
   reset the Persona clock. Every generated commentary event is eventually
