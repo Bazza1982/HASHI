@@ -691,6 +691,51 @@ async def test_scheduler_routes_legacy_dream_action_to_native_runtime(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_scheduler_routes_jobs_automation_without_skill_dispatch(tmp_path):
+    calls: list[dict[str, Any]] = []
+
+    class Runtime:
+        name = "zelda"
+        startup_success = True
+
+        async def invoke_scheduler_automation(self, **kwargs: Any):
+            calls.append(kwargs)
+            return True, "done"
+
+    runtime = Runtime()
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler-state.json",
+        runtimes=[runtime],
+        authorized_id=1,
+    )
+    job = {
+        "id": "remote-guard-daily",
+        "agent": "zelda",
+        "enabled": True,
+        "schedule": "30 1 * * *",
+        "action": "automation:remote-guard",
+        "args": "status",
+    }
+
+    ok = await scheduler._fire_cron_job(
+        job,
+        runtime_map={"zelda": runtime},
+        tasks={"crons": [job]},
+        now_dt=scheduler_module.datetime.now(),
+    )
+
+    assert ok is True
+    assert calls == [
+        {
+            "automation_id": "remote-guard",
+            "args": "status",
+            "task_id": "remote-guard-daily",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_skill_dream_is_a_native_command_compatibility_route(
     monkeypatch,
 ):

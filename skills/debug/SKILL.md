@@ -1,8 +1,6 @@
 ---
-id: debug
-name: Debug
-type: toggle
-description: Debug within the requested scope using minimum sufficient, risk-linked verification
+name: debug
+description: Use when diagnosing or fixing a scoped failure with direct evidence and minimum sufficient, risk-linked verification.
 ---
 
 Treat the task as a scoped debugging assignment. Complete the requested outcome with direct evidence. Debug mode increases rigor, not scope.

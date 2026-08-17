@@ -1,8 +1,6 @@
 ---
-id: codex
-name: Delegate to Codex
-type: prompt
-description: Delegate a coding task to Codex CLI and manage it as a project manager
+name: codex
+description: Use when delegating a self-contained coding task to Codex CLI, monitoring its progress, and reporting the result as project manager.
 ---
 
 You are delegating a coding task to OpenAI Codex CLI. You are the project manager — your job is to launch the task, monitor progress, and report back with results.
@@ -88,7 +86,3 @@ If the task failed, read the error log carefully and either:
 - Do not blindly trust "success" — verify the output when possible.
 - If the task is very large, break it into smaller Codex invocations.
 - The workspace directory for Codex should be the target project directory, not your own workspace.
-
-## User's task
-
-{prompt}

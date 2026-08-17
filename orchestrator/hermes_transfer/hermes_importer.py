@@ -26,7 +26,7 @@ class HermesImportOptions:
     overwrite: bool = False
     include_memory: bool = True
     include_schedules: bool = True
-    include_skills: bool = True
+    include_skills: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,8 +83,9 @@ def plan_hermes_import(
     ]
     if "schedules/tasks.json" not in package.names:
         warnings.append("package does not contain schedules/tasks.json")
-    if not any(name.startswith("skills/") for name in package.names):
-        warnings.append("package does not contain Hermes skill files; hchat skill must be installed separately if needed")
+    contains_skill_archive = any(name.startswith("skills/") for name in package.names)
+    if contains_skill_archive:
+        warnings.append("package Skill files remain inert; native HER/Claw Skill loading is disabled")
 
     planned = [
         PlannedWrite(path=str(profile / "AGENT.md"), action="write", description="write imported Hermes instructions"),
@@ -97,7 +98,14 @@ def plan_hermes_import(
     if opts.include_schedules:
         planned.append(PlannedWrite(path=str(profile / "imported_schedules"), kind="directory", action="create", description="write paused schedule drafts"))
     if opts.include_skills:
-        planned.append(PlannedWrite(path=str(profile / "skills"), kind="directory", action="create", description="copy package skills when present"))
+        planned.append(
+            PlannedWrite(
+                path=str(profile / "legacy_skill_archive"),
+                kind="directory",
+                action="create",
+                description="archive package Skill files without activating them",
+            )
+        )
 
     dry_run = DryRunReport(
         operation="hermes_import",
@@ -148,7 +156,11 @@ def import_hermes_agent(
         if opts.include_schedules:
             _write_paused_schedules(archive, plan.profile_dir / "imported_schedules" / _package_slug(plan.transfer_package.manifest))
         if opts.include_skills:
-            _write_prefix(archive, "skills/", plan.profile_dir / "skills")
+            _write_prefix(
+                archive,
+                "skills/",
+                plan.profile_dir / "legacy_skill_archive" / _package_slug(plan.transfer_package.manifest),
+            )
 
     _write_yaml_file(plan.profile_dir / "config.yaml", plan.profile_config)
     _upsert_bridge_agent(plan.bridge_home / "agents.yaml", plan.target_profile_name, plan.bridge_agent_entry)

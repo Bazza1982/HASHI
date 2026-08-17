@@ -60,7 +60,7 @@ Five execution modes:
 - `/verbose [on|off]` — show a temporary technical activity card with planning, tools, tests, validation, retries, and runtime status; Persona speech, reasoning, and answer drafts are excluded
 - `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
 - `/stream` and `/preview` — retired compatibility commands that point to the display controls above; Telegram answers are delivered only when complete
-- `/skill` — browse, toggle, and run skills (inline keyboard)
+- `/skill` — browse and apply standard instruction Skills (inline keyboard)
 - `/active [on|off] [minutes]` — toggle bridge-managed proactive heartbeat (default 10 min)
 - `/nudge [list]` — show idle continuation jobs. `/nudge <minutes> <exit condition>` creates an idle-only continuation job; `/nudge max <id-fragment> <+100|-100|number|unlimited>` adjusts the optional fire limit. Telegram nudge panels also include `Max -100`, `Max +100`, and `Max ∞` buttons.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]` — control native bridge-owned voice replies
@@ -165,11 +165,11 @@ all files. See [Memory+ v2 — Compact Work Continuity](MEMORY_PLUS_V2.md) for
 backend routing, rollover, migration, and writer ownership.
 
 ## Skills System
-- Skills live under `skills/` as `skills/<id>/skill.md` with YAML frontmatter.
-- Three types: `toggle` (on/off bridge behavior), `action` (runnable script), `prompt` (template with optional backend routing).
-- Skill state persisted per agent in `workspace/skill_state.json`.
-- Built-in skills: `cron`, `heartbeat`, `debug`, `recall`.
-- `recall` — toggle for one-shot automatic session restore after unexpected restart (not after `/new`).
+- Skills live under `skills/` as `skills/<kebab-case-name>/SKILL.md` packages.
+- Frontmatter requires standard `name` and `description`; Agent Skills optional metadata fields are accepted, while the Markdown body supplies request instructions.
+- `/skill` no longer exposes action or toggle package types. Cron, heartbeat, nudge, and deterministic automation live under `/jobs`; debug, recall state, and Dream remain runtime controls.
+- Native HER/Claw Skill discovery and execution are disabled, so HASHI is the only `/skill` owner.
+- Legacy underscore IDs remain accepted for scheduled-job compatibility while new definitions use kebab-case.
 - Delegation skills: `/skill codex <task>`, `/skill claude <task>`, `/skill gemini <task>` for cross-backend delegation.
 
 ## Browser Tool

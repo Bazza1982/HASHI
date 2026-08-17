@@ -259,7 +259,7 @@ start a Meditation call. Controls are available at three levels:
 - Operational override: `HASHI_HER_HABIT_MEDITATION=on|off`
 
 Each agent stores its own files under `workspaces/<agent>/habits/*.json`.
-`/skill dream` remains the separate nightly memory-reflection mechanism and does
+`/dream` remains the separate nightly memory-reflection mechanism and does
 not read or write HER Habit files.
 
 The HER-only `/habit` menu supports inspection, persistent on/off/default
@@ -616,7 +616,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/notepad [today\|carryover\|history\|find <query>]` | Inspect the compact Memory+ work card and archived-day pointers |
 | `/privacy [0-5]` | Show privacy details or quickly select a privacy level; Level 1 is the default |
 | `/handoff` | Restore continuity from recent transcript |
-| `/skill` | Browse and run skills (inline keyboard) |
+| `/skill` | Browse and apply standard instruction Skills (inline keyboard) |
 | `/exp <task>` | Run a task after consulting context-specific EXP guidebooks |
 | `/help` | Show available commands |
 
@@ -700,25 +700,22 @@ configuration summary.
 
 ### Skills System
 
-**Skills** are modular capabilities that extend agent functionality. Every skill is defined by a `skill.md` file with frontmatter + instructions.
+**Skills** are portable instruction packages following the Agent Skills layout.
+Every package uses `skills/<kebab-case-name>/SKILL.md`, with required `name` and
+`description` frontmatter plus Markdown instructions. Standard optional
+frontmatter (`license`, `compatibility`, `metadata`, and experimental
+`allowed-tools`) is accepted for portability; HASHI's runtime permission policy
+remains authoritative.
 
-#### Skill Types
+Packages may include `scripts/`, `references/`, and `assets/` resources. The
+Skill body is loaded only when that Skill is invoked. Legacy action, toggle,
+backend-routing, and lowercase `skill.md` manifests are not part of the live
+catalog.
 
-| Type | Behavior | Example |
-|------|----------|---------|
-| **Action** | One-shot execution, runs a script | `dream`, `agent_audit`, `system_status` |
-| **Prompt** | Routes user input to a backend/tool | `codex`, `gemini`, `claude` |
-| **Toggle** | Injects instructions while active | `TTS`, `carbon-accounting`, `academic-writing` |
-
-#### Built-in Skills
-
-| Skill | Type | Description |
-|-------|------|-------------|
-| `dream` | Action | Nightly memory consolidation + behavioral reflection |
-| `agent_audit` | Action | Local-only agent behavior audit report |
-| `cron` | Action | Cron job management |
-| `heartbeat` | Action | Heartbeat job management |
-| `recall` | Toggle | Auto-restore continuity after restart |
+Cron, heartbeat, nudge, and deterministic scheduled automation belong to
+`/jobs`. Debug, recall state, and Dream remain runtime controls. `/EXP` remains
+an independent structured execution system. Native HER/Claw Skill discovery,
+installation, loading, and execution are disabled; HASHI owns `/skill`.
 
 #### Using Skills
 
@@ -726,9 +723,7 @@ configuration summary.
 /skill                          → Show skill grid (Telegram inline keyboard)
 /skill help                     → List all skills
 /skill <name>                   → Show skill info
-/skill <name> <prompt>          → Run prompt skill with input
-/skill <name> on                → Enable toggle skill
-/skill <name> off               → Disable toggle skill
+/skill <name> <request>         → Apply the Skill instructions to a request
 ```
 
 ---
@@ -1041,8 +1036,8 @@ Every agent request includes assembled context:
 --- SYSTEM IDENTITY ---
 {agent.md contents}
 
---- ACTIVE SKILLS ---
-{active toggle skills}
+--- ACTIVE RUNTIME INSTRUCTIONS ---
+{enabled runtime instructions}
 
 --- RELEVANT LONG-TERM MEMORY ---
 {top retrieved memories}

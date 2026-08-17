@@ -38,7 +38,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/usecomputer [on|off|status|examples|task]`: load managed GUI-aware operating guidance. This is a unified shortcut for desktop/browser/Windows computer use, but it does not force GUI when a better non-GUI path exists.
 - `/browser [status|examples|1-4 task]`: run an internet task with a selected route: HASHI headless browser, CLI-native browsing, Brave search, or the logged-in HASHI browser extension.
 - `/exp <task>`: consult the context-specific EXP guidebooks under `exp/` before running a task.
-- `/skill`: browse built-in and custom skills.
+- `/skill`: browse and apply standard built-in or custom instruction Skills.
 - `/mode [fixed|flex|wrapper|audit|dual-brain]`: inspect or switch execution
   mode. `/mode memory+` is a compatibility alias that enables continuity
   without changing the current mode.
@@ -68,7 +68,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   intentional process kill is not reported as a Backend error.
 - `/steer <direction>`: when busy, stop the current turn immediately (all backends), keep interim thinking/progress/artefacts, then continue with a mid-task wrapper. When idle, send the direction as a plain new request (no steer wrapper). Example: `/steer also include unit tests`. The intentional kill (e.g. exit `-9`) is suppressed — you should see the steer ack, not `❌ Backend error`. Full reference: [STEER_COMMAND.md](STEER_COMMAND.md).
 - `/focus`: one-off scope correction that does not cancel or finish the task. When busy, replace the active backend turn with an immediate continuation that preserves progress/artefacts, narrows execution to the original user-requested scope, and keeps working until the requested outcome is complete or genuinely blocked. When idle, apply the same continuation reminder to the most recent task; if no task is available, do nothing. Full reference: [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md).
-- `/recall [count]`: remove requests still waiting in this agent's request queue without interrupting the current task. With no count, remove the entire waiting queue. The optional count may be any positive whole number: `/recall 1` removes the newest waiting request, `/recall 2` removes the newest two, and `/recall n` removes up to the newest `n`. If `n` exceeds the queue length, all waiting requests are removed without error. Retained requests keep their original FIFO order. It does not restart the backend or affect cron jobs or future messages. This command is separate from the `recall` memory skill managed through `/skill recall`. Full reference: [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md).
+- `/recall [count]`: remove requests still waiting in this agent's request queue without interrupting the current task. With no count, remove the entire waiting queue. The optional count may be any positive whole number: `/recall 1` removes the newest waiting request, `/recall 2` removes the newest two, and `/recall n` removes up to the newest `n`. If `n` exceeds the queue length, all waiting requests are removed without error. Retained requests keep their original FIFO order. It does not restart the backend or affect cron jobs or future messages. This queue command is separate from the hidden legacy recall-state compatibility setting. Full reference: [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md).
 - `/privacy [0-5]`: show the privacy menu and active-backend compatibility details, or request a level directly. Level 0 disables the privacy framework; Level 1 is the default provider-trust mode with no local redaction. Levels 2–5 remain visible as reserved framework states and cannot be activated until their promised controls are installed and verified. Lowering the active level requires explicit confirmation.
 - `/start`: start another stopped agent.
 - `/reboot`: hot restart agents with live Python code reload. Modes:
@@ -135,16 +135,11 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - Progress updates during a running job are not yet a built-in manager heartbeat. If a task needs periodic progress messages, the task command must emit them or call an approved notification surface intentionally; normal terminal completion/failure routing remains managed by BackgroundJobManager.
 
 ## Skills System
-- Skills live under `skills/`.
-- Types: `action`, `prompt`, `toggle`.
-- Built-ins currently include:
-  - `cron`
-  - `heartbeat`
-  - `debug`
-  - `recall`
-- Toggle skills persist in workspace state until turned off.
-- `/skill` is the main browser for the skill catalog.
-- `recall` is a bridge policy toggle: if ON, recent continuity is auto-restored once after an unexpected restart, but not after `/new` or `/fresh`.
+- Skills live under `skills/<kebab-case-name>/SKILL.md` and contain portable instructions plus optional `scripts/`, `references/`, and `assets/` resources.
+- `name` and `description` are required Agent Skills frontmatter. Standard optional metadata fields are accepted.
+- `/skill` lists and applies instruction packages only; it has no action, toggle, backend-routing, cron, or heartbeat package types.
+- `/jobs` owns cron, heartbeat, nudge, and deterministic automation. Debug, recall state, and Dream are runtime controls; `/EXP` stays independent.
+- Native HER/Claw Skill discovery and execution are disabled. HASHI is the only live Skill owner.
 
 ## Workspaces And Files
 - Main repo guide: `README.md`

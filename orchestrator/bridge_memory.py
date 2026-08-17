@@ -865,7 +865,15 @@ class BridgeContextAssembler:
             for skill_id, skill_name, skill_body in active_skills:
                 skill_parts.append(f"## [{skill_id}] {skill_name}")
                 skill_parts.append(skill_body)
-            add_section("active_skills", "ACTIVE SKILLS", skill_parts, item_count=len(active_skills))
+            # The remaining persistent injection is a runtime setting (Debug),
+            # not a catalog Skill type. Keep the internal key stable for token
+            # accounting while presenting the ownership boundary accurately.
+            add_section(
+                "active_skills",
+                "ACTIVE RUNTIME INSTRUCTIONS",
+                skill_parts,
+                item_count=len(active_skills),
+            )
 
         if extra_sections:
             for title, body in extra_sections:

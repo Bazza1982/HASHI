@@ -201,3 +201,4 @@ exp/barry/aonsw_data_analysis/
 
 # Local Remote/HChat health-check action (machine-specific configuration and bytecode)
 /skills/remote_guard/
+/skills/remote-guard/

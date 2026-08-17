@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
-import re
 from pathlib import Path
-
 
 PROJECT_ROOT = Path("/home/lily/projects/hashi")
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "generate_agent_behavior_audit.py"
@@ -30,6 +29,7 @@ def main() -> int:
         cwd=str(WORKSPACE),
         capture_output=True,
         text=True,
+        check=False,
     )
     output = (proc.stdout or "").strip()
     err = (proc.stderr or "").strip()
@@ -56,7 +56,7 @@ def main() -> int:
     print("Daily agent behavior audit executed.")
     print(f"Report path: {report_path}")
     print(f"Latest report: {LATEST_REPORT}")
-    print("Execution mode: local-only action skill (no external API, no OpenRouter, no DeepSeek)")
+    print("Execution mode: local-only Jobs automation (no external API, no OpenRouter, no DeepSeek)")
     if findings:
         print("Key findings:")
         for item in findings:

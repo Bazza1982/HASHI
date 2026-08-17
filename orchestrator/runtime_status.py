@@ -255,7 +255,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
             "<b>ACTIVITY</b>",
             f"<b>Runtime</b> · <code>{'BUSY' if runtime.is_generating else 'IDLE'}</code> · queue <code>{runtime.queue.qsize()}</code> · process <code>{html.escape(str(runtime._process_info()))}</code>",
             f"<b>Request</b> · {html.escape(str(current_line))}",
-            f"<b>Memory</b> · skills {html.escape(', '.join(active_skills) if active_skills else 'none')} · recall <code>{'ON' if recall_on else 'OFF'}</code> · FYI <code>{'ARMED' if runtime._pending_session_primer else 'CLEAR'}</code>",
+            f"<b>Memory</b> · runtime settings {html.escape(', '.join(active_skills) if active_skills else 'none')} · recall <code>{'ON' if recall_on else 'OFF'}</code> · FYI <code>{'ARMED' if runtime._pending_session_primer else 'CLEAR'}</code>",
             f"<b>Proactive</b> · <code>{active_mode}</code> · every {html.escape(active_interval)} · hb <code>{heartbeat_count}</code> · cron <code>{cron_count}</code>",
             f"<b>Health</b> · {html.escape(health_line)}",
             f"<b>Last activity</b> · success {html.escape(runtime._format_age(runtime.last_success_at))} · activity {html.escape(runtime._format_age(runtime.last_activity_at))}",

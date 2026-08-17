@@ -1,14 +1,14 @@
 from __future__ import annotations
-import asyncio
+
 import json
-import os
-import sys
-from uuid import uuid4
-from contextlib import suppress
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+import yaml
 
 from orchestrator.job_ownership import ownership_mismatch_label
 
@@ -17,24 +17,36 @@ from orchestrator.job_ownership import ownership_mismatch_label
 class SkillDefinition:
     id: str
     name: str
-    type: str
     description: str
     body: str
     skill_dir: Path
-    run: str | None = None
-    backend: str | None = None
+
+
+class SkillValidationError(ValueError):
+    """Raised when a HASHI Skill package violates the public package contract."""
 
 
 class SkillManager:
     ACTIVE_HEARTBEAT_DEFAULT_MINUTES = 10
-    ACTION_SKILL_TIMEOUT_S = 1800
+    SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    SKILL_FRONTMATTER_KEYS = frozenset(
+        {
+            "name",
+            "description",
+            "license",
+            "compatibility",
+            "metadata",
+            "allowed-tools",
+        }
+    )
+    RUNTIME_TOGGLE_IDS = frozenset({"debug", "recall"})
 
     def __init__(self, project_root: Path, tasks_path: Path):
         self.project_root = project_root
         self.skills_dir = project_root / "skills"
         self.tasks_path = tasks_path
         self.active_heartbeats_path = project_root / "managed_active_heartbeats.json"
-        self._action_skill_locks: dict[str, asyncio.Lock] = {}
+        self._skill_validation_errors: list[str] = []
 
     def _now(self) -> str:
         return datetime.now().isoformat(timespec="seconds")
@@ -42,20 +54,90 @@ class SkillManager:
     def _read_text(self, path: Path) -> str:
         return path.read_text(encoding="utf-8-sig")
 
-    def _parse_frontmatter(self, text: str) -> tuple[dict[str, str], str]:
-        raw = (text or "").strip()
-        if not raw.startswith("---"):
-            return {}, raw
-        parts = raw.split("---", 2)
-        if len(parts) < 3:
-            return {}, raw
-        frontmatter = {}
-        for line in parts[1].splitlines():
-            if ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            frontmatter[key.strip()] = value.strip()
-        return frontmatter, parts[2].strip()
+    def _parse_frontmatter(self, text: str, *, source: Path) -> tuple[dict[str, Any], str]:
+        lines = (text or "").splitlines()
+        if not lines or lines[0].strip() != "---":
+            raise SkillValidationError(f"{source}: SKILL.md must start with YAML frontmatter")
+        try:
+            closing_index = next(
+                index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"
+            )
+        except StopIteration as exc:
+            raise SkillValidationError(f"{source}: YAML frontmatter is not closed") from exc
+
+        try:
+            parsed = yaml.safe_load("\n".join(lines[1:closing_index])) or {}
+        except yaml.YAMLError as exc:
+            raise SkillValidationError(f"{source}: invalid YAML frontmatter: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise SkillValidationError(f"{source}: YAML frontmatter must be a mapping")
+
+        unknown = sorted(
+            str(key) for key in set(parsed) - self.SKILL_FRONTMATTER_KEYS
+        )
+        if unknown:
+            raise SkillValidationError(
+                f"{source}: unsupported frontmatter keys: {', '.join(str(key) for key in unknown)}"
+            )
+        for key in ("name", "description"):
+            value = parsed.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise SkillValidationError(f"{source}: `{key}` must be a non-empty string")
+            parsed[key] = value.strip()
+
+        optional_strings = ("license", "allowed-tools")
+        for key in optional_strings:
+            if key in parsed and not isinstance(parsed[key], str):
+                raise SkillValidationError(f"{source}: `{key}` must be a string")
+
+        if "compatibility" in parsed:
+            compatibility = parsed["compatibility"]
+            if not isinstance(compatibility, str):
+                raise SkillValidationError(f"{source}: `compatibility` must be a string")
+            if len(compatibility) > 500:
+                raise SkillValidationError(
+                    f"{source}: `compatibility` must be 500 characters or fewer"
+                )
+
+        if "metadata" in parsed:
+            metadata = parsed["metadata"]
+            if not isinstance(metadata, dict) or any(
+                not isinstance(key, str) or not isinstance(value, str)
+                for key, value in metadata.items()
+            ):
+                raise SkillValidationError(
+                    f"{source}: `metadata` must map string keys to string values"
+                )
+
+        return parsed, "\n".join(lines[closing_index + 1 :]).strip()
+
+    def _load_skill_definition(self, skill_dir: Path) -> SkillDefinition:
+        skill_md = skill_dir / "SKILL.md"
+        frontmatter, body = self._parse_frontmatter(self._read_text(skill_md), source=skill_md)
+        skill_id = frontmatter["name"]
+        if len(skill_id) > 64:
+            raise SkillValidationError(f"{skill_md}: `name` must be 64 characters or fewer")
+        if not self.SKILL_NAME_PATTERN.fullmatch(skill_id):
+            raise SkillValidationError(
+                f"{skill_md}: `name` must be lowercase kebab-case (letters, digits, hyphens)"
+            )
+        if skill_dir.name != skill_id:
+            raise SkillValidationError(
+                f"{skill_md}: directory `{skill_dir.name}` must match skill name `{skill_id}`"
+            )
+        if len(frontmatter["description"]) > 1024:
+            raise SkillValidationError(
+                f"{skill_md}: `description` must be 1024 characters or fewer"
+            )
+        if not body:
+            raise SkillValidationError(f"{skill_md}: instruction body must not be empty")
+        return SkillDefinition(
+            id=skill_id,
+            name=skill_id,
+            description=frontmatter["description"],
+            body=body,
+            skill_dir=skill_dir,
+        )
 
     def _skill_state_path(self, workspace_dir: Path) -> Path:
         return workspace_dir / "skill_state.json"
@@ -74,59 +156,55 @@ class SkillManager:
 
     def list_skills(self) -> list[SkillDefinition]:
         if not self.skills_dir.exists():
+            self._skill_validation_errors = []
             return []
         skills: list[SkillDefinition] = []
+        errors: list[str] = []
         for skill_dir in sorted(p for p in self.skills_dir.iterdir() if p.is_dir()):
-            skill_md = skill_dir / "skill.md"
+            skill_md = skill_dir / "SKILL.md"
             if not skill_md.exists():
                 continue
             try:
-                frontmatter, body = self._parse_frontmatter(self._read_text(skill_md))
-            except Exception:
+                skills.append(self._load_skill_definition(skill_dir))
+            except (OSError, UnicodeError, SkillValidationError) as exc:
+                errors.append(str(exc))
                 continue
-            skill_id = (frontmatter.get("id") or skill_dir.name).strip()
-            skill_type = (frontmatter.get("type") or "").strip().lower()
-            if skill_type not in {"action", "prompt", "toggle"}:
-                continue
-            skills.append(
-                SkillDefinition(
-                    id=skill_id,
-                    name=(frontmatter.get("name") or skill_id).strip(),
-                    type=skill_type,
-                    description=(frontmatter.get("description") or "").strip(),
-                    body=body,
-                    skill_dir=skill_dir,
-                    run=frontmatter.get("run"),
-                    backend=frontmatter.get("backend"),
-                )
-            )
+        self._skill_validation_errors = errors
         return skills
 
+    def skill_validation_errors(self) -> list[str]:
+        self.list_skills()
+        return list(self._skill_validation_errors)
+
+    def _canonical_skill_id(self, value: str) -> str:
+        return (value or "").strip().lower().replace("_", "-")
+
     def get_skill(self, skill_id: str) -> SkillDefinition | None:
-        wanted = (skill_id or "").strip().lower()
+        wanted = self._canonical_skill_id(skill_id)
         for skill in self.list_skills():
-            if skill.id.lower() == wanted or skill.name.lower() == wanted:
+            if skill.id == wanted:
                 return skill
         return None
-
-    def list_skills_by_type(self) -> dict[str, list[SkillDefinition]]:
-        grouped = {"action": [], "toggle": [], "prompt": []}
-        for skill in self.list_skills():
-            grouped.setdefault(skill.type, []).append(skill)
-        return grouped
 
     def get_active_toggle_ids(self, workspace_dir: Path) -> set[str]:
         state = self._load_json(self._skill_state_path(workspace_dir), {})
         active = state.get("active_skills", {})
         if isinstance(active, list):
-            return {str(item) for item in active}
-        if isinstance(active, dict):
-            return {str(key) for key, value in active.items() if value}
-        return set()
+            raw_ids = {str(item) for item in active}
+        elif isinstance(active, dict):
+            raw_ids = {str(key) for key, value in active.items() if value}
+        else:
+            raw_ids = set()
+        return {
+            canonical
+            for item in raw_ids
+            if (canonical := self._canonical_skill_id(item)) in self.RUNTIME_TOGGLE_IDS
+        }
 
     def get_active_toggle_skills(self, workspace_dir: Path) -> list[SkillDefinition]:
         active_ids = self.get_active_toggle_ids(workspace_dir)
-        return [skill for skill in self.list_skills() if skill.type == "toggle" and skill.id in active_ids]
+        debug = self.get_skill("debug")
+        return [debug] if debug is not None and "debug" in active_ids else []
 
     def set_toggle_state(
         self,
@@ -135,11 +213,9 @@ class SkillManager:
         enabled: bool,
         actor: str = "user",
     ) -> tuple[bool, str]:
-        skill = self.get_skill(skill_id)
-        if skill is None:
-            return False, f"Unknown skill: {skill_id}"
-        if skill.type != "toggle":
-            return False, f"Skill '{skill.id}' is not a toggle skill."
+        canonical_id = self._canonical_skill_id(skill_id)
+        if canonical_id not in self.RUNTIME_TOGGLE_IDS:
+            return False, f"Unknown runtime setting: {skill_id}"
 
         state_path = self._skill_state_path(workspace_dir)
         state = self._load_json(state_path, {})
@@ -147,28 +223,20 @@ class SkillManager:
         if not isinstance(active, dict):
             active = {}
         if enabled:
-            active[skill.id] = {"enabled_at": self._now(), "enabled_by": actor}
+            active[canonical_id] = {"enabled_at": self._now(), "enabled_by": actor}
         else:
-            active.pop(skill.id, None)
+            active.pop(canonical_id, None)
         state["active_skills"] = active
         self._save_json(state_path, state)
-        return True, f"{skill.name} is now {'ON' if enabled else 'OFF'}."
+        label = "Debug" if canonical_id == "debug" else "Recall"
+        return True, f"{label} is now {'ON' if enabled else 'OFF'}."
 
     def describe_skill(self, skill: SkillDefinition, workspace_dir: Path) -> str:
         lines = [
-            f"{skill.name} [{skill.type}]",
+            skill.name,
             skill.description or "No description.",
+            f"Usage: /skill {skill.id} <request>",
         ]
-        if skill.type == "toggle":
-            state = "ON" if skill.id in self.get_active_toggle_ids(workspace_dir) else "OFF"
-            lines.append(f"State: {state}")
-            lines.append("Usage: /skill {name} on | /skill {name} off".format(name=skill.id))
-        elif skill.type == "prompt":
-            backend = skill.backend or "current-backend"
-            lines.append(f"Backend: {backend}")
-            lines.append(f"Usage: /skill {skill.id} <prompt>")
-        elif skill.type == "action":
-            lines.append(f"Usage: /skill {skill.id}")
         body = (skill.body or "").strip()
         if body:
             preview = body if len(body) <= 700 else body[:700].rstrip() + "\n\n[truncated]"
@@ -188,99 +256,13 @@ class SkillManager:
         if not body:
             return user_prompt
         return (
-            f"--- SKILL CONTEXT [{skill.id}] ---\n"
+            f"--- SKILL INSTRUCTIONS [{skill.id}] ---\n"
+            f"Skill package root: {skill.skill_dir}\n"
+            "Resolve relative resource paths against that package root.\n\n"
             f"{body}\n\n"
-            f"--- SKILL REQUEST ---\n"
+            f"--- USER REQUEST ---\n"
             f"{user_prompt}"
         )
-
-    async def run_action_skill(
-        self,
-        skill: SkillDefinition,
-        workspace_dir: Path,
-        args: str = "",
-        extra_env: dict[str, str] | None = None,
-        timeout_s: float | None = None,
-    ) -> tuple[bool, str]:
-        if skill.id in {"cron", "heartbeat"}:
-            return True, self.describe_jobs(skill.id)
-        if not skill.run:
-            return False, f"Action skill '{skill.id}' is missing a run target."
-
-        run_path = skill.skill_dir / skill.run
-        if not run_path.exists():
-            return False, f"Action target not found: {run_path.name}"
-
-        suffix = run_path.suffix.lower()
-        if suffix == ".py":
-            cmd = [sys.executable, str(run_path)]
-        elif suffix == ".ps1":
-            cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(run_path)]
-        elif suffix == ".bat":
-            cmd = ["cmd", "/c", str(run_path)]
-        else:
-            cmd = [str(run_path)]
-        if args.strip():
-            cmd.append(args.strip())
-        effective_timeout_s = float(timeout_s or self.ACTION_SKILL_TIMEOUT_S)
-        lock_key = f"{workspace_dir.resolve()}::{skill.id}"
-        lock = self._action_skill_locks.setdefault(lock_key, asyncio.Lock())
-        if lock.locked():
-            return False, f"Action skill '{skill.id}' is already running."
-
-        env = os.environ.copy()
-        env["BRIDGE_PROJECT_ROOT"] = str(self.project_root)
-        env["BRIDGE_WORKSPACE_DIR"] = str(workspace_dir)
-        env["BRIDGE_SKILL_ID"] = skill.id
-        if extra_env:
-            env.update({k: str(v) for k, v in extra_env.items() if v is not None})
-
-        async with lock:
-            proc = None
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    cwd=str(workspace_dir),
-                    env=env,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(),
-                    timeout=effective_timeout_s,
-                )
-            except asyncio.CancelledError:
-                if proc is not None:
-                    with suppress(Exception):
-                        proc.kill()
-                    with suppress(Exception):
-                        await proc.wait()
-                raise
-            except asyncio.TimeoutError:
-                if proc is not None:
-                    with suppress(Exception):
-                        proc.kill()
-                    with suppress(Exception):
-                        await proc.wait()
-                return False, (
-                    f"Action skill '{skill.id}' timed out after "
-                    f"{int(effective_timeout_s)}s."
-                )
-            except Exception as e:
-                return False, f"Action skill '{skill.id}' failed to start: {e}"
-
-        out_text = stdout.decode("utf-8", errors="replace").strip()
-        err_text = stderr.decode("utf-8", errors="replace").strip()
-        lines = []
-        if out_text:
-            lines.append(out_text)
-        if err_text:
-            lines.append(f"stderr:\n{err_text}")
-        if proc.returncode != 0:
-            lines.append(f"exit_code={proc.returncode}")
-        text = "\n\n".join(lines).strip() or f"Action skill '{skill.id}' completed."
-        success = proc.returncode == 0
-        return success, text
 
     def _load_tasks(self) -> dict[str, Any]:
         tasks = self._load_json(self.tasks_path, {"version": 1, "heartbeats": [], "crons": [], "nudges": []})

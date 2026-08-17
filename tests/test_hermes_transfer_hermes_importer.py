@@ -109,7 +109,7 @@ def test_import_hermes_agent_creates_disabled_profile_and_bridge_entry(tmp_path)
     assert (profile / "hashi_import" / "audit" / "migration_report.md").exists()
 
 
-def test_import_hermes_agent_writes_memory_skills_and_paused_schedules(tmp_path):
+def test_import_hermes_agent_writes_memory_and_paused_schedules_but_no_live_skills(tmp_path):
     profile, bridge = _hermes_target(tmp_path)
     package = _hashi_to_hermes_package(tmp_path)
 
@@ -117,12 +117,30 @@ def test_import_hermes_agent_writes_memory_skills_and_paused_schedules(tmp_path)
 
     assert (profile / "imported_memory").exists()
     assert list((profile / "imported_memory").glob("*/files/MEMORY.md"))
-    assert (profile / "skills" / "hchat" / "SKILL.md").read_text(encoding="utf-8") == "# HChat\n"
+    assert not (profile / "skills").exists()
+    assert not (profile / "legacy_skill_archive").exists()
     [schedule_file] = list((profile / "imported_schedules").glob("*/tasks.paused.json"))
     schedules = json.loads(schedule_file.read_text(encoding="utf-8"))
     assert schedules["heartbeats"][0]["enabled"] is False
     assert schedules["heartbeats"][0]["import_state"] == "paused_review_draft"
     assert schedules["crons"][0]["enabled"] is False
+
+
+def test_import_hermes_agent_can_explicitly_retain_inert_skill_archive(tmp_path):
+    profile, bridge = _hermes_target(tmp_path)
+    package = _hashi_to_hermes_package(tmp_path)
+
+    plan = import_hermes_agent(
+        profile,
+        bridge,
+        package,
+        options=HermesImportOptions(include_skills=True),
+    )
+
+    [archived] = list((profile / "legacy_skill_archive").glob("*/hchat/SKILL.md"))
+    assert archived.read_text(encoding="utf-8") == "# HChat\n"
+    assert not (profile / "skills").exists()
+    assert any("Skill files remain inert" in warning for warning in plan.warnings)
 
 
 def test_plan_hermes_import_rejects_existing_profile_without_overwrite(tmp_path):

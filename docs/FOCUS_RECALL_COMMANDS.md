@@ -91,7 +91,7 @@ first-out order.
 - shut down, reset, or reinitialize the backend;
 - write an active-turn interruption marker;
 - affect cron jobs, scheduled future work, or messages sent after the command;
-- change the `recall` memory skill managed through `/skill recall`.
+- change the separate legacy auto-restore runtime setting.
 
 The reply reports how many queued requests were actually withdrawn. An empty
 queue is a successful no-op.
