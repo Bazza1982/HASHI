@@ -110,6 +110,81 @@ def test_cold_runtime_marks_previous_turn_unavailable_for_her_session_fallback(
     assert payload["previous_turn"] is None
 
 
+def test_cold_flex_runtime_recovers_last_confirmed_delivery_from_workspace_state(
+    tmp_path,
+):
+    before_rebuild = _runtime(tmp_path)
+    policy_turn = _item(
+        "req-0004",
+        "这也太容易啦，我明年博士就毕业了呢哈哈。",
+    )
+    runtime_turn_context.record_delivered_turn(
+        before_rebuild,
+        policy_turn,
+        "外籍华人博士永居通道需要博士学位和在中国境内工作。",
+    )
+
+    after_rebuild = _runtime(tmp_path)
+    follow_up = _item(
+        "req-0001",
+        "这个政策有没有申请人年龄限制？哪所大学博士限制？",
+    )
+
+    payload = _section_payload(after_rebuild, follow_up)
+
+    assert payload["previous_turn_status"] == "captured"
+    assert payload["previous_turn_source"] == "durable_delivery_state"
+    assert payload["reply_target"] == {
+        "kind": "latest_delivered_final",
+        "request_id": "req-0004",
+    }
+    assert payload["previous_turn"]["user_text"].startswith("这也太容易")
+    assert "外籍华人博士永居通道" in payload["previous_turn"]["assistant_text"]
+
+
+def test_first_upgrade_cold_start_recovers_only_latest_bridge_memory_exchange(
+    tmp_path,
+):
+    runtime = _runtime(tmp_path)
+    runtime.memory_store = SimpleNamespace(
+        get_recent_turns=lambda *, limit: [
+            {"role": "user", "source": "text", "text": "更早的投资问题"},
+            {"role": "assistant", "source": "her", "text": "更早的投资回答"},
+            {"role": "user", "source": "text", "text": "博士政策全国都适用吗？"},
+            {
+                "role": "assistant",
+                "source": "her",
+                "text": "外籍华人博士永居政策全国适用。",
+            },
+        ][:limit]
+    )
+
+    payload = _section_payload(
+        runtime,
+        _item("req-0001", "这个政策有年龄和毕业院校限制吗？"),
+    )
+
+    assert payload["previous_turn_status"] == "captured"
+    assert payload["previous_turn_source"] == "bridge_memory_fallback"
+    assert payload["previous_turn"]["user_text"] == "博士政策全国都适用吗？"
+    assert payload["previous_turn"]["assistant_text"] == "外籍华人博士永居政策全国适用。"
+    assert "更早的投资问题" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_explicit_context_reset_clears_process_and_durable_delivery_state(tmp_path):
+    runtime = _runtime(tmp_path)
+    turn = _item("req-0001", "remember this")
+    runtime_turn_context.record_delivered_turn(runtime, turn, "remembered answer")
+
+    runtime_turn_context.clear_delivered_turn_context(runtime)
+
+    assert runtime._last_delivered_turn_by_chat == {}
+    cold_runtime = _runtime(tmp_path)
+    payload = _section_payload(cold_runtime, _item("req-0001", "A"))
+    assert payload["previous_turn_status"] == "unavailable"
+    assert payload["previous_turn"] is None
+
+
 def test_pending_earlier_direct_turn_freezes_absence_of_a_visible_final(tmp_path):
     runtime = _runtime(tmp_path)
     earlier = _item("req-0001", "first request still running")
