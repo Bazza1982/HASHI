@@ -72,14 +72,14 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260816-034` | Verified | P1 | offline `--status` constructed a second rebuild manager and falsely failed an active build as a kernel restart | `test_offline_status_is_strictly_read_only_during_active_build`; `test_manager_ownership_lock_excludes_a_second_process` |
 | `HER-20260817-035` | Deployed to Arale — live behavior verification pending | P1 | source-integrated `.22` lost native direct-response termination, so completed TaskFrame answers entered primary execution and MAX/MAX+ review loops | `direct_response_finishes_after_one_planning_call_at_every_native_effort`; `invalid_direct_response_falls_back_to_primary_execution`; `test_claw_direct_response_acknowledgement_is_final_only` |
 | `HER-20260817-036` | Deployed to Arale — live behavior verification pending | P2 | pending model-authored Persona commentary shared technical cadence and vanished silently at turn finalization | `test_claw_cadence_technical_activity_does_not_delay_persona_commentary`; `test_claw_cadence_finish_supersedes_only_latest_pending_commentary`; `test_her_effort_commentary_matrix_reaches_transport_receipt` |
-| `HER-20260817-037` | Fixed in source — rebuild/live verification pending | P2 | primary tool-turn Persona text remained internal `assistant_delta`, so the repaired commentary cadence had no native events to deliver | `complete_tool_bound_text_emits_one_commentary_before_tool_execution`; `test_claw_tool_bound_assistant_commentary_is_user_visible_primary_model_text`; effort transport matrix |
-| `HER-20260817-038` | Fixed in source — rebuild/live verification pending | P1 | StreamLake's 504 inside an established SSE stream was hard-coded non-retryable and aborted a resumable Arale turn | `stream_message_marks_embedded_gateway_timeout_as_retryable`; `provider_stream_retries_embedded_504_once_and_returns_only_complete_attempt` |
+| `HER-20260817-037` | Deployed to Arale — live behavior verification pending | P2 | primary tool-turn Persona text remained internal `assistant_delta`, so the repaired commentary cadence had no native events to deliver | `complete_tool_bound_text_emits_one_commentary_before_tool_execution`; `test_claw_tool_bound_assistant_commentary_is_user_visible_primary_model_text`; effort transport matrix |
+| `HER-20260817-038` | Deployed to Arale — live behavior verification pending | P1 | StreamLake's 504 inside an established SSE stream was hard-coded non-retryable and aborted a resumable Arale turn | `stream_message_marks_embedded_gateway_timeout_as_retryable`; `provider_stream_retries_embedded_504_once_and_returns_only_complete_attempt` |
 
 ## Historical entries
 
 ### HER-20260817-038 — embedded SSE 504 aborted a resumable turn
 
-- **Status:** Fixed in source — rebuild/live verification pending
+- **Status:** Deployed to Arale — live behavior verification pending
 - **Severity:** P1
 - **Discovered:** 2026-08-17 AEST in Arale request `req-0002`, fixed-session
   HER, `deepseek/deepseek-v4-pro` through StreamLake.
@@ -111,11 +111,18 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   result.
 - **Secrets/redaction checked:** yes; tests and documentation use synthetic
   credentials and provider payloads only.
-- **Remaining risk:** managed rebuild and one live Arale provider retest remain.
+- **Managed adoption:** commit `99dc906d`; job
+  `rebuild-20260817-075341-15872f6e`; candidate
+  `dev-f08531a74d37c890-d79f38effe44`; binary SHA-256
+  `d79f38effe44bfa417ce81749d528711c73b7baf6dbe5f6b1f7dedbb7493ef9b`.
+  Candidate version/CLI/stream-json verification passed, Arale selected the
+  exact immutable binary, targeted hot restart completed, the 69-tool gateway
+  validated, Telegram reconnected, and the managed postcheck passed.
+- **Remaining risk:** one live Arale provider-timeout recovery retest remains.
 
 ### HER-20260817-037 — native tool-turn commentary was never produced
 
-- **Status:** Fixed in source — rebuild/live verification pending
+- **Status:** Deployed to Arale — live behavior verification pending
 - **Severity:** P2
 - **Recurrence of:** distinct producer-side defect exposed after
   `HER-20260817-036`; the cadence/terminal repair itself remained loaded.
@@ -146,8 +153,12 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   JSON serialization, adapter ownership/provenance, and low-through-ultra
   transport receipt coverage using the new native event type.
 - **Secrets/redaction checked:** yes; no private model text is stored in tests.
-- **Remaining risk:** managed rebuild and one live multi-tool Arale retest
-  remain.
+- **Managed adoption:** the same commit `99dc906d`, rebuild job
+  `rebuild-20260817-075341-15872f6e`, and immutable candidate
+  `dev-f08531a74d37c890-d79f38effe44` passed candidate verification, targeted
+  Arale restart, exact binary selection, Tool Gateway validation, Telegram
+  reconnection, and managed postcheck.
+- **Remaining risk:** one live multi-tool Arale retest remains.
 
 ### HER-20260817-036 — pending Persona commentary vanished at finalization
 
