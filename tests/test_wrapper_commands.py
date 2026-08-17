@@ -468,6 +468,7 @@ def _make_status_runtime(mode: str, state: dict) -> FlexibleAgentRuntime:
     runtime.handoff_path = Path("/tmp/xishi/handoff.md")
     runtime._verbose = False
     runtime._think = False
+    runtime._commentary = True
     runtime.last_backend_switch_at = None
     runtime.session_id_dt = "test-session"
     return runtime
@@ -523,6 +524,31 @@ def test_status_text_shows_wrapper_model_configuration():
     assert "<b>Wrapper</b> · <code>claude-cli / claude-haiku-4-5</code>" in text
     assert "<b>Context window</b> · <code>3</code>" in text
     assert "<b>Slots</b> · <code>3</code> configured" in text
+
+
+def test_status_text_moves_display_settings_into_summary_for_compact_and_full(tmp_path):
+    runtime = _make_status_runtime("flex", {})
+    runtime.workspace_dir = tmp_path / "xishi"
+    runtime._think = True
+    runtime._commentary = False
+    telegram_stream_policy.set_typing_enabled(runtime, True)
+
+    for detailed in (False, True):
+        text = runtime._build_status_text(detailed=detailed)
+
+        memory_index = text.index("<b>Memory+</b>")
+        think_index = text.index("<b>Think</b> · <code>ON</code>")
+        commentary_index = text.index("<b>Commentary</b> · <code>OFF</code>")
+        typing_index = text.index(
+            "<b>Typing</b> · <code>ON</code> · persisted override"
+        )
+        connections_index = text.index("<b>CONNECTIONS</b>")
+
+        assert memory_index < think_index < commentary_index < typing_index
+        assert typing_index < connections_index
+        assert text.count("<b>Think</b>") == 1
+        assert text.count("<b>Commentary</b>") == 1
+        assert text.count("<b>Typing</b>") == 1
 
 
 def test_status_full_includes_audit_criteria_and_wrapper_slots():
