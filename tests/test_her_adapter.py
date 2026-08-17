@@ -3146,6 +3146,7 @@ async def test_claw_direct_response_acknowledgement_is_final_only(tmp_path):
     )
 
     assert response.is_success is True
+    assert response.tool_loop_count == 0
     expected = ("Hello from the configured Persona. " * 40).strip()
     assert len(expected) > 500
     assert response.text == expected

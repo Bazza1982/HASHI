@@ -70,8 +70,44 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260815-032` | Fixed — live verification pending | P0 | isolated scheduler choices and CONTINUE checkpoints were absent from the primary conversation context | `test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_task`; `test_her_isolated_continuation_resumes_exact_checkpoint_without_replacing_primary` |
 | `HER-20260816-033` | Fixed in source — rebuild/live verification pending | P1 | TaskFrame again saw only `A` while the primary executor saw and completed the previous option | `task_checkpoint_receives_immediate_previous_dialogue_context`; `tests/test_runtime_turn_context.py` |
 | `HER-20260816-034` | Verified | P1 | offline `--status` constructed a second rebuild manager and falsely failed an active build as a kernel restart | `test_offline_status_is_strictly_read_only_during_active_build`; `test_manager_ownership_lock_excludes_a_second_process` |
+| `HER-20260817-035` | Fixed in source — rebuild/live verification pending | P1 | source-integrated `.22` lost native direct-response termination, so completed TaskFrame answers entered primary execution and MAX/MAX+ review loops | `direct_response_finishes_after_one_planning_call_at_every_native_effort`; `invalid_direct_response_falls_back_to_primary_execution`; `test_claw_direct_response_acknowledgement_is_final_only` |
 
 ## Historical entries
+
+### HER-20260817-035 — TaskFrame direct answers no longer terminated the turn
+
+- **Status:** Fixed in source — rebuild/live verification pending
+- **Severity:** P1
+- **Discovered:** 2026-08-17 AEST during a MAX+ `/handoff` latency diagnosis
+- **Expected:** when TaskFrame determines that its Persona-authored
+  acknowledgement completely answers a no-tool, no-state-change turn, HER
+  persists and delivers that answer once with `completed/end_turn`, without a
+  second primary generation or any assurance review. Non-direct work continues
+  through the primary Agent under the TaskFrame goal and boundaries.
+- **Actual:** the source-integrated `.22` `TaskFrame` had no `direct_response`
+  field and `run_turn_observed` unconditionally entered the primary execution
+  loop. The Python adapter still recognized synthetic `direct_response=true`
+  events, but native HER could never produce one. At MAX+ this amplified a
+  completed acknowledgement into a redundant primary answer and repeated
+  verification revisions.
+- **User-visible impact:** a simple handoff acknowledgement took several
+  minutes, consumed repeated model/reviewer calls, and risked a worse duplicate
+  final answer even though planning had already produced the complete response.
+- **Root cause:** the supervised source import from the certified `.22` line did
+  not preserve the native direct-response profile and early-return path that
+  remained documented and present in the `.19` binary. Adapter-only synthetic
+  coverage proved final-lane routing but not native production or termination,
+  so the producer/consumer contract split was not detected.
+- **Repair:** restore an explicit native `TaskFrame.direct_response`; require a
+  complete Persona answer with no planned actions, tools, assurance, completed
+  execution claims, failures, remaining work, or next action; bypass independent
+  planning and completion gates; persist the answer in the normal session; emit
+  the initial TaskPlan for final-lane classification; and return zero-iteration
+  `completed/end_turn`. Invalid direct frames retain a visible planning error and
+  fall through the existing authorization-preserving primary path.
+- **Regression tests:** native effort matrix for `medium`, `high`, `xhigh`,
+  `max`, and `max+`; invalid-direct non-blocking fallback; non-direct TaskFrame
+  handoff to the primary Agent; existing adapter final-lane delivery test.
 
 ### HER-20260816-034 — rebuild status observer falsely became a restart owner
 

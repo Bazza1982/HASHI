@@ -9,7 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No changes recorded after the v4.0.0-alpha.2 release-candidate cut._
+### Fixed
+
+- **Native HER direct-response finalization regression** — restored the
+  TaskFrame `direct_response` disposition across `medium` through `max+`.
+  A validated Persona-authored direct answer now becomes the persisted final
+  response with zero primary execution iterations and no independent planning,
+  verification, testing, or completion review. Frames that retain actions,
+  tools, assurance, completed claims, failures, or remaining work are rejected
+  and fall back to non-blocking primary execution. Non-direct frames continue to
+  provide the primary Agent with the canonical goal and execution boundaries.
 
 ## [4.0.0-alpha.2] - 2026-08-16 (Release Candidate)
 
