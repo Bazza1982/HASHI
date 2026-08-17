@@ -309,6 +309,7 @@ def _reinitialize_workspace_runtime(runtime: Any) -> None:
         runtime.config.system_md,
         active_skill_provider=runtime._get_active_skill_sections,
         sys_prompt_manager=runtime.sys_prompt_manager,
+        global_sys_prompt_manager=getattr(runtime, "global_sys_prompt_manager", None),
     )
     runtime.reload_post_turn_observers()
 

@@ -1371,7 +1371,10 @@ Prompt semantics:
 
 - memory prompt controls the pre-turn FYI context generator;
 - notepad prompt controls the continuity update call after a successful turn;
-- `/sys` is unchanged and still belongs to the right-brain runtime system prompt
-  path via `workspaces/<agent>/sys_prompts.json`.
+- `/sys` still belongs to the right-brain runtime system prompt path. Local
+  slots use `workspaces/<agent>/sys_prompts.json`; `/sys global` and `/sys g`
+  add instance-wide slots from `bridge_home/state/global_sys_prompts.json`.
+- Active global slots are assembled before local slots and take precedence over
+  conflicting local `/sys` rules.
 - right-brain execution instructions are handled by `agent.md` and `/sys`, not
   by dual-brain prompt controls.

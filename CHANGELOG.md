@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Instance-global `/sys` slots** — `/sys global ...` and the compatible
+  `/sys g ...` short form manage one atomically persisted ten-slot prompt layer
+  shared by all configured Bridge Agents in a HASHI instance. Existing local
+  `/sys` syntax is unchanged. Telegram scope/slot/action buttons, confirmation
+  gates for global-impact mutations, refresh-on-request visibility, and a
+  prompt-free global mutation audit accompany the new layer.
+
 ### Fixed
 
 - **HER native commentary production and transient stream recovery** — complete

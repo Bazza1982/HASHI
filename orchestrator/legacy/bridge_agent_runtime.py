@@ -158,11 +158,13 @@ class BridgeAgentRuntime:
         self.handoff_builder = HandoffBuilder(self.config.workspace_dir, transcript_filename="conversation_log.jsonl")
         self.parked_topics = ParkedTopicStore(self.config.workspace_dir)
         self.sys_prompt_manager = SysPromptManager(self.config.workspace_dir)
+        self.global_sys_prompt_manager = SysPromptManager.for_instance(self.global_config)
         self.context_assembler = BridgeContextAssembler(
             self.memory_store,
             self.config.system_md,
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
+            global_sys_prompt_manager=self.global_sys_prompt_manager,
         )
     def get_typing_placeholder(self) -> tuple[str, str | None]:
         extra = self.config.extra or {}
@@ -3065,55 +3067,14 @@ class BridgeAgentRuntime:
         )
 
     async def cmd_sys(self, update, context):
-        if update.effective_user.id != self.global_config.authorized_id:
-            return
-        args = [a.strip() for a in (context.args or []) if a.strip()]
-        mgr = self.sys_prompt_manager
+        from orchestrator import runtime_sys_prompts
 
-        if not args:
-            await update.message.reply_text(
-                runtime_menu_views.sys_slots_text(mgr),
-                parse_mode="HTML",
-            )
-            return
+        await runtime_sys_prompts.cmd_sys(self, update, context)
 
-        slot = args[0]
-        if slot not in mgr.SLOTS:
-            await update.message.reply_text(f"Invalid slot '{slot}'. Use 1–10.")
-            return
+    async def callback_sys(self, update, context):
+        from orchestrator import runtime_sys_prompts
 
-        if len(args) == 1:
-            await update.message.reply_text(
-                runtime_menu_views.sys_slot_text(mgr, slot),
-                parse_mode="HTML",
-            )
-            return
-
-        sub = args[1].lower()
-
-        if sub == "on":
-            await update.message.reply_text(mgr.activate(slot))
-        elif sub == "off":
-            await update.message.reply_text(mgr.deactivate(slot))
-        elif sub == "delete":
-            await update.message.reply_text(mgr.delete(slot))
-        elif sub == "save":
-            text = " ".join(args[2:])
-            if not text:
-                await update.message.reply_text("Usage: /sys <slot> save <message>")
-                return
-            await update.message.reply_text(mgr.save(slot, text))
-        elif sub == "replace":
-            text = " ".join(args[2:])
-            if not text:
-                await update.message.reply_text("Usage: /sys <slot> replace <message>")
-                return
-            await update.message.reply_text(mgr.replace(slot, text))
-        else:
-            await update.message.reply_text(
-                "Usage:\n/sys — show all slots\n/sys <n> — show slot\n"
-                "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>"
-            )
+        await runtime_sys_prompts.callback_sys(self, update, context)
 
     async def cmd_usecomputer(self, update, context):
         if update.effective_user.id != self.global_config.authorized_id:
@@ -4787,6 +4748,7 @@ class BridgeAgentRuntime:
             BotCommand("help", "Show help menu"),
             BotCommand("start", "Start another stopped agent"),
             BotCommand("status", "View agent status"),
+            BotCommand("sys", "Manage local/global system prompts"),
             BotCommand("voice", "Toggle native voice replies"),
             BotCommand("safevoice", "Toggle voice confirmation safety layer"),
             BotCommand("active", "Toggle proactive heartbeat"),
@@ -4863,6 +4825,7 @@ class BridgeAgentRuntime:
         self.app.add_handler(CallbackQueryHandler(self.callback_model, pattern=r"^(model|effort):"))
         self.app.add_handler(CallbackQueryHandler(self.callback_voice, pattern=r"^voice:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_safevoice, pattern=r"^safevoice:"))
+        self.app.add_handler(CallbackQueryHandler(self.callback_sys, pattern=r"^sys:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_start_agent, pattern=r"^startagent:"))
         self.app.add_handler(CallbackQueryHandler(self.callback_skill, pattern=r"^(skill|skilljob|nudgejob):"))
         self.app.add_handler(CommandHandler("new", self.cmd_new))

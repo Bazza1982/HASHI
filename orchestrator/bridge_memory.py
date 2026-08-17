@@ -1,18 +1,44 @@
 from __future__ import annotations
+
 import hashlib
 import json
+import logging
 import math
 import os
 import re
 import sqlite3
 import struct
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from tools.token_tracker import estimate_tokens as _estimate_tokens
 
 CURRENT_REQUEST_SEPARATOR = "\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n"
+
+sys_prompt_logger = logging.getLogger("BridgeU.SysPrompt")
+_SYS_PROMPT_LOCKS_GUARD = globals().get("_SYS_PROMPT_LOCKS_GUARD", threading.Lock())
+_SYS_PROMPT_LOCKS: dict[str, threading.RLock] = globals().get("_SYS_PROMPT_LOCKS", {})
+
+
+def _sys_prompt_path_lock(path: Path) -> threading.RLock:
+    key = str(Path(path).resolve())
+    with _SYS_PROMPT_LOCKS_GUARD:
+        return _SYS_PROMPT_LOCKS.setdefault(key, threading.RLock())
+
+
+def global_sys_prompt_state_path(global_config: Any) -> Path:
+    """Return the canonical prompt-slot file for one HASHI instance."""
+
+    bridge_home = getattr(global_config, "bridge_home", None) or getattr(
+        global_config,
+        "project_root",
+        None,
+    )
+    if not bridge_home:
+        raise ValueError("Global system prompts require bridge_home or project_root")
+    return Path(bridge_home) / "state" / "global_sys_prompts.json"
 
 
 class LocalEmbeddingEncoder:
@@ -583,96 +609,193 @@ class BridgeMemoryStore:
 
 
 class SysPromptManager:
-    """Manages up to 10 additional system prompt slots per workspace."""
+    """Manage ten local or instance-shared additional system prompt slots."""
 
-    SLOTS = [str(i) for i in range(1, 11)]
+    SLOTS: ClassVar[list[str]] = [str(i) for i in range(1, 11)]
 
-    def __init__(self, workspace_dir: Path):
-        self.state_path = workspace_dir / "sys_prompts.json"
-        self._data: dict = self._load()
+    def __init__(
+        self,
+        workspace_dir: Path | None = None,
+        *,
+        state_path: Path | None = None,
+        shared: bool = False,
+        scope: str = "local",
+    ):
+        if state_path is None:
+            if workspace_dir is None:
+                raise ValueError("workspace_dir or state_path is required")
+            state_path = Path(workspace_dir) / "sys_prompts.json"
+        self.state_path = Path(state_path)
+        self.shared = bool(shared)
+        self.scope = "global" if scope == "global" else "local"
+        self._lock = _sys_prompt_path_lock(self.state_path)
+        with self._lock:
+            self._data: dict = self._load() or self._empty_slots()
 
-    def _load(self) -> dict:
-        if self.state_path.exists():
-            try:
-                return json.loads(self.state_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        return {slot: {"text": "", "active": False} for slot in self.SLOTS}
+    @classmethod
+    def for_instance(cls, global_config: Any) -> SysPromptManager:
+        return cls(
+            state_path=global_sys_prompt_state_path(global_config),
+            shared=True,
+            scope="global",
+        )
 
-    def _save(self):
-        # Ensure all 10 slots exist
-        for slot in self.SLOTS:
-            self._data.setdefault(slot, {"text": "", "active": False})
-        self.state_path.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
+    @classmethod
+    def _empty_slots(cls) -> dict[str, dict[str, object]]:
+        return {slot: {"text": "", "active": False} for slot in cls.SLOTS}
+
+    @classmethod
+    def _normalize(cls, payload: object) -> dict[str, dict[str, object]]:
+        if not isinstance(payload, dict):
+            raise TypeError("system prompt state must be a JSON object")
+        normalized = cls._empty_slots()
+        for slot in cls.SLOTS:
+            raw = payload.get(slot)
+            if not isinstance(raw, dict):
+                continue
+            text = raw.get("text", "")
+            normalized[slot] = {
+                "text": text if isinstance(text, str) else str(text or ""),
+                "active": bool(raw.get("active", False)),
+            }
+        return normalized
+
+    def _load(self) -> dict[str, dict[str, object]] | None:
+        if not self.state_path.exists():
+            return self._empty_slots()
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+            return self._normalize(payload)
+        except Exception as exc:  # noqa: BLE001 - malformed state must not stop an Agent
+            sys_prompt_logger.error(
+                "Could not load %s system prompt state from %s: %s",
+                self.scope,
+                self.state_path,
+                exc,
+            )
+            return None
+
+    def _refresh_locked(self) -> None:
+        if not self.shared:
+            return
+        loaded = self._load()
+        if loaded is not None:
+            self._data = loaded
+
+    def _save_locked(self) -> None:
+        self._data = self._normalize(self._data)
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.state_path.with_name(
+            f".{self.state_path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
+        )
+        try:
+            temporary.write_text(
+                json.dumps(self._data, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, self.state_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _save(self) -> None:
+        with self._lock:
+            self._save_locked()
 
     def _slot(self, n: str) -> dict:
-        self._data.setdefault(n, {"text": "", "active": False})
-        return self._data[n]
+        with self._lock:
+            self._refresh_locked()
+            self._data.setdefault(n, {"text": "", "active": False})
+            return self._data[n]
+
+    def get_slot(self, n: str) -> dict[str, object]:
+        with self._lock:
+            self._refresh_locked()
+            slot = self._data.setdefault(n, {"text": "", "active": False})
+            return {"text": str(slot.get("text") or ""), "active": bool(slot.get("active"))}
 
     def display_all(self) -> str:
         lines = ["*System Prompt Slots:*"]
-        for slot in self.SLOTS:
-            s = self._slot(slot)
+        for item in self.list_slots():
+            slot = str(item["slot"])
+            s = item
             status = "ON" if s["active"] else "off"
-            preview = (s["text"][:60] + "…") if len(s["text"]) > 60 else s["text"]
+            text = str(s["text"])
+            preview = (text[:60] + "…") if len(text) > 60 else text
             lines.append(f"[{slot}] {status} | {preview or '(empty)'}")
         return "\n".join(lines)
 
     def display_slot(self, n: str) -> str:
-        s = self._slot(n)
+        s = self.get_slot(n)
         status = "ON" if s["active"] else "off"
         text = s["text"] or "(empty)"
         return f"Slot {n} [{status}]:\n{text}"
 
     def activate(self, n: str) -> str:
-        if not self._slot(n)["text"]:
-            return f"Slot {n} is empty — save a message first."
-        self._data[n]["active"] = True
-        self._save()
-        return f"Slot {n} activated."
+        with self._lock:
+            self._refresh_locked()
+            if not self._data.setdefault(n, {"text": "", "active": False})["text"]:
+                return f"Slot {n} is empty — save a message first."
+            self._data[n]["active"] = True
+            self._save_locked()
+        prefix = "Global slot" if self.scope == "global" else "Slot"
+        return f"{prefix} {n} activated."
 
     def deactivate(self, n: str) -> str:
-        self._data[n]["active"] = False
-        self._save()
-        return f"Slot {n} deactivated."
+        with self._lock:
+            self._refresh_locked()
+            self._data.setdefault(n, {"text": "", "active": False})["active"] = False
+            self._save_locked()
+        prefix = "Global slot" if self.scope == "global" else "Slot"
+        return f"{prefix} {n} deactivated."
 
     def save(self, n: str, text: str) -> str:
-        self._data[n] = {"text": text, "active": False}
-        self._save()
+        with self._lock:
+            self._refresh_locked()
+            self._data[n] = {"text": text, "active": False}
+            self._save_locked()
+        if self.scope == "global":
+            return f"Global slot {n} saved (inactive). Use /sys global {n} on to activate."
         return f"Slot {n} saved (inactive). Use /sys {n} on to activate."
 
     def replace(self, n: str, text: str) -> str:
-        was_active = self._slot(n).get("active", False)
-        self._data[n] = {"text": text, "active": was_active}
-        self._save()
-        return f"Slot {n} updated."
+        with self._lock:
+            self._refresh_locked()
+            was_active = self._data.setdefault(n, {"text": "", "active": False}).get("active", False)
+            self._data[n] = {"text": text, "active": was_active}
+            self._save_locked()
+        prefix = "Global slot" if self.scope == "global" else "Slot"
+        return f"{prefix} {n} updated."
 
     def delete(self, n: str) -> str:
-        self._data[n] = {"text": "", "active": False}
-        self._save()
-        return f"Slot {n} cleared."
+        with self._lock:
+            self._refresh_locked()
+            self._data[n] = {"text": "", "active": False}
+            self._save_locked()
+        prefix = "Global slot" if self.scope == "global" else "Slot"
+        return f"{prefix} {n} cleared."
 
     def get_active_texts(self) -> list[str]:
-        return [
-            self._data[slot]["text"]
-            for slot in self.SLOTS
-            if self._data.get(slot, {}).get("active") and self._data[slot].get("text")
-        ]
+        return [str(item["text"]) for item in self.get_active_entries()]
+
+    def get_active_entries(self) -> list[dict[str, object]]:
+        return [item for item in self.list_slots() if item["active"] and item["text"]]
 
     def list_slots(self) -> list[dict[str, object]]:
         """Return every stable SYS slot without exposing mutable state."""
-        return [
-            {
-                "slot": slot,
-                "active": bool(self._slot(slot).get("active")),
-                "text": str(self._slot(slot).get("text") or ""),
-            }
-            for slot in self.SLOTS
-        ]
+        with self._lock:
+            self._refresh_locked()
+            return [
+                {
+                    "slot": slot,
+                    "active": bool(self._data.get(slot, {}).get("active")),
+                    "text": str(self._data.get(slot, {}).get("text") or ""),
+                }
+                for slot in self.SLOTS
+            ]
 
 
 class BridgeContextAssembler:
-    PROMPT_BUDGETS = {
+    PROMPT_BUDGETS: ClassVar[dict[str, int]] = {
         "codex-cli": 24000,
         "gemini-cli": 24000,
         "claude-cli": 50000,
@@ -680,11 +803,19 @@ class BridgeContextAssembler:
         "ollama-api": 30000,
     }
 
-    def __init__(self, memory_store: BridgeMemoryStore, system_md: Path | None, active_skill_provider=None, sys_prompt_manager=None):
+    def __init__(
+        self,
+        memory_store: BridgeMemoryStore,
+        system_md: Path | None,
+        active_skill_provider=None,
+        sys_prompt_manager=None,
+        global_sys_prompt_manager=None,
+    ):
         self.memory_store = memory_store
         self.system_md = system_md
         self.active_skill_provider = active_skill_provider
         self.sys_prompt_manager = sys_prompt_manager
+        self.global_sys_prompt_manager = global_sys_prompt_manager
         self.turns_injection_enabled: bool = True
         self.saved_memory_injection_enabled: bool = True
 
@@ -847,15 +978,42 @@ class BridgeContextAssembler:
                 }
             )
 
-        if self.sys_prompt_manager:
-            active_sys = self.sys_prompt_manager.get_active_texts()
-            if active_sys:
-                add_section(
-                    "additional_system_context",
-                    "ADDITIONAL SYSTEM CONTEXT",
-                    list(active_sys),
-                    item_count=len(active_sys),
+        active_local_sys = (
+            self.sys_prompt_manager.get_active_texts() if self.sys_prompt_manager else []
+        )
+        active_global_entries = (
+            self.global_sys_prompt_manager.get_active_entries()
+            if self.global_sys_prompt_manager
+            else []
+        )
+        if active_global_entries:
+            global_parts = [
+                (
+                    "INSTANCE-GLOBAL /sys rules apply to every configured Agent in this HASHI "
+                    "instance. If an instance-global /sys rule conflicts with an Agent-local /sys "
+                    "rule, the instance-global rule takes precedence."
                 )
+            ]
+            global_parts.extend(
+                f"[Global /sys slot {item['slot']}]\n{item['text']}"
+                for item in active_global_entries
+            )
+            if active_local_sys:
+                global_parts.append("AGENT-LOCAL /sys rules follow:")
+                global_parts.extend(active_local_sys)
+            add_section(
+                "additional_system_context",
+                "ADDITIONAL SYSTEM CONTEXT",
+                global_parts,
+                item_count=len(active_global_entries) + len(active_local_sys),
+            )
+        elif active_local_sys:
+            add_section(
+                "additional_system_context",
+                "ADDITIONAL SYSTEM CONTEXT",
+                list(active_local_sys),
+                item_count=len(active_local_sys),
+            )
 
         if system_text:
             add_section("system_identity", "SYSTEM IDENTITY", [system_text], item_count=1)

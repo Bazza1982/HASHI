@@ -101,24 +101,52 @@ def ticket_list_text(
     return "\n".join(lines)
 
 
-def sys_slots_text(manager: Any) -> str:
+def _sys_command_prefix(scope: str) -> str:
+    return "/sys global" if scope == "global" else "/sys"
+
+
+def sys_slots_text(
+    manager: Any,
+    *,
+    scope: str = "local",
+    instance_id: str | None = None,
+) -> str:
+    is_global = scope == "global"
+    prefix = _sys_command_prefix(scope)
     slots = []
     active_count = 0
     configured_count = 0
-    for slot_id in manager.SLOTS:
-        slot = manager._slot(slot_id)
-        active = bool(slot.get("active"))
-        text = str(slot.get("text") or "")
+    items = (
+        manager.list_slots()
+        if hasattr(manager, "list_slots")
+        else [
+            {"slot": slot_id, **manager._slot(slot_id)}
+            for slot_id in manager.SLOTS
+        ]
+    )
+    for item in items:
+        slot_id = str(item.get("slot") or "")
+        active = bool(item.get("active"))
+        text = str(item.get("text") or "")
         active_count += int(active)
         configured_count += int(bool(text))
         slots.append((slot_id, active, text))
 
     lines = [
-        card_title("🧾", "System prompt slots"),
+        card_title("🌐" if is_global else "🧾", "Global system prompt slots" if is_global else "System prompt slots"),
         "",
         f"<b>Current</b> · <code>{active_count}</code> active",
         f"<b>Configured</b> · <code>{configured_count}/{len(slots)}</code>",
-        "<b>Changes</b> · immediate and persistent in this workspace",
+        (
+            f"<b>Scope</b> · every Agent in <code>{html.escape(instance_id or 'this HASHI instance')}</code>"
+            if is_global
+            else "<b>Scope</b> · this Agent only"
+        ),
+        (
+            "<b>Changes</b> · visible to all Agents on their next request"
+            if is_global
+            else "<b>Changes</b> · immediate and persistent in this workspace"
+        ),
         "",
         "<b>SLOTS</b>",
     ]
@@ -133,33 +161,48 @@ def sys_slots_text(manager: Any) -> str:
         [
             "",
             "<b>Use</b>",
-            _command("/sys <slot>", "view one slot"),
-            _command("/sys <slot> on|off", "change its active state"),
-            _command("/sys <slot> save|replace <text>", "update its content"),
-            _command("/sys output <slot>", "return its raw content"),
+            _command(f"{prefix} <slot>", "view one slot"),
+            _command(f"{prefix} <slot> on|off", "change its active state"),
+            _command(f"{prefix} <slot> save|replace <text>", "update its content"),
+            _command(f"{prefix} output <slot>", "return its raw content"),
         ]
     )
+    if is_global:
+        lines.append(_command("/sys g …", "short alias for /sys global …"))
     return "\n".join(lines)
 
 
-def sys_slot_text(manager: Any, slot_id: str) -> str:
-    slot = manager._slot(slot_id)
+def sys_slot_text(
+    manager: Any,
+    slot_id: str,
+    *,
+    scope: str = "local",
+    instance_id: str | None = None,
+) -> str:
+    is_global = scope == "global"
+    prefix = _sys_command_prefix(scope)
+    slot = manager.get_slot(slot_id) if hasattr(manager, "get_slot") else manager._slot(slot_id)
     active = bool(slot.get("active"))
     text = str(slot.get("text") or "")
     return "\n".join(
         [
-            card_title("🧾", "System prompt slot"),
+            card_title("🌐" if is_global else "🧾", "Global system prompt slot" if is_global else "System prompt slot"),
             "",
             f"<b>Current</b> · <b>{status_label(active)}</b>",
             f"<b>Slot</b> · <code>{html.escape(slot_id)}</code>",
+            (
+                f"<b>Scope</b> · every Agent in <code>{html.escape(instance_id or 'this HASHI instance')}</code>"
+                if is_global
+                else "<b>Scope</b> · this Agent only"
+            ),
             f"<b>Size</b> · <code>{len(text)}</code> chars",
             "",
             f"<pre>{html.escape(text or '(empty)')}</pre>",
             "",
             "<b>Use</b>",
-            _command(f"/sys {slot_id} on|off", "change its active state"),
-            _command(f"/sys {slot_id} replace <text>", "replace its content"),
-            _command(f"/sys output {slot_id}", "return its raw content"),
+            _command(f"{prefix} {slot_id} on|off", "change its active state"),
+            _command(f"{prefix} {slot_id} replace <text>", "replace its content"),
+            _command(f"{prefix} output {slot_id}", "return its raw content"),
         ]
     )
 

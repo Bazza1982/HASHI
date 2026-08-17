@@ -42,7 +42,6 @@ def test_command_card_divider_is_centralized() -> None:
 def test_active_and_legacy_runtimes_share_critical_menu_renderers() -> None:
     required = (
         "runtime_menu_views.parked_topics_text(",
-        "runtime_menu_views.sys_slots_text(",
         "runtime_menu_views.loop_list_text(",
         "runtime_menu_views.safevoice_menu_text(",
     )
@@ -52,6 +51,10 @@ def test_active_and_legacy_runtimes_share_critical_menu_renderers() -> None:
     ):
         source = (ROOT / relative_path).read_text(encoding="utf-8")
         assert all(call in source for call in required)
+        assert "runtime_sys_prompts.cmd_sys(self, update, context)" in source
+
+    shared_sys_source = (ROOT / "orchestrator/runtime_sys_prompts.py").read_text(encoding="utf-8")
+    assert "runtime_menu_views.sys_slots_text(" in shared_sys_source
 
 
 def test_parked_topics_card_escapes_values_and_keeps_actions_last() -> None:

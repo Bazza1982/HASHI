@@ -258,6 +258,7 @@ class FlexibleAgentRuntime:
         self._last_prompt_audit: dict = {}        # prompt section breakdown for token audit
         self.memory_dir = self.workspace_dir / "memory"
         self.sys_prompt_manager = SysPromptManager(self.workspace_dir)
+        self.global_sys_prompt_manager = SysPromptManager.for_instance(self.global_config)
         self.backend_state_dir = self.workspace_dir / "backend_state"
         self.transcript_log_path = self.workspace_dir / "transcript.jsonl"
         self.core_transcript_log_path = self.workspace_dir / "core_transcript.jsonl"
@@ -308,6 +309,7 @@ class FlexibleAgentRuntime:
             self.config.system_md,
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
+            global_sys_prompt_manager=self.global_sys_prompt_manager,
         )
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
@@ -966,6 +968,11 @@ class FlexibleAgentRuntime:
             md_path = getattr(self.config, "system_md", None)
             if md_path and Path(md_path).exists():
                 parts.append(Path(md_path).read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        try:
+            for text in self.global_sys_prompt_manager.get_active_texts():
+                parts.append(text)
         except Exception:
             pass
         try:
@@ -2660,68 +2667,14 @@ class FlexibleAgentRuntime:
 
 
     async def cmd_sys(self, update, context):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        args = [a.strip() for a in (context.args or []) if a.strip()]
-        mgr = self.sys_prompt_manager
+        from orchestrator import runtime_sys_prompts
 
-        if not args:
-            await self._reply_text(
-                update,
-                runtime_menu_views.sys_slots_text(mgr),
-                parse_mode="HTML",
-            )
-            return
+        await runtime_sys_prompts.cmd_sys(self, update, context)
 
-        # /sys output <n> — return raw content of slot, no state change
-        if args[0].lower() == "output":
-            slot = args[1] if len(args) > 1 else ""
-            if slot not in mgr.SLOTS:
-                await update.message.reply_text("Usage: /sys output <1-10>")
-                return
-            text = mgr._slot(slot).get("text", "")
-            await update.message.reply_text(text if text else "(empty)", parse_mode=None)
-            return
+    async def callback_sys(self, update, context):
+        from orchestrator import runtime_sys_prompts
 
-        slot = args[0]
-        if slot not in mgr.SLOTS:
-            await update.message.reply_text(f"Invalid slot '{slot}'. Use 1-10.")
-            return
-
-        if len(args) == 1:
-            await self._reply_text(
-                update,
-                runtime_menu_views.sys_slot_text(mgr, slot),
-                parse_mode="HTML",
-            )
-            return
-
-        sub = args[1].lower()
-
-        if sub == "on":
-            await update.message.reply_text(mgr.activate(slot))
-        elif sub == "off":
-            await update.message.reply_text(mgr.deactivate(slot))
-        elif sub == "delete":
-            await update.message.reply_text(mgr.delete(slot))
-        elif sub == "save":
-            text = " ".join(args[2:])
-            if not text:
-                await update.message.reply_text("Usage: /sys <slot> save <message>")
-                return
-            await update.message.reply_text(mgr.save(slot, text))
-        elif sub == "replace":
-            text = " ".join(args[2:])
-            if not text:
-                await update.message.reply_text("Usage: /sys <slot> replace <message>")
-                return
-            await update.message.reply_text(mgr.replace(slot, text))
-        else:
-            await update.message.reply_text(
-                "Usage:\n/sys - show all slots\n/sys <n> - show slot\n"
-                "/sys <n> on|off|delete\n/sys <n> save <msg>\n/sys <n> replace <msg>\n"
-                "/sys output <n> - return raw content of slot"
-            )
+        await runtime_sys_prompts.callback_sys(self, update, context)
 
     async def cmd_habit(self, update, context):
         # Resolve lazily so /reboot can replace HER command behaviour without
