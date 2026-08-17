@@ -36,6 +36,38 @@ HER_SESSION_SCOPE_PERSISTENT = "persistent"
 HER_SESSION_SCOPE_ISOLATED = "isolated_per_run"
 HER_SESSION_SCOPE_ISOLATED_RESUME = "isolated_resume"
 
+_DANGLING_TOOL_MARKERS = (
+    "<｜dsml｜tool_calls",
+    "<｜｜dsml｜｜tool_calls",
+    "<｜dsml｜invoke",
+    "<｜｜dsml｜｜invoke",
+    "<|dsml|tool_calls",
+    "<||dsml||tool_calls",
+    "<|dsml|invoke",
+    "<||dsml||invoke",
+    "<tool_call>",
+)
+
+
+def _contains_dangling_tool_markup(text: Any) -> bool:
+    normalized = str(text or "").lower()
+    visible = "\n".join(normalized.split("```")[::2])
+    return any(marker in visible for marker in _DANGLING_TOOL_MARKERS)
+
+
+def _safe_blocked_tool_markup_final(item) -> str:
+    prompt = str(getattr(item, "prompt", "") or "")
+    if any("\u4e00" <= char <= "\u9fff" for char in prompt):
+        return (
+            "本轮回复包含未完成的工具控制标记，HASHI 已阻止其发送。"
+            "相关操作不视为已执行或已完成；任务状态为未完成，请从已保存的任务检查点继续。"
+        )
+    return (
+        "HASHI blocked an unfinished tool-control envelope from the final response. "
+        "No related action is considered executed or complete; the task remains incomplete "
+        "and should resume from its preserved checkpoint."
+    )
+
 
 def queued_elapsed_s(item) -> float:
     """Return request age from a process-local clock when available."""
@@ -1175,6 +1207,27 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
         item,
         display_text or response.text,
     )
+    if _contains_dangling_tool_markup(response.text) or _contains_dangling_tool_markup(
+        visible_text
+    ):
+        fallback = _safe_blocked_tool_markup_final(item)
+        runtime.logger.error(
+            f"Blocked dangling tool markup at the final delivery boundary: request={item.request_id}"
+        )
+        response.text = fallback
+        response.stop_reason = "no_final_text"
+        metadata = getattr(response, "stream_metadata", None)
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        metadata.update(
+            {
+                "claw_completion_status": "incomplete",
+                "claw_stop_reason": "no_final_text",
+                "dangling_tool_markup_blocked": True,
+            }
+        )
+        response.stream_metadata = metadata
+        display_text = fallback
+        visible_text = fallback
     if not visible_text.strip():
         return SuccessfulResponse(
             display_text=display_text,

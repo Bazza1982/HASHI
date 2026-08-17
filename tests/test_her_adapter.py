@@ -27,6 +27,8 @@ from adapters.her import (
     HERAdapter,
     _build_claw_incomplete_report,
     _build_claw_technical_lease,
+    _claw_compact_execution_ledger,
+    _claw_contains_dangling_tool_markup,
     _claw_incomplete_response,
     _claw_jsonl_to_stream_events,
     _claw_run_is_incomplete,
@@ -821,6 +823,95 @@ def test_claw_max_iterations_blocks_deepseek_single_bar_dsml_markup():
     assert metadata["persona_render_required"] is True
 
 
+def test_dangling_markup_detector_allows_explicit_fenced_examples():
+    assert _claw_contains_dangling_tool_markup(
+        '<｜DSML｜tool_calls><｜DSML｜invoke name="bash">'
+    )
+    assert not _claw_contains_dangling_tool_markup(
+        'Example only:\n```text\n<｜DSML｜tool_calls><｜DSML｜invoke name="bash">\n```'
+    )
+
+
+def test_compact_execution_ledger_distinguishes_verified_and_unverified_actions():
+    result = ClawTaskResult(
+        text="done",
+        model="deepseek/test",
+        permission_mode="workspace-write",
+        cwd="/workspace",
+        returncode=0,
+        duration_ms=10,
+        stdout="",
+        stderr="",
+        json_data={},
+        tool_uses=[
+            {"id": "read-1", "name": "read_file"},
+            {"id": "write-1", "name": "write_file"},
+            {"id": "send-1", "name": "external_send"},
+        ],
+        tool_results=[
+            {"tool_use_id": "read-1", "output": "state", "is_error": False},
+            {"tool_use_id": "write-1", "output": "written", "is_error": False},
+            {"tool_use_id": "send-1", "output": "transport unavailable", "is_error": True},
+        ],
+    )
+
+    ledger = _claw_compact_execution_ledger(result)
+
+    assert ledger["total_entries"] == 3
+    assert [entry["verification"] for entry in ledger["entries"]] == [
+        "verified",
+        "unverified_side_effect",
+        "failed",
+    ]
+    assert all("output" not in entry for entry in ledger["entries"])
+
+
+@pytest.mark.asyncio
+async def test_completed_adapter_path_blocks_dangling_dsml_and_marks_incomplete(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = tmp_path / "hashi-her"
+    adapter._run_task_async = AsyncMock(
+        return_value=ClawTaskResult(
+            text='<｜DSML｜tool_calls><｜DSML｜invoke name="bash">',
+            model="deepseek/test",
+            permission_mode="workspace-write",
+            cwd=str(tmp_path),
+            returncode=0,
+            duration_ms=1,
+            stdout="",
+            stderr="",
+            json_data={"usage": {}},
+            tool_uses=[],
+            tool_results=[],
+            session_id="session-dsml",
+            iterations=2,
+            completion_status="completed",
+            stop_reason="end_turn",
+        )
+    )
+    adapter._render_incomplete_persona_response = AsyncMock(
+        return_value=(
+            "I could not verify a completed action, so I am stopping safely.",
+            {"persona_renderer_succeeded": True},
+        )
+    )
+
+    response = await adapter.generate_response("report the result", "req-dsml")
+
+    assert response.is_success is True
+    assert not _claw_contains_dangling_tool_markup(response.text)
+    assert response.stream_metadata["claw_completion_status"] == "incomplete"
+    assert response.stream_metadata["claw_stop_reason"] == "no_final_text"
+    assert response.stream_metadata["dangling_tool_markup_blocked"] is True
+
+
 def test_claw_max_iterations_without_model_final_uses_sunny_persona_and_receipt_counts():
     result = ClawTaskResult(
         text="",
@@ -1297,6 +1388,7 @@ def test_build_claw_env_uses_allowlist_only():
             "CLAW_MAX_TOOL_ITERATIONS": "96",
             "CLAW_TASK_PLANNING": "1",
             "CLAW_EXECUTION_EFFORT": "high",
+            "HASHI_MANAGED_TRANSPORT": "1",
             "ANTHROPIC_API_KEY": "must-not-pass",
             "HASHI_REMOTE_SHARED_TOKEN": "must-not-pass",
             "HOME": "/tmp/home",
@@ -1310,6 +1402,7 @@ def test_build_claw_env_uses_allowlist_only():
         "CLAW_MAX_TOOL_ITERATIONS": "96",
         "CLAW_TASK_PLANNING": "1",
         "CLAW_EXECUTION_EFFORT": "high",
+        "HASHI_MANAGED_TRANSPORT": "1",
         "HOME": "/tmp/home",
         "PATH": "/bin",
     }
@@ -1483,6 +1576,8 @@ def test_run_claw_task_builds_safe_one_shot_command(tmp_path):
           "model": "deepseek/test",
           "iterations": 2,
           "estimated_cost": "$0.0001",
+          "task_checkpoint": {"active_goal": "inspect", "next_action": "ask"},
+          "pending_interaction": {"interaction_id": "ask-1", "kind": "question", "question": "Continue?"},
           "tool_uses": [{"name": "read_file"}],
           "tool_results": [{"is_error": False}]
         }))
@@ -1504,6 +1599,12 @@ def test_run_claw_task_builds_safe_one_shot_command(tmp_path):
     assert result.iterations == 2
     assert result.tool_uses == [{"name": "read_file"}]
     assert result.tool_results == [{"is_error": False}]
+    assert result.task_checkpoint == {"active_goal": "inspect", "next_action": "ask"}
+    assert result.pending_interaction == {
+        "interaction_id": "ask-1",
+        "kind": "question",
+        "question": "Continue?",
+    }
 
 
 def test_run_claw_task_rejects_invalid_permission_mode(tmp_path):
