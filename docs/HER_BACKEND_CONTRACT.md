@@ -261,6 +261,18 @@ validated changes become active immediately. The adapter also honors the
 runtime's per-request intake eligibility, so internal and maintenance requests
 do not learn simply because the agent-wide switch is on.
 
+Selected foreground Habits are never concatenated to the Bridge prompt or any
+user/session message. The adapter passes the original authoritative request
+byte-for-byte and transports the rendered Habit records through the bounded,
+request-scoped `HASHI_HER_HABIT_ADVISORY_CONTEXT` channel. It removes any
+ambient or provider-configured value before installing the request's own
+selection. Native HER promotes that value into a separate system advisory for
+both TaskFrame planning and primary execution. The advisory may inform approach
+and checks, but it is not user intent, evidence, authority, or part of
+`active_goal`; conflicts are ignored. It is not persisted in conversation
+history. The legacy inline rendering helper remains compatibility-only and must
+not be used by foreground HER execution.
+
 Standalone HASHI contains no second Habit writer. The explicit
 `HERAdapter.habit_pipeline_owner = "adapter"` marker lets downstream consumers
 that still carry an older compatibility pipeline keep it dormant instead of

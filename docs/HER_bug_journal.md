@@ -76,8 +76,57 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260817-038` | Deployed to Arale — live behavior verification pending | P1 | StreamLake's 504 inside an established SSE stream was hard-coded non-retryable and aborted a resumable Arale turn | `stream_message_marks_embedded_gateway_timeout_as_retryable`; `provider_stream_retries_embedded_504_once_and_returns_only_complete_attempt` |
 | `HER-20260817-039` | Deployed to Arale — live behavior verification pending | P1 | a legacy effort gate silently demoted every native Persona commentary at `low` and `medium` to internal despite `/commentary on` | `test_medium_adapter_delivers_native_tool_turn_commentary`; corrected low-through-ultra transport matrix |
 | `HER-20260817-040` | Fixed in source — user-managed reboot/live verification pending | P2 | short HER acknowledgement/commentary messages bypassed Markdown rendering and appeared as literal markup in Telegram | `test_her_short_commentary_renders_markdown_before_telegram_delivery`; `test_her_commentary_uses_long_sender_when_rendered_html_exceeds_limit` |
+| `HER-20260818-041` | Fixed in source — online rebuild/live verification pending | P1 | adapter-appended Habit advice entered the authoritative TaskFrame request and fallback `active_goal` | `habit_advice_stays_outside_authoritative_request_when_planning_falls_back`; `test_enabled_feature_plans_and_schedules_meditation_at_every_effort` |
 
 ## Historical entries
+
+### HER-20260818-041 — inline Habit advice polluted TaskFrame authority
+
+- **Status:** Fixed in source — online rebuild/live verification pending
+- **Severity:** P1
+- **Discovered:** 2026-08-18 AEST while investigating Zhaojun request
+  `req-0004` on `deepseek/deepseek-v4-flash`.
+- **Expected:** TaskFrame planning, fallback framing, and the persisted user
+  message receive only the authoritative Bridge request. Relevant Habits are
+  separate advisory system context shared with the planner and primary Agent.
+- **Actual:** the adapter appended a selected Habit envelope after the Bridge's
+  `CURRENT USER REQUEST — AUTHORITATIVE` marker. Native goal extraction
+  correctly selected that marker but then treated every later byte as the
+  request. When the provider returned conversational prose instead of TaskFrame
+  JSON, strict validation rejected it and the conservative fallback copied the
+  polluted text into `active_goal`.
+- **Blast radius:** this was not unique to Zhaojun. A redacted control-ledger
+  scan found the same fallback signature in Arale, Sakura, Sunny, and Zhaojun.
+  Zhaojun made it conspicuous because Habit retrieval matched and Flash produced
+  invalid planning output in the same turn, while newer non-blocking planning
+  reporting exposed the fallback frame instead of hiding it.
+- **Root cause:** an injection-boundary design defect in HASHI's adapter, not a
+  TaskFrame parser defect. DeepSeek Flash was a trigger/amplifier because it can
+  deviate from the JSON-only planning protocol; it was not necessary for the
+  pollution and did not create the authority merge.
+- **Repair:** keep the foreground prompt byte-identical; render selected Habits
+  into `HASHI_HER_HABIT_ADVISORY_CONTEXT`; discard ambient values; bound the
+  native value; and add it as an explicit non-authoritative system advisory to
+  both planner and executor without persisting it in session messages. The old
+  inline helper remains compatibility-only.
+- **Regression tests:** adapter effort matrix proves selected Habit text is in
+  the advisory environment and absent from the prompt; ambient-value rejection
+  proves request ownership; a native mock deliberately returns invalid planner
+  prose and proves planner messages, executor session, and fallback
+  `active_goal` remain clean without relying on any model family.
+- **Verification:** `47` Habit tests, `117` HER adapter tests, and the complete
+  runtime suite (`672` unit + `2` conformance + `12` integration) pass; Rust
+  formatting and targeted CLI compilation pass. The repository's prescribed
+  `.venv` `tests + veritas` suite passes with `2389 passed, 2 skipped`.
+- **Source provenance:** HASHI commit `e335b73d`; affected active candidate
+  source SHA `391eaab7628e3fa67c6637d16d6babbac1178a3d`.
+- **Secrets/redaction checked:** yes; private request and Habit bodies were not
+  copied into regression fixtures or this entry.
+- **Managed adoption:** the standalone offline rebuild correctly refused to
+  bypass the live kernel's single-owner rebuild lock. Run the supported online
+  `/rebuild`, then reset Zhaojun's already-contaminated HER session and perform
+  one live Habit-match plus forced-invalid-planner canary before marking this
+  entry Verified.
 
 ### HER-20260817-040 — short Persona messages bypassed Telegram Markdown rendering
 

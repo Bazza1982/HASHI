@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **HER Habit / TaskFrame authority pollution** — foreground Habit records now
+  travel through a bounded request-scoped system advisory channel shared by the
+  planner and primary executor, while the Bridge prompt and persisted user
+  message remain byte-clean. Ambient advisory values are discarded, Habit text
+  cannot enter fallback `active_goal`, and a model-independent invalid-planner
+  regression proves the boundary still holds when TaskFrame parsing fails.
 - **HER native commentary production and transient stream recovery** — complete
   model-authored text that precedes a tool call now becomes one explicit
   Persona commentary event before `ToolStart`; token deltas remain internal and
