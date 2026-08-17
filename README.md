@@ -270,6 +270,54 @@ write these records.
 
 ---
 
+## Local And Global System Prompt Slots
+
+`/sys` keeps its original ten Agent-local prompt slots and also exposes ten
+instance-global slots. Existing local commands are unchanged:
+
+```text
+/sys
+/sys 1 save <message>
+/sys 1 on|off|delete
+/sys output 1
+```
+
+Use either `global` or its short alias `g` as the first argument to manage the
+shared scope:
+
+```text
+/sys global
+/sys global 1 save <message>
+/sys global 1 on
+/sys global 1 off
+/sys global output 1
+
+/sys g 1 replace <message>
+```
+
+Global `save` only accepts an empty slot and remains inactive until enabled.
+Use `replace` for an existing slot. Activating or deleting a global slot
+requires confirmation; replacing an already-active global slot requires
+`/sys global <slot> replace CONFIRM <message>`. Telegram cards provide Local /
+Global scope navigation, slot selection, On/Off, Output, and confirmed Delete
+buttons.
+
+Global slots are stored once under the owning instance's
+`bridge_home/state/global_sys_prompts.json`. Reads refresh on every request and
+writes use a shared lock plus atomic replacement, so all configured Bridge
+Agents observe a change on their next request without copying state between
+workspaces. Global rules are injected before Agent-local rules and take
+precedence over them when they conflict. Global mutations are recorded without
+prompt text in `bridge_home/state/global_sys_prompt_audit.jsonl`.
+
+This scope covers normal Bridge requests, including Telegram, Workbench,
+HChat, Scheduler, and Automation paths that use the Bridge context assembler.
+An already-running request is not rewritten. HER/Ultra internal sub-agents use
+their own native system-prompt assembly and do not directly load this Bridge
+state.
+
+---
+
 ## SafeVoice — Voice Confirmation
 
 Voice messages can be misinterpreted by speech-to-text, potentially sending unintended commands to agents. SafeVoice adds a confirmation layer:

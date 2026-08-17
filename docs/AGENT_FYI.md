@@ -241,6 +241,25 @@ python tools/browser_cli.py evaluate   --url <url> --script "() => document.titl
 
 **Prerequisites:** `playwright install chromium` (one-time setup).
 
+## Local And Global `/sys`
+
+- `/sys <slot> ...` continues to manage the current Agent's
+  `workspaces/<agent>/sys_prompts.json`.
+- `/sys global <slot> ...` manages the HASHI-instance shared slots;
+  `/sys g ...` is the exact short form.
+- Shared state lives at `bridge_home/state/global_sys_prompts.json`, refreshes
+  on every request, and is never copied into Agent workspaces.
+- Active global entries are injected before local entries and win only over a
+  conflicting local `/sys` entry; existing higher authority boundaries remain
+  unchanged.
+- Global changes reach configured Bridge Agents on their next request, including
+  queued Scheduler and Automation requests. In-flight requests are unchanged.
+- Global activation and deletion require confirmation. Replacing an active
+  global slot requires `replace CONFIRM <message>`.
+- Global `save` only fills an empty slot; use `replace` for configured slots.
+- HER/Ultra internal sub-agents have a separate native prompt path and do not
+  directly load Bridge-level Global Sys state.
+
 ## Usecomputer Command
 
 `/usecomputer` is the consolidated operator-facing shortcut for "use the computer like a human if needed".
