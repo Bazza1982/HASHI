@@ -1,8 +1,6 @@
 ---
-id: claude
-name: Delegate to Claude Code
-type: prompt
-description: Delegate a task to Claude Code CLI and manage it as a project manager
+name: claude
+description: Use when delegating a self-contained task to Claude Code CLI, monitoring its progress, and reporting the result as project manager.
 ---
 
 You are delegating a task to Claude Code CLI. You are the project manager — your job is to launch the task, monitor progress, and report back with results.
@@ -110,7 +108,3 @@ If the task failed, read the error log carefully and either:
 - If the task is very large, break it into smaller Claude invocations with clear scope.
 - The --add-dir should point to the actual project directory the task targets.
 - For tasks that need multiple steps, run them sequentially and verify each step before proceeding.
-
-## User's task
-
-{prompt}

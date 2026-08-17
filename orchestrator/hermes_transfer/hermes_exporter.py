@@ -28,7 +28,7 @@ class HermesExportError(ValueError):
 
 @dataclass(frozen=True)
 class HermesExportOptions:
-    include_skills: bool = True
+    include_skills: bool = False
     include_memories: bool = True
     include_cron: bool = True
     max_memory_chars: int = 2200
@@ -105,6 +105,7 @@ def plan_hermes_export(
 
     if opts.include_skills:
         _collect_skills(files, profile, opts, warnings)
+        warnings.append("Hermes skill files included as inert transfer archive only; HER/Claw skill loading is disabled")
 
     _warn_blocked_profile_state(profile, warnings)
     files["source/secrets_summary.json"] = _json_text({"included": False, "policy": "excluded_by_default"})

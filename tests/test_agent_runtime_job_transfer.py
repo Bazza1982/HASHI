@@ -255,7 +255,7 @@ async def test_runtime_jobs_handle_tokenized_toggle_callback():
     async def _render(query, kind):
         render_calls.append((query, kind))
 
-    runtime._render_skill_jobs = _render
+    runtime._render_jobs = _render
     token = runtime_jobs.mint_callback_token(
         runtime,
         "skilljob_action",

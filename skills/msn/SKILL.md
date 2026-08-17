@@ -1,8 +1,6 @@
 ---
-id: msn
-name: Minato · Shimanto · Nagare Browser
-type: prompt
-description: Browse the M/S/N workflow hierarchy. Usage: /minato | /shimanto [minato] | /nagare [shimanto] [minato] | /nagare --minato [minato]
+name: msn
+description: Use when browsing the Minato, Shimanto, and Nagare workflow hierarchy through the HASHI flow registry commands.
 ---
 
 Parse the user's command and run the appropriate registry query.
@@ -51,7 +49,3 @@ Display the command output directly to the user. Do not add commentary unless th
 
 Directory slugs use kebab-case (e.g. `ai-consulting`, `workflow-work`).
 If the user types a human-readable name (e.g. "AI Consulting"), convert to kebab-case before passing to the script.
-
-## User's command
-
-{prompt}

@@ -101,11 +101,11 @@ Primary artifacts:
 | Git integration | ✅ |
 | Markdown terminal rendering (ANSI) | ✅ |
 | Model aliases (opus/sonnet/haiku) | ✅ |
-| Direct CLI subcommands (`status`, `sandbox`, `agents`, `mcp`, `skills`, `doctor`) | ✅ |
-| Slash commands (including `/skills`, `/agents`, `/mcp`, `/doctor`, `/plugin`, `/subagent`) | ✅ |
+| Direct CLI subcommands (`status`, `sandbox`, `agents`, `mcp`, `doctor`) | ✅ |
+| Slash commands (including `/agents`, `/mcp`, `/doctor`, `/plugin`, `/subagent`) | ✅ |
 | Hooks (`/hooks`, config-backed lifecycle hooks) | ✅ |
 | Plugin management surfaces | ✅ |
-| Skills inventory / install / uninstall surfaces | ✅ |
+| Native Skill surfaces | Deliberately disabled; HASHI owns `/skill` |
 | Machine-readable JSON output across core CLI surfaces | ✅ |
 
 ## Model Aliases
@@ -146,7 +146,6 @@ Top-level commands:
   bootstrap-plan
   agents
   mcp
-  skills
   system-prompt
   init
 ```
@@ -158,7 +157,9 @@ Top-level commands:
 `claw mcp --output-format json` reports partial MCP config success: valid servers remain in `servers[]` while malformed siblings appear in `invalid_servers[]`, with `total_configured`, `valid_count`, and `invalid_count` split out for automation. `status` mirrors this as `mcp_validation`, and doctor includes an `mcp validation` check.
 `status --output-format json` also reports partial hook config success under `hook_validation`: valid hook entries are retained while malformed or unknown-event siblings appear in `invalid_hooks[]`, with `valid_count`, `invalid_count`, and typed `kind` fields (`invalid_hooks_config` or `unknown_hook_event`) for automation. `doctor --output-format json` includes a `hook validation` check, and `config --output-format json` includes `hook_validation` metadata with degraded status when invalid entries exist.
 Shorthand prompt mode honors the POSIX `--` end-of-flags separator, so `claw -- "-prompt-with-dash"` and unknown dash-prefixed non-flag text stay on the prompt path instead of being treated as CLI options.
-`claw dump-manifests` is self-contained: it emits the Rust resolver inventory for the selected workspace (commands, tools, agents, skills, and bootstrap phases) without requiring an upstream Claude Code TypeScript checkout. Use `--manifests-dir PATH` only to scope resolver discovery to another directory.
+`claw dump-manifests` is self-contained: it emits the Rust resolver inventory for the selected workspace (commands, tools, agents, and bootstrap phases) without requiring an upstream Claude Code TypeScript checkout. Use `--manifests-dir PATH` only to scope resolver discovery to another directory.
+
+Native HER/Claw Skill discovery, installation, slash commands, and the `Skill` tool are intentionally disabled. HASHI provides the sole `/skill` control surface so the two runtimes cannot discover or activate competing packages.
 
 The command surface is moving quickly. For the canonical live help text, run:
 
@@ -174,12 +175,11 @@ The REPL now exposes a much broader surface than the original minimal shell:
 
 - session / visibility: `/help`, `/status`, `/sandbox`, `/cost`, `/resume`, `/session`, `/version`, `/usage`, `/stats`
 - workspace / git: `/compact`, `/clear`, `/config`, `/memory`, `/init`, `/diff`, `/commit`, `/pr`, `/issue`, `/export`, `/hooks`, `/files`, `/release-notes`
-- discovery / debugging: `/mcp`, `/agents`, `/skills`, `/doctor`, `/tasks`, `/context`, `/desktop`
+- discovery / debugging: `/mcp`, `/agents`, `/doctor`, `/tasks`, `/context`, `/desktop`
 - automation / analysis: `/review`, `/advisor`, `/insights`, `/security-review`, `/subagent`, `/team`, `/telemetry`, `/providers`, `/cron`, and more
 - plugin management: `/plugin` (with aliases `/plugins`, `/marketplace`)
 
 Notable claw-first surfaces now available directly in slash form:
-- `/skills [list|show <name>|install <path>|uninstall <name>|help]`
 - `/agents [list|show <name>|create <name>|help]`
 - `/mcp [list|show <server>|help]`
 - `/doctor`
@@ -203,7 +203,7 @@ rust/
     ├── runtime/            # Session, config, permissions, MCP, prompts, auth/runtime loop
     ├── rusty-claude-cli/   # Main CLI binary (`claw`)
     ├── telemetry/          # Session tracing and usage telemetry types
-    └── tools/              # Built-in tools, skill resolution, tool search, agent runtime surfaces
+    └── tools/              # Built-in tools, tool search, and agent runtime surfaces
 ```
 
 ### Crate Responsibilities
@@ -216,7 +216,7 @@ rust/
 - **runtime** — `ConversationRuntime`, config loading, session persistence, permission policy, MCP client lifecycle, system prompt assembly, usage tracking
 - **rusty-claude-cli** — REPL, one-shot prompt, direct CLI subcommands, streaming display, tool call rendering, CLI argument parsing
 - **telemetry** — session trace events and supporting telemetry payloads
-- **tools** — tool specs + execution: Bash, ReadFile, WriteFile, EditFile, GlobSearch, GrepSearch, WebSearch, WebFetch, Agent, TodoWrite, NotebookEdit, Skill, ToolSearch, and runtime-facing tool discovery
+- **tools** — tool specs + execution: Bash, ReadFile, WriteFile, EditFile, GlobSearch, GrepSearch, WebSearch, WebFetch, Agent, TodoWrite, NotebookEdit, ToolSearch, and runtime-facing tool discovery
 
 ## Stats
 

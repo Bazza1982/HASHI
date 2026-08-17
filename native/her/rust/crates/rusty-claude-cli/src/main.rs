@@ -45,12 +45,10 @@ use api::{
 };
 
 use commands::{
-    classify_skills_slash_command, handle_agents_slash_command, handle_agents_slash_command_json,
-    handle_mcp_slash_command, handle_mcp_slash_command_json, handle_plugins_slash_command,
-    handle_skills_slash_command, handle_skills_slash_command_json, render_slash_command_help,
-    render_slash_command_help_filtered, resolve_skill_invocation, resume_supported_slash_commands,
-    slash_command_specs, validate_slash_command_input, PluginsCommandResult, SkillSlashDispatch,
-    SlashCommand,
+    handle_agents_slash_command, handle_agents_slash_command_json, handle_mcp_slash_command,
+    handle_mcp_slash_command_json, handle_plugins_slash_command, render_slash_command_help,
+    render_slash_command_help_filtered, resume_supported_slash_commands, slash_command_specs,
+    validate_slash_command_input, PluginsCommandResult, SlashCommand,
 };
 use init::initialize_repo;
 use plugins::{PluginHooks, PluginManager, PluginManagerConfig, PluginRegistry};
@@ -490,10 +488,8 @@ fn classify_error_kind(message: &str) -> &'static str {
         "unsupported_acp_invocation"
     } else if message.starts_with("missing_argument:") {
         "missing_argument"
-    } else if message.contains("unsupported skills action") {
-        "unsupported_skills_action"
-    } else if message.starts_with("invalid_install_source:") {
-        "invalid_install_source"
+    } else if message.starts_with("disabled_surface:") {
+        "disabled_surface"
     } else if message.starts_with("invalid_cwd:") {
         "invalid_cwd"
     } else if message.starts_with("invalid_output_path:") {
@@ -560,10 +556,6 @@ fn classify_error_kind(message: &str) -> &'static str {
     } else if message.contains("plugin source") && message.contains("was not found") {
         // #794: `plugins install /nonexistent/path` → "plugin source ... was not found"
         "plugin_source_not_found"
-    } else if (message.contains("skill source") && message.contains("not found"))
-        || message.starts_with("skill '")
-    {
-        "skill_not_found"
     } else if message.contains("Unsupported config section") {
         "unsupported_config_section"
     } else if message.contains("unknown_plugins_action") {
@@ -722,17 +714,6 @@ fn fallback_hint_for_error_kind(kind: &str) -> Option<&'static str> {
         // #794: plugins install with a path that doesn't exist
         "plugin_source_not_found" => Some(
             "Check that the path or URL is correct. Use a local directory or a valid registry id.",
-        ),
-        // #795: skills install/show of a non-existing skill path or name
-        "skill_not_found" => Some(
-            "Run `claw skills list` to see available skills, or `claw skills install <path>` to install a new one.",
-        ),
-        // #795/#431: unsupported/invalid skills lifecycle input should include actionable local guidance.
-        "unsupported_skills_action" => Some(
-            "Supported: list, show <name>, install <path>, uninstall <name>, help. Run `claw skills help` for details.",
-        ),
-        "invalid_install_source" => Some(
-            "Pass a local skill directory containing SKILL.md or a standalone markdown file.",
         ),
         "invalid_tool_name" => Some(
             "Use canonical snake_case tool names from `available` or documented aliases from `tool_aliases`.",
@@ -1029,7 +1010,7 @@ fn plugin_summary_json(plugin: &plugins::PluginSummary) -> Value {
         "description": &plugin.metadata.description,
         "kind": plugin.metadata.kind.to_string(),
         "source": &plugin.metadata.source,
-        // #730: path parity with agents (#728) and skills (#729)
+        // #730: path parity with other local inventory surfaces.
         "path": plugin.metadata.root.as_ref().map(|p| p.display().to_string()),
         "enabled": plugin.enabled,
         "lifecycle_state": plugin.lifecycle_state(),
@@ -1082,10 +1063,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             args,
             output_format,
         } => LiveCli::print_mcp(args.as_deref(), output_format)?,
-        CliAction::Skills {
-            args,
-            output_format,
-        } => LiveCli::print_skills(args.as_deref(), output_format)?,
         CliAction::Plugins {
             action,
             target,
@@ -1273,10 +1250,6 @@ enum CliAction {
         args: Option<String>,
         output_format: CliOutputFormat,
     },
-    Skills {
-        args: Option<String>,
-        output_format: CliOutputFormat,
-    },
     Plugins {
         action: Option<String>,
         target: Option<String>,
@@ -1407,7 +1380,6 @@ enum LocalHelpTopic {
     BootstrapPlan,
     // #720: subsystem help topics so `claw help agents` etc. route to usage JSON
     Agents,
-    Skills,
     Plugins,
     Mcp,
     Config,
@@ -1626,7 +1598,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 // `--help` following a subcommand that would otherwise forward
                 // the arg to the API (e.g. `claw prompt --help`) should show
                 // top-level help instead. Subcommands that consume their own
-                // args (agents, mcp, plugins, skills) and local help-topic
+                // args (agents, mcp, plugins) and local help-topic
                 // subcommands (status, sandbox, doctor, init, state, export,
                 // version, system-prompt, dump-manifests, bootstrap-plan) must
                 // NOT be intercepted here — they handle --help in their own
@@ -1892,7 +1864,6 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 "dump-manifests" => Some(LocalHelpTopic::DumpManifests),
                 "bootstrap-plan" => Some(LocalHelpTopic::BootstrapPlan),
                 "agents" | "agent" => Some(LocalHelpTopic::Agents),
-                "skills" | "skill" => Some(LocalHelpTopic::Skills),
                 "plugins" | "plugin" | "marketplace" => Some(LocalHelpTopic::Plugins),
                 "mcp" => Some(LocalHelpTopic::Mcp),
                 "config" => Some(LocalHelpTopic::Config),
@@ -2094,7 +2065,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         // plugins` (and `claw plugins --help`, `claw plugins list`, ...)
         // attempt an Anthropic network call, surfacing the misleading error
         // `missing Anthropic credentials` even though the command is purely
-        // local introspection. Mirror `agents`/`mcp`/`skills`: action is the
+        // local introspection. Mirror `agents`/`mcp`: action is the
         // first positional arg, target is the second.
         // `plugin` (singular) and `marketplace` are aliases for `plugins`.
         // All three must route to the same local handler so that no form
@@ -2224,34 +2195,6 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             "interactive_only: `claw fork` is a slash command.\nStart `claw` and run `/session fork [branch-name]` inside the REPL."
                 .to_string(),
         ),
-        "skills" => {
-            let args = join_optional_args(&rest[1..]);
-            if let Some(action) = args.as_deref() {
-                let first_word = action.split_whitespace().next().unwrap_or(action);
-                if matches!(first_word, "add") {
-                    return Err(format!(
-                        "unsupported skills action: {first_word}. Supported actions: list, show <name>, install <path>, uninstall <name>, help, or <skill> [args]"
-                    ));
-                }
-            }
-            match classify_skills_slash_command(args.as_deref()) {
-                SkillSlashDispatch::Invoke(prompt) => Ok(CliAction::Prompt {
-                    prompt,
-                    model,
-                    output_format,
-                    allowed_tools,
-                    permission_mode: permission_mode(),
-                    compact,
-                    base_commit,
-                    reasoning_effort: reasoning_effort.clone(),
-                    allow_broad_cwd,
-                }),
-                SkillSlashDispatch::Local => Ok(CliAction::Skills {
-                    args,
-                    output_format,
-                }),
-            }
-        }
         "settings" => {
             let tail = &rest[1..];
             if tail.is_empty() {
@@ -2274,6 +2217,10 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         "system-prompt" => parse_system_prompt_args(&rest[1..], model, output_format),
         "acp" => parse_acp_args(&rest[1..], output_format),
         "login" | "logout" => Err(removed_auth_surface_error(rest[0].as_str())),
+        "skill" | "skills" => Err(
+            "disabled_surface: HER/Claw skills are disabled. Use the HASHI /skill command."
+                .to_string(),
+        ),
         "init" => {
             // #771: extra positional args to `init` were silently ignored — now rejected
             if rest.len() > 1 {
@@ -2497,7 +2444,6 @@ fn parse_single_word_command_alias(
                 "session" => Some(LocalHelpTopic::Session),
                 "compact" => Some(LocalHelpTopic::Compact),
                 "agents" | "agent" => Some(LocalHelpTopic::Agents),
-                "skills" | "skill" => Some(LocalHelpTopic::Skills),
                 "plugins" | "plugin" | "marketplace" => Some(LocalHelpTopic::Plugins),
                 "mcp" => Some(LocalHelpTopic::Mcp),
                 "config" => Some(LocalHelpTopic::Config),
@@ -2552,7 +2498,6 @@ fn parse_single_word_command_alias(
             "session" => Some(LocalHelpTopic::Session),
             "compact" => Some(LocalHelpTopic::Compact),
             "agents" | "agent" => Some(LocalHelpTopic::Agents),
-            "skills" | "skill" => Some(LocalHelpTopic::Skills),
             "plugins" | "plugin" | "marketplace" => Some(LocalHelpTopic::Plugins),
             "mcp" => Some(LocalHelpTopic::Mcp),
             "config" => Some(LocalHelpTopic::Config),
@@ -2625,7 +2570,6 @@ fn bare_slash_command_guidance(command_name: &str) -> Option<String> {
             | "plugin"
             | "plugins"
             | "marketplace"
-            | "skills"
             | "system-prompt"
             | "init"
             | "prompt"
@@ -2682,22 +2626,6 @@ fn parse_acp_args(args: &[String], output_format: CliOutputFormat) -> Result<Cli
     }
 }
 
-fn try_resolve_bare_skill_prompt(cwd: &Path, trimmed: &str) -> Option<String> {
-    let bare_first_token = trimmed.split_whitespace().next().unwrap_or_default();
-    let looks_like_skill_name = !bare_first_token.is_empty()
-        && !bare_first_token.starts_with('/')
-        && bare_first_token
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
-    if !looks_like_skill_name {
-        return None;
-    }
-    match resolve_skill_invocation(cwd, Some(trimmed)) {
-        Ok(SkillSlashDispatch::Invoke(prompt)) => Some(prompt),
-        _ => None,
-    }
-}
-
 fn join_optional_args(args: &[String]) -> Option<String> {
     let joined = args.join(" ");
     let trimmed = joined.trim();
@@ -2716,6 +2644,12 @@ fn parse_direct_slash_cli_action(
     reasoning_effort: Option<String>,
     allow_broad_cwd: bool,
 ) -> Result<CliAction, String> {
+    if matches!(rest.first().map(String::as_str), Some("/skill" | "/skills")) {
+        return Err(
+            "disabled_surface: HER/Claw skills are disabled. Use the HASHI /skill command."
+                .to_string(),
+        );
+    }
     let raw = rest.join(" ");
     match SlashCommand::parse(&raw) {
         Ok(Some(SlashCommand::Help)) => Ok(CliAction::Help { output_format }),
@@ -2746,25 +2680,6 @@ fn parse_direct_slash_cli_action(
             },
             output_format,
         }),
-        Ok(Some(SlashCommand::Skills { args })) => {
-            match classify_skills_slash_command(args.as_deref()) {
-                SkillSlashDispatch::Invoke(prompt) => Ok(CliAction::Prompt {
-                    prompt,
-                    model,
-                    output_format,
-                    allowed_tools,
-                    permission_mode: permission_mode.mode,
-                    compact,
-                    base_commit,
-                    reasoning_effort: reasoning_effort.clone(),
-                    allow_broad_cwd,
-                }),
-                SkillSlashDispatch::Local => Ok(CliAction::Skills {
-                    args,
-                    output_format,
-                }),
-            }
-        }
         Ok(Some(SlashCommand::Unknown(name))) => {
             // #828: /approve and /deny are valid REPL-only slash commands that
             // are not SlashCommand enum variants (they require an active tool
@@ -2903,7 +2818,6 @@ fn suggest_similar_subcommand(input: &str) -> Option<Vec<String>> {
         "bootstrap-plan",
         "agents",
         "mcp",
-        "skills",
         "system-prompt",
         "acp",
         "init",
@@ -2948,8 +2862,6 @@ fn is_known_top_level_subcommand(value: &str) -> bool {
             | "agents"
             | "agent"
             | "mcp"
-            | "skills"
-            | "skill"
             | "plugins"
             | "plugin"
             | "marketplace"
@@ -4935,7 +4847,6 @@ fn dump_manifests_at_path(
             println!("  Commands         {}", manifest["commands"]);
             println!("  Tools            {}", manifest["tools"]);
             println!("  Agents           {}", manifest["agents"]);
-            println!("  Skills           {}", manifest["skills"]);
             println!("  Bootstrap phases {}", manifest["bootstrap_phases"]);
         }
         CliOutputFormat::Json => println!("{}", serde_json::to_string_pretty(&manifest)?),
@@ -4971,14 +4882,8 @@ fn build_rust_resolver_manifest(workspace_dir: &Path) -> Result<Value, Box<dyn s
         .collect::<Vec<_>>();
 
     let agent_report = handle_agents_slash_command_json(None, workspace_dir)?;
-    let skill_report = handle_skills_slash_command_json(None, workspace_dir)?;
     let agents = agent_report
         .get("agents")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let skills = skill_report
-        .get("skills")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
@@ -4997,12 +4902,10 @@ fn build_rust_resolver_manifest(workspace_dir: &Path) -> Result<Value, Box<dyn s
         "commands": command_entries.len(),
         "tools": tool_entries.len(),
         "agents": agents.len(),
-        "skills": skills.len(),
         "bootstrap_phases": bootstrap.len(),
         "command_manifests": command_entries,
         "tool_manifests": tool_entries,
         "agent_manifests": agents,
-        "skill_manifests": skills,
         "bootstrap_manifest": bootstrap,
     }))
 }
@@ -6888,22 +6791,6 @@ fn run_resume_command(
                 ),
             })
         }
-        SlashCommand::Skills { args } => {
-            if let SkillSlashDispatch::Invoke(_) = classify_skills_slash_command(args.as_deref()) {
-                // #779: use interactive_only: prefix + \n hint so #776 classify/split emits
-                // error_kind:interactive_only + non-null hint instead of unknown+null.
-                let skill_name = args.as_deref().unwrap_or("<skill>");
-                return Err(format!(
-                    "interactive_only: /skills {skill_name} invocation requires a live session.\nStart `claw` and run `/skills {skill_name}` inside the REPL, or use `claw -p <prompt>` with skill context."
-                ).into());
-            }
-            let cwd = env::current_dir()?;
-            Ok(ResumeCommandOutcome {
-                session: session.clone(),
-                message: Some(handle_skills_slash_command(args.as_deref(), &cwd)?),
-                json: Some(handle_skills_slash_command_json(args.as_deref(), &cwd)?),
-            })
-        }
         SlashCommand::Plugins { action, target } => {
             // Only list is supported in resume mode (no runtime to reload)
             match action.as_deref() {
@@ -7263,16 +7150,6 @@ fn run_repl(
                         eprintln!("{error}");
                         continue;
                     }
-                }
-                // Bare-word skill dispatch: if the first token of the input
-                // matches a known skill name, invoke it as `/skills <input>`
-                // rather than forwarding raw text to the LLM (ROADMAP #36).
-                let cwd = std::env::current_dir().unwrap_or_default();
-                if let Some(prompt) = try_resolve_bare_skill_prompt(&cwd, &trimmed) {
-                    editor.push_history(input);
-                    cli.record_prompt_history(&trimmed);
-                    cli.run_turn(&prompt)?;
-                    continue;
                 }
                 editor.push_history(input);
                 cli.record_prompt_history(&trimmed);
@@ -8675,19 +8552,6 @@ impl LiveCli {
                 }
                 false
             }
-            SlashCommand::Skills { args } => {
-                match classify_skills_slash_command(args.as_deref()) {
-                    SkillSlashDispatch::Invoke(prompt) => self.run_turn(&prompt)?,
-                    SkillSlashDispatch::Local => {
-                        if let Err(error) =
-                            Self::print_skills(args.as_deref(), CliOutputFormat::Text)
-                        {
-                            eprintln!("{error}");
-                        }
-                    }
-                }
-                false
-            }
             SlashCommand::Doctor => {
                 println!(
                     "{}",
@@ -9073,7 +8937,7 @@ impl LiveCli {
             CliOutputFormat::Text => println!("{}", handle_agents_slash_command(args, &cwd)?),
             CliOutputFormat::Json => {
                 let value = handle_agents_slash_command_json(args, &cwd)?;
-                // #789: parity with print_mcp/#788 print_skills — exit 1 when envelope
+                // #789: parity with other local reports — exit 1 when envelope
                 // reports an error so automation can rely on exit code instead of
                 // parsing the JSON status field.
                 let is_error = value.get("status").and_then(|v| v.as_str()) == Some("error");
@@ -9108,31 +8972,6 @@ impl LiveCli {
                     || value.get("status").and_then(serde_json::Value::as_str) == Some("error");
                 println!("{}", serde_json::to_string_pretty(&value)?);
                 if is_error {
-                    std::process::exit(1);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn print_skills(
-        args: Option<&str>,
-        output_format: CliOutputFormat,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let cwd = env::current_dir()?;
-        match output_format {
-            CliOutputFormat::Text => println!("{}", handle_skills_slash_command(args, &cwd)?),
-            CliOutputFormat::Json => {
-                let result = handle_skills_slash_command_json(args, &cwd)?;
-                let is_error = result.get("status").and_then(|v| v.as_str()) == Some("error");
-                // #739: action:"help" with unexpected set is a usage response, not a fatal error;
-                // don't return Err which would emit a second error envelope from the generic path.
-                let is_help_action = result.get("action").and_then(|v| v.as_str()) == Some("help");
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                if is_error && !is_help_action {
-                    // #788: the error JSON is already emitted above; returning Err here
-                    // would cause the top-level handler to emit a second error envelope.
-                    // Exit directly to signal failure without a duplicate envelope.
                     std::process::exit(1);
                 }
             }
@@ -9211,7 +9050,7 @@ impl LiveCli {
             }
             CliOutputFormat::Json => {
                 let action_str = action.unwrap_or("list");
-                // #743/#420: plugins help must return a usage envelope matching agents/mcp/skills help shape.
+                // #743/#420: plugins help must return a usage envelope matching agents/mcp help shape.
                 if matches!(action_str, "help" | "-h" | "--help") {
                     let cwd_str = cwd.display().to_string();
                     let obj = json!({
@@ -9279,7 +9118,7 @@ impl LiveCli {
                                 "status": "error",
                                 "error_kind": "plugin_not_found",
                                 "requested": name,
-                                // #734: parity with skills show which always emits a message field
+                                // #734: always emit a message field for local reports.
                                 "message": format!("plugin '{}' not found", name),
                                 // #760: hint so callers know how to enumerate available plugins
                                 "hint": "Run `claw plugins list` to see available plugins.",
@@ -10739,10 +10578,10 @@ fn render_help_topic(topic: LocalHelpTopic) -> String {
             .to_string(),
         LocalHelpTopic::DumpManifests => "Dump Manifests
   Usage            claw dump-manifests [--manifests-dir <path>] [--output-format <format>]
-  Purpose          emit every skill/agent/tool manifest the resolver would load for the current cwd
+  Purpose          emit every agent/tool manifest the resolver would load for the current cwd
   Options          --manifests-dir scopes discovery to a specific directory
   Formats          text (default), json
-  Related          claw skills · claw agents · claw doctor"
+  Related          claw agents · claw doctor"
             .to_string(),
         LocalHelpTopic::BootstrapPlan => "Bootstrap Plan
   Usage            claw bootstrap-plan [--output-format <format>]
@@ -10756,11 +10595,6 @@ fn render_help_topic(topic: LocalHelpTopic) -> String {
             &env::current_dir().unwrap_or_default(),
         )
         .unwrap_or_else(|_| "agents help unavailable".to_string()),
-        LocalHelpTopic::Skills => commands::handle_skills_slash_command(
-            Some("--help"),
-            &env::current_dir().unwrap_or_default(),
-        )
-        .unwrap_or_else(|_| "skills help unavailable".to_string()),
         LocalHelpTopic::Plugins => "Plugins
   Usage            claw plugins [list|show <name>|install <path>|enable <name>|disable <name>|uninstall <name>]
   Purpose          manage lifecycle of plugins that extend tool and hook capabilities
@@ -10827,7 +10661,6 @@ fn local_help_topic_command(topic: LocalHelpTopic) -> &'static str {
         LocalHelpTopic::DumpManifests => "dump-manifests",
         LocalHelpTopic::BootstrapPlan => "bootstrap-plan",
         LocalHelpTopic::Agents => "agents",
-        LocalHelpTopic::Skills => "skills",
         LocalHelpTopic::Plugins => "plugins",
         LocalHelpTopic::Mcp => "mcp",
         LocalHelpTopic::Config => "config",
@@ -11112,14 +10945,6 @@ fn print_help_topic(
                 println!("{}", serde_json::to_string_pretty(&json)?);
                 return Ok(());
             }
-            LocalHelpTopic::Skills => {
-                let json = commands::handle_skills_slash_command_json(Some("--help"), &cwd)
-                    .unwrap_or_else(
-                        |_| serde_json::json!({"kind":"skills","action":"help","status":"error"}),
-                    );
-                println!("{}", serde_json::to_string_pretty(&json)?);
-                return Ok(());
-            }
             _ => {}
         }
     }
@@ -11239,7 +11064,6 @@ fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::er
             "permissions" => runtime_config
                 .get("permissions")
                 .map(|value| value.render()),
-            "skills" => runtime_config.get("skills").map(|value| value.render()),
             "agents" => runtime_config.get("agents").map(|value| value.render()),
             "settings" => Some(runtime_config.as_json().render()),
             // #344: /config help shows available sections
@@ -11252,7 +11076,6 @@ fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::er
                 lines.push("  mcp          MCP server configuration".to_string());
                 lines.push("  sandbox      Sandbox configuration".to_string());
                 lines.push("  permissions  Permission rules".to_string());
-                lines.push("  skills       Skills configuration".to_string());
                 lines.push("  agents       Agent configuration".to_string());
                 lines.push("  settings     Full merged settings".to_string());
                 lines.push(format!("  Loaded keys: {}", runtime_config.merged().len()));
@@ -11260,7 +11083,7 @@ fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::er
             }
             other => {
                 lines.push(format!(
-                    "  Unsupported config section '{other}'. Use: env, hooks, model, plugins, mcp, sandbox, permissions, skills, agents, or settings."
+                    "  Unsupported config section '{other}'. Use: env, hooks, model, plugins, mcp, sandbox, permissions, agents, or settings."
                 ));
                 return Ok(lines.join(
                     "
@@ -11367,7 +11190,6 @@ fn render_config_json(
                 .map(|v| v.render()),
             "sandbox" => runtime_config.get("sandbox").map(|v| v.render()),
             "permissions" => runtime_config.get("permissions").map(|v| v.render()),
-            "skills" => runtime_config.get("skills").map(|v| v.render()),
             "agents" => runtime_config.get("agents").map(|v| v.render()),
             "settings" => Some(runtime_config.as_json().render()),
             // #344: /config help returns structured section list
@@ -11377,7 +11199,7 @@ fn render_config_json(
                     "action": "help",
                     "status": "ok",
                     "section": "help",
-                    "available_sections": ["env", "hooks", "model", "plugins", "mcp", "sandbox", "permissions", "skills", "agents", "settings"],
+                    "available_sections": ["env", "hooks", "model", "plugins", "mcp", "sandbox", "permissions", "agents", "settings"],
                     "loaded_keys": runtime_config.merged().len(),
                 }));
             }
@@ -11386,11 +11208,11 @@ fn render_config_json(
                 // .hint get actionable guidance instead of null
                 let hint = if matches!(other, "list" | "show" | "info") {
                     format!(
-                        "'claw config {other}' is not a subcommand. To list all config: `claw config`. To inspect a section: `claw config <section>` where section is one of: env, hooks, model, plugins, mcp, sandbox, permissions, skills, agents, settings."
+                        "'claw config {other}' is not a subcommand. To list all config: `claw config`. To inspect a section: `claw config <section>` where section is one of: env, hooks, model, plugins, mcp, sandbox, permissions, agents, settings."
                     )
                 } else {
                     format!(
-                        "'{other}' is not a config section. Supported: env, hooks, model, plugins, mcp, sandbox, permissions, skills, agents, settings."
+                        "'{other}' is not a config section. Supported: env, hooks, model, plugins, mcp, sandbox, permissions, agents, settings."
                     )
                 };
                 return Ok(serde_json::json!({
@@ -11400,9 +11222,9 @@ fn render_config_json(
                     "error_kind": "unsupported_config_section",
                     "section": other,
                     "ok": false,
-                    "error": format!("Unsupported config section '{other}'. Use: env, hooks, model, plugins, mcp, sandbox, permissions, skills, agents, or settings."),
+                    "error": format!("Unsupported config section '{other}'. Use: env, hooks, model, plugins, mcp, sandbox, permissions, agents, or settings."),
                     "hint": hint,
-                    "supported_sections": ["env", "hooks", "model", "plugins", "mcp", "sandbox", "permissions", "skills", "agents", "settings"],
+                    "supported_sections": ["env", "hooks", "model", "plugins", "mcp", "sandbox", "permissions", "agents", "settings"],
                     "cwd": cwd.display().to_string(),
                     "loaded_files": loaded_files,
                     "files": base["files"].clone(),
@@ -14189,7 +14011,6 @@ fn slash_command_completion_candidates_with_sessions(
         "/ultraplan ",
         "/agents help",
         "/mcp help",
-        "/skills help",
     ] {
         completions.insert(candidate.to_string());
     }
@@ -15231,7 +15052,6 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "  claw bootstrap-plan")?;
     writeln!(out, "  claw agents")?;
     writeln!(out, "  claw mcp")?;
-    writeln!(out, "  claw skills")?;
     writeln!(out, "  claw system-prompt [--cwd PATH] [--date YYYY-MM-DD]")?;
     writeln!(out, "  claw init")?;
     writeln!(
@@ -15331,7 +15151,6 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(out, "  claw agents")?;
     writeln!(out, "  claw mcp show my-server")?;
-    writeln!(out, "  claw /skills")?;
     writeln!(out, "  claw doctor")?;
     writeln!(out, "  source of truth: {OFFICIAL_REPO_URL}")?;
     writeln!(
@@ -15403,12 +15222,11 @@ mod tests {
         resume_supported_slash_commands, run_resume_command, short_tool_id,
         slash_command_completion_candidates_with_sessions, split_error_hint, status_context,
         status_json_value, stream_json_terminal_failure_json, summarize_tool_payload_for_markdown,
-        try_resolve_bare_skill_prompt, validate_no_args, write_mcp_server_fixture, CliAction,
-        CliOutputFormat, CliToolExecutor, GitOperation, GitWorkspaceSummary,
-        InternalPromptProgressEvent, InternalPromptProgressState, LiveCli, LocalHelpTopic,
-        PermissionModeProvenance, PromptHistoryEntry, SessionLifecycleKind,
-        SessionLifecycleSummary, SlashCommand, StatusUsage, TmuxPaneSnapshot, DEFAULT_MODEL,
-        LATEST_SESSION_REFERENCE, STUB_COMMANDS,
+        validate_no_args, write_mcp_server_fixture, CliAction, CliOutputFormat, CliToolExecutor,
+        GitOperation, GitWorkspaceSummary, InternalPromptProgressEvent,
+        InternalPromptProgressState, LiveCli, LocalHelpTopic, PermissionModeProvenance,
+        PromptHistoryEntry, SessionLifecycleKind, SessionLifecycleSummary, SlashCommand,
+        StatusUsage, TmuxPaneSnapshot, DEFAULT_MODEL, LATEST_SESSION_REFERENCE, STUB_COMMANDS,
     };
     use api::{ApiError, MessageResponse, OutputContentBlock, Usage};
     use plugins::{
@@ -15705,16 +15523,6 @@ mod tests {
             Ok(value) => value,
             Err(payload) => std::panic::resume_unwind(payload),
         }
-    }
-
-    fn write_skill_fixture(root: &Path, name: &str, description: &str) {
-        let skill_dir = root.join(name);
-        fs::create_dir_all(&skill_dir).expect("skill dir should exist");
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
-        )
-        .expect("skill file should write");
     }
 
     fn write_plugin_fixture(root: &Path, name: &str, include_hooks: bool, include_lifecycle: bool) {
@@ -16635,32 +16443,6 @@ mod tests {
             CliAction::Mcp {
                 args: None,
                 output_format: CliOutputFormat::Text,
-            }
-        );
-        assert_eq!(
-            parse_args(&["skills".to_string()]).expect("skills should parse"),
-            CliAction::Skills {
-                args: None,
-                output_format: CliOutputFormat::Text,
-            }
-        );
-        assert_eq!(
-            parse_args(&[
-                "skills".to_string(),
-                "help".to_string(),
-                "overview".to_string()
-            ])
-            .expect("skills help overview should invoke"),
-            CliAction::Prompt {
-                prompt: "$help overview".to_string(),
-                model: DEFAULT_MODEL.to_string(),
-                output_format: CliOutputFormat::Text,
-                allowed_tools: None,
-                permission_mode: crate::default_permission_mode(),
-                compact: false,
-                base_commit: None,
-                reasoning_effort: None,
-                allow_broad_cwd: false,
             }
         );
         assert_eq!(
@@ -17596,12 +17378,8 @@ mod tests {
             "legacy_session_no_workspace_binding"
         );
         assert_eq!(
-            classify_error_kind("unsupported skills action: bogus. Supported actions: list"),
-            "unsupported_skills_action"
-        );
-        assert_eq!(
-            classify_error_kind("invalid_install_source: bogus"),
-            "invalid_install_source"
+            classify_error_kind("disabled_surface: HER/Claw skills are disabled"),
+            "disabled_surface"
         );
         assert_eq!(
             classify_error_kind("invalid_tool_name: unsupported tool in --allowedTools: teleport"),
@@ -17685,14 +17463,6 @@ mod tests {
         assert_eq!(
             classify_error_kind("plugin source `/nonexistent/path` was not found"),
             "plugin_source_not_found"
-        );
-        assert_eq!(
-            classify_error_kind("skill source /path/to/skill not found"),
-            "skill_not_found"
-        );
-        assert_eq!(
-            classify_error_kind("skill 'my-skill' does not exist"),
-            "skill_not_found"
         );
         assert_eq!(
             classify_error_kind("Unsupported config section 'show'. Use: env, hooks, model"),
@@ -18069,24 +17839,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_json_output_for_mcp_and_skills_commands() {
+    fn parses_json_output_for_mcp_commands() {
         assert_eq!(
             parse_args(&["--output-format=json".to_string(), "mcp".to_string()])
                 .expect("json mcp should parse"),
             CliAction::Mcp {
                 args: None,
-                output_format: CliOutputFormat::Json,
-            }
-        );
-        assert_eq!(
-            parse_args(&[
-                "--output-format=json".to_string(),
-                "/skills".to_string(),
-                "help".to_string(),
-            ])
-            .expect("json /skills help should parse"),
-            CliAction::Skills {
-                args: Some("help".to_string()),
                 output_format: CliOutputFormat::Json,
             }
         );
@@ -18130,7 +17888,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_direct_agents_mcp_and_skills_slash_commands() {
+    fn parses_direct_agents_and_mcp_slash_commands() {
         let _guard = env_lock();
         let _cwd_guard = cwd_guard();
         std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
@@ -18147,82 +17905,6 @@ mod tests {
             CliAction::Mcp {
                 args: Some("show demo".to_string()),
                 output_format: CliOutputFormat::Text,
-            }
-        );
-        assert_eq!(
-            parse_args(&["/skills".to_string()]).expect("/skills should parse"),
-            CliAction::Skills {
-                args: None,
-                output_format: CliOutputFormat::Text,
-            }
-        );
-        assert_eq!(
-            parse_args(&["/skill".to_string()]).expect("/skill should parse"),
-            CliAction::Skills {
-                args: None,
-                output_format: CliOutputFormat::Text,
-            }
-        );
-        assert_eq!(
-            parse_args(&["/skills".to_string(), "help".to_string()])
-                .expect("/skills help should parse"),
-            CliAction::Skills {
-                args: Some("help".to_string()),
-                output_format: CliOutputFormat::Text,
-            }
-        );
-        assert_eq!(
-            parse_args(&["/skill".to_string(), "list".to_string()])
-                .expect("/skill list should parse"),
-            CliAction::Skills {
-                args: Some("list".to_string()),
-                output_format: CliOutputFormat::Text,
-            }
-        );
-        assert_eq!(
-            parse_args(&[
-                "/skills".to_string(),
-                "help".to_string(),
-                "overview".to_string()
-            ])
-            .expect("/skills help overview should invoke"),
-            CliAction::Prompt {
-                prompt: "$help overview".to_string(),
-                model: DEFAULT_MODEL.to_string(),
-                output_format: CliOutputFormat::Text,
-                allowed_tools: None,
-                permission_mode: crate::default_permission_mode(),
-                compact: false,
-                base_commit: None,
-                reasoning_effort: None,
-                allow_broad_cwd: false,
-            }
-        );
-        assert_eq!(
-            parse_args(&[
-                "/skills".to_string(),
-                "install".to_string(),
-                "./fixtures/help-skill".to_string(),
-            ])
-            .expect("/skills install should parse"),
-            CliAction::Skills {
-                args: Some("install ./fixtures/help-skill".to_string()),
-                output_format: CliOutputFormat::Text,
-            }
-        );
-        assert_eq!(
-            parse_args(&["/skills".to_string(), "/test".to_string()])
-                .expect("/skills /test should normalize to a single skill prompt prefix"),
-            CliAction::Prompt {
-                prompt: "$test".to_string(),
-                model: DEFAULT_MODEL.to_string(),
-                output_format: CliOutputFormat::Text,
-                allowed_tools: None,
-                permission_mode: crate::default_permission_mode(),
-                compact: false,
-                base_commit: None,
-                reasoning_effort: None,
-                allow_broad_cwd: false,
             }
         );
         assert_eq!(
@@ -18281,36 +17963,17 @@ mod tests {
     }
 
     #[test]
-    fn typoed_skills_subcommand_returns_did_you_mean_error() {
-        let error = parse_args(&["skilsl".to_string()]).expect_err("skilsl should error");
-        assert!(error.contains("unknown subcommand: skilsl."));
-        assert!(error.contains("skills"));
-    }
-
-    #[test]
-    fn unsupported_skills_actions_return_typed_error_683() {
-        let error = parse_args(&["skills".to_string(), "add".to_string()])
-            .expect_err("skills add should error");
-        assert!(
-            error.contains("unsupported skills action"),
-            "skills add should contain 'unsupported skills action', got: {error}"
-        );
-        assert_eq!(
-            classify_error_kind(&error),
-            "unsupported_skills_action",
-            "skills add should classify as unsupported_skills_action, got: {error}"
-        );
-
-        for action in ["remove", "uninstall", "delete"] {
-            assert_eq!(
-                parse_args(&["skills".to_string(), action.to_string()])
-                    .expect(&format!("skills {action} should parse")),
-                CliAction::Skills {
-                    args: Some(action.to_string()),
-                    output_format: CliOutputFormat::Text,
-                },
-                "skills {action} should route locally so missing targets are handled without credentials"
-            );
+    fn her_skill_surfaces_are_explicitly_disabled() {
+        for args in [
+            vec!["skill".to_string()],
+            vec!["skills".to_string(), "list".to_string()],
+            vec!["/skill".to_string()],
+            vec!["/skills".to_string(), "show".to_string()],
+        ] {
+            let error = parse_args(&args).expect_err("HER skill surface must stay disabled");
+            assert!(error.starts_with("disabled_surface:"), "got: {error}");
+            assert_eq!(classify_error_kind(&error), "disabled_surface");
+            assert!(error.contains("HASHI /skill"));
         }
     }
 
@@ -18614,38 +18277,6 @@ mod tests {
     }
 
     #[test]
-    fn bare_skill_dispatch_resolves_known_project_skill_to_prompt() {
-        let _guard = env_lock();
-        let workspace = temp_dir();
-        write_skill_fixture(
-            &workspace.join(".codex").join("skills"),
-            "caveman",
-            "Project skill fixture",
-        );
-
-        let prompt = try_resolve_bare_skill_prompt(&workspace, "caveman sharpen club")
-            .expect("known bare skill should dispatch");
-        assert_eq!(prompt, "$caveman sharpen club");
-
-        fs::remove_dir_all(workspace).expect("workspace should clean up");
-    }
-
-    #[test]
-    fn bare_skill_dispatch_ignores_unknown_or_non_skill_input() {
-        let _guard = env_lock();
-        let workspace = temp_dir();
-        fs::create_dir_all(&workspace).expect("workspace should exist");
-
-        assert_eq!(
-            try_resolve_bare_skill_prompt(&workspace, "not-a-known-skill do thing"),
-            None
-        );
-        assert_eq!(try_resolve_bare_skill_prompt(&workspace, "/status"), None);
-
-        fs::remove_dir_all(workspace).expect("workspace should clean up");
-    }
-
-    #[test]
     fn repl_help_includes_shared_commands_and_exit() {
         let help = render_repl_help();
         assert!(help.contains("REPL"));
@@ -18674,7 +18305,8 @@ mod tests {
         ));
         assert!(help.contains("aliases: /plugins, /marketplace"));
         assert!(help.contains("/agents"));
-        assert!(help.contains("/skills"));
+        assert!(!help.contains("/skills"));
+        assert!(!help.contains("/skill"));
         assert!(help.contains("/exit"));
         assert!(help.contains(
             "Auto-save            .claw/sessions/<workspace-fingerprint>/<session-id>.jsonl"
@@ -18900,8 +18532,8 @@ mod tests {
         assert!(help.contains("claw acp [serve]"));
         assert!(help.contains("claw agents"));
         assert!(help.contains("claw mcp"));
-        assert!(help.contains("claw skills"));
-        assert!(help.contains("claw /skills"));
+        assert!(!help.contains("claw skills"));
+        assert!(!help.contains("claw /skills"));
         assert!(help.contains("ultraworkers/claw-code"));
         assert!(help.contains("cargo install claw-code"));
         assert!(!help.contains("claw login"));

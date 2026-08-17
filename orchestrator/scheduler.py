@@ -13,7 +13,7 @@ from orchestrator.superloop_scheduler import advance_superloops_once
 scheduler_logger = logging.getLogger("BridgeU.Scheduler")
 
 SCHEDULER_JOB_TIMEOUT_S = 30
-SCHEDULER_SKILL_TIMEOUT_S = 1860  # Keep longer than the action-skill watchdog so the skill layer owns timeout/cleanup.
+SCHEDULER_ACTION_TIMEOUT_S = 1860  # Bounds Jobs-owned automations and legacy scheduled Skill prompts.
 PARKED_FOLLOWUP_TIMEOUT_S = 15
 CRON_CATCHUP_THRESHOLD_S = 3600
 LEGACY_RECOVERY_MIGRATION_MAX_AGE_S = 24 * 60 * 60
@@ -838,6 +838,20 @@ class TaskScheduler:
                 f"This is a missed occurrence originally due at {scheduled_for.astimezone().isoformat(timespec='minutes')}.\n"
                 f"Recovery batch: {recovery_batch_id or 'unknown'}\n\n"
             )
+        if action.startswith("automation:"):
+            automation_id = action.split(":", 1)[1]
+            args = recovery_header + (hb.get("args", "") or prompt)
+            return await self._run_scheduler_action(
+                rt.invoke_scheduler_automation(
+                    automation_id=automation_id,
+                    args=args,
+                    task_id=task_id,
+                ),
+                task_kind="Heartbeat",
+                task_id=task_id,
+                agent_name=agent_name,
+                timeout_s=SCHEDULER_ACTION_TIMEOUT_S,
+            )
         if action.startswith("skill:"):
             skill_id = action.split(":", 1)[1]
             args = recovery_header + (hb.get("args", "") or prompt)
@@ -850,7 +864,7 @@ class TaskScheduler:
                 task_kind="Heartbeat",
                 task_id=task_id,
                 agent_name=agent_name,
-                timeout_s=SCHEDULER_SKILL_TIMEOUT_S,
+                timeout_s=SCHEDULER_ACTION_TIMEOUT_S,
             )
         return await self._run_scheduler_action(
             rt.enqueue_request(
@@ -920,7 +934,21 @@ class TaskScheduler:
                 task_kind="Cron",
                 task_id=task_id,
                 agent_name=agent_name,
-                timeout_s=SCHEDULER_SKILL_TIMEOUT_S,
+                timeout_s=SCHEDULER_ACTION_TIMEOUT_S,
+            )
+        if action.startswith("automation:"):
+            automation_id = action.split(":", 1)[1]
+            args = recovery_header + (cron.get("args", "") or cron.get("prompt", ""))
+            return await self._run_scheduler_action(
+                rt.invoke_scheduler_automation(
+                    automation_id=automation_id,
+                    args=args,
+                    task_id=task_id,
+                ),
+                task_kind="Cron",
+                task_id=task_id,
+                agent_name=agent_name,
+                timeout_s=SCHEDULER_ACTION_TIMEOUT_S,
             )
         if action.startswith("skill:"):
             skill_id = action.split(":", 1)[1]
@@ -934,7 +962,7 @@ class TaskScheduler:
                 task_kind="Cron",
                 task_id=task_id,
                 agent_name=agent_name,
-                timeout_s=SCHEDULER_SKILL_TIMEOUT_S,
+                timeout_s=SCHEDULER_ACTION_TIMEOUT_S,
             )
 
         prompt = cron.get("prompt", "")

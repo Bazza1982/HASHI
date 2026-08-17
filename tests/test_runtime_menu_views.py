@@ -191,11 +191,10 @@ def test_claw_provider_cards_follow_standard_order_and_escape_values() -> None:
     assert "codex&lt;cli&gt;" in unavailable
 
 
-def test_skill_detail_escapes_reference_and_reports_active_toggle() -> None:
+def test_skill_detail_escapes_reference_and_reports_standard_package() -> None:
     skill = SimpleNamespace(
         id="debug<strict>",
         name="Debug & inspect",
-        type="toggle",
         description="Use <carefully>.",
         body="Never expose A&B.",
     )
@@ -208,7 +207,8 @@ def test_skill_detail_escapes_reference_and_reports_active_toggle() -> None:
     )
 
     _assert_standard_card(text, "DEBUG &amp; INSPECT")
-    assert "<b>Current</b> · <b>ON</b>" in text
+    assert "<b>Current</b> · <b>READY</b>" in text
+    assert "<b>Format</b> · <code>SKILL.md</code>" in text
     assert "Use &lt;carefully&gt;." in text
     assert "Never expose A&amp;B." in text
     assert "debug&lt;strict&gt;" in text

@@ -29,6 +29,15 @@ BRIDGE_LOG = PROJECT_ROOT / "logs" / "bridge.log"
 LOGS_ROOT = PROJECT_ROOT / "logs"
 MANAGED_HEARTBEATS_JSON = PROJECT_ROOT / "managed_active_heartbeats.json"
 TRANSCRIPT_GLOB = PROJECT_ROOT / "workspaces" / "*" / "transcript.jsonl"
+AUTOMATION_SCRIPTS = {
+    "agent-audit": PROJECT_ROOT / "skills" / "agent-audit" / "scripts" / "agent_audit.py",
+    "hermes-memory-import": PROJECT_ROOT / "skills" / "hermes-memory-import" / "scripts" / "hermes_memory_import.py",
+    "memory-consolidation": PROJECT_ROOT / "skills" / "memory-consolidation" / "scripts" / "memory_consolidation.py",
+    "remote-guard": PROJECT_ROOT / "skills" / "remote-guard" / "scripts" / "remote_guard.py",
+}
+LEGACY_AUTOMATION_SCRIPTS = {
+    "remote-guard": PROJECT_ROOT / "skills" / "remote_guard" / "remote_guard.py",
+}
 
 NETWORK_PATTERNS: dict[str, str] = {
     "requests/httpx/aiohttp": r"\b(?:requests|httpx|aiohttp)\b",
@@ -120,19 +129,6 @@ def load_json(path: Path, fallback: object) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def parse_frontmatter_run(skill_md: Path) -> str | None:
-    if not skill_md.exists():
-        return None
-    text = skill_md.read_text(encoding="utf-8", errors="ignore")
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return None
-    for line in parts[1].splitlines():
-        if line.startswith("run:"):
-            return line.split(":", 1)[1].strip()
-    return None
-
-
 def line_hits(text: str, patterns: dict[str, str]) -> list[str]:
     hits: list[str] = []
     lines = text.splitlines()
@@ -214,18 +210,18 @@ def audit_job_config(crons: list[CronEntry]) -> list[Finding]:
         )
         return findings
 
-    if target.action != "skill:agent_audit":
+    if target.action not in {"automation:agent-audit", "skill:agent_audit"}:
         findings.append(
             Finding(
                 severity="Critical",
-                title="审计 job 仍是提示词型执行，不是本地审计 skill",
+                title="审计 job 仍是提示词型执行，不是本地审计 automation",
                 details=[
                     f"`lily-daily-agent-audit` 当前 action 为 `{target.action}`。",
                     "这会让审计依赖 agent 自述，而不是固定的本地证据检查流程。",
                 ],
                 evidence=[
                     f"{TASKS_JSON}: cron id `lily-daily-agent-audit`",
-                    "期望配置：`action=skill:agent_audit`",
+                    "期望配置：`action=automation:agent-audit`（旧 `skill:agent_audit` 兼容）",
                 ],
             )
         )
@@ -233,18 +229,23 @@ def audit_job_config(crons: list[CronEntry]) -> list[Finding]:
 
 
 def resolve_skill_script(skill_name: str) -> Path | None:
-    skill_dir = PROJECT_ROOT / "skills" / skill_name
-    skill_md = skill_dir / "skill.md"
-    run_name = parse_frontmatter_run(skill_md) or f"{skill_name}.py"
-    script_path = skill_dir / run_name
+    canonical_name = str(skill_name or "").replace("_", "-")
+    script_path = AUTOMATION_SCRIPTS.get(canonical_name)
+    if script_path is None:
+        return None
+    if not script_path.exists():
+        script_path = LEGACY_AUTOMATION_SCRIPTS.get(canonical_name, script_path)
     return script_path if script_path.exists() else None
 
 
 def audit_enabled_skills(crons: list[CronEntry]) -> list[SkillAudit]:
     fanout_map: dict[str, list[CronEntry]] = {}
     for cron in crons:
-        if cron.action.startswith("skill:"):
-            fanout_map.setdefault(cron.action.split(":", 1)[1], []).append(cron)
+        if cron.action.startswith(("automation:", "skill:")):
+            raw_name = cron.action.split(":", 1)[1]
+            canonical_name = raw_name.replace("_", "-")
+            if canonical_name in AUTOMATION_SCRIPTS:
+                fanout_map.setdefault(canonical_name, []).append(cron)
 
     audits: list[SkillAudit] = []
     for skill_name, fanout in sorted(fanout_map.items()):
@@ -266,7 +267,7 @@ def audit_enabled_skills(crons: list[CronEntry]) -> list[SkillAudit]:
         text = script_path.read_text(encoding="utf-8", errors="ignore")
         secondary_paths = discover_secondary_script_paths(script_path, text)
         secondary_hits: list[str] = []
-        if skill_name != "agent_audit":
+        if skill_name != "agent-audit":
             for secondary_path in secondary_paths:
                 secondary_text = secondary_path.read_text(encoding="utf-8", errors="ignore")
                 secondary_hits.extend(
@@ -426,7 +427,7 @@ def api_usage_findings(crons: list[CronEntry], skill_audits: list[SkillAudit]) -
             findings.append(
                 Finding(
                     severity=severity,
-                    title=f"`skill:{audit.skill_name}` 存在 API hop 风险特征",
+                    title=f"`automation:{audit.skill_name}` 存在 API hop 风险特征",
                     details=[
                         f"影响 cron: {fanout}",
                         "风险特征命中不等于已确认违规，但必须人工复核实现意图。",
@@ -438,7 +439,7 @@ def api_usage_findings(crons: list[CronEntry], skill_audits: list[SkillAudit]) -
                 )
             )
     else:
-        clean_notes.append("已检查所有 enabled `skill:*` 的实现文件，未发现 `requests/httpx/aiohttp/urllib/localhost/127.0.0.1//v1/` 这类 API hop 特征。")
+        clean_notes.append("已检查所有 enabled `automation:*` 与旧 `skill:*` automation 兼容路由，未发现 `requests/httpx/aiohttp/urllib/localhost/127.0.0.1//v1/` 这类 API hop 特征。")
 
     secondary_risky = [audit for audit in skill_audits if audit.secondary_hits]
     for audit in secondary_risky:
@@ -446,7 +447,7 @@ def api_usage_findings(crons: list[CronEntry], skill_audits: list[SkillAudit]) -
         findings.append(
             Finding(
                 severity="High" if len(audit.fanout) > 1 else "Medium",
-                title=f"`skill:{audit.skill_name}` 的二级脚本出现 API hop 风险特征",
+                title=f"`automation:{audit.skill_name}` 的二级脚本出现 API hop 风险特征",
                 details=[
                     f"影响 cron: {fanout}",
                     "这是 wrapper 之外的 subprocess/import 目标脚本命中，不应再被顶层扫描遗漏。",
@@ -460,8 +461,8 @@ def api_usage_findings(crons: list[CronEntry], skill_audits: list[SkillAudit]) -
         findings.append(
             Finding(
                 severity="High",
-                title="enabled skill 缺少可审计实现文件",
-                details=[f"`skill:{audit.skill_name}` 未解析到本地脚本" for audit in missing_skills],
+                title="enabled automation 缺少可审计实现文件",
+                details=[f"`automation:{audit.skill_name}` 未解析到本地脚本" for audit in missing_skills],
                 evidence=[f"{PROJECT_ROOT / 'skills'}"],
             )
         )
@@ -906,17 +907,17 @@ def build_report() -> str:
 
     sections.append("## 自动 API 使用检查\n")
     api_lines = [
-        f"已检查 enabled cron {len(crons)} 条，其中 `skill:*` {sum(1 for cron in crons if cron.action.startswith('skill:'))} 条，`enqueue_prompt` {sum(1 for cron in crons if cron.action == 'enqueue_prompt')} 条。",
+        f"已检查 enabled cron {len(crons)} 条，其中 `automation:*`/旧 `skill:*` {sum(1 for cron in crons if cron.action.startswith(('automation:', 'skill:')))} 条，`enqueue_prompt` {sum(1 for cron in crons if cron.action == 'enqueue_prompt')} 条。",
     ]
     if approved_notes:
         api_lines.extend(approved_notes)
-    api_lines.append("判定原则：不仅看 cron 配置，还沿着 enabled skill 实现文件与部分二级脚本检查 API hop 特征。")
+    api_lines.append("判定原则：不仅看 cron 配置，还沿着 enabled automation 实现文件与部分二级脚本检查 API hop 特征。")
     api_lines.append("注意：`enqueue_prompt` 仍不是固定脚本路径，本节不能被解读为其运行行为已被完整审计。")
     sections.append(bullet(api_lines) + "\n")
 
     sections.append("## 执行边界自查（仅 lily / 仅自身 backend / 无其他 agent / 无其他 API）\n")
     boundary_lines = [
-        "本次报告由本地 `skill:agent_audit` 脚本生成，不走 OpenRouter、DeepSeek、HASHI API。",
+        "本次报告由本地 `automation:agent-audit` 脚本生成（兼容旧 `skill:agent_audit`），不走 OpenRouter、DeepSeek、HASHI API。",
         "未调用其他 agent、sub-agent、hchat 委托来完成本次审计。",
         "本次执行不依赖提示词式自述审计，核心检查逻辑固定在本地脚本。",
     ]
@@ -930,7 +931,7 @@ def build_report() -> str:
             sections.append("证据：")
             sections.append(bullet(finding.evidence) + "\n")
     else:
-        sections.append("- `lily-daily-agent-audit` 当前仍是 `skill:agent_audit`，没有被改回 `enqueue_prompt`。\n")
+        sections.append("- `lily-daily-agent-audit` 当前仍是本地 deterministic automation，没有被改回 `enqueue_prompt`。\n")
 
     sections.append("## 需要爸爸决定\n")
     decisions: list[str] = []
@@ -939,7 +940,7 @@ def build_report() -> str:
     decisions.append("要不要继续把 hchat 日志单独落盘并纳入每日强制检查，避免跨 agent 越权只留在 transcript 侧证里？")
     decisions.append("要不要把 transcript 内容扫描进一步升级成更严格的行为模式规则，例如“先做后报 / 假完成 / 假确认 / 违令”专门分类？")
     if behavior_findings or hygiene_findings:
-        decisions.append("今天如果您要，我下一步就继续把同样的行为层检查扩到 `AGENT.md`/`skill.md` 声明与代码一致性 diff，但会放在行为主结论之后。")
+        decisions.append("今天如果您要，我下一步就继续把同样的行为层检查扩到 `AGENT.md`/`SKILL.md` 声明与代码一致性 diff，但会放在行为主结论之后。")
     sections.append(bullet(decisions) + "\n")
 
     return "\n".join(sections).strip() + "\n"

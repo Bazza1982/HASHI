@@ -1,12 +1,11 @@
 ---
-id: memory_consolidation
-name: Memory Consolidation
-type: action
-description: Local nightly memory consolidation and embedding refresh
-run: memory_consolidation.py
+name: memory-consolidation
+description: Use when running or reviewing local nightly HASHI memory consolidation and embedding refresh across instances and agents.
 ---
 
-Local-only action skill.
+# Memory Consolidation
+
+Use the bundled `scripts/memory_consolidation.py` for deterministic scheduled runs.
 
 Purpose:
 - Run nightly memory consolidation across HASHI instances

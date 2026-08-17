@@ -1,8 +1,6 @@
 ---
-id: library_pick
-name: Library Pick
-type: prompt
-description: Search Zotero by keyword/author/criteria, locate markdowns and PDFs, then COPY them to a specified literature group folder. NEVER deletes or moves originals from the main library. Handles missing markdowns (locate PDF fallback, optional PDF-to-markdown conversion).
+name: library-pick
+description: Use when searching Zotero by keyword, author, or criteria and copying matching markdowns or PDFs into a literature group without moving or deleting originals.
 ---
 
 You are performing a **Library Pick** operation for the user's PhD reference library. Follow the steps below precisely and interactively.
@@ -172,7 +170,3 @@ Report to the user:
 Ask if there's anything else to do.
 
 ---
-
-## User's command
-
-{prompt}

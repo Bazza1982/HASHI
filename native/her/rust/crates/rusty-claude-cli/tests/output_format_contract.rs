@@ -939,7 +939,7 @@ fn inventory_commands_emit_structured_json_when_requested() {
             isolated_codex.to_str().expect("utf8 codex home"),
         ),
     ];
-    // #789: agents show not-found now exits 1 (parity with skills #788);
+    // #789: agents show not-found now exits 1;
     // use run_claw directly instead of assert_json_command_with_env which checks success.
     let agents_show_out = run_claw(
         &root,
@@ -1006,10 +1006,6 @@ fn inventory_commands_emit_structured_json_when_requested() {
     assert_eq!(mcp["action"], "list");
     assert_eq!(mcp["status"], "ok");
     assert!(mcp["config_load_error"].is_null());
-
-    let skills = assert_json_command(&root, &["--output-format", "json", "skills"]);
-    assert_eq!(skills["kind"], "skills");
-    assert_eq!(skills["action"], "list");
 
     let plugins = assert_json_command(&root, &["--output-format", "json", "plugins"]);
     assert_eq!(plugins["kind"], "plugin");
@@ -1198,83 +1194,6 @@ fn agents_command_emits_structured_agent_entries_when_requested() {
     assert_eq!(parsed["agents"][2]["name"], "planner");
     assert_eq!(parsed["agents"][2]["active"], false);
     assert_eq!(parsed["agents"][2]["shadowed_by"]["id"], "project_claw");
-}
-
-#[test]
-fn agents_and_skills_inventory_share_source_schema_702() {
-    let root = unique_temp_dir("inventory-source-schema-702");
-    let workspace = root.join("workspace");
-    let project_agents = workspace.join(".codex").join("agents");
-    let project_skills = workspace.join(".codex").join("skills");
-    let legacy_commands = workspace.join(".claude").join("commands");
-    let home = root.join("home");
-    let isolated_config = root.join("config-home");
-    let isolated_codex = root.join("codex-home");
-    fs::create_dir_all(&workspace).expect("workspace should exist");
-    fs::create_dir_all(&home).expect("home should exist");
-
-    write_agent(
-        &project_agents,
-        "planner",
-        "Project planner",
-        "gpt-5.4",
-        "medium",
-    );
-    write_skill(&project_skills, "plan", "Project planning guidance");
-    write_legacy_command(&legacy_commands, "deploy", "Legacy deployment guidance");
-
-    let envs = [
-        ("HOME", home.to_str().expect("utf8 home")),
-        (
-            "CLAW_CONFIG_HOME",
-            isolated_config.to_str().expect("utf8 config home"),
-        ),
-        (
-            "CODEX_HOME",
-            isolated_codex.to_str().expect("utf8 codex home"),
-        ),
-    ];
-    let agents =
-        assert_json_command_with_env(&workspace, &["--output-format", "json", "agents"], &envs);
-    let skills =
-        assert_json_command_with_env(&workspace, &["--output-format", "json", "skills"], &envs);
-
-    let agent_source = &agents["agents"][0]["source"];
-    let skill_source = &skills["skills"][0]["source"];
-    for source in [agent_source, skill_source] {
-        assert!(
-            source.get("id").is_some(),
-            "inventory source must expose id: {source}"
-        );
-        assert!(
-            source.get("label").is_some(),
-            "inventory source must expose label: {source}"
-        );
-        assert!(
-            source.get("detail_label").is_some(),
-            "inventory source must expose detail_label for a stable cross-resource path: {source}"
-        );
-    }
-    assert_eq!(agent_source["id"], "project_claw");
-    assert_eq!(agent_source["label"], "Project roots");
-    assert_eq!(agent_source["detail_label"], Value::Null);
-    assert_eq!(skill_source["id"], "project_claw");
-    assert_eq!(skill_source["label"], "Project roots");
-    assert_eq!(skill_source["detail_label"], Value::Null);
-
-    let legacy_skill = skills["skills"]
-        .as_array()
-        .expect("skills array")
-        .iter()
-        .find(|skill| skill["name"] == "deploy")
-        .expect("legacy command skill should be listed");
-    assert_eq!(legacy_skill["source"]["id"], "project_claw");
-    assert_eq!(legacy_skill["source"]["label"], "Project roots");
-    assert_eq!(legacy_skill["source"]["detail_label"], "legacy /commands");
-    assert_eq!(
-        legacy_skill["origin"]["id"], "legacy_commands_dir",
-        "legacy origin stays for compatibility while generic parsers use source"
-    );
 }
 
 #[test]
@@ -1643,28 +1562,6 @@ fn resumed_inventory_commands_emit_structured_json_when_requested() {
     assert_eq!(mcp["kind"], "mcp");
     assert_eq!(mcp["action"], "list");
     assert!(mcp["servers"].is_array());
-
-    let skills = assert_json_command_with_env(
-        &root,
-        &[
-            "--output-format",
-            "json",
-            "--resume",
-            session_path.to_str().expect("utf8 session path"),
-            "/skills",
-        ],
-        &[
-            (
-                "CLAW_CONFIG_HOME",
-                config_home.to_str().expect("utf8 config home"),
-            ),
-            ("HOME", home.to_str().expect("utf8 home")),
-        ],
-    );
-    assert_eq!(skills["kind"], "skills");
-    assert_eq!(skills["action"], "list");
-    assert!(skills["summary"]["total"].is_number());
-    assert!(skills["skills"].is_array());
 
     let agents = assert_json_command_with_env(
         &root,
@@ -2105,7 +2002,6 @@ fn local_json_surfaces_have_non_empty_action_contract_714() {
             &workspace,
             strings(&["--output-format", "json", "config", "unknown"]),
         ),
-        (&workspace, strings(&["--output-format", "json", "skills"])),
         (&workspace, strings(&["--output-format", "json", "agents"])),
         (&workspace, strings(&["--output-format", "json", "plugins"])),
         (&workspace, strings(&["--output-format", "json", "mcp"])),
@@ -2535,11 +2431,6 @@ fn global_json_surfaces_suppress_config_deprecation_stderr_810_821_824() {
             "show",
         ),
         (
-            vec!["--output-format", "json", "skills", "list"],
-            "skills",
-            "list",
-        ),
-        (
             vec!["--output-format", "json", "agents", "list"],
             "agents",
             "list",
@@ -2698,25 +2589,6 @@ fn write_agent(root: &Path, name: &str, description: &str, model: &str, reasonin
         ),
     )
     .expect("agent fixture should write");
-}
-
-fn write_skill(root: &Path, name: &str, description: &str) {
-    let skill_root = root.join(name);
-    fs::create_dir_all(&skill_root).expect("skill root should exist");
-    fs::write(
-        skill_root.join("SKILL.md"),
-        format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
-    )
-    .expect("skill fixture should write");
-}
-
-fn write_legacy_command(root: &Path, name: &str, description: &str) {
-    fs::create_dir_all(root).expect("legacy command root should exist");
-    fs::write(
-        root.join(format!("{name}.md")),
-        format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
-    )
-    .expect("legacy command fixture should write");
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {
@@ -4121,62 +3993,6 @@ fn resume_plugin_mutations_are_typed_interactive_only_777() {
 }
 
 #[test]
-fn resume_skills_invocation_is_typed_interactive_only_779() {
-    // #779: `/skills <skill>` invocation in resume mode returned bare prose;
-    // after #776 classify/split it fell to error_kind:"unknown" + hint:null.
-    // Fix: use interactive_only: prefix + \n hint so callers get typed fields.
-    let root = unique_temp_dir("resume-skills-invocation-779");
-    fs::create_dir_all(&root).expect("temp dir should exist");
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&root)
-        .output()
-        .ok();
-    let session_file = write_session_fixture(&root, "resume-skills-779", None);
-
-    // A non-empty skills arg that would classify as Invoke
-    let output = run_claw(
-        &root,
-        &[
-            "--resume",
-            session_file.to_str().unwrap(),
-            "--output-format",
-            "json",
-            "/skills my-skill",
-        ],
-        &[],
-    );
-    assert!(
-        !output.status.success(),
-        "/skills <skill> in resume mode should exit non-zero"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json_line = stdout
-        .lines()
-        .find(|l| l.trim_start().starts_with('{'))
-        .unwrap_or_else(|| {
-            panic!("/skills invocation should emit JSON error on stdout, got: {stderr}")
-        });
-    let parsed: serde_json::Value = serde_json::from_str(json_line).unwrap();
-    assert_eq!(
-        parsed["error_kind"], "interactive_only",
-        "resumed /skills invocation must return interactive_only, got {:?}",
-        parsed["error_kind"]
-    );
-    let hint = parsed["hint"].as_str().unwrap_or("");
-    assert!(
-        !hint.is_empty(),
-        "resumed /skills invocation must have non-null hint (#779)"
-    );
-    assert!(
-        hint.contains("claw") || hint.contains("REPL") || hint.contains("skills"),
-        "hint must reference live session or CLI, got: {hint:?}"
-    );
-}
-
-#[test]
 fn acp_unsupported_invocation_has_hint_782() {
     // #782: `claw acp start` returned error_kind:unsupported_acp_invocation but hint:null
     // because the remediation text was on the same line as the error message.
@@ -4595,112 +4411,10 @@ fn resume_directory_path_returns_typed_kind_and_hint_787() {
 }
 
 #[test]
-fn skills_show_not_found_emits_single_json_object_788() {
-    // #788: `claw --output-format json skills show no-such-skill` emitted TWO JSON objects:
-    // one from the skills handler (action:"show", status:"error") and a second from the
-    // top-level error handler (action:"abort"). The skills handler returned Err() after
-    // printing its JSON, which caused the ? propagation to trigger a duplicate envelope.
-    // Fix: exit(1) directly after the skills JSON is emitted instead of returning Err.
-    let root = unique_temp_dir("skills-show-double-emit-788");
-    fs::create_dir_all(&root).expect("temp dir");
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&root)
-        .output()
-        .ok();
-
-    let output = run_claw(
-        &root,
-        &[
-            "--output-format",
-            "json",
-            "skills",
-            "show",
-            "no-such-skill-xyz",
-        ],
-        &[],
-    );
-    assert!(!output.status.success(), "skills show unknown should fail");
-    // Skills handler emits JSON to stdout; the duplicate was on stderr from the main error path.
-    // After fix: stdout has 1 JSON object, stderr has none (no duplicate).
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Count JSON objects in stdout — must be exactly 1
-    let json_objects: Vec<serde_json::Value> = {
-        let mut objects = Vec::new();
-        let mut remaining = stdout.trim();
-        while !remaining.is_empty() {
-            match serde_json::from_str::<serde_json::Value>(remaining) {
-                Ok(v) => {
-                    objects.push(v);
-                    break;
-                }
-                Err(_) => {
-                    // Try finding a complete JSON object
-                    if let Some(pos) = remaining.find('{') {
-                        remaining = &remaining[pos..];
-                        let mut depth = 0i32;
-                        let mut end = 0;
-                        for (i, c) in remaining.char_indices() {
-                            match c {
-                                '{' => depth += 1,
-                                '}' => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        end = i + 1;
-                                        break;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        if end > 0 {
-                            if let Ok(v) = serde_json::from_str(&remaining[..end]) {
-                                objects.push(v);
-                                remaining = remaining[end..].trim_start();
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        objects
-    };
-
-    assert_eq!(
-        json_objects.len(),
-        1,
-        "skills show not-found must emit exactly 1 JSON object on stdout, got {}. stdout: {} stderr: {}",
-        json_objects.len(),
-        stdout,
-        stderr
-    );
-    // Verify stderr has no duplicate error JSON (the pre-#788 bug was a second abort envelope here)
-    let stderr_has_json = stderr.lines().any(|l| l.trim_start().starts_with('{'));
-    assert!(
-        !stderr_has_json,
-        "stderr must have no duplicate JSON error envelope, got: {stderr}"
-    );
-    assert_eq!(
-        json_objects[0]["error_kind"], "skill_not_found",
-        "single JSON object must have skill_not_found error_kind"
-    );
-    assert_eq!(json_objects[0]["status"], "error");
-}
-
-#[test]
 fn agents_show_not_found_exits_nonzero_789() {
     // #789: `claw --output-format json agents show <not-found>` returned exit 0 despite
     // emitting status:"error". print_agents had no error check — just println + Ok(()).
-    // Skills was fixed in #788 (exit 1 via process::exit); agents/plugins had the same gap.
+    // Agents/plugins must emit exactly one terminal JSON object on failure.
     let root = unique_temp_dir("agents-show-exit-789");
     fs::create_dir_all(&root).expect("temp dir");
     std::process::Command::new("git")
@@ -4947,50 +4661,6 @@ fn agents_list_flag_shaped_filter_returns_unknown_option_792() {
 }
 
 #[test]
-fn skills_list_flag_shaped_filter_returns_unknown_option_792() {
-    // #792: same gap as agents — `claw skills list --bogus-flag` returned success
-    // with empty list instead of unknown_option error.
-    let root = unique_temp_dir("skills-list-flag-792");
-    fs::create_dir_all(&root).expect("temp dir");
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&root)
-        .output()
-        .ok();
-
-    let output = run_claw(
-        &root,
-        &[
-            "--output-format",
-            "json",
-            "skills",
-            "list",
-            "--unknown-flag",
-        ],
-        &[],
-    );
-    assert!(
-        !output.status.success(),
-        "skills list --unknown-flag must exit non-zero (#792)"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let j: serde_json::Value = serde_json::from_str(stdout.trim())
-        .expect("skills list flag-filter should emit valid JSON");
-    assert_eq!(
-        j["error_kind"], "unknown_option",
-        "skills list flag-shaped filter must return unknown_option, got {:?}",
-        j["error_kind"]
-    );
-    assert_eq!(j["status"], "error");
-    assert!(
-        j["hint"]
-            .as_str()
-            .is_some_and(|h| h.contains("claw skills list") || h.contains("filter")),
-        "hint should reference correct usage (#792)"
-    );
-}
-
-#[test]
 fn plugins_list_flag_shaped_filter_returns_cli_parse_on_stdout_793_817() {
     // #793: `claw plugins list --bogus-flag` silently returned status:"ok" with empty
     // plugins list instead of an error. The list filter branch in print_plugins treated
@@ -5134,194 +4804,6 @@ fn plugins_install_not_found_path_returns_typed_kind_794() {
 }
 
 #[test]
-fn skills_lifecycle_errors_have_typed_local_json_795_431() {
-    // #431: skills install/uninstall lifecycle paths are local JSON surfaces and must not
-    // fall through to provider credential checks. #795: every error envelope needs a hint.
-    let root = unique_temp_dir("skills-lifecycle-431");
-    let config_home = root.join("config-home");
-    let home = root.join("home");
-    fs::create_dir_all(&config_home).expect("config home");
-    fs::create_dir_all(&home).expect("home");
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&root)
-        .output()
-        .ok();
-    let envs = [
-        (
-            "CLAW_CONFIG_HOME",
-            config_home.to_str().expect("utf8 config home"),
-        ),
-        ("HOME", home.to_str().expect("utf8 home")),
-        ("ANTHROPIC_API_KEY", ""),
-        ("ANTHROPIC_AUTH_TOKEN", ""),
-        ("OPENAI_API_KEY", ""),
-    ];
-
-    let missing_arg = run_claw(
-        &root,
-        &["skills", "install", "--output-format", "json"],
-        &envs,
-    );
-    assert_eq!(missing_arg.status.code(), Some(1));
-    assert!(
-        missing_arg.stderr.is_empty(),
-        "stderr: {}",
-        String::from_utf8_lossy(&missing_arg.stderr)
-    );
-    let missing_arg_json = parse_json_stdout(&missing_arg, "skills install missing source");
-    assert_eq!(missing_arg_json["kind"], "skills");
-    assert_eq!(missing_arg_json["action"], "install");
-    assert_eq!(missing_arg_json["error_kind"], "missing_argument");
-    assert_eq!(missing_arg_json["argument"], "install_source");
-    assert!(missing_arg_json["hint"]
-        .as_str()
-        .is_some_and(|hint| !hint.is_empty()));
-
-    let invalid_source = run_claw(
-        &root,
-        &["skills", "install", "bogus-name", "--output-format", "json"],
-        &envs,
-    );
-    assert_eq!(invalid_source.status.code(), Some(1));
-    assert!(
-        invalid_source.stderr.is_empty(),
-        "stderr: {}",
-        String::from_utf8_lossy(&invalid_source.stderr)
-    );
-    let invalid_source_json = parse_json_stdout(&invalid_source, "skills install invalid source");
-    assert_eq!(invalid_source_json["kind"], "skills");
-    assert_eq!(invalid_source_json["action"], "install");
-    assert_eq!(invalid_source_json["error_kind"], "invalid_install_source");
-    assert_eq!(invalid_source_json["source"], "bogus-name");
-    assert_eq!(invalid_source_json["source_kind"], "name");
-    assert_eq!(invalid_source_json["reason"], "not_found");
-    assert!(invalid_source_json["hint"]
-        .as_str()
-        .is_some_and(|hint| { hint.contains("local path") || hint.contains("SKILL.md") }));
-
-    let missing_uninstall = run_claw(
-        &root,
-        &[
-            "skills",
-            "uninstall",
-            "nonexistent-skill-xyz",
-            "--output-format",
-            "json",
-        ],
-        &envs,
-    );
-    assert_eq!(missing_uninstall.status.code(), Some(1));
-    assert!(
-        missing_uninstall.stderr.is_empty(),
-        "stderr: {}",
-        String::from_utf8_lossy(&missing_uninstall.stderr)
-    );
-    let missing_uninstall_json =
-        parse_json_stdout(&missing_uninstall, "skills uninstall missing skill");
-    assert_eq!(missing_uninstall_json["kind"], "skills");
-    assert_eq!(missing_uninstall_json["action"], "uninstall");
-    assert_eq!(missing_uninstall_json["error_kind"], "skill_not_found");
-    assert_eq!(missing_uninstall_json["requested"], "nonexistent-skill-xyz");
-    assert_eq!(
-        missing_uninstall_json["skills_dir"],
-        config_home.join("skills").display().to_string()
-    );
-    assert_eq!(
-        missing_uninstall_json["available_names"]
-            .as_array()
-            .expect("available_names")
-            .len(),
-        0
-    );
-    assert!(missing_uninstall_json["hint"]
-        .as_str()
-        .is_some_and(|hint| !hint.is_empty()));
-}
-
-#[test]
-fn skills_install_uninstall_roundtrip_stays_local_431() {
-    let root = unique_temp_dir("skills-roundtrip-431");
-    let config_home = root.join("config-home");
-    let home = root.join("home");
-    let source_root = root.join("fixtures");
-    fs::create_dir_all(&config_home).expect("config home");
-    fs::create_dir_all(&home).expect("home");
-    write_skill(&source_root, "roundtrip", "Roundtrip skill");
-    let skill_source = source_root.join("roundtrip");
-    let envs = [
-        (
-            "CLAW_CONFIG_HOME",
-            config_home.to_str().expect("utf8 config home"),
-        ),
-        ("HOME", home.to_str().expect("utf8 home")),
-        ("ANTHROPIC_API_KEY", ""),
-        ("ANTHROPIC_AUTH_TOKEN", ""),
-        ("OPENAI_API_KEY", ""),
-    ];
-
-    let install = run_claw(
-        &root,
-        &[
-            "skills",
-            "install",
-            skill_source.to_str().expect("utf8 skill source"),
-            "--output-format",
-            "json",
-        ],
-        &envs,
-    );
-    assert!(
-        install.status.success(),
-        "stdout:\n{}\n\nstderr:\n{}",
-        String::from_utf8_lossy(&install.stdout),
-        String::from_utf8_lossy(&install.stderr)
-    );
-    let install_json = parse_json_stdout(&install, "skills install roundtrip");
-    assert_eq!(install_json["kind"], "skills");
-    assert_eq!(install_json["action"], "install");
-    assert_eq!(install_json["status"], "ok");
-    assert_eq!(install_json["invocation_name"], "roundtrip");
-    let installed_path = config_home.join("skills").join("roundtrip");
-    assert_eq!(
-        install_json["installed_path"],
-        installed_path.display().to_string()
-    );
-    assert!(installed_path.join("SKILL.md").is_file());
-
-    let uninstall = run_claw(
-        &root,
-        &[
-            "skills",
-            "uninstall",
-            "roundtrip",
-            "--output-format",
-            "json",
-        ],
-        &envs,
-    );
-    assert!(
-        uninstall.status.success(),
-        "stdout:\n{}\n\nstderr:\n{}",
-        String::from_utf8_lossy(&uninstall.stdout),
-        String::from_utf8_lossy(&uninstall.stderr)
-    );
-    let uninstall_json = parse_json_stdout(&uninstall, "skills uninstall roundtrip");
-    assert_eq!(uninstall_json["kind"], "skills");
-    assert_eq!(uninstall_json["action"], "uninstall");
-    assert_eq!(uninstall_json["status"], "ok");
-    assert_eq!(uninstall_json["removed"], "roundtrip");
-    assert_eq!(
-        uninstall_json["removed_path"],
-        installed_path.display().to_string()
-    );
-    assert!(
-        !installed_path.exists(),
-        "uninstall should remove installed skill files"
-    );
-}
-
-#[test]
 fn agents_create_scaffolds_toml_and_lists_locally_431() {
     let root = unique_temp_dir("agents-create-431");
     let config_home = root.join("config-home");
@@ -5428,50 +4910,6 @@ fn agents_show_extra_positional_arg_returns_unexpected_extra_796() {
     assert!(
         h.contains("claw agents show") || h.contains("Usage"),
         "hint should reference usage, got: {h:?}"
-    );
-}
-
-#[test]
-fn skills_show_extra_positional_arg_returns_unexpected_extra_796() {
-    // #796: same gap as agents — `claw skills show <name> <extra>` treated "name extra"
-    // as a single skill name → skill_not_found. Fix: detect space-containing name.
-    let root = unique_temp_dir("skills-show-extra-796");
-    fs::create_dir_all(&root).expect("temp dir");
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&root)
-        .output()
-        .ok();
-
-    let output = run_claw(
-        &root,
-        &[
-            "--output-format",
-            "json",
-            "skills",
-            "show",
-            "some-skill",
-            "--extra-flag",
-        ],
-        &[],
-    );
-    assert!(
-        !output.status.success(),
-        "skills show with extra arg must exit non-zero (#796)"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let j: serde_json::Value =
-        serde_json::from_str(stdout.trim()).expect("skills show extra arg should emit valid JSON");
-    assert_eq!(
-        j["error_kind"], "unexpected_extra_args",
-        "skills show extra arg should return unexpected_extra_args, got {:?}",
-        j["error_kind"]
-    );
-    assert!(
-        j["hint"]
-            .as_str()
-            .is_some_and(|h| h.contains("claw skills show") || h.contains("Usage")),
-        "hint should reference usage (#796)"
     );
 }
 
@@ -5729,6 +5167,26 @@ fn settings_json_and_help_json_are_local_808() {
 
 // #825: unknown single-word subcommand must return command_not_found, not
 // fall through to missing_credentials after provider startup.
+#[test]
+fn her_skill_surfaces_emit_disabled_json_contract() {
+    let root = unique_temp_dir("her-skills-disabled");
+    fs::create_dir_all(&root).expect("temp dir");
+
+    for args in [
+        vec!["--output-format", "json", "skills", "list"],
+        vec!["--output-format", "json", "/skill"],
+    ] {
+        let output = run_claw(&root, &args, &[]);
+        assert!(!output.status.success(), "args={args:?}");
+        let parsed = parse_json_stdout(&output, "disabled HER Skill surface");
+        assert_eq!(parsed["kind"], "disabled_surface");
+        assert_eq!(parsed["error_kind"], "disabled_surface");
+        assert!(parsed["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("HASHI /skill")));
+    }
+}
+
 #[test]
 fn unknown_subcommand_json_emits_command_not_found() {
     let root = unique_temp_dir("unknown-cmd-json-825");

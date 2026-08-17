@@ -469,34 +469,23 @@ def skills_menu_text(*, count: int, agent_name: str) -> str:
         current=f"<code>{count}</code> available",
         facts=[
             f"<b>Agent</b> · <code>{html.escape(agent_name)}</code>",
-            "<b>Scope</b> · action, toggle and prompt skills",
+            "<b>Format</b> · standard <code>SKILL.md</code> instruction packages",
         ],
-        consequence="Toggle changes persist in this workspace; actions run immediately.",
-        action="Choose a skill for its status and available actions.",
+        consequence="Skills add focused instructions to a request; Jobs and runtime settings stay on their own control surfaces.",
+        action="Choose a Skill to view its usage and instructions.",
     )
 
 
 def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
-    skill_type = str(getattr(skill, "type", "unknown") or "unknown")
     skill_id = str(getattr(skill, "id", "unknown") or "unknown")
     skill_name = str(getattr(skill, "name", skill_id) or skill_id)
     description = str(getattr(skill, "description", "") or "No description.")
     facts = [
         f"<b>ID</b> · <code>{html.escape(skill_id)}</code>",
-        f"<b>Type</b> · <code>{html.escape(skill_type)}</code>",
+        "<b>Format</b> · <code>SKILL.md</code>",
     ]
-    if skill_type == "toggle":
-        enabled = skill_id in manager.get_active_toggle_ids(workspace_dir)
-        current = f"<b>{status_label(enabled)}</b>"
-        usage = f"/skill {skill_id} on|off"
-    elif skill_type == "prompt":
-        current = "<b>READY</b>"
-        backend = str(getattr(skill, "backend", "") or "current backend")
-        facts.append(f"<b>Backend</b> · <code>{html.escape(backend)}</code>")
-        usage = f"/skill {skill_id} <prompt>"
-    else:
-        current = "<b>READY</b>"
-        usage = f"/skill {skill_id}"
+    current = "<b>READY</b>"
+    usage = f"/skill {skill_id} <request>"
 
     text = setting_card(
         "🧰",

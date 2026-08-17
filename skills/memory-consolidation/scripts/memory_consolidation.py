@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
-import argparse
 from pathlib import Path
-
 
 PROJECT_ROOT = Path("/home/lily/projects/hashi")
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "consolidate_memory.py"
@@ -29,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
         cwd=str(PROJECT_ROOT),
         capture_output=True,
         text=True,
+        check=False,
     )
     stdout = (proc.stdout or "").strip()
     stderr = (proc.stderr or "").strip()
@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         return proc.returncode
 
     print("Memory consolidation completed successfully.")
-    print("Execution mode: local-only action skill (no OpenRouter, no HASHI API relay)")
+    print("Execution mode: local-only Jobs automation (no OpenRouter, no HASHI API relay)")
     if stdout:
         print()
         print(stdout)

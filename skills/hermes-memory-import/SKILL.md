@@ -1,15 +1,14 @@
 ---
-id: hermes_memory_import
-name: Hermes Memory Import
-type: action
-description: Import local Windows Hermes profile chat and memory files into Lily consolidated memory before wiki update
-run: hermes_memory_import.py
+name: hermes-memory-import
+description: Use when validating or importing local Windows Hermes profile chat and memory files into Lily consolidated memory before a wiki update.
 ---
 
-Local-only action skill.
+# Hermes Memory Import
+
+Use the bundled `scripts/hermes_memory_import.py` for deterministic scheduled runs.
 
 Purpose:
-- Restore the existing Lily pre-wiki Hermes memory import entrypoint.
+- Use the existing Lily pre-wiki Hermes memory import entrypoint.
 - Validate configured Hermes profile paths before importing.
 - Run the existing standalone sidecar importer at `workspaces/lily/scripts/hermes_memory_import.py`.
 

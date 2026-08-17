@@ -12,15 +12,33 @@ from orchestrator.skill_manager import SkillDefinition
 
 
 @pytest.mark.asyncio
+async def test_legacy_underscore_action_id_routes_to_jobs_automation():
+    invoke_automation = AsyncMock(return_value=(True, "automation done"))
+    runtime = SimpleNamespace(invoke_scheduler_automation=invoke_automation)
+
+    result = await FlexibleAgentRuntime.invoke_scheduler_skill(
+        runtime,
+        skill_id="memory_consolidation",
+        args="run",
+        task_id="nightly-memory",
+    )
+
+    assert result == (True, "automation done")
+    invoke_automation.assert_awaited_once_with(
+        automation_id="memory_consolidation",
+        args="run",
+        task_id="nightly-memory",
+    )
+
+
+@pytest.mark.asyncio
 async def test_scheduled_prompt_skill_retains_agent_current_backend(tmp_path):
     skill = SkillDefinition(
         id="legacy-pinned-skill",
         name="Legacy pinned skill",
-        type="prompt",
         description="",
         body="Use the owning Agent runtime.",
         skill_dir=Path(tmp_path),
-        backend="codex-cli",
     )
     manager = SimpleNamespace(
         get_skill=lambda _skill_id: skill,
@@ -60,11 +78,9 @@ async def test_legacy_scheduled_prompt_skill_retains_agent_current_backend(tmp_p
     skill = SkillDefinition(
         id="legacy-pinned-skill",
         name="Legacy pinned skill",
-        type="prompt",
         description="",
         body="Use the owning Agent runtime.",
         skill_dir=Path(tmp_path),
-        backend="codex-cli",
     )
     manager = SimpleNamespace(
         get_skill=lambda _skill_id: skill,

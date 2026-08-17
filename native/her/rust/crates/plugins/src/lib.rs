@@ -1698,7 +1698,7 @@ fn detect_claude_code_manifest_contract_gaps(
     for (field, detail) in [
         (
             "skills",
-            "plugin manifest field `skills` uses the Claude Code plugin contract; `claw` does not load plugin-managed skills and instead discovers skills from local roots such as `.claw/skills`, `.omc/skills`, `.agents/skills`, `~/.omc/skills`, and `~/.claude/skills/omc-learned`.",
+            "plugin manifest field `skills` uses the Claude Code plugin contract; native HER/Claw skill loading is disabled, and HASHI owns the `/skill` surface.",
         ),
         (
             "mcpServers",
@@ -2722,7 +2722,7 @@ mod tests {
         let error = load_plugin_from_directory(&root)
             .expect_err("Claude Code plugin manifest should fail with guidance");
         let rendered = error.to_string();
-        assert!(rendered.contains("field `skills` uses the Claude Code plugin contract"));
+        assert!(rendered.contains("native HER/Claw skill loading is disabled"));
         assert!(rendered.contains("field `mcpServers` uses the Claude Code plugin contract"));
         assert!(rendered.contains("field `agents` uses the Claude Code plugin contract"));
         assert!(rendered.contains("field `commands` uses Claude Code-style directory globs"));

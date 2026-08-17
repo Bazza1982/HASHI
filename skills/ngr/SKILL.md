@@ -1,8 +1,6 @@
 ---
-id: ngr
-name: Nagare Workflow Manager
-type: prompt
-description: Create, list, or edit Nagare (NGR) multi-agent workflows. Usage: /ngr new <name> | /ngr list | /ngr edit <name>
+name: ngr
+description: Use when creating, listing, editing, or running packaged Nagare multi-agent workflows in HASHI.
 ---
 
 Parse the first word of the user's command to determine which action to take:
@@ -21,7 +19,7 @@ Run an **interactive packaging session** with the user to design and create a co
 ### Paths
 
 - Workflow YAML: `/home/lily/projects/hashi/flow/workflows/library/<name>.yaml`
-- Skill file: `/home/lily/projects/hashi/skills/<name>/skill.md`
+- Skill file: `/home/lily/projects/hashi/skills/<kebab-case-name>/SKILL.md`
 - Workspace: `/home/lily/projects/hashi/flow/workspaces/<name>/`
 
 ### Step 1 — Understand the workflow
@@ -79,18 +77,18 @@ Once the user approves the design:
 
 1. Write the workflow YAML to `flow/workflows/library/<name>.yaml`
 2. Create the workspace directory `flow/workspaces/<name>/`
-3. Create the skill file at `skills/<name>/skill.md` using the template below
+3. Create the skill file at `skills/<kebab-case-name>/SKILL.md` using the template below
 4. Confirm all files were created and show a summary
 
 ### Skill file template for packaged workflow
 
 ```markdown
 ---
-id: <name>
-name: <Human-readable name>
-type: prompt
-description: Run the <name> NGR workflow — <one-line description>
+name: <kebab-case-name>
+description: Use when running the <name> NGR workflow to <one-line description>.
 ---
+
+# <Human-readable name>
 
 Run the **<name>** Nagare workflow.
 
@@ -127,9 +125,6 @@ If a step fails, check:
 
 Report the error and ask the user whether to retry or abort.
 
-## User's task
-
-{prompt}
 ```
 
 ---
@@ -148,7 +143,7 @@ For each, display:
 ## Action: edit <name>
 
 1. Read the existing workflow YAML at `flow/workflows/library/<name>.yaml`
-2. Read the existing skill file at `skills/<name>/skill.md`
+2. Read the existing skill file at `skills/<kebab-case-name>/SKILL.md`
 3. Show the user what currently exists
 4. Ask what they want to change
 5. Make the changes interactively, same as the `new` packaging process
@@ -167,7 +162,3 @@ cd /home/lily/projects/hashi && python flow/flow_trigger.py start <name> [--inpu
 Monitor and report back.
 
 ---
-
-## User's command
-
-{prompt}

@@ -167,9 +167,9 @@ unreleased checkpoint above):
 
 ## Additional Features Delivered (v1.2-alpha)
 
-### /dream Skill — Nightly Memory Consolidation
+### /dream — Nightly Memory Consolidation
 - Agents “dream” at 01:30 daily: LLM reflects on the day’s transcript, extracts memories into `bridge_memory.sqlite`, optionally updates `AGENT.md` with behavioral insights.
-- Snapshot-based `/skill dream undo` for morning rollback (no LLM required).
+- Snapshot-based `/dream undo` for morning rollback (no LLM required).
 - Persistent `dream_log.md` and on/off toggle via `tasks.json` cron.
 
 ### Process-Tree Force Stop

@@ -415,12 +415,12 @@ async def handle_skill_job_callback(runtime, query, data: str) -> bool:
     if action == "toggle":
         ok, message = runtime.skill_manager.set_job_enabled(kind, task_id, enabled=(value == "on"))
         await query.answer(message, show_alert=not ok)
-        await runtime._render_skill_jobs(query, kind)
+        await runtime._render_jobs(query, kind)
         return True
     if action == "delete":
         ok, message = runtime.skill_manager.delete_job(kind, task_id)
         await query.answer(message, show_alert=not ok)
-        await runtime._render_skill_jobs(query, kind)
+        await runtime._render_jobs(query, kind)
         return True
     if action == "run":
         job = runtime.skill_manager.get_job(kind, task_id)

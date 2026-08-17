@@ -1,8 +1,6 @@
 ---
-id: gemini
-name: Delegate to Gemini
-type: prompt
-description: Delegate a task to Gemini CLI and manage it as a project manager
+name: gemini
+description: Use when delegating a self-contained task to Gemini CLI, monitoring its progress, and reporting the result as project manager.
 ---
 
 You are delegating a task to Google Gemini CLI. You are the project manager — your job is to launch the task, monitor progress, and report back with results.
@@ -134,7 +132,3 @@ If the task failed, read the error log carefully and either:
 - Do not blindly trust the output — verify claims when possible.
 - If the task is very large, break it into smaller Gemini invocations.
 - Use --include-directories to point at the actual project the task targets.
-
-## User's task
-
-{prompt}

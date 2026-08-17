@@ -1342,11 +1342,6 @@ class FlexibleAgentRuntime:
             )
             self.parked_topics.record_followup_sent(slot_id, sent_at=now_dt)
 
-    def _skills_by_type(self) -> dict[str, list[SkillDefinition]]:
-        if not self.skill_manager:
-            return {"action": [], "toggle": [], "prompt": []}
-        return self.skill_manager.list_skills_by_type()
-
     def _mark_activity(self):
         self.last_activity_at = datetime.now()
 
@@ -1434,37 +1429,20 @@ class FlexibleAgentRuntime:
         return runtime_status.build_status_text(self, detailed=detailed)
 
     def _skill_keyboard(self) -> InlineKeyboardMarkup:
-        buttons = []
-        grouped = self._skills_by_type()
-        active_ids = self.skill_manager.get_active_toggle_ids(self.workspace_dir) if self.skill_manager else set()
-        for skill_type in ("action", "toggle", "prompt"):
-            for skill in grouped.get(skill_type, []):
-                label = skill.id
-                if skill.type == "toggle":
-                    label = f"{skill.id} {'ON' if skill.id in active_ids else 'OFF'}"
-                buttons.append([InlineKeyboardButton(label, callback_data=f"skill:show:{skill.id}")])
+        skills = self.skill_manager.list_skills() if self.skill_manager else []
+        buttons = [
+            [InlineKeyboardButton(skill.id, callback_data=f"skill:show:{skill.id}")]
+            for skill in skills
+        ]
         return InlineKeyboardMarkup(buttons or [[InlineKeyboardButton("No skills", callback_data="skill:noop:none")]])
 
     def _skill_action_keyboard(self, skill: SkillDefinition) -> InlineKeyboardMarkup | None:
-        buttons = []
-        if skill.type == "toggle":
-            enabled = skill.id in self.skill_manager.get_active_toggle_ids(self.workspace_dir)
-            buttons.append(
-                [
-                    InlineKeyboardButton(selected_label("On", enabled), callback_data=f"skill:toggle:{skill.id}:on"),
-                    InlineKeyboardButton(selected_label("Off", not enabled), callback_data=f"skill:toggle:{skill.id}:off"),
-                ]
-            )
-        elif skill.type == "action" and skill.id not in {"cron", "heartbeat"}:
-            buttons.append([InlineKeyboardButton("Run now", callback_data=f"skill:run:{skill.id}")])
-        elif skill.type == "prompt":
-            buttons.append([InlineKeyboardButton("Show usage", callback_data=f"skill:show:{skill.id}")])
-        if skill.id in {"cron", "heartbeat"}:
-            buttons.append([InlineKeyboardButton("↻ Refresh jobs", callback_data=f"skill:jobs:{skill.id}")])
-        buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="skill:back:menu")])
-        return InlineKeyboardMarkup(buttons) if buttons else None
+        del skill
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton(BACK_LABEL, callback_data="skill:back:menu")]]
+        )
 
-    async def _render_skill_jobs(self, update_or_query, kind: str):
+    async def _render_jobs(self, update_or_query, kind: str):
         from orchestrator.runtime_jobs import _build_jobs_with_buttons
         text, markup = _build_jobs_with_buttons(self, self.name, self.skill_manager, filter_agent=self.name)
         if hasattr(update_or_query, "edit_message_text"):
@@ -1477,6 +1455,14 @@ class FlexibleAgentRuntime:
             # Legacy scheduled Dream jobs must never reach the retired generic
             # memory/AGENT.md writer. Route them through native HER Dream.
             return await self.invoke_her_dream(task_id=task_id)
+        from orchestrator.automation_runner import is_automation
+
+        if is_automation(skill_id):
+            return await self.invoke_scheduler_automation(
+                automation_id=skill_id,
+                args=args,
+                task_id=task_id,
+            )
         if not self.skill_manager:
             message = f"Scheduler skill invocation requested without skill manager: {skill_id}"
             self.error_logger.error(message)
@@ -1486,39 +1472,7 @@ class FlexibleAgentRuntime:
             message = f"Unknown scheduler skill: {skill_id}"
             self.error_logger.error(message)
             return False, message
-        if skill.type == "toggle":
-            message = f"Toggle skill cannot be scheduled: {skill_id}"
-            self.error_logger.error(message)
-            return False, message
-        skill_env = {
-            "BRIDGE_ACTIVE_BACKEND": self.config.active_backend,
-            "BRIDGE_ACTIVE_MODEL": self.get_current_model(),
-        }
-        if skill.type == "action":
-            ok, text = await self.skill_manager.run_action_skill(
-                skill,
-                self.workspace_dir,
-                args=args,
-                extra_env=skill_env,
-            )
-            if ok and text:
-                await self.send_long_message(
-                    chat_id=self._primary_chat_id(),
-                    text=text,
-                    request_id=f"skill-{task_id}",
-                    purpose="scheduler-skill",
-                )
-            elif text:
-                self.error_logger.error(text)
-            return ok, text
         prompt = self.skill_manager.build_prompt_for_skill(skill, args or "")
-        if skill.backend and self.config.active_backend != skill.backend:
-            self.logger.info(
-                "Scheduled prompt skill %s declares backend=%s; retaining agent current backend=%s.",
-                skill.id,
-                skill.backend,
-                self.config.active_backend,
-            )
         await self.enqueue_request(
             chat_id=self._primary_chat_id(),
             prompt=prompt,
@@ -1527,6 +1481,39 @@ class FlexibleAgentRuntime:
             silent=False,
         )
         return True, f"Scheduled prompt skill queued: {skill.id}"
+
+    async def invoke_scheduler_automation(
+        self,
+        automation_id: str,
+        args: str,
+        task_id: str,
+    ) -> tuple[bool, str | None]:
+        from orchestrator.automation_runner import run_automation
+
+        if not self.skill_manager:
+            message = f"Scheduler automation requested without manager: {automation_id}"
+            self.error_logger.error(message)
+            return False, message
+        ok, text = await run_automation(
+            project_root=self.skill_manager.project_root,
+            workspace_dir=self.workspace_dir,
+            automation_id=automation_id,
+            args=args,
+            extra_env={
+                "BRIDGE_ACTIVE_BACKEND": self.config.active_backend,
+                "BRIDGE_ACTIVE_MODEL": self.get_current_model(),
+            },
+        )
+        if ok and text:
+            await self.send_long_message(
+                chat_id=self._primary_chat_id(),
+                text=text,
+                request_id=f"automation-{task_id}",
+                purpose="scheduler-automation",
+            )
+        elif text:
+            self.error_logger.error(text)
+        return ok, text
 
     async def invoke_her_dream(
         self,
@@ -3268,31 +3255,10 @@ class FlexibleAgentRuntime:
         if skill is None:
             await self._reply_text(update, f"Unknown skill: {skill_id}")
             return
-        if skill.type != "prompt":
-            await self._reply_text(update, f"Skill '{skill_id}' is not a prompt skill.")
-            return
         prompt_text = " ".join(args or []).strip()
         if not prompt_text:
             await self._reply_text(update, f"Usage: /{skill_id} <prompt>")
             return
-        if skill.backend:
-            allowed = [b["engine"] for b in self.config.allowed_backends]
-            if skill.backend not in allowed:
-                await self._reply_text(
-                    update,
-                    f"Skill '{skill.id}' targets {skill.backend}, which is not allowed for this flex agent.",
-                )
-                return
-            if self.config.active_backend != skill.backend:
-                await self._reply_text(update, f"Switching backend to {skill.backend} for skill {skill.id}...")
-                success, message = await self._switch_backend_mode(
-                    update.effective_chat.id,
-                    skill.backend,
-                    with_context=bool(self._get_active_skill_sections()),
-                )
-                if not success:
-                    await self._send_text(update.effective_chat.id, message)
-                    return
         prompt = self.skill_manager.build_prompt_for_skill(skill, prompt_text)
         await self._reply_text(update, f"Running skill {skill.id}...")
         await self.enqueue_request(
@@ -3362,8 +3328,7 @@ class FlexibleAgentRuntime:
             return
 
         if not args:
-            grouped = self._skills_by_type()
-            count = sum(len(items) for items in grouped.values())
+            count = len(self.skill_manager.list_skills())
             await self._reply_text(
                 update,
                 runtime_menu_views.skills_menu_text(count=count, agent_name=self.name),
@@ -3373,26 +3338,52 @@ class FlexibleAgentRuntime:
             return
 
         sub = args[0].strip().lower()
+        if sub in {"cron", "heartbeat"}:
+            await self._reply_text(update, "Cron and heartbeat controls moved to /jobs.")
+            return
+        if sub == "recall":
+            rest = " ".join(args[1:]).strip().lower()
+            if rest not in {"on", "off"}:
+                await self._reply_text(update, "Recall is a runtime setting. Usage: /skill recall on|off")
+                return
+            _, message = self.skill_manager.set_toggle_state(
+                self.workspace_dir,
+                "recall",
+                enabled=(rest == "on"),
+            )
+            await self._reply_text(update, message)
+            return
+        if sub == "debug" and len(args) == 2 and args[1].strip().lower() in {"on", "off"}:
+            enabled = args[1].strip().lower() == "on"
+            _, message = self.skill_manager.set_toggle_state(
+                self.workspace_dir,
+                "debug",
+                enabled=enabled,
+            )
+            await self._reply_text(update, message)
+            return
         if sub == "help":
-            grouped = self._skills_by_type()
-            count = sum(len(items) for items in grouped.values())
+            skills = self.skill_manager.list_skills()
+            validation_errors = self.skill_manager.skill_validation_errors()
             lines = [
                 card_title("🧰", "Skills reference"),
                 "",
-                f"<b>Current</b> · <code>{count}</code> available",
+                f"<b>Current</b> · <code>{len(skills)}</code> available",
                 f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
                 "",
             ]
-            for skill_type in ("action", "toggle", "prompt"):
-                entries = grouped.get(skill_type, [])
-                if not entries:
-                    continue
-                lines.append(f"<b>{skill_type.upper()}</b>")
-                for skill in entries:
-                    lines.append(
-                        f"<code>{html.escape(skill.id)}</code> · {html.escape(skill.description)}"
-                    )
-                lines.append("")
+            for skill in skills:
+                lines.append(
+                    f"<code>{html.escape(skill.id)}</code> · {html.escape(skill.description)}"
+                )
+            if validation_errors:
+                lines.extend(
+                    [
+                        "",
+                        f"⚠️ <b>Invalid packages skipped</b> · <code>{len(validation_errors)}</code>",
+                    ]
+                )
+            lines.extend(["", "Jobs: <code>/jobs</code> · EXP: <code>/exp</code>"])
             await self._reply_text(update, "\n".join(lines).strip(), parse_mode="HTML")
             return
 
@@ -3402,51 +3393,6 @@ class FlexibleAgentRuntime:
             return
 
         rest = " ".join(args[1:]).strip()
-        if skill.id in {"cron", "heartbeat"} and not rest:
-            await self._render_skill_jobs(update, skill.id)
-            return
-
-        if skill.type == "toggle":
-            if rest.lower() in {"on", "off"}:
-                _, message = self.skill_manager.set_toggle_state(
-                    self.workspace_dir,
-                    skill.id,
-                    enabled=(rest.lower() == "on"),
-                )
-                await self._reply_text(
-                    update,
-                    f"✅ {html.escape(message)}\n\n"
-                    + runtime_menu_views.skill_detail_text(skill, self.workspace_dir, manager=self.skill_manager),
-                    parse_mode="HTML",
-                    reply_markup=self._skill_action_keyboard(skill),
-                )
-                return
-            await self._reply_text(
-                update,
-                runtime_menu_views.skill_detail_text(skill, self.workspace_dir, manager=self.skill_manager),
-                parse_mode="HTML",
-                reply_markup=self._skill_action_keyboard(skill),
-            )
-            return
-
-        if skill.type == "action":
-            _, message = await self.skill_manager.run_action_skill(
-                skill,
-                self.workspace_dir,
-                args=rest,
-                extra_env={
-                    "BRIDGE_ACTIVE_BACKEND": self.config.active_backend,
-                    "BRIDGE_ACTIVE_MODEL": self.get_current_model(),
-                },
-            )
-            await self.send_long_message(
-                chat_id=update.effective_chat.id,
-                text=message,
-                request_id=f"skill-{skill.id}",
-                purpose="skill-action",
-            )
-            return
-
         if not rest:
             await self._reply_text(
                 update,
@@ -3456,24 +3402,6 @@ class FlexibleAgentRuntime:
             )
             return
 
-        if skill.backend:
-            allowed = [b["engine"] for b in self.config.allowed_backends]
-            if skill.backend not in allowed:
-                await self._reply_text(
-                    update,
-                    f"Skill '{skill.id}' targets {skill.backend}, which is not allowed for this flex agent.",
-                )
-                return
-            if self.config.active_backend != skill.backend:
-                await self._reply_text(update, f"Switching backend to {skill.backend} for skill {skill.id}...")
-                success, message = await self._switch_backend_mode(
-                    update.effective_chat.id,
-                    skill.backend,
-                    with_context=bool(self._get_active_skill_sections()),
-                )
-                if not success:
-                    await self._send_text(update.effective_chat.id, message)
-                    return
         prompt = self.skill_manager.build_prompt_for_skill(skill, rest)
         await self._reply_text(update, f"Running skill {skill.id}...")
         await self.enqueue_request(
@@ -3616,6 +3544,12 @@ class FlexibleAgentRuntime:
         if action in {"her:dream", "skill:dream"}:
             return await self.invoke_her_dream(
                 task_id=str(job.get("id") or "manual"),
+            )
+        if action.startswith("automation:"):
+            return await self.invoke_scheduler_automation(
+                automation_id=action.split(":", 1)[1],
+                args=job.get("args", "") or job.get("prompt", ""),
+                task_id=job.get("id", "manual"),
             )
         if action.startswith("skill:"):
             return await self.invoke_scheduler_skill(

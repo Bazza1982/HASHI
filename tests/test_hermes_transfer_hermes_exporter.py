@@ -83,7 +83,7 @@ def test_plan_hermes_export_builds_dry_run_without_package(tmp_path):
     assert "memory/files/large.md" not in plan.files
     assert "schedules/tasks.json" in plan.files
     assert "source/hermes_cron/daily.yaml" in plan.files
-    assert "skills/hchat/SKILL.md" in plan.files
+    assert "skills/hchat/SKILL.md" not in plan.files
     assert "sessions/sessions.db" not in plan.files
     assert "plugins/cache/blob" not in plan.files
     warning_text = "\n".join(plan.warnings)
@@ -104,7 +104,7 @@ def test_export_hermes_agent_writes_readable_package_with_paused_cron_drafts(tmp
     assert transfer.manifest["target_runtime"] == "hashi"
     assert "identity/hermes_instructions.md" in transfer.names
     assert "source/hermes_cron/daily.yaml" in transfer.names
-    assert "skills/hchat/SKILL.md" in transfer.names
+    assert "skills/hchat/SKILL.md" not in transfer.names
 
     with zipfile.ZipFile(package, "r") as archive:
         schedules = json.loads(archive.read("schedules/tasks.json"))
@@ -135,6 +135,20 @@ def test_plan_hermes_export_can_disable_optional_sections(tmp_path):
     assert not any(name.startswith("memory/files/") for name in plan.files)
     assert not any(name.startswith("source/hermes_cron/") for name in plan.files)
     assert json.loads(plan.files["schedules/tasks.json"])["crons"] == []
+
+
+def test_plan_hermes_export_can_explicitly_archive_skills_without_activation(tmp_path):
+    profile, bridge = _fixture_hermes(tmp_path)
+
+    plan = plan_hermes_export(
+        profile,
+        bridge,
+        "xiaoye",
+        options=HermesExportOptions(include_skills=True),
+    )
+
+    assert "skills/hchat/SKILL.md" in plan.files
+    assert any("inert transfer archive" in warning for warning in plan.warnings)
 
 
 def test_plan_hermes_export_requires_existing_bridge_agent(tmp_path):

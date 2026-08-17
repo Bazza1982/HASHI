@@ -685,11 +685,6 @@ class BridgeAgentRuntime:
             )
             self.parked_topics.record_followup_sent(slot_id, sent_at=now_dt)
 
-    def _skills_by_type(self) -> dict[str, list[SkillDefinition]]:
-        if not self.skill_manager:
-            return {"action": [], "toggle": [], "prompt": []}
-        return self.skill_manager.list_skills_by_type()
-
     def _mark_activity(self):
         self.last_activity_at = datetime.now()
 
@@ -817,7 +812,7 @@ class BridgeAgentRuntime:
             "<b>ACTIVITY</b>",
             f"<b>Runtime</b> · <code>{'BUSY' if self.is_generating else 'IDLE'}</code> · queue <code>{self.queue.qsize()}</code> · process <code>{html.escape(str(self._process_info()))}</code>",
             f"<b>Request</b> · {html.escape(str(current_line))}",
-            f"<b>Memory</b> · skills {html.escape(', '.join(active_skills) if active_skills else 'none')} · recall <code>{'ON' if recall_on else 'OFF'}</code> · FYI <code>{'ARMED' if self._pending_session_primer else 'CLEAR'}</code>",
+            f"<b>Memory</b> · runtime settings {html.escape(', '.join(active_skills) if active_skills else 'none')} · recall <code>{'ON' if recall_on else 'OFF'}</code> · FYI <code>{'ARMED' if self._pending_session_primer else 'CLEAR'}</code>",
             f"<b>Proactive</b> · <code>{active_mode}</code> · every {html.escape(active_interval)} · hb <code>{heartbeat_count}</code> · cron <code>{cron_count}</code>",
             f"<b>Health</b> · {html.escape(health_line)}",
             f"<b>Last activity</b> · success {html.escape(self._format_age(self.last_success_at))} · activity {html.escape(self._format_age(self.last_activity_at))}",
@@ -846,37 +841,20 @@ class BridgeAgentRuntime:
         return "\n".join(lines)
 
     def _skill_keyboard(self) -> InlineKeyboardMarkup:
-        buttons = []
-        grouped = self._skills_by_type()
-        active_ids = self.skill_manager.get_active_toggle_ids(self.config.workspace_dir) if self.skill_manager else set()
-        for skill_type in ("action", "toggle", "prompt"):
-            for skill in grouped.get(skill_type, []):
-                label = skill.id
-                if skill.type == "toggle":
-                    label = f"{skill.id} {'ON' if skill.id in active_ids else 'OFF'}"
-                buttons.append([InlineKeyboardButton(label, callback_data=f"skill:show:{skill.id}")])
+        skills = self.skill_manager.list_skills() if self.skill_manager else []
+        buttons = [
+            [InlineKeyboardButton(skill.id, callback_data=f"skill:show:{skill.id}")]
+            for skill in skills
+        ]
         return InlineKeyboardMarkup(buttons or [[InlineKeyboardButton("No skills", callback_data="skill:noop:none")]])
 
     def _skill_action_keyboard(self, skill: SkillDefinition) -> InlineKeyboardMarkup:
-        buttons = []
-        if skill.type == "toggle":
-            enabled = skill.id in self.skill_manager.get_active_toggle_ids(self.config.workspace_dir)
-            buttons.append(
-                [
-                    InlineKeyboardButton(selected_label("On", enabled), callback_data=f"skill:toggle:{skill.id}:on"),
-                    InlineKeyboardButton(selected_label("Off", not enabled), callback_data=f"skill:toggle:{skill.id}:off"),
-                ]
-            )
-        elif skill.type == "action" and skill.id not in {"cron", "heartbeat"}:
-            buttons.append([InlineKeyboardButton("Run now", callback_data=f"skill:run:{skill.id}")])
-        elif skill.type == "prompt":
-            buttons.append([InlineKeyboardButton("Show usage", callback_data=f"skill:show:{skill.id}")])
-        if skill.id in {"cron", "heartbeat"}:
-            buttons.append([InlineKeyboardButton("↻ Refresh jobs", callback_data=f"skill:jobs:{skill.id}")])
-        buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="skill:back:menu")])
-        return InlineKeyboardMarkup(buttons) if buttons else None
+        del skill
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton(BACK_LABEL, callback_data="skill:back:menu")]]
+        )
 
-    async def _render_skill_jobs(self, update_or_query, kind: str):
+    async def _render_jobs(self, update_or_query, kind: str):
         text, markup = _build_jobs_with_buttons(self, self.name, self.skill_manager, filter_agent=self.name)
         if hasattr(update_or_query, "edit_message_text"):
             await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
@@ -884,6 +862,14 @@ class BridgeAgentRuntime:
             await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
     async def invoke_scheduler_skill(self, skill_id: str, args: str, task_id: str) -> tuple[bool, str | None]:
+        from orchestrator.automation_runner import is_automation
+
+        if is_automation(skill_id):
+            return await self.invoke_scheduler_automation(
+                automation_id=skill_id,
+                args=args,
+                task_id=task_id,
+            )
         if not self.skill_manager:
             message = f"Scheduler skill invocation requested without skill manager: {skill_id}"
             self.error_logger.error(message)
@@ -893,39 +879,7 @@ class BridgeAgentRuntime:
             message = f"Unknown scheduler skill: {skill_id}"
             self.error_logger.error(message)
             return False, message
-        if skill.type == "toggle":
-            message = f"Toggle skill cannot be scheduled: {skill_id}"
-            self.error_logger.error(message)
-            return False, message
-        skill_env = {
-            "BRIDGE_ACTIVE_BACKEND": self.config.engine,
-            "BRIDGE_ACTIVE_MODEL": self.config.model,
-        }
-        if skill.type == "action":
-            ok, text = await self.skill_manager.run_action_skill(
-                skill,
-                self.config.workspace_dir,
-                args=args,
-                extra_env=skill_env,
-            )
-            if ok and text:
-                await self.send_long_message(
-                    chat_id=self.global_config.authorized_id,
-                    text=text,
-                    request_id=f"skill-{task_id}",
-                    purpose="scheduler-skill",
-                )
-            elif text:
-                self.error_logger.error(text)
-            return ok, text
         prompt = self.skill_manager.build_prompt_for_skill(skill, args or "")
-        if skill.backend and skill.backend != self.config.engine:
-            self.logger.info(
-                "Scheduled prompt skill %s declares backend=%s; retaining agent current backend=%s.",
-                skill.id,
-                skill.backend,
-                self.config.engine,
-            )
         await self.enqueue_request(
             chat_id=self.global_config.authorized_id,
             prompt=prompt,
@@ -934,6 +888,39 @@ class BridgeAgentRuntime:
             silent=False,
         )
         return True, f"Scheduled prompt skill queued: {skill.id}"
+
+    async def invoke_scheduler_automation(
+        self,
+        automation_id: str,
+        args: str,
+        task_id: str,
+    ) -> tuple[bool, str | None]:
+        from orchestrator.automation_runner import run_automation
+
+        if not self.skill_manager:
+            message = f"Scheduler automation requested without manager: {automation_id}"
+            self.error_logger.error(message)
+            return False, message
+        ok, text = await run_automation(
+            project_root=self.skill_manager.project_root,
+            workspace_dir=self.config.workspace_dir,
+            automation_id=automation_id,
+            args=args,
+            extra_env={
+                "BRIDGE_ACTIVE_BACKEND": self.config.engine,
+                "BRIDGE_ACTIVE_MODEL": self.config.model,
+            },
+        )
+        if ok and text:
+            await self.send_long_message(
+                chat_id=self.global_config.authorized_id,
+                text=text,
+                request_id=f"automation-{task_id}",
+                purpose="scheduler-automation",
+            )
+        elif text:
+            self.error_logger.error(text)
+        return ok, text
 
     def _build_media_prompt(self, media_kind: str, filename: str, caption: str = "", emoji: str = "") -> tuple[str, str]:
         kind = media_kind.lower()
@@ -3448,17 +3435,9 @@ class BridgeAgentRuntime:
         if skill is None:
             await update.message.reply_text(f"Unknown skill: {skill_id}")
             return
-        if skill.type != "prompt":
-            await update.message.reply_text(f"Skill '{skill_id}' is not a prompt skill.")
-            return
         prompt_text = " ".join(args or []).strip()
         if not prompt_text:
             await update.message.reply_text(f"Usage: /{skill_id} <prompt>")
-            return
-        if skill.backend and skill.backend != self.config.engine:
-            await update.message.reply_text(
-                f"Skill '{skill.id}' targets {skill.backend}, but this agent uses {self.config.engine}."
-            )
             return
         prompt = self.skill_manager.build_prompt_for_skill(skill, prompt_text)
         await update.message.reply_text(f"Running skill {skill.id}...")
@@ -3516,8 +3495,7 @@ class BridgeAgentRuntime:
 
         args = list(context.args or [])
         if not args:
-            grouped = self._skills_by_type()
-            count = sum(len(items) for items in grouped.values())
+            count = len(self.skill_manager.list_skills())
             await update.message.reply_text(
                 runtime_menu_views.skills_menu_text(count=count, agent_name=self.name),
                 parse_mode="HTML",
@@ -3526,26 +3504,57 @@ class BridgeAgentRuntime:
             return
 
         sub = args[0].strip().lower()
+        if sub in {"cron", "heartbeat"}:
+            await update.message.reply_text("Cron and heartbeat controls moved to /jobs.")
+            return
+        if sub == "dream":
+            await update.message.reply_text("Dream is a runtime command. Use /dream.")
+            return
+        if sub == "recall":
+            rest = " ".join(args[1:]).strip().lower()
+            if rest not in {"on", "off"}:
+                await update.message.reply_text(
+                    "Recall is a runtime setting. Usage: /skill recall on|off"
+                )
+                return
+            _, message = self.skill_manager.set_toggle_state(
+                self.config.workspace_dir,
+                "recall",
+                enabled=(rest == "on"),
+            )
+            await update.message.reply_text(message)
+            return
+        if sub == "debug" and len(args) == 2 and args[1].strip().lower() in {"on", "off"}:
+            enabled = args[1].strip().lower() == "on"
+            _, message = self.skill_manager.set_toggle_state(
+                self.config.workspace_dir,
+                "debug",
+                enabled=enabled,
+            )
+            await update.message.reply_text(message)
+            return
         if sub == "help":
-            grouped = self._skills_by_type()
-            count = sum(len(items) for items in grouped.values())
+            skills = self.skill_manager.list_skills()
+            validation_errors = self.skill_manager.skill_validation_errors()
             lines = [
                 card_title("🧰", "Skills reference"),
                 "",
-                f"<b>Current</b> · <code>{count}</code> available",
+                f"<b>Current</b> · <code>{len(skills)}</code> available",
                 f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
                 "",
             ]
-            for skill_type in ("action", "toggle", "prompt"):
-                entries = grouped.get(skill_type, [])
-                if not entries:
-                    continue
-                lines.append(f"<b>{skill_type.upper()}</b>")
-                for skill in entries:
-                    lines.append(
-                        f"<code>{html.escape(skill.id)}</code> · {html.escape(skill.description)}"
-                    )
-                lines.append("")
+            for skill in skills:
+                lines.append(
+                    f"<code>{html.escape(skill.id)}</code> · {html.escape(skill.description)}"
+                )
+            if validation_errors:
+                lines.extend(
+                    [
+                        "",
+                        f"⚠️ <b>Invalid packages skipped</b> · <code>{len(validation_errors)}</code>",
+                    ]
+                )
+            lines.extend(["", "Jobs: <code>/jobs</code> · EXP: <code>/exp</code>"])
             await update.message.reply_text("\n".join(lines).strip(), parse_mode="HTML")
             return
 
@@ -3555,57 +3564,6 @@ class BridgeAgentRuntime:
             return
 
         rest = " ".join(args[1:]).strip()
-        if skill.id in {"cron", "heartbeat"} and not rest:
-            await self._render_skill_jobs(update, skill.id)
-            return
-
-        if skill.type == "toggle":
-            if rest.lower() in {"on", "off"}:
-                ok, message = self.skill_manager.set_toggle_state(
-                    self.config.workspace_dir,
-                    skill.id,
-                    enabled=(rest.lower() == "on"),
-                )
-                await update.message.reply_text(
-                    f"✅ {html.escape(message)}\n\n"
-                    + runtime_menu_views.skill_detail_text(
-                        skill,
-                        self.config.workspace_dir,
-                        manager=self.skill_manager,
-                    ),
-                    parse_mode="HTML",
-                    reply_markup=self._skill_action_keyboard(skill),
-                )
-                return
-            await update.message.reply_text(
-                runtime_menu_views.skill_detail_text(
-                    skill,
-                    self.config.workspace_dir,
-                    manager=self.skill_manager,
-                ),
-                parse_mode="HTML",
-                reply_markup=self._skill_action_keyboard(skill),
-            )
-            return
-
-        if skill.type == "action":
-            ok, message = await self.skill_manager.run_action_skill(
-                skill,
-                self.config.workspace_dir,
-                args=rest,
-                extra_env={
-                    "BRIDGE_ACTIVE_BACKEND": self.config.engine,
-                    "BRIDGE_ACTIVE_MODEL": self.config.model,
-                },
-            )
-            await self.send_long_message(
-                chat_id=update.effective_chat.id,
-                text=message,
-                request_id=f"skill-{skill.id}",
-                purpose="skill-action",
-            )
-            return
-
         if not rest:
             await update.message.reply_text(
                 runtime_menu_views.skill_detail_text(
@@ -3615,12 +3573,6 @@ class BridgeAgentRuntime:
                 ),
                 parse_mode="HTML",
                 reply_markup=self._skill_action_keyboard(skill),
-            )
-            return
-
-        if skill.backend and skill.backend != self.config.engine:
-            await update.message.reply_text(
-                f"Skill '{skill.id}' targets {skill.backend}, but this agent uses {self.config.engine}."
             )
             return
 
@@ -3662,12 +3614,12 @@ class BridgeAgentRuntime:
             if action == "toggle":
                 ok, message = self.skill_manager.set_job_enabled(kind, task_id, enabled=(value == "on"))
                 await query.answer(message, show_alert=not ok)
-                await self._render_skill_jobs(query, kind)
+                await self._render_jobs(query, kind)
                 return
             if action == "delete":
                 ok, message = self.skill_manager.delete_job(kind, task_id)
                 await query.answer(message, show_alert=not ok)
-                await self._render_skill_jobs(query, kind)
+                await self._render_jobs(query, kind)
                 return
             if action == "run":
                 job = self.skill_manager.get_job(kind, task_id)
@@ -3758,8 +3710,7 @@ class BridgeAgentRuntime:
                 return
         if data.startswith("skill:"):
             if data == "skill:back:menu":
-                grouped = self._skills_by_type()
-                count = sum(len(items) for items in grouped.values())
+                count = len(self.skill_manager.list_skills())
                 await query.edit_message_text(
                     runtime_menu_views.skills_menu_text(count=count, agent_name=self.name),
                     parse_mode="HTML",
@@ -3768,31 +3719,19 @@ class BridgeAgentRuntime:
                 await query.answer()
                 return
             _, action, skill_id, *rest = data.split(":")
+            if action in {"toggle", "run", "jobs"}:
+                await query.answer(
+                    "This legacy Skill action is disabled. Use /jobs or the runtime command.",
+                    show_alert=True,
+                )
+                return
             skill = self.skill_manager.get_skill(skill_id)
             if skill is None:
                 await query.answer("Unknown skill", show_alert=True)
                 return
             if action == "show":
-                if skill.id in {"cron", "heartbeat"}:
-                    await self._render_skill_jobs(query, skill.id)
-                else:
-                    await query.edit_message_text(
-                        runtime_menu_views.skill_detail_text(
-                            skill,
-                            self.config.workspace_dir,
-                            manager=self.skill_manager,
-                        ),
-                        parse_mode="HTML",
-                        reply_markup=self._skill_action_keyboard(skill),
-                    )
-                await query.answer()
-                return
-            if action == "toggle" and rest:
-                enabled = rest[0] == "on"
-                ok, message = self.skill_manager.set_toggle_state(self.config.workspace_dir, skill.id, enabled=enabled)
                 await query.edit_message_text(
-                    f"✅ {html.escape(message)}\n\n"
-                    + runtime_menu_views.skill_detail_text(
+                    runtime_menu_views.skill_detail_text(
                         skill,
                         self.config.workspace_dir,
                         manager=self.skill_manager,
@@ -3800,27 +3739,6 @@ class BridgeAgentRuntime:
                     parse_mode="HTML",
                     reply_markup=self._skill_action_keyboard(skill),
                 )
-                await query.answer()
-                return
-            if action == "run":
-                ok, message = await self.skill_manager.run_action_skill(
-                    skill,
-                    self.config.workspace_dir,
-                    extra_env={
-                        "BRIDGE_ACTIVE_BACKEND": self.config.engine,
-                        "BRIDGE_ACTIVE_MODEL": self.config.model,
-                    },
-                )
-                await query.answer("Skill executed" if ok else "Skill failed", show_alert=not ok)
-                await self.send_long_message(
-                    chat_id=query.message.chat_id,
-                    text=message,
-                    request_id=f"skill-{skill.id}",
-                    purpose="skill-action",
-                )
-                return
-            if action == "jobs":
-                await self._render_skill_jobs(query, skill.id)
                 await query.answer()
                 return
         await query.answer()
@@ -3991,6 +3909,12 @@ class BridgeAgentRuntime:
                 purpose="skill-job-run",
             )
             return True, text
+        if action.startswith("automation:"):
+            return await self.invoke_scheduler_automation(
+                automation_id=action.split(":", 1)[1],
+                args=job.get("args", "") or job.get("prompt", ""),
+                task_id=job.get("id", "manual"),
+            )
         if action.startswith("skill:"):
             return await self.invoke_scheduler_skill(
                 skill_id=action.split(":", 1)[1],
