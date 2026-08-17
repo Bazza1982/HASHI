@@ -14,7 +14,6 @@ from telegram.error import RetryAfter
 
 from orchestrator import (
     runtime_cross_session,
-    runtime_lifecycle,
     runtime_pipeline,
     runtime_retry,
     telegram_stream_policy,
@@ -46,20 +45,6 @@ class _Logger:
 
     def error(self, message):
         self.messages.append(message)
-
-
-def test_background_status_uses_agent_owned_template_only():
-    runtime = SimpleNamespace(
-        config=SimpleNamespace(
-            extra={"background_status_text": "爸爸，小夏还在认真处理～ 🌸"}
-        )
-    )
-
-    assert runtime_lifecycle.background_status_text(runtime) == "爸爸，小夏还在认真处理～ 🌸"
-    runtime.config.extra = {"typing_message": "_小夏 is typing..._"}
-    assert runtime_lifecycle.background_status_text(runtime) == "_小夏 is typing..._"
-    runtime.config.extra = {}
-    assert runtime_lifecycle.background_status_text(runtime) == ""
 
 
 class _ContextAssembler:

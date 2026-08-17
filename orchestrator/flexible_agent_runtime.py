@@ -31,6 +31,7 @@ from orchestrator.command_ui import (
     status_label,
 )
 from orchestrator import runtime_audit, runtime_common
+from orchestrator import runtime_background_status
 from orchestrator.browser_mode import (
     build_browser_task_prompt,
     get_browser_examples_text,
@@ -210,6 +211,9 @@ class FlexibleAgentRuntime:
         self._scheduled_retry_tasks: set[asyncio.Task] = set()
         # Background tasks spawned when bg_mode detaches a long-running generation.
         self._background_tasks: set[asyncio.Task] = set()
+        # Tool-free, Persona-authored transition render/delivery helpers. These
+        # are kept separate so they never masquerade as detached user work.
+        self._persona_background_status_tasks: set[asyncio.Task] = set()
         self._request_listeners: dict[str, list] = {}
         self._pending_request_results: dict[str, dict] = {}
         self._transfer_state: dict | None = None
@@ -7704,6 +7708,7 @@ class FlexibleAgentRuntime:
         receipt_delivered = False
         try:
             await runtime_delivery_order.wait_for_turn(self, item.request_id)
+            await runtime_background_status.wait_for_delivery(item)
             if task.cancelled():
                 receipt_error = "background_task_cancelled"
                 self._mark_error(f"Background task cancelled: {item.summary}")

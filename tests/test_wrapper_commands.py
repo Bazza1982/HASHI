@@ -2147,6 +2147,36 @@ async def test_background_completion_uses_wrapper_output_for_visible_surfaces(tm
 
 
 @pytest.mark.asyncio
+async def test_background_final_waits_for_transition_status_delivery(tmp_path):
+    runtime, sent, _voices = _make_background_runtime(tmp_path)
+    item = _queued_request()
+    status_release = asyncio.Event()
+
+    async def deliver_status():
+        await status_release.wait()
+
+    item._background_status_delivery_task = asyncio.create_task(deliver_status())
+    generation_task = asyncio.create_task(
+        _completed_task(BackendResponse(text="core raw", duration_ms=1.0))
+    )
+    await generation_task
+    completion = asyncio.create_task(
+        FlexibleAgentRuntime._on_background_complete(
+            runtime,
+            generation_task,
+            item,
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert sent == []
+    status_release.set()
+    await completion
+    assert sent[0]["text"] == "wrapped visible"
+    assert _voices[0]["text"] == "wrapped visible"
+
+
+@pytest.mark.asyncio
 async def test_background_transfer_suppression_buffers_wrapper_output(tmp_path):
     runtime, sent, voices = _make_background_runtime(tmp_path)
     runtime._should_buffer_during_transfer = lambda request_id: True

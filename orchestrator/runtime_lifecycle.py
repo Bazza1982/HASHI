@@ -5,7 +5,11 @@ import time
 from contextlib import suppress
 from typing import Any
 
-from orchestrator import runtime_delivery_order, runtime_pipeline
+from orchestrator import (
+    runtime_background_status,
+    runtime_delivery_order,
+    runtime_pipeline,
+)
 from orchestrator.audit_mode import AuditTelemetryCollector, should_audit_source
 from orchestrator.memory_plus_mode import (
     ensure_memory_plus_observer,
@@ -14,15 +18,6 @@ from orchestrator.memory_plus_mode import (
     prepare_memory_plus_store,
 )
 from orchestrator.wrapper_mode import SESSION_RESET_SOURCE
-
-
-def background_status_text(runtime: Any) -> str:
-    """Return the Agent-owned status template, if one is configured."""
-
-    extra = getattr(getattr(runtime, "config", None), "extra", None) or {}
-    return str(
-        extra.get("background_status_text") or extra.get("typing_message") or ""
-    ).strip()
 
 
 async def initialize(runtime: Any) -> bool:
@@ -58,6 +53,9 @@ async def shutdown(runtime: Any) -> None:
     runtime.logger.info(f"Shutting down flex agent '{runtime.name}'...")
     runtime.is_shutting_down = True
     await _cancel_tasks(runtime._scheduled_retry_tasks)
+    await _cancel_tasks(
+        getattr(runtime, "_persona_background_status_tasks", set())
+    )
     await _cancel_tasks(runtime._background_tasks)
     if runtime.process_task:
         runtime.process_task.cancel()
@@ -124,6 +122,7 @@ async def process_queue(runtime: Any) -> None:
                 audit_active=audit_active,
                 audit_collector=audit_collector,
             )
+            runtime_background_status.prepare(runtime, item)
 
             generation = await runtime_pipeline.run_backend_generation(
                 runtime,
@@ -145,17 +144,21 @@ async def process_queue(runtime: Any) -> None:
                     if feedback.answer_preview_task is not None:
                         with suppress(asyncio.CancelledError):
                             await feedback.answer_preview_task
-                if feedback.placeholder:
-                    status_text = background_status_text(runtime)
-                    if status_text:
-                        with suppress(Exception):
-                            await runtime.app.bot.edit_message_text(
-                                chat_id=item.chat_id,
-                                message_id=feedback.placeholder.message_id,
-                                text=status_text,
-                            )
                 setattr(item, "_audit_collector", audit_collector)
                 setattr(item, "_her_message_router", feedback.her_message_router)
+                status_placeholder = feedback.placeholder
+                if (
+                    feedback.answer_stream_state is not None
+                    and feedback.answer_stream_state.has_text
+                ):
+                    # Never overwrite a real streamed answer preview with status.
+                    status_placeholder = None
+                runtime_background_status.schedule_delivery(
+                    runtime,
+                    item,
+                    generation.generation_task,
+                    status_placeholder,
+                )
                 runtime._register_background_task(generation.generation_task, item)
                 runtime.logger.info(
                     f"Detached {item.request_id} to background "
