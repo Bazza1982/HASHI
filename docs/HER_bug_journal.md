@@ -70,13 +70,13 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260815-032` | Fixed — live verification pending | P0 | isolated scheduler choices and CONTINUE checkpoints were absent from the primary conversation context | `test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_task`; `test_her_isolated_continuation_resumes_exact_checkpoint_without_replacing_primary` |
 | `HER-20260816-033` | Fixed in source — rebuild/live verification pending | P1 | TaskFrame again saw only `A` while the primary executor saw and completed the previous option | `task_checkpoint_receives_immediate_previous_dialogue_context`; `tests/test_runtime_turn_context.py` |
 | `HER-20260816-034` | Verified | P1 | offline `--status` constructed a second rebuild manager and falsely failed an active build as a kernel restart | `test_offline_status_is_strictly_read_only_during_active_build`; `test_manager_ownership_lock_excludes_a_second_process` |
-| `HER-20260817-035` | Fixed in source — rebuild/live verification pending | P1 | source-integrated `.22` lost native direct-response termination, so completed TaskFrame answers entered primary execution and MAX/MAX+ review loops | `direct_response_finishes_after_one_planning_call_at_every_native_effort`; `invalid_direct_response_falls_back_to_primary_execution`; `test_claw_direct_response_acknowledgement_is_final_only` |
+| `HER-20260817-035` | Fixed; candidate verified — activation deferred | P1 | source-integrated `.22` lost native direct-response termination, so completed TaskFrame answers entered primary execution and MAX/MAX+ review loops | `direct_response_finishes_after_one_planning_call_at_every_native_effort`; `invalid_direct_response_falls_back_to_primary_execution`; `test_claw_direct_response_acknowledgement_is_final_only` |
 
 ## Historical entries
 
 ### HER-20260817-035 — TaskFrame direct answers no longer terminated the turn
 
-- **Status:** Fixed in source — rebuild/live verification pending
+- **Status:** Fixed; candidate verified — activation deferred
 - **Severity:** P1
 - **Discovered:** 2026-08-17 AEST during a MAX+ `/handoff` latency diagnosis
 - **Expected:** when TaskFrame determines that its Persona-authored
@@ -108,6 +108,13 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **Regression tests:** native effort matrix for `medium`, `high`, `xhigh`,
   `max`, and `max+`; invalid-direct non-blocking fallback; non-direct TaskFrame
   handoff to the primary Agent; existing adapter final-lane delivery test.
+- **Managed rebuild:** job `rebuild-20260817-061803-bfc0b34d` built and verified
+  immutable candidate `dev-acbe61534cf4a5eb-20d2d521fa40` with binary SHA-256
+  `20d2d521fa4065b53a5e7615f8da920bb503e7b7494b7a7a1b2b68d18df14d9f`.
+  Adoption was safely deferred because Arale remained busy with an active user
+  task throughout the 120-second idle window; the previously selected HER was
+  left unchanged. A later `/rebuild` while Arale is idle can reuse this verified
+  candidate and complete targeted adoption without recompilation.
 
 ### HER-20260816-034 — rebuild status observer falsely became a restart owner
 
