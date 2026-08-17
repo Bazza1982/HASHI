@@ -1556,6 +1556,8 @@ def _her_stream_origin(event: Mapping[str, Any]) -> str:
     kind = str(event.get("kind") or "")
     if kind in {"task_acknowledgement", "task_plan", "user_commentary", "task_commentary"}:
         return "her_planner"
+    if kind == "assistant_commentary":
+        return "primary_model"
     if kind in {"thinking_delta", "thinking_redacted", "thinking_summary"}:
         return "provider"
     if kind == "assistant_delta":
@@ -1643,7 +1645,7 @@ def _her_stream_event_id(
         if mapped_index == 0:
             return f"{request}:plan:{suffix}"
         return f"{request}:technical:task_plan:{suffix}:{mapped_index}"
-    if kind in {"user_commentary", "task_commentary"}:
+    if kind in {"user_commentary", "task_commentary", "assistant_commentary"}:
         identity = revision if revision is not None else source_index
         return f"{request}:commentary:{phase}:{identity or 0}:{mapped_index}"
     ordinal = source_index if source_index is not None else 0
@@ -1731,7 +1733,7 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
     if kind == "task_acknowledgement":
         text = str(event.get("text") or event.get("summary") or "").strip()
         return StreamEvent(kind=KIND_ACKNOWLEDGEMENT, summary=text) if text else None
-    if kind in {"user_commentary", "task_commentary"}:
+    if kind in {"user_commentary", "task_commentary", "assistant_commentary"}:
         text = str(event.get("text") or event.get("summary") or "").strip()
         return StreamEvent(kind=KIND_COMMENTARY, summary=text) if text else None
     if kind == "permission_required":

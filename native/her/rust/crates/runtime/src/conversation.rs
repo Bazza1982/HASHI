@@ -401,6 +401,19 @@ pub enum RuntimeStreamEvent {
         revision: usize,
         text: String,
     },
+    /// A complete, model-authored user update that preceded tool use in an
+    /// execution turn. Text deltas remain internal while streaming; this event
+    /// is emitted once, only after the provider turn completed successfully and
+    /// before any requested tool is executed.
+    AssistantCommentary {
+        iteration: usize,
+        text: String,
+    },
+    ProviderRetry {
+        attempt: usize,
+        max_attempts: usize,
+        reason: String,
+    },
     PermissionRequired {
         tool_name: String,
         reason: String,
@@ -2064,6 +2077,21 @@ where
                 pending_tool_uses.clear();
             }
             let proposed_text = user_visible_text(&assistant_message);
+            let asks_user = pending_tool_uses
+                .iter()
+                .any(|(_, name, _)| name == "AskUserQuestion");
+            if !pending_tool_uses.is_empty()
+                && !asks_user
+                && !proposed_text.trim().is_empty()
+                && !contains_dangling_tool_markup(&proposed_text)
+            {
+                if let Some(observer) = observer.as_deref_mut() {
+                    observer(RuntimeStreamEvent::AssistantCommentary {
+                        iteration: iterations,
+                        text: proposed_text.clone(),
+                    });
+                }
+            }
             let proposed_visible_answer = pending_tool_uses.is_empty()
                 && !proposed_text.trim().is_empty()
                 && !contains_dangling_tool_markup(&proposed_text);
@@ -3783,8 +3811,8 @@ fn validate_planned_tool_identifiers(
     available_tool_capabilities: &BTreeSet<String>,
 ) -> Result<(), RuntimeError> {
     let mut seen = BTreeSet::new();
-    for planned in &mut frame.planned_tools {
-        let original = planned.clone();
+    let mut normalized = Vec::with_capacity(frame.planned_tools.len());
+    for original in std::mem::take(&mut frame.planned_tools) {
         let canonical = canonical_tool_capability(&original).ok_or_else(|| {
             RuntimeError::new(format!(
                 "task frame planned_tools contains non-canonical tool prose `{original}`"
@@ -3810,13 +3838,11 @@ fn validate_planned_tool_identifiers(
                 )));
             }
         };
-        if !seen.insert(resolved.clone()) {
-            return Err(RuntimeError::new(format!(
-                "task frame planned_tools contains duplicate canonical capability `{resolved}`"
-            )));
+        if seen.insert(resolved.clone()) {
+            normalized.push(resolved);
         }
-        *planned = resolved;
     }
+    frame.planned_tools = normalized;
     Ok(())
 }
 
@@ -4882,7 +4908,7 @@ mod tests {
     }
 
     #[test]
-    fn planned_tool_fields_reject_prose_and_aliases_share_one_capability() {
+    fn planned_tool_fields_reject_prose_and_deduplicate_capability_aliases() {
         let mut frame = transition_frame();
         frame.planned_tools = vec!["inspect the logs carefully".to_string()];
         assert!(super::validate_planned_tool_identifiers(&mut frame, &BTreeSet::new()).is_err());
@@ -4894,6 +4920,15 @@ mod tests {
             super::canonical_tool_capability("Grep"),
             super::canonical_tool_capability("grep_search")
         );
+
+        frame.planned_tools = vec![
+            "Read".to_string(),
+            "read_file".to_string(),
+            "claw_workspace_read".to_string(),
+        ];
+        super::validate_planned_tool_identifiers(&mut frame, &BTreeSet::new())
+            .expect("aliases for one capability should be harmless");
+        assert_eq!(frame.planned_tools, vec!["claw_workspace_read".to_string()]);
     }
 
     #[test]
@@ -6726,6 +6761,91 @@ mod tests {
         assert_eq!(
             user_visible_text(summary.assistant_messages.last().expect("primary answer")),
             "圣上，主 Agent 已完成检查并报告结果。"
+        );
+    }
+
+    #[test]
+    fn complete_tool_bound_text_emits_one_commentary_before_tool_execution() {
+        struct CommentaryApi {
+            planning_calls: usize,
+            execution_calls: usize,
+        }
+
+        impl ApiClient for CommentaryApi {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                if !request.allow_tools {
+                    self.planning_calls += 1;
+                    return Ok(vec![
+                        AssistantEvent::TextDelta(
+                            r#"{"acknowledgement":"圣上，臣妾会先核验记录，再禀报结果。","active_goal":"核验记录并报告结果","direct_response":false,"success_criteria":["报告核实后的结果"],"planned_actions":["读取记录","报告结果"],"planned_tools":["echo"],"do_not_do":["不修改记录"],"completed":[],"remaining_work":["核验记录"],"failures":[],"next_action":"读取记录"}"#.to_string(),
+                        ),
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+                self.execution_calls += 1;
+                if self.execution_calls == 1 {
+                    return Ok(vec![
+                        AssistantEvent::TextDelta(
+                            "圣上，臣妾已经定位记录，现正读取原始证据。".to_string(),
+                        ),
+                        AssistantEvent::ToolUse {
+                            id: "echo-1".to_string(),
+                            name: "echo".to_string(),
+                            input: "record".to_string(),
+                        },
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+                Ok(vec![
+                    AssistantEvent::TextDelta("圣上，记录已经核验完成。".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CommentaryApi {
+                planning_calls: 0,
+                execution_calls: 0,
+            },
+            StaticToolExecutor::new().register("echo", |input| Ok(input.to_string())),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_task_planning_enabled(true);
+        let mut observed = Vec::new();
+        let mut observer = |event| observed.push(event);
+
+        let summary = runtime
+            .run_turn_observed("核验记录", None, Some(&mut observer))
+            .expect("tool-bound commentary should not affect execution");
+
+        assert_eq!(summary.tool_results.len(), 1);
+        let commentary_index = observed
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    RuntimeStreamEvent::AssistantCommentary {
+                        iteration: 1,
+                        text,
+                    } if text == "圣上，臣妾已经定位记录，现正读取原始证据。"
+                )
+            })
+            .expect("one complete assistant commentary should be emitted");
+        let tool_start_index = observed
+            .iter()
+            .position(|event| matches!(event, RuntimeStreamEvent::ToolStart { .. }))
+            .expect("tool should start");
+        assert!(commentary_index < tool_start_index);
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|event| matches!(event, RuntimeStreamEvent::AssistantCommentary { .. }))
+                .count(),
+            1,
+            "the terminal answer must not be duplicated as commentary"
         );
     }
 

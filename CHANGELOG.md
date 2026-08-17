@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **HER native commentary production and transient stream recovery** — complete
+  model-authored text that precedes a tool call now becomes one explicit
+  Persona commentary event before `ToolStart`; token deltas remain internal and
+  terminal answers are never duplicated as commentary. TaskFrame tool aliases
+  that resolve to one live capability are deduplicated instead of invalidating
+  a replan. OpenAI-compatible errors embedded inside an established SSE stream
+  now preserve 408/409/429/5xx and timeout retryability, and HER retries one
+  incomplete provider stream without replaying any tool side effect. Retry
+  attempts remain technical `/verbose` telemetry.
 - **HER Persona commentary cadence regression** — separated the
   model-authored Persona commentary clock from `/verbose` technical activity
   and neutral runtime leases. Pending progress is now a single coalesced slot:

@@ -1783,31 +1783,12 @@ fn parse_sse_frame(
     if data_lines.is_empty() {
         // Detect raw JSON error response (not SSE-framed)
         if let Ok(raw) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(err_obj) = raw.get("error") {
-                let msg = err_obj
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("provider returned an error")
-                    .to_string();
-                let code = err_obj
-                    .get("code")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|c| c as u16);
-                let status = reqwest::StatusCode::from_u16(code.unwrap_or(500))
-                    .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
-                return Err(ApiError::Api {
-                    status,
-                    error_type: err_obj
-                        .get("type")
-                        .and_then(|t| t.as_str())
-                        .map(str::to_owned),
-                    message: Some(msg),
-                    request_id: None,
-                    body: trimmed.chars().take(500).collect(),
-                    retryable: false,
-                    suggested_action: suggested_action_for_status(status),
-                    retry_after: None,
-                });
+            if raw.get("error").is_some() {
+                return Err(embedded_stream_error(
+                    &raw,
+                    trimmed.chars().take(500).collect(),
+                    reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                ));
             }
         }
         // Detect HTML responses
@@ -1835,31 +1816,12 @@ fn parse_sse_frame(
     // HTTP error status. Surface the error message directly rather than letting
     // ChatCompletionChunk deserialization fail with a cryptic 'missing field' error.
     if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&payload) {
-        if let Some(err_obj) = raw.get("error") {
-            let msg = err_obj
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("provider returned an error in stream")
-                .to_string();
-            let code = err_obj
-                .get("code")
-                .and_then(serde_json::Value::as_u64)
-                .map(|c| c as u16);
-            let status = reqwest::StatusCode::from_u16(code.unwrap_or(400))
-                .unwrap_or(reqwest::StatusCode::BAD_REQUEST);
-            return Err(ApiError::Api {
-                status,
-                error_type: err_obj
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .map(str::to_owned),
-                message: Some(msg),
-                request_id: None,
-                body: payload.clone(),
-                retryable: false,
-                suggested_action: suggested_action_for_status(status),
-                retry_after: None,
-            });
+        if raw.get("error").is_some() {
+            return Err(embedded_stream_error(
+                &raw,
+                payload.clone(),
+                reqwest::StatusCode::BAD_REQUEST,
+            ));
         }
     }
     // Detect HTML or other non-JSON responses early for better error messages
@@ -1881,6 +1843,61 @@ fn parse_sse_frame(
     serde_json::from_str::<ChatCompletionChunk>(&payload)
         .map(Some)
         .map_err(|error| ApiError::json_deserialize(provider, model, &payload, error))
+}
+
+fn embedded_stream_error(
+    raw: &serde_json::Value,
+    body: String,
+    default_status: reqwest::StatusCode,
+) -> ApiError {
+    let err_obj = raw
+        .get("error")
+        .expect("embedded_stream_error requires an error object");
+    let message = err_obj
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("provider returned an error in stream")
+        .to_string();
+    let code = err_obj.get("code").and_then(|value| {
+        value
+            .as_u64()
+            .and_then(|code| u16::try_from(code).ok())
+            .or_else(|| value.as_str().and_then(|code| code.parse::<u16>().ok()))
+    });
+    let status = code
+        .and_then(|code| reqwest::StatusCode::from_u16(code).ok())
+        .unwrap_or(default_status);
+    let error_type = err_obj
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            err_obj
+                .get("metadata")
+                .and_then(|metadata| metadata.get("error_type"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_owned);
+    let timeout_signal = error_type
+        .as_deref()
+        .is_some_and(|kind| kind.to_ascii_lowercase().contains("timeout"))
+        || message.to_ascii_lowercase().contains("gateway timeout")
+        || message
+            .to_ascii_lowercase()
+            .contains("upstream idle timeout");
+    ApiError::Api {
+        status,
+        error_type,
+        message: Some(message),
+        request_id: raw
+            .get("request_id")
+            .or_else(|| raw.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        body,
+        retryable: is_retryable_status(status) || timeout_signal,
+        suggested_action: suggested_action_for_status(status),
+        retry_after: None,
+    }
 }
 
 fn read_env_non_empty(key: &str) -> Result<Option<String>, ApiError> {

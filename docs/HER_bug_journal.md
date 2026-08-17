@@ -72,8 +72,82 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260816-034` | Verified | P1 | offline `--status` constructed a second rebuild manager and falsely failed an active build as a kernel restart | `test_offline_status_is_strictly_read_only_during_active_build`; `test_manager_ownership_lock_excludes_a_second_process` |
 | `HER-20260817-035` | Deployed to Arale — live behavior verification pending | P1 | source-integrated `.22` lost native direct-response termination, so completed TaskFrame answers entered primary execution and MAX/MAX+ review loops | `direct_response_finishes_after_one_planning_call_at_every_native_effort`; `invalid_direct_response_falls_back_to_primary_execution`; `test_claw_direct_response_acknowledgement_is_final_only` |
 | `HER-20260817-036` | Deployed to Arale — live behavior verification pending | P2 | pending model-authored Persona commentary shared technical cadence and vanished silently at turn finalization | `test_claw_cadence_technical_activity_does_not_delay_persona_commentary`; `test_claw_cadence_finish_supersedes_only_latest_pending_commentary`; `test_her_effort_commentary_matrix_reaches_transport_receipt` |
+| `HER-20260817-037` | Fixed in source — rebuild/live verification pending | P2 | primary tool-turn Persona text remained internal `assistant_delta`, so the repaired commentary cadence had no native events to deliver | `complete_tool_bound_text_emits_one_commentary_before_tool_execution`; `test_claw_tool_bound_assistant_commentary_is_user_visible_primary_model_text`; effort transport matrix |
+| `HER-20260817-038` | Fixed in source — rebuild/live verification pending | P1 | StreamLake's 504 inside an established SSE stream was hard-coded non-retryable and aborted a resumable Arale turn | `stream_message_marks_embedded_gateway_timeout_as_retryable`; `provider_stream_retries_embedded_504_once_and_returns_only_complete_attempt` |
 
 ## Historical entries
+
+### HER-20260817-038 — embedded SSE 504 aborted a resumable turn
+
+- **Status:** Fixed in source — rebuild/live verification pending
+- **Severity:** P1
+- **Discovered:** 2026-08-17 AEST in Arale request `req-0002`, fixed-session
+  HER, `deepseek/deepseek-v4-pro` through StreamLake.
+- **Expected:** a transient gateway/idle timeout received after an SSE handshake
+  is classified with the same retryability as an HTTP 504. HER may replay one
+  incomplete model attempt, while tools execute only from a complete response.
+- **Actual:** the provider returned `code=504`, `error_type=timeout`, and
+  `Upstream idle timeout exceeded` inside a `data:` frame after the preceding
+  tool result. `parse_sse_frame` constructed `ApiError::Api` with
+  `retryable=false`; the CLI converted it to an opaque `RuntimeError` and
+  immediately ended the task as a backend error after 618.63 seconds.
+- **User-visible impact:** verified work and session state were retained, but
+  Arale could not wrap up or continue the current turn after one transient
+  provider timeout.
+- **Root cause:** SSE-embedded errors bypassed normal HTTP status
+  classification, and the CLI erased structured retryability before its
+  post-handshake continuation policy could inspect it.
+- **Repair:** extract numeric or string status, provider timeout metadata, and
+  request ID from embedded errors; preserve structured failure stage and
+  retryability through stream consumption; replay one incomplete retryable
+  stream under the original deadline; emit technical `provider_retry`
+  telemetry; never retry handshake-exhausted or local failures at this layer.
+- **Exactly-once boundary:** the conversation runtime receives events only
+  after one provider attempt completes, and no tool is executed before that
+  return. A discarded incomplete attempt therefore cannot replay a tool side
+  effect.
+- **Regression tests:** exact StreamLake-shaped SSE 504 classification plus a
+  real local two-response SSE server proving one retry and a complete recovered
+  result.
+- **Secrets/redaction checked:** yes; tests and documentation use synthetic
+  credentials and provider payloads only.
+- **Remaining risk:** managed rebuild and one live Arale provider retest remain.
+
+### HER-20260817-037 — native tool-turn commentary was never produced
+
+- **Status:** Fixed in source — rebuild/live verification pending
+- **Severity:** P2
+- **Recurrence of:** distinct producer-side defect exposed after
+  `HER-20260817-036`; the cadence/terminal repair itself remained loaded.
+- **Discovered:** 2026-08-17 AEST while tracing Arale's first live test after the
+  commentary deployment.
+- **Expected:** Persona text authored by the primary model before a tool call is
+  assembled into one commentary event, then follows the independent commentary
+  cadence to Telegram. Raw token deltas stay internal and final answers stay on
+  the final lane.
+- **Actual:** ten tool turns contained clear Persona preambles, but native HER
+  emitted them only as `assistant_delta`; the adapter correctly classifies that
+  type as internal. One replan also authored `task_commentary`, but harmless
+  aliases resolved to the same planned capability and caused the whole replan
+  to be rejected, discarding its optional commentary.
+- **User-visible impact:** only the initial acknowledgement appeared during a
+  long Arale task even though `/commentary on` and the repaired cadence were
+  active.
+- **Root cause:** previous end-to-end tests injected synthetic
+  `task_commentary` and proved routing/cadence, but never proved that a real
+  primary tool turn produced a commentary event. TaskFrame validation also
+  treated duplicate canonical aliases as a fatal planning error.
+- **Repair:** after a provider turn completes successfully, assemble its visible
+  text and emit one `assistant_commentary` immediately before ToolStart when a
+  non-interactive tool will run; exclude final and AskUserQuestion turns;
+  preserve raw deltas as internal; deduplicate same-capability TaskFrame aliases
+  in first-seen order.
+- **Regression tests:** native producer ordering and non-duplication, native
+  JSON serialization, adapter ownership/provenance, and low-through-ultra
+  transport receipt coverage using the new native event type.
+- **Secrets/redaction checked:** yes; no private model text is stored in tests.
+- **Remaining risk:** managed rebuild and one live multi-tool Arale retest
+  remain.
 
 ### HER-20260817-036 — pending Persona commentary vanished at finalization
 

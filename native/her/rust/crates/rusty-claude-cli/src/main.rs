@@ -12929,6 +12929,66 @@ struct AnthropicRuntimeClient {
     reasoning_effort: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderAttemptFailureStage {
+    Handshake,
+    Stream,
+    PostToolStall,
+    Local,
+}
+
+#[derive(Debug)]
+struct ProviderAttemptError {
+    error: RuntimeError,
+    retryable: bool,
+    stage: ProviderAttemptFailureStage,
+}
+
+impl ProviderAttemptError {
+    fn provider(
+        session_id: &str,
+        error: api::ApiError,
+        stage: ProviderAttemptFailureStage,
+    ) -> Self {
+        let retryable = error.is_retryable();
+        Self {
+            error: RuntimeError::new(format_user_visible_api_error(session_id, &error)),
+            retryable,
+            stage,
+        }
+    }
+
+    fn post_tool_stall() -> Self {
+        Self {
+            error: RuntimeError::new("post-tool stall: model did not respond within timeout"),
+            retryable: true,
+            stage: ProviderAttemptFailureStage::PostToolStall,
+        }
+    }
+
+    fn local(error: RuntimeError) -> Self {
+        Self {
+            error,
+            retryable: false,
+            stage: ProviderAttemptFailureStage::Local,
+        }
+    }
+
+    fn may_retry_stream(&self) -> bool {
+        self.retryable
+            && matches!(
+                self.stage,
+                ProviderAttemptFailureStage::Stream | ProviderAttemptFailureStage::PostToolStall
+            )
+    }
+}
+
+impl From<RuntimeError> for ProviderAttemptError {
+    fn from(error: RuntimeError) -> Self {
+        Self::local(error)
+    }
+}
+
 impl AnthropicRuntimeClient {
     fn new(
         session_id: &str,
@@ -13050,43 +13110,45 @@ impl AnthropicRuntimeClient {
 
         self.runtime.block_on(async {
             let deadline = request_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
-            // When resuming after tool execution, apply a stall timeout on the
-            // first stream event.  If the model does not respond within the
-            // deadline we drop the stalled connection and re-send the request as
-            // a continuation nudge (one retry only).
-            let max_attempts: usize = if is_post_tool { 2 } else { 1 };
+            // Retry one incomplete provider stream. The conversation runtime
+            // cannot execute tools until a complete assistant response returns,
+            // so replaying the same request here cannot duplicate a tool side
+            // effect. Handshake errors already have API-layer retries and local
+            // failures remain terminal.
+            let max_attempts: usize = 2;
 
             for attempt in 1..=max_attempts {
-                let operation = self.consume_stream(
-                    &message_request,
-                    is_post_tool && attempt == 1,
-                    observer.as_deref_mut(),
-                );
+                let operation =
+                    self.consume_stream(&message_request, is_post_tool, observer.as_deref_mut());
                 let result = if let Some(deadline) = deadline {
                     match tokio::time::timeout_at(deadline, operation).await {
                         Ok(result) => result,
-                        Err(_) => Err(RuntimeError::new(format!(
+                        Err(_) => Err(ProviderAttemptError::local(RuntimeError::new(format!(
                             "provider call exceeded hard timeout of {} seconds",
                             request_timeout.map_or(0, |timeout| timeout.as_secs())
-                        ))),
+                        )))),
                     }
                 } else {
                     operation.await
                 };
                 match result {
                     Ok(events) => return Ok(events),
-                    Err(error)
-                        if error.to_string().contains("post-tool stall")
-                            && attempt < max_attempts =>
-                    {
-                        // Stalled after tool completion — nudge the model by
-                        // re-sending the same request.
+                    Err(error) if error.may_retry_stream() && attempt < max_attempts => {
+                        // The first attempt never reached the conversation
+                        // ledger, so re-send the same request once.
+                        if let Some(observer) = observer.as_deref_mut() {
+                            observer(RuntimeStreamEvent::ProviderRetry {
+                                attempt: attempt + 1,
+                                max_attempts,
+                                reason: error.error.to_string(),
+                            });
+                        }
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(error.error),
                 }
             }
 
-            Err(RuntimeError::new("post-tool continuation nudge exhausted"))
+            Err(RuntimeError::new("provider stream retry exhausted"))
         })
     }
     /// Consume a single streaming response, optionally applying a stall
@@ -13097,13 +13159,17 @@ impl AnthropicRuntimeClient {
         message_request: &MessageRequest,
         apply_stall_timeout: bool,
         mut observer: Option<&mut RuntimeStreamObserver<'_>>,
-    ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+    ) -> Result<Vec<AssistantEvent>, ProviderAttemptError> {
         let mut stream = self
             .client
             .stream_message(message_request)
             .await
             .map_err(|error| {
-                RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
+                ProviderAttemptError::provider(
+                    &self.session_id,
+                    error,
+                    ProviderAttemptFailureStage::Handshake,
+                )
             })?;
         let mut stdout = io::stdout();
         let mut sink = io::sink();
@@ -13126,17 +13192,21 @@ impl AnthropicRuntimeClient {
             let next = if apply_stall_timeout && !received_any_event {
                 match tokio::time::timeout(POST_TOOL_STALL_TIMEOUT, stream.next_event()).await {
                     Ok(inner) => inner.map_err(|error| {
-                        RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
+                        ProviderAttemptError::provider(
+                            &self.session_id,
+                            error,
+                            ProviderAttemptFailureStage::Stream,
+                        )
                     })?,
-                    Err(_elapsed) => {
-                        return Err(RuntimeError::new(
-                            "post-tool stall: model did not respond within timeout",
-                        ));
-                    }
+                    Err(_elapsed) => return Err(ProviderAttemptError::post_tool_stall()),
                 }
             } else {
                 stream.next_event().await.map_err(|error| {
-                    RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
+                    ProviderAttemptError::provider(
+                        &self.session_id,
+                        error,
+                        ProviderAttemptFailureStage::Stream,
+                    )
                 })?
             };
 
@@ -13345,7 +13415,11 @@ impl AnthropicRuntimeClient {
             })
             .await
             .map_err(|error| {
-                RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
+                ProviderAttemptError::provider(
+                    &self.session_id,
+                    error,
+                    ProviderAttemptFailureStage::Handshake,
+                )
             })?;
         let mut events = response_to_events(response, out)?;
         push_prompt_cache_record(&self.client, &mut events);
@@ -13681,6 +13755,25 @@ fn runtime_stream_event_json(event: RuntimeStreamEvent) -> serde_json::Value {
             "event_id": format!("task-commentary:{revision}"),
             "text": text,
             "summary": text,
+        }),
+        RuntimeStreamEvent::AssistantCommentary { iteration, text } => json!({
+            "kind": "assistant_commentary",
+            "phase": "execution",
+            "iteration": iteration,
+            "event_id": format!("assistant-commentary:{iteration}"),
+            "text": text,
+            "summary": text,
+        }),
+        RuntimeStreamEvent::ProviderRetry {
+            attempt,
+            max_attempts,
+            reason,
+        } => json!({
+            "kind": "provider_retry",
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "reason": reason,
+            "summary": format!("retrying incomplete provider stream ({attempt}/{max_attempts})"),
         }),
         RuntimeStreamEvent::PermissionRequired { tool_name, reason } => json!({
             "kind": "permission_required",
@@ -15240,7 +15333,10 @@ mod tests {
         PromptHistoryEntry, SessionLifecycleKind, SessionLifecycleSummary, SlashCommand,
         StatusUsage, TmuxPaneSnapshot, DEFAULT_MODEL, LATEST_SESSION_REFERENCE, STUB_COMMANDS,
     };
-    use api::{ApiError, MessageResponse, OutputContentBlock, Usage};
+    use api::{
+        ApiError, MessageResponse, OpenAiCompatClient, OpenAiCompatConfig, OutputContentBlock,
+        Usage,
+    };
     use plugins::{
         PluginManager, PluginManagerConfig, PluginTool, PluginToolDefinition, PluginToolPermission,
     };
@@ -15910,6 +16006,27 @@ mod tests {
         assert_eq!(commentary["event_id"], json!("task-commentary:2"));
         assert_eq!(commentary["text"], json!("Verified material progress."));
 
+        let assistant_commentary =
+            super::runtime_stream_event_json(runtime::RuntimeStreamEvent::AssistantCommentary {
+                iteration: 3,
+                text: "I found the record and am checking its source.".to_string(),
+            });
+        assert_eq!(assistant_commentary["kind"], json!("assistant_commentary"));
+        assert_eq!(
+            assistant_commentary["event_id"],
+            json!("assistant-commentary:3")
+        );
+        assert_eq!(assistant_commentary["phase"], json!("execution"));
+
+        let retry = super::runtime_stream_event_json(runtime::RuntimeStreamEvent::ProviderRetry {
+            attempt: 2,
+            max_attempts: 2,
+            reason: "504 Gateway Timeout".to_string(),
+        });
+        assert_eq!(retry["kind"], json!("provider_retry"));
+        assert_eq!(retry["attempt"], json!(2));
+        assert_eq!(retry["max_attempts"], json!(2));
+
         let permission =
             super::runtime_stream_event_json(runtime::RuntimeStreamEvent::PermissionRequired {
                 tool_name: "WriteFile".to_string(),
@@ -15921,6 +16038,144 @@ mod tests {
             json!("permission-required:write_file")
         );
         assert_eq!(permission["user_action_required"], json!(true));
+    }
+
+    #[test]
+    fn provider_attempt_retry_policy_only_replays_incomplete_stream_failures() {
+        let retryable_stream = super::ProviderAttemptError {
+            error: runtime::RuntimeError::new("504 Gateway Timeout"),
+            retryable: true,
+            stage: super::ProviderAttemptFailureStage::Stream,
+        };
+        let retryable_handshake = super::ProviderAttemptError {
+            error: runtime::RuntimeError::new("504 Gateway Timeout"),
+            retryable: true,
+            stage: super::ProviderAttemptFailureStage::Handshake,
+        };
+        let local_failure = super::ProviderAttemptError {
+            error: runtime::RuntimeError::new("invalid local response"),
+            retryable: false,
+            stage: super::ProviderAttemptFailureStage::Local,
+        };
+
+        assert!(retryable_stream.may_retry_stream());
+        assert!(!retryable_handshake.may_retry_stream());
+        assert!(!local_failure.may_retry_stream());
+    }
+
+    #[test]
+    fn provider_stream_retries_embedded_504_once_and_returns_only_complete_attempt() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener");
+        let address = listener.local_addr().expect("test address");
+        let timeout_body = concat!(
+            "data: {\"id\":\"gen-timeout\",\"model\":\"deepseek/deepseek-v4-pro\",",
+            "\"choices\":[{\"delta\":{\"content\":\"Incomplete answer\"}}]}\n\n",
+            "data: {\"id\":\"gen-timeout\",\"object\":\"chat.completion.chunk\",",
+            "\"model\":\"deepseek/deepseek-v4-pro\",\"choices\":[],",
+            "\"error\":{\"code\":504,\"message\":\"Upstream idle timeout exceeded\",",
+            "\"metadata\":{\"error_type\":\"timeout\"}}}\n\n"
+        );
+        let recovered_body = concat!(
+            "data: {\"id\":\"gen-recovered\",\"model\":\"deepseek/deepseek-v4-pro\",",
+            "\"choices\":[{\"delta\":{\"content\":\"Recovered answer\"}}]}\n\n",
+            "data: {\"id\":\"gen-recovered\",\"choices\":[{\"delta\":{},",
+            "\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let responses = [timeout_body.to_string(), recovered_body.to_string()];
+        let server = thread::spawn(move || {
+            for body in responses {
+                let (mut socket, _) = listener.accept().expect("provider request");
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("read timeout");
+                let mut request = Vec::new();
+                let mut content_length = None;
+                let mut header_end = None;
+                loop {
+                    let mut chunk = [0_u8; 4096];
+                    let count = socket.read(&mut chunk).expect("read provider request");
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    if header_end.is_none() {
+                        header_end = request
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .map(|position| position + 4);
+                        if let Some(end) = header_end {
+                            let headers = String::from_utf8_lossy(&request[..end]);
+                            content_length = headers.lines().find_map(|line| {
+                                line.split_once(':').and_then(|(name, value)| {
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().ok())
+                                        .flatten()
+                                })
+                            });
+                        }
+                    }
+                    if header_end
+                        .zip(content_length)
+                        .is_some_and(|(end, length)| request.len() >= end + length)
+                    {
+                        break;
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .expect("write provider response");
+            }
+            2_usize
+        });
+
+        let client = OpenAiCompatClient::new("test-key", OpenAiCompatConfig::openai())
+            .with_base_url(format!("http://{address}"))
+            .with_retry_policy(0, Duration::ZERO, Duration::ZERO);
+        let mut runtime_client = super::AnthropicRuntimeClient {
+            runtime: tokio::runtime::Runtime::new().expect("runtime"),
+            client: super::ApiProviderClient::OpenAi(client),
+            session_id: "retry-session".to_string(),
+            model: "deepseek/deepseek-v4-pro".to_string(),
+            enable_tools: false,
+            emit_output: false,
+            allowed_tools: None,
+            tool_registry: GlobalToolRegistry::builtin(),
+            progress_reporter: None,
+            reasoning_effort: None,
+        };
+        let mut observed = Vec::new();
+        let mut observer = |event| observed.push(event);
+        let events = runtime_client
+            .stream_with_observer(
+                runtime::ApiRequest {
+                    system_prompt: vec!["system".to_string()],
+                    messages: vec![ConversationMessage::user_text("continue")],
+                    allow_tools: false,
+                    timeout: Some(Duration::from_secs(5)),
+                },
+                Some(&mut observer),
+            )
+            .expect("one retry should recover the incomplete stream");
+
+        assert_eq!(server.join().expect("server join"), 2);
+        assert!(events.iter().any(
+            |event| matches!(event, AssistantEvent::TextDelta(text) if text == "Recovered answer")
+        ));
+        assert!(!events.iter().any(
+            |event| matches!(event, AssistantEvent::TextDelta(text) if text == "Incomplete answer")
+        ));
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|event| matches!(event, runtime::RuntimeStreamEvent::ProviderRetry { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]

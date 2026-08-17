@@ -341,6 +341,46 @@ def test_claw_explicit_task_commentary_is_user_visible():
     assert commentary.provenance == "model_authored"
 
 
+def test_claw_tool_bound_assistant_commentary_is_user_visible_primary_model_text():
+    events = _claw_jsonl_to_stream_events(
+        {
+            "kind": "assistant_commentary",
+            "phase": "execution",
+            "iteration": 3,
+            "event_id": "assistant-commentary:3",
+            "text": "Sunny found the source record and is checking it now. ☀️",
+        },
+        request_id="req-assistant-commentary",
+    )
+
+    [commentary] = events
+    assert commentary.kind == KIND_COMMENTARY
+    assert commentary.delivery_class == DELIVERY_USER_COMMENTARY
+    assert commentary.event_id == "assistant-commentary:3"
+    assert commentary.origin == "primary_model"
+    assert commentary.phase == "execution"
+    assert commentary.provenance == "model_authored"
+
+
+def test_claw_provider_retry_remains_technical_verbose_telemetry():
+    events = _claw_jsonl_to_stream_events(
+        {
+            "kind": "provider_retry",
+            "attempt": 2,
+            "max_attempts": 2,
+            "reason": "504 Gateway Timeout",
+            "summary": "retrying incomplete provider stream (2/2)",
+        },
+        request_id="req-provider-retry",
+    )
+
+    [retry] = events
+    assert retry.kind == KIND_PROGRESS
+    assert retry.delivery_class == DELIVERY_TECHNICAL
+    assert retry.origin == "her_runtime"
+    assert retry.phase == "execution"
+
+
 def test_claw_internal_error_is_technical_unless_user_action_is_required():
     [internal] = _claw_jsonl_to_stream_events(
         {"kind": "error", "error": "planner response was invalid JSON"},

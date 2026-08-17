@@ -1138,10 +1138,10 @@ async def test_her_effort_commentary_matrix_reaches_transport_receipt(
                 "text": "Sunny will inspect the requested evidence. ☀️",
             },
             {
-                "kind": "task_commentary",
-                "event_id": "task-commentary:2",
-                "phase": "replan",
-                "revision": 2,
+                "kind": "assistant_commentary",
+                "event_id": "assistant-commentary:1",
+                "phase": "execution",
+                "iteration": 1,
                 "text": "Sunny completed the inspection and is validating it. ☀️",
             },
         ]

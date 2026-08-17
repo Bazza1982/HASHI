@@ -574,6 +574,45 @@ async fn stream_message_retries_retryable_sse_handshake_failures() {
     }
 }
 
+#[tokio::test]
+async fn stream_message_marks_embedded_gateway_timeout_as_retryable() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let sse = concat!(
+        "data: {\"id\":\"gen-timeout-1\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek/deepseek-v4-pro\",\"choices\":[],\"error\":{\"code\":504,\"message\":\"Upstream idle timeout exceeded\",\"metadata\":{\"error_type\":\"timeout\"}}}\n\n"
+    );
+    let server = spawn_server(
+        state,
+        vec![http_response("200 OK", "text/event-stream", sse)],
+    )
+    .await;
+
+    let client = OpenAiCompatClient::new("openai-test-key", OpenAiCompatConfig::openai())
+        .with_base_url(server.base_url());
+    let mut stream = client
+        .stream_message(&MessageRequest {
+            model: "deepseek/deepseek-v4-pro".to_string(),
+            ..sample_request(false)
+        })
+        .await
+        .expect("the HTTP/SSE handshake should succeed");
+
+    let error = stream
+        .next_event()
+        .await
+        .expect_err("the embedded provider error should surface");
+    assert!(error.is_retryable());
+    assert_eq!(error.request_id(), Some("gen-timeout-1"));
+    assert!(matches!(
+        error,
+        ApiError::Api {
+            status,
+            error_type: Some(ref error_type),
+            retryable: true,
+            ..
+        } if status.as_u16() == 504 && error_type == "timeout"
+    ));
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn openai_streaming_requests_opt_into_usage_chunks() {
