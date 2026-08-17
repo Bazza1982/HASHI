@@ -9,13 +9,24 @@ the queue and exposes a bounded, structured envelope to HER.
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 FORMAT = "hashi-turn-context-v1"
 SECTION_TITLE = "HASHI TURN CONTEXT"
 MAX_USER_CHARS = 5_000
 MAX_ASSISTANT_CHARS = 8_000
+DELIVERY_STATE_VERSION = 1
+DELIVERY_STATE_FILENAME = "her_turn_context.json"
+MAX_PERSISTED_CHATS = 64
+
+# importlib.reload() reuses the module dictionary. Preserve the lock so a
+# minimal reboot cannot split writers between the old and new module objects.
+_DELIVERY_STATE_LOCK = globals().get("_DELIVERY_STATE_LOCK") or threading.RLock()
 
 _DIRECT_SOURCES = frozenset(
     {
@@ -103,6 +114,204 @@ def _state(runtime: Any) -> dict[str, dict[str, Any]]:
     return state
 
 
+def _workspace_dir(runtime: Any) -> Path | None:
+    value = getattr(runtime, "workspace_dir", None)
+    if value is None:
+        value = getattr(getattr(runtime, "config", None), "workspace_dir", None)
+    if value is None:
+        return None
+    try:
+        return Path(value)
+    except TypeError:
+        return None
+
+
+def delivery_state_path(runtime: Any) -> Path | None:
+    workspace = _workspace_dir(runtime)
+    if workspace is None:
+        return None
+    return workspace / "state" / DELIVERY_STATE_FILENAME
+
+
+def _empty_delivery_state() -> dict[str, Any]:
+    return {"version": DELIVERY_STATE_VERSION, "chats": {}}
+
+
+def _read_delivery_state_unlocked(path: Path) -> dict[str, Any]:
+    try:
+        if not path.exists():
+            return _empty_delivery_state()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return _empty_delivery_state()
+    chats = payload.get("chats") if isinstance(payload, Mapping) else None
+    if not isinstance(chats, Mapping):
+        return _empty_delivery_state()
+    return {
+        "version": DELIVERY_STATE_VERSION,
+        "chats": {
+            str(chat_key): dict(entry)
+            for chat_key, entry in chats.items()
+            if isinstance(entry, Mapping)
+        },
+    }
+
+
+def _warn_persistence(runtime: Any, action: str, exc: Exception) -> None:
+    logger = getattr(runtime, "logger", None)
+    if logger is not None:
+        logger.warning("Could not %s HER delivered-turn context: %s", action, exc)
+
+
+def _write_delivery_state_unlocked(
+    runtime: Any,
+    path: Path,
+    payload: Mapping[str, Any],
+) -> bool:
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+        path.chmod(0o600)
+        return True
+    except Exception as exc:
+        _warn_persistence(runtime, "persist", exc)
+        return False
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _persist_previous_turn(
+    runtime: Any,
+    chat_key: str,
+    previous: Mapping[str, Any],
+) -> bool:
+    path = delivery_state_path(runtime)
+    if path is None or not chat_key:
+        return False
+    entry = {
+        "request_id": str(previous.get("request_id") or ""),
+        "source": str(previous.get("source") or "unknown"),
+        "user_text": _bounded_text(previous.get("user_text"), MAX_USER_CHARS),
+        "assistant_text": _bounded_text(
+            previous.get("assistant_text"), MAX_ASSISTANT_CHARS
+        ),
+        "model": str(previous.get("model") or ""),
+        "effort": str(previous.get("effort") or ""),
+        "updated_at": time.time(),
+    }
+    if not entry["user_text"] or not entry["assistant_text"]:
+        return False
+    try:
+        with _DELIVERY_STATE_LOCK:
+            payload = _read_delivery_state_unlocked(path)
+            chats = payload["chats"]
+            chats.pop(chat_key, None)
+            chats[chat_key] = entry
+            if len(chats) > MAX_PERSISTED_CHATS:
+                newest = list(chats.items())[-MAX_PERSISTED_CHATS:]
+                payload["chats"] = dict(newest)
+            return _write_delivery_state_unlocked(runtime, path, payload)
+    except Exception as exc:
+        _warn_persistence(runtime, "persist", exc)
+        return False
+
+
+def _persisted_previous_turn(runtime: Any, chat_key: str) -> dict[str, Any] | None:
+    path = delivery_state_path(runtime)
+    if path is None or not chat_key:
+        return None
+    try:
+        with _DELIVERY_STATE_LOCK:
+            entry = _read_delivery_state_unlocked(path)["chats"].get(chat_key)
+    except Exception as exc:
+        _warn_persistence(runtime, "read", exc)
+        return None
+    if not isinstance(entry, Mapping):
+        return None
+    previous = {
+        "request_id": str(entry.get("request_id") or ""),
+        "source": str(entry.get("source") or "unknown"),
+        "user_text": _bounded_text(entry.get("user_text"), MAX_USER_CHARS),
+        "assistant_text": _bounded_text(
+            entry.get("assistant_text"), MAX_ASSISTANT_CHARS
+        ),
+        "model": str(entry.get("model") or ""),
+        "effort": str(entry.get("effort") or ""),
+    }
+    if not previous["user_text"] or not previous["assistant_text"]:
+        return None
+    return previous
+
+
+def _bridge_memory_previous_turn(runtime: Any) -> dict[str, Any] | None:
+    """One-time compatibility fallback for workspaces created before this state."""
+
+    store = getattr(runtime, "memory_store", None)
+    if store is None:
+        store = getattr(getattr(runtime, "context_assembler", None), "memory_store", None)
+    resolver = getattr(store, "get_recent_turns", None)
+    if not callable(resolver):
+        return None
+    try:
+        turns = list(resolver(limit=6) or [])
+    except TypeError:
+        try:
+            turns = list(resolver(6) or [])
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+    for assistant_index in range(len(turns) - 1, -1, -1):
+        assistant = turns[assistant_index]
+        if str(_value(assistant, "role", "")).strip().lower() != "assistant":
+            continue
+        assistant_text = _bounded_text(
+            _value(assistant, "text", ""), MAX_ASSISTANT_CHARS
+        )
+        if not assistant_text:
+            continue
+        for user_index in range(assistant_index - 1, -1, -1):
+            user = turns[user_index]
+            if str(_value(user, "role", "")).strip().lower() != "user":
+                continue
+            user_text = _bounded_text(_value(user, "text", ""), MAX_USER_CHARS)
+            if not user_text:
+                continue
+            return {
+                "request_id": "",
+                "source": str(_value(user, "source", "unknown") or "unknown"),
+                "user_text": user_text,
+                "assistant_text": assistant_text,
+                "model": "",
+                "effort": "",
+            }
+    return None
+
+
+def clear_delivered_turn_context(runtime: Any) -> None:
+    """Clear process and durable referent state for explicit fresh-session flows."""
+
+    _state(runtime).clear()
+    path = delivery_state_path(runtime)
+    if path is None:
+        return
+    with _DELIVERY_STATE_LOCK:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception as exc:
+            _warn_persistence(runtime, "clear", exc)
+
+
 def _has_earlier_pending_direct_turn(runtime: Any, item: Any) -> bool:
     ordering = getattr(runtime, "_direct_delivery_order", None)
     requests = getattr(ordering, "requests", None)
@@ -152,8 +361,34 @@ def capture_at_enqueue(runtime: Any, item: Any) -> dict[str, Any] | None:
         return None
 
     chat_key = str(_value(item, "chat_id", ""))
-    previous = _cross_session_previous(item) or _state(runtime).get(chat_key)
+    previous = _cross_session_previous(item)
+    previous_source = "cross_session_receipt" if previous is not None else "none"
+    if previous is None:
+        previous = _state(runtime).get(chat_key)
+        if previous is not None:
+            previous_source = "process_delivery_state"
+    if previous is None:
+        previous = _persisted_previous_turn(runtime, chat_key)
+        if previous is not None:
+            previous_source = "durable_delivery_state"
+    if previous is None:
+        previous = _bridge_memory_previous_turn(runtime)
+        if previous is not None:
+            previous_source = "bridge_memory_fallback"
+            _persist_previous_turn(runtime, chat_key, previous)
     previous = dict(previous) if isinstance(previous, Mapping) else None
+    if previous is not None and previous_source in {
+        "durable_delivery_state",
+        "bridge_memory_fallback",
+    }:
+        _state(runtime)[chat_key] = dict(previous)
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.info(
+                "Recovered HER previous-turn context at enqueue: request=%s source=%s",
+                str(_value(item, "request_id", "") or ""),
+                previous_source,
+            )
     model = _current_model(runtime)
     effort = _current_effort(runtime)
     current = {
@@ -166,6 +401,7 @@ def capture_at_enqueue(runtime: Any, item: Any) -> dict[str, Any] | None:
     payload: dict[str, Any] = {
         "format": FORMAT,
         "captured_at_enqueue": True,
+        "previous_turn_source": previous_source,
         "previous_turn_status": (
             "captured"
             if previous is not None
@@ -259,5 +495,7 @@ def record_delivered_turn(
         "model": str(current.get("model") or _current_model(runtime)),
         "effort": str(current.get("effort") or _current_effort(runtime)),
     }
-    _state(runtime)[str(_value(item, "chat_id", ""))] = record
+    chat_key = str(_value(item, "chat_id", ""))
+    _state(runtime)[chat_key] = record
+    _persist_previous_turn(runtime, chat_key, record)
     return dict(record)
