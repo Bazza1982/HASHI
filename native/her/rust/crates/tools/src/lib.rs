@@ -742,27 +742,6 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
-            name: "SendUserMessage",
-            description: "Send a message to the user.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "message": { "type": "string" },
-                    "attachments": {
-                        "type": "array",
-                        "items": { "type": "string" }
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["normal", "proactive"]
-                    }
-                },
-                "required": ["message", "status"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
             name: "Config",
             description: "Get or set Claude Code settings.",
             input_schema: json!({
@@ -1447,7 +1426,10 @@ fn execute_tool_with_enforcer(
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
         "Sleep" => from_value::<SleepInput>(input).and_then(run_sleep),
-        "SendUserMessage" | "Brief" => from_value::<BriefInput>(input).and_then(run_brief),
+        "SendUserMessage" => Err(String::from(
+            "SendUserMessage is not connected to the user transport. Return the message as the turn's final response instead.",
+        )),
+        "Brief" => from_value::<BriefInput>(input).and_then(run_brief),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
         "EnterPlanMode" => from_value::<EnterPlanModeInput>(input).and_then(run_enter_plan_mode),
         "ExitPlanMode" => from_value::<ExitPlanModeInput>(input).and_then(run_exit_plan_mode),
@@ -1535,7 +1517,24 @@ fn maybe_enforce_permission_check_with_mode(
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_ask_user_question(input: AskUserQuestionInput) -> Result<String, String> {
-    use std::io::{self, BufRead, Write};
+    use std::io::{self, BufRead, IsTerminal, Write};
+
+    // HASHI invokes HER as a non-interactive child process. Reading that
+    // process's stdin cannot obtain a later Telegram reply: EOF previously
+    // produced an empty value that was falsely reported as an answer. Return a
+    // structured pending interaction instead; the conversation runtime will
+    // stop tool execution, render the question as the agent's final response,
+    // and let HASHI bind the next user turn to it.
+    let managed_transport = std::env::var("HASHI_MANAGED_TRANSPORT")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes"));
+    if managed_transport || !io::stdin().is_terminal() {
+        return to_pretty_json(json!({
+            "question": input.question,
+            "options": input.options,
+            "status": "pending_user_input"
+        }));
+    }
 
     // Display the question to the user via stdout
     let stdout = io::stdout();
@@ -3990,7 +3989,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "ToolSearch",
             "TodoWrite",
             "StructuredOutput",
-            "SendUserMessage",
         ],
         "Verification" => vec![
             "bash",
@@ -4001,7 +3999,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "ToolSearch",
             "TodoWrite",
             "StructuredOutput",
-            "SendUserMessage",
             "PowerShell",
         ],
         "claw-guide" => vec![
@@ -4011,7 +4008,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "WebFetch",
             "ToolSearch",
             "StructuredOutput",
-            "SendUserMessage",
         ],
         "statusline-setup" => vec![
             "bash",
@@ -4034,7 +4030,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "ToolSearch",
             "NotebookEdit",
             "Sleep",
-            "SendUserMessage",
             "Config",
             "StructuredOutput",
             "REPL",
@@ -6719,7 +6714,7 @@ mod tests {
         assert!(names.contains(&"ToolSearch"));
         assert!(names.contains(&"NotebookEdit"));
         assert!(names.contains(&"Sleep"));
-        assert!(names.contains(&"SendUserMessage"));
+        assert!(!names.contains(&"SendUserMessage"));
         assert!(names.contains(&"Config"));
         assert!(names.contains(&"EnterPlanMode"));
         assert!(names.contains(&"ExitPlanMode"));
@@ -9480,31 +9475,43 @@ mod tests {
     }
 
     #[test]
-    fn brief_returns_sent_message_and_attachment_metadata() {
-        let attachment = std::env::temp_dir().join(format!(
-            "clawd-brief-{}.png",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::write(&attachment, b"png-data").expect("write attachment");
-
-        let result = execute_tool(
+    fn send_user_message_fails_closed_without_a_transport() {
+        let error = execute_tool(
             "SendUserMessage",
             &json!({
                 "message": "hello user",
-                "attachments": [attachment.display().to_string()],
                 "status": "normal"
             }),
         )
-        .expect("SendUserMessage should succeed");
+        .expect_err("SendUserMessage must not fake transport success");
+
+        assert!(error.contains("not connected to the user transport"));
+    }
+
+    #[test]
+    fn ask_user_question_returns_pending_in_a_noninteractive_process() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var_os("HASHI_MANAGED_TRANSPORT");
+        std::env::set_var("HASHI_MANAGED_TRANSPORT", "1");
+        let result = execute_tool(
+            "AskUserQuestion",
+            &json!({
+                "question": "Choose a route",
+                "options": ["A route", "B route"]
+            }),
+        )
+        .expect("noninteractive clarification should become pending");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("json");
-        assert_eq!(output["message"], "hello user");
-        assert!(output["sentAt"].as_str().is_some());
-        assert_eq!(output["attachments"][0]["isImage"], true);
-        let _ = std::fs::remove_file(attachment);
+        assert_eq!(output["status"], "pending_user_input");
+        assert_eq!(output["question"], "Choose a route");
+        assert!(output.get("answer").is_none());
+        match previous {
+            Some(value) => std::env::set_var("HASHI_MANAGED_TRANSPORT", value),
+            None => std::env::remove_var("HASHI_MANAGED_TRANSPORT"),
+        }
     }
 
     #[test]

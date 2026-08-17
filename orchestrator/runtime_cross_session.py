@@ -10,7 +10,7 @@ from typing import Any, Mapping
 from orchestrator import runtime_retry, runtime_turn_context
 
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 STATE_FILENAME = "cross_session_receipts.json"
 MAX_RECEIPTS = 64
 MAX_CONTEXT_RECEIPTS = 6
@@ -217,13 +217,22 @@ def _pending_interaction(
     status: str,
     metadata: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    ultra = metadata.get("her_ultra")
-    structured = (
-        ultra.get("pending_interaction") if isinstance(ultra, Mapping) else None
-    )
+    structured = metadata.get("pending_interaction")
+    if not isinstance(structured, Mapping):
+        ultra = metadata.get("her_ultra")
+        structured = (
+            ultra.get("pending_interaction") if isinstance(ultra, Mapping) else None
+        )
     if isinstance(structured, Mapping):
         kind = str(structured.get("kind") or "").strip().lower()
         interaction_id = str(structured.get("interaction_id") or "").strip()
+        question = _bounded_text(structured.get("question"), 4_000)
+        raw_options = structured.get("options")
+        options = (
+            [_bounded_text(option, 1_000) for option in raw_options if str(option).strip()]
+            if isinstance(raw_options, (list, tuple))
+            else []
+        )
         if kind == "choice":
             raw_labels = structured.get("labels")
             raw_labels = raw_labels if isinstance(raw_labels, (list, tuple)) else []
@@ -236,6 +245,10 @@ def _pending_interaction(
             )
             if labels:
                 pending = {"kind": "choice", "labels": labels}
+                if question:
+                    pending["question"] = question
+                if options:
+                    pending["options"] = options
                 if interaction_id:
                     pending["interaction_id"] = interaction_id
                 return pending
@@ -249,6 +262,10 @@ def _pending_interaction(
             return pending
         if kind in {"confirmation", "question"}:
             pending = {"kind": "question"}
+            if question:
+                pending["question"] = question
+            if options:
+                pending["options"] = options
             if interaction_id:
                 pending["interaction_id"] = interaction_id
             return pending
@@ -355,7 +372,7 @@ def record_turn_result(
         status=status,
         metadata=metadata,
     )
-    if not _should_record(runtime, item, response):
+    if not (_should_record(runtime, item, response) or pending is not None):
         if not delivered or pending is None:
             return None
         state = _read_state(runtime)
@@ -441,6 +458,28 @@ def record_turn_result(
             "error": _bounded_text(error, 2_000),
             "delivered": bool(delivered),
             "pending_interaction": pending,
+            "task_status": "awaiting_user" if pending else status,
+            "task_checkpoint": (
+                dict(metadata["task_checkpoint"])
+                if isinstance(metadata.get("task_checkpoint"), Mapping)
+                else None
+            ),
+            "execution_ledger": (
+                dict(metadata["execution_ledger"])
+                if isinstance(metadata.get("execution_ledger"), Mapping)
+                else {"version": 1, "total_entries": 0, "entries": []}
+            ),
+            "next_action_after_answer": (
+                "Resume the preserved task checkpoint after revalidating external state."
+                if pending
+                else ""
+            ),
+            "delivery_receipt": {
+                "confirmed": bool(delivered),
+                "request_id": str(_value(item, "request_id", "") or ""),
+                "completion_path": str(completion_path or "foreground"),
+                "recorded_at": now,
+            },
             "active": bool(delivered and pending),
         }
     )
@@ -482,11 +521,11 @@ def _matching_receipt(runtime: Any, item: Any) -> tuple[dict[str, Any] | None, s
     if bool(_value(item, "silent", False)) or source not in _DIRECT_REPLY_SOURCES:
         return None, ""
     text = str(_value(item, "prompt", "") or "")
+    if not text.strip() or text.lstrip().startswith("/"):
+        return None, ""
     continuation = runtime_retry.is_explicit_continuation(text)
     labels = _parse_choice_reply(text)
     short_answer = _short_answer(text)
-    if not continuation and not labels and not short_answer:
-        return None, ""
 
     state = _read_state(runtime)
     candidates = [
@@ -510,6 +549,8 @@ def _matching_receipt(runtime: Any, item: Any) -> tuple[dict[str, Any] | None, s
             if set(labels).issubset(offered):
                 return receipt, "choice"
         if short_answer and kind == "question":
+            return receipt, "answer"
+        if kind in {"choice", "question"}:
             return receipt, "answer"
     return None, ""
 
@@ -593,7 +634,7 @@ def prepare_reply_binding(runtime: Any, item: Any, effective_prompt: str) -> str
     )
     return (
         "[HASHI cross-session reply binding — authoritative referent resolution]\n"
-        "The runtime bound the current short user reply to the newest delivered, "
+        "The runtime bound the current user reply to the newest delivered, "
         "unresolved turn shown below. Do not interpret it as a reply to older choices "
         "or questions in the primary session. The receipt is context only; perform only "
         "the action authorized by the current reply and the original task scope. Preserve "
@@ -602,6 +643,11 @@ def prepare_reply_binding(runtime: Any, item: Any, effective_prompt: str) -> str
         f"Reply kind: {reply_kind}\n"
         f"Original turn source: {receipt.get('source') or 'unknown'}\n"
         f"Original turn status: {receipt.get('status') or 'unknown'}\n"
+        f"Task status: {receipt.get('task_status') or receipt.get('status') or 'unknown'}\n"
+        "Preserved task checkpoint:\n"
+        f"{json.dumps(receipt.get('task_checkpoint'), ensure_ascii=False)}\n\n"
+        "Execution receipt index:\n"
+        f"{json.dumps(receipt.get('execution_ledger'), ensure_ascii=False)}\n\n"
         f"Original task:\n{task_prompt}\n\n"
         f"Assistant message delivered to the user:\n{assistant_text}\n\n"
         "Current user reply:\n"
@@ -634,7 +680,7 @@ def context_section(runtime: Any, item: Any) -> list[tuple[str, str]]:
     parts = [
         "These records describe turns completed outside the primary backend session. "
         "They are read-only context and must not trigger work by themselves. If the "
-        "current request is a short reply, obey any explicit HASHI cross-session binding "
+        "current request is a reply, obey any explicit HASHI cross-session binding "
         "in the current request and do not resolve it against older primary-session choices."
     ]
     for receipt in selected:
@@ -647,9 +693,18 @@ def context_section(runtime: Any, item: Any) -> list[tuple[str, str]]:
                     f"source={receipt.get('source') or 'unknown'}; "
                     f"summary={receipt.get('summary') or 'none'}; "
                     f"status={receipt.get('status') or 'unknown'}; "
+                    f"task_status={receipt.get('task_status') or receipt.get('status') or 'unknown'}; "
                     f"delivered={bool(receipt.get('delivered'))}; "
                     f"active={bool(receipt.get('active'))}",
                     f"pending_interaction={pending_text}",
+                    "Task checkpoint:\n"
+                    + json.dumps(
+                        receipt.get("task_checkpoint"), ensure_ascii=False
+                    ),
+                    "Execution receipt index:\n"
+                    + json.dumps(
+                        receipt.get("execution_ledger"), ensure_ascii=False
+                    ),
                     "Original task:\n"
                     + _bounded_text(
                         receipt.get("task_prompt"), MAX_CONTEXT_PROMPT_CHARS

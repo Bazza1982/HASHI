@@ -112,6 +112,7 @@ CLAW_ENV_ALLOWLIST = (
     "CLAW_MAX_TOOL_ITERATIONS",
     "CLAW_TASK_PLANNING",
     "CLAW_EXECUTION_EFFORT",
+    "HASHI_MANAGED_TRANSPORT",
     *OS_ENV_ALLOWLIST,
 )
 
@@ -235,6 +236,8 @@ class ClawTaskResult:
     stop_reason: str | None = None
     provider_stop_reason: str | None = None
     estimated_cost: str | None = None
+    task_checkpoint: dict[str, Any] | None = None
+    pending_interaction: dict[str, Any] | None = None
 
 
 def _claw_run_is_incomplete(result: ClawTaskResult) -> bool:
@@ -375,6 +378,75 @@ def _claw_pair_tool_ledger(
         if result_id not in matched_result_ids:
             ledger.append((_claw_tool_name(result), result))
     return ledger
+
+
+def _claw_compact_execution_ledger(result: ClawTaskResult) -> dict[str, Any]:
+    """Return a bounded proof index without copying tool inputs or outputs."""
+    pairs = _claw_pair_tool_ledger(result.tool_uses, result.tool_results)
+    entries: list[dict[str, Any]] = []
+    for index, (name, tool_result) in enumerate(pairs):
+        tool_use = result.tool_uses[index] if index < len(result.tool_uses) else None
+        tool_use_id = ""
+        if isinstance(tool_use, Mapping):
+            tool_use_id = str(
+                tool_use.get("id") or tool_use.get("tool_use_id") or ""
+            ).strip()
+        if not tool_use_id and isinstance(tool_result, Mapping):
+            tool_use_id = str(
+                tool_result.get("tool_use_id")
+                or tool_result.get("toolUseId")
+                or ""
+            ).strip()
+        if name.strip().lower() == "askuserquestion" and tool_result is not None:
+            status = "pending_user_input"
+            verification = "control_boundary"
+        elif tool_result is None:
+            status = "missing_result"
+            verification = "unverified"
+        elif _claw_result_is_error(tool_result):
+            status = "failed"
+            verification = "failed"
+        elif _claw_tool_is_read_only(name) or _claw_has_explicit_verification(tool_result):
+            status = "succeeded"
+            verification = "verified"
+        else:
+            status = "succeeded"
+            verification = "unverified_side_effect"
+        entries.append(
+            {
+                "tool_use_id": tool_use_id,
+                "tool": name,
+                "status": status,
+                "verification": verification,
+            }
+        )
+    total_entries = len(entries)
+    entries = entries[-64:]
+    return {
+        "version": 1,
+        "total_entries": total_entries,
+        "omitted_entries": max(0, total_entries - len(entries)),
+        "entries": entries,
+    }
+
+
+def _claw_contains_dangling_tool_markup(text: str) -> bool:
+    normalized = str(text or "").lower()
+    visible = "\n".join(normalized.split("```")[::2])
+    return any(
+        marker in visible
+        for marker in (
+            "<｜dsml｜tool_calls",
+            "<｜｜dsml｜｜tool_calls",
+            "<｜dsml｜invoke",
+            "<｜｜dsml｜｜invoke",
+            "<|dsml|tool_calls",
+            "<||dsml||tool_calls",
+            "<|dsml|invoke",
+            "<||dsml||invoke",
+            "<tool_call>",
+        )
+    )
 
 
 def _claw_uses_chinese(*values: str) -> bool:
@@ -740,16 +812,7 @@ def _claw_incomplete_response(
     """Preserve a safe model closing; otherwise return the neutral evidence report."""
     report, metadata = _build_claw_incomplete_report(result, prompt=prompt)
     model_text = str(result.text or "").strip()
-    dangling_tool_markup = (
-        "DSML" in model_text and ("tool_calls" in model_text or "invoke name=" in model_text)
-    ) or any(
-        marker in model_text
-        for marker in (
-            "<｜｜DSML｜｜tool_calls>",
-            "<tool_call>",
-            '"tool_calls":',
-        )
-    )
+    dangling_tool_markup = _claw_contains_dangling_tool_markup(model_text)
     if model_text and not dangling_tool_markup:
         recommendation = str(metadata.get("recommended_action") or "stop").upper()
         use_chinese = any(
@@ -2127,6 +2190,12 @@ def run_claw_task(
         estimated_cost=data.get("estimated_cost")
         if isinstance(data.get("estimated_cost"), str)
         else None,
+        task_checkpoint=dict(data["task_checkpoint"])
+        if isinstance(data.get("task_checkpoint"), Mapping)
+        else None,
+        pending_interaction=dict(data["pending_interaction"])
+        if isinstance(data.get("pending_interaction"), Mapping)
+        else None,
     )
 
 
@@ -3439,6 +3508,7 @@ INCOMPLETE TASK FACTS (quoted, read-only)
         env["CLAW_MAX_TOOL_ITERATIONS"] = str(self._max_tool_iterations())
         env["CLAW_TASK_PLANNING"] = "0" if inner_effort == "low" else "1"
         env["CLAW_EXECUTION_EFFORT"] = inner_effort
+        env["HASHI_MANAGED_TRANSPORT"] = "1"
         if self._gateway_config_home is not None:
             env["CLAW_CONFIG_HOME"] = str(self._gateway_config_home)
             project_root = Path(__file__).resolve().parents[1]
@@ -4478,12 +4548,27 @@ RUNTIME FACTS (quoted, read-only)
             or stream_usage.get("thinking_tokens")
             or 0
         )
+        dangling_tool_markup_blocked = _claw_contains_dangling_tool_markup(result.text)
+        if dangling_tool_markup_blocked and not _claw_run_is_incomplete(result):
+            self.logger.error(
+                "HER completed path returned dangling tool markup; converting to a safe incomplete final: request=%s",
+                request_id,
+            )
+            result = replace(
+                result,
+                text="",
+                completion_status="incomplete",
+                stop_reason="no_final_text",
+            )
         response_text = result.text
-        fallback_metadata: dict[str, Any] = {}
+        fallback_metadata: dict[str, Any] = {
+            "dangling_tool_markup_blocked": dangling_tool_markup_blocked,
+        }
         if _claw_run_is_incomplete(result):
-            response_text, fallback_metadata = _claw_incomplete_response(
+            response_text, incomplete_metadata = _claw_incomplete_response(
                 result, prompt=prompt
             )
+            fallback_metadata.update(incomplete_metadata)
             if fallback_metadata.get("persona_render_required"):
                 (
                     persona_response,
@@ -4526,6 +4611,25 @@ RUNTIME FACTS (quoted, read-only)
                 fallback_metadata.get("persona_renderer_succeeded", False),
                 fallback_metadata.get("recommended_action") or "unknown",
             )
+        if _claw_contains_dangling_tool_markup(response_text):
+            # Last-resort transport safety: even a persona renderer must never
+            # re-introduce an executable control envelope into visible text.
+            result = replace(
+                result,
+                text="",
+                completion_status="incomplete",
+                stop_reason="no_final_text",
+            )
+            response_text, deterministic_metadata = _build_claw_incomplete_report(
+                result, prompt=prompt
+            )
+            fallback_metadata.update(deterministic_metadata)
+            fallback_metadata.update(
+                {
+                    "dangling_tool_markup_blocked": True,
+                    "persona_renderer_output_blocked": True,
+                }
+            )
         if habit_config.enabled:
             self._schedule_habit_meditation(
                 job_id=meditation_job_id,
@@ -4559,6 +4663,9 @@ RUNTIME FACTS (quoted, read-only)
                 "her_session_id": result.session_id or "",
                 "her_model": result.model,
                 "her_resumed_session": bool(isolated_resume),
+                "pending_interaction": result.pending_interaction,
+                "task_checkpoint": result.task_checkpoint,
+                "execution_ledger": _claw_compact_execution_ledger(result),
                 **(
                     {
                         "her_habit_meditation": True,
@@ -4882,6 +4989,12 @@ RUNTIME FACTS (quoted, read-only)
             or None,
             estimated_cost=parsed.get("estimated_cost")
             if isinstance(parsed.get("estimated_cost"), str)
+            else None,
+            task_checkpoint=dict(parsed["task_checkpoint"])
+            if isinstance(parsed.get("task_checkpoint"), Mapping)
+            else None,
+            pending_interaction=dict(parsed["pending_interaction"])
+            if isinstance(parsed.get("pending_interaction"), Mapping)
             else None,
         )
 

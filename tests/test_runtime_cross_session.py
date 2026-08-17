@@ -109,7 +109,7 @@ def test_scheduler_choice_receipt_is_persisted_and_injected(tmp_path):
     }
     state_path = runtime_cross_session.receipt_state_path(runtime)
     assert state_path is not None
-    assert json.loads(state_path.read_text(encoding="utf-8"))["version"] == 1
+    assert json.loads(state_path.read_text(encoding="utf-8"))["version"] == 2
     assert runtime_cross_session.context_section(runtime, item) == []
 
     user_item = _item(request_id="req-user", source="text", prompt="What happened?")
@@ -164,6 +164,82 @@ def test_ultra_structured_choice_receipt_does_not_depend_on_rendered_text(tmp_pa
     assert runtime.current_request_meta["resume_session_id"] == (
         "ultra-primary-session"
     )
+
+
+def test_primary_pending_turn_persists_checkpoint_and_binds_a_full_flex_reply(tmp_path):
+    runtime = _runtime(tmp_path, mode="flex")
+    item = _item(
+        request_id="req-primary-pending",
+        source="text",
+        prompt="Inspect the workbook and ask before writing",
+        summary="Workbook clarification",
+    )
+    response = _response(
+        "I inspected the workbook. Which mapping should I use?",
+        session_id="primary-pending-session",
+        completion="incomplete",
+        stop_reason="requires_user_input",
+        session_scope="persistent",
+    )
+    response.stream_metadata.update(
+        {
+            "pending_interaction": {
+                "interaction_id": "ask-1",
+                "kind": "choice",
+                "question": "Which mapping should I use?",
+                "options": ["Use the existing mapping", "Create a new mapping"],
+                "labels": ["A", "B"],
+            },
+            "task_checkpoint": {
+                "active_goal": "Populate the workbook after clarification",
+                "completed": ["Inspected source files"],
+                "remaining_work": ["Write the selected mapping"],
+                "next_action": "Await the user's answer",
+            },
+            "execution_ledger": {
+                "version": 1,
+                "total_entries": 1,
+                "entries": [
+                    {
+                        "tool_use_id": "read-1",
+                        "tool": "read_file",
+                        "status": "succeeded",
+                        "verification": "verified",
+                    }
+                ],
+            },
+        }
+    )
+
+    receipt = runtime_cross_session.record_turn_result(
+        runtime,
+        item,
+        assistant_text=response.text,
+        response=response,
+        delivered=True,
+        completion_path="foreground",
+    )
+
+    assert receipt is not None
+    assert receipt["task_status"] == "awaiting_user"
+    assert receipt["task_checkpoint"]["completed"] == ["Inspected source files"]
+    assert receipt["execution_ledger"]["entries"][0]["tool_use_id"] == "read-1"
+    assert receipt["delivery_receipt"]["confirmed"] is True
+
+    reply = _item(
+        request_id="req-primary-answer",
+        source="text",
+        prompt="Use the existing mapping, but preserve all current workbook formatting.",
+        summary="Mapping answer",
+    )
+    _begin(runtime, reply)
+    bound_prompt = runtime_cross_session.prepare_reply_binding(runtime, reply, reply.prompt)
+
+    assert "Populate the workbook after clarification" in bound_prompt
+    assert "read-1" in bound_prompt
+    assert "preserve all current workbook formatting" in bound_prompt
+    assert reply._cross_session_receipt["reply_kind"] == "answer"
+    assert runtime.current_request_meta["resume_session_id"] == "primary-pending-session"
 
 
 def test_active_receipt_is_not_trimmed_out_by_recent_completed_receipts(tmp_path):
@@ -438,11 +514,13 @@ def test_newer_primary_choice_prevents_stale_scheduler_choice_binding(tmp_path):
 
     prompt = runtime_cross_session.prepare_reply_binding(runtime, reply, reply.prompt)
 
-    assert prompt == "A"
-    assert "cross_session_receipt" not in runtime.current_request_meta
-    receipt = runtime_cross_session.load_receipts(runtime)[0]
-    assert receipt["active"] is False
-    assert receipt["resolved_by"] == "newer_primary_interaction:req-primary"
+    assert "Original task:\nGive me a different choice" in prompt
+    assert "Current user reply:\nA" in prompt
+    assert runtime.current_request_meta["cross_session_receipt"]["request_id"] == "req-primary"
+    receipts = runtime_cross_session.load_receipts(runtime)
+    assert receipts[0]["active"] is False
+    assert receipts[1]["active"] is True
+    assert receipts[1]["task_status"] == "awaiting_user"
 
 
 def test_newer_primary_question_with_trailing_emoji_closes_scheduler_prompt(tmp_path):
@@ -484,9 +562,11 @@ def test_newer_primary_question_with_trailing_emoji_closes_scheduler_prompt(tmp_
         completion_path="foreground",
     )
 
-    receipt = runtime_cross_session.load_receipts(runtime)[0]
-    assert receipt["active"] is False
-    assert receipt["resolved_by"] == "newer_primary_interaction:req-primary"
+    receipts = runtime_cross_session.load_receipts(runtime)
+    assert receipts[0]["active"] is False
+    assert receipts[0]["resolved_by"].startswith("superseded_by:")
+    assert receipts[1]["active"] is True
+    assert receipts[1]["pending_interaction"]["kind"] == "question"
 
 
 def test_newer_scheduler_completion_closes_older_scheduler_choice(tmp_path):

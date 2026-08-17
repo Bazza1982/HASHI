@@ -8303,6 +8303,8 @@ impl LiveCli {
                 "session_id": self.session.id,
                 "completion_status": summary.completion_status.as_str(),
                 "stop_reason": summary.stop_reason.as_str(),
+                "task_checkpoint": summary.task_checkpoint,
+                "pending_interaction": summary.pending_interaction,
                 "provider_stop_reason": summary.provider_stop_reason,
                 "usage": {
                     "input_tokens": summary.usage.input_tokens,
@@ -8332,6 +8334,8 @@ impl LiveCli {
                 "iterations": summary.iterations,
                 "completion_status": summary.completion_status.as_str(),
                 "stop_reason": summary.stop_reason.as_str(),
+                "task_checkpoint": summary.task_checkpoint,
+                "pending_interaction": summary.pending_interaction,
                 "provider_stop_reason": summary.provider_stop_reason,
                 "auto_compaction": summary.auto_compaction.map(|event| json!({
                     "removed_messages": event.removed_message_count,
@@ -8403,6 +8407,8 @@ impl LiveCli {
                 "iterations": summary.iterations,
                 "completion_status": summary.completion_status.as_str(),
                 "stop_reason": summary.stop_reason.as_str(),
+                "task_checkpoint": summary.task_checkpoint,
+                "pending_interaction": summary.pending_interaction,
                 "provider_stop_reason": summary.provider_stop_reason,
                 "auto_compaction": summary.auto_compaction.map(|event| json!({
                     "removed_messages": event.removed_message_count,
