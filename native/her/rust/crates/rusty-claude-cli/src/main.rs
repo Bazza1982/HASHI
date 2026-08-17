@@ -15879,6 +15879,7 @@ mod tests {
         let frame = runtime::TaskFrame {
             acknowledgement: "I will inspect the requested state.".to_string(),
             active_goal: "inspect state".to_string(),
+            direct_response: false,
             success_criteria: vec!["report verified state".to_string()],
             planned_actions: vec!["inspect".to_string()],
             planned_tools: vec!["read_file".to_string()],
@@ -15897,6 +15898,7 @@ mod tests {
         assert_eq!(plan["kind"], json!("task_plan"));
         assert_eq!(plan["revision"], json!(2));
         assert_eq!(plan["event_id"], json!("task-plan:2"));
+        assert_eq!(plan["frame"]["direct_response"], json!(false));
 
         let commentary =
             super::runtime_stream_event_json(runtime::RuntimeStreamEvent::TaskCommentary {
