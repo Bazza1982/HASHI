@@ -68,7 +68,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260814-030` | Verified | P1 | fixed-mode planner saw only the incremental current prompt, not the persistent session view used by the primary agent | `fixed_session_planner_sees_resumed_options_at_every_planning_effort`; `medium_plus_plans_replans_and_reports_non_blocking_tool_divergence` |
 | `HER-20260814-031` | Verified | P1 | long fixed sessions could make the planner answer as the conversational agent instead of returning TaskFrame JSON | `planner_request_preserves_session_prefix_and_appends_nonpersistent_control`; fixed-session direct-response effort matrix |
 | `HER-20260815-032` | Fixed — live verification pending | P0 | isolated scheduler choices and CONTINUE checkpoints were absent from the primary conversation context | `test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_task`; `test_her_isolated_continuation_resumes_exact_checkpoint_without_replacing_primary` |
-| `HER-20260816-033` | Fixed in source — rebuild/live verification pending | P1 | TaskFrame again saw only `A` while the primary executor saw and completed the previous option | `task_checkpoint_receives_immediate_previous_dialogue_context`; `tests/test_runtime_turn_context.py` |
+| `HER-20260816-033` | Reopened | P1 | TaskFrame again saw only `A` while the primary executor saw and completed the previous option | `task_checkpoint_receives_immediate_previous_dialogue_context`; `tests/test_runtime_turn_context.py` |
 | `HER-20260816-034` | Verified | P1 | offline `--status` constructed a second rebuild manager and falsely failed an active build as a kernel restart | `test_offline_status_is_strictly_read_only_during_active_build`; `test_manager_ownership_lock_excludes_a_second_process` |
 | `HER-20260817-035` | Deployed to Arale — live behavior verification pending | P1 | source-integrated `.22` lost native direct-response termination, so completed TaskFrame answers entered primary execution and MAX/MAX+ review loops | `direct_response_finishes_after_one_planning_call_at_every_native_effort`; `invalid_direct_response_falls_back_to_primary_execution`; `test_claw_direct_response_acknowledgement_is_final_only` |
 | `HER-20260817-036` | Deployed to Arale — live behavior verification pending | P2 | pending model-authored Persona commentary shared technical cadence and vanished silently at turn finalization | `test_claw_cadence_technical_activity_does_not_delay_persona_commentary`; `test_claw_cadence_finish_supersedes_only_latest_pending_commentary`; `test_her_effort_commentary_matrix_reaches_transport_receipt` |
@@ -416,7 +416,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 
 ### HER-20260816-033 — TaskFrame and executor again resolved different turns
 
-- **Status:** Fixed in source — rebuild/live verification pending
+- **Status:** Reopened
 - **Severity:** P1
 - **Recurrence of:** `HER-20260814-030`
 - **Discovered:** 2026-08-16 AEST during a deliberate HER model-switch test
@@ -466,7 +466,23 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **Secrets/redaction checked:** yes; the envelope is bounded, process-local on
   the HASHI side, and the documented examples contain no private task content or
   credentials.
-- **Recurrence count:** 1
+- **2026-08-18 recurrence:** Lulu's first Flex turn after a clean development
+  rebuild asked about “this policy.” The full execution prompt still contained
+  four recent Bridge turns, but the TaskFrame envelope reported
+  `previous_turn_status=unavailable` and supplied no previous dialogue. The
+  planner therefore requested clarification while primary execution recovered
+  the policy topic from the larger Bridge prompt.
+- **Recurrence root cause:** the enqueue snapshot retained its latest confirmed
+  delivery only in process memory. The cold-start fallback assumed a resumable
+  persistent HER session, which Flex mode intentionally disables; Lulu's last
+  visible turn also belonged to an isolated resumed session. Durable Bridge
+  history survived the rebuild but was not used to recover the canonical
+  previous pair.
+- **Repair boundary:** persist only the latest confirmed user/assistant delivery
+  per chat, recover it before the first post-restart enqueue, use existing Bridge
+  turns once for pre-fix workspace compatibility, and clear both states on
+  explicit `/new` or `/fresh`. Do not expose TaskFrame to an unbounded transcript.
+- **Recurrence count:** 2
 
 ### HER-20260815-032 — isolated scheduler replies were absent from primary context
 
