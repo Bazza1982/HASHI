@@ -2302,7 +2302,10 @@ async def test_prepare_successful_response_blocks_dangling_tool_markup_globally(
 
 def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
     runtime = _runtime()
-    item = _item()
+    item = _item(
+        skill_id="debug",
+        skill_usage_event_id="skill-use-1",
+    )
     usage_records = []
     audit_records = []
     fake_module = types.SimpleNamespace(
@@ -2342,6 +2345,8 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
     assert usage_records[0][1]["output_tokens"] == len("visible text") // 2
     event = audit_records[0][0][1]
     assert event["request_id"] == "req-1"
+    assert event["skill_id"] == "debug"
+    assert event["skill_usage_event_id"] == "skill-use-1"
     assert event["token_source"] == "estimated"
     assert event["thinking_chars"] == 44
     assert event["thinking_event_count"] == 2

@@ -70,7 +70,7 @@ class _SkillManager:
         return {"scripts": 0, "references": 0, "assets": 0, "other": 1}
 
     def can_uninstall_skill(self, skill):
-        return skill.source_type in {"installed", "linked"}
+        return skill.source_type in {"project", "installed", "linked"}
 
     def uninstall_skill(self, skill_id: str):
         self.uninstalled = True
@@ -191,6 +191,29 @@ async def test_handle_skill_uninstall_requires_confirmation():
 
     assert runtime.skill_manager.uninstalled is True
     assert "0" in confirm_query.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_handle_project_skill_delete_requires_confirmation():
+    runtime = _runtime()
+    runtime.skill_manager.skill.source_type = "project"
+    runtime.skill_manager.skill.managed = False
+    request_query = _Query("skill:x:demo-key")
+
+    await runtime_skill_callbacks.handle_skill_callback(
+        runtime,
+        request_query,
+        request_query.data,
+    )
+
+    assert runtime.skill_manager.uninstalled is False
+    assert "DELETE SKILL" in request_query.edits[-1]["text"]
+    labels = [
+        button.text
+        for row in request_query.edits[-1]["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    assert "Delete Skill" in labels
 
 
 @pytest.mark.asyncio

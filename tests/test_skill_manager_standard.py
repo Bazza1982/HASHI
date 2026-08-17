@@ -196,12 +196,14 @@ def test_linked_skill_unlinks_without_touching_source(tmp_path: Path):
     assert not (project_root / "skills" / "linked-skill").exists()
 
 
-def test_uninstall_refuses_project_skills_and_job_dependencies(tmp_path: Path):
+def test_delete_moves_project_skills_to_recovery_and_blocks_job_dependencies(
+    tmp_path: Path,
+):
     project_root = tmp_path / "project"
     _write_skill(
         project_root,
         "project-skill",
-        "name: project-skill\ndescription: Use when testing a protected package.",
+        "name: project-skill\ndescription: Use when testing a built-in package.",
     )
     source_root = tmp_path / "incoming"
     _write_skill(
@@ -235,11 +237,13 @@ def test_uninstall_refuses_project_skills_and_job_dependencies(tmp_path: Path):
     )
     assert ok is True, message
 
-    protected, protected_message, _ = manager.uninstall_skill("project-skill")
+    deleted, deleted_message, recovery_path = manager.uninstall_skill("project-skill")
     blocked, blocked_message, _ = manager.uninstall_skill("managed-skill")
 
-    assert protected is False
-    assert "protected" in protected_message.lower()
+    assert deleted is True, deleted_message
+    assert recovery_path is not None and recovery_path.is_dir()
+    assert "deleted" in deleted_message.lower()
+    assert manager.get_skill("project-skill") is None
     assert blocked is False
     assert "managed-nightly" in blocked_message
     dependencies = manager.skill_dependencies("managed-skill")
@@ -253,6 +257,87 @@ def test_uninstall_refuses_project_skills_and_job_dependencies(tmp_path: Path):
         }
     ]
     assert manager.get_skill("managed-skill") is not None
+
+
+def test_skill_usage_stats_merge_new_ledger_and_historical_token_audit(
+    tmp_path: Path,
+):
+    _write_skill(
+        tmp_path,
+        "measured-skill",
+        "name: measured-skill\ndescription: Use when testing usage metrics.",
+    )
+    manager = SkillManager(tmp_path, tmp_path / "tasks.json")
+
+    first_event = manager.record_skill_usage(
+        "measured-skill",
+        agent="momo",
+        request_id="req-new-1",
+        source="skill:measured-skill",
+    )
+    second_event = manager.record_skill_usage(
+        "measured_skill",
+        agent="zelda",
+        request_id="automation-job-1",
+        source="scheduler-automation",
+        task_id="job-1",
+    )
+    audit_path = tmp_path / "workspaces" / "momo" / "token_audit.jsonl"
+    audit_path.parent.mkdir(parents=True)
+    audit_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-01-01T00:00:00+00:00",
+                        "agent": "momo",
+                        "source": "skill:measured-skill",
+                        "success": True,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-01-02T00:00:00+00:00",
+                        "agent": "momo",
+                        "source": "skill:measured-skill",
+                        "skill_id": "measured-skill",
+                        "skill_usage_event_id": first_event,
+                        "success": True,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-01-03T00:00:00+00:00",
+                        "agent": "lulu",
+                        "source": "scheduler-skill",
+                        "skill_id": "measured-skill",
+                        "success": True,
+                    }
+                ),
+                "{invalid-json",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    stats = manager.skill_usage_stats("measured-skill")
+    usage_records = [
+        json.loads(line)
+        for line in manager.skill_usage_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert first_event and second_event
+    assert all(
+        "prompt" not in record and "skill_body" not in record
+        for record in usage_records
+    )
+    assert stats["total"] == 4
+    assert stats["tracked"] == 2
+    assert stats["historical"] == 2
+    assert stats["agents"] == 3
+    assert stats["by_agent"] == {"lulu": 1, "momo": 2, "zelda": 1}
+    assert stats["last_used_at"] is not None
 
 
 def test_dependency_scan_includes_managed_active_heartbeats(tmp_path: Path):

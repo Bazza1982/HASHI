@@ -724,7 +724,15 @@ installation, loading, and execution are disabled; HASHI owns `/skill`.
 /skill help                     → List all skills
 /skill <name>                   → Show skill info
 /skill <name> <request>         → Apply the Skill instructions to a request
+/skill delete <name>            → Move a built-in/installed package to recovery
 ```
+
+The Skill detail card shows a project-wide cumulative usage counter. New
+invocations append privacy-bounded metadata (Skill ID, agent, request ID, and
+source; never the prompt) to `state/skill_usage.jsonl`. Existing direct Skill
+runs are folded in from per-agent `token_audit.jsonl` history. Built-in and
+installed packages are recoverably deleted, linked packages are unlinked, and
+any structured Job reference blocks removal.
 
 ---
 

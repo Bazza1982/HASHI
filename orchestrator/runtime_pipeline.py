@@ -92,6 +92,21 @@ def queued_elapsed_s(item) -> float:
     )
 
 
+def skill_usage_audit_fields(item: Any) -> dict[str, str]:
+    """Return optional Skill attribution without emitting empty audit fields."""
+
+    fields: dict[str, str] = {}
+    skill_id = str(getattr(item, "skill_id", "") or "").strip()
+    usage_event_id = str(
+        getattr(item, "skill_usage_event_id", "") or ""
+    ).strip()
+    if skill_id:
+        fields["skill_id"] = skill_id
+    if usage_event_id:
+        fields["skill_usage_event_id"] = usage_event_id
+    return fields
+
+
 def _append_her_message_audit(
     runtime,
     item,
@@ -304,6 +319,7 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         "habit_learning_eligible": bool(
             getattr(item, "habit_learning_eligible", True)
         ),
+        **skill_usage_audit_fields(item),
         "session_scope": _resolve_her_session_scope(runtime, item),
     }
     runtime.current_request_meta = request_meta
@@ -1354,6 +1370,7 @@ def record_foreground_usage_audit(
                 "model": runtime.get_current_model(),
                 "source": item.source,
                 "summary": item.summary,
+                **skill_usage_audit_fields(item),
                 "silent": item.silent,
                 "is_retry": item.is_retry,
                 "success": response.is_success,
