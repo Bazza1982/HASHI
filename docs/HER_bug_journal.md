@@ -70,14 +70,14 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260815-032` | Fixed — live verification pending | P0 | isolated scheduler choices and CONTINUE checkpoints were absent from the primary conversation context | `test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_task`; `test_her_isolated_continuation_resumes_exact_checkpoint_without_replacing_primary` |
 | `HER-20260816-033` | Fixed in source — rebuild/live verification pending | P1 | TaskFrame again saw only `A` while the primary executor saw and completed the previous option | `task_checkpoint_receives_immediate_previous_dialogue_context`; `tests/test_runtime_turn_context.py` |
 | `HER-20260816-034` | Verified | P1 | offline `--status` constructed a second rebuild manager and falsely failed an active build as a kernel restart | `test_offline_status_is_strictly_read_only_during_active_build`; `test_manager_ownership_lock_excludes_a_second_process` |
-| `HER-20260817-035` | Fixed; candidate verified — activation deferred | P1 | source-integrated `.22` lost native direct-response termination, so completed TaskFrame answers entered primary execution and MAX/MAX+ review loops | `direct_response_finishes_after_one_planning_call_at_every_native_effort`; `invalid_direct_response_falls_back_to_primary_execution`; `test_claw_direct_response_acknowledgement_is_final_only` |
-| `HER-20260817-036` | Fixed in source — live verification pending | P2 | pending model-authored Persona commentary shared technical cadence and vanished silently at turn finalization | `test_claw_cadence_technical_activity_does_not_delay_persona_commentary`; `test_claw_cadence_finish_supersedes_only_latest_pending_commentary`; `test_her_effort_commentary_matrix_reaches_transport_receipt` |
+| `HER-20260817-035` | Deployed to Arale — live behavior verification pending | P1 | source-integrated `.22` lost native direct-response termination, so completed TaskFrame answers entered primary execution and MAX/MAX+ review loops | `direct_response_finishes_after_one_planning_call_at_every_native_effort`; `invalid_direct_response_falls_back_to_primary_execution`; `test_claw_direct_response_acknowledgement_is_final_only` |
+| `HER-20260817-036` | Deployed to Arale — live behavior verification pending | P2 | pending model-authored Persona commentary shared technical cadence and vanished silently at turn finalization | `test_claw_cadence_technical_activity_does_not_delay_persona_commentary`; `test_claw_cadence_finish_supersedes_only_latest_pending_commentary`; `test_her_effort_commentary_matrix_reaches_transport_receipt` |
 
 ## Historical entries
 
 ### HER-20260817-036 — pending Persona commentary vanished at finalization
 
-- **Status:** Fixed in source — live verification pending
+- **Status:** Deployed to Arale — live behavior verification pending
 - **Severity:** P2
 - **Discovered:** 2026-08-17 AEST while tracing a MAX+ Arale turn whose native
   event ledger contained a model-authored `task_commentary` but whose Telegram
@@ -108,10 +108,16 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **Regression tests:** cadence isolation under technical activity; one-slot
   coalescing; terminal supersession; real adapter stream finalization; and a
   `low` through `ultra` native-event-to-transport-receipt matrix.
+- **Managed adoption:** job `rebuild-20260817-070110-3c9bf6f7` reused candidate
+  `dev-acbe61534cf4a5eb-20d2d521fa40`, completed Arale's targeted hot restart,
+  verified the current HER adapter/runtime-pipeline reload contract, restored
+  Telegram connectivity, and passed the managed postcheck on 2026-08-17 AEST.
+  This proves deployment and transport health; a real long-running turn is
+  still required before changing the issue status to `Verified`.
 
 ### HER-20260817-035 — TaskFrame direct answers no longer terminated the turn
 
-- **Status:** Fixed; candidate verified — activation deferred
+- **Status:** Deployed to Arale — live behavior verification pending
 - **Severity:** P1
 - **Discovered:** 2026-08-17 AEST during a MAX+ `/handoff` latency diagnosis
 - **Expected:** when TaskFrame determines that its Persona-authored
@@ -150,6 +156,10 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   task throughout the 120-second idle window; the previously selected HER was
   left unchanged. A later `/rebuild` while Arale is idle can reuse this verified
   candidate and complete targeted adoption without recompilation.
+- **Managed adoption:** follow-up job `rebuild-20260817-070110-3c9bf6f7`
+  reused that immutable candidate, completed Arale's targeted hot restart, and
+  passed the managed postcheck on 2026-08-17 AEST. A real direct-response turn
+  remains the final user-visible verification step.
 
 ### HER-20260816-034 — rebuild status observer falsely became a restart owner
 
