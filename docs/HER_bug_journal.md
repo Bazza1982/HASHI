@@ -75,8 +75,39 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260817-037` | Verified; delivery follow-up tracked by `HER-20260817-039` | P2 | primary tool-turn Persona text remained internal `assistant_delta`, so the repaired commentary cadence had no native events to deliver | `complete_tool_bound_text_emits_one_commentary_before_tool_execution`; `test_claw_tool_bound_assistant_commentary_is_user_visible_primary_model_text`; effort transport matrix |
 | `HER-20260817-038` | Deployed to Arale — live behavior verification pending | P1 | StreamLake's 504 inside an established SSE stream was hard-coded non-retryable and aborted a resumable Arale turn | `stream_message_marks_embedded_gateway_timeout_as_retryable`; `provider_stream_retries_embedded_504_once_and_returns_only_complete_attempt` |
 | `HER-20260817-039` | Deployed to Arale — live behavior verification pending | P1 | a legacy effort gate silently demoted every native Persona commentary at `low` and `medium` to internal despite `/commentary on` | `test_medium_adapter_delivers_native_tool_turn_commentary`; corrected low-through-ultra transport matrix |
+| `HER-20260817-040` | Fixed in source — user-managed reboot/live verification pending | P2 | short HER acknowledgement/commentary messages bypassed Markdown rendering and appeared as literal markup in Telegram | `test_her_short_commentary_renders_markdown_before_telegram_delivery`; `test_her_commentary_uses_long_sender_when_rendered_html_exceeds_limit` |
 
 ## Historical entries
+
+### HER-20260817-040 — short Persona messages bypassed Telegram Markdown rendering
+
+- **Status:** Fixed in source — user-managed reboot/live verification pending
+- **Severity:** P2
+- **Discovered:** 2026-08-17 AEST in an Arale `high+` run after commentary
+  delivery itself had been restored.
+- **Expected:** acknowledgement and commentary use the same Telegram-safe
+  Markdown-to-HTML rendering contract as final and long messages. The audit
+  ledger retains the exact model-authored Markdown.
+- **Actual:** a short Chinese commentary reached Telegram, but `**bold**`
+  markers were displayed literally and list-item emphasis was visually
+  malformed. The generated-event and transport-receipt hashes matched, proving
+  the text was neither model corruption nor an adapter mutation.
+- **Root cause:** the HER message router sent messages of at most 3,500 raw
+  characters straight through `_send_text` without a parse mode. Longer HER
+  messages and final answers used `send_long_message`, which applies the shared
+  Markdown-to-HTML renderer before Telegram delivery.
+- **Repair:** render short acknowledgement/commentary with `_md_to_html`, send
+  it with `parse_mode=HTML`, and choose the short-versus-long transport from the
+  rendered length. The long path still receives the raw Markdown so its
+  established renderer and chunker remain authoritative.
+- **Regression tests:** a redacted Chinese bold/list commentary proves HTML is
+  delivered while the audit preserves exact raw Markdown; an expansion case
+  proves HTML escaping cannot push the direct-send payload over its safe limit.
+- **Secrets/redaction checked:** yes; the regression fixture preserves the
+  formatting shape but replaces names, document numbers, and task details.
+- **Managed adoption:** Python-only source fix `6b02b779`; no hot reload or
+  reboot was performed during Arale's active work. The user will reboot after
+  this source fix is committed.
 
 ### HER-20260817-039 — low/medium effort silently suppressed Persona commentary
 
