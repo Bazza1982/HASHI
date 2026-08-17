@@ -196,6 +196,11 @@ def test_primary_pending_turn_persists_checkpoint_and_binds_a_full_flex_reply(tm
                 "remaining_work": ["Write the selected mapping"],
                 "next_action": "Await the user's answer",
             },
+            "planning_status": "failed",
+            "planning_error": (
+                "task frame planned_tools contains non-canonical tool prose "
+                "`write_file 或 hashi_file_write`"
+            ),
             "execution_ledger": {
                 "version": 1,
                 "total_entries": 1,
@@ -223,6 +228,8 @@ def test_primary_pending_turn_persists_checkpoint_and_binds_a_full_flex_reply(tm
     assert receipt is not None
     assert receipt["task_status"] == "awaiting_user"
     assert receipt["task_checkpoint"]["completed"] == ["Inspected source files"]
+    assert receipt["planning_status"] == "failed"
+    assert "write_file 或 hashi_file_write" in receipt["planning_error"]
     assert receipt["execution_ledger"]["entries"][0]["tool_use_id"] == "read-1"
     assert receipt["delivery_receipt"]["confirmed"] is True
 
@@ -236,6 +243,8 @@ def test_primary_pending_turn_persists_checkpoint_and_binds_a_full_flex_reply(tm
     bound_prompt = runtime_cross_session.prepare_reply_binding(runtime, reply, reply.prompt)
 
     assert "Populate the workbook after clarification" in bound_prompt
+    assert "Planning status: failed" in bound_prompt
+    assert "write_file 或 hashi_file_write" in bound_prompt
     assert "read-1" in bound_prompt
     assert "preserve all current workbook formatting" in bound_prompt
     assert reply._cross_session_receipt["reply_kind"] == "answer"

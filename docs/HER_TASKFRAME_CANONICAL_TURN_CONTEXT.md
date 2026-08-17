@@ -132,7 +132,11 @@ unbounded transcript merely to resolve one short reference.
 
 The runtime also supplies the same canonical metadata to every primary
 execution iteration. Once the initial TaskFrame passes validation,
-`TaskFrame.active_goal` is the canonical resolved goal for that turn. Execution
+`TaskFrame.active_goal` is the canonical resolved goal for that turn. If the
+TaskFrame is rejected after bounded attempts, the strict error is preserved as a
+planning diagnostic and the primary Agent receives an authorization-preserving
+fallback plus this same canonical context. Planning failure therefore cannot
+terminate the turn or erase the primary Agent's responsibility to answer. Execution
 must not reinterpret the current message into a different task.
 
 ## 5. Ambiguity and side-effect rule
@@ -143,12 +147,15 @@ For bounded short requests such as `A`, `continue`, `resume`, `ok`, `可以` and
 - when the supplied previous dialogue determines the referent, TaskFrame must
   write the concrete resolved goal;
 - an `active_goal` that merely repeats `A` or reports an obviously unclear task
-  fails before task tools run;
-- Max/Max+ fallback may not bypass this resolution failure;
+  is rejected and recorded as a planning failure;
+- every planning-enabled effort falls back to the primary Agent rather than
+  treating that rejected TaskFrame as a terminal backend error;
 - when no matching previous dialogue exists, the agent must not guess or use a
   later-delivered message as authority;
-- if execution cannot reconcile the accepted TaskFrame with the canonical
-  context, it must avoid side-effecting tools and ask for clarification.
+- the primary Agent may resolve the request from the same canonical previous
+  dialogue and continue; if it still cannot reconcile the request with that
+  context, it must avoid side-effecting tools, report the planning failure in its
+  own response and ask for clarification.
 
 This guard is deliberately narrower than a lexical intent engine. It catches
 the proven control split without turning planned tool names into a brittle hard
@@ -178,7 +185,8 @@ Required deterministic tests cover:
 5. a later cron final cannot replace a frozen reply target;
 6. an earlier pending direct turn records `captured_no_prior_final`;
 7. a cold HASHI runtime falls back to the persistent HER immediate pair;
-8. an unresolved short-choice TaskFrame stops before tools;
+8. an unresolved short-choice TaskFrame is rejected without stopping the primary
+   Agent, which resolves the canonical previous dialogue or asks the user;
 9. a HASHI snapshot outranks misleading newer session history.
 
 Source verification on 2026-08-16 completed with:

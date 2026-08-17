@@ -31,6 +31,7 @@ from adapters.her import (
     _claw_contains_dangling_tool_markup,
     _claw_incomplete_response,
     _claw_jsonl_to_stream_events,
+    _claw_planning_failure_notice,
     _claw_run_is_incomplete,
     _HERStreamCadenceController,
     _parse_json_output,
@@ -832,6 +833,21 @@ def test_dangling_markup_detector_allows_explicit_fenced_examples():
     )
 
 
+def test_planning_failure_notice_is_visible_in_user_language_and_not_duplicated():
+    chinese = _claw_planning_failure_notice("请继续处理", "实际检查已经完成。")
+    assert "内部规划报告" in chinese
+    assert "主 Agent 已按原始请求与既有权限继续执行" in chinese
+
+    english = _claw_planning_failure_notice("continue the task", "The check completed.")
+    assert "Internal planning report" in english
+    assert "continued under the original request" in english
+
+    already_visible = "Internal planning failed validation, but execution continued."
+    assert (
+        _claw_planning_failure_notice("continue", already_visible) == already_visible
+    )
+
+
 def test_compact_execution_ledger_distinguishes_verified_and_unverified_actions():
     result = ClawTaskResult(
         text="done",
@@ -910,6 +926,59 @@ async def test_completed_adapter_path_blocks_dangling_dsml_and_marks_incomplete(
     assert response.stream_metadata["claw_completion_status"] == "incomplete"
     assert response.stream_metadata["claw_stop_reason"] == "no_final_text"
     assert response.stream_metadata["dangling_tool_markup_blocked"] is True
+
+
+@pytest.mark.asyncio
+async def test_completed_adapter_path_exposes_nonblocking_planning_failure(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = tmp_path / "hashi-her"
+    adapter._run_task_async = AsyncMock(
+        return_value=ClawTaskResult(
+            text="实际工具执行与状态回读均已完成。",
+            model="deepseek/test",
+            permission_mode="workspace-write",
+            cwd=str(tmp_path),
+            returncode=0,
+            duration_ms=1,
+            stdout="",
+            stderr="",
+            json_data={"usage": {}},
+            tool_uses=[{"id": "write-1", "name": "write_file"}],
+            tool_results=[
+                {
+                    "tool_use_id": "write-1",
+                    "tool_name": "write_file",
+                    "output": "verified",
+                    "is_error": False,
+                }
+            ],
+            session_id="session-planning-fallback",
+            iterations=2,
+            completion_status="completed",
+            stop_reason="end_turn",
+            planning_status="failed",
+            planning_error=(
+                "task frame planned_tools contains non-canonical tool prose "
+                "`write_file 或 hashi_file_write`"
+            ),
+        )
+    )
+
+    response = await adapter.generate_response("请更新文件", "req-planning-fallback")
+
+    assert response.is_success is True
+    assert "实际工具执行与状态回读均已完成" in response.text
+    assert "内部规划报告" in response.text
+    assert response.stream_metadata["planning_status"] == "failed"
+    assert "write_file 或 hashi_file_write" in response.stream_metadata["planning_error"]
+    assert response.stream_metadata["planning_failure_user_visible"] is True
 
 
 def test_claw_max_iterations_without_model_final_uses_sunny_persona_and_receipt_counts():
@@ -1578,6 +1647,8 @@ def test_run_claw_task_builds_safe_one_shot_command(tmp_path):
           "estimated_cost": "$0.0001",
           "task_checkpoint": {"active_goal": "inspect", "next_action": "ask"},
           "pending_interaction": {"interaction_id": "ask-1", "kind": "question", "question": "Continue?"},
+          "planning_status": "failed",
+          "planning_error": "task frame planned_tools contains non-canonical tool prose",
           "tool_uses": [{"name": "read_file"}],
           "tool_results": [{"is_error": False}]
         }))
@@ -1605,6 +1676,10 @@ def test_run_claw_task_builds_safe_one_shot_command(tmp_path):
         "kind": "question",
         "question": "Continue?",
     }
+    assert result.planning_status == "failed"
+    assert result.planning_error == (
+        "task frame planned_tools contains non-canonical tool prose"
+    )
 
 
 def test_run_claw_task_rejects_invalid_permission_mode(tmp_path):

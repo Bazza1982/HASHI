@@ -464,6 +464,12 @@ def record_turn_result(
                 if isinstance(metadata.get("task_checkpoint"), Mapping)
                 else None
             ),
+            "planning_status": _bounded_text(
+                metadata.get("planning_status", ""), 80
+            ),
+            "planning_error": _bounded_text(
+                metadata.get("planning_error", ""), 2_000
+            ),
             "execution_ledger": (
                 dict(metadata["execution_ledger"])
                 if isinstance(metadata.get("execution_ledger"), Mapping)
@@ -646,6 +652,9 @@ def prepare_reply_binding(runtime: Any, item: Any, effective_prompt: str) -> str
         f"Task status: {receipt.get('task_status') or receipt.get('status') or 'unknown'}\n"
         "Preserved task checkpoint:\n"
         f"{json.dumps(receipt.get('task_checkpoint'), ensure_ascii=False)}\n\n"
+        f"Planning status: {receipt.get('planning_status') or 'unknown'}\n"
+        "Planning diagnostic:\n"
+        f"{receipt.get('planning_error') or 'none'}\n\n"
         "Execution receipt index:\n"
         f"{json.dumps(receipt.get('execution_ledger'), ensure_ascii=False)}\n\n"
         f"Original task:\n{task_prompt}\n\n"
@@ -701,6 +710,9 @@ def context_section(runtime: Any, item: Any) -> list[tuple[str, str]]:
                     + json.dumps(
                         receipt.get("task_checkpoint"), ensure_ascii=False
                     ),
+                    f"Planning status: {receipt.get('planning_status') or 'unknown'}",
+                    "Planning diagnostic:\n"
+                    + str(receipt.get("planning_error") or "none"),
                     "Execution receipt index:\n"
                     + json.dumps(
                         receipt.get("execution_ledger"), ensure_ascii=False

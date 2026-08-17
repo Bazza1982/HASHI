@@ -50,7 +50,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260811-012` | Verified | P3 | the delayed-response fixture printed a BrokenPipe traceback after the expected client timeout | `test_scripted_provider_tolerates_timed_out_client_disconnect` |
 | `HER-20260811-013` | Verified | P3 | the native-ceiling checker confused provider iterations with executed tool iterations | `test_packaged_candidate_hits_native_iteration_ceiling_exactly` |
 | `HER-20260812-014` | Verified | P1 | configured stdio MCP child logs leaked into HER structured CLI stderr | `allowed_tools_json_errors_isolate_configured_mcp_stderr` |
-| `HER-20260812-015` | Verified | P1 | initial planning-format deviations could abort valid tasks before execution | `medium_planning_format_failure_uses_conservative_fallback`; `high_effort_retries_an_invalid_initial_assurance_frame_once` |
+| `HER-20260812-015` | Fixed in source — rebuild/live verification pending | P1 | initial planning/validation deviations could abort valid tasks before primary execution | `medium_noncanonical_planned_tool_prose_reports_and_executes_real_tools`; `initial_planner_provider_error_is_visible_but_does_not_block_agent` |
 | `HER-20260812-016` | Verified | P2 | request activity timestamps could move backwards when wall-clock time regressed | `test_request_activity_clamps_regressing_timestamps_to_sequence_order` |
 | `HER-20260812-017` | Fixed — blast-radius verification pending | P1 | AskUserQuestion terminal UI corrupted structured JSONL and hid its correlated tool_end | `stream_json_ask_user_question_preserves_correlated_tool_events` |
 | `HER-20260812-018` | Verified | P1 | controller nudge misclassified an in-progress task's next packet as a pending-task start and livelocked | `test_in_progress_packet_continuation_cannot_require_new_start_authority` |
@@ -1093,6 +1093,36 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **Remaining risk:** assurance-enabled high/xhigh/max+ planning intentionally retains
   stricter validation after bounded format recovery; those effort cells must prove their
   own recovery and terminal contracts without weakening authorization boundaries.
+- **Regression and invariant expansion — 2026-08-17:** Arale request `req-0004` at
+  medium effort produced a structurally parseable TaskFrame whose `planned_tools`
+  contained the non-canonical prose `write_file 或 hashi_file_write`. The strict
+  validator correctly rejected that field, but the integrated runtime again treated the
+  planner's semantic validation error as a terminal backend failure before the primary
+  Agent or any task tool ran. This is a recurrence of the pre-execution planning-gate
+  failure class, with a new semantic/tool-name subtype; it is not a model tool-execution
+  capability failure.
+- **Revised invariant:** planning and independent review are advisory. Their provider,
+  response, schema, semantic, tool-registry, resolution or assurance validation failures
+  remain strict and auditable, but cannot decide whether the primary Agent gets to run.
+  Runtime permissions, safety controls and concrete tool dispatch remain authoritative.
+  When user input is genuinely required, the primary Agent must end the turn with its
+  persona-authored progress report and question instead of guessing or disappearing.
+- **2026-08-17 source repair:** all exhausted initial TaskFrame failures now install the
+  same conservative, authorization-preserving fallback used by the primary Agent; the
+  original diagnostic is exported as `planning_status=failed` / `planning_error`, made
+  user-visible without replacing the Agent's answer, and retained with the task
+  checkpoint and verified execution ledger in cross-session receipts for fixed and flex
+  continuation. Validation itself was not weakened, and planning retries remain only a
+  bounded quality optimization.
+- **2026-08-17 regression coverage:** exact Arale prose is covered by
+  `medium_noncanonical_planned_tool_prose_reports_and_executes_real_tools`; provider
+  failure by `initial_planner_provider_error_is_visible_but_does_not_block_agent`;
+  canonical short-choice continuity by
+  `unresolved_short_choice_plan_falls_back_to_canonical_context_execution`; generic and
+  missing-assurance frames by the renamed non-blocking boundary tests; reviewer
+  non-ownership by `max_planning_block_is_advisory_and_task_agent_still_answers`; and
+  HASHI delivery/continuity by the planning-notice and cross-session receipt tests.
+- **Recurrence count:** 1
 - **Recurrence count:** 0
 
 ### HER-20260812-016 — request activity timestamps moved backwards

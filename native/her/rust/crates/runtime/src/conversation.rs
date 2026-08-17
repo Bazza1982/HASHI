@@ -555,6 +555,9 @@ pub struct TurnSummary {
     pub auto_compaction: Option<AutoCompactionEvent>,
     pub task_checkpoint: Option<TaskFrame>,
     pub pending_interaction: Option<Value>,
+    /// An internal planning failure that was reported but did not block the
+    /// task-performing agent from running.
+    pub planning_error: Option<String>,
 }
 
 /// Whether a turn reached a normal model stop or preserved unfinished work at
@@ -1008,10 +1011,10 @@ where
         let parsed = (|| {
             let (mut frame, task_commentary) =
                 parse_task_checkpoint(&raw, previous.is_none()).ok_or_else(|| {
-                RuntimeError::new(
-                    "task understanding checkpoint returned an invalid task frame; execution stopped before tools",
+                    RuntimeError::new(
+                    "task understanding checkpoint returned an invalid task frame; planning attempt rejected",
                 )
-            })?;
+                })?;
             validate_planned_tool_identifiers(&mut frame, &available_tool_capabilities)?;
             if let Some(previous) = previous {
                 validate_task_frame_transition(
@@ -1373,6 +1376,7 @@ where
         let mut consumed_divergence_triggers = BTreeSet::new();
         let mut consumed_failure_triggers = BTreeSet::new();
         let mut max_review_feedback_due: Option<String> = None;
+        let mut planning_error: Option<String> = None;
         let mut max_execution_reviewed_tool_count: Option<usize> = None;
         let mut max_execution_revision_round = 0;
         let mut max_testing_revision_round = 0;
@@ -1435,31 +1439,27 @@ where
             let (mut frame, _, checkpoint_cache_events) = match checkpoint {
                 Ok(checkpoint) => checkpoint,
                 Err(error) => {
-                    if error
-                        .to_string()
-                        .contains("canonical immediate previous dialogue")
-                    {
-                        self.record_turn_failed(0, &error);
-                        return Err(error);
-                    }
-                    if self.max_independent_review_enabled {
-                        self.record_control_fallback("planning", "planning", 0, &error.to_string());
-                        max_review_feedback_due = Some(format!(
-                            "MAX PLANNING CHECKPOINT RECOVERY: Structured planning did not converge after {checkpoint_attempts} attempts ({error}). Continue the user's task using the authoritative request and normal authorization controls. Build a practical plan internally, perform useful work, and disclose any uncertainty in your own final answer."
-                        ));
-                        (
-                            fallback_max_task_frame(
-                                &authoritative_goal,
-                                self.effective_finalization_reserve(),
-                                &error,
-                            ),
-                            None,
-                            Vec::new(),
-                        )
-                    } else {
-                        self.record_turn_failed(0, &error);
-                        return Err(error);
-                    }
+                    // TaskFrame is advisory state, not an execution permit.
+                    // A planner/provider/schema/semantic failure must remain
+                    // visible and auditable, but actual authorization is still
+                    // enforced by the authoritative request, runtime permission
+                    // policy, and every concrete tool dispatch below.
+                    let failure = error.to_string();
+                    planning_error = Some(failure.clone());
+                    self.record_control_fallback("planning", "planning", 0, &failure);
+                    max_review_feedback_due = Some(format!(
+                        "NON-BLOCKING PLANNING FAILURE: The internal TaskFrame planner did not produce an accepted plan after {checkpoint_attempts} attempt(s): {failure}. This is advisory failure, not a reason to stop the task. Continue from the authoritative request and canonical conversation context under the existing runtime permissions. Before using tools, tell the user in your normal persona that planning validation failed but execution is continuing. In the final answer, disclose the planning failure separately from actual execution results. If the authoritative request itself remains materially ambiguous, ask the user instead of guessing."
+                    ));
+                    (
+                        fallback_task_frame(
+                            &authoritative_goal,
+                            self.task_assurance_enabled
+                                .then_some(self.effective_finalization_reserve()),
+                            &error,
+                        ),
+                        None,
+                        Vec::new(),
+                    )
                 }
             };
             self.emit_pending_control_events(observer.as_deref_mut());
@@ -2580,6 +2580,7 @@ where
             auto_compaction,
             task_checkpoint: task_frame.clone(),
             pending_interaction: pending_user_interaction.clone(),
+            planning_error,
         };
         if self.max_plus_enabled {
             if let (Some(observer), Some(frame)) = (observer, task_frame.as_ref()) {
@@ -3102,9 +3103,9 @@ where
     }
 }
 
-fn fallback_max_task_frame(
+fn fallback_task_frame(
     authoritative_goal: &str,
-    finalization_reserve: usize,
+    finalization_reserve: Option<usize>,
     planning_error: &RuntimeError,
 ) -> TaskFrame {
     let goal = authoritative_goal.trim();
@@ -3112,19 +3113,13 @@ fn fallback_max_task_frame(
         .chars()
         .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character));
     let acknowledgement = if contains_chinese {
-        "我会继续处理当前请求，执行必要步骤，并在最终答复中如实说明验证结果与不确定性。".to_string()
+        "内部规划没有通过校验，但这不会阻断我。我会依据您的当前请求和既有权限继续执行，并在最终答复中如实报告规划失败、实际结果与不确定性。".to_string()
     } else {
-        "I will continue the current request, perform the necessary work, and report verified results and uncertainty honestly."
+        "Internal planning did not pass validation, but it will not block me. I will continue from your current request under the existing permissions and report the planning failure, actual results, and uncertainty honestly."
             .to_string()
     };
-    TaskFrame {
-        acknowledgement,
-        active_goal: goal.to_string(),
-        success_criteria: vec!["Answer the authoritative request using task-matched evidence".to_string()],
-        planned_actions: vec!["Determine and execute the practical steps needed for the current request".to_string()],
-        planned_tools: Vec::new(),
-        do_not_do: vec!["Do not expand authorization beyond the current request".to_string()],
-        assurance: Some(Box::new(TaskAssurance {
+    let assurance = finalization_reserve.map(|finalization_reserve| {
+        Box::new(TaskAssurance {
             review_strategy: vec!["Use independent feedback to improve the work without blocking execution".to_string()],
             review_interval_tool_results: 6,
             review_triggers: vec!["tool failure, scope change, or conflicting evidence".to_string()],
@@ -3141,7 +3136,20 @@ fn fallback_max_task_frame(
             hypotheses: Vec::new(),
             discriminations: Vec::new(),
             evidence_updates: Vec::new(),
-        })),
+        })
+    });
+    TaskFrame {
+        acknowledgement,
+        active_goal: goal.to_string(),
+        success_criteria: vec![
+            "Answer the authoritative request using task-matched evidence".to_string(),
+        ],
+        planned_actions: vec![
+            "Determine and execute the practical steps needed for the current request".to_string(),
+        ],
+        planned_tools: Vec::new(),
+        do_not_do: vec!["Do not expand authorization beyond the current request".to_string()],
+        assurance,
         completed: Vec::new(),
         remaining_work: vec!["Perform the requested work and verify the result".to_string()],
         failures: vec![format!("Structured planning unavailable: {planning_error}")],
@@ -4022,7 +4030,7 @@ fn validate_initial_task_frame(frame: &TaskFrame) -> Result<(), RuntimeError> {
             .any(|artifact| normalized_goal.contains(artifact))
     {
         return Err(RuntimeError::new(
-            "task understanding checkpoint did not identify the authoritative current request; execution stopped before tools",
+            "task understanding checkpoint did not identify the authoritative current request; planning attempt rejected",
         ));
     }
     if acknowledgement.chars().count() < 8
@@ -4036,7 +4044,7 @@ fn validate_initial_task_frame(frame: &TaskFrame) -> Result<(), RuntimeError> {
             .any(|artifact| normalized_ack.contains(artifact))
     {
         return Err(RuntimeError::new(
-            "task understanding checkpoint produced a generic or protocol-level acknowledgement; execution stopped before tools",
+            "task understanding checkpoint produced a generic or protocol-level acknowledgement; planning attempt rejected",
         ));
     }
     Ok(())
@@ -4109,7 +4117,7 @@ fn validate_task_frame_resolution(
             .any(|marker| resolved_goal.contains(marker))
     {
         return Err(RuntimeError::new(
-            "task understanding checkpoint did not resolve the short current request from the canonical immediate previous dialogue; execution stopped before tools",
+            "task understanding checkpoint did not resolve the short current request from the canonical immediate previous dialogue; planning attempt rejected",
         ));
     }
     Ok(())
@@ -4121,7 +4129,7 @@ fn validate_assurance_task_frame(
 ) -> Result<(), RuntimeError> {
     let Some(assurance) = frame.assurance.as_deref() else {
         return Err(RuntimeError::new(
-            "high-effort task checkpoint omitted its assurance plan; execution stopped before tools",
+            "high-effort task checkpoint omitted its assurance plan; planning attempt rejected",
         ));
     };
     let mut missing = Vec::new();
@@ -4155,7 +4163,7 @@ fn validate_assurance_task_frame(
     if !missing.is_empty() {
         return Err(RuntimeError::new(
             format!(
-                "high-effort task checkpoint omitted or invalidated required assurance fields ({}); execution stopped before tools",
+                "high-effort task checkpoint omitted or invalidated required assurance fields ({}); planning attempt rejected",
                 missing.join(", ")
             ),
         ));
@@ -4166,7 +4174,7 @@ fn validate_assurance_task_frame(
 fn validate_max_assurance_task_frame(frame: &TaskFrame) -> Result<(), RuntimeError> {
     let Some(assurance) = frame.assurance.as_deref() else {
         return Err(RuntimeError::new(
-            "max-effort task checkpoint omitted its assurance plan; execution stopped before tools",
+            "max-effort task checkpoint omitted its assurance plan; planning attempt rejected",
         ));
     };
     if assurance
@@ -4175,7 +4183,7 @@ fn validate_max_assurance_task_frame(frame: &TaskFrame) -> Result<(), RuntimeErr
         .all(|item| item.trim().is_empty())
     {
         return Err(RuntimeError::new(
-            "max-effort task checkpoint omitted test_strategy; execution stopped before tools",
+            "max-effort task checkpoint omitted test_strategy; planning attempt rejected",
         ));
     }
     Ok(())
@@ -4184,7 +4192,7 @@ fn validate_max_assurance_task_frame(frame: &TaskFrame) -> Result<(), RuntimeErr
 fn validate_max_plus_assurance_task_frame(frame: &TaskFrame) -> Result<(), RuntimeError> {
     let assurance = frame.assurance.as_deref().ok_or_else(|| {
         RuntimeError::new(
-            "max+ task checkpoint omitted its assurance plan; execution stopped before tools",
+            "max+ task checkpoint omitted its assurance plan; planning attempt rejected",
         )
     })?;
     let hypothesis_ids = assurance
@@ -7872,14 +7880,25 @@ mod tests {
     }
 
     #[test]
-    fn high_effort_rejects_a_plan_without_assurance_strategies() {
-        struct MissingAssuranceApi;
+    fn high_effort_missing_assurance_plan_is_reported_without_blocking_agent() {
+        struct MissingAssuranceApi {
+            planning_calls: usize,
+            execution_calls: usize,
+        }
 
         impl ApiClient for MissingAssuranceApi {
-            fn stream(
-                &mut self,
-                _request: ApiRequest,
-            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                if request.allow_tools {
+                    self.execution_calls += 1;
+                    return Ok(vec![
+                        AssistantEvent::TextDelta(
+                            "I continued under the authoritative request and reported the result."
+                                .to_string(),
+                        ),
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+                self.planning_calls += 1;
                 Ok(vec![
                     AssistantEvent::TextDelta(
                         r#"{"acknowledgement":"I will implement and validate the requested change.","active_goal":"implement the change","success_criteria":["works"],"planned_actions":["implement"],"planned_tools":[],"do_not_do":[],"completed":[],"remaining_work":["implement"],"failures":[],"next_action":"implement"}"#.to_string(),
@@ -7891,7 +7910,10 @@ mod tests {
 
         let mut runtime = ConversationRuntime::new(
             Session::new(),
-            MissingAssuranceApi,
+            MissingAssuranceApi {
+                planning_calls: 0,
+                execution_calls: 0,
+            },
             StaticToolExecutor::new(),
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
             vec!["system".to_string()],
@@ -7900,12 +7922,21 @@ mod tests {
         .with_task_assurance(true, 6)
         .with_max_iterations(10);
 
-        let error = runtime
+        let summary = runtime
             .run_turn("implement the change", None)
-            .expect_err("high effort must require review and validation strategies");
-        assert!(error
-            .to_string()
-            .contains("high-effort task checkpoint omitted its assurance plan"));
+            .expect("an invalid assurance plan must not block the task-performing agent");
+
+        assert_eq!(runtime.api_client_mut().planning_calls, 2);
+        assert_eq!(runtime.api_client_mut().execution_calls, 1);
+        assert_eq!(summary.completion_status, CompletionStatus::Completed);
+        assert!(summary.planning_error.as_deref().is_some_and(
+            |error| error.contains("high-effort task checkpoint omitted its assurance plan")
+        ));
+        assert!(summary
+            .task_checkpoint
+            .as_ref()
+            .and_then(|frame| frame.assurance.as_deref())
+            .is_some());
     }
 
     #[test]
@@ -8462,7 +8493,7 @@ A"#;
     }
 
     #[test]
-    fn generic_acknowledgement_stops_before_execution() {
+    fn generic_acknowledgement_reports_planning_failure_and_continues_execution() {
         struct GenericPlanningApi {
             execution_calls: usize,
         }
@@ -8478,7 +8509,12 @@ A"#;
                     ]);
                 }
                 self.execution_calls += 1;
-                Ok(vec![AssistantEvent::MessageStop])
+                Ok(vec![
+                    AssistantEvent::TextDelta(
+                        "The callback review continued under the runtime fallback.".to_string(),
+                    ),
+                    AssistantEvent::MessageStop,
+                ])
             }
         }
 
@@ -8493,15 +8529,272 @@ A"#;
         let mut observed = Vec::new();
         let mut observer = |event| observed.push(event);
 
-        let error = runtime
+        let summary = runtime
             .run_turn_observed("repair the callback", None, Some(&mut observer))
-            .expect_err("generic acknowledgement must fail closed");
+            .expect("a planning-format failure must not block the task agent");
 
-        assert!(error.to_string().contains("generic or protocol-level"));
-        assert_eq!(runtime.api_client_mut().execution_calls, 0);
-        assert!(!observed
-            .iter()
-            .any(|event| matches!(event, RuntimeStreamEvent::TaskAcknowledgement { .. })));
+        assert_eq!(runtime.api_client_mut().execution_calls, 1);
+        assert_eq!(summary.completion_status, CompletionStatus::Completed);
+        assert!(summary
+            .planning_error
+            .as_deref()
+            .is_some_and(|error| error.contains("generic or protocol-level")));
+        assert_eq!(
+            super::user_visible_text(summary.assistant_messages.last().expect("agent answer")),
+            "The callback review continued under the runtime fallback."
+        );
+        assert!(observed.iter().any(|event| matches!(
+            event,
+            RuntimeStreamEvent::TaskAcknowledgement { text }
+                if text.contains("planning did not pass validation")
+        )));
+        assert!(observed.iter().any(|event| matches!(
+            event,
+            RuntimeStreamEvent::ControlInvocation { stage, outcome, error, .. }
+                if stage == "planning"
+                    && outcome == "fallback"
+                    && error.as_deref().is_some_and(|value| value.contains("generic or protocol-level"))
+        )));
+        assert!(observed.iter().any(|event| matches!(
+            event,
+            RuntimeStreamEvent::TaskPlan { phase, frame, .. }
+                if phase == "initial"
+                    && frame.active_goal == "repair the callback"
+                    && frame.planned_tools.is_empty()
+                    && frame.failures.iter().any(|failure| failure.contains("Structured planning unavailable"))
+        )));
+    }
+
+    #[test]
+    fn medium_noncanonical_planned_tool_prose_reports_and_executes_real_tools() {
+        struct NonCanonicalToolPlanApi {
+            planning_calls: usize,
+            execution_calls: usize,
+        }
+
+        impl ApiClient for NonCanonicalToolPlanApi {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                if !request.allow_tools {
+                    self.planning_calls += 1;
+                    return Ok(vec![
+                        AssistantEvent::TextDelta(
+                            r#"{"acknowledgement":"I will update the requested file and verify it.","active_goal":"update the requested file","success_criteria":["the requested change is verified"],"planned_actions":["write the file","verify the result"],"planned_tools":["write_file 或 hashi_file_write"],"do_not_do":["do not change unrelated files"],"completed":[],"remaining_work":["write and verify"],"failures":[],"next_action":"write the file"}"#.to_string(),
+                        ),
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+
+                assert!(
+                    request.system_prompt.iter().any(|part| {
+                        (part.contains("NON-BLOCKING PLANNING FAILURE")
+                            || part.contains("Internal planning did not pass validation"))
+                            && part.contains("write_file 或 hashi_file_write")
+                    }),
+                    "primary prompt did not receive planning diagnostic: {:?}",
+                    request.system_prompt
+                );
+                self.execution_calls += 1;
+                if self.execution_calls == 1 {
+                    return Ok(vec![
+                        AssistantEvent::TextDelta(
+                            "Internal planning failed validation, but I am continuing under the original request."
+                                .to_string(),
+                        ),
+                        AssistantEvent::ToolUse {
+                            id: "write-1".to_string(),
+                            name: "write_file".to_string(),
+                            input: "approved change".to_string(),
+                        },
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+                Ok(vec![
+                    AssistantEvent::TextDelta(
+                        "The requested file change was executed and verified.".to_string(),
+                    ),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            NonCanonicalToolPlanApi {
+                planning_calls: 0,
+                execution_calls: 0,
+            },
+            StaticToolExecutor::new().register("write_file", |input| {
+                assert_eq!(input, "approved change");
+                Ok("written and read back".to_string())
+            }),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_task_planning_enabled(true);
+        let mut observed = Vec::new();
+        let mut observer = |event| observed.push(event);
+
+        let summary = runtime
+            .run_turn_observed("update the requested file", None, Some(&mut observer))
+            .expect("non-canonical planner prose must not stop the primary agent");
+
+        assert_eq!(runtime.api_client_mut().planning_calls, 1);
+        assert_eq!(runtime.api_client_mut().execution_calls, 2);
+        assert_eq!(summary.tool_results.len(), 1);
+        assert_eq!(summary.completion_status, CompletionStatus::Completed);
+        assert_eq!(summary.stop_reason, TurnStopReason::EndTurn);
+        assert!(summary.planning_error.as_deref().is_some_and(|error| {
+            error.contains(
+                "task frame planned_tools contains non-canonical tool prose `write_file 或 hashi_file_write`",
+            )
+        }));
+        assert_eq!(
+            super::user_visible_text(summary.assistant_messages.last().expect("agent answer")),
+            "The requested file change was executed and verified."
+        );
+        assert!(observed.iter().any(|event| matches!(
+            event,
+            RuntimeStreamEvent::ToolEnd { name, is_error, .. }
+                if name == "write_file" && !is_error
+        )));
+    }
+
+    #[test]
+    fn initial_planner_provider_error_is_visible_but_does_not_block_agent() {
+        struct PlannerProviderErrorApi {
+            execution_calls: usize,
+        }
+
+        impl ApiClient for PlannerProviderErrorApi {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                if !request.allow_tools {
+                    return Err(RuntimeError::new(
+                        "planner provider temporarily unavailable",
+                    ));
+                }
+                self.execution_calls += 1;
+                Ok(vec![
+                    AssistantEvent::TextDelta(
+                        "I continued from the authoritative request and completed the check."
+                            .to_string(),
+                    ),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            PlannerProviderErrorApi { execution_calls: 0 },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_task_planning_enabled(true);
+
+        let summary = runtime
+            .run_turn("complete the check", None)
+            .expect("planner provider failure must degrade to advisory state");
+
+        assert_eq!(runtime.api_client_mut().execution_calls, 1);
+        assert_eq!(summary.completion_status, CompletionStatus::Completed);
+        assert!(summary
+            .planning_error
+            .as_deref()
+            .is_some_and(|error| error.contains("planner provider temporarily unavailable")));
+    }
+
+    #[test]
+    fn unresolved_short_choice_plan_falls_back_to_canonical_context_execution() {
+        struct UnresolvedChoiceApi {
+            planning_done: bool,
+            execution_calls: usize,
+        }
+
+        impl ApiClient for UnresolvedChoiceApi {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                if !request.allow_tools && !self.planning_done {
+                    self.planning_done = true;
+                    return Ok(vec![
+                        AssistantEvent::TextDelta(
+                            r#"{"acknowledgement":"I will carry out option A.","active_goal":"A","success_criteria":["option A is completed"],"planned_actions":["apply option A"],"planned_tools":[],"do_not_do":["do not apply another option"],"completed":[],"remaining_work":["apply A"],"failures":[],"next_action":"apply A"}"#.to_string(),
+                        ),
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+                if request.allow_tools {
+                    self.execution_calls += 1;
+                    assert!(request.system_prompt.iter().any(|part| {
+                        part.contains("previous_turn_supplied\":true")
+                            && part.contains("Planning and primary execution")
+                    }));
+                    if self.execution_calls == 1 {
+                        return Ok(vec![
+                            AssistantEvent::ToolUse {
+                                id: "inspect-a".to_string(),
+                                name: "inspect_state".to_string(),
+                                input: "option-a".to_string(),
+                            },
+                            AssistantEvent::MessageStop,
+                        ]);
+                    }
+                    return Ok(vec![
+                        AssistantEvent::TextDelta(
+                            "I resolved A from the preceding options and completed the inspection."
+                                .to_string(),
+                        ),
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+                unreachable!("only the initial planning call should disable tools")
+            }
+        }
+
+        let mut session = Session::new();
+        session
+            .push_user_text("Choose the next action")
+            .expect("previous user turn");
+        session
+            .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "A. Inspect the current state\nB. Cancel".to_string(),
+            }]))
+            .expect("previous assistant turn");
+        let mut runtime = ConversationRuntime::new(
+            session,
+            UnresolvedChoiceApi {
+                planning_done: false,
+                execution_calls: 0,
+            },
+            StaticToolExecutor::new().register("inspect_state", |input| {
+                assert_eq!(input, "option-a");
+                Ok("current state inspected".to_string())
+            }),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_task_planning_enabled(true)
+        .with_max_iterations(6);
+
+        let summary = runtime
+            .run_turn("A", None)
+            .expect("unresolved planning must return control to the persona agent");
+
+        assert_eq!(runtime.api_client_mut().execution_calls, 2);
+        assert_eq!(summary.tool_results.len(), 1);
+        assert_eq!(summary.completion_status, CompletionStatus::Completed);
+        assert_eq!(summary.stop_reason, TurnStopReason::EndTurn);
+        assert!(
+            summary
+                .planning_error
+                .as_deref()
+                .is_some_and(|error| error.contains("canonical immediate previous dialogue")),
+            "unexpected planning diagnostic: {:?}",
+            summary.planning_error
+        );
+        assert!(super::user_visible_text(
+            summary.assistant_messages.last().expect("persona answer")
+        )
+        .contains("resolved A from the preceding options"));
     }
 
     #[test]

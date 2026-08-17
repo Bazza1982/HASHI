@@ -8305,6 +8305,8 @@ impl LiveCli {
                 "stop_reason": summary.stop_reason.as_str(),
                 "task_checkpoint": summary.task_checkpoint,
                 "pending_interaction": summary.pending_interaction,
+                "planning_status": if summary.planning_error.is_some() { "failed" } else if summary.task_checkpoint.is_some() { "succeeded" } else { "disabled" },
+                "planning_error": summary.planning_error,
                 "provider_stop_reason": summary.provider_stop_reason,
                 "usage": {
                     "input_tokens": summary.usage.input_tokens,
@@ -8336,6 +8338,8 @@ impl LiveCli {
                 "stop_reason": summary.stop_reason.as_str(),
                 "task_checkpoint": summary.task_checkpoint,
                 "pending_interaction": summary.pending_interaction,
+                "planning_status": if summary.planning_error.is_some() { "failed" } else if summary.task_checkpoint.is_some() { "succeeded" } else { "disabled" },
+                "planning_error": summary.planning_error,
                 "provider_stop_reason": summary.provider_stop_reason,
                 "auto_compaction": summary.auto_compaction.map(|event| json!({
                     "removed_messages": event.removed_message_count,
@@ -8409,6 +8413,8 @@ impl LiveCli {
                 "stop_reason": summary.stop_reason.as_str(),
                 "task_checkpoint": summary.task_checkpoint,
                 "pending_interaction": summary.pending_interaction,
+                "planning_status": if summary.planning_error.is_some() { "failed" } else if summary.task_checkpoint.is_some() { "succeeded" } else { "disabled" },
+                "planning_error": summary.planning_error,
                 "provider_stop_reason": summary.provider_stop_reason,
                 "auto_compaction": summary.auto_compaction.map(|event| json!({
                     "removed_messages": event.removed_message_count,
