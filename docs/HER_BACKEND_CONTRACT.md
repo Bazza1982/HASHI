@@ -77,13 +77,27 @@ not user intent or new authority, and it is never appended to the persistent ses
 Existing format validation and bounded retries remain fail-safe for providers that
 occasionally return empty or invalid JSON.
 
+TaskFrame validation remains strict, but TaskFrame is not an admission gate for the
+task-performing Agent. If the initial planner exhausts its bounded attempts because of
+a provider, response, schema, semantic-resolution, tool-name or assurance-field error,
+HER records the rejected output, emits fallback telemetry, installs an
+authorization-preserving fallback frame and returns control to the primary Agent. The
+primary Agent continues from the authoritative request and canonical turn context under
+the unchanged runtime permission policy. It must ask the user when that context cannot
+safely resolve a material ambiguity. `planning_status=failed` and the bounded diagnostic
+are exported in JSON, kept in cross-session receipts and made visible beside the primary
+Agent's persona-authored result. A planning or review failure alone never proves that
+task execution failed or succeeded.
+
 Task planning is internal control state. The initial `TaskAcknowledgement` may be
 presented once; later `TaskPlan` revisions remain technical telemetry. Only an explicit
 `TaskCommentary` event may carry model-authored progress. Replans preserve the immutable
 goal and authorization envelope, may not regress verified ledger evidence, use canonical
 tool capabilities from the active registry, and stop after bounded review/no-change
-budgets. Internal parser/reviewer failures are non-actionable technical events unless a
-real permission boundary or user decision is required.
+budgets. Internal parser/reviewer failures are advisory technical events: they are
+reported, but do not replace or suppress the primary Agent's answer. Only a real runtime
+permission boundary, safety boundary or unresolved user decision may prevent the
+corresponding action, and the primary Agent must then report progress and ask the user.
 
 For every Flex turn, the complete canonical turn payload is the user message seen by
 HER's task planner. The authoritative current request is repeated separately as the

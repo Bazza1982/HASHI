@@ -184,6 +184,11 @@ _No changes recorded after the v4.0.0-alpha.2 release-candidate cut._
 
 ### Fixed
 
+- **Non-blocking HER planning boundary** — strict TaskFrame and independent-review
+  validation no longer suppresses the primary Agent when planning exhausts its bounded
+  attempts. HER now continues under the original request and runtime permissions,
+  exposes the planning diagnostic to the user, and preserves it beside TaskFrame and
+  verified execution receipts for fixed/flex continuation.
 - **Long-session HER planner protocol (`0.1.0-hashi.19`)** — preserved the
   complete fixed-session context while moving the planning control boundary to a
   non-persisted trailing envelope and enabling provider-native JSON output. This

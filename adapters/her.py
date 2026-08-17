@@ -238,6 +238,8 @@ class ClawTaskResult:
     estimated_cost: str | None = None
     task_checkpoint: dict[str, Any] | None = None
     pending_interaction: dict[str, Any] | None = None
+    planning_status: str | None = None
+    planning_error: str | None = None
 
 
 def _claw_run_is_incomplete(result: ClawTaskResult) -> bool:
@@ -247,6 +249,31 @@ def _claw_run_is_incomplete(result: ClawTaskResult) -> bool:
         completion_status in _CLAW_INCOMPLETE_STATUSES
         or stop_reason in _CLAW_INCOMPLETE_STOP_REASONS
     )
+
+
+def _claw_planning_failure_notice(prompt: str, response_text: str) -> str:
+    """Guarantee a concise user-visible record of non-blocking plan failure."""
+
+    normalized = response_text.casefold()
+    if (
+        "planning failure" in normalized
+        or "planning validation failed" in normalized
+        or "planning failed validation" in normalized
+        or "规划失败" in response_text
+        or "规划没有通过" in response_text
+        or "规划未通过" in response_text
+    ):
+        return response_text
+    contains_chinese = any("\u4e00" <= char <= "\u9fff" for char in prompt)
+    notice = (
+        "⚠️ **内部规划报告：** 本轮 TaskFrame planning 未通过校验；"
+        "主 Agent 已按原始请求与既有权限继续执行，以上结果来自实际执行而非该计划。"
+        if contains_chinese
+        else "⚠️ **Internal planning report:** TaskFrame planning did not pass validation. "
+        "The primary agent continued under the original request and existing permissions; "
+        "the result above comes from actual execution, not from the rejected plan."
+    )
+    return f"{response_text.rstrip()}\n\n{notice}" if response_text.strip() else notice
 
 
 def _claw_tool_name(item: Any) -> str:
@@ -2196,6 +2223,8 @@ def run_claw_task(
         pending_interaction=dict(data["pending_interaction"])
         if isinstance(data.get("pending_interaction"), Mapping)
         else None,
+        planning_status=str(data.get("planning_status") or "").strip() or None,
+        planning_error=str(data.get("planning_error") or "").strip() or None,
     )
 
 
@@ -4630,6 +4659,15 @@ RUNTIME FACTS (quoted, read-only)
                     "persona_renderer_output_blocked": True,
                 }
             )
+        if str(result.planning_status or "").strip().lower() == "failed":
+            response_text = _claw_planning_failure_notice(prompt, response_text)
+            fallback_metadata.update(
+                {
+                    "planning_status": "failed",
+                    "planning_error": str(result.planning_error or "")[:2_000],
+                    "planning_failure_user_visible": True,
+                }
+            )
         if habit_config.enabled:
             self._schedule_habit_meditation(
                 job_id=meditation_job_id,
@@ -4665,6 +4703,8 @@ RUNTIME FACTS (quoted, read-only)
                 "her_resumed_session": bool(isolated_resume),
                 "pending_interaction": result.pending_interaction,
                 "task_checkpoint": result.task_checkpoint,
+                "planning_status": result.planning_status or "unknown",
+                "planning_error": result.planning_error or "",
                 "execution_ledger": _claw_compact_execution_ledger(result),
                 **(
                     {
@@ -4996,6 +5036,9 @@ RUNTIME FACTS (quoted, read-only)
             pending_interaction=dict(parsed["pending_interaction"])
             if isinstance(parsed.get("pending_interaction"), Mapping)
             else None,
+            planning_status=str(parsed.get("planning_status") or "").strip()
+            or None,
+            planning_error=str(parsed.get("planning_error") or "").strip() or None,
         )
 
     async def _communicate_with_activity(
