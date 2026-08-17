@@ -101,19 +101,22 @@ Habit files contain a short title, compact natural-language metadata, and an
 actionable body. Retrieval scores only the title and metadata. The body is read
 only for the small set of matches selected for the current request.
 
-Matched records are appended to the HER task input as advisory internal planning
-context. They are explicitly subordinate to the current user request, policies,
-permissions, and exact-output requirements.
+Matched records are rendered into a bounded, request-scoped system advisory
+channel used by both TaskFrame planning and primary execution. They are never
+appended to the HER user input, persisted session message, or fallback
+`active_goal`, and are explicitly subordinate to the current user request,
+policies, permissions, and exact-output requirements. Ambient advisory-channel
+values are discarded before the adapter installs its own selection.
 
 Retrieval and use are deliberately different observations. Recording a selected
 Habit ID proves retrieval only when the same ID is present in the executed
-planning context. It does not prove that the model followed the Habit. Behavioral
+system advisory context. It does not prove that the model followed the Habit. Behavioral
 use needs its own predeclared, observable next-request output or tool-side-effect
 assertion. A conflicting Habit must lose to the current request.
 
 ## Execution and observable evidence
 
-The main HER run is unchanged except for the optional planning context. After a
+The main HER run is unchanged except for the optional system advisory. After a
 completed run, Meditation receives a bounded trace made from evidence HER can
 actually expose. A HER timeout, non-zero exit, or cancellation after execution
 started can also be reflected on; a pre-execution backend discovery failure
