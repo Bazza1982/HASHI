@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import adapters.her as her_adapter_module
 from adapters.claw_cli import ClawCLIAdapter
 from adapters.her import (
     ClawBinaryNotFound,
@@ -267,9 +268,7 @@ def test_tool_gateway_settings_disable_unavailable_native_web_search(
 
     adapter._prepare_tool_gateway()
 
-    settings_path = (
-        tmp_path / "backend_state" / "her_config" / "settings.json"
-    )
+    settings_path = tmp_path / "backend_state" / "her_config" / "settings.json"
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     assert settings["permissions"]["deniedTools"] == ["WebSearch"]
     assert "hashi-tools" in settings["mcpServers"]
@@ -638,7 +637,7 @@ async def test_claw_cadence_finish_supersedes_only_latest_pending_commentary():
 
 
 @pytest.mark.asyncio
-async def test_medium_claw_controller_audits_but_suppresses_progress_commentary():
+async def test_disabled_claw_controller_audits_but_suppresses_progress_commentary():
     received = []
 
     async def callback(event):
@@ -664,7 +663,7 @@ async def test_medium_claw_controller_audits_but_suppresses_progress_commentary(
         KIND_COMMENTARY,
     ]
     assert received[1].delivery_class == DELIVERY_INTERNAL
-    assert "suppressed_reason=effort_progress_disabled" in received[1].detail
+    assert "suppressed_reason=commentary_cadence_disabled" in received[1].detail
 
 
 @pytest.mark.asyncio
@@ -985,9 +984,7 @@ def test_planning_failure_notice_is_visible_in_user_language_and_not_duplicated(
     assert "continued under the original request" in english
 
     already_visible = "Internal planning failed validation, but execution continued."
-    assert (
-        _claw_planning_failure_notice("continue", already_visible) == already_visible
-    )
+    assert _claw_planning_failure_notice("continue", already_visible) == already_visible
 
 
 def test_compact_execution_ledger_distinguishes_verified_and_unverified_actions():
@@ -1009,7 +1006,11 @@ def test_compact_execution_ledger_distinguishes_verified_and_unverified_actions(
         tool_results=[
             {"tool_use_id": "read-1", "output": "state", "is_error": False},
             {"tool_use_id": "write-1", "output": "written", "is_error": False},
-            {"tool_use_id": "send-1", "output": "transport unavailable", "is_error": True},
+            {
+                "tool_use_id": "send-1",
+                "output": "transport unavailable",
+                "is_error": True,
+            },
         ],
     )
 
@@ -1025,7 +1026,9 @@ def test_compact_execution_ledger_distinguishes_verified_and_unverified_actions(
 
 
 @pytest.mark.asyncio
-async def test_completed_adapter_path_blocks_dangling_dsml_and_marks_incomplete(tmp_path):
+async def test_completed_adapter_path_blocks_dangling_dsml_and_marks_incomplete(
+    tmp_path,
+):
     cfg = SimpleNamespace(
         name="test",
         workspace_dir=tmp_path,
@@ -1119,7 +1122,9 @@ async def test_completed_adapter_path_exposes_nonblocking_planning_failure(tmp_p
     assert "实际工具执行与状态回读均已完成" in response.text
     assert "内部规划报告" in response.text
     assert response.stream_metadata["planning_status"] == "failed"
-    assert "write_file 或 hashi_file_write" in response.stream_metadata["planning_error"]
+    assert (
+        "write_file 或 hashi_file_write" in response.stream_metadata["planning_error"]
+    )
     assert response.stream_metadata["planning_failure_user_visible"] is True
 
 
@@ -3163,6 +3168,87 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
     )
     assert (tmp_path / "claw_exec_events.jsonl").stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "claw_control_events.jsonl").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_medium_adapter_delivers_native_tool_turn_commentary(
+    tmp_path, monkeypatch
+):
+    fake = _write_exe(
+        tmp_path / "claw",
+        """
+        #!/usr/bin/env python3
+        import json, sys, time
+        if "--help" in sys.argv:
+            print("Usage: claw [--output-format text|json|stream-json] prompt TEXT")
+        elif sys.argv[1] == "version":
+            print(json.dumps({"kind": "version", "version": "0.1.0", "git_sha": "fake"}))
+        else:
+            events = [
+                {"kind": "run_started", "model": "deepseek/test", "session_id": "medium-commentary"},
+                {"kind": "task_acknowledgement", "event_id": "task-acknowledgement:1",
+                 "text": "Sunny will inspect the request. ☀️"},
+                {"kind": "assistant_commentary", "event_id": "assistant-commentary:1",
+                 "phase": "execution", "iteration": 1,
+                 "text": "Sunny completed the inspection and is validating it. ☀️"},
+                {"kind": "run_finished", "message": "verified final answer", "model": "deepseek/test",
+                 "session_id": "medium-commentary", "iterations": 1,
+                 "completion_status": "completed", "stop_reason": "end_turn",
+                 "tool_uses": [], "tool_results": [],
+                 "usage": {"input_tokens": 5, "output_tokens": 7}},
+            ]
+            for event in events:
+                print(json.dumps(event), flush=True)
+                if event["kind"] == "assistant_commentary":
+                    time.sleep(0.05)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={"claw_binary_path": str(fake), "effort": "medium"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    observed_enablement = []
+    native_controller = her_adapter_module._HERStreamCadenceController
+
+    def fast_controller(*args, **kwargs):
+        observed_enablement.append(kwargs["progress_enabled"])
+        kwargs.update(
+            first_update_s=0.001,
+            target_interval_s=0.002,
+            hard_interval_s=0.003,
+            activity_grace_s=0,
+        )
+        return native_controller(*args, **kwargs)
+
+    monkeypatch.setattr(
+        her_adapter_module,
+        "_HERStreamCadenceController",
+        fast_controller,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    assert await adapter.initialize() is True
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    response = await adapter.generate_response(
+        "inspect request",
+        "req-medium-commentary",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is True
+    assert observed_enablement == [True]
+    assert [
+        event.summary
+        for event in events
+        if event.kind == KIND_COMMENTARY
+        and event.delivery_class == DELIVERY_USER_COMMENTARY
+    ] == ["Sunny completed the inspection and is validating it. ☀️"]
 
 
 @pytest.mark.asyncio
