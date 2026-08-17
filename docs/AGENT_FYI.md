@@ -38,7 +38,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/usecomputer [on|off|status|examples|task]`: load managed GUI-aware operating guidance. This is a unified shortcut for desktop/browser/Windows computer use, but it does not force GUI when a better non-GUI path exists.
 - `/browser [status|examples|1-4 task]`: run an internet task with a selected route: HASHI headless browser, CLI-native browsing, Brave search, or the logged-in HASHI browser extension.
 - `/exp <task>`: consult the context-specific EXP guidebooks under `exp/` before running a task.
-- `/skill`: browse and apply standard built-in or custom instruction Skills.
+- `/skill`: browse, apply, validate, enable/disable, install/link, and safely uninstall standard instruction Skills.
 - `/mode [fixed|flex|wrapper|audit|dual-brain]`: inspect or switch execution
   mode. `/mode memory+` is a compatibility alias that enables continuity
   without changing the current mode.
@@ -137,7 +137,8 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 ## Skills System
 - Skills live under `skills/<kebab-case-name>/SKILL.md` and contain portable instructions plus optional `scripts/`, `references/`, and `assets/` resources.
 - `name` and `description` are required Agent Skills frontmatter. Standard optional metadata fields are accepted.
-- `/skill` lists and applies instruction packages only; it has no action, toggle, backend-routing, cron, or heartbeat package types.
+- `/skill` lists, applies, and maintains instruction packages. Per-agent package enable/disable state is lifecycle metadata, not a legacy toggle Skill type.
+- Local packages can be validated and copied or linked. Only HASHI-managed installs/links can be removed; repository packages are protected, and structured Job references block uninstall.
 - `/jobs` owns cron, heartbeat, nudge, and deterministic automation. Debug, recall state, and Dream are runtime controls; `/EXP` stays independent.
 - Native HER/Claw Skill discovery and execution are disabled. HASHI is the only live Skill owner.
 

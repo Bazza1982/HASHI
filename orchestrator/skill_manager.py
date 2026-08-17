@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
-from dataclasses import dataclass
+import shutil
+import tempfile
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +24,20 @@ class SkillDefinition:
     description: str
     body: str
     skill_dir: Path
+    license: str | None = None
+    compatibility: str | None = None
+    metadata: dict[str, str] = field(default_factory=dict)
+    allowed_tools: str | None = None
+    source_type: str = "project"
+    source: str | None = None
+    scope: str = "project"
+    managed: bool = False
+    installed_at: str | None = None
+    content_sha256: str | None = None
+
+    @property
+    def version(self) -> str | None:
+        return self.metadata.get("version") or None
 
 
 class SkillValidationError(ValueError):
@@ -42,10 +60,14 @@ class SkillManager:
     RUNTIME_TOGGLE_IDS = frozenset({"debug", "recall"})
 
     def __init__(self, project_root: Path, tasks_path: Path):
-        self.project_root = project_root
-        self.skills_dir = project_root / "skills"
-        self.tasks_path = tasks_path
-        self.active_heartbeats_path = project_root / "managed_active_heartbeats.json"
+        self.project_root = Path(project_root)
+        self.skills_dir = self.project_root / "skills"
+        self.tasks_path = Path(tasks_path)
+        self.active_heartbeats_path = (
+            self.project_root / "managed_active_heartbeats.json"
+        )
+        self.skill_registry_path = self.project_root / "state" / "skill_registry.json"
+        self.skill_recovery_dir = self.project_root / "state" / "skill_recovery"
         self._skill_validation_errors: list[str] = []
 
     def _now(self) -> str:
@@ -54,27 +76,35 @@ class SkillManager:
     def _read_text(self, path: Path) -> str:
         return path.read_text(encoding="utf-8-sig")
 
-    def _parse_frontmatter(self, text: str, *, source: Path) -> tuple[dict[str, Any], str]:
+    def _parse_frontmatter(
+        self, text: str, *, source: Path
+    ) -> tuple[dict[str, Any], str]:
         lines = (text or "").splitlines()
         if not lines or lines[0].strip() != "---":
-            raise SkillValidationError(f"{source}: SKILL.md must start with YAML frontmatter")
+            raise SkillValidationError(
+                f"{source}: SKILL.md must start with YAML frontmatter"
+            )
         try:
             closing_index = next(
-                index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"
+                index
+                for index, line in enumerate(lines[1:], start=1)
+                if line.strip() == "---"
             )
         except StopIteration as exc:
-            raise SkillValidationError(f"{source}: YAML frontmatter is not closed") from exc
+            raise SkillValidationError(
+                f"{source}: YAML frontmatter is not closed"
+            ) from exc
 
         try:
             parsed = yaml.safe_load("\n".join(lines[1:closing_index])) or {}
         except yaml.YAMLError as exc:
-            raise SkillValidationError(f"{source}: invalid YAML frontmatter: {exc}") from exc
+            raise SkillValidationError(
+                f"{source}: invalid YAML frontmatter: {exc}"
+            ) from exc
         if not isinstance(parsed, dict):
             raise SkillValidationError(f"{source}: YAML frontmatter must be a mapping")
 
-        unknown = sorted(
-            str(key) for key in set(parsed) - self.SKILL_FRONTMATTER_KEYS
-        )
+        unknown = sorted(str(key) for key in set(parsed) - self.SKILL_FRONTMATTER_KEYS)
         if unknown:
             raise SkillValidationError(
                 f"{source}: unsupported frontmatter keys: {', '.join(str(key) for key in unknown)}"
@@ -82,7 +112,9 @@ class SkillManager:
         for key in ("name", "description"):
             value = parsed.get(key)
             if not isinstance(value, str) or not value.strip():
-                raise SkillValidationError(f"{source}: `{key}` must be a non-empty string")
+                raise SkillValidationError(
+                    f"{source}: `{key}` must be a non-empty string"
+                )
             parsed[key] = value.strip()
 
         optional_strings = ("license", "allowed-tools")
@@ -93,7 +125,9 @@ class SkillManager:
         if "compatibility" in parsed:
             compatibility = parsed["compatibility"]
             if not isinstance(compatibility, str):
-                raise SkillValidationError(f"{source}: `compatibility` must be a string")
+                raise SkillValidationError(
+                    f"{source}: `compatibility` must be a string"
+                )
             if len(compatibility) > 500:
                 raise SkillValidationError(
                     f"{source}: `compatibility` must be 500 characters or fewer"
@@ -111,12 +145,21 @@ class SkillManager:
 
         return parsed, "\n".join(lines[closing_index + 1 :]).strip()
 
-    def _load_skill_definition(self, skill_dir: Path) -> SkillDefinition:
+    def _load_skill_definition(
+        self,
+        skill_dir: Path,
+        *,
+        registry_entry: dict[str, Any] | None = None,
+    ) -> SkillDefinition:
         skill_md = skill_dir / "SKILL.md"
-        frontmatter, body = self._parse_frontmatter(self._read_text(skill_md), source=skill_md)
+        frontmatter, body = self._parse_frontmatter(
+            self._read_text(skill_md), source=skill_md
+        )
         skill_id = frontmatter["name"]
         if len(skill_id) > 64:
-            raise SkillValidationError(f"{skill_md}: `name` must be 64 characters or fewer")
+            raise SkillValidationError(
+                f"{skill_md}: `name` must be 64 characters or fewer"
+            )
         if not self.SKILL_NAME_PATTERN.fullmatch(skill_id):
             raise SkillValidationError(
                 f"{skill_md}: `name` must be lowercase kebab-case (letters, digits, hyphens)"
@@ -130,17 +173,54 @@ class SkillManager:
                 f"{skill_md}: `description` must be 1024 characters or fewer"
             )
         if not body:
-            raise SkillValidationError(f"{skill_md}: instruction body must not be empty")
+            raise SkillValidationError(
+                f"{skill_md}: instruction body must not be empty"
+            )
+        registry_entry = registry_entry if isinstance(registry_entry, dict) else {}
+        if registry_entry:
+            source_type = str(registry_entry.get("source_type") or "installed")
+            source = str(registry_entry.get("source") or skill_dir)
+            scope = str(registry_entry.get("scope") or "project")
+            managed = source_type in {"installed", "linked"}
+            installed_at = str(registry_entry.get("installed_at") or "") or None
+            content_sha256 = str(registry_entry.get("content_sha256") or "") or None
+        elif skill_dir.is_symlink():
+            source_type = "linked"
+            try:
+                source = str(skill_dir.resolve(strict=True))
+            except OSError:
+                source = str(skill_dir)
+            scope = "project"
+            managed = False
+            installed_at = None
+            content_sha256 = None
+        else:
+            source_type = "project"
+            source = str(skill_dir)
+            scope = "project"
+            managed = False
+            installed_at = None
+            content_sha256 = None
         return SkillDefinition(
             id=skill_id,
             name=skill_id,
             description=frontmatter["description"],
             body=body,
             skill_dir=skill_dir,
+            license=frontmatter.get("license"),
+            compatibility=frontmatter.get("compatibility"),
+            metadata=dict(frontmatter.get("metadata") or {}),
+            allowed_tools=frontmatter.get("allowed-tools"),
+            source_type=source_type,
+            source=source,
+            scope=scope,
+            managed=managed,
+            installed_at=installed_at,
+            content_sha256=content_sha256,
         )
 
     def _skill_state_path(self, workspace_dir: Path) -> Path:
-        return workspace_dir / "skill_state.json"
+        return Path(workspace_dir) / "skill_state.json"
 
     def _load_json(self, path: Path, default: Any) -> Any:
         if not path.exists():
@@ -152,11 +232,44 @@ class SkillManager:
 
     def _save_json(self, path: Path, payload: Any):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8"
+        )
+
+    def _load_skill_registry(self) -> dict[str, Any]:
+        payload = self._load_json(
+            self.skill_registry_path, {"version": 1, "skills": {}}
+        )
+        if not isinstance(payload, dict):
+            return {"version": 1, "skills": {}}
+        entries = payload.get("skills")
+        if not isinstance(entries, dict):
+            entries = {}
+        return {"version": 1, "skills": dict(entries)}
+
+    def _save_skill_registry(self, payload: dict[str, Any]) -> None:
+        """Atomically persist install provenance without touching Skill packages."""
+
+        self.skill_registry_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.skill_registry_path.with_name(
+            f".{self.skill_registry_path.name}.{uuid4().hex}.tmp"
+        )
+        try:
+            temporary.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, self.skill_registry_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def list_skills(self) -> list[SkillDefinition]:
+        registry_entries = self._load_skill_registry().get("skills", {})
         if not self.skills_dir.exists():
-            self._skill_validation_errors = []
+            self._skill_validation_errors = [
+                f"Managed Skill `{skill_id}` is missing from {self.skills_dir}"
+                for skill_id in sorted(registry_entries)
+            ]
             return []
         skills: list[SkillDefinition] = []
         errors: list[str] = []
@@ -165,16 +278,38 @@ class SkillManager:
             if not skill_md.exists():
                 continue
             try:
-                skills.append(self._load_skill_definition(skill_dir))
+                skills.append(
+                    self._load_skill_definition(
+                        skill_dir,
+                        registry_entry=registry_entries.get(skill_dir.name),
+                    )
+                )
             except (OSError, UnicodeError, SkillValidationError) as exc:
                 errors.append(str(exc))
                 continue
+        loaded_ids = {skill.id for skill in skills}
+        for skill_id in sorted(set(registry_entries) - loaded_ids):
+            expected = self.skills_dir / skill_id
+            if not expected.exists():
+                errors.append(f"Managed Skill `{skill_id}` is missing from {expected}")
         self._skill_validation_errors = errors
         return skills
 
     def skill_validation_errors(self) -> list[str]:
         self.list_skills()
         return list(self._skill_validation_errors)
+
+    def validate_skill(self, skill_id: str) -> tuple[bool, list[str]]:
+        canonical = self._canonical_skill_id(skill_id)
+        skill_dir = self.skills_dir / canonical
+        if not skill_dir.is_dir():
+            return False, [f"Skill package is missing: {skill_dir}"]
+        registry_entry = self._load_skill_registry().get("skills", {}).get(canonical)
+        try:
+            self._load_skill_definition(skill_dir, registry_entry=registry_entry)
+        except (OSError, UnicodeError, SkillValidationError) as exc:
+            return False, [str(exc)]
+        return True, []
 
     def _canonical_skill_id(self, value: str) -> str:
         return (value or "").strip().lower().replace("_", "-")
@@ -185,6 +320,315 @@ class SkillManager:
             if skill.id == wanted:
                 return skill
         return None
+
+    def skill_callback_key(self, skill_id: str) -> str:
+        canonical = self._canonical_skill_id(skill_id)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+    def get_skill_by_callback_key(self, callback_key: str) -> SkillDefinition | None:
+        matches = [
+            skill
+            for skill in self.list_skills()
+            if self.skill_callback_key(skill.id) == str(callback_key or "")
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def get_disabled_skill_ids(self, workspace_dir: Path) -> set[str]:
+        state = self._load_json(self._skill_state_path(workspace_dir), {})
+        disabled = state.get("disabled_skills", {}) if isinstance(state, dict) else {}
+        if isinstance(disabled, list):
+            raw_ids = {str(item) for item in disabled}
+        elif isinstance(disabled, dict):
+            raw_ids = {str(key) for key, value in disabled.items() if value}
+        else:
+            raw_ids = set()
+        return {self._canonical_skill_id(item) for item in raw_ids}
+
+    def is_skill_enabled(self, workspace_dir: Path, skill_id: str) -> bool:
+        return self._canonical_skill_id(skill_id) not in self.get_disabled_skill_ids(
+            workspace_dir
+        )
+
+    def set_skill_enabled(
+        self,
+        workspace_dir: Path,
+        skill_id: str,
+        *,
+        enabled: bool,
+        actor: str = "user",
+    ) -> tuple[bool, str]:
+        skill = self.get_skill(skill_id)
+        if skill is None:
+            return False, f"Unknown Skill: {skill_id}"
+        state_path = self._skill_state_path(workspace_dir)
+        state = self._load_json(state_path, {})
+        if not isinstance(state, dict):
+            state = {}
+        disabled = state.get("disabled_skills", {})
+        if not isinstance(disabled, dict):
+            disabled = {}
+        if enabled:
+            disabled.pop(skill.id, None)
+        else:
+            disabled[skill.id] = {
+                "disabled_at": self._now(),
+                "disabled_by": actor,
+            }
+        state["disabled_skills"] = disabled
+        self._save_json(state_path, state)
+        return (
+            True,
+            f"Skill '{skill.id}' {'enabled' if enabled else 'disabled'} for this agent.",
+        )
+
+    def skill_resource_counts(self, skill: SkillDefinition) -> dict[str, int]:
+        counts = {"scripts": 0, "references": 0, "assets": 0, "other": 0}
+        category_roots = {
+            category: skill.skill_dir / category
+            for category in ("scripts", "references", "assets")
+        }
+        for category, root in category_roots.items():
+            if not root.is_dir():
+                continue
+            for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+                base = Path(dirpath)
+                dirnames[:] = [
+                    name for name in dirnames if not (base / name).is_symlink()
+                ]
+                counts[category] += len(filenames)
+        known_roots = set(category_roots.values())
+        try:
+            for child in skill.skill_dir.iterdir():
+                if child in known_roots or child.name == "SKILL.md":
+                    continue
+                counts["other"] += 1
+        except OSError:
+            pass
+        return counts
+
+    def skill_dependencies(
+        self,
+        skill_id: str,
+        *,
+        enabled_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        wanted = self._canonical_skill_id(skill_id)
+        dependencies: list[dict[str, Any]] = []
+        tasks = self._load_tasks()
+        job_groups = {
+            "heartbeat": [
+                *tasks.get("heartbeats", []),
+                *self._load_active_heartbeats(),
+            ],
+            "cron": tasks.get("crons", []),
+            "nudge": tasks.get("nudges", []),
+        }
+        for kind, jobs in job_groups.items():
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                enabled = bool(job.get("enabled", False))
+                if enabled_only and not enabled:
+                    continue
+                action = str(job.get("action") or "")
+                if ":" not in action:
+                    continue
+                action_kind, action_target = action.split(":", 1)
+                if action_kind not in {"skill", "automation"}:
+                    continue
+                if self._canonical_skill_id(action_target) != wanted:
+                    continue
+                dependencies.append(
+                    {
+                        "kind": kind,
+                        "id": str(job.get("id") or "unknown"),
+                        "agent": str(job.get("agent") or "unknown"),
+                        "enabled": enabled,
+                        "action": action,
+                    }
+                )
+        return dependencies
+
+    def can_uninstall_skill(self, skill: SkillDefinition) -> bool:
+        return skill.source_type in {"installed", "linked"}
+
+    def _package_digest(self, package_dir: Path) -> str:
+        digest = hashlib.sha256()
+        files: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(package_dir, followlinks=False):
+            base = Path(dirpath)
+            linked_directories = [
+                name for name in dirnames if (base / name).is_symlink()
+            ]
+            if linked_directories:
+                raise SkillValidationError(
+                    f"{base / linked_directories[0]}: symbolic links are not allowed in copied packages"
+                )
+            for filename in filenames:
+                path = base / filename
+                if path.is_symlink():
+                    raise SkillValidationError(
+                        f"{path}: symbolic links are not allowed in copied packages"
+                    )
+                files.append(path)
+        for path in sorted(
+            files, key=lambda item: item.relative_to(package_dir).as_posix()
+        ):
+            relative = path.relative_to(package_dir).as_posix()
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            with path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    def install_skill(
+        self,
+        source: str | Path,
+        *,
+        link: bool = False,
+        actor: str = "user",
+    ) -> tuple[bool, str, SkillDefinition | None]:
+        raw_source = str(source or "").strip().strip("\"'")
+        if not raw_source:
+            return False, "A local Skill package directory is required.", None
+        source_path = Path(raw_source).expanduser()
+        if not source_path.is_absolute():
+            source_path = self.project_root / source_path
+        try:
+            source_path = source_path.resolve(strict=True)
+        except OSError as exc:
+            return False, f"Skill source is unavailable: {exc}", None
+        if not source_path.is_dir():
+            return False, f"Skill source is not a directory: {source_path}", None
+        try:
+            source_skill = self._load_skill_definition(source_path)
+            content_sha256 = self._package_digest(source_path)
+        except (OSError, UnicodeError, SkillValidationError) as exc:
+            return False, f"Skill package validation failed: {exc}", None
+
+        destination = self.skills_dir / source_skill.id
+        if destination.exists() or destination.is_symlink():
+            return False, f"Skill '{source_skill.id}' already exists.", None
+        self.skills_dir.mkdir(parents=True, exist_ok=True)
+        registry = self._load_skill_registry()
+        if source_skill.id in registry["skills"]:
+            return (
+                False,
+                f"Skill '{source_skill.id}' already has a registry entry.",
+                None,
+            )
+
+        source_type = "linked" if link else "installed"
+        registry_entry = {
+            "source_type": source_type,
+            "source": str(source_path),
+            "scope": "project",
+            "installed_at": self._now(),
+            "installed_by": actor,
+            "content_sha256": content_sha256,
+        }
+        temporary_root: Path | None = None
+        try:
+            if link:
+                temporary_link = self.skills_dir / f".link-{uuid4().hex}"
+                temporary_link.symlink_to(source_path, target_is_directory=True)
+                os.replace(temporary_link, destination)
+            else:
+                temporary_root = Path(
+                    tempfile.mkdtemp(prefix=".install-", dir=self.skills_dir)
+                )
+                staged_package = temporary_root / source_skill.id
+                shutil.copytree(source_path, staged_package, symlinks=False)
+                self._load_skill_definition(staged_package)
+                os.replace(staged_package, destination)
+            registry["skills"][source_skill.id] = registry_entry
+            self._save_skill_registry(registry)
+        except Exception as exc:
+            if destination.is_symlink():
+                destination.unlink(missing_ok=True)
+            elif destination.exists():
+                rollback_root = self.skill_recovery_dir / "failed-installs"
+                rollback_root.mkdir(parents=True, exist_ok=True)
+                destination.rename(
+                    rollback_root / f"{source_skill.id}-{uuid4().hex[:8]}"
+                )
+            return False, f"Skill installation failed: {exc}", None
+        finally:
+            if temporary_root is not None:
+                shutil.rmtree(temporary_root, ignore_errors=True)
+
+        installed = self.get_skill(source_skill.id)
+        if installed is None:
+            return (
+                False,
+                f"Skill '{source_skill.id}' installed but failed final validation.",
+                None,
+            )
+        action = "linked" if link else "installed"
+        return True, f"Skill '{source_skill.id}' {action} successfully.", installed
+
+    def uninstall_skill(
+        self,
+        skill_id: str,
+    ) -> tuple[bool, str, Path | None]:
+        skill = self.get_skill(skill_id)
+        if skill is None:
+            return False, f"Unknown Skill: {skill_id}", None
+        if not self.can_uninstall_skill(skill):
+            return (
+                False,
+                f"Skill '{skill.id}' is a protected project package; disable it instead.",
+                None,
+            )
+        dependencies = self.skill_dependencies(skill.id)
+        if dependencies:
+            labels = ", ".join(item["id"] for item in dependencies[:5])
+            if len(dependencies) > 5:
+                labels += f", +{len(dependencies) - 5} more"
+            return (
+                False,
+                f"Skill '{skill.id}' is still referenced by Jobs: {labels}.",
+                None,
+            )
+
+        registry = self._load_skill_registry()
+        old_entry = registry["skills"].pop(skill.id, None)
+        recovery_path: Path | None = None
+        linked_target: Path | None = None
+        try:
+            if skill.skill_dir.is_symlink():
+                linked_target = skill.skill_dir.resolve(strict=False)
+                skill.skill_dir.unlink()
+            else:
+                self.skill_recovery_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                recovery_path = self.skill_recovery_dir / (
+                    f"{skill.id}-{timestamp}-{uuid4().hex[:8]}"
+                )
+                skill.skill_dir.rename(recovery_path)
+            self._save_skill_registry(registry)
+        except Exception as exc:
+            if linked_target is not None and not skill.skill_dir.exists():
+                skill.skill_dir.symlink_to(linked_target, target_is_directory=True)
+            elif (
+                recovery_path is not None
+                and recovery_path.exists()
+                and not skill.skill_dir.exists()
+            ):
+                recovery_path.rename(skill.skill_dir)
+            if old_entry is not None:
+                registry["skills"][skill.id] = old_entry
+            return False, f"Skill uninstall failed: {exc}", None
+
+        if skill.source_type == "linked":
+            return True, f"Skill '{skill.id}' unlinked; source files were kept.", None
+        return (
+            True,
+            f"Skill '{skill.id}' uninstalled to the recovery area.",
+            recovery_path,
+        )
 
     def get_active_toggle_ids(self, workspace_dir: Path) -> set[str]:
         state = self._load_json(self._skill_state_path(workspace_dir), {})
@@ -239,7 +683,9 @@ class SkillManager:
         ]
         body = (skill.body or "").strip()
         if body:
-            preview = body if len(body) <= 700 else body[:700].rstrip() + "\n\n[truncated]"
+            preview = (
+                body if len(body) <= 700 else body[:700].rstrip() + "\n\n[truncated]"
+            )
             lines.extend(["", preview])
         return "\n".join(lines)
 
@@ -265,7 +711,9 @@ class SkillManager:
         )
 
     def _load_tasks(self) -> dict[str, Any]:
-        tasks = self._load_json(self.tasks_path, {"version": 1, "heartbeats": [], "crons": [], "nudges": []})
+        tasks = self._load_json(
+            self.tasks_path, {"version": 1, "heartbeats": [], "crons": [], "nudges": []}
+        )
         tasks.setdefault("heartbeats", [])
         tasks.setdefault("crons", [])
         tasks.setdefault("nudges", [])
@@ -284,10 +732,9 @@ class SkillManager:
     def _is_managed_active_heartbeat(self, job: dict[str, Any]) -> bool:
         if not isinstance(job, dict):
             return False
-        return (
-            job.get("managed_by") == "active-command"
-            or str(job.get("id", "")).endswith("-active-heartbeat")
-        )
+        return job.get("managed_by") == "active-command" or str(
+            job.get("id", "")
+        ).endswith("-active-heartbeat")
 
     def _load_active_heartbeats(self) -> list[dict[str, Any]]:
         payload = self._load_json(self.active_heartbeats_path, {"heartbeats": []})
@@ -303,11 +750,15 @@ class SkillManager:
     def _ensure_active_heartbeats_migrated(self):
         tasks = self._load_tasks()
         heartbeats = list(tasks.get("heartbeats", []))
-        migrated = [dict(job) for job in heartbeats if self._is_managed_active_heartbeat(job)]
+        migrated = [
+            dict(job) for job in heartbeats if self._is_managed_active_heartbeat(job)
+        ]
         if not migrated:
             return
 
-        remaining = [job for job in heartbeats if not self._is_managed_active_heartbeat(job)]
+        remaining = [
+            job for job in heartbeats if not self._is_managed_active_heartbeat(job)
+        ]
         existing = {job.get("id"): dict(job) for job in self._load_active_heartbeats()}
         for job in migrated:
             existing[job.get("id")] = job
@@ -316,7 +767,9 @@ class SkillManager:
         self._save_tasks(tasks)
         self._save_active_heartbeats(list(existing.values()))
 
-    def list_jobs(self, kind: str, agent_name: str | None = None) -> list[dict[str, Any]]:
+    def list_jobs(
+        self, kind: str, agent_name: str | None = None
+    ) -> list[dict[str, Any]]:
         self._ensure_active_heartbeats_migrated()
         tasks = self._load_tasks()
         key = self._task_key_for_kind(kind)
@@ -384,10 +837,7 @@ class SkillManager:
             job
             for job in crons
             if job.get("agent") == agent_name
-            and (
-                job.get("id") == legacy_id
-                or job.get("action") == "skill:dream"
-            )
+            and (job.get("id") == legacy_id or job.get("action") == "skill:dream")
         ]
         enabled_legacy = [job for job in legacy_jobs if bool(job.get("enabled"))]
         canonical = next((job for job in crons if job.get("id") == new_task_id), None)
@@ -443,7 +893,13 @@ class SkillManager:
 
     def describe_jobs(self, kind: str, agent_name: str | None = None) -> str:
         jobs = self.list_jobs(kind, agent_name=agent_name)
-        title = "Cron Jobs" if kind == "cron" else "Nudge Jobs" if kind == "nudge" else "Heartbeat Jobs"
+        title = (
+            "Cron Jobs"
+            if kind == "cron"
+            else "Nudge Jobs"
+            if kind == "nudge"
+            else "Heartbeat Jobs"
+        )
         if not jobs:
             suffix = f" for {agent_name}" if agent_name else ""
             return f"{title}{suffix}\n\nNo jobs configured."
@@ -453,7 +909,11 @@ class SkillManager:
         lines.append("")
         for job in jobs:
             enabled = "ON" if job.get("enabled", False) else "OFF"
-            schedule = (job.get("schedule") or job.get("time", "?")) if kind == "cron" else f"{job.get('interval_seconds', 0)}s"
+            schedule = (
+                (job.get("schedule") or job.get("time", "?"))
+                if kind == "cron"
+                else f"{job.get('interval_seconds', 0)}s"
+            )
             action = job.get("action", "enqueue_prompt")
             note = job.get("note") or ""
             lines.append(f"- {job.get('id')} [{enabled}] {schedule} -> {action}")
@@ -461,7 +921,9 @@ class SkillManager:
                 lines.append(f"  {note}")
         return "\n".join(lines)
 
-    def set_job_enabled(self, kind: str, task_id: str, enabled: bool) -> tuple[bool, str]:
+    def set_job_enabled(
+        self, kind: str, task_id: str, enabled: bool
+    ) -> tuple[bool, str]:
         self._ensure_active_heartbeats_migrated()
         if kind == "heartbeat":
             jobs = self._load_active_heartbeats()
@@ -537,7 +999,9 @@ class SkillManager:
                 return True, f"Deleted {task_id}."
         return False, f"Unknown {kind} task: {task_id}"
 
-    def transfer_job(self, kind: str, task_id: str, new_agent: str) -> tuple[bool, str, dict | None]:
+    def transfer_job(
+        self, kind: str, task_id: str, new_agent: str
+    ) -> tuple[bool, str, dict | None]:
         """Disable original job and create a copy owned by new_agent.
 
         Returns (ok, message, new_job_dict).
@@ -560,7 +1024,9 @@ class SkillManager:
         new_job["id"] = f"{new_agent}-{uuid4().hex[:8]}"
         new_job["agent"] = new_agent
         new_job["enabled"] = False
-        new_job["note"] = (job.get("note") or job["id"]) + f" [transferred from {job.get('agent', '?')}]"
+        new_job["note"] = (
+            job.get("note") or job["id"]
+        ) + f" [transferred from {job.get('agent', '?')}]"
         mismatch = ownership_mismatch_label(new_job)
         if mismatch:
             new_job["note"] += f" [{mismatch}; review before enabling]"
@@ -569,7 +1035,11 @@ class SkillManager:
         key = self._task_key_for_kind(kind)
         tasks.setdefault(key, []).append(new_job)
         self._save_tasks(tasks)
-        return True, f"Transferred to {new_agent} (disabled, review before enabling).", new_job
+        return (
+            True,
+            f"Transferred to {new_agent} (disabled, review before enabling).",
+            new_job,
+        )
 
     def import_job(self, kind: str, job: dict) -> tuple[bool, str]:
         """Import a job dict into local tasks.json (used for cross-instance transfer)."""
@@ -586,6 +1056,7 @@ class SkillManager:
         existing_ids = {j.get("id") for j in tasks.get(key, [])}
         if job.get("id") in existing_ids:
             from uuid import uuid4
+
             job["id"] = f"{job.get('agent', 'imported')}-{uuid4().hex[:8]}"
         tasks.setdefault(key, []).append(job)
         self._save_tasks(tasks)
@@ -656,9 +1127,15 @@ class SkillManager:
                 f"Interval: {default_minutes} min (default)\n"
                 f"Usage: /active on [{default_minutes}] | /active off"
             )
-        interval_minutes = max(1, int(job.get("interval_seconds", default_minutes * 60) // 60))
+        interval_minutes = max(
+            1, int(job.get("interval_seconds", default_minutes * 60) // 60)
+        )
         state = "ON" if job.get("enabled", False) else "OFF"
-        reset_note = " (default reset)" if not job.get("enabled", False) and interval_minutes == default_minutes else ""
+        reset_note = (
+            " (default reset)"
+            if not job.get("enabled", False) and interval_minutes == default_minutes
+            else ""
+        )
         return (
             f"Active mode: {state}\n"
             f"Interval: {interval_minutes} min{reset_note}\n"
@@ -675,7 +1152,9 @@ class SkillManager:
             "Be concise, specific, and useful. Do not pretend to have done work you have not done. If there is nothing meaningful to report, say that briefly instead of inventing activity."
         )
 
-    def set_active_heartbeat(self, agent_name: str, enabled: bool, minutes: int | None = None) -> tuple[bool, str]:
+    def set_active_heartbeat(
+        self, agent_name: str, enabled: bool, minutes: int | None = None
+    ) -> tuple[bool, str]:
         self._ensure_active_heartbeats_migrated()
         heartbeats = self._load_active_heartbeats()
         task_id = self.get_active_heartbeat_job_id(agent_name)
@@ -719,7 +1198,10 @@ class SkillManager:
         self._save_active_heartbeats(heartbeats)
 
         if enabled:
-            return True, f"Active mode is now ON. Proactive heartbeat set to every {interval_minutes} min."
+            return (
+                True,
+                f"Active mode is now ON. Proactive heartbeat set to every {interval_minutes} min.",
+            )
         return True, (
             f"Active mode is now OFF. Proactive heartbeat disabled and interval reset to "
             f"{self.ACTIVE_HEARTBEAT_DEFAULT_MINUTES} min."

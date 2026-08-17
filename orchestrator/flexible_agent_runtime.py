@@ -1433,18 +1433,20 @@ class FlexibleAgentRuntime:
         return runtime_status.build_status_text(self, detailed=detailed)
 
     def _skill_keyboard(self) -> InlineKeyboardMarkup:
-        skills = self.skill_manager.list_skills() if self.skill_manager else []
-        buttons = [
-            [InlineKeyboardButton(skill.id, callback_data=f"skill:show:{skill.id}")]
-            for skill in skills
-        ]
-        return InlineKeyboardMarkup(buttons or [[InlineKeyboardButton("No skills", callback_data="skill:noop:none")]])
+        from orchestrator.runtime_skill_callbacks import build_skill_catalog_keyboard
+
+        if not self.skill_manager:
+            return InlineKeyboardMarkup(
+                [[InlineKeyboardButton("No skills", callback_data="skill:noop:none")]]
+            )
+        return build_skill_catalog_keyboard(self.skill_manager, self.workspace_dir)
 
     def _skill_action_keyboard(self, skill: SkillDefinition) -> InlineKeyboardMarkup | None:
-        del skill
-        return InlineKeyboardMarkup(
-            [[InlineKeyboardButton(BACK_LABEL, callback_data="skill:back:menu")]]
-        )
+        from orchestrator.runtime_skill_callbacks import build_skill_action_keyboard
+
+        if not self.skill_manager:
+            return None
+        return build_skill_action_keyboard(self.skill_manager, self.workspace_dir, skill)
 
     async def _render_jobs(self, update_or_query, kind: str):
         from orchestrator.runtime_jobs import _build_jobs_with_buttons
@@ -1462,8 +1464,18 @@ class FlexibleAgentRuntime:
         from orchestrator.automation_runner import is_automation
 
         if is_automation(skill_id):
+            manager = getattr(self, "skill_manager", None)
+            skill = manager.get_skill(skill_id) if manager is not None else None
+            enabled_check = getattr(manager, "is_skill_enabled", None)
+            if skill is not None and callable(enabled_check) and not enabled_check(
+                self.workspace_dir,
+                skill.id,
+            ):
+                message = f"Scheduler Skill is disabled for {self.name}: {skill.id}"
+                self.error_logger.error(message)
+                return False, message
             return await self.invoke_scheduler_automation(
-                automation_id=skill_id,
+                automation_id=skill.id if skill is not None else skill_id,
                 args=args,
                 task_id=task_id,
             )
@@ -1474,6 +1486,11 @@ class FlexibleAgentRuntime:
         skill = self.skill_manager.get_skill(skill_id)
         if skill is None:
             message = f"Unknown scheduler skill: {skill_id}"
+            self.error_logger.error(message)
+            return False, message
+        enabled_check = getattr(self.skill_manager, "is_skill_enabled", None)
+        if callable(enabled_check) and not enabled_check(self.workspace_dir, skill.id):
+            message = f"Scheduler Skill is disabled for {self.name}: {skill.id}"
             self.error_logger.error(message)
             return False, message
         prompt = self.skill_manager.build_prompt_for_skill(skill, args or "")
@@ -1496,6 +1513,14 @@ class FlexibleAgentRuntime:
 
         if not self.skill_manager:
             message = f"Scheduler automation requested without manager: {automation_id}"
+            self.error_logger.error(message)
+            return False, message
+        skill = self.skill_manager.get_skill(automation_id)
+        enabled_check = getattr(self.skill_manager, "is_skill_enabled", None)
+        if skill is not None and callable(enabled_check) and not enabled_check(
+            self.workspace_dir, skill.id
+        ):
+            message = f"Scheduler automation Skill is disabled for {self.name}: {skill.id}"
             self.error_logger.error(message)
             return False, message
         ok, text = await run_automation(
@@ -3259,6 +3284,12 @@ class FlexibleAgentRuntime:
         if skill is None:
             await self._reply_text(update, f"Unknown skill: {skill_id}")
             return
+        if not self.skill_manager.is_skill_enabled(self.workspace_dir, skill.id):
+            await self._reply_text(
+                update,
+                f"Skill '{skill.id}' is disabled for this agent. Use /skill enable {skill.id} first.",
+            )
+            return
         prompt_text = " ".join(args or []).strip()
         if not prompt_text:
             await self._reply_text(update, f"Usage: /{skill_id} <prompt>")
@@ -3302,6 +3333,12 @@ class FlexibleAgentRuntime:
                 parse_mode="HTML",
             )
             return
+        if not self.skill_manager.is_skill_enabled(self.workspace_dir, skill.id):
+            await self._reply_text(
+                update,
+                "Skill 'debug' is disabled for this agent. Use /skill enable debug first.",
+            )
+            return
         prompt = self.skill_manager.build_prompt_for_skill(skill, prompt_text)
         await self._reply_text(update, f"Running skill {skill.id}...")
         await self.enqueue_request(
@@ -3331,17 +3368,7 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, "Skill system is not configured.")
             return
 
-        if not args:
-            count = len(self.skill_manager.list_skills())
-            await self._reply_text(
-                update,
-                runtime_menu_views.skills_menu_text(count=count, agent_name=self.name),
-                parse_mode="HTML",
-                reply_markup=self._skill_keyboard(),
-            )
-            return
-
-        sub = args[0].strip().lower()
+        sub = args[0].strip().lower() if args else ""
         if sub in {"cron", "heartbeat"}:
             await self._reply_text(update, "Cron and heartbeat controls moved to /jobs.")
             return
@@ -3366,54 +3393,12 @@ class FlexibleAgentRuntime:
             )
             await self._reply_text(update, message)
             return
-        if sub == "help":
-            skills = self.skill_manager.list_skills()
-            validation_errors = self.skill_manager.skill_validation_errors()
-            lines = [
-                card_title("🧰", "Skills reference"),
-                "",
-                f"<b>Current</b> · <code>{len(skills)}</code> available",
-                f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
-                "",
-            ]
-            for skill in skills:
-                lines.append(
-                    f"<code>{html.escape(skill.id)}</code> · {html.escape(skill.description)}"
-                )
-            if validation_errors:
-                lines.extend(
-                    [
-                        "",
-                        f"⚠️ <b>Invalid packages skipped</b> · <code>{len(validation_errors)}</code>",
-                    ]
-                )
-            lines.extend(["", "Jobs: <code>/jobs</code> · EXP: <code>/exp</code>"])
-            await self._reply_text(update, "\n".join(lines).strip(), parse_mode="HTML")
-            return
+        from orchestrator.runtime_skill_commands import handle_standard_skill_command
 
-        skill = self.skill_manager.get_skill(sub)
-        if skill is None:
-            await self._reply_text(update, f"Unknown skill: {sub}")
-            return
+        async def reply(text: str, **kwargs):
+            return await self._reply_text(update, text, **kwargs)
 
-        rest = " ".join(args[1:]).strip()
-        if not rest:
-            await self._reply_text(
-                update,
-                runtime_menu_views.skill_detail_text(skill, self.workspace_dir, manager=self.skill_manager),
-                parse_mode="HTML",
-                reply_markup=self._skill_action_keyboard(skill),
-            )
-            return
-
-        prompt = self.skill_manager.build_prompt_for_skill(skill, rest)
-        await self._reply_text(update, f"Running skill {skill.id}...")
-        await self.enqueue_request(
-            update.effective_chat.id,
-            prompt,
-            f"skill:{skill.id}",
-            f"Skill {skill.id}",
-        )
+        await handle_standard_skill_command(self, update, args, reply)
 
     async def cmd_exp(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
