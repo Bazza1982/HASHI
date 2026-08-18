@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import suppress
 from typing import Any
 
 from orchestrator import (
@@ -18,6 +17,71 @@ from orchestrator.memory_plus_mode import (
     prepare_memory_plus_store,
 )
 from orchestrator.wrapper_mode import SESSION_RESET_SOURCE
+
+RUNTIME_TASK_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
+
+def _consume_shutdown_task_result(task: asyncio.Future) -> None:
+    try:
+        task.result()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def _settle_shutdown_task(
+    runtime: Any,
+    task: asyncio.Future,
+    *,
+    label: str,
+    timeout_s: float,
+    cancel_first: bool,
+    allow_exception: bool = False,
+) -> bool:
+    if cancel_first:
+        task.cancel()
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+    except asyncio.CancelledError:
+        task.cancel()
+        if not task.done():
+            task.add_done_callback(_consume_shutdown_task_result)
+        raise
+    if task not in done:
+        task.cancel()
+        task.add_done_callback(_consume_shutdown_task_result)
+        runtime.error_logger.warning(
+            f"Shutdown step '{label}' timed out after {timeout_s:.1f}s."
+        )
+        return False
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return True
+    except Exception as exc:
+        runtime.error_logger.warning(
+            f"Shutdown step '{label}' failed: {type(exc).__name__}: {exc}"
+        )
+        return allow_exception
+    return True
+
+
+async def _run_shutdown_step(
+    runtime: Any,
+    awaitable,
+    *,
+    label: str,
+    allow_exception: bool = False,
+) -> bool:
+    task = asyncio.create_task(awaitable, name=f"shutdown-{runtime.name}-{label}")
+    return await _settle_shutdown_task(
+        runtime,
+        task,
+        label=label,
+        timeout_s=RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS,
+        cancel_first=False,
+        allow_exception=allow_exception,
+    )
 
 
 async def initialize(runtime: Any) -> bool:
@@ -52,26 +116,71 @@ async def initialize(runtime: Any) -> bool:
 async def shutdown(runtime: Any) -> None:
     runtime.logger.info(f"Shutting down flex agent '{runtime.name}'...")
     runtime.is_shutting_down = True
-    await _cancel_tasks(runtime._scheduled_retry_tasks)
-    await _cancel_tasks(
-        getattr(runtime, "_persona_background_status_tasks", set())
+    clean = await _cancel_tasks(
+        runtime,
+        runtime._scheduled_retry_tasks,
+        label="retry-tasks",
     )
-    await _cancel_tasks(runtime._background_tasks)
+    clean = (
+        await _cancel_tasks(
+            runtime,
+            getattr(runtime, "_persona_background_status_tasks", set()),
+            label="persona-status-tasks",
+        )
+        and clean
+    )
+    clean = (
+        await _cancel_tasks(
+            runtime,
+            runtime._background_tasks,
+            label="background-tasks",
+        )
+        and clean
+    )
     if runtime.process_task:
-        runtime.process_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await runtime.process_task
-        runtime.process_task = None
-    await runtime.backend_manager.shutdown()
-    runtime._mark_runtime_shutdown(clean=True)
+        process_stopped = await _settle_shutdown_task(
+            runtime,
+            runtime.process_task,
+            label="queue-processor",
+            timeout_s=RUNTIME_TASK_SHUTDOWN_TIMEOUT_SECONDS,
+            cancel_first=True,
+        )
+        clean = process_stopped and clean
+        if process_stopped:
+            runtime.process_task = None
+    clean = (
+        await _run_shutdown_step(
+            runtime,
+            runtime.backend_manager.shutdown(),
+            label="backend",
+        )
+        and clean
+    )
 
     if runtime.startup_success:
-        for action in (runtime.app.updater.stop, runtime.app.stop, runtime.app.shutdown):
-            try:
-                await action()
-            except Exception as exc:
-                runtime.error_logger.warning(f"Shutdown warning: {exc}")
-        runtime.logger.info("Telegram app shut down cleanly.")
+        for label, action in (
+            ("telegram-updater", runtime.app.updater.stop),
+            ("telegram-app-stop", runtime.app.stop),
+            ("telegram-app-shutdown", runtime.app.shutdown),
+        ):
+            clean = (
+                await _run_shutdown_step(
+                    runtime,
+                    action(),
+                    label=label,
+                    allow_exception=True,
+                )
+                and clean
+            )
+        if clean:
+            runtime.logger.info("Telegram app shut down cleanly.")
+
+    runtime._mark_runtime_shutdown(clean=clean)
+    if not clean:
+        raise RuntimeError(
+            "Runtime shutdown was incomplete; at least one task or service exceeded "
+            "its shutdown deadline."
+        )
 
 
 async def process_queue(runtime: Any) -> None:
@@ -135,15 +244,23 @@ async def process_queue(runtime: Any) -> None:
             backend_started_monotonic = generation.backend_started_monotonic
 
             if generation.detached:
-                if feedback.stop_typing and feedback.typing_task:
+                if feedback.stop_typing:
                     feedback.stop_typing.set()
-                    await feedback.typing_task
-                    if feedback.escalation_task is not None:
-                        with suppress(asyncio.CancelledError):
-                            await feedback.escalation_task
-                    if feedback.answer_preview_task is not None:
-                        with suppress(asyncio.CancelledError):
-                            await feedback.answer_preview_task
+                await runtime_pipeline.settle_interactive_feedback_task(
+                    runtime,
+                    feedback.typing_task,
+                    label="typing-detach",
+                )
+                await runtime_pipeline.settle_interactive_feedback_task(
+                    runtime,
+                    feedback.escalation_task,
+                    label="escalation-detach",
+                )
+                await runtime_pipeline.settle_interactive_feedback_task(
+                    runtime,
+                    feedback.answer_preview_task,
+                    label="answer-preview-detach",
+                )
                 setattr(item, "_audit_collector", audit_collector)
                 setattr(item, "_her_message_router", feedback.her_message_router)
                 status_placeholder = feedback.placeholder
@@ -318,9 +435,37 @@ async def process_queue(runtime: Any) -> None:
                 runtime.current_request_meta = None
 
 
-async def _cancel_tasks(tasks: set[asyncio.Task]) -> None:
-    for task in list(tasks):
+async def _cancel_tasks(
+    runtime: Any,
+    tasks: set[asyncio.Task],
+    *,
+    label: str,
+) -> bool:
+    task_list = [task for task in list(tasks) if not task.done()]
+    for task in task_list:
         task.cancel()
-    for task in list(tasks):
-        with suppress(asyncio.CancelledError):
-            await task
+    if not task_list:
+        return True
+    try:
+        done, pending = await asyncio.wait(
+            task_list,
+            timeout=RUNTIME_TASK_SHUTDOWN_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        for task in task_list:
+            task.cancel()
+            if not task.done():
+                task.add_done_callback(_consume_shutdown_task_result)
+        raise
+    for task in done:
+        _consume_shutdown_task_result(task)
+    if not pending:
+        return True
+    for task in pending:
+        task.cancel()
+        task.add_done_callback(_consume_shutdown_task_result)
+    runtime.error_logger.warning(
+        f"Shutdown step '{label}' left {len(pending)} task(s) pending after "
+        f"{RUNTIME_TASK_SHUTDOWN_TIMEOUT_SECONDS:.1f}s."
+    )
+    return False

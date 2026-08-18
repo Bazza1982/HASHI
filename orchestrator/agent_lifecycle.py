@@ -10,6 +10,14 @@ from orchestrator.bootstrap_logging import C_RESET, C_STOP
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
+RUNTIME_TEARDOWN_TIMEOUT_SECONDS = 20.0
+
+
+def _consume_teardown_task_result(task: asyncio.Future) -> None:
+    try:
+        task.result()
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
 class AgentLifecycleManager:
@@ -294,7 +302,14 @@ class AgentLifecycleManager:
                 return False, f"Agent '{agent_name}' is not running."
 
             bridge_logger.info("Stopping agent '%s' (reason=%s)", agent_name, reason)
-            await self.teardown_runtime(runtime)
+            stopped = await self.teardown_runtime(runtime)
+            if not stopped:
+                message = (
+                    f"Agent '{agent_name}' did not stop cleanly; cold process restart required."
+                )
+                main_logger.error(message)
+                bridge_logger.error("%s (reason=%s)", message, reason)
+                return False, message
 
             self.kernel.runtimes[:] = [rt for rt in self.kernel.runtimes if rt.name != agent_name]
             main_logger.info("Agent '%s' stopped.", agent_name)
@@ -302,23 +317,47 @@ class AgentLifecycleManager:
             print(f"{C_STOP}[system] Agent '{agent_name}' stopped{C_RESET}", flush=True)
             return True, f"Stopped agent '{agent_name}'."
 
-    async def teardown_runtime(self, runtime, timeout: float = 10.0):
-        """Stop a single runtime's queue task, backend, and Telegram app."""
+    async def teardown_runtime(
+        self,
+        runtime,
+        timeout: float | None = None,
+    ) -> bool:
+        """Stop one runtime within a hard deadline, even if it ignores cancellation."""
+        if timeout is None:
+            timeout = RUNTIME_TEARDOWN_TIMEOUT_SECONDS
         process_task = getattr(runtime, "process_task", None)
         if process_task is not None:
             process_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await process_task
-            runtime.process_task = None
 
+        shutdown_task = asyncio.create_task(
+            runtime.shutdown(),
+            name=f"teardown-{runtime.name}",
+        )
         try:
-            await asyncio.wait_for(runtime.shutdown(), timeout=timeout)
-        except asyncio.TimeoutError:
+            done, _pending = await asyncio.wait({shutdown_task}, timeout=timeout)
+        except asyncio.CancelledError:
+            shutdown_task.cancel()
+            if not shutdown_task.done():
+                shutdown_task.add_done_callback(_consume_teardown_task_result)
+            raise
+        if shutdown_task not in done:
+            shutdown_task.cancel()
+            shutdown_task.add_done_callback(_consume_teardown_task_result)
             main_logger.warning("Shutdown timed out for '%s'.", runtime.name)
             bridge_logger.warning("Agent '%s' shutdown timed out after %.1fs", runtime.name, timeout)
+            return False
+        try:
+            shutdown_task.result()
+        except asyncio.CancelledError:
+            main_logger.warning("Shutdown was cancelled for '%s'.", runtime.name)
+            bridge_logger.warning("Agent '%s' shutdown task was cancelled", runtime.name)
+            return False
         except Exception as e:
             main_logger.warning("Shutdown warning for '%s': %s", runtime.name, e)
             bridge_logger.warning("Agent '%s' shutdown warning: %s: %s", runtime.name, type(e).__name__, e)
+            return False
+        runtime.process_task = None
+        return True
 
     async def shutdown_all_agents(self, timeout: float = 30.0):
         """Parallel shutdown of all agents. Used during orchestrator exit."""
@@ -330,10 +369,13 @@ class AgentLifecycleManager:
         bridge_logger.warning("Shutting down %s active agents in parallel", len(agents))
 
         async def _stop_one(rt):
-            await self.teardown_runtime(rt, timeout=timeout - 2.0)
-            main_logger.info("Agent '%s' stopped.", rt.name)
-            bridge_logger.info("Agent '%s' fully torn down", rt.name)
-            print(f"{C_STOP}[system] Agent '{rt.name}' stopped{C_RESET}", flush=True)
+            stopped = await self.teardown_runtime(rt, timeout=timeout - 2.0)
+            if stopped:
+                main_logger.info("Agent '%s' stopped.", rt.name)
+                bridge_logger.info("Agent '%s' fully torn down", rt.name)
+                print(f"{C_STOP}[system] Agent '{rt.name}' stopped{C_RESET}", flush=True)
+            else:
+                main_logger.error("Agent '%s' did not stop cleanly.", rt.name)
 
         try:
             await asyncio.wait_for(

@@ -828,6 +828,84 @@ async def test_cleanup_interactive_feedback_can_leave_stream_owned_placeholder()
 
 
 @pytest.mark.asyncio
+async def test_cleanup_interactive_feedback_propagates_queue_worker_cancellation():
+    runtime = _runtime()
+    child_started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    release_child = asyncio.Event()
+
+    async def _stubborn_feedback_task():
+        child_started.set()
+        try:
+            await release_child.wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            await release_child.wait()
+
+    escalation_task = asyncio.create_task(_stubborn_feedback_task())
+    await child_started.wait()
+    cleanup_task = asyncio.create_task(
+        runtime_pipeline.cleanup_interactive_feedback(
+            runtime,
+            _item(),
+            stop_typing=None,
+            typing_task=None,
+            escalation_task=escalation_task,
+            think_flush_task=None,
+            placeholder=None,
+        )
+    )
+    await asyncio.sleep(0)
+
+    cleanup_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(cleanup_task, timeout=0.5)
+
+    assert child_cancelled.is_set()
+    release_child.set()
+    await escalation_task
+
+
+@pytest.mark.asyncio
+async def test_cleanup_interactive_feedback_has_hard_child_deadline(monkeypatch):
+    runtime = _runtime()
+    release_child = asyncio.Event()
+
+    async def _stubborn_feedback_task():
+        try:
+            await release_child.wait()
+        except asyncio.CancelledError:
+            await release_child.wait()
+
+    monkeypatch.setattr(
+        runtime_pipeline,
+        "INTERACTIVE_FEEDBACK_CLEANUP_TIMEOUT_SECONDS",
+        0.01,
+    )
+    typing_task = asyncio.create_task(_stubborn_feedback_task())
+
+    await asyncio.wait_for(
+        runtime_pipeline.cleanup_interactive_feedback(
+            runtime,
+            _item(),
+            stop_typing=None,
+            typing_task=typing_task,
+            escalation_task=None,
+            think_flush_task=None,
+            placeholder=None,
+        ),
+        timeout=0.5,
+    )
+
+    assert any(
+        "timed out for typing" in message
+        for message in runtime.error_logger.messages
+    )
+    release_child.set()
+    await typing_task
+
+
+@pytest.mark.asyncio
 async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks():
     runtime = _runtime()
     telegram_stream_policy.set_typing_enabled(runtime, True)

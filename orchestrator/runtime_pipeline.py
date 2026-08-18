@@ -31,6 +31,7 @@ EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
     "I wasn't able to complete that — a tool I tried to use didn't return a result. "
     "Please check that all required API keys (e.g. brave_api_key for web search) are configured in secrets.json."
 )
+INTERACTIVE_FEEDBACK_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 HER_SESSION_SCOPE_PERSISTENT = "persistent"
 HER_SESSION_SCOPE_ISOLATED = "isolated_per_run"
@@ -530,6 +531,80 @@ def log_backend_finished(
     )
 
 
+def _consume_feedback_task_result(task: asyncio.Future) -> None:
+    """Retrieve a detached cleanup task result without surfacing loop warnings."""
+
+    try:
+        task.result()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def settle_interactive_feedback_task(
+    runtime,
+    task: asyncio.Future | None,
+    *,
+    label: str,
+    cancel_first: bool = False,
+    timeout_s: float | None = None,
+) -> bool:
+    """Bound feedback cleanup while preserving cancellation of the queue worker.
+
+    Awaiting a child task directly makes it easy to accidentally consume the
+    queue worker's ``CancelledError``. ``asyncio.wait`` lets us distinguish a
+    child that was already cancelled from cancellation of this caller.
+    """
+
+    if task is None:
+        return True
+    if cancel_first:
+        task.cancel()
+    deadline = (
+        INTERACTIVE_FEEDBACK_CLEANUP_TIMEOUT_SECONDS
+        if timeout_s is None
+        else max(0.0, float(timeout_s))
+    )
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=deadline)
+    except asyncio.CancelledError:
+        task.cancel()
+        if not task.done():
+            task.add_done_callback(_consume_feedback_task_result)
+        raise
+
+    if task not in done:
+        task.cancel()
+        task.add_done_callback(_consume_feedback_task_result)
+        runtime.error_logger.warning(
+            f"Interactive feedback cleanup timed out for {label} after {deadline:.1f}s; "
+            "continuing without blocking the agent queue."
+        )
+        return False
+
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        # The child itself was cancelled. Caller cancellation is handled above.
+        return True
+    except Exception as exc:
+        runtime.error_logger.warning(
+            f"Interactive feedback cleanup warning for {label}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False
+    return True
+
+
+async def _run_interactive_feedback_cleanup_step(
+    runtime,
+    awaitable,
+    *,
+    label: str,
+) -> bool:
+    task = asyncio.create_task(awaitable, name=f"feedback-cleanup-{label}")
+    return await settle_interactive_feedback_task(runtime, task, label=label)
+
+
 async def cleanup_interactive_feedback(
     runtime,
     item,
@@ -544,38 +619,43 @@ async def cleanup_interactive_feedback(
 ) -> None:
     if stop_typing:
         stop_typing.set()
-    if typing_task:
-        await typing_task
-    if escalation_task is not None:
-        try:
-            await escalation_task
-        except asyncio.CancelledError:
-            pass
-    if answer_preview_task is not None:
-        try:
-            await answer_preview_task
-        except asyncio.CancelledError:
-            pass
+    await settle_interactive_feedback_task(runtime, typing_task, label="typing")
+    await settle_interactive_feedback_task(runtime, escalation_task, label="escalation")
+    await settle_interactive_feedback_task(
+        runtime,
+        answer_preview_task,
+        label="answer-preview",
+    )
 
     if think_flush_task is not None:
-        think_flush_task.cancel()
-        try:
-            await think_flush_task
-        except asyncio.CancelledError:
-            pass
-        await runtime._flush_thinking(item.chat_id)
+        await settle_interactive_feedback_task(
+            runtime,
+            think_flush_task,
+            label="thinking-flush-loop",
+            cancel_first=True,
+        )
+        await _run_interactive_feedback_cleanup_step(
+            runtime,
+            runtime._flush_thinking(item.chat_id),
+            label="thinking-flush-final",
+        )
 
     if placeholder and delete_placeholder:
-        try:
-            delete_started = time.monotonic()
-            await runtime.app.bot.delete_message(chat_id=item.chat_id, message_id=placeholder.message_id)
+        delete_started = time.monotonic()
+        deleted = await _run_interactive_feedback_cleanup_step(
+            runtime,
+            runtime.app.bot.delete_message(
+                chat_id=item.chat_id,
+                message_id=placeholder.message_id,
+            ),
+            label="placeholder-delete",
+        )
+        if deleted:
             delete_elapsed_s = max(0.0, time.monotonic() - delete_started)
             runtime.telegram_logger.info(
                 f"Deleted placeholder for {item.request_id} "
                 f"(elapsed_s={delete_elapsed_s:.2f})"
             )
-        except Exception:
-            pass
 
 
 async def answer_preview_loop(
