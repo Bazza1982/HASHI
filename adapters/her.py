@@ -3400,6 +3400,17 @@ INCOMPLETE TASK FACTS (quoted, read-only)
             return f"local/{model}"
         return model
 
+    def _vision_enabled(self) -> bool:
+        """Whether the configured HER model can consume image content.
+
+        DeepSeek models are text-only; every other HER-routable model is
+        treated as vision-capable (e.g. openai/gpt-4.1-mini).
+        """
+        model = str(getattr(self.config, "model", "") or "").strip()
+        provider = str(self._extra.get("provider") or "").strip()
+        haystack = f"{provider} {model}".lower()
+        return "deepseek" not in haystack
+
     def _permission_mode(self) -> str:
         requested = str(self._extra.get("permission_mode") or "workspace-write")
         if requested not in VALID_PERMISSION_MODES:
@@ -3639,6 +3650,7 @@ INCOMPLETE TASK FACTS (quoted, read-only)
                 registry,
                 self.global_config,
             ),
+            vision_enabled=self._vision_enabled(),
         )
         settings = {
             "mcpServers": {

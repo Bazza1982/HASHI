@@ -334,3 +334,42 @@ async def test_gateway_preserves_structured_content_and_context_scopes_media(tmp
         "mimeType": "image/jpeg",
         "data": "YWJj",
     }
+
+
+@pytest.mark.asyncio
+async def test_gateway_strips_image_blocks_for_text_only_backend(tmp_path):
+    workspace = tmp_path / "workspace"
+    media = tmp_path / "media" / "zelda"
+    workspace.mkdir()
+    media.mkdir(parents=True)
+    registry = ToolRegistry(["file_read"], workspace, workspace, {})
+    context_path = tmp_path / "context.json"
+    write_gateway_context(
+        registry,
+        context_path,
+        additional_allowed_tools={"media_read"},
+        media_roots=[media],
+        vision_enabled=False,
+    )
+    context = load_gateway_context(context_path)
+    assert context.vision_enabled is False
+    gateway = ToolGateway(context)
+
+    async def structured_execute(name, arguments, tool_call_id=""):
+        from tools.registry import ToolResult
+
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output="safe metadata only",
+            content=[
+                {"type": "text", "text": "visible metadata"},
+                {"type": "text", "text": "[IMAGE_OCR] extracted text [/IMAGE_OCR]"},
+                {"type": "image", "mimeType": "image/jpeg", "data": "YWJj"},
+            ],
+        )
+
+    gateway.registry.execute = structured_execute
+    response = await gateway.call("media_read", {"path": "photo.jpg"}, "call-3")
+    kinds = [block["type"] for block in response["content"]]
+    assert kinds == ["text", "text"], kinds
+    assert any("IMAGE_OCR" in block.get("text", "") for block in response["content"])
