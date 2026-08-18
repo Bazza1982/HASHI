@@ -47,7 +47,7 @@
   {
     "task_id": "HD-003",
     "phase": "stage_1_flash_cheap",
-    "title": "Run Stage 1 Flash CORE-OFF cheap packets plus all 24 HABIT-WIRE packets with per-packet repair cycles",
+    "title": "Run official DeepSeek Flash CORE-OFF cheap packets plus all 12 HABIT-WIRE packets with immediate per-packet repair cycles",
     "owner_agent": "ajiao",
     "owner_instance": "HASHI2",
     "status": "pending",
@@ -56,7 +56,7 @@
     ],
     "required_evidence": [
       "flash_cheap_queue_complete",
-      "flash_habit_wire_24_cell_ledger",
+      "flash_habit_wire_12_cell_ledger",
       "no_disallowed_route_or_model",
       "attempt_receipts",
       "defect_cycle_records"
@@ -66,7 +66,7 @@
   {
     "task_id": "HD-004",
     "phase": "stage_1_flash_presentation_continuity",
-    "title": "Run Stage 1 Flash CORE-OFF presentation/continuity plus four HABIT-DEEP lifecycle packets",
+    "title": "Run official DeepSeek Flash CORE-OFF presentation/continuity plus two HABIT-DEEP lifecycle packets",
     "owner_agent": "ajiao",
     "owner_instance": "HASHI2",
     "status": "pending",
@@ -76,7 +76,7 @@
     "required_evidence": [
       "flash_presentation_queue_complete",
       "flash_continuity_queue_complete",
-      "flash_habit_deep_four_cell_ledger",
+      "flash_habit_deep_two_cell_ledger",
       "background_silence_and_session_isolation_evidence",
       "formation_observed_evidence",
       "retrieval_observed_evidence",
@@ -90,7 +90,7 @@
   {
     "task_id": "HD-005",
     "phase": "stage_1_flash_expensive",
-    "title": "Run Stage 1 Flash CORE-OFF boundary/endurance plus two HABIT-FAULT restart and backlog packets",
+    "title": "Run official DeepSeek Flash CORE-OFF boundary/endurance plus one HABIT-FAULT restart and backlog packet",
     "owner_agent": "ajiao",
     "owner_instance": "HASHI2",
     "status": "pending",
@@ -102,7 +102,7 @@
       "native_boundary_evidence",
       "endurance_evidence",
       "fault_evidence",
-      "flash_habit_fault_two_cell_ledger",
+      "flash_habit_fault_one_cell_ledger",
       "journal_restart_and_backlog_evidence",
       "defect_cycle_records"
     ],
@@ -119,8 +119,8 @@
       "HD-005"
     ],
     "required_evidence": [
-      "stage_1_24_cell_ledger",
-      "stage_1_habit_30_item_ledger",
+      "stage_1_12_cell_ledger",
+      "stage_1_habit_15_item_ledger",
       "core_flash_passed_gate",
       "habit_flash_passed_gate",
       "stage_1_ancillary_suite_ledger",
@@ -131,61 +131,19 @@
     "artifact_refs": []
   },
   {
-    "task_id": "HD-007",
-    "phase": "stage_2_pro_cheap",
-    "title": "Only after both Flash subgates, run Pro CORE-OFF cheap packets and all 24 Pro HABIT-WIRE packets",
-    "owner_agent": "ajiao",
+    "task_id": "HD-009",
+    "phase": "final_same_candidate_gate",
+    "title": "Verify joint Layer A, all 12 official Flash CORE-OFF cells, all Habit suites, regressions, migration, and journals on the final candidate",
+    "owner_agent": "lin_yueru",
     "owner_instance": "HASHI2",
     "status": "pending",
     "depends_on": [
       "HD-006"
     ],
     "required_evidence": [
-      "persisted_stage_1_gate_checked_before_first_pro_request",
-      "persisted_core_and_habit_flash_subgates_checked",
-      "pro_habit_wire_24_cell_ledger",
-      "pro_cheap_queue_complete",
-      "no_disallowed_route_or_model",
-      "attempt_receipts",
-      "defect_cycle_records"
-    ],
-    "artifact_refs": []
-  },
-  {
-    "task_id": "HD-008",
-    "phase": "stage_2_pro_remaining_and_flash_revalidation",
-    "title": "Run remaining Pro CORE-OFF plus HABIT-DEEP and HABIT-FAULT packets; revalidate both Flash subgates after shared repairs",
-    "owner_agent": "ajiao",
-    "owner_instance": "HASHI2",
-    "status": "pending",
-    "depends_on": [
-      "HD-007"
-    ],
-    "required_evidence": [
-      "pro_remaining_queue_complete",
-      "shared_fix_invalidation_ledger",
-      "required_flash_revalidation_complete",
-      "pro_habit_deep_four_cell_ledger",
-      "pro_habit_fault_two_cell_ledger",
-      "attempt_receipts",
-      "defect_cycle_records"
-    ],
-    "artifact_refs": []
-  },
-  {
-    "task_id": "HD-009",
-    "phase": "final_same_candidate_gate",
-    "title": "Verify joint Layer A, 48 CORE-OFF cells, all Habit suites, regressions, migration, and journals on the final candidate",
-    "owner_agent": "lin_yueru",
-    "owner_instance": "HASHI2",
-    "status": "pending",
-    "depends_on": [
-      "HD-008"
-    ],
-    "required_evidence": [
       "final_candidate_identity",
-      "final_48_cell_ledger",
-      "final_60_item_habit_live_ledger",
+      "final_12_cell_ledger",
+      "final_15_item_habit_live_ledger",
       "final_habit_offline_and_migration_ledger",
       "final_formation_retrieval_behavioral_use_ledger",
       "final_ancillary_suite_ledger",

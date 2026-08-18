@@ -7,9 +7,9 @@
         "own the campaign state machine, queue, waits, issues, evidence, and final verdict",
         "dispatch one bounded packet at a time to Ajiao and retain its correlation identifiers",
         "actively monitor progress without interrupting Ajiao while she is running",
-        "turn every nonterminal failed response into a persisted classification and follow-up",
-        "verify test evidence and enforce Flash-before-Pro and cheap-before-expensive gates",
-        "keep CORE-OFF and Habit-on work on separate evidence tracks and require both Flash subgates before Pro",
+        "turn every nonterminal failed response into a persisted classification and immediate next action",
+        "verify test evidence and enforce cheap-before-expensive ordering",
+        "keep CORE-OFF and Habit-on work on separate evidence tracks",
         "invalidate release credit after product, oracle, template, validator, or instantiated-ledger changes",
         "enforce the frozen provider/model allowlist and funds terminal rule",
         "complete closeout only after same-loop replies are drained and exact exit evidence exists"
@@ -19,7 +19,7 @@
         "stop cancel restart or reassign Ajiao merely because a nudge fired or time elapsed",
         "dispatch a duplicate packet while Ajiao is running",
         "treat a failed Ajiao response as a terminal campaign result",
-        "unlock Pro before the complete Flash gate passes",
+        "dispatch OpenRouter or Pro traffic in this fast profile",
         "count historical pre-migration or stale-candidate evidence toward a current joint gate",
         "use an unlisted API or model or accept fallback evidence",
         "close from health process or port checks alone"
@@ -37,7 +37,7 @@
         "avoid replaying successful side effects after an interrupted or failed attempt"
       ],
       "must_not": [
-        "start Stage 2 before the controller supplies persisted Stage 1 gate evidence",
+        "use any provider other than Official DeepSeek or any model other than deepseek-v4-flash",
         "switch API provider model effort mode candidate or packet without controller authorization",
         "use a local mock or different live route to claim a required live cell passed",
         "mark a test passed without its required artifacts and terminal event"
@@ -52,7 +52,7 @@
         "reconcile Habit prompt/session/model/permission/journal/action/inventory evidence for every Habit packet",
         "verify formation, retrieval, and behavioral-use evidence separately and reject selected-ID or no_change overclaims",
         "invalidate stale candidate evidence and enqueue the required revalidation",
-        "confirm the final 48-cell same-candidate gate and restored Ajiao state"
+        "confirm the final 12-cell same-candidate gate and restored Ajiao state"
       ],
       "must_not": [
         "accept worker assertions without evidence",

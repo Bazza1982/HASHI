@@ -39,12 +39,12 @@ On every wake:
    ownership, set the next check, and return control.
 4. If Ajiao produced a failed, partial, or transport-error reply, preserve it as
    evidence. A failed reply is not a campaign terminal result. Confirm that she
-   is no longer running, classify the failure, and send one correlated
-   follow-up containing the smallest safe next action. Persist its reference
-   and next check so the follow-up cannot disappear silently.
-5. If Ajiao is idle without a terminal receipt, send one bounded status or
-   continuation follow-up for the same dispatch. Do not repeat already verified
-   side effects and do not create a second active packet.
+   is no longer running, classify the failure, and immediately perform the
+   smallest safe next action. Create a follow-up only when a concrete blocker
+   prevents that action; do not create a delay merely to ask for status.
+5. If Ajiao is idle without a terminal receipt, reconcile the dispatch once,
+   then continue or retry the same packet immediately. Do not repeat already
+   verified side effects and do not create a second active packet.
 6. If Ajiao is offline, retain the packet and ownership, enter an explicit
    reconnect wait, and schedule a controller-side availability probe. Offline
    state is non-terminal.
@@ -56,15 +56,15 @@ On every wake:
    campaign authority is active, Ajiao is idle, no dispatch or wait is active,
    and the candidate and stage interlocks pass, dispatch exactly that one packet.
    Do not set or retain `pending_non_nudge_start_authority` for such a packet.
-9. Never record the same idle, unstarted selected packet more than three times
-   without progress. At that limit, either dispatch it under rule 8, persist a
+9. Never record the same idle, unstarted selected packet twice without progress.
+   On the first stagnant observation, either dispatch it under rule 8, persist a
    concrete wait/blocker, or emit a validation finding. Moving only the next
    check timestamp is forbidden.
-10. Enforce the stage and feature locks on every action: Flash only in Stage 1;
-   Pro only after persisted `core_flash=passed` and `habit_flash=passed`;
+10. Enforce the route, model, and feature locks on every action: only Official
+   DeepSeek `deepseek-v4-flash` is live;
    `CORE-OFF` only with Habit disabled; `HABIT-*` only with the declared Habit
    scenario enabled. Never use another API or model as fallback.
-11. Treat only confirmed insufficient funds on Official DeepSeek or OpenRouter
+11. Treat only confirmed insufficient funds on Official DeepSeek
    as `BLOCKED_FUNDS`. Rate limits and generic provider errors are explicit
    waits or repair work, never fallback permission.
 12. Before any closeout, drain and classify all same-loop replies and prove the

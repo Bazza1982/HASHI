@@ -5,16 +5,11 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_PROVIDERS = {"official_deepseek", "openrouter"}
+EXPECTED_PROVIDERS = {"official_deepseek"}
 EXPECTED_MODES = ["fixed", "flex"]
 EXPECTED_EFFORTS = ["low", "medium", "high", "xhigh", "max", "max+"]
 EXPECTED_FLASH_MODELS = {
     "official_deepseek": "deepseek-v4-flash",
-    "openrouter": "deepseek/deepseek-v4-flash",
-}
-EXPECTED_PRO_MODELS = {
-    "official_deepseek": "deepseek-v4-pro",
-    "openrouter": "deepseek/deepseek-v4-pro",
 }
 
 
@@ -183,9 +178,9 @@ def validate_template(template_dir: Path) -> dict[str, Any]:
         "The nudge must not duplicate an active packet.",
     )
     require(
-        liveness.get("must_follow_up_nonterminal_failure") is True,
+        liveness.get("must_follow_up_nonterminal_failure") is False,
         "nudge_follow_up",
-        "Every nonterminal failure must receive a follow-up.",
+        "Fast mode must not create unconditional follow-up waits.",
     )
     require(
         liveness.get("must_surface_stagnation") is True,
@@ -193,9 +188,9 @@ def validate_template(template_dir: Path) -> dict[str, Any]:
         "The nudge must surface rather than repeat a functional livelock.",
     )
     require(
-        liveness.get("stagnation_observation_limit") == 3,
+        liveness.get("stagnation_observation_limit") == 1,
         "nudge_stagnation_limit",
-        "The selected-packet stagnation limit must be three observations.",
+        "Fast mode must surface selected-packet stagnation after one observation.",
     )
     require(liveness.get("max_nudges") == 0, "nudge_limit", "The controller nudge must be unlimited.")
     require(
@@ -213,16 +208,6 @@ def validate_template(template_dir: Path) -> dict[str, Any]:
         "worker_failed_reply_is_terminal",
     ):
         require(policy.get(key) is False, "execution_policy", f"execution_policy.{key} must be false.")
-    require(
-        policy.get("stage_2_requires_stage_1_pass") is True,
-        "stage_lock_policy",
-        "Stage 2 must require a passed Stage 1 gate.",
-    )
-    require(
-        policy.get("stage_2_requires_both_flash_subgates") is True,
-        "joint_stage_lock_policy",
-        "Stage 2 must require both core and Habit Flash subgates.",
-    )
     require(
         policy.get("core_profile_requires_habit_disabled") is True,
         "core_off_policy",
@@ -243,87 +228,69 @@ def validate_template(template_dir: Path) -> dict[str, Any]:
     providers = dimensions.get("providers", {})
     modes = dimensions.get("modes", [])
     efforts = dimensions.get("efforts", [])
-    require(set(providers) == EXPECTED_PROVIDERS, "providers", "Only Official DeepSeek and OpenRouter are allowed.")
+    require(set(providers) == EXPECTED_PROVIDERS, "providers", "Only Official DeepSeek is allowed.")
     require(modes == EXPECTED_MODES, "modes", "The mode dimension must be fixed then flex.")
     require(efforts == EXPECTED_EFFORTS, "efforts", "All six effort levels must be ordered and present.")
     expected_stage_cells = len(providers) * len(modes) * len(efforts)
-    require(expected_stage_cells == 24, "stage_cell_math", "Each model stage must contain 24 core cells.")
+    require(expected_stage_cells == 12, "stage_cell_math", "The Flash stage must contain 12 core cells.")
 
     stages = {stage.get("stage_id"): stage for stage in campaign.get("stages", [])}
     stage_1 = stages.get("stage_1_flash", {})
-    stage_2 = stages.get("stage_2_pro", {})
+    require(set(stages) == {"stage_1_flash"}, "stage_set", "Only the Flash stage is allowed.")
     require(
         stage_1.get("allowed_live_models") == EXPECTED_FLASH_MODELS,
         "stage_1_models",
-        "Stage 1 must contain only the two Flash slugs.",
+        "Stage 1 must contain only the official DeepSeek Flash slug.",
     )
-    require(
-        stage_2.get("allowed_live_models") == EXPECTED_PRO_MODELS,
-        "stage_2_models",
-        "Stage 2 must contain only the two Pro slugs.",
-    )
-    require(stage_1.get("expected_core_cells") == 24, "stage_1_count", "Stage 1 count must be 24.")
-    require(stage_2.get("expected_core_cells") == 24, "stage_2_count", "Stage 2 count must be 24.")
-    for stage_id, stage in (("Stage 1", stage_1), ("Stage 2", stage_2)):
+    require(stage_1.get("expected_core_cells") == 12, "stage_1_count", "Stage 1 count must be 12.")
+    for stage_id, stage in (("Stage 1", stage_1),):
         require(
-            stage.get("expected_habit_wire_cells") == 24,
+            stage.get("expected_habit_wire_cells") == 12,
             "habit_wire_stage_count",
-            f"{stage_id} must contain 24 HABIT-WIRE cells.",
+            f"{stage_id} must contain 12 HABIT-WIRE cells.",
         )
         require(
-            stage.get("expected_habit_deep_cells") == 4,
+            stage.get("expected_habit_deep_cells") == 2,
             "habit_deep_stage_count",
-            f"{stage_id} must contain four HABIT-DEEP cells.",
+            f"{stage_id} must contain two HABIT-DEEP cells.",
         )
         require(
-            stage.get("expected_habit_fault_cells") == 2,
+            stage.get("expected_habit_fault_cells") == 1,
             "habit_fault_stage_count",
-            f"{stage_id} must contain two HABIT-FAULT cells.",
+            f"{stage_id} must contain one HABIT-FAULT cell.",
         )
-    require(
-        "stage_1_flash=passed" in stage_2.get("locked_until", []),
-        "stage_2_lock",
-        "Stage 2 must remain locked until Stage 1 is passed.",
-    )
-    require(
-        {"core_flash=passed", "habit_flash=passed"}.issubset(
-            set(stage_2.get("locked_until", []))
-        ),
-        "joint_stage_2_lock",
-        "Stage 2 must stay locked until both Flash subgates pass.",
-    )
 
     counts = campaign.get("expected_counts", {})
-    require(counts.get("total_core_cells") == 48, "total_cells", "The campaign must require all 48 core cells.")
+    require(counts.get("total_core_cells") == 12, "total_cells", "The campaign must require all 12 core cells.")
     require(
-        counts.get("total_core_scenario_groups") == 480,
+        counts.get("total_core_scenario_groups") == 120,
         "scenario_count",
-        "The campaign must require 480 core scenario groups.",
+        "The campaign must require 120 core scenario groups.",
     )
     require(
-        counts.get("total_presentation_runs") == 384,
+        counts.get("total_presentation_runs") == 96,
         "presentation_count",
-        "The campaign must require 384 presentation runs.",
+        "The campaign must require 96 presentation runs.",
     )
     require(
-        counts.get("total_habit_wire_cells") == 48,
+        counts.get("total_habit_wire_cells") == 12,
         "habit_wire_count",
-        "The campaign must require 48 HABIT-WIRE cells.",
+        "The campaign must require 12 HABIT-WIRE cells.",
     )
     require(
-        counts.get("total_habit_deep_cells") == 8,
+        counts.get("total_habit_deep_cells") == 2,
         "habit_deep_count",
-        "The campaign must require eight HABIT-DEEP cells.",
+        "The campaign must require two HABIT-DEEP cells.",
     )
     require(
-        counts.get("total_habit_fault_cells") == 4,
+        counts.get("total_habit_fault_cells") == 1,
         "habit_fault_count",
-        "The campaign must require four HABIT-FAULT cells.",
+        "The campaign must require one HABIT-FAULT cell.",
     )
     require(
-        counts.get("total_live_work_items") == 108,
+        counts.get("total_live_work_items") == 27,
         "joint_work_item_count",
-        "The campaign must expand 108 joint live work items.",
+        "The campaign must expand 27 joint live work items.",
     )
     require(
         {"feature_profile", "habit_scenario"}.issubset(
@@ -359,23 +326,18 @@ def validate_template(template_dir: Path) -> dict[str, Any]:
     require(
         set(funds.get("required_live_routes", [])) == EXPECTED_PROVIDERS,
         "funds_routes",
-        "Both live routes must be required.",
+        "Only the official DeepSeek route must be required.",
     )
     require(
         funds.get("terminal_on_confirmed_insufficient_funds_from_any_required_route") is True,
         "funds_terminal",
-        "Confirmed funds exhaustion on either required route must be terminal.",
+        "Confirmed funds exhaustion on the official route must be terminal.",
     )
     require(funds.get("terminal_status") == "BLOCKED_FUNDS", "funds_status", "Funds terminal status must be BLOCKED_FUNDS.")
 
-    require(isinstance(tasks, list) and len(tasks) == 10, "taskboard_shape", "The taskboard must contain ten phase gates.")
+    require(isinstance(tasks, list) and len(tasks) == 8, "taskboard_shape", "The taskboard must contain eight phase gates.")
     task_map = {task.get("task_id"): task for task in tasks if isinstance(task, dict)}
     require(len(task_map) == len(tasks), "task_ids", "Task IDs must be unique.")
-    require(
-        task_map.get("HD-007", {}).get("depends_on") == ["HD-006"],
-        "pro_task_lock",
-        "The first Pro task must depend directly on the Flash gate.",
-    )
     for task_id, task in task_map.items():
         for dependency in task.get("depends_on", []):
             require(dependency in task_map, "task_dependency", f"{task_id} has unknown dependency {dependency}.")
@@ -460,13 +422,12 @@ def validate_template(template_dir: Path) -> dict[str, Any]:
     return {
         "ok": not findings,
         "template": "her_debug",
-        "stage_1_core_cells": 24,
-        "stage_2_core_cells": 24,
-        "total_core_cells": 48,
-        "total_habit_wire_cells": 48,
-        "total_habit_deep_cells": 8,
-        "total_habit_fault_cells": 4,
-        "total_live_work_items": 108,
+        "stage_1_core_cells": 12,
+        "total_core_cells": 12,
+        "total_habit_wire_cells": 12,
+        "total_habit_deep_cells": 2,
+        "total_habit_fault_cells": 1,
+        "total_live_work_items": 27,
         "finding_count": len(findings),
         "findings": findings,
     }

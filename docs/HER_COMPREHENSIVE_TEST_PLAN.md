@@ -688,6 +688,23 @@ Every terminal path must have a deterministic expected status and user message.
 Faults are injected through a local proxy, fake provider, fake clock, or test process.
 Do not trigger real account lockouts or provider abuse controls.
 
+### 11.1 Persona-preserving native-ceiling gate
+
+For every `low`, `medium`, `high`, `xhigh`, `max`, and `max+` native-boundary
+run, the final provider iteration must be tool-free and authored in the active
+agent's visible persona. HASHI must deliver that model-authored closing response
+unchanged when it is non-empty; it must not replace it with a system-style
+diagnostic. The response must truthfully distinguish confirmed progress from
+remaining uncertainty, identify the iteration boundary, mention a resumable
+checkpoint when one exists, and invite the user to choose whether to continue,
+pivot, or stop. These are semantic assertions, not fixed-language string checks.
+
+If HER returns no usable closing text, HASHI may emit a neutral deterministic
+fallback. A plain `max_iterations` boundary defaults to `CONTINUE`; only concrete
+failure, missing-receipt, or risk evidence may recommend `PIVOT`. Certification
+must cover fixed and flex modes, both CORE-OFF and Habit-on, and all six effort
+levels before the fast campaign can advance beyond the affected gate.
+
 ## 12. Evidence and automated verdicts
 
 Each run directory contains:

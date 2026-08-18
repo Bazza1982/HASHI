@@ -56,36 +56,28 @@ def test_template_validator_accepts_the_checked_in_design() -> None:
     assert report == {
         "ok": True,
         "template": "her_debug",
-        "stage_1_core_cells": 24,
-        "stage_2_core_cells": 24,
-        "total_core_cells": 48,
-        "total_habit_wire_cells": 48,
-        "total_habit_deep_cells": 8,
-        "total_habit_fault_cells": 4,
-        "total_live_work_items": 108,
+        "stage_1_core_cells": 12,
+        "total_core_cells": 12,
+        "total_habit_wire_cells": 12,
+        "total_habit_deep_cells": 2,
+        "total_habit_fault_cells": 1,
+        "total_live_work_items": 27,
         "finding_count": 0,
         "findings": [],
     }
 
 
-def test_campaign_freezes_flash_before_pro_and_forbids_fallbacks() -> None:
+def test_campaign_uses_only_official_flash_and_forbids_fallbacks() -> None:
     campaign = _load_json("campaign.template.json")
     stages = {stage["stage_id"]: stage for stage in campaign["stages"]}
 
     assert campaign["joint_campaign_version"] == 3
     assert stages["stage_1_flash"]["allowed_live_models"] == {
         "official_deepseek": "deepseek-v4-flash",
-        "openrouter": "deepseek/deepseek-v4-flash",
     }
-    assert stages["stage_2_pro"]["allowed_live_models"] == {
-        "official_deepseek": "deepseek-v4-pro",
-        "openrouter": "deepseek/deepseek-v4-pro",
-    }
-    assert "stage_1_flash=passed" in stages["stage_2_pro"]["locked_until"]
-    assert "core_flash=passed" in stages["stage_2_pro"]["locked_until"]
-    assert "habit_flash=passed" in stages["stage_2_pro"]["locked_until"]
-    assert campaign["expected_counts"]["total_core_cells"] == 48
-    assert campaign["expected_counts"]["total_live_work_items"] == 108
+    assert set(stages) == {"stage_1_flash"}
+    assert campaign["expected_counts"]["total_core_cells"] == 12
+    assert campaign["expected_counts"]["total_live_work_items"] == 27
     assert {"feature_profile", "habit_scenario"}.issubset(
         campaign["work_item_key_fields"]
     )
@@ -103,9 +95,11 @@ def test_nudge_belongs_to_controller_and_cannot_interrupt_ajiao() -> None:
     assert liveness["may_dispatch_duplicate_active_packet"] is False
     assert liveness["may_continue_packets_for_in_progress_task"] is True
     assert liveness["must_not_require_new_start_authority_for_in_progress_task_packet"] is True
-    assert liveness["must_follow_up_nonterminal_failure"] is True
+    assert liveness["must_follow_up_nonterminal_failure"] is False
     assert liveness["must_surface_stagnation"] is True
-    assert liveness["stagnation_observation_limit"] == 3
+    assert liveness["stagnation_observation_limit"] == 1
+    assert liveness["wait_requires_concrete_external_blocker"] is True
+    assert liveness["idle_eligible_packet_dispatches_immediately"] is True
     assert liveness["operator_pause_requires_explicit_resume"] is True
     assert liveness["controller_transient_drain_auto_resumes"] is True
     assert liveness["max_nudges"] == 0
@@ -202,6 +196,24 @@ def test_null_selected_packet_cannot_hide_idle_in_progress_livelock() -> None:
         state, campaign, tasks
     ) is False
 
+
+def test_validation_rejects_state_campaign_status_mismatch(tmp_path: Path) -> None:
+    controller = _controller_module()
+    controller.SUPERLOOPS = tmp_path / "superloops"
+    created = controller.instantiate()
+    loop_id = created["loop_id"]
+    loop_dir = controller.SUPERLOOPS / "loops" / loop_id
+    campaign = json.loads((loop_dir / "campaign.json").read_text(encoding="utf-8"))
+    campaign["status"] = "running"
+    controller._atomic_json(loop_dir / "campaign.json", campaign)
+
+    report = controller._custom_validation(loop_id)
+
+    assert report["ok"] is False
+    assert "state_campaign_status_mismatch" in {
+        finding["code"] for finding in report["findings"]
+    }
+
 def test_joint_migration_start_clears_pause_interlock(tmp_path: Path) -> None:
     controller = _controller_module()
     controller.SUPERLOOPS = tmp_path / "superloops"
@@ -246,12 +258,33 @@ def test_joint_migration_start_clears_pause_interlock(tmp_path: Path) -> None:
     assert resumed_campaign["status"] == "running"
 
 
-def test_pro_task_depends_on_complete_flash_gate() -> None:
+def test_create_nudge_refresh_reenables_existing_controller(tmp_path: Path) -> None:
+    controller = _controller_module()
+    controller.SUPERLOOPS = tmp_path / "superloops"
+    controller.TASKS_PATH = tmp_path / "tasks.json"
+    created = controller.instantiate()
+    loop_id = created["loop_id"]
+    first = controller.create_nudge(loop_id)
+    nudge_id = first["job"]["id"]
+    payload = json.loads(controller.TASKS_PATH.read_text(encoding="utf-8"))
+    persisted = next(item for item in payload["nudges"] if item["id"] == nudge_id)
+    persisted["enabled"] = False
+    controller._atomic_json(controller.TASKS_PATH, payload)
+
+    refreshed = controller.create_nudge(loop_id)
+
+    assert refreshed["created"] is False
+    assert refreshed["refreshed"] is True
+    assert refreshed["job"]["enabled"] is True
+
+
+def test_final_gate_depends_directly_on_complete_flash_gate() -> None:
     tasks = {task["task_id"]: task for task in _load_json("taskboard.template.json")}
 
     assert tasks["HD-006"]["phase"] == "stage_1_flash_gate"
-    assert tasks["HD-007"]["phase"] == "stage_2_pro_cheap"
-    assert tasks["HD-007"]["depends_on"] == ["HD-006"]
+    assert "HD-007" not in tasks
+    assert "HD-008" not in tasks
+    assert tasks["HD-009"]["depends_on"] == ["HD-006"]
     assert all(task["status"] == "pending" for task in tasks.values())
 
 
@@ -266,7 +299,6 @@ def test_only_pass_or_confirmed_funds_exhaustion_is_terminal() -> None:
     }
     assert campaign["funds_policy"]["required_live_routes"] == [
         "official_deepseek",
-        "openrouter",
     ]
     assert campaign["funds_policy"][
         "terminal_on_confirmed_insufficient_funds_from_any_required_route"
@@ -398,17 +430,17 @@ def test_joint_migration_invalidates_legacy_candidate_and_expands_habit_tracks(
 
     assert result["migrated"] is True
     assert result["validation"]["ok"] is True
-    assert result["validation"]["core_cells"] == 48
-    assert result["validation"]["habit_wire_cells"] == 48
-    assert result["validation"]["habit_deep_cells"] == 8
-    assert result["validation"]["habit_fault_cells"] == 4
+    assert result["validation"]["core_cells"] == 12
+    assert result["validation"]["habit_wire_cells"] == 12
+    assert result["validation"]["habit_deep_cells"] == 2
+    assert result["validation"]["habit_fault_cells"] == 1
     migrated_state = json.loads((loop_dir / "state.json").read_text(encoding="utf-8"))
     assert migrated_state["status"] == "paused"
     assert migrated_state["candidate"]["evidence_valid"] is False
     assert migrated_state["candidate"]["supersedes_candidate_hash"] == "1" * 64
     assert migrated_state["gates"]["core_flash"] == "pending"
     assert migrated_state["gates"]["habit_flash"] == "pending"
-    assert migrated_state["gates"]["stage_2_pro"] == "locked"
+    assert "stage_2_pro" not in migrated_state["gates"]
     migrated_waits = json.loads((loop_dir / "waits.json").read_text(encoding="utf-8"))
     assert migrated_waits[0]["status"] == "stale"
     assert migrated_waits[0]["prior_status"] == "pending"

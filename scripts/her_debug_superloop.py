@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Instantiate and operate the persisted two-stage HER debug Superloop."""
+"""Operate the official-DeepSeek Flash fast HER debug Superloop."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from orchestrator.superloop_validator import validate_loop
 TEMPLATE = ROOT / "superloops" / "templates" / "her_debug"
 SUPERLOOPS = ROOT / "superloops"
 TASKS_PATH = ROOT / "tasks.json"
-PROVIDER_ORDER = ("official_deepseek", "openrouter")
+PROVIDER_ORDER = ("official_deepseek",)
 MODE_ORDER = ("fixed", "flex")
 EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "max+")
 SCENARIOS = tuple(f"C{number:02d}" for number in range(10))
@@ -37,10 +37,10 @@ HABIT_ON = "habit_on"
 HABIT_WIRE = "habit_wire"
 HABIT_DEEP = "habit_deep"
 HABIT_FAULT = "habit_fault"
-EXPECTED_CORE_CELLS = 48
-EXPECTED_HABIT_WIRE_CELLS = 48
-EXPECTED_HABIT_DEEP_CELLS = 8
-EXPECTED_HABIT_FAULT_CELLS = 4
+EXPECTED_CORE_CELLS = 12
+EXPECTED_HABIT_WIRE_CELLS = 12
+EXPECTED_HABIT_DEEP_CELLS = 2
+EXPECTED_HABIT_FAULT_CELLS = 1
 CURRENT_JOINT_CAMPAIGN_VERSION = 3
 EXPECTED_LIVE_WORK_ITEMS = (
     EXPECTED_CORE_CELLS
@@ -49,8 +49,7 @@ EXPECTED_LIVE_WORK_ITEMS = (
     + EXPECTED_HABIT_FAULT_CELLS
 )
 STAGES = (
-    ("stage_1_flash", "FLASH", {"official_deepseek": "deepseek-v4-flash", "openrouter": "deepseek/deepseek-v4-flash"}),
-    ("stage_2_pro", "PRO", {"official_deepseek": "deepseek-v4-pro", "openrouter": "deepseek/deepseek-v4-pro"}),
+    ("stage_1_flash", "FLASH", {"official_deepseek": "deepseek-v4-flash"}),
 )
 CONTROLLER_ACTOR = agent_actor("lin_yueru", instance="HASHI2", source="her_debug_controller")
 
@@ -162,11 +161,9 @@ def _presentation_runs(cell_id: str, *, status: str) -> list[dict[str, Any]]:
 def _build_work_items() -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for stage_index, (stage_id, model_code, model_map) in enumerate(STAGES, start=1):
-        stage_status = "locked" if stage_id == "stage_2_pro" else "pending"
-        for effort_index, effort in enumerate(EFFORT_ORDER):
-            # Rotate provider order between effort batches while retaining a frozen manifest.
-            providers = PROVIDER_ORDER if effort_index % 2 == 0 else tuple(reversed(PROVIDER_ORDER))
-            for provider in providers:
+        stage_status = "pending"
+        for effort in EFFORT_ORDER:
+            for provider in PROVIDER_ORDER:
                 for mode in MODE_ORDER:
                     cell_id = (
                         f"HER-LIVE-{_provider_code(provider)}-{model_code}-"
@@ -427,6 +424,11 @@ def _custom_validation(loop_id: str) -> dict[str, Any]:
 
     require(state.get("template") == "her_debug", "template", "Loop must use her_debug.")
     require(
+        state.get("status") == campaign.get("status"),
+        "state_campaign_status_mismatch",
+        "Loop state and campaign status must remain synchronized.",
+    )
+    require(
         campaign.get("joint_campaign_version") == CURRENT_JOINT_CAMPAIGN_VERSION,
         "joint_campaign_version",
         f"Campaign must use joint version {CURRENT_JOINT_CAMPAIGN_VERSION}.",
@@ -457,7 +459,7 @@ def _custom_validation(loop_id: str) -> dict[str, Any]:
     require(
         len(work_items) == EXPECTED_LIVE_WORK_ITEMS,
         "work_item_count",
-        "The joint campaign must expand 108 live work items.",
+        "The fast campaign must expand 27 live work items.",
     )
     require(
         len({item.get("work_item_id") for item in work_items})
@@ -468,32 +470,32 @@ def _custom_validation(loop_id: str) -> dict[str, Any]:
     require(
         len(core_items) == EXPECTED_CORE_CELLS,
         "core_cell_count",
-        "Exactly 48 CORE-OFF cells must be expanded.",
+        "Exactly 12 CORE-OFF cells must be expanded.",
     )
     require(
-        sum(len(item.get("scenario_groups", [])) for item in core_items) == 480,
+        sum(len(item.get("scenario_groups", [])) for item in core_items) == 120,
         "core_scenario_count",
-        "Exactly 480 CORE-OFF scenario groups must be expanded.",
+        "Exactly 120 CORE-OFF scenario groups must be expanded.",
     )
     require(
-        sum(len(item.get("presentation_runs", [])) for item in core_items) == 384,
+        sum(len(item.get("presentation_runs", [])) for item in core_items) == 96,
         "core_presentation_count",
-        "Exactly 384 CORE-OFF presentation runs must be expanded.",
+        "Exactly 96 CORE-OFF presentation runs must be expanded.",
     )
     require(
         len(habit_wire_items) == EXPECTED_HABIT_WIRE_CELLS,
         "habit_wire_count",
-        "Exactly 48 HABIT-WIRE cells must be expanded.",
+        "Exactly 12 HABIT-WIRE cells must be expanded.",
     )
     require(
         len(habit_deep_items) == EXPECTED_HABIT_DEEP_CELLS,
         "habit_deep_count",
-        "Exactly eight HABIT-DEEP cells must be expanded.",
+        "Exactly two HABIT-DEEP cells must be expanded.",
     )
     require(
         len(habit_fault_items) == EXPECTED_HABIT_FAULT_CELLS,
         "habit_fault_count",
-        "Exactly four HABIT-FAULT cells must be expanded.",
+        "Exactly one HABIT-FAULT cell must be expanded.",
     )
     require(
         sum(
@@ -501,22 +503,12 @@ def _custom_validation(loop_id: str) -> dict[str, Any]:
             and item.get("feature_profile") == CORE_OFF
             for item in work_items
         )
-        == 24,
+        == 12,
         "flash_core_count",
-        "Stage 1 must contain 24 CORE-OFF cells.",
-    )
-    require(
-        sum(
-            item.get("stage") == "stage_2_pro"
-            and item.get("feature_profile") == CORE_OFF
-            for item in work_items
-        )
-        == 24,
-        "pro_core_count",
-        "Stage 2 must contain 24 CORE-OFF cells.",
+        "Stage 1 must contain 12 CORE-OFF cells.",
     )
     for item in work_items:
-        stage_models = dict(STAGES[0][2] if item.get("stage") == "stage_1_flash" else STAGES[1][2])
+        stage_models = dict(STAGES[0][2])
         require(item.get("model") == stage_models.get(item.get("provider")), "route_model", f"Illegal model for {item.get('work_item_id')}.")
         require(
             item.get("feature_profile") in {CORE_OFF, HABIT_ON},
@@ -536,13 +528,8 @@ def _custom_validation(loop_id: str) -> dict[str, Any]:
                 "habit_scenario",
                 f"Invalid Habit scenario for {item.get('work_item_id')}.",
             )
-        if item.get("stage") == "stage_2_pro" and (
-            state.get("gates", {}).get("core_flash") != "passed"
-            or state.get("gates", {}).get("habit_flash") != "passed"
-        ):
-            require(item.get("status") == "locked", "pro_lock", f"Pro cell is unlocked early: {item.get('work_item_id')}.")
-    require(len(tasks) == 10, "task_count", "The phase taskboard must contain ten tasks.")
-    require(campaign.get("expected_counts", {}).get("total_core_cells") == 48, "campaign_count", "Campaign count changed.")
+    require(len(tasks) == 8, "task_count", "The phase taskboard must contain eight tasks.")
+    require(campaign.get("expected_counts", {}).get("total_core_cells") == 12, "campaign_count", "Campaign count changed.")
     require(
         campaign.get("expected_counts", {}).get("total_live_work_items")
         == EXPECTED_LIVE_WORK_ITEMS,
@@ -626,7 +613,7 @@ def instantiate() -> dict[str, Any]:
         "- Controller: `lin_yueru@HASHI2`\n"
         "- Worker: `ajiao@HASHI2`\n"
         "- Terminal results: `PASSED` or `BLOCKED_FUNDS` only\n"
-        "- Oracle: `docs/HER_COMPREHENSIVE_TEST_PLAN.md`\n"
+        "- Oracle: `docs/HER_FLASH_FAST_TEST_PLAN.md`\n"
         "- Policy: `controller_policy.md`\n"
     )
     store.create_compiled_loop(
@@ -648,7 +635,7 @@ def instantiate() -> dict[str, Any]:
         {
             "captured_at": now,
             "files": _template_hashes(),
-            "oracle_sha256": _sha256(ROOT / "docs" / "HER_COMPREHENSIVE_TEST_PLAN.md"),
+            "oracle_sha256": _sha256(ROOT / "docs" / "HER_FLASH_FAST_TEST_PLAN.md"),
         },
     )
     (loop_dir / "dispatches.jsonl").touch(exist_ok=False)
@@ -665,8 +652,8 @@ def instantiate() -> dict[str, Any]:
             "habit_deep_cells": EXPECTED_HABIT_DEEP_CELLS,
             "habit_fault_cells": EXPECTED_HABIT_FAULT_CELLS,
             "live_work_items": EXPECTED_LIVE_WORK_ITEMS,
-            "scenario_groups": 480,
-            "presentation_runs": 384,
+            "scenario_groups": 120,
+            "presentation_runs": 96,
         },
         actor=CONTROLLER_ACTOR,
     )
@@ -968,7 +955,7 @@ def migrate_joint_campaign(loop_id: str) -> dict[str, Any]:
         "captured_at": now,
         "files": _template_hashes(),
         "oracle_sha256": _sha256(
-            ROOT / "docs" / "HER_COMPREHENSIVE_TEST_PLAN.md"
+            ROOT / "docs" / "HER_FLASH_FAST_TEST_PLAN.md"
         ),
         "migration": {
             "from_joint_campaign_version": source_version,
@@ -1005,7 +992,6 @@ def migrate_joint_campaign(loop_id: str) -> dict[str, Any]:
         "layer_a_offline": "pending",
         "core_flash": "pending",
         "habit_flash": "pending",
-        "stage_2_pro": "locked",
         "historical_evidence_mutated": False,
         "historical_wait_records_retained": True,
         "stale_wait_ids": stale_wait_ids,
@@ -1039,12 +1025,12 @@ def migrate_joint_campaign(loop_id: str) -> dict[str, Any]:
         f"- Status: paused after joint HER/Habit oracle realignment to v{CURRENT_JOINT_CAMPAIGN_VERSION}\n"
         "- Controller: `lin_yueru@HASHI2`\n"
         "- Worker: `ajiao@HASHI2`\n"
-        "- CORE-OFF: 48 cells\n"
-        "- HABIT-WIRE / DEEP / FAULT: 48 / 8 / 4 live items\n"
-        "- Pro gate: locked until both Flash subgates pass\n"
+        "- CORE-OFF: 12 official-DeepSeek Flash cells\n"
+        "- HABIT-WIRE / DEEP / FAULT: 12 / 2 / 1 live items\n"
+        "- Pro and OpenRouter: excluded from the fast profile\n"
         f"- Realignment receipt: `{receipt_ref}`\n"
         "- Historical evidence: retained but stale for release credit\n"
-        "- Oracle: `docs/HER_COMPREHENSIVE_TEST_PLAN.md`\n"
+        "- Oracle: `docs/HER_FLASH_FAST_TEST_PLAN.md`\n"
         "- Policy: `controller_policy.md`\n"
     )
     (loop_dir / "README.md").write_text(summary, encoding="utf-8")
@@ -1113,6 +1099,7 @@ def create_nudge(loop_id: str) -> dict[str, Any]:
             )
             if persisted is None:
                 raise RuntimeError("persisted controller nudge is missing from tasks.json")
+            persisted["enabled"] = True
             persisted["prompt"] = rendered_policy
             persisted["note"] = f"HER debug joint controller for {loop_id}"
             persisted["superloop_id"] = loop_id

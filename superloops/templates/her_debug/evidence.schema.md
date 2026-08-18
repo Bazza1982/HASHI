@@ -24,9 +24,9 @@ final verified attempt ID
 stale reason, when invalidated
 ```
 
-The ledger must reconcile to 24 Flash and 24 Pro `CORE-OFF` cells, 24 Flash and
-24 Pro `HABIT-WIRE` cells, eight `HABIT-DEEP` cells, four `HABIT-FAULT` cells,
-480 core scenario groups, and 384 core presentation runs, plus the plan's
+The ledger must reconcile to 12 official-DeepSeek Flash `CORE-OFF` cells, 12
+`HABIT-WIRE` cells, two `HABIT-DEEP` cells, one `HABIT-FAULT` cell, 120 core
+scenario groups, and 96 core presentation runs, plus the plan's
 offline, boundary, continuity, endurance, restart, migration, and fault work.
 
 ## Dispatch and follow-up ledger
@@ -146,7 +146,7 @@ populate this terminal record.
 ## Final evidence
 
 `PASSED` requires the final composite candidate identity (HASHI commit/build,
-HER source/package, and oracle hashes), complete joint Layer A verdict, both
-24-cell core gates and both Habit gates, every ancillary suite, full HASHI/HER regression results,
+HER source/package, and oracle hashes), complete joint Layer A verdict, the
+12-cell core gate and Habit gate, every ancillary suite, full HASHI/HER regression results,
 all affecting journal entries verified, Ajiao restoration evidence, and a
 drained/classified reply ledger with no active dispatch, wait, or blocker.

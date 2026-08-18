@@ -3,19 +3,13 @@
   "joint_campaign_version": 3,
   "campaign_id": "{{CAMPAIGN_ID}}",
   "loop_id": "{{LOOP_ID}}",
-  "status": "planned",
-  "authoritative_plan": "docs/HER_COMPREHENSIVE_TEST_PLAN.md",
+  "status": "paused",
+  "authoritative_plan": "docs/HER_FLASH_FAST_TEST_PLAN.md",
   "dimensions": {
     "providers": {
       "official_deepseek": {
         "route_code": "DS",
-        "flash_model": "deepseek-v4-flash",
-        "pro_model": "deepseek-v4-pro"
-      },
-      "openrouter": {
-        "route_code": "OR",
-        "flash_model": "deepseek/deepseek-v4-flash",
-        "pro_model": "deepseek/deepseek-v4-pro"
+        "flash_model": "deepseek-v4-flash"
       }
     },
     "modes": [
@@ -37,54 +31,32 @@
       "ordinal": 1,
       "status": "pending",
       "allowed_live_models": {
-        "official_deepseek": "deepseek-v4-flash",
-        "openrouter": "deepseek/deepseek-v4-flash"
+        "official_deepseek": "deepseek-v4-flash"
       },
-      "expected_core_cells": 24,
-      "expected_habit_wire_cells": 24,
-      "expected_habit_deep_cells": 4,
-      "expected_habit_fault_cells": 2,
+      "expected_core_cells": 12,
+      "expected_habit_wire_cells": 12,
+      "expected_habit_deep_cells": 2,
+      "expected_habit_fault_cells": 1,
       "locked_until": [
         "layer_a_offline=passed"
       ],
       "completion_gate": "core_flash_and_habit_flash_are_both_passed_and_all_affecting_defects_verified"
-    },
-    {
-      "stage_id": "stage_2_pro",
-      "ordinal": 2,
-      "status": "locked",
-      "allowed_live_models": {
-        "official_deepseek": "deepseek-v4-pro",
-        "openrouter": "deepseek/deepseek-v4-pro"
-      },
-      "expected_core_cells": 24,
-      "expected_habit_wire_cells": 24,
-      "expected_habit_deep_cells": 4,
-      "expected_habit_fault_cells": 2,
-      "locked_until": [
-        "layer_a_offline=passed",
-        "core_flash=passed",
-        "habit_flash=passed",
-        "stage_1_flash=passed"
-      ],
-      "completion_gate": "all_pro_cells_and_ancillary_suites_passed_and_all_affecting_defects_verified"
     }
   ],
   "expected_counts": {
-    "stage_1_core_cells": 24,
-    "stage_2_core_cells": 24,
-    "total_core_cells": 48,
+    "stage_1_core_cells": 12,
+    "total_core_cells": 12,
     "scenario_groups_per_cell": 10,
-    "total_core_scenario_groups": 480,
+    "total_core_scenario_groups": 120,
     "presentation_variants_per_cell": 8,
-    "total_presentation_runs": 384,
-    "habit_wire_cells_per_stage": 24,
-    "total_habit_wire_cells": 48,
-    "habit_deep_cells_per_stage": 4,
-    "total_habit_deep_cells": 8,
-    "habit_fault_cells_per_stage": 2,
-    "total_habit_fault_cells": 4,
-    "total_live_work_items": 108
+    "total_presentation_runs": 96,
+    "habit_wire_cells_per_stage": 12,
+    "total_habit_wire_cells": 12,
+    "habit_deep_cells_per_stage": 2,
+    "total_habit_deep_cells": 2,
+    "habit_fault_cells_per_stage": 1,
+    "total_habit_fault_cells": 1,
+    "total_live_work_items": 27
   },
   "wave_order": [
     "cheap",
@@ -127,7 +99,7 @@
     "BLOCKED_FUNDS"
   ],
   "retry_policy": {
-    "model_deviation_cold_retries": 3,
+    "model_deviation_cold_retries": 1,
     "transient_route_same_route_only": true,
     "worker_failure_requires_correlated_follow_up": true,
     "worker_running_forbids_interrupt_or_duplicate_dispatch": true,
@@ -143,8 +115,7 @@
   },
   "funds_policy": {
     "required_live_routes": [
-      "official_deepseek",
-      "openrouter"
+      "official_deepseek"
     ],
     "terminal_on_confirmed_insufficient_funds_from_any_required_route": true,
     "confirmation": "explicit_provider_response_plus_read_only_balance_check_or_one_bounded_same_route_probe",
@@ -160,9 +131,7 @@
   "candidate_invalidation": {
     "shared_runtime_fix_invalidates_prior_candidate_evidence": true,
     "plan_template_or_ledger_change_invalidates_prior_candidate_evidence": true,
-    "stage_2_shared_fix_sets_stage_1_to": "revalidation_required",
-    "pro_advancement_pauses_until_flash_revalidation": true,
-    "final_all_48_cells_require_same_candidate": true,
+    "final_all_12_cells_require_same_candidate": true,
     "final_joint_habit_suites_require_same_candidate": true,
     "candidate_identity_fields": [
       "hashi_commit",

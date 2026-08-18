@@ -61,17 +61,18 @@ def test_campaign_expands_every_cell_scenario_and_presentation_run() -> None:
         item for item in items if item["habit_scenario"] == "habit_fault"
     ]
 
-    assert len(items) == 108
-    assert len({item["work_item_id"] for item in items}) == 108
-    assert len(core) == 48
-    assert sum(item["stage"] == "stage_1_flash" for item in core) == 24
-    assert sum(item["stage"] == "stage_2_pro" for item in core) == 24
-    assert sum(len(item["scenario_groups"]) for item in core) == 480
-    assert sum(len(item["presentation_runs"]) for item in core) == 384
-    assert len(habit_wire) == 48
-    assert len(habit_deep) == 8
-    assert len(habit_fault) == 4
-    assert all(item["status"] == "locked" for item in items if item["stage"] == "stage_2_pro")
+    assert len(items) == 27
+    assert len({item["work_item_id"] for item in items}) == 27
+    assert len(core) == 12
+    assert all(item["stage"] == "stage_1_flash" for item in core)
+    assert sum(len(item["scenario_groups"]) for item in core) == 120
+    assert sum(len(item["presentation_runs"]) for item in core) == 96
+    assert len(habit_wire) == 12
+    assert len(habit_deep) == 2
+    assert len(habit_fault) == 1
+    assert {item["provider"] for item in items} == {"official_deepseek"}
+    assert {item["model"] for item in items} == {"deepseek-v4-flash"}
+    assert all(item["status"] == "pending" for item in items)
     assert all(item["habit_scenario"] == "none" for item in core)
     assert all(item["feature_profile"] == "habit_on" for item in items if item not in core)
 

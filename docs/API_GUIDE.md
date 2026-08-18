@@ -150,8 +150,12 @@ therefore maps `/effort` to the maximum agentic model/tool-loop iterations:
 `low=12`, `medium=32`, `high=96` (default), `xhigh=192`, and `max=384`.
 Reaching the selected budget returns a successful but machine-readable
 `completion_status: incomplete` result with `stop_reason: max_iterations`;
-the final iteration is tool-free and reports verified progress and a recommended
-next step. A natural model stop returns `completed` with `end_turn`.
+the final iteration is tool-free and responds in the active agent persona with
+verified progress, remaining uncertainty, the resumable checkpoint, and a choice
+to continue, pivot, or stop. HASHI preserves that model-authored closing text;
+only a missing closing response uses the neutral deterministic fallback. A plain
+iteration ceiling recommends continuation unless concrete failure or risk evidence
+supports a pivot. A natural model stop returns `completed` with `end_turn`.
 
 ### xAI OAuth setup
 
