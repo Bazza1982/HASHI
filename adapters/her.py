@@ -117,6 +117,14 @@ CLAW_ENV_ALLOWLIST = (
     "CLAW_MAX_TOOL_ITERATIONS",
     "CLAW_TASK_PLANNING",
     "CLAW_EXECUTION_EFFORT",
+    "CLAW_POST_TOOL_STALL_TIMEOUT_SECONDS",
+    "CLAW_POST_TOOL_RETRY_STALL_TIMEOUT_SECONDS",
+    "CLAW_POST_TOOL_STALL_TIMEOUT_SECONDS_ANTHROPIC",
+    "CLAW_POST_TOOL_RETRY_STALL_TIMEOUT_SECONDS_ANTHROPIC",
+    "CLAW_POST_TOOL_STALL_TIMEOUT_SECONDS_OPENAI",
+    "CLAW_POST_TOOL_RETRY_STALL_TIMEOUT_SECONDS_OPENAI",
+    "CLAW_POST_TOOL_STALL_TIMEOUT_SECONDS_XAI",
+    "CLAW_POST_TOOL_RETRY_STALL_TIMEOUT_SECONDS_XAI",
     "HASHI_MANAGED_TRANSPORT",
     *OS_ENV_ALLOWLIST,
 )
@@ -244,6 +252,10 @@ class ClawTaskResult:
     pending_interaction: dict[str, Any] | None = None
     planning_status: str | None = None
     planning_error: str | None = None
+    terminal_kind: str | None = None
+    message_origin: str | None = None
+    exit_reasoning_status: str | None = None
+    exit_reasoning_attempts: int | None = None
 
 
 def _claw_run_is_incomplete(result: ClawTaskResult) -> bool:
@@ -253,31 +265,6 @@ def _claw_run_is_incomplete(result: ClawTaskResult) -> bool:
         completion_status in _CLAW_INCOMPLETE_STATUSES
         or stop_reason in _CLAW_INCOMPLETE_STOP_REASONS
     )
-
-
-def _claw_planning_failure_notice(prompt: str, response_text: str) -> str:
-    """Guarantee a concise user-visible record of non-blocking plan failure."""
-
-    normalized = response_text.casefold()
-    if (
-        "planning failure" in normalized
-        or "planning validation failed" in normalized
-        or "planning failed validation" in normalized
-        or "规划失败" in response_text
-        or "规划没有通过" in response_text
-        or "规划未通过" in response_text
-    ):
-        return response_text
-    contains_chinese = any("\u4e00" <= char <= "\u9fff" for char in prompt)
-    notice = (
-        "⚠️ **内部规划报告：** 本轮 TaskFrame planning 未通过校验；"
-        "主 Agent 已按原始请求与既有权限继续执行，以上结果来自实际执行而非该计划。"
-        if contains_chinese
-        else "⚠️ **Internal planning report:** TaskFrame planning did not pass validation. "
-        "The primary agent continued under the original request and existing permissions; "
-        "the result above comes from actual execution, not from the rejected plan."
-    )
-    return f"{response_text.rstrip()}\n\n{notice}" if response_text.strip() else notice
 
 
 def _claw_tool_name(item: Any) -> str:
@@ -357,16 +344,6 @@ def _claw_tool_is_read_only(name: str) -> bool:
     leaf = normalized.rsplit(".", 1)[-1]
     leaf = leaf.removeprefix("browser_")
     return leaf == "file_read" or leaf.startswith(_CLAW_READ_ONLY_TOOL_MARKERS)
-
-
-def _claw_count_names(names: list[str], *, empty: str = "无") -> str:
-    counts: dict[str, int] = {}
-    for name in names:
-        counts[name] = counts.get(name, 0) + 1
-    return (
-        ", ".join(f"`{name}` ×{count}" for name, count in sorted(counts.items()))
-        or empty
-    )
 
 
 def _claw_pair_tool_ledger(
@@ -700,225 +677,38 @@ class _HERStreamCadenceController:
         self._changed.set()
 
 
-def _build_claw_incomplete_report(
-    result: ClawTaskResult, *, prompt: str
-) -> tuple[str, dict[str, Any]]:
-    ledger = _claw_pair_tool_ledger(result.tool_uses, result.tool_results)
-    successful: list[str] = []
-    failed: list[str] = []
-    verified: list[str] = []
-    uncertain: list[str] = []
-    missing: list[str] = []
-
-    for name, tool_result in ledger:
-        if tool_result is None:
-            missing.append(name)
-            uncertain.append(name)
-        elif _claw_result_is_error(tool_result):
-            failed.append(name)
-        else:
-            successful.append(name)
-            if _claw_tool_is_read_only(name) or _claw_has_explicit_verification(
-                tool_result
-            ):
-                verified.append(name)
-            else:
-                uncertain.append(name)
-
-    failed_counts: dict[str, int] = {}
-    for name in failed:
-        failed_counts[name] = failed_counts.get(name, 0) + 1
-    repeated_failure = any(count >= 2 for count in failed_counts.values())
-
-    stop_reason = str(result.stop_reason or "incomplete").strip().lower()
-    execution_limit = stop_reason in {"max_iterations", "budget_exhausted"}
-    if execution_limit:
-        recommendation = "CONTINUE"
-        recommendation_zh = "从已保存的 session 继续；执行轮数耗尽不代表计划需要改变。"
-        recommendation_en = "Resume the saved session; exhausting execution turns does not require a plan change."
-    elif missing or repeated_failure or failed:
-        recommendation = "PIVOT"
-        recommendation_zh = "改变策略后再继续；不要重复执行未经核验的副作用操作。"
-        recommendation_en = (
-            "Change strategy before continuing; do not repeat unverified side effects."
-        )
-    elif successful:
-        recommendation = "CONTINUE"
-        recommendation_zh = "从已保存的 session 继续，并先核验当前页面或外部状态。"
-        recommendation_en = (
-            "Resume the saved session and verify current external state first."
-        )
-    else:
-        recommendation = "STOP"
-        recommendation_zh = "当前账本没有可确认进展；停止并重新评估任务或请求人工决定。"
-        recommendation_en = "No confirmed progress is present; stop and reassess or request a human decision."
-
-    iterations = result.iterations if result.iterations is not None else "未知"
-    stop_reason = result.stop_reason or "incomplete"
-    checkpoint_zh = (
-        "- 已保存本次 session，可在后续回合继续。"
-        if result.session_id
-        else "- 本次结果没有 session checkpoint；后续继续前应先核验外部状态。"
-    )
-    checkpoint_en = (
-        "- The session checkpoint was preserved for a later turn."
-        if result.session_id
-        else "- No session checkpoint was returned; verify external state before continuing."
-    )
-    use_chinese = any(
-        "\u4e00" <= char <= "\u9fff" for char in f"{prompt}\n{result.text}"
-    )
-
-    if use_chinese:
-        report = "\n".join(
-            (
-                "## ⚠️ 执行未完成",
-                "",
-                f"任务在 **{iterations}** 轮后停止；原始模型收尾未作为最终答复发送。",
-                "",
-                "### 完成了什么",
-                f"- 成功返回的工具结果：{_claw_count_names(successful)}",
-                f"- 失败的工具结果：{_claw_count_names(failed)}",
-                "- 以上只代表工具执行记录，不代表整体业务目标已经完成。",
-                "",
-                "### 已验证",
-                f"- 有明确读取结果或状态变化证据：{_claw_count_names(verified)}",
-                "",
-                "### 状态不确定",
-                f"- 缺少明确状态变化证据或执行回执：{_claw_count_names(uncertain)}",
-                f"- 工具执行失败：{_claw_count_names(failed)}",
-                "",
-                "### 为什么停止",
-                f"- `completion_status=incomplete`；`stop_reason={stop_reason}`。",
-                checkpoint_zh,
-                "",
-                "### 建议下一步",
-                f"- **{recommendation}** — {recommendation_zh}",
-            )
-        )
-    else:
-        report = "\n".join(
-            (
-                "## ⚠️ Execution incomplete",
-                "",
-                f"The task stopped after **{iterations}** iterations. The model's raw closing text was not delivered as the final answer.",
-                "",
-                "### What completed",
-                f"- Successful tool results: {_claw_count_names(successful, empty='none')}",
-                f"- Failed tool results: {_claw_count_names(failed, empty='none')}",
-                "- Tool success does not by itself prove that the overall task completed.",
-                "",
-                "### Verified",
-                f"- Explicit read results or state-change evidence: {_claw_count_names(verified, empty='none')}",
-                "",
-                "### Uncertain",
-                f"- Missing explicit state-change evidence or execution receipt: {_claw_count_names(uncertain, empty='none')}",
-                f"- Failed tool executions: {_claw_count_names(failed, empty='none')}",
-                "",
-                "### Why it stopped",
-                f"- `completion_status=incomplete`; `stop_reason={stop_reason}`.",
-                checkpoint_en,
-                "",
-                "### Recommended next step",
-                f"- **{recommendation}** — {recommendation_en}",
-            )
-        )
-
-    metadata = {
-        "fallback_report_generated": True,
-        "successful_tool_results": len(successful),
-        "failed_tool_results": len(failed),
-        "verified_tool_results": len(verified),
-        "uncertain_tool_results": len(uncertain),
-        "missing_tool_results": len(missing),
-        "recommended_action": recommendation.lower(),
-    }
-    return report, metadata
-
-
-def _claw_incomplete_persona_facts(
-    result: ClawTaskResult,
-    *,
-    metadata: Mapping[str, Any],
-) -> list[str]:
-    """Build the immutable evidence lines for an incomplete Persona report."""
-
-    ledger = _claw_pair_tool_ledger(result.tool_uses, result.tool_results)
-    successful: list[str] = []
-    failed: list[str] = []
-    verified: list[str] = []
-    uncertain: list[str] = []
-    for name, tool_result in ledger:
-        if tool_result is None:
-            uncertain.append(name)
-        elif _claw_result_is_error(tool_result):
-            failed.append(name)
-        else:
-            successful.append(name)
-            if _claw_tool_is_read_only(name) or _claw_has_explicit_verification(
-                tool_result
-            ):
-                verified.append(name)
-            else:
-                uncertain.append(name)
-
-    recommendation = str(metadata.get("recommended_action") or "stop").upper()
-    iterations = result.iterations if result.iterations is not None else "unknown"
-    return [
-        "Overall task status: incomplete.",
-        f"Stop reason: {result.stop_reason or 'incomplete'}.",
-        f"Iterations used: {iterations}.",
-        f"Successful tool results: {_claw_count_names(successful, empty='none')}.",
-        f"Failed tool results: {_claw_count_names(failed, empty='none')}.",
-        f"Verified results: {_claw_count_names(verified, empty='none')}.",
-        f"Uncertain results: {_claw_count_names(uncertain, empty='none')}.",
-        "Session checkpoint preserved: " + ("yes." if result.session_id else "no."),
-        f"Recommended action: {recommendation}.",
-    ]
-
-
 def _claw_incomplete_response(
     result: ClawTaskResult,
     *,
     prompt: str,
 ) -> tuple[str, dict[str, Any]]:
-    """Preserve a safe model closing; otherwise return the neutral evidence report."""
-    report, metadata = _build_claw_incomplete_report(result, prompt=prompt)
+    """Accept only an explicitly proven primary-model exit report."""
+    del prompt
     model_text = str(result.text or "").strip()
     dangling_tool_markup = _claw_contains_dangling_tool_markup(model_text)
-    if model_text and not dangling_tool_markup:
-        recommendation = str(metadata.get("recommended_action") or "stop").upper()
-        use_chinese = any(
-            "\u4e00" <= char <= "\u9fff" for char in f"{prompt}\n{model_text}"
-        )
-        actions = (
-            {
-                "CONTINUE": "从已保存的 session 继续；不要重复已经完成的工作。",
-                "PIVOT": "存在明确失败或缺失回执；改变策略后再继续。",
-                "STOP": "停止并重新评估任务或请求人工决定。",
-            }
-            if use_chinese
-            else {
-                "CONTINUE": "Resume the saved session without repeating completed work.",
-                "PIVOT": "A concrete failure or missing receipt exists; change strategy before continuing.",
-                "STOP": "Stop and reassess the task or request a human decision.",
-            }
-        )
-        return (
-            f"{model_text}\n\n**{recommendation}** — {actions.get(recommendation, actions['STOP'])}",
-            {
-                **metadata,
-                "fallback_report_generated": False,
-                "persona_final_response_preserved": True,
-                "persona_interpretation_generated": False,
-            },
-        )
-    return report, {
-        **metadata,
-        "persona_final_response_preserved": False,
+    trusted_model_final = (
+        str(result.terminal_kind or "").strip().lower() == "model_report"
+        and str(result.message_origin or "").strip().lower() == "primary_model"
+        and str(result.exit_reasoning_status or "").strip().lower()
+        in {"embedded", "completed"}
+    )
+    metadata = {
+        "fallback_report_generated": False,
+        "persona_final_response_preserved": trusted_model_final
+        and bool(model_text)
+        and not dangling_tool_markup,
         "persona_interpretation_generated": False,
-        "persona_render_required": True,
+        "terminal_protocol_valid": trusted_model_final,
+        "dangling_tool_markup_blocked": dangling_tool_markup,
     }
+    if trusted_model_final and model_text and not dangling_tool_markup:
+        metadata["persona_final_response_preserved"] = True
+        return model_text, metadata
+    metadata["terminal_protocol_error"] = (
+        "HER exit protocol error: incomplete run did not provide a safe "
+        "primary-model final message"
+    )
+    return "", metadata
 
 
 @dataclass(frozen=True)
@@ -1549,7 +1339,14 @@ def _her_stream_phase(event: Mapping[str, Any]) -> str:
         return "initial"
     if kind in {"independent_review", "control_invocation"}:
         return "verification"
-    if kind in {"run_finished", "provider_stop_reason", "terminal_diagnostic"}:
+    if kind in {
+        "run_finished",
+        "provider_stop_reason",
+        "terminal_diagnostic",
+        "exit_reasoning_started",
+        "exit_reasoning_completed",
+        "exit_reasoning_failed",
+    }:
         return "finalization"
     return "execution"
 
@@ -1569,6 +1366,10 @@ def _her_stream_origin(event: Mapping[str, Any]) -> str:
         return "provider"
     if kind == "assistant_delta":
         return "primary_model"
+    if kind in {"exit_reasoning_started", "exit_reasoning_completed"}:
+        return str(event.get("message_origin") or "primary_model")
+    if kind == "exit_reasoning_failed":
+        return str(event.get("message_origin") or "her_runtime")
     if kind in {"tool_call", "tool_start", "tool_end"}:
         return "tool_gateway"
     if kind in {"independent_review", "control_invocation"}:
@@ -1899,6 +1700,32 @@ def _claw_jsonl_to_stream_event(event: Mapping[str, Any]) -> StreamEvent | None:
             summary=f"HER terminal diagnostic: {classification}"[:500],
             detail=f"action={action};provider_stop_reason={provider_reason}"[:2000],
         )
+    if kind in {
+        "exit_reasoning_started",
+        "exit_reasoning_completed",
+        "exit_reasoning_failed",
+    }:
+        attempt = int(event.get("attempt") or 0)
+        if kind == "exit_reasoning_started":
+            trigger = str(event.get("trigger") or "unknown")
+            return StreamEvent(
+                kind=KIND_PROGRESS,
+                summary=f"HER exit reasoning started (attempt {attempt})"[:500],
+                detail=f"trigger={trigger};allow_tools=false"[:1000],
+            )
+        if kind == "exit_reasoning_completed":
+            status = str(event.get("status") or "completed")
+            return StreamEvent(
+                kind=KIND_PROGRESS,
+                summary=f"HER exit reasoning completed ({status})"[:500],
+                detail=f"attempt={attempt};message_origin=primary_model"[:1000],
+            )
+        error_kind = str(event.get("error_kind") or "unknown")
+        return StreamEvent(
+            kind=KIND_ERROR,
+            summary=f"HER exit reasoning failed: {error_kind}"[:500],
+            detail=redact_secret_text(str(event.get("error") or ""))[:2000],
+        )
     if kind in {"tool_call", "tool_start"}:
         name = str(event.get("name") or event.get("tool_name") or "tool")
         summary = str(event.get("summary") or f"HER tool started: {name}")
@@ -2183,8 +2010,11 @@ def run_claw_json_command(
             if isinstance(parsed, dict)
             else None
         )
+        unstructured_error = stderr.strip() or stdout.strip()
         raise ClawCommandError(
-            message or f"HER command exited with code {completed.returncode}",
+            message
+            or unstructured_error
+            or f"HER command exited with code {completed.returncode}",
             returncode=completed.returncode,
             stdout=stdout,
             stderr=stderr,
@@ -2278,6 +2108,13 @@ def run_claw_task(
         else None,
         planning_status=str(data.get("planning_status") or "").strip() or None,
         planning_error=str(data.get("planning_error") or "").strip() or None,
+        terminal_kind=str(data.get("terminal_kind") or "").strip() or None,
+        message_origin=str(data.get("message_origin") or "").strip() or None,
+        exit_reasoning_status=str(data.get("exit_reasoning_status") or "").strip()
+        or None,
+        exit_reasoning_attempts=data.get("exit_reasoning_attempts")
+        if isinstance(data.get("exit_reasoning_attempts"), int)
+        else None,
     )
 
 
@@ -2395,6 +2232,8 @@ class HERAdapter(BaseBackend):
 
     DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
     DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
+    DEFAULT_POST_TOOL_STALL_TIMEOUT_SEC = 60
+    DEFAULT_POST_TOOL_RETRY_STALL_TIMEOUT_SEC = 120
     habit_pipeline_owner = "adapter"
 
     def _define_capabilities(self) -> BackendCapabilities:
@@ -2587,6 +2426,7 @@ class HERAdapter(BaseBackend):
         request_id: str,
         returncode: int,
         parsed_error: Mapping[str, Any] | None,
+        stdout: str,
         stderr: str,
         resume: str | None,
     ) -> None:
@@ -2598,6 +2438,7 @@ class HERAdapter(BaseBackend):
                 "resumed_session": bool(resume),
                 "session_id": resume,
                 "parsed_error": dict(parsed_error or {}),
+                "stdout": self._bounded_diagnostic_text(stdout),
                 "stderr": self._bounded_diagnostic_text(stderr),
             }
         )
@@ -2649,6 +2490,12 @@ class HERAdapter(BaseBackend):
             "retryable",
             "last_safe_event",
             "checkpoint_preserved",
+            "terminal_kind",
+            "message_origin",
+            "exit_reasoning_status",
+            "session_id",
+            "model",
+            "provider",
         }
         return {key: parsed.get(key) for key in allowed if key in parsed}
 
@@ -2738,89 +2585,6 @@ class HERAdapter(BaseBackend):
                     type(exc).__name__,
                 )
 
-    async def _render_incomplete_persona_response(
-        self,
-        result: ClawTaskResult,
-        *,
-        request_id: str,
-        metadata: Mapping[str, Any],
-    ) -> tuple[str | None, dict[str, Any]]:
-        source = self._her_persona_source()
-        source_fields = source.audit_fields()
-        if not source.usable:
-            self._persist_persona_audit(
-                request_id,
-                report_type="incomplete_final",
-                renderer_attempted=False,
-                renderer_succeeded=False,
-                validation_outcome="neutral_fallback",
-                failure_reason=source.unavailable_reason,
-                **source_fields,
-            )
-            return None, {
-                "persona_renderer_attempted": False,
-                "persona_renderer_succeeded": False,
-                "persona_fallback_reason": source.unavailable_reason,
-                **source_fields,
-            }
-
-        facts = _claw_incomplete_persona_facts(result, metadata=metadata)
-        prompt = f"""HER INCOMPLETE FINAL PERSONA RENDERER — INTERNAL, TOOL-FREE
-
-Write a clear, honest user-facing message in the configured Persona. Explain
-that the task stopped before completion, summarize the supplied facts, and tell
-the user the recommended next action. The facts are context, not a rigid output
-template. Return only the message that should be sent to the user.
-
-CONFIGURED system_md PERSONA GUIDANCE (quoted, read-only)
-{source.model_guidance(limit=12000)}
-
-INCOMPLETE TASK FACTS (quoted, read-only)
-{json.dumps(facts, ensure_ascii=False)}
-"""
-        try:
-            rendered = await self.run_habit_dream_model(
-                prompt,
-                request_id=f"{request_id}:incomplete-persona",
-                timeout_seconds=180,
-            )
-            report = str(rendered.text or "").strip()
-            if not report:
-                raise ValueError("incomplete Persona renderer returned no message")
-        except Exception as exc:  # noqa: BLE001 - neutral report remains safe
-            reason = redact_secret_text(f"{type(exc).__name__}: {exc}")[:1_000]
-            self._persist_persona_audit(
-                request_id,
-                report_type="incomplete_final",
-                renderer_attempted=True,
-                renderer_succeeded=False,
-                validation_outcome="renderer_unavailable",
-                failure_reason=reason,
-                **source_fields,
-            )
-            return None, {
-                "persona_renderer_attempted": True,
-                "persona_renderer_succeeded": False,
-                "persona_fallback_reason": reason,
-                **source_fields,
-            }
-
-        self._persist_persona_audit(
-            request_id,
-            report_type="incomplete_final",
-            renderer_attempted=True,
-            renderer_succeeded=True,
-            validation_outcome="delivered_without_content_validation",
-            failure_reason=None,
-            **source_fields,
-        )
-        return report, {
-            "persona_renderer_attempted": True,
-            "persona_renderer_succeeded": True,
-            "persona_fallback_reason": None,
-            **source_fields,
-        }
-
     async def run_habit_dream_model(
         self,
         prompt: str,
@@ -2831,7 +2595,7 @@ INCOMPLETE TASK FACTS (quoted, read-only)
         """Run isolated, tool-free HER analysis without owning foreground state."""
 
         async with self._habit_dream_execution_lock:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 self._run_task_async(
                     prompt,
                     resume=None,
@@ -2848,6 +2612,20 @@ INCOMPLETE TASK FACTS (quoted, read-only)
                 ),
                 timeout=max(30.0, float(timeout_seconds)),
             )
+        trusted_terminal = (
+            str(result.terminal_kind or "").strip().lower() == "model_report"
+            and str(result.message_origin or "").strip().lower() == "primary_model"
+            and str(result.exit_reasoning_status or "").strip().lower()
+            in {"embedded", "completed"}
+            and bool(str(result.text or "").strip())
+            and not _claw_contains_dangling_tool_markup(result.text)
+        )
+        if not trusted_terminal:
+            raise ClawError(
+                "HER exit protocol error: isolated model call did not provide a safe "
+                "primary-model final message"
+            )
+        return result
 
     def _habit_notification_context(
         self,
@@ -4000,16 +3778,34 @@ INCOMPLETE TASK FACTS (quoted, read-only)
             or 0
         )
         incomplete = _claw_run_is_incomplete(result)
-        return _her_ultra.HERUltraInvocationResult(
-            text=result.text,
-            is_success=not incomplete,
-            error=(
+        trusted_model_report = (
+            str(result.terminal_kind or "").strip().lower() == "model_report"
+            and str(result.message_origin or "").strip().lower() == "primary_model"
+            and str(result.exit_reasoning_status or "").strip().lower()
+            in {"embedded", "completed"}
+            and bool(str(result.text or "").strip())
+            and not _claw_contains_dangling_tool_markup(result.text)
+        )
+        if not trusted_model_report:
+            error = (
+                "HER exit protocol error: internal Ultra invocation did not provide "
+                "a safe primary-model report"
+            )
+            error_type = "model_protocol_error"
+        elif incomplete:
+            error = (
                 "HER internal task stopped before completion: "
                 f"{result.stop_reason or result.completion_status or 'incomplete'}"
-                if incomplete
-                else ""
-            ),
-            error_type="incomplete" if incomplete else "",
+            )
+            error_type = "incomplete"
+        else:
+            error = ""
+            error_type = ""
+        return _her_ultra.HERUltraInvocationResult(
+            text=result.text,
+            is_success=not incomplete and trusted_model_report,
+            error=error,
+            error_type=error_type,
             retryable=False,
             session_id=result.session_id or "",
             model=result.model,
@@ -4020,6 +3816,12 @@ INCOMPLETE TASK FACTS (quoted, read-only)
             tool_loop_count=result.iterations or 0,
             duration_ms=result.duration_ms,
             cost_usd=None,
+            completion_status=result.completion_status or "unknown",
+            stop_reason=result.stop_reason or "unknown",
+            terminal_kind=result.terminal_kind or "unknown",
+            message_origin=result.message_origin or "unknown",
+            exit_reasoning_status=result.exit_reasoning_status or "unknown",
+            exit_reasoning_attempts=result.exit_reasoning_attempts or 0,
         )
 
     @staticmethod
@@ -4043,6 +3845,21 @@ INCOMPLETE TASK FACTS (quoted, read-only)
             error=str(exc),
             error_type=error_type,
             retryable=retryable,
+            session_id=str(parsed.get("session_id") or ""),
+            model=str(parsed.get("model") or ""),
+            completion_status="error",
+            stop_reason=str(parsed.get("stop_reason") or "backend_error"),
+            terminal_kind=str(parsed.get("terminal_kind") or "runtime_error"),
+            message_origin=str(parsed.get("message_origin") or "runtime"),
+            exit_reasoning_status=str(
+                parsed.get("exit_reasoning_status") or "failed_runtime"
+            ),
+            exit_reasoning_attempts=(
+                parsed.get("exit_reasoning_attempts")
+                if isinstance(parsed.get("exit_reasoning_attempts"), int)
+                else 0
+            ),
+            checkpoint_preserved=bool(parsed.get("checkpoint_preserved")),
         )
 
     def _cancel_ultra_runs(self, reason: str) -> None:
@@ -4171,11 +3988,13 @@ RUNTIME FACTS (quoted, read-only)
         async def invoke_primary(
             spec: _her_ultra.HERUltraPrimaryExecutionSpec,
         ) -> _her_ultra.HERUltraInvocationResult:
-            read_only_phases = {
+            tool_free_phases = {
                 "planning",
                 "plan_correction",
                 "assembly",
                 "failure_finalization",
+                "direct_response",
+                "interaction",
             }
             try:
                 result = await self._run_task_async(
@@ -4186,11 +4005,11 @@ RUNTIME FACTS (quoted, read-only)
                     track_session_identity=False,
                     permission_mode_override=(
                         "read-only"
-                        if spec.phase in read_only_phases
+                        if spec.phase in tool_free_phases
                         else authority.permission_mode
                     ),
                     allowed_tools_override=(
-                        [] if spec.phase in read_only_phases else inherited_tools
+                        [] if spec.phase in tool_free_phases else inherited_tools
                     ),
                     task_env_overrides=self._ultra_task_env(spec.effort),
                     model_override=spec.model,
@@ -4266,6 +4085,15 @@ RUNTIME FACTS (quoted, read-only)
                     if outcome.status in {"completed", "incomplete"}:
                         self._session_id = outcome.primary_session_id or None
                         self._persist_session_identity()
+                    elif outcome.checkpoint_preserved:
+                        self._session_id = outcome.primary_session_id or previous_session or None
+                        self._persist_session_identity()
+                        self.logger.warning(
+                            "HER Ultra failed after preserving its Primary checkpoint: "
+                            "request=%s session=%s",
+                            request_id,
+                            self._session_id or "unavailable",
+                        )
                     else:
                         self._quarantine_persistent_session(
                             request_id,
@@ -4320,17 +4148,41 @@ RUNTIME FACTS (quoted, read-only)
             ),
             "her_ultra": ultra_metadata,
             "her_retry": bool(is_retry),
+            "her_terminal_kind": outcome.terminal_kind,
+            "her_message_origin": outcome.message_origin,
+            "her_exit_reasoning_status": outcome.exit_reasoning_status,
+            "her_exit_reasoning_attempts": outcome.exit_reasoning_attempts,
+            "terminal_kind": outcome.terminal_kind,
+            "message_origin": outcome.message_origin,
+            "exit_reasoning_status": outcome.exit_reasoning_status,
+            "exit_reasoning_attempts": outcome.exit_reasoning_attempts,
+            "checkpoint_preserved": outcome.checkpoint_preserved,
         }
-        pending_kind = str(
-            (outcome.pending_interaction or {}).get("kind") or ""
-        ).lower()
-        if pending_kind == "continuation":
-            stream_metadata["recommended_action"] = "continue"
+        trusted_terminal = (
+            outcome.terminal_kind.strip().lower() == "model_report"
+            and outcome.message_origin.strip().lower() == "primary_model"
+            and outcome.exit_reasoning_status.strip().lower()
+            in {"embedded", "completed"}
+            and bool(outcome.text.strip())
+            and not _claw_contains_dangling_tool_markup(outcome.text)
+        )
+        response_text = outcome.text
+        response_error = outcome.error
+        response_is_success = outcome.is_success
+        if outcome.is_success and not trusted_terminal:
+            response_text = ""
+            response_error = (
+                "HER exit protocol error: Ultra outcome did not provide a safe "
+                "primary-model final message"
+            )
+            response_is_success = False
+            stop_reason = "model_protocol_error"
+            stream_metadata["claw_stop_reason"] = stop_reason
         return BackendResponse(
-            text=outcome.text,
+            text=response_text,
             duration_ms=outcome.duration_ms,
-            error=outcome.error or None,
-            is_success=outcome.is_success,
+            error=response_error or None,
+            is_success=response_is_success,
             stop_reason=stop_reason,
             usage=TokenUsage(
                 input_tokens=outcome.input_tokens,
@@ -4516,7 +4368,24 @@ RUNTIME FACTS (quoted, read-only)
                         task_env_overrides=foreground_env_overrides,
                     )
                 except (asyncio.CancelledError, Exception) as exc:
-                    self._quarantine_persistent_session(request_id, exc)
+                    parsed_error = getattr(exc, "parsed_error", None)
+                    checkpoint_preserved = bool(
+                        isinstance(parsed_error, Mapping)
+                        and parsed_error.get("checkpoint_preserved")
+                    )
+                    if checkpoint_preserved:
+                        checkpoint_session = str(
+                            parsed_error.get("session_id") or previous or ""
+                        ).strip()
+                        self._session_id = checkpoint_session or None
+                        self._persist_session_identity()
+                        self.logger.warning(
+                            "HER failed after preserving its checkpoint: request=%s session=%s",
+                            request_id,
+                            checkpoint_session or "unavailable",
+                        )
+                    else:
+                        self._quarantine_persistent_session(request_id, exc)
                     raise
                 checkpoint_session = result.session_id or self._session_id
                 if checkpoint_session:
@@ -4663,17 +4532,6 @@ RUNTIME FACTS (quoted, read-only)
             or 0
         )
         dangling_tool_markup_blocked = _claw_contains_dangling_tool_markup(result.text)
-        if dangling_tool_markup_blocked and not _claw_run_is_incomplete(result):
-            self.logger.error(
-                "HER completed path returned dangling tool markup; converting to a safe incomplete final: request=%s",
-                request_id,
-            )
-            result = replace(
-                result,
-                text="",
-                completion_status="incomplete",
-                stop_reason="no_final_text",
-            )
         response_text = result.text
         fallback_metadata: dict[str, Any] = {
             "dangling_tool_markup_blocked": dangling_tool_markup_blocked,
@@ -4683,75 +4541,56 @@ RUNTIME FACTS (quoted, read-only)
                 result, prompt=prompt
             )
             fallback_metadata.update(incomplete_metadata)
-            if fallback_metadata.get("persona_render_required"):
-                (
-                    persona_response,
-                    persona_metadata,
-                ) = await self._render_incomplete_persona_response(
-                    result,
-                    request_id=request_id,
-                    metadata=fallback_metadata,
-                )
-                fallback_metadata.update(persona_metadata)
-                if persona_response:
-                    response_text = persona_response
-                    fallback_metadata.update(
-                        {
-                            "fallback_report_generated": False,
-                            "persona_interpretation_generated": True,
-                        }
-                    )
-            elif fallback_metadata.get("persona_final_response_preserved"):
-                persona_source = self._her_persona_source()
-                self._persist_persona_audit(
-                    request_id,
-                    report_type="incomplete_final",
-                    renderer_attempted=False,
-                    renderer_succeeded=False,
-                    model_final_preserved=True,
-                    validation_outcome="safe_model_final_preserved",
-                    failure_reason=None,
-                    **persona_source.audit_fields(),
-                )
             self.logger.warning(
                 "HER incomplete run finalized: request=%s completion=%s "
-                "stop_reason=%s persona_preserved=%s persona_interpreted=%s "
-                "persona_renderer_succeeded=%s recommendation=%s",
+                "stop_reason=%s persona_preserved=%s exit_status=%s",
                 request_id,
                 result.completion_status or "unknown",
                 result.stop_reason or "unknown",
                 fallback_metadata.get("persona_final_response_preserved", False),
-                fallback_metadata.get("persona_interpretation_generated", False),
-                fallback_metadata.get("persona_renderer_succeeded", False),
-                fallback_metadata.get("recommended_action") or "unknown",
+                result.exit_reasoning_status or "unknown",
+            )
+        trusted_terminal = (
+            str(result.terminal_kind or "").strip().lower() == "model_report"
+            and str(result.message_origin or "").strip().lower() == "primary_model"
+            and str(result.exit_reasoning_status or "").strip().lower()
+            in {"embedded", "completed"}
+        )
+        if not trusted_terminal or not str(response_text or "").strip():
+            error = fallback_metadata.get("terminal_protocol_error") or (
+                "HER exit protocol error: run_finished did not identify a "
+                "primary-model final message"
+            )
+            return BackendResponse(
+                text="",
+                duration_ms=result.duration_ms,
+                error=str(error),
+                is_success=False,
+                stop_reason=result.stop_reason,
+                stream_metadata={
+                    "her_terminal_kind": result.terminal_kind or "unknown",
+                    "her_message_origin": result.message_origin or "unknown",
+                    "her_exit_reasoning_status": result.exit_reasoning_status
+                    or "unknown",
+                    **fallback_metadata,
+                },
             )
         if _claw_contains_dangling_tool_markup(response_text):
-            # Last-resort transport safety: even a persona renderer must never
-            # re-introduce an executable control envelope into visible text.
-            result = replace(
-                result,
+            return BackendResponse(
                 text="",
-                completion_status="incomplete",
+                duration_ms=result.duration_ms,
+                error=(
+                    "HER exit protocol error: selected model final contained "
+                    "dangling tool-call markup"
+                ),
+                is_success=False,
                 stop_reason="no_final_text",
-            )
-            response_text, deterministic_metadata = _build_claw_incomplete_report(
-                result, prompt=prompt
-            )
-            fallback_metadata.update(deterministic_metadata)
-            fallback_metadata.update(
-                {
+                stream_metadata={
+                    "her_terminal_kind": result.terminal_kind,
+                    "her_message_origin": result.message_origin,
+                    "her_exit_reasoning_status": result.exit_reasoning_status,
                     "dangling_tool_markup_blocked": True,
-                    "persona_renderer_output_blocked": True,
-                }
-            )
-        if str(result.planning_status or "").strip().lower() == "failed":
-            response_text = _claw_planning_failure_notice(prompt, response_text)
-            fallback_metadata.update(
-                {
-                    "planning_status": "failed",
-                    "planning_error": str(result.planning_error or "")[:2_000],
-                    "planning_failure_user_visible": True,
-                }
+                },
             )
         if habit_config.enabled:
             self._schedule_habit_meditation(
@@ -4780,6 +4619,14 @@ RUNTIME FACTS (quoted, read-only)
                 "claw_completion_status": result.completion_status or "unknown",
                 "claw_stop_reason": result.stop_reason or "unknown",
                 "claw_provider_stop_reason": result.provider_stop_reason or "unknown",
+                "her_terminal_kind": result.terminal_kind or "unknown",
+                "her_message_origin": result.message_origin or "unknown",
+                "her_exit_reasoning_status": result.exit_reasoning_status or "unknown",
+                "her_exit_reasoning_attempts": result.exit_reasoning_attempts,
+                "terminal_kind": result.terminal_kind or "unknown",
+                "message_origin": result.message_origin or "unknown",
+                "exit_reasoning_status": result.exit_reasoning_status or "unknown",
+                "exit_reasoning_attempts": result.exit_reasoning_attempts,
                 "claw_execution_effort": self.effort,
                 "claw_max_iterations": self._max_tool_iterations(),
                 "her_session_scope": session_scope,
@@ -4851,6 +4698,68 @@ RUNTIME FACTS (quoted, read-only)
             f"total_runtime_s={total_runtime:.2f}"
         )
 
+    def _post_tool_timeout_provider_keys(self, task_model: str) -> list[str]:
+        provider_name, _ = self._provider_and_model()
+        normalized_model = str(task_model or "").strip().lower()
+        prefix = normalized_model.split("/", 1)[0] if normalized_model else ""
+        keys: list[str] = []
+        # A model override (for example an Ultra worker routed to a different
+        # provider) is more specific than the Agent's configured base route.
+        for candidate in (normalized_model, prefix, provider_name, "default"):
+            key = str(candidate or "").strip().lower()
+            if key and key not in keys:
+                keys.append(key)
+        return keys
+
+    def _configured_post_tool_timeout(
+        self,
+        key: str,
+        *,
+        task_model: str,
+        minimum: int,
+    ) -> int | None:
+        raw = self._extra.get(key)
+        by_provider = self._extra.get(f"{key}_by_provider")
+        if isinstance(by_provider, Mapping):
+            normalized = {
+                str(name).strip().lower(): value
+                for name, value in by_provider.items()
+                if str(name).strip()
+            }
+            for provider_key in self._post_tool_timeout_provider_keys(task_model):
+                if provider_key in normalized:
+                    raw = normalized[provider_key]
+                    break
+        if raw is None:
+            return None
+        try:
+            seconds = int(raw)
+        except (TypeError, ValueError):
+            self.logger.warning("Ignoring invalid HER %s value: %r", key, raw)
+            return None
+        if seconds <= 0:
+            self.logger.warning("Ignoring non-positive HER %s value: %r", key, raw)
+            return None
+        return max(minimum, seconds)
+
+    def _post_tool_timeout_env(self, task_model: str) -> dict[str, str]:
+        initial = self._configured_post_tool_timeout(
+            "post_tool_stall_timeout_sec",
+            task_model=task_model,
+            minimum=self.DEFAULT_POST_TOOL_STALL_TIMEOUT_SEC,
+        )
+        retry = self._configured_post_tool_timeout(
+            "post_tool_retry_stall_timeout_sec",
+            task_model=task_model,
+            minimum=self.DEFAULT_POST_TOOL_RETRY_STALL_TIMEOUT_SEC,
+        )
+        values: dict[str, str] = {}
+        if initial is not None:
+            values["CLAW_POST_TOOL_STALL_TIMEOUT_SECONDS"] = str(initial)
+        if retry is not None:
+            values["CLAW_POST_TOOL_RETRY_STALL_TIMEOUT_SECONDS"] = str(retry)
+        return values
+
     async def _run_task_async(
         self,
         prompt: str,
@@ -4913,6 +4822,7 @@ RUNTIME FACTS (quoted, read-only)
                 ),
             }
         )
+        task_env.update(self._post_tool_timeout_env(task_model))
         async with self._active_process_lock:
             if self._stopping_active_processes:
                 raise ClawCommandError(
@@ -5045,6 +4955,7 @@ RUNTIME FACTS (quoted, read-only)
                 request_id=request_id,
                 returncode=proc.returncode or 1,
                 parsed_error=parsed_error,
+                stdout=stdout,
                 stderr=stderr,
                 resume=resume,
             )
@@ -5054,7 +4965,7 @@ RUNTIME FACTS (quoted, read-only)
                 or parsed_error.get("message")
             )
             raise ClawCommandError(
-                str(message or exc),
+                str(message or stderr.strip() or stdout.strip() or exc),
                 returncode=proc.returncode or 1,
                 stdout=stdout,
                 stderr=stderr,
@@ -5074,6 +4985,7 @@ RUNTIME FACTS (quoted, read-only)
                 request_id=request_id,
                 returncode=proc.returncode or 1,
                 parsed_error=parsed if isinstance(parsed, Mapping) else None,
+                stdout=stdout,
                 stderr=stderr,
                 resume=resume,
             )
@@ -5123,6 +5035,13 @@ RUNTIME FACTS (quoted, read-only)
             else None,
             planning_status=str(parsed.get("planning_status") or "").strip() or None,
             planning_error=str(parsed.get("planning_error") or "").strip() or None,
+            terminal_kind=str(parsed.get("terminal_kind") or "").strip() or None,
+            message_origin=str(parsed.get("message_origin") or "").strip() or None,
+            exit_reasoning_status=str(parsed.get("exit_reasoning_status") or "").strip()
+            or None,
+            exit_reasoning_attempts=parsed.get("exit_reasoning_attempts")
+            if isinstance(parsed.get("exit_reasoning_attempts"), int)
+            else None,
         )
 
     async def _communicate_with_activity(
@@ -5506,7 +5425,10 @@ RUNTIME FACTS (quoted, read-only)
             kind == "run_finished"
             and str(event.get("completion_status") or "").lower() == "error"
         )
-        if not is_failed_terminal and kind != "terminal_diagnostic":
+        if not is_failed_terminal and kind not in {
+            "terminal_diagnostic",
+            "exit_reasoning_failed",
+        }:
             return
         self._persist_diagnostic_record(
             {

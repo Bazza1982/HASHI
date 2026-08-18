@@ -381,14 +381,6 @@ def _authority_inputs(
     return persona_source, sys_guidance, requests, cursor_end
 
 
-def _failure_report(run_id: str, reason: str) -> str:
-    return (
-        f"🌙 Dream failed · run {run_id}\n\n"
-        "No Habit changes were applied.\n"
-        f"Reason: {reason}"
-    )
-
-
 @asynccontextmanager
 async def _tracked_dream_task(
     adapter: Any,
@@ -497,6 +489,19 @@ async def execute_dream(
         report_type="dream",
         **persona_source.audit_fields(),
     )
+    if not persona_source.usable:
+        reason = persona_source.unavailable_reason or "system_md_unavailable"
+        journal.append_audit(
+            "dream_persona_unavailable",
+            run_id=run_id,
+            report_type="dream",
+            renderer_attempted=False,
+            renderer_succeeded=False,
+            validation_outcome="renderer_unavailable_preflight",
+            error=reason,
+            **persona_source.audit_fields(),
+        )
+        return False, reason, None
 
     run_lock = getattr(adapter, "_habit_dream_run_lock", None)
     if run_lock is None:
@@ -559,7 +564,7 @@ async def execute_dream(
                         )
                         return (
                             False,
-                            _failure_report(run_id, str(exc)),
+                            str(exc),
                             journal.get_run(run_id),
                         )
                     try:
@@ -597,7 +602,7 @@ async def execute_dream(
                         )
                         return (
                             False,
-                            _failure_report(run_id, str(exc)),
+                            str(exc),
                             journal.get_run(run_id),
                         )
                     journal.record_attempt(
@@ -629,7 +634,7 @@ async def execute_dream(
                     journal.mark_failed(run_id, status="stale", error=str(exc))
                     return (
                         False,
-                        _failure_report(run_id, str(exc)),
+                        str(exc),
                         journal.get_run(run_id),
                     )
                 continue
@@ -643,7 +648,7 @@ async def execute_dream(
                         run_id,
                         error=f"{type(exc).__name__}: {exc}",
                     )
-                return False, _failure_report(run_id, str(exc)), journal.get_run(run_id)
+                return False, str(exc), journal.get_run(run_id)
 
         journal.write_cursor(
             offset=int(cursor_end["offset"]),
@@ -679,8 +684,7 @@ async def execute_dream(
                 validation_outcome="delivered_without_content_validation",
                 **persona_source.audit_fields(),
             )
-        except Exception as exc:  # noqa: BLE001 - deterministic facts remain deliverable
-            report = her_dream.render_deterministic_report(manifest)
+        except Exception as exc:  # noqa: BLE001 - preserve the exact terminal failure
             journal.append_audit(
                 "dream_persona_unavailable",
                 run_id=run_id,
@@ -691,6 +695,7 @@ async def execute_dream(
                 error=f"{type(exc).__name__}: {exc}"[:1_000],
                 **persona_source.audit_fields(),
             )
+            return False, str(exc), manifest
         return True, report, manifest
 
 
@@ -712,6 +717,24 @@ async def execute_undo(
         if latest is None:
             return False, "No HER Dream changes are currently available to undo."
         run_id = str(latest["run_id"])
+    config = getattr(runtime, "config", None)
+    persona_source = her_persona.load_configured_persona(
+        getattr(config, "system_md", None)
+    )
+    if not persona_source.usable:
+        reason = persona_source.unavailable_reason or "system_md_unavailable"
+        journal.append_audit(
+            "dream_undo_persona_unavailable",
+            run_id=run_id,
+            undo_id="preflight",
+            report_type="dream_undo",
+            renderer_attempted=False,
+            renderer_succeeded=False,
+            validation_outcome="renderer_unavailable_preflight",
+            error=reason,
+            **persona_source.audit_fields(),
+        )
+        return False, reason
     try:
         async with adapter._habit_execution_lock:
             result = her_dream.undo_dream_run(
@@ -723,10 +746,6 @@ async def execute_undo(
     except (ValueError, FileNotFoundError, her_dream.DreamUndoConflict) as exc:
         return False, f"Dream undo refused: {exc}"
     facts = [str(item) for item in result["report_facts"]]
-    config = getattr(runtime, "config", None)
-    persona_source = her_persona.load_configured_persona(
-        getattr(config, "system_md", None)
-    )
     journal.append_audit(
         "dream_undo_persona_source",
         run_id=run_id,
@@ -754,14 +773,7 @@ async def execute_undo(
             validation_outcome="delivered_without_content_validation",
             **persona_source.audit_fields(),
         )
-    except Exception as exc:  # noqa: BLE001 - immutable facts remain deliverable
-        report = "\n".join(
-            [
-                "🌙 Dream undo completed · " + result["undo_id"],
-                "",
-                *(f"{index}. {fact}" for index, fact in enumerate(facts, start=1)),
-            ]
-        )
+    except Exception as exc:  # noqa: BLE001 - preserve the exact terminal failure
         journal.append_audit(
             "dream_undo_persona_unavailable",
             run_id=run_id,
@@ -773,6 +785,7 @@ async def execute_undo(
             error=f"{type(exc).__name__}: {exc}"[:1_000],
             **persona_source.audit_fields(),
         )
+        return False, str(exc)
     return True, report
 
 

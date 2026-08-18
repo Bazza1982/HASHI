@@ -560,6 +560,10 @@ async def test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_ta
             "claw_completion_status": "incomplete",
             "claw_stop_reason": "max_iterations",
             "recommended_action": "continue",
+            "pending_interaction": {
+                "kind": "continuation",
+                "token": "CONTINUE",
+            },
             "her_session_scope": "isolated_per_run",
             "her_session_id": "scheduler-session",
             "her_model": "local/deepseek-v4-pro",
@@ -2539,6 +2543,42 @@ async def test_handle_backend_error_passes_raw_failure_to_delivery_boundary():
 
 
 @pytest.mark.asyncio
+async def test_handle_backend_error_delivers_exact_error_for_silent_scheduled_request():
+    runtime = _runtime()
+    item = _item(source="scheduler", silent=True, deliver_to_telegram=True)
+    response = SimpleNamespace(error="429 Too Many Requests\nrequest_id=req_exact_123")
+
+    await runtime_pipeline.handle_backend_error(
+        runtime,
+        item,
+        response,
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+    )
+
+    assert runtime.sent_message["text"] == response.error
+    assert runtime.sent_message["purpose"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_handle_backend_error_keeps_non_deliverable_silent_request_internal():
+    runtime = _runtime()
+    item = _item(source="scheduler", silent=True, deliver_to_telegram=False)
+
+    await runtime_pipeline.handle_backend_error(
+        runtime,
+        item,
+        SimpleNamespace(error="internal scheduled failure"),
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+    )
+
+    assert not hasattr(runtime, "sent_message")
+
+
+@pytest.mark.asyncio
 async def test_handle_backend_error_buffers_transfer_without_delivery():
     runtime = _runtime()
     runtime._should_buffer_during_transfer = lambda request_id: True
@@ -2603,6 +2643,10 @@ async def test_scheduler_delivery_persists_cross_session_receipt_after_send():
             "claw_completion_status": "incomplete",
             "claw_stop_reason": "max_iterations",
             "recommended_action": "continue",
+            "pending_interaction": {
+                "kind": "continuation",
+                "token": "CONTINUE",
+            },
             "her_session_scope": "isolated_per_run",
             "her_session_id": "scheduler-session",
             "her_model": "local/deepseek-v4-pro",

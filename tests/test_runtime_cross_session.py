@@ -57,9 +57,10 @@ def _response(
     completion: str = "completed",
     stop_reason: str = "end_turn",
     recommendation: str = "",
+    pending_interaction: dict[str, str] | None = None,
     session_scope: str = "isolated_per_run",
 ) -> BackendResponse:
-    return BackendResponse(
+    response = BackendResponse(
         text=text,
         duration_ms=1,
         stop_reason=stop_reason,
@@ -72,6 +73,9 @@ def _response(
             "recommended_action": recommendation,
         },
     )
+    if pending_interaction is not None:
+        response.stream_metadata["pending_interaction"] = dict(pending_interaction)
+    return response
 
 
 def _begin(runtime: SimpleNamespace, item: SimpleNamespace) -> None:
@@ -282,6 +286,34 @@ def test_active_receipt_is_not_trimmed_out_by_recent_completed_receipts(tmp_path
     assert section.count("## Receipt ") == runtime_cross_session.MAX_CONTEXT_RECEIPTS
 
 
+def test_incomplete_status_and_legacy_recommendation_do_not_invent_a_pending_reply(
+    tmp_path,
+):
+    runtime = _runtime(tmp_path)
+    item = _item()
+    visible = "The selected model reported unfinished work and suggested continuing."
+
+    receipt = runtime_cross_session.record_turn_result(
+        runtime,
+        item,
+        assistant_text=visible,
+        response=_response(
+            visible,
+            session_id="scheduler-session",
+            completion="incomplete",
+            stop_reason="max_iterations",
+            recommendation="continue",
+        ),
+        delivered=True,
+        completion_path="foreground",
+    )
+
+    assert receipt is not None
+    assert receipt["status"] == "incomplete"
+    assert receipt["pending_interaction"] is None
+    assert receipt["active"] is False
+
+
 def test_continue_binds_exact_isolated_session(tmp_path):
     runtime = _runtime(tmp_path)
     scheduler_item = _item()
@@ -296,6 +328,7 @@ def test_continue_binds_exact_isolated_session(tmp_path):
             completion="incomplete",
             stop_reason="max_iterations",
             recommendation="continue",
+            pending_interaction={"kind": "continuation", "token": "CONTINUE"},
         ),
         delivered=True,
         completion_path="foreground",
@@ -334,6 +367,7 @@ def test_model_mismatch_keeps_bound_reply_out_of_primary_session(tmp_path):
             completion="incomplete",
             stop_reason="max_iterations",
             recommendation="continue",
+            pending_interaction={"kind": "continuation", "token": "CONTINUE"},
         ),
         delivered=True,
         completion_path="foreground",
@@ -427,6 +461,7 @@ def test_reply_target_is_frozen_at_enqueue_before_later_scheduler_delivery(tmp_p
             completion="incomplete",
             stop_reason="max_iterations",
             recommendation="continue",
+            pending_interaction={"kind": "continuation", "token": "CONTINUE"},
         ),
         delivered=True,
         completion_path="background",
@@ -546,6 +581,7 @@ def test_newer_primary_question_with_trailing_emoji_closes_scheduler_prompt(tmp_
             completion="incomplete",
             stop_reason="max_iterations",
             recommendation="continue",
+            pending_interaction={"kind": "continuation", "token": "CONTINUE"},
         ),
         delivered=True,
         completion_path="foreground",
@@ -659,6 +695,7 @@ def test_failed_bound_reply_keeps_original_checkpoint_retryable(tmp_path):
             completion="incomplete",
             stop_reason="max_iterations",
             recommendation="continue",
+            pending_interaction={"kind": "continuation", "token": "CONTINUE"},
         ),
         delivered=True,
         completion_path="foreground",

@@ -132,6 +132,10 @@ def _task_result(
         iterations=1,
         completion_status="completed",
         stop_reason="end_turn",
+        terminal_kind="model_report",
+        message_origin="primary_model",
+        exit_reasoning_status="embedded",
+        exit_reasoning_attempts=0,
     )
 
 

@@ -17,7 +17,6 @@ from adapters.her_dream import (
     latest_undoable_run,
     parse_dream_proposal,
     recover_interrupted_runs,
-    render_deterministic_report,
     undo_dream_run,
 )
 from adapters.her_habits import HERHabitStore
@@ -234,9 +233,6 @@ def test_dream_commit_journals_combine_rewrite_archive_and_protected_conflict(
     assert journal._snapshot_path(run_id).is_file()
     assert list(journal.raw_root.glob(f"{run_id}-attempt-1.txt"))
     assert list(journal.validation_root.glob(f"{run_id}-attempt-1.json"))
-    report = render_deterministic_report(manifest)
-    assert report.startswith("🌙 Dream completed")
-    assert f"/dream undo {run_id} 1" in report
 
 
 def test_dream_stale_fingerprint_applies_nothing(tmp_path):

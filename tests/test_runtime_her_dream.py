@@ -452,7 +452,7 @@ async def test_dream_complete_body_can_be_rendered_in_configured_persona(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_missing_configured_persona_skips_renderer_and_uses_neutral_report(
+async def test_missing_configured_persona_surfaces_exact_local_error_without_fallback(
     tmp_path,
 ):
     runtime = FakeDreamRuntime(tmp_path)
@@ -467,13 +467,37 @@ async def test_missing_configured_persona_skips_renderer_and_uses_neutral_report
         origin="manual",
     )
 
-    assert ok is True
-    assert report.startswith("🌙 Dream completed")
-    assert len(adapter.calls) == 1
-    assert "MUST NOT BE USED" not in adapter.calls[0]["prompt"]
+    assert ok is False
+    assert report == "system_md_missing"
+    assert adapter.calls == []
     audit = adapter._journal.audit_path.read_text(encoding="utf-8")
     assert "system_md_missing" in audit
     assert "dream_persona_unavailable" in audit
+
+
+@pytest.mark.asyncio
+async def test_dream_persona_provider_failure_surfaces_exact_error_without_fallback(
+    tmp_path,
+):
+    runtime = FakeDreamRuntime(tmp_path)
+    adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
+    _seed_habit(adapter._store)
+    runtime.config.system_md.write_text("Use the Zelda persona.", encoding="utf-8")
+    provider_error = "429 Too Many Requests\nrequest_id=req_dream_exact_123"
+    adapter.responses = ['{"groups":[]}', RuntimeError(provider_error)]
+
+    ok, report, manifest = await runtime_her_dream.execute_dream(
+        runtime,
+        origin="manual",
+    )
+
+    assert ok is False
+    assert report == provider_error
+    assert manifest is not None
+    assert "Dream completed" not in report
+    assert "dream_persona_unavailable" in adapter._journal.audit_path.read_text(
+        encoding="utf-8"
+    )
 
 
 @pytest.mark.asyncio
@@ -596,6 +620,7 @@ async def test_dream_retries_once_after_concurrent_habit_change(tmp_path):
 async def test_cancelled_dream_is_tracked_and_journalled(tmp_path):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
+    runtime.config.system_md.write_text("Use the Zelda persona.", encoding="utf-8")
     adapter._habit_dream_tasks = set()
     _seed_habit(adapter._store)
     started = asyncio.Event()

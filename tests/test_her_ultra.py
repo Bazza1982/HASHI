@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -123,6 +124,18 @@ def _worker_success(
     )
 
 
+def _primary_report(text: str, **kwargs: Any) -> HERUltraInvocationResult:
+    """Construct an explicitly provenance-verified Primary model report."""
+
+    kwargs.setdefault("terminal_kind", "model_report")
+    kwargs.setdefault("message_origin", "primary_model")
+    kwargs.setdefault("exit_reasoning_status", "embedded")
+    return HERUltraInvocationResult(
+        text=text,
+        **kwargs,
+    )
+
+
 def test_ultra_worker_timeout_inherits_her_policy_unless_explicitly_configured():
     assert _config().subagent_timeout_sec is None
     assert _config(subagent_timeout_sec=900).subagent_timeout_sec == 900
@@ -135,6 +148,14 @@ def test_her_timeout_is_not_marked_retryable_for_ultra_workers():
 
     assert invocation.error_type == "timeout"
     assert invocation.retryable is False
+
+
+def test_primary_report_provenance_is_fail_closed_by_default():
+    assert (
+        HERUltraInvocationResult(text="unattributed text").has_trusted_model_report
+        is False
+    )
+    assert _primary_report("attributed model report").has_trusted_model_report is True
 
 
 def test_extract_json_object_prefers_outer_latest_complete_object():
@@ -371,14 +392,14 @@ async def test_assembly_receives_complete_noncanonical_worker_payload(tmp_path):
 
     async def primary(spec):
         if spec.phase == "planning":
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(plan_payload), session_id="primary"
             )
         assert spec.phase == "assembly"
         assert '"NAME": "Ubuntu"' in spec.prompt
         assert '"VERSION_ID": "22.04"' in spec.prompt
         assert '"raw_payload"' in spec.prompt
-        return HERUltraInvocationResult(text="verified answer", session_id="primary")
+        return _primary_report(text="verified answer", session_id="primary")
 
     async def worker(_spec):
         return HERUltraInvocationResult(text=json.dumps(worker_payload))
@@ -456,7 +477,7 @@ async def test_orchestrator_uses_parallel_workers_and_one_primary_assembly(tmp_p
     async def primary(spec):
         phases.append((spec.phase, spec.resume_session_id))
         if spec.phase == "planning":
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(plan_payload),
                 session_id="primary-session",
                 model="model-pro",
@@ -466,7 +487,7 @@ async def test_orchestrator_uses_parallel_workers_and_one_primary_assembly(tmp_p
         assert spec.phase == "assembly"
         assert spec.resume_session_id == "primary-session"
         assert '"a"' in spec.prompt and '"c"' in spec.prompt
-        return HERUltraInvocationResult(
+        return _primary_report(
             text="assembled answer",
             session_id="primary-session",
             model="model-pro",
@@ -584,10 +605,10 @@ async def test_orchestrator_retries_only_transient_retry_safe_worker(tmp_path):
 
     async def primary(spec):
         if spec.phase == "planning":
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(plan_payload), session_id="primary"
             )
-        return HERUltraInvocationResult(text="done", session_id="primary")
+        return _primary_report(text="done", session_id="primary")
 
     async def worker(spec):
         nonlocal attempts
@@ -635,11 +656,11 @@ async def test_orchestrator_does_not_retry_a_worker_timeout(tmp_path):
     async def primary(spec):
         phases.append(spec.phase)
         if spec.phase == "planning":
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(plan_payload), session_id="primary"
             )
         assert spec.phase == "failure_finalization"
-        return HERUltraInvocationResult(
+        return _primary_report(
             text="The worker timed out; the task is incomplete.",
             session_id="primary",
         )
@@ -695,10 +716,10 @@ async def test_worker_inherits_full_parent_authority_without_subtask_reauthoriza
 
     async def primary(spec):
         if spec.phase == "planning":
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(plan_payload), session_id="primary"
             )
-        return HERUltraInvocationResult(text="assembled", session_id="primary")
+        return _primary_report(text="assembled", session_id="primary")
 
     async def worker(spec):
         worker_specs.append(spec)
@@ -737,7 +758,7 @@ async def test_primary_marks_non_idempotent_worker_as_not_retryable(tmp_path):
 
     async def primary(spec):
         if spec.phase == "planning":
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(plan_payload), session_id="primary"
             )
         raise AssertionError("assembly must not run without usable evidence")
@@ -824,14 +845,14 @@ async def test_failed_dependency_is_not_dispatched(tmp_path):
     async def primary(spec):
         primary_phases.append(spec.phase)
         if spec.phase == "planning":
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(plan_payload), session_id="primary"
             )
         assert spec.phase == "failure_finalization"
         assert "No required worker produced usable evidence" in spec.prompt
         assert '"a"' in spec.prompt and '"b"' in spec.prompt
         assert "permanent failure" in spec.prompt
-        return HERUltraInvocationResult(
+        return _primary_report(
             text="Both required tasks failed; the work is incomplete.",
             session_id="primary-final",
         )
@@ -890,13 +911,13 @@ async def test_required_worker_failure_is_reported_as_incomplete(tmp_path):
 
     async def primary(spec):
         if spec.phase == "planning":
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(plan_payload), session_id="primary"
             )
         assert spec.phase == "assembly"
         assert '"completion_status": "incomplete"' in spec.prompt
         assert '"required_failures": [\n    "b"\n  ]' in spec.prompt
-        return HERUltraInvocationResult(
+        return _primary_report(
             text="Task a completed, but required task b failed.",
             session_id="primary-final",
         )
@@ -947,13 +968,13 @@ async def test_optional_worker_failure_does_not_make_run_incomplete(tmp_path):
 
     async def primary(spec):
         if spec.phase == "planning":
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(plan_payload), session_id="primary"
             )
         assert spec.phase == "assembly"
         assert '"completion_status": "completed"' in spec.prompt
         assert "optional check failed" in spec.prompt
-        return HERUltraInvocationResult(
+        return _primary_report(
             text="Required work completed; the optional check failed.",
             session_id="primary-final",
         )
@@ -987,7 +1008,7 @@ async def test_optional_worker_failure_does_not_make_run_incomplete(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_primary_finalization_failure_returns_deterministic_report(tmp_path):
+async def test_primary_finalization_physical_failure_surfaces_exact_error(tmp_path):
     goal = "Always report worker failure"
     request_id = "req-finalization-fallback"
     authority = _authority()
@@ -1000,15 +1021,20 @@ async def test_primary_finalization_failure_returns_deterministic_report(tmp_pat
 
     async def primary(spec):
         if spec.phase == "planning":
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(plan_payload), session_id="primary"
             )
         assert spec.phase == "failure_finalization"
         return HERUltraInvocationResult(
             text="",
             is_success=False,
-            error="final renderer unavailable",
+            error="503 Service Unavailable: final renderer unavailable",
             error_type="provider_unavailable",
+            terminal_kind="provider_error",
+            message_origin="provider",
+            exit_reasoning_status="failed_physical",
+            checkpoint_preserved=True,
+            session_id="primary",
         )
 
     async def worker(_spec):
@@ -1032,17 +1058,21 @@ async def test_primary_finalization_failure_returns_deterministic_report(tmp_pat
         authority=authority,
     )
 
-    assert outcome.is_success is True
-    assert outcome.status == "incomplete"
-    assert outcome.primary_session_id == ""
-    assert "Primary finalization error: final renderer unavailable" in outcome.text
-    assert "- a: failed — worker timed out" in outcome.text
+    assert outcome.is_success is False
+    assert outcome.status == "failed"
+    assert outcome.primary_session_id == "primary"
+    assert outcome.text == ""
+    assert outcome.error == "503 Service Unavailable: final renderer unavailable"
+    assert outcome.terminal_kind == "provider_error"
+    assert outcome.message_origin == "provider"
+    assert outcome.exit_reasoning_status == "failed_physical"
+    assert outcome.checkpoint_preserved is True
     state = json.loads(
         (tmp_path / "run-finalization-fallback" / "state.json").read_text(
             encoding="utf-8"
         )
     )
-    assert state["status"] == "incomplete"
+    assert state["status"] == "failed"
     assert state["primary"]["state"] == "failed"
 
 
@@ -1066,14 +1096,14 @@ async def test_direct_plan_records_user_facing_answer_in_primary_session(tmp_pat
     async def primary(spec):
         phases.append((spec.phase, spec.resume_session_id))
         if spec.phase == "planning":
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(plan_payload), session_id="primary"
             )
         assert spec.phase == "direct_response"
         assert goal in spec.prompt
         assert "Momo persona" in spec.prompt
         assert "direct answer" in spec.prompt
-        return HERUltraInvocationResult(
+        return _primary_report(
             text="persona-rendered direct answer", session_id="primary-direct"
         )
 
@@ -1152,16 +1182,16 @@ async def test_invalid_plan_is_corrected_in_same_primary_session(tmp_path):
         calls.append((spec.phase, spec.resume_session_id, spec.prompt))
         if spec.phase == "planning":
             invalid = {**valid, "subtasks": "not-a-list"}
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(invalid), session_id="primary-invalid"
             )
         if spec.phase == "plan_correction":
             assert "subtasks must be a list" in spec.prompt
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(valid), session_id="primary-corrected"
             )
         assert spec.phase == "direct_response"
-        return HERUltraInvocationResult(
+        return _primary_report(
             text="corrected final answer", session_id="primary-direct"
         )
 
@@ -1191,6 +1221,55 @@ async def test_invalid_plan_is_corrected_in_same_primary_session(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_exhausted_plan_corrections_end_with_primary_model_reasoning(tmp_path):
+    calls = []
+
+    async def primary(spec):
+        calls.append((spec.phase, spec.resume_session_id, spec.prompt))
+        if spec.phase in {"planning", "plan_correction"}:
+            return _primary_report(
+                text='{"subtasks":"still-invalid"}',
+                session_id=f"primary-{spec.phase}",
+            )
+        assert spec.phase == "failure_finalization"
+        assert "execution did not start" in spec.prompt
+        assert "Investigate safely" in spec.prompt
+        return _primary_report(
+            text="The plan remained invalid, so execution did not start. I recommend narrowing the request.",
+            session_id="primary-exit-report",
+            exit_reasoning_status="completed",
+            exit_reasoning_attempts=1,
+        )
+
+    async def worker(_spec):
+        raise AssertionError("worker must not run without a valid plan")
+
+    outcome = await HERUltraOrchestrator(
+        config=_config(),
+        ledger_root=tmp_path,
+        primary_executor=primary,
+        worker_executor=worker,
+        run_id_factory=lambda: "run-invalid-plan-exit",
+    ).run(
+        authoritative_goal="Investigate safely",
+        parent_request_id="req-invalid-plan-exit",
+        authority=_authority(),
+    )
+
+    assert outcome.is_success is True
+    assert outcome.status == "incomplete"
+    assert outcome.text.startswith("The plan remained invalid")
+    assert outcome.terminal_kind == "model_report"
+    assert outcome.message_origin == "primary_model"
+    assert outcome.exit_reasoning_status == "completed"
+    assert [phase for phase, _session, _prompt in calls] == [
+        "planning",
+        "plan_correction",
+        "failure_finalization",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_primary_provider_failure_is_not_treated_as_plan_correction(tmp_path):
     calls = []
 
@@ -1199,9 +1278,12 @@ async def test_primary_provider_failure_is_not_treated_as_plan_correction(tmp_pa
         return HERUltraInvocationResult(
             text="",
             is_success=False,
-            error="provider unavailable",
+            error="503 Service Unavailable: provider unavailable",
             error_type="provider",
             retryable=True,
+            terminal_kind="provider_error",
+            message_origin="provider",
+            exit_reasoning_status="failed_physical",
         )
 
     async def worker(_spec):
@@ -1220,7 +1302,9 @@ async def test_primary_provider_failure_is_not_treated_as_plan_correction(tmp_pa
     )
 
     assert outcome.is_success is False
-    assert outcome.error == "provider unavailable"
+    assert outcome.error == "503 Service Unavailable: provider unavailable"
+    assert outcome.terminal_kind == "provider_error"
+    assert outcome.message_origin == "provider"
     assert calls == ["planning"]
 
 
@@ -1240,13 +1324,13 @@ async def test_pending_interaction_is_rendered_into_primary_session(tmp_path):
     async def primary(spec):
         phases.append((spec.phase, spec.resume_session_id))
         if spec.phase == "planning":
-            return HERUltraInvocationResult(
+            return _primary_report(
                 text=json.dumps(plan_payload), session_id="primary-planned"
             )
         assert spec.phase == "interaction"
         assert spec.resume_session_id == "primary-planned"
         assert '"interaction_id"' in spec.prompt
-        return HERUltraInvocationResult(
+        return _primary_report(
             text="Choose A or B?",
             session_id="primary-question",
         )
@@ -1313,7 +1397,7 @@ async def test_orchestrator_cancellation_rejects_late_worker_result(tmp_path):
     )
 
     async def primary(spec):
-        return HERUltraInvocationResult(
+        return _primary_report(
             text=json.dumps(plan_payload), session_id="primary"
         )
 
@@ -1409,6 +1493,10 @@ def _claw_result(
         iterations=1,
         completion_status="completed",
         stop_reason="end_turn",
+        terminal_kind="model_report",
+        message_origin="primary_model",
+        exit_reasoning_status="embedded",
+        exit_reasoning_attempts=0,
     )
 
 
@@ -1507,6 +1595,9 @@ async def test_her_adapter_ultra_returns_one_response_and_checkpoints_primary(tm
     assert response.stream_metadata["claw_inner_execution_effort"] == "high"
     assert response.stream_metadata["her_ultra"]["subtask_count"] == 2
     assert response.stream_metadata["her_ultra"]["completed_subtasks"] == 2
+    assert response.stream_metadata["terminal_kind"] == "model_report"
+    assert response.stream_metadata["message_origin"] == "primary_model"
+    assert response.stream_metadata["exit_reasoning_status"] == "embedded"
     assert response.usage.input_tokens == 12
     assert response.usage.output_tokens == 8
     assert adapter._session_id == "primary-final"
@@ -1648,11 +1739,85 @@ async def test_her_adapter_reports_all_worker_failures_without_backend_error(tmp
     assert response.stream_metadata["claw_completion_status"] == "incomplete"
     assert response.stream_metadata["her_ultra"]["status"] == "incomplete"
     assert response.stream_metadata["her_ultra"]["completed_subtasks"] == 0
+    assert response.stream_metadata["terminal_kind"] == "model_report"
+    assert response.stream_metadata["message_origin"] == "primary_model"
     assert adapter._session_id == "primary-final"
     assert any(
         prompt.startswith("[HER Ultra Primary Failure Finalization Contract]")
         for prompt, _kwargs in calls
     )
+
+
+@pytest.mark.asyncio
+async def test_her_adapter_ultra_primary_finalization_preserves_exact_provider_error(
+    tmp_path,
+):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/deepseek-v4-pro",
+        extra={"effort": "ultra"},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = tmp_path / "hashi-her"
+    adapter._session_id = "primary-existing"
+    adapter._persist_session_identity()
+    authority = adapter._ultra_authority()
+    plan = _plan_payload(
+        goal="Investigate one failing worker",
+        parent_request_id="req-ultra-provider-error",
+        authority=authority,
+        subtasks=[_subtask_payload("a")],
+    )
+    provider_error = "503 Service Unavailable\nrequest_id=req_ultra_exact_123"
+
+    async def run_task(prompt, **kwargs):
+        if prompt.startswith("[HER Ultra Primary Planning Contract]"):
+            return _claw_result(
+                json.dumps(plan),
+                model=kwargs["model_override"],
+                session_id="primary-planned",
+            )
+        if prompt.startswith("[HER Ultra Isolated Sub-agent Task]"):
+            raise ClawCommandError(
+                "worker failed",
+                returncode=1,
+                parsed_error={"error_kind": "worker_error", "retryable": False},
+            )
+        assert prompt.startswith(
+            "[HER Ultra Primary Failure Finalization Contract]"
+        )
+        raise ClawCommandError(
+            provider_error,
+            returncode=1,
+            parsed_error={
+                "error_message": provider_error,
+                "terminal_kind": "provider_error",
+                "message_origin": "provider",
+                "exit_reasoning_status": "failed_physical",
+                "checkpoint_preserved": True,
+                "session_id": "primary-final-error",
+                "model": cfg.model,
+                "provider": "deepseek",
+            },
+        )
+
+    adapter._run_task_async = run_task
+
+    response = await adapter.generate_response(
+        "Investigate one failing worker",
+        "req-ultra-provider-error",
+    )
+
+    assert response.is_success is False
+    assert response.text == ""
+    assert response.error == provider_error
+    assert response.stream_metadata["terminal_kind"] == "provider_error"
+    assert response.stream_metadata["message_origin"] == "provider"
+    assert response.stream_metadata["exit_reasoning_status"] == "failed_physical"
+    assert response.stream_metadata["checkpoint_preserved"] is True
+    assert adapter._session_id == "primary-final-error"
 
 
 def test_her_ultra_effort_maps_cli_environment_to_inner_effort(tmp_path):
@@ -1756,6 +1921,8 @@ async def test_her_adapter_ultra_isolated_resume_does_not_mutate_primary_checkpo
     assert response.stream_metadata["her_resumed_session"] is True
     assert calls[0][1]["resume"] == "receipt-session"
     assert len(calls) == 2
+    assert all(call[1]["permission_mode_override"] == "read-only" for call in calls)
+    assert all(call[1]["allowed_tools_override"] == [] for call in calls)
     assert adapter._session_id == "persistent-session"
 
 

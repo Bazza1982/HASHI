@@ -19,6 +19,7 @@ from adapters.claw_cli import ClawCLIAdapter
 from adapters.her import (
     ClawBinaryNotFound,
     ClawCommandError,
+    ClawError,
     ClawJsonError,
     ClawPackagedRuntimeError,
     ClawProviderConfigError,
@@ -26,13 +27,11 @@ from adapters.her import (
     ClawTaskResult,
     ClawTimeoutError,
     HERAdapter,
-    _build_claw_incomplete_report,
     _build_claw_technical_lease,
     _claw_compact_execution_ledger,
     _claw_contains_dangling_tool_markup,
     _claw_incomplete_response,
     _claw_jsonl_to_stream_events,
-    _claw_planning_failure_notice,
     _claw_run_is_incomplete,
     _HERStreamCadenceController,
     _parse_json_output,
@@ -708,9 +707,13 @@ async def test_claw_cadence_suppresses_unchanged_material_revision_after_deliver
     assert "suppressed_reason=unchanged_material_progress" in suppressed.detail
 
 
-def test_claw_max_iterations_builds_chinese_verified_fallback_report():
+def test_legacy_incomplete_text_without_provenance_is_rejected():
     result = ClawTaskResult(
-        text="模型原始收尾",
+        text=(
+            "Execution status: INCOMPLETE.\n\n"
+            "Completed and verified: The tool ledger contains 68 successful result(s).\n\n"
+            "Unfinished or unverified: 3 tool result(s) failed."
+        ),
         model="deepseek/test",
         permission_mode="workspace-write",
         cwd="/workspace",
@@ -719,35 +722,25 @@ def test_claw_max_iterations_builds_chinese_verified_fallback_report():
         stdout="",
         stderr="",
         json_data={},
-        tool_uses=[{"id": "react-1", "name": "browser_react"}],
-        tool_results=[
-            {
-                "tool_use_id": "react-1",
-                "tool_name": "browser_react",
-                "output": {"success": True, "state_changed": True},
-                "is_error": False,
-            }
-        ],
-        iterations=12,
-        completion_status="completed",
-        stop_reason="max_iterations",
+        tool_uses=[],
+        tool_results=[],
+        iterations=77,
+        completion_status="incomplete",
+        stop_reason="no_final_text",
     )
 
     assert _claw_run_is_incomplete(result) is True
-    report, metadata = _build_claw_incomplete_report(result, prompt="继续完成任务")
+    response, metadata = _claw_incomplete_response(result, prompt="继续完成任务")
 
-    assert "执行未完成" in report
-    assert "模型原始收尾" not in report
-    assert "`browser_react` ×1" in report
-    assert "**CONTINUE**" in report
-    assert metadata["verified_tool_results"] == 1
-    assert metadata["uncertain_tool_results"] == 0
-    assert metadata["recommended_action"] == "continue"
+    assert response == ""
+    assert metadata["terminal_protocol_valid"] is False
+    assert "primary-model final message" in metadata["terminal_protocol_error"]
+    assert metadata["fallback_report_generated"] is False
 
 
-def test_claw_max_iterations_with_recovered_read_failure_recommends_continue():
+def test_incomplete_primary_model_report_is_preserved_without_runtime_advice():
     result = ClawTaskResult(
-        text="",
+        text="殿下，一项读取失败但后续读取已核实状态；建议从保存点继续。",
         model="deepseek/test",
         permission_mode="read-only",
         cwd="/workspace",
@@ -772,57 +765,18 @@ def test_claw_max_iterations_with_recovered_read_failure_recommends_continue():
         iterations=12,
         completion_status="incomplete",
         stop_reason="max_iterations",
+        terminal_kind="model_report",
+        message_origin="primary_model",
+        exit_reasoning_status="completed",
+        exit_reasoning_attempts=1,
     )
 
-    report, metadata = _build_claw_incomplete_report(result, prompt="continue")
+    response, metadata = _claw_incomplete_response(result, prompt="continue")
 
-    assert "**CONTINUE**" in report
-    assert "**PIVOT**" not in report
-    assert metadata["successful_tool_results"] == 1
-    assert metadata["failed_tool_results"] == 1
-    assert metadata["verified_tool_results"] == 1
-    assert metadata["uncertain_tool_results"] == 0
-    assert metadata["recommended_action"] == "continue"
-
-
-@pytest.mark.parametrize(
-    "failure_names",
-    [("read_file", "read_file"), ("read_file", "glob")],
-)
-def test_claw_max_iterations_with_unresolved_failures_still_recommends_continue(
-    failure_names,
-):
-    result = ClawTaskResult(
-        text="",
-        model="deepseek/test",
-        permission_mode="read-only",
-        cwd="/workspace",
-        returncode=0,
-        duration_ms=10,
-        stdout="",
-        stderr="",
-        json_data={},
-        tool_uses=[
-            {"id": "read-1", "name": failure_names[0]},
-            {"id": "read-2", "name": failure_names[1]},
-            {"id": "read-3", "name": "mcp__hashi-tools__file_read"},
-        ],
-        tool_results=[
-            {"tool_use_id": "read-1", "output": "failed once", "is_error": True},
-            {"tool_use_id": "read-2", "output": "failed twice", "is_error": True},
-            {"tool_use_id": "read-3", "output": "verified", "is_error": False},
-        ],
-        session_id="session-stuck",
-        iterations=12,
-        completion_status="incomplete",
-        stop_reason="max_iterations",
-    )
-
-    report, metadata = _build_claw_incomplete_report(result, prompt="continue")
-
-    assert "**CONTINUE**" in report
-    assert "**PIVOT**" not in report
-    assert metadata["recommended_action"] == "continue"
+    assert response == result.text
+    assert "**CONTINUE**" not in response
+    assert "**PIVOT**" not in response
+    assert metadata["terminal_protocol_valid"] is True
 
 
 @pytest.mark.parametrize(
@@ -858,12 +812,16 @@ def test_claw_max_iterations_preserves_primary_agent_final_for_every_effort(
         iterations=iterations,
         completion_status="incomplete",
         stop_reason="max_iterations",
+        terminal_kind="model_report",
+        message_origin="primary_model",
+        exit_reasoning_status="completed",
+        exit_reasoning_attempts=1,
     )
 
     response, metadata = _claw_incomplete_response(result, prompt="请继续")
 
-    assert response.startswith(primary_final)
-    assert "**CONTINUE**" in response
+    assert response == primary_final
+    assert "**CONTINUE**" not in response
     assert metadata["persona_final_response_preserved"] is True
     assert metadata["fallback_report_generated"] is False
 
@@ -885,6 +843,10 @@ def test_claw_budget_exhaustion_also_preserves_safe_primary_agent_closing():
         iterations=9,
         completion_status="incomplete",
         stop_reason="budget_exhausted",
+        terminal_kind="model_report",
+        message_origin="primary_model",
+        exit_reasoning_status="completed",
+        exit_reasoning_attempts=1,
     )
 
     response, metadata = _claw_incomplete_response(result, prompt="请继续")
@@ -911,6 +873,10 @@ def test_claw_max_iterations_does_not_deliver_dangling_tool_markup():
         iterations=12,
         completion_status="incomplete",
         stop_reason="max_iterations",
+        terminal_kind="model_report",
+        message_origin="primary_model",
+        exit_reasoning_status="completed",
+        exit_reasoning_attempts=2,
     )
 
     response, metadata = _claw_incomplete_response(
@@ -927,17 +893,12 @@ def test_claw_max_iterations_does_not_deliver_dangling_tool_markup():
     )
 
     assert "<｜｜DSML｜｜tool_calls>" not in response
-    assert response.startswith("## ⚠️ 执行未完成")
-    assert "爸爸" not in response
-    assert "小夏" not in response
-    assert "`completion_status=incomplete`" in response
-    assert "任务在 **12** 轮后停止" in response
-    assert "`bash` ×1" in response
-    assert "**CONTINUE**" in response
+    assert response == ""
     assert metadata["persona_final_response_preserved"] is False
     assert metadata["persona_interpretation_generated"] is False
-    assert metadata["persona_render_required"] is True
-    assert metadata["fallback_report_generated"] is True
+    assert metadata["dangling_tool_markup_blocked"] is True
+    assert metadata["fallback_report_generated"] is False
+    assert "primary-model final message" in metadata["terminal_protocol_error"]
 
 
 def test_claw_max_iterations_blocks_deepseek_single_bar_dsml_markup():
@@ -957,12 +918,17 @@ def test_claw_max_iterations_blocks_deepseek_single_bar_dsml_markup():
         iterations=31,
         completion_status="incomplete",
         stop_reason="max_iterations",
+        terminal_kind="model_report",
+        message_origin="primary_model",
+        exit_reasoning_status="completed",
+        exit_reasoning_attempts=2,
     )
 
     response, metadata = _claw_incomplete_response(result, prompt="请继续")
 
     assert "DSML" not in response
-    assert metadata["persona_render_required"] is True
+    assert metadata["dangling_tool_markup_blocked"] is True
+    assert metadata["persona_final_response_preserved"] is False
 
 
 def test_dangling_markup_detector_allows_explicit_fenced_examples():
@@ -972,19 +938,6 @@ def test_dangling_markup_detector_allows_explicit_fenced_examples():
     assert not _claw_contains_dangling_tool_markup(
         'Example only:\n```text\n<｜DSML｜tool_calls><｜DSML｜invoke name="bash">\n```'
     )
-
-
-def test_planning_failure_notice_is_visible_in_user_language_and_not_duplicated():
-    chinese = _claw_planning_failure_notice("请继续处理", "实际检查已经完成。")
-    assert "内部规划报告" in chinese
-    assert "主 Agent 已按原始请求与既有权限继续执行" in chinese
-
-    english = _claw_planning_failure_notice("continue the task", "The check completed.")
-    assert "Internal planning report" in english
-    assert "continued under the original request" in english
-
-    already_visible = "Internal planning failed validation, but execution continued."
-    assert _claw_planning_failure_notice("continue", already_visible) == already_visible
 
 
 def test_compact_execution_ledger_distinguishes_verified_and_unverified_actions():
@@ -1055,21 +1008,18 @@ async def test_completed_adapter_path_blocks_dangling_dsml_and_marks_incomplete(
             iterations=2,
             completion_status="completed",
             stop_reason="end_turn",
-        )
-    )
-    adapter._render_incomplete_persona_response = AsyncMock(
-        return_value=(
-            "I could not verify a completed action, so I am stopping safely.",
-            {"persona_renderer_succeeded": True},
+            terminal_kind="model_report",
+            message_origin="primary_model",
+            exit_reasoning_status="embedded",
+            exit_reasoning_attempts=0,
         )
     )
 
     response = await adapter.generate_response("report the result", "req-dsml")
 
-    assert response.is_success is True
-    assert not _claw_contains_dangling_tool_markup(response.text)
-    assert response.stream_metadata["claw_completion_status"] == "incomplete"
-    assert response.stream_metadata["claw_stop_reason"] == "no_final_text"
+    assert response.is_success is False
+    assert response.text == ""
+    assert "dangling tool-call markup" in response.error
     assert response.stream_metadata["dangling_tool_markup_blocked"] is True
 
 
@@ -1113,22 +1063,26 @@ async def test_completed_adapter_path_exposes_nonblocking_planning_failure(tmp_p
                 "task frame planned_tools contains non-canonical tool prose "
                 "`write_file 或 hashi_file_write`"
             ),
+            terminal_kind="model_report",
+            message_origin="primary_model",
+            exit_reasoning_status="embedded",
+            exit_reasoning_attempts=0,
         )
     )
 
     response = await adapter.generate_response("请更新文件", "req-planning-fallback")
 
     assert response.is_success is True
-    assert "实际工具执行与状态回读均已完成" in response.text
-    assert "内部规划报告" in response.text
+    assert response.text == "实际工具执行与状态回读均已完成。"
+    assert "内部规划报告" not in response.text
     assert response.stream_metadata["planning_status"] == "failed"
     assert (
         "write_file 或 hashi_file_write" in response.stream_metadata["planning_error"]
     )
-    assert response.stream_metadata["planning_failure_user_visible"] is True
+    assert "planning_failure_user_visible" not in response.stream_metadata
 
 
-def test_claw_max_iterations_without_model_final_uses_sunny_persona_and_receipt_counts():
+def test_claw_max_iterations_without_model_final_is_a_protocol_error_not_persona_fallback():
     result = ClawTaskResult(
         text="",
         model="deepseek/test",
@@ -1166,144 +1120,10 @@ def test_claw_max_iterations_without_model_final_uses_sunny_persona_and_receipt_
 """.strip(),
     )
 
-    assert response.startswith("## ⚠️ 执行未完成")
-    assert "爸爸" not in response
-    assert "小夏" not in response
-    assert "`bash` ×5, `edit_file` ×6" in response
-    assert "失败的工具结果：无" in response
-    assert "**CONTINUE**" in response
+    assert response == ""
     assert metadata["persona_interpretation_generated"] is False
-    assert metadata["persona_render_required"] is True
-    assert metadata["successful_tool_results"] == 11
-    assert metadata["failed_tool_results"] == 0
-
-
-def test_claw_max_iterations_without_persona_uses_natural_neutral_fallback():
-    result = ClawTaskResult(
-        text="",
-        model="deepseek/test",
-        permission_mode="read-only",
-        cwd="/workspace",
-        returncode=0,
-        duration_ms=10,
-        stdout="",
-        stderr="",
-        json_data={},
-        tool_uses=[],
-        tool_results=[],
-        iterations=12,
-        completion_status="incomplete",
-        stop_reason="max_iterations",
-    )
-
-    response, metadata = _claw_incomplete_response(result, prompt="continue")
-
-    assert response.startswith("## ⚠️ Execution incomplete")
-    assert "**CONTINUE**" in response
-    assert metadata["persona_interpretation_generated"] is False
-    assert metadata["persona_render_required"] is True
-
-
-@pytest.mark.asyncio
-async def test_incomplete_persona_renderer_uses_only_configured_system_md(tmp_path):
-    configured = tmp_path / "nested" / "voice.md"
-    configured.parent.mkdir()
-    configured.write_text(
-        "Fictional Persona: 月桂司书；称呼用户为殿下。", encoding="utf-8"
-    )
-    (tmp_path / "AGENT.md").write_text("WRONG FALLBACK PERSONA", encoding="utf-8")
-    before = configured.read_bytes()
-    result = ClawTaskResult(
-        text="",
-        model="deepseek/test",
-        permission_mode="workspace-write",
-        cwd=str(tmp_path),
-        returncode=0,
-        duration_ms=10,
-        stdout="",
-        stderr="",
-        json_data={},
-        tool_uses=[{"id": "read-1", "name": "read_file"}],
-        tool_results=[
-            {"tool_use_id": "read-1", "output": "verified", "is_error": False}
-        ],
-        session_id="session-1",
-        iterations=12,
-        completion_status="incomplete",
-        stop_reason="max_iterations",
-    )
-    _neutral, metadata = _claw_incomplete_response(
-        result, prompt="ignored prompt Persona"
-    )
-    rendered_message = "殿下，本次执行轮数已用尽。月桂司书会从存档继续。"
-    adapter = HERAdapter.__new__(HERAdapter)
-    adapter.config = SimpleNamespace(
-        system_md=configured,
-        workspace_dir=tmp_path,
-    )
-    adapter.run_habit_dream_model = AsyncMock(
-        return_value=SimpleNamespace(text=rendered_message)
-    )
-
-    report, render_metadata = await adapter._render_incomplete_persona_response(
-        result,
-        request_id="req-persona",
-        metadata=metadata,
-    )
-
-    assert report == rendered_message
-    assert render_metadata["persona_renderer_succeeded"] is True
-    [call] = adapter.run_habit_dream_model.await_args_list
-    renderer_prompt = call.args[0]
-    assert "月桂司书" in renderer_prompt
-    assert "WRONG FALLBACK PERSONA" not in renderer_prompt
-    assert "rigid output" in renderer_prompt
-    audit_path = tmp_path / "backend_state" / "her_persona_audit.jsonl"
-    audit = audit_path.read_text(encoding="utf-8")
-    assert "delivered_without_content_validation" in audit
-    assert "Fictional Persona" not in audit
-    assert audit_path.stat().st_mode & 0o777 == 0o600
-    assert configured.read_bytes() == before
-
-
-@pytest.mark.asyncio
-async def test_incomplete_persona_renderer_missing_source_uses_neutral_without_model_call(
-    tmp_path,
-):
-    result = ClawTaskResult(
-        text="",
-        model="deepseek/test",
-        permission_mode="read-only",
-        cwd=str(tmp_path),
-        returncode=0,
-        duration_ms=10,
-        stdout="",
-        stderr="",
-        json_data={},
-        tool_uses=[],
-        tool_results=[],
-        iterations=12,
-        completion_status="incomplete",
-        stop_reason="max_iterations",
-    )
-    _neutral, metadata = _claw_incomplete_response(result, prompt="continue")
-    adapter = HERAdapter.__new__(HERAdapter)
-    adapter.config = SimpleNamespace(
-        system_md=tmp_path / "missing.md",
-        workspace_dir=tmp_path,
-    )
-    adapter.run_habit_dream_model = AsyncMock()
-
-    report, render_metadata = await adapter._render_incomplete_persona_response(
-        result,
-        request_id="req-missing-persona",
-        metadata=metadata,
-    )
-
-    assert report is None
-    assert render_metadata["persona_renderer_attempted"] is False
-    assert render_metadata["persona_fallback_reason"] == "system_md_missing"
-    adapter.run_habit_dream_model.assert_not_awaited()
+    assert metadata["terminal_protocol_valid"] is False
+    assert "primary-model final message" in metadata["terminal_protocol_error"]
 
 
 def test_stream_json_parser_accepts_legacy_diagnostics_when_run_finished_exists():
@@ -1604,6 +1424,8 @@ def test_build_claw_env_uses_allowlist_only():
             "CLAW_MAX_TOOL_ITERATIONS": "96",
             "CLAW_TASK_PLANNING": "1",
             "CLAW_EXECUTION_EFFORT": "high",
+            "CLAW_POST_TOOL_STALL_TIMEOUT_SECONDS": "90",
+            "CLAW_POST_TOOL_RETRY_STALL_TIMEOUT_SECONDS_OPENAI": "180",
             "HASHI_MANAGED_TRANSPORT": "1",
             "ANTHROPIC_API_KEY": "must-not-pass",
             "HASHI_REMOTE_SHARED_TOKEN": "must-not-pass",
@@ -1618,6 +1440,8 @@ def test_build_claw_env_uses_allowlist_only():
         "CLAW_MAX_TOOL_ITERATIONS": "96",
         "CLAW_TASK_PLANNING": "1",
         "CLAW_EXECUTION_EFFORT": "high",
+        "CLAW_POST_TOOL_STALL_TIMEOUT_SECONDS": "90",
+        "CLAW_POST_TOOL_RETRY_STALL_TIMEOUT_SECONDS_OPENAI": "180",
         "HASHI_MANAGED_TRANSPORT": "1",
         "HOME": "/tmp/home",
         "PATH": "/bin",
@@ -2223,6 +2047,10 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
               "iterations": 1,
               "completion_status": "incomplete",
               "stop_reason": "max_iterations",
+              "terminal_kind": "model_report",
+              "message_origin": "primary_model",
+              "exit_reasoning_status": "completed",
+              "exit_reasoning_attempts": 1,
               "tool_uses": [
                 {"id": "read-1", "name": "browser_get_text"},
                 {"id": "click-1", "name": "browser_click"}
@@ -2255,8 +2083,9 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
     resumed = await adapter.generate_response("continue", "req-2")
 
     assert response.is_success is True
-    assert response.text.startswith("adapter done")
-    assert "**CONTINUE**" in response.text
+    assert response.text == "adapter done"
+    assert "**CONTINUE**" not in response.text
+    assert "**PIVOT**" not in response.text
     assert resumed.is_success is True
     assert adapter._session_id == "session-1"
     assert response.usage.input_tokens == 3
@@ -2267,10 +2096,10 @@ async def test_claw_adapter_generate_response_with_fake_binary(tmp_path):
     assert response.stream_metadata["claw_max_iterations"] == 96
     assert response.stream_metadata["fallback_report_generated"] is False
     assert response.stream_metadata["persona_final_response_preserved"] is True
-    assert response.stream_metadata["successful_tool_results"] == 2
-    assert response.stream_metadata["verified_tool_results"] == 1
-    assert response.stream_metadata["uncertain_tool_results"] == 1
-    assert response.stream_metadata["recommended_action"] == "continue"
+    assert response.stream_metadata["terminal_kind"] == "model_report"
+    assert response.stream_metadata["message_origin"] == "primary_model"
+    assert response.stream_metadata["exit_reasoning_status"] == "completed"
+    assert "recommended_action" not in response.stream_metadata
 
 
 @pytest.mark.asyncio
@@ -2376,6 +2205,12 @@ async def test_her_full_context_turn_never_resumes_or_checkpoints_session(tmp_pa
             tool_uses=[],
             tool_results=[],
             session_id="full-context-session",
+            completion_status="completed",
+            stop_reason="end_turn",
+            terminal_kind="model_report",
+            message_origin="primary_model",
+            exit_reasoning_status="embedded",
+            exit_reasoning_attempts=0,
         )
     )
 
@@ -2405,6 +2240,10 @@ def _concurrency_task_result(tmp_path, *, text: str, session_id: str) -> ClawTas
         iterations=1,
         completion_status="completed",
         stop_reason="end_turn",
+        terminal_kind="model_report",
+        message_origin="primary_model",
+        exit_reasoning_status="embedded",
+        exit_reasoning_attempts=0,
     )
 
 
@@ -2630,6 +2469,7 @@ async def test_her_failure_persists_structured_error_and_redacted_stderr(tmp_pat
     assert failure["request_id"] == "req-error"
     assert failure["parsed_error"]["http_status"] == 400
     assert failure["parsed_error"]["provider_request_id"] == "provider-req-123"
+    assert '"kind": "run_finished"' in failure["stdout"]
     assert failure["stderr"] == "Authorization: Bearer <redacted>\n"
     assert "secret-token" not in json.dumps(records)
 
@@ -2687,7 +2527,57 @@ async def test_her_early_stream_failure_uses_stderr_error_and_persists_it(tmp_pa
     failure = next(record for record in records if record["kind"] == "command_failure")
     assert failure["request_id"] == "req-early-error"
     assert failure["parsed_error"] == raised.value.parsed_error
+    assert '"kind": "run_started"' in failure["stdout"]
     assert "INFO provider startup" in failure["stderr"]
+
+
+@pytest.mark.asyncio
+async def test_her_unstructured_failure_surfaces_redacted_stderr_and_persists_both(
+    tmp_path,
+):
+    fake = _write_exe(
+        tmp_path / "hashi-her",
+        """
+        #!/usr/bin/env python3
+        import sys
+        print("partial provider stdout")
+        print("Authorization: Bearer secret-token", file=sys.stderr)
+        print("503 Service Unavailable: provider offline", file=sys.stderr)
+        raise SystemExit(1)
+        """,
+    )
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = fake
+    adapter._supports_stream_json = True
+
+    with pytest.raises(ClawCommandError) as raised:
+        await adapter._run_task_async(
+            "prompt",
+            resume=None,
+            request_id="req-unstructured-error",
+        )
+
+    assert str(raised.value) == (
+        "Authorization: Bearer <redacted>\n"
+        "503 Service Unavailable: provider offline"
+    )
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "backend_state" / "her_diagnostics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    failure = next(record for record in records if record["kind"] == "command_failure")
+    assert failure["stdout"] == "partial provider stdout\n"
+    assert failure["stderr"].endswith("503 Service Unavailable: provider offline\n")
+    assert "secret-token" not in json.dumps(records)
 
 
 @pytest.mark.asyncio
@@ -2742,6 +2632,83 @@ async def test_her_failed_persistent_turn_quarantines_session_and_surfaces_metad
     )
     assert quarantine["session_id"] == "session-poisoned"
     assert quarantine["error_kind"] == "invalid_session_state"
+
+
+@pytest.mark.asyncio
+async def test_her_physical_provider_failure_preserves_checkpoint_and_exact_error(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._binary = tmp_path / "hashi-her"
+    adapter._session_id = "session-before-provider-error"
+    adapter._persist_session_identity()
+    provider_error = "429 Too Many Requests\nrequest_id=req_exact_123"
+    adapter._run_task_async = AsyncMock(
+        side_effect=ClawCommandError(
+            provider_error,
+            returncode=1,
+            parsed_error={
+                "kind": "run_finished",
+                "error_message": provider_error,
+                "terminal_kind": "provider_error",
+                "message_origin": "provider",
+                "exit_reasoning_status": "failed_physical",
+                "checkpoint_preserved": True,
+                "session_id": "session-after-provider-error",
+                "model": "deepseek/test",
+                "provider": "openai",
+            },
+        )
+    )
+
+    response = await adapter.generate_response("continue", "req-provider-error")
+
+    assert response.is_success is False
+    assert response.error == provider_error
+    assert response.stream_metadata["her_error"]["terminal_kind"] == "provider_error"
+    assert response.stream_metadata["her_error"]["message_origin"] == "provider"
+    assert adapter._session_id == "session-after-provider-error"
+    persisted = json.loads(adapter._session_state_path.read_text(encoding="utf-8"))
+    assert persisted["session_id"] == "session-after-provider-error"
+
+
+@pytest.mark.asyncio
+async def test_isolated_model_renderer_rejects_nonempty_text_without_provenance(
+    tmp_path,
+):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/test",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter._run_task_async = AsyncMock(
+        return_value=ClawTaskResult(
+            text="legacy deterministic report",
+            model="deepseek/test",
+            permission_mode="read-only",
+            cwd=str(tmp_path),
+            returncode=0,
+            duration_ms=1,
+            stdout="",
+            stderr="",
+            json_data={},
+            tool_uses=[],
+            tool_results=[],
+            completion_status="completed",
+            stop_reason="end_turn",
+        )
+    )
+
+    with pytest.raises(ClawError, match="primary-model final message"):
+        await adapter.run_habit_dream_model("render", request_id="req-render")
 
 
 @pytest.mark.asyncio
@@ -2825,6 +2792,10 @@ async def test_her_task_runner_passes_resumed_prompt_as_text_without_stdin(tmp_p
             "session_id": "session-next",
             "completion_status": "completed",
             "stop_reason": "end_turn",
+            "terminal_kind": "model_report",
+            "message_origin": "primary_model",
+            "exit_reasoning_status": "completed",
+            "exit_reasoning_attempts": 1,
             "provider_stop_reason": "end_turn",
             "tool_uses": [],
             "tool_results": [],
@@ -2876,6 +2847,8 @@ async def test_her_task_runner_passes_effective_timeout_policy_to_compaction(tmp
             "idle_source": os.environ.get("CLAW_SEMANTIC_COMPACTION_IDLE_TIMEOUT_SOURCE"),
             "hard": os.environ.get("CLAW_REQUEST_HARD_TIMEOUT_SECONDS"),
             "hard_source": os.environ.get("CLAW_REQUEST_HARD_TIMEOUT_SOURCE"),
+            "post_tool": os.environ.get("CLAW_POST_TOOL_STALL_TIMEOUT_SECONDS"),
+            "post_tool_retry": os.environ.get("CLAW_POST_TOOL_RETRY_STALL_TIMEOUT_SECONDS"),
         }))
         """,
     )
@@ -2887,6 +2860,9 @@ async def test_her_task_runner_passes_effective_timeout_policy_to_compaction(tmp
             "permission_mode": "danger-full-access",
             "idle_timeout_sec": 7_200,
             "hard_timeout_sec": 14_400,
+            "post_tool_stall_timeout_sec": 90,
+            "post_tool_stall_timeout_sec_by_provider": {"deepseek": 75},
+            "post_tool_retry_stall_timeout_sec": 180,
             "_hashi_timeout_policy": {
                 "sources": {
                     "idle_timeout_sec": "user override",
@@ -2913,6 +2889,28 @@ async def test_her_task_runner_passes_effective_timeout_policy_to_compaction(tmp
     assert result.json_data["idle_source"] == "user override"
     assert result.json_data["hard"] == "14400"
     assert result.json_data["hard_source"] == "backend configuration"
+    assert result.json_data["post_tool"] == "75"
+    assert result.json_data["post_tool_retry"] == "180"
+
+
+def test_post_tool_timeout_provider_override_follows_the_actual_task_model(tmp_path):
+    cfg = SimpleNamespace(
+        name="test",
+        workspace_dir=tmp_path,
+        model="deepseek/base-model",
+        extra={
+            "post_tool_stall_timeout_sec_by_provider": {
+                "deepseek": 75,
+                "openrouter": 95,
+            }
+        },
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = HERAdapter(cfg, SimpleNamespace(), api_key="test-key")
+
+    assert adapter._post_tool_timeout_env("openrouter/worker-model") == {
+        "CLAW_POST_TOOL_STALL_TIMEOUT_SECONDS": "95"
+    }
 
 
 @pytest.mark.asyncio
@@ -2990,6 +2988,8 @@ async def test_claw_adapter_stream_json_emits_verbose_events(tmp_path, caplog):
                 {"kind": "provider_stop_reason", "reason": "end_turn"},
                 {"kind": "run_finished", "message": "final answer", "model": "deepseek/test", "iterations": 1,
                  "completion_status": "completed", "stop_reason": "end_turn", "provider_stop_reason": "end_turn",
+                 "terminal_kind": "model_report", "message_origin": "primary_model",
+                 "exit_reasoning_status": "completed", "exit_reasoning_attempts": 1,
                  "tool_uses": [{"name": "read_file"}], "tool_results": [],
                  "usage": {"input_tokens": 5, "output_tokens": 7}},
             ]:
@@ -3194,6 +3194,8 @@ async def test_medium_adapter_delivers_native_tool_turn_commentary(
                 {"kind": "run_finished", "message": "verified final answer", "model": "deepseek/test",
                  "session_id": "medium-commentary", "iterations": 1,
                  "completion_status": "completed", "stop_reason": "end_turn",
+                 "terminal_kind": "model_report", "message_origin": "primary_model",
+                 "exit_reasoning_status": "completed", "exit_reasoning_attempts": 1,
                  "tool_uses": [], "tool_results": [],
                  "usage": {"input_tokens": 5, "output_tokens": 7}},
             ]
@@ -3275,6 +3277,8 @@ async def test_claw_adapter_terminal_final_supersedes_one_pending_commentary(tmp
                 {"kind": "run_finished", "message": "verified final answer", "model": "deepseek/test",
                  "session_id": "commentary-session", "iterations": 1,
                  "completion_status": "completed", "stop_reason": "end_turn",
+                 "terminal_kind": "model_report", "message_origin": "primary_model",
+                 "exit_reasoning_status": "completed", "exit_reasoning_attempts": 1,
                  "tool_uses": [], "tool_results": [],
                  "usage": {"input_tokens": 5, "output_tokens": 7}},
             ]:
@@ -3341,6 +3345,9 @@ async def test_claw_adapter_stream_json_emits_actual_thinking_delta(tmp_path):
                 {"kind": "thinking_summary", "summary": "legacy aggregate should not double count", "thinking_chars": 99},
                 {"kind": "usage", "input_tokens": 5, "output_tokens": 7},
                 {"kind": "run_finished", "message": "final answer", "model": "deepseek/test", "iterations": 1,
+                 "completion_status": "completed", "stop_reason": "end_turn",
+                 "terminal_kind": "model_report", "message_origin": "primary_model",
+                 "exit_reasoning_status": "completed", "exit_reasoning_attempts": 1,
                  "tool_uses": [], "tool_results": [], "usage": {"input_tokens": 5, "output_tokens": 7}},
             ]:
                 print(json.dumps(event), flush=True)
@@ -3412,6 +3419,8 @@ async def test_claw_direct_response_acknowledgement_is_final_only(tmp_path):
                 {"kind": "run_finished", "message": answer,
                  "model": "deepseek/test", "iterations": 0,
                  "completion_status": "completed", "stop_reason": "end_turn",
+                 "terminal_kind": "model_report", "message_origin": "primary_model",
+                 "exit_reasoning_status": "embedded", "exit_reasoning_attempts": 0,
                  "provider_stop_reason": "end_turn", "tool_uses": [], "tool_results": [],
                  "usage": {"input_tokens": 4, "output_tokens": 7}},
             ]:
