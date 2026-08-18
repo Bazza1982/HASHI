@@ -17,6 +17,7 @@ from telegram.error import NetworkError as TelegramNetworkError, TimedOut as Tel
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from adapters.base import BaseBackend
+from orchestrator import runtime_pending
 from orchestrator.agent_fyi import build_agent_fyi_primer
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.command_ui import (
@@ -810,6 +811,12 @@ class BridgeAgentRuntime:
         available_efforts = self._get_available_efforts()
         current_effort = self._get_current_effort() if available_efforts else "n/a"
         display_policy = telegram_stream_policy.get_display_policy(self)
+        runtime_line = (
+            f"<b>Runtime</b> · <code>{'BUSY' if self.is_generating else 'IDLE'}</code> "
+            f"· queue <code>{self.queue.qsize()}</code> "
+            f"· delayed <code>{runtime_pending.delayed_count_now(self)}</code> "
+            f"· process <code>{html.escape(str(self._process_info()))}</code>"
+        )
         lines = [
             card_title("📊", "Hashi status"),
             "",
@@ -824,7 +831,7 @@ class BridgeAgentRuntime:
             f"<b>Typing</b> · <code>{'ON' if display_policy.typing_enabled else 'OFF'}</code>",
             "",
             "<b>ACTIVITY</b>",
-            f"<b>Runtime</b> · <code>{'BUSY' if self.is_generating else 'IDLE'}</code> · queue <code>{self.queue.qsize()}</code> · process <code>{html.escape(str(self._process_info()))}</code>",
+            runtime_line,
             f"<b>Request</b> · {html.escape(str(current_line))}",
             f"<b>Memory</b> · runtime settings {html.escape(', '.join(active_skills) if active_skills else 'none')} · recall <code>{'ON' if recall_on else 'OFF'}</code> · FYI <code>{'ARMED' if self._pending_session_primer else 'CLEAR'}</code>",
             f"<b>Proactive</b> · <code>{active_mode}</code> · every {html.escape(active_interval)} · hb <code>{heartbeat_count}</code> · cron <code>{cron_count}</code>",

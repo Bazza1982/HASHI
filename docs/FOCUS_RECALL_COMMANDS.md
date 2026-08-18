@@ -1,21 +1,23 @@
-# Telegram task-control commands: `/focus` and `/recall`
+# Telegram task-control commands: `/focus`, `/recall`, and `/delay`
 
-**Status:** Implemented and user-tested
+**Status:** Implemented and regression-tested
 
-**Date:** 2026-07-24
+**Updated:** 2026-08-18
 
-**Commit:** `da48df5`
+**Original focus/recall commit:** `da48df5`
 
 ## Purpose
 
-`/focus` and `/recall` solve two different problems while work is in progress:
+`/focus`, `/recall`, and `/delay` solve three different queue-control problems:
 
 - `/focus` corrects the **scope of the active or most recent task** and tells the
   agent to continue working.
-- `/recall [count]` removes **requests that have not started yet** while leaving
-  the current task alone.
+- `/recall [count]` removes **READY or FUTURE requests that have not started
+  yet** while leaving the current task alone.
+- `/delay <minutes> <message>` creates a persistent FUTURE request that joins
+  the normal READY FIFO when its due time arrives.
 
-Both commands are available in flexible and fixed runtimes and appear in the
+All three commands are available in flexible and fixed runtimes and appear in the
 Telegram bot command menu.
 
 ## `/focus`
@@ -70,14 +72,20 @@ nested wrappers.
 /recall 100
 ```
 
+The waiting queue has two logical layers:
+
+- **READY**: the existing in-memory FIFO consumed by the agent runtime;
+- **FUTURE**: persistent `/delay` records that are not visible to the agent and
+  do not count as busy until the scheduler moves them into READY.
+
 Behavior:
 
 | Command | Result |
 | --- | --- |
-| `/recall` | Remove every request still waiting in this agent's queue |
-| `/recall 1` | Remove the newest waiting request |
-| `/recall 2` | Remove up to the newest two waiting requests |
-| `/recall n` | Remove up to the newest `n`, where `n` is any positive whole number |
+| `/recall` | Remove every READY and FUTURE request still waiting for this agent |
+| `/recall 1` | Remove the newest waiting request across both layers |
+| `/recall 2` | Remove up to the newest two requests across both layers |
+| `/recall n` | Remove up to the newest `n` across both layers, where `n` is any positive whole number |
 
 If `n` is larger than the queue, HASHI removes all waiting requests without
 error. Requests that remain in the queue retain their original first-in,
@@ -90,11 +98,42 @@ first-out order.
 - interrupt or stop the active task;
 - shut down, reset, or reinitialize the backend;
 - write an active-turn interruption marker;
-- affect cron jobs, scheduled future work, or messages sent after the command;
+- affect cron jobs, heartbeats, nudges, deterministic automations, or messages
+  sent after the command;
 - change the separate legacy auto-restore runtime setting.
 
-The reply reports how many queued requests were actually withdrawn. An empty
-queue is a successful no-op.
+The reply reports how many READY and delayed requests were actually withdrawn.
+An empty combined queue is a successful no-op.
+
+## `/delay`
+
+### Usage
+
+```text
+/delay 5 send me a message to say hi
+/delay list
+/delay cancel delay-abc123def0
+```
+
+The first form accepts a positive whole number of minutes, from 1 through
+10080 (seven days), followed by a non-empty text message. HASHI persists the
+record immediately and returns its ID and local due time.
+
+At the first scheduler tick on or after the due time, HASHI appends the exact
+payload to the owning agent's normal FIFO with source `text`. The current task
+is not interrupted and existing READY requests remain ahead of it. Backend,
+model, workzone, permissions, and context are resolved normally when the due
+request is processed, so all execution backends share the same behavior.
+
+Delay records live in scheduler state but are independent from `/jobs` data.
+They survive reboot and agent stop; if an agent is offline at the due time, the
+record remains FUTURE and is dispatched after that agent starts again. Wipe,
+reset, deletion, move, and session transfer are blocked while the affected
+agent owns delayed messages, preventing orphaned or surprising later work.
+
+The payload is not recursively parsed as a Telegram command. For example,
+`/delay 5 /stop` sends the text `/stop` to the model after five minutes; it does
+not invoke HASHI's `/stop` handler.
 
 ### Invalid counts
 
@@ -115,10 +154,11 @@ the same effect as recalling the whole current queue.
 
 | Command | Active task | Waiting queue | What happens next |
 | --- | --- | --- | --- |
-| `/stop` | Interrupted and saved durably | Cleared | A later plain `continue`, `resume`, or `继续` resumes the saved task |
-| `/steer <direction>` while busy | Interrupted | Cleared | Continue with the added direction and preserved progress |
-| `/focus` | Re-focused through an immediate continuation | Cleared when busy | Continue only within the original scope until done or genuinely blocked |
-| `/recall [count]` | Continues untouched | All or newest `count` removed | Current task keeps running |
+| `/stop` | Interrupted and saved durably | READY cleared; FUTURE preserved | A later plain `continue`, `resume`, or `继续` resumes the saved task |
+| `/steer <direction>` while busy | Interrupted | READY cleared; FUTURE preserved | Continue with the added direction and preserved progress |
+| `/focus` | Re-focused through an immediate continuation | READY cleared when busy; FUTURE preserved | Continue only within the original scope until done or genuinely blocked |
+| `/recall [count]` | Continues untouched | All or newest `count` across READY+FUTURE removed | Current task keeps running |
+| `/delay <minutes> <message>` | Continues untouched | Adds one FUTURE request | Request joins READY when due |
 
 Use `/focus` when the agent has drifted beyond the requested scope. Use
 `/recall` when the current work is correct but one or more later prompts should
@@ -158,6 +198,9 @@ active task continues.
 | Piece | Location |
 | --- | --- |
 | Shared handlers, focus wrapper, queue withdrawal | `orchestrator/runtime_control.py` |
+| Persistent delay state and due dispatch | `orchestrator/scheduler.py` |
+| Shared READY/FUTURE queue operations | `orchestrator/runtime_pending.py` |
+| Delay command | `orchestrator/commands/delay.py` |
 | Flexible-runtime command method | `orchestrator/flexible_agent_runtime.py` |
 | Fixed-runtime command method and menu | `orchestrator/legacy/bridge_agent_runtime.py` |
 | Shared command and bot-menu bindings | `orchestrator/runtime_command_binding.py` |

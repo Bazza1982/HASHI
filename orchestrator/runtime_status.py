@@ -4,12 +4,12 @@ import html
 from datetime import datetime
 from typing import Any, Mapping
 
-from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
-from orchestrator.memory_plus_mode import get_memory_plus_status
-from orchestrator import telegram_delivery_failover
+from orchestrator import runtime_pending, telegram_delivery_failover
 from orchestrator import telegram_stream_policy
-from orchestrator.wrapper_mode import load_wrapper_config, visible_wrapper_slots
+from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
 from orchestrator.command_ui import card_title
+from orchestrator.memory_plus_mode import get_memory_plus_status
+from orchestrator.wrapper_mode import load_wrapper_config, visible_wrapper_slots
 
 
 def compute_status_string(runtime) -> str:
@@ -206,6 +206,12 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         if hasattr(runtime, "backend_ready")
         else ("ONLINE" if runtime.telegram_connected else "LOCAL")
     )
+    delayed_count = runtime_pending.delayed_count_now(runtime)
+    runtime_line = (
+        f"<b>Runtime</b> · <code>{'BUSY' if runtime.is_generating else 'IDLE'}</code> "
+        f"· queue <code>{runtime.queue.qsize()}</code> · delayed <code>{delayed_count}</code> "
+        f"· process <code>{html.escape(str(runtime._process_info()))}</code>"
+    )
     lines = [
         card_title("📊", "Hashi status"),
         "",
@@ -253,7 +259,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
             _delivery_line(delivery),
             "",
             "<b>ACTIVITY</b>",
-            f"<b>Runtime</b> · <code>{'BUSY' if runtime.is_generating else 'IDLE'}</code> · queue <code>{runtime.queue.qsize()}</code> · process <code>{html.escape(str(runtime._process_info()))}</code>",
+            runtime_line,
             f"<b>Request</b> · {html.escape(str(current_line))}",
             f"<b>Memory</b> · runtime settings {html.escape(', '.join(active_skills) if active_skills else 'none')} · recall <code>{'ON' if recall_on else 'OFF'}</code> · FYI <code>{'ARMED' if runtime._pending_session_primer else 'CLEAR'}</code>",
             f"<b>Proactive</b> · <code>{active_mode}</code> · every {html.escape(active_interval)} · hb <code>{heartbeat_count}</code> · cron <code>{cron_count}</code>",

@@ -237,3 +237,97 @@ async def test_recall_ignores_unauthorized_user():
 
     assert queue.qsize() == 1
     reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recall_count_selects_newest_across_ready_and_delayed(tmp_path):
+    from datetime import datetime
+
+    from orchestrator.scheduler import TaskScheduler
+
+    replies: list[str] = []
+
+    async def _reply(_update, text, **_kwargs):
+        replies.append(text)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    await queue.put(
+        SimpleNamespace(
+            request_id="ready-old",
+            created_at=datetime.fromtimestamp(1_000).isoformat(),
+        )
+    )
+    runtime = SimpleNamespace(
+        name="zelda",
+        logger=SimpleNamespace(warning=lambda *a, **k: None),
+        queue=queue,
+        current_request_meta={"request_id": "active-1"},
+        is_generating=True,
+        _is_authorized_user=lambda _uid: True,
+        _reply_text=_reply,
+    )
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=1,
+    )
+    runtime.orchestrator = SimpleNamespace(scheduler=scheduler)
+    delayed = await scheduler.schedule_delayed_message(
+        agent_name="zelda",
+        chat_id=42,
+        prompt="newer delayed request",
+        delay_minutes=5,
+        now_ts=2_000,
+    )
+
+    await runtime_control.cmd_recall(runtime, _update(), SimpleNamespace(args=["1"]))
+
+    assert [item.request_id for item in list(queue._queue)] == ["ready-old"]
+    assert await scheduler.list_delayed_messages("zelda") == []
+    assert delayed["id"] not in replies[0]
+    assert "1 delayed" in replies[0]
+
+
+@pytest.mark.asyncio
+async def test_recall_all_clears_ready_and_delayed_without_interrupting_active(tmp_path):
+    from orchestrator.scheduler import TaskScheduler
+
+    replies: list[str] = []
+
+    async def _reply(_update, text, **_kwargs):
+        replies.append(text)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    await queue.put(SimpleNamespace(request_id="ready-1"))
+    current_meta = {"request_id": "active-1"}
+    runtime = SimpleNamespace(
+        name="zelda",
+        logger=SimpleNamespace(warning=lambda *a, **k: None),
+        queue=queue,
+        current_request_meta=current_meta,
+        is_generating=True,
+        _is_authorized_user=lambda _uid: True,
+        _reply_text=_reply,
+    )
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=1,
+    )
+    runtime.orchestrator = SimpleNamespace(scheduler=scheduler)
+    await scheduler.schedule_delayed_message(
+        agent_name="zelda",
+        chat_id=42,
+        prompt="later",
+        delay_minutes=5,
+    )
+
+    await runtime_control.cmd_recall(runtime, _update(), SimpleNamespace(args=[]))
+
+    assert queue.empty()
+    await asyncio.wait_for(queue.join(), timeout=0.1)
+    assert await scheduler.list_delayed_messages("zelda") == []
+    assert runtime.current_request_meta is current_meta
+    assert "1 ready, 1 delayed" in replies[0]

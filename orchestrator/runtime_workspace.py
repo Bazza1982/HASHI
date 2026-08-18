@@ -6,6 +6,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator import runtime_pending
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
 from orchestrator.command_ui import card_title, confirm_card
 from orchestrator.handoff_builder import HandoffBuilder
@@ -173,6 +174,14 @@ async def cmd_wipe(runtime: Any, update: Any, context: Any) -> None:
     if runtime._backend_busy():
         await runtime._reply_text(update, "Wipe is blocked while a request is running or queued. Use /stop first.")
         return
+    delayed = await runtime_pending.delayed_count(runtime)
+    if delayed:
+        await runtime._reply_text(
+            update,
+            f"Wipe is blocked while {delayed} delayed message(s) are pending. "
+            "Use /recall first.",
+        )
+        return
 
     args = [a.strip() for a in (context.args or []) if a.strip()]
     if not args or args[0].upper() != "CONFIRM":
@@ -213,6 +222,14 @@ async def cmd_reset(runtime: Any, update: Any, context: Any) -> None:
         return
     if runtime._backend_busy():
         await runtime._reply_text(update, "Reset is blocked while a request is running or queued. Use /stop first.")
+        return
+    delayed = await runtime_pending.delayed_count(runtime)
+    if delayed:
+        await runtime._reply_text(
+            update,
+            f"Reset is blocked while {delayed} delayed message(s) are pending. "
+            "Use /recall first.",
+        )
         return
 
     args = [a.strip() for a in (context.args or []) if a.strip()]

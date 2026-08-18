@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import html
-from collections import deque
 from datetime import datetime
 from typing import Any
 
-from orchestrator.command_ui import card_title
+from orchestrator import runtime_pending
 from orchestrator.command_registry import RuntimeCommand
-
+from orchestrator.command_ui import card_title
 
 USAGE = (
     "Usage: /queue [list|show <request_id>|cancel <request_id>|clear|history]\n"
@@ -88,6 +88,8 @@ def _short(value: str | None, limit: int = 120) -> str:
 
 
 def _item_id(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("id") or item.get("request_id") or "")
     return str(getattr(item, "request_id", "") or "")
 
 
@@ -102,7 +104,9 @@ def _matches(item: Any, request_id: str) -> bool:
 def _item_line(index: int, item: Any) -> str:
     rid = html.escape(_item_id(item) or f"#{index}")
     source = html.escape(str(getattr(item, "source", "?") or "?"))
-    summary = html.escape(_short(getattr(item, "summary", "") or getattr(item, "prompt", "")))
+    summary = html.escape(
+        _short(getattr(item, "summary", "") or getattr(item, "prompt", ""))
+    )
     age = html.escape(_age(getattr(item, "created_at", None)))
     silent = " silent" if bool(getattr(item, "silent", False)) else ""
     return f"{index}. <code>{rid}</code> [{source}{silent}] {summary} ({age})"
@@ -118,15 +122,39 @@ def _current_line(runtime: Any) -> str:
     return f"<b>Running</b> · <code>1</code>\n<code>{rid}</code> · {source} · {summary}"
 
 
-def _build_list(runtime: Any) -> str:
+def _delayed_line(index: int, record: dict[str, Any]) -> str:
+    delay_id = html.escape(str(record.get("id") or f"delay-{index}"))
+    summary = html.escape(
+        _short(str(record.get("summary") or record.get("prompt") or ""))
+    )
+    try:
+        due = datetime.fromtimestamp(float(record.get("due_at") or 0)).astimezone()
+        due_text = due.strftime("%Y-%m-%d %H:%M:%S %Z")
+    except (TypeError, ValueError, OSError):
+        due_text = "?"
+    return f"{index}. <code>{delay_id}</code> [text] {summary} (due {html.escape(due_text)})"
+
+
+def _build_list(runtime: Any, delayed_items: list[dict[str, Any]] | None = None) -> str:
     items = _queue_items(runtime)
+    if delayed_items is None:
+        delayed_items = runtime_pending.delayed_messages_now(runtime)
+    else:
+        delayed_items = list(delayed_items)
+    total = len(items) + len(delayed_items)
+    current_line = f"<b>Current</b> · <code>{total}</code> pending"
+    if delayed_items:
+        current_line += (
+            f" · <code>{len(items)}</code> ready · "
+            f"<code>{len(delayed_items)}</code> delayed"
+        )
     lines = [
         card_title("📥", "Request queue"),
         "",
-        f"<b>Current</b> · <code>{_queue_size(runtime)}</code> pending",
+        current_line,
         _current_line(runtime),
         f"<b>Agent</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
-        "<b>Scope</b> · in-memory requests for this agent",
+        "<b>Scope</b> · READY FIFO plus persistent FUTURE delays for this agent",
     ]
     if items:
         lines.append("")
@@ -135,7 +163,14 @@ def _build_list(runtime: Any) -> str:
             lines.append(_item_line(index, item))
         if len(items) > 25:
             lines.append(f"<i>... and {len(items) - 25} more</i>")
-    else:
+    if delayed_items:
+        lines.append("")
+        lines.append("<b>DELAYED</b>")
+        for index, record in enumerate(delayed_items[:25], 1):
+            lines.append(_delayed_line(index, record))
+        if len(delayed_items) > 25:
+            lines.append(f"<i>... and {len(delayed_items) - 25} more delayed</i>")
+    if not items and not delayed_items:
         lines.append("")
         lines.append("Queue is empty.")
     lines.append("")
@@ -155,10 +190,19 @@ def _find_item(runtime: Any, request_id: str) -> Any | None:
     for item in _queue_items(runtime):
         if _matches(item, request_id):
             return item
+    delayed_matches = [
+        record
+        for record in runtime_pending.delayed_messages_now(runtime)
+        if _matches(record, request_id)
+    ]
+    if len(delayed_matches) == 1:
+        return delayed_matches[0]
     return None
 
 
 def _format_detail(item: Any) -> str:
+    if isinstance(item, dict) and str(item.get("id") or "").startswith("delay-"):
+        return _format_delayed_detail(item)
     prompt = str(getattr(item, "prompt", "") or "")
     clipped = prompt[:2000]
     lines = [
@@ -181,33 +225,108 @@ def _format_detail(item: Any) -> str:
 
 
 def _remove_items(runtime: Any, predicate) -> list[Any]:
+    """Compatibility adapter for local queue-button extensions.
+
+    Current built-in handlers use the locked async helpers in runtime_pending.
+    This non-awaiting adapter keeps existing private queue UI modules working
+    while balancing asyncio.Queue unfinished-task accounting.
+    """
+
+    delayed = runtime_pending.delayed_messages_now(runtime)
+    selected_delayed = [record for record in delayed if predicate(record)]
+    if selected_delayed:
+        scheduler = runtime_pending.scheduler_for(runtime)
+        cancel_now = getattr(scheduler, "cancel_delayed_messages_now", None)
+        if callable(cancel_now):
+            selected_ids = {str(record["id"]) for record in selected_delayed}
+            selected_delayed = list(
+                cancel_now(
+                    getattr(runtime, "name", ""),
+                    delay_ids=selected_ids,
+                )
+                or []
+            )
+        else:
+            selected_delayed = []
+
     queue = getattr(runtime, "queue", None)
-    raw = getattr(queue, "_queue", None)
-    if raw is None:
-        return []
-    kept = deque()
-    removed = []
-    for item in list(raw):
+    drained: list[Any] = []
+    if queue is not None:
+        while True:
+            try:
+                drained.append(queue.get_nowait())
+                queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+
+    removed_ready: list[Any] = []
+    kept: list[Any] = []
+    for item in drained:
         if predicate(item):
-            removed.append(item)
+            removed_ready.append(item)
         else:
             kept.append(item)
-    raw.clear()
-    raw.extend(kept)
-    return removed
+    for item in kept:
+        queue.put_nowait(item)
+    return removed_ready + selected_delayed
+
+
+def _format_delayed_detail(record: dict[str, Any]) -> str:
+    prompt = str(record.get("prompt") or "")
+    clipped = prompt[:2000]
+    try:
+        due = (
+            datetime.fromtimestamp(float(record.get("due_at") or 0))
+            .astimezone()
+            .isoformat(timespec="seconds")
+        )
+    except (TypeError, ValueError, OSError):
+        due = "?"
+    lines = [
+        card_title("⏳", "Delayed queue item"),
+        "",
+        "<b>Current</b> · <b>DELAYED</b>",
+        f"<b>ID</b> · <code>{html.escape(str(record.get('id') or 'unknown'))}</code>",
+        "<b>Source</b> · <code>text</code>",
+        f"<b>Due</b> · <code>{html.escape(due)}</code>",
+        f"<b>Attempts</b> · <code>{int(record.get('attempts') or 0)}</code>",
+        "",
+        "<b>PROMPT</b>",
+        f"<pre>{html.escape(clipped)}</pre>",
+    ]
+    if len(prompt) > len(clipped):
+        lines.append(f"<i>... ({len(prompt)} chars total)</i>")
+    return "\n".join(lines)
 
 
 async def _cancel(runtime: Any, update: Any, request_id: str) -> None:
-    removed = _remove_items(runtime, lambda item: _matches(item, request_id))
-    if not removed:
-        await _send(runtime, update, f"Item <code>{html.escape(request_id)}</code> not found in pending queue.")
+    removed = await runtime_pending.cancel_pending_by_id(runtime, request_id)
+    if not removed.total:
+        await _send(
+            runtime,
+            update,
+            f"Item <code>{html.escape(request_id)}</code> not found in pending queue.",
+        )
         return
-    await _send(runtime, update, f"Cancelled {len(removed)} pending item(s): <code>{html.escape(_item_id(removed[0]))}</code>")
+    kind = "delayed" if removed.delayed else "ready"
+    await _send(
+        runtime,
+        update,
+        f"Cancelled {removed.total} pending item(s): "
+        f"<code>{html.escape(request_id)}</code> ({kind}).",
+    )
 
 
 async def _clear(runtime: Any, update: Any) -> None:
-    removed = _remove_items(runtime, lambda _item: True)
-    await _send(runtime, update, f"Cleared {len(removed)} pending item(s). Running request was not interrupted.")
+    removed = await runtime_pending.recall_pending(runtime)
+    detail = ""
+    if removed.delayed:
+        detail = f" ({removed.ready} ready, {removed.delayed} delayed)"
+    await _send(
+        runtime,
+        update,
+        f"Cleared {removed.total} pending item(s){detail}. Running request was not interrupted.",
+    )
 
 
 def _history(runtime: Any) -> str:
@@ -239,17 +358,38 @@ def _history(runtime: Any) -> str:
 async def queue_command(runtime: Any, update: Any, context: Any) -> None:
     if not _is_authorized(runtime, update):
         return
-    args = [str(arg).strip() for arg in (getattr(context, "args", []) or []) if str(arg).strip()]
+    args = [
+        str(arg).strip()
+        for arg in (getattr(context, "args", []) or [])
+        if str(arg).strip()
+    ]
     sub = args[0].lower() if args else "list"
     if sub in {"help", "-h", "--help"}:
         await _send(runtime, update, html.escape(USAGE))
         return
     if sub in {"list", "ls", "status"}:
-        await _send(runtime, update, _build_list(runtime))
+        delayed = await runtime_pending.delayed_messages(runtime)
+        await _send(runtime, update, _build_list(runtime, delayed))
         return
     if sub == "show" and len(args) >= 2:
         item = _find_item(runtime, args[1])
-        await _send(runtime, update, _format_detail(item) if item else f"Item <code>{html.escape(args[1])}</code> not found.")
+        if item is not None:
+            await _send(runtime, update, _format_detail(item))
+            return
+        delayed = await runtime_pending.delayed_messages(runtime)
+        delayed_matches = [
+            record
+            for record in delayed
+            if str(record.get("id") or "") == args[1]
+            or str(record.get("id") or "").endswith(args[1])
+        ]
+        await _send(
+            runtime,
+            update,
+            _format_delayed_detail(delayed_matches[0])
+            if len(delayed_matches) == 1
+            else f"Item <code>{html.escape(args[1])}</code> not found.",
+        )
         return
     if sub == "cancel" and len(args) >= 2:
         await _cancel(runtime, update, args[1])

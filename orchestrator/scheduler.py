@@ -1,13 +1,16 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from orchestrator import runtime_pending, scheduler_recovery
 from orchestrator.job_ownership import ownership_mismatch_label
-from orchestrator import scheduler_recovery
+from orchestrator.runtime_common import _safe_excerpt
 from orchestrator.superloop_scheduler import advance_superloops_once
 
 scheduler_logger = logging.getLogger("BridgeU.Scheduler")
@@ -17,6 +20,9 @@ SCHEDULER_ACTION_TIMEOUT_S = 1860  # Bounds Jobs-owned automations and legacy sc
 PARKED_FOLLOWUP_TIMEOUT_S = 15
 CRON_CATCHUP_THRESHOLD_S = 3600
 LEGACY_RECOVERY_MIGRATION_MAX_AGE_S = 24 * 60 * 60
+MAX_DELAY_MINUTES = 7 * 24 * 60
+MAX_DELAY_MESSAGE_CHARS = 16_000
+MAX_PENDING_DELAYS_PER_AGENT = 100
 
 try:
     from croniter import croniter
@@ -199,6 +205,10 @@ class TaskScheduler:
         self.state.setdefault("missed_crons", {})
         self.state.setdefault("missed_heartbeats", {})
         self.state.setdefault("recovery_batches", {})
+        delayed_messages = self.state.setdefault("delayed_messages", {})
+        if not isinstance(delayed_messages, dict):
+            self.state["delayed_messages"] = {}
+        self._delay_lock = asyncio.Lock()
         self._recovery_lock = asyncio.Lock()
         if self._prepare_recovery_state():
             self._save_state()
@@ -226,14 +236,292 @@ class TaskScheduler:
             "missed_crons": {},
             "missed_heartbeats": {},
             "recovery_batches": {},
+            "delayed_messages": {},
         }
 
     def _save_state(self):
+        temporary = self.state_path.with_name(
+            f".{self.state_path.name}.{os.getpid()}.{uuid4().hex}.tmp"
+        )
         try:
-            with open(self.state_path, "w", encoding="utf-8") as f:
-                json.dump(self.state, f, indent=2)
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                json.dumps(self.state, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, self.state_path)
+            return True
         except Exception as e:
             scheduler_logger.error(f"Failed to save state: {e}")
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+
+    def _delayed_message_records(self) -> dict[str, dict[str, Any]]:
+        records = self.state.setdefault("delayed_messages", {})
+        if not isinstance(records, dict):
+            records = {}
+            self.state["delayed_messages"] = records
+        return records
+
+    def count_delayed_messages(self, agent_name: str) -> int:
+        wanted = str(agent_name or "")
+        return sum(
+            1
+            for record in self._delayed_message_records().values()
+            if isinstance(record, dict) and str(record.get("agent") or "") == wanted
+        )
+
+    def list_delayed_messages_now(self, agent_name: str) -> list[dict[str, Any]]:
+        """Return a non-awaiting snapshot for status and legacy command adapters."""
+
+        wanted = str(agent_name or "")
+        records = [
+            dict(record)
+            for record in self._delayed_message_records().values()
+            if isinstance(record, dict) and str(record.get("agent") or "") == wanted
+        ]
+        return sorted(
+            records,
+            key=lambda record: (
+                float(record.get("due_at") or 0),
+                float(record.get("created_at") or 0),
+                str(record.get("id") or ""),
+            ),
+        )
+
+    async def list_delayed_messages(self, agent_name: str) -> list[dict[str, Any]]:
+        async with self._delay_lock:
+            return self.list_delayed_messages_now(agent_name)
+
+    async def schedule_delayed_message(
+        self,
+        *,
+        agent_name: str,
+        chat_id: int,
+        prompt: str,
+        delay_minutes: int,
+        idempotency_key: str | None = None,
+        now_ts: float | None = None,
+    ) -> dict[str, Any]:
+        message = str(prompt or "").strip()
+        if not message:
+            raise ValueError("Delayed message cannot be empty.")
+        if len(message) > MAX_DELAY_MESSAGE_CHARS:
+            raise ValueError(
+                f"Delayed message cannot exceed {MAX_DELAY_MESSAGE_CHARS} characters."
+            )
+        try:
+            minutes = int(delay_minutes)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Delay must be a whole number of minutes.") from exc
+        if minutes < 1 or minutes > MAX_DELAY_MINUTES:
+            raise ValueError(
+                f"Delay must be between 1 and {MAX_DELAY_MINUTES} minutes."
+            )
+
+        agent = str(agent_name or "").strip()
+        if not agent:
+            raise ValueError("Delayed message requires an owning agent.")
+        key = str(idempotency_key or "").strip()
+        current = time.time() if now_ts is None else float(now_ts)
+
+        async with self._delay_lock:
+            records = self._delayed_message_records()
+            if key:
+                for existing in records.values():
+                    if (
+                        isinstance(existing, dict)
+                        and str(existing.get("agent") or "") == agent
+                        and str(existing.get("idempotency_key") or "") == key
+                    ):
+                        result = dict(existing)
+                        result["deduplicated"] = True
+                        return result
+
+            if self.count_delayed_messages(agent) >= MAX_PENDING_DELAYS_PER_AGENT:
+                raise ValueError(
+                    f"Agent {agent} already has the maximum of "
+                    f"{MAX_PENDING_DELAYS_PER_AGENT} delayed messages."
+                )
+
+            delay_id = f"delay-{uuid4().hex[:10]}"
+            record: dict[str, Any] = {
+                "id": delay_id,
+                "agent": agent,
+                "chat_id": int(chat_id),
+                "prompt": message,
+                "summary": _safe_excerpt(message),
+                "created_at": current,
+                "due_at": current + minutes * 60,
+                "delay_minutes": minutes,
+                "attempts": 0,
+            }
+            if key:
+                record["idempotency_key"] = key
+            records[delay_id] = record
+            if not self._save_state():
+                records.pop(delay_id, None)
+                raise RuntimeError("Could not persist delayed message state.")
+            scheduler_logger.info(
+                "Scheduled delayed message %s for %s in %s minute(s).",
+                delay_id,
+                agent,
+                minutes,
+            )
+            return dict(record)
+
+    async def cancel_delayed_messages(
+        self,
+        agent_name: str,
+        *,
+        delay_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        async with self._delay_lock:
+            return self._cancel_delayed_messages_unlocked(
+                agent_name,
+                delay_ids=delay_ids,
+            )
+
+    def cancel_delayed_messages_now(
+        self,
+        agent_name: str,
+        *,
+        delay_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Synchronously cancel records for legacy private-command adapters."""
+
+        if self._delay_lock.locked():
+            raise RuntimeError("Delayed-message state is busy; retry the queue command.")
+        return self._cancel_delayed_messages_unlocked(
+            agent_name,
+            delay_ids=delay_ids,
+        )
+
+    def _cancel_delayed_messages_unlocked(
+        self,
+        agent_name: str,
+        *,
+        delay_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        wanted_agent = str(agent_name or "")
+        wanted_ids = {str(value) for value in delay_ids} if delay_ids is not None else None
+        records = self._delayed_message_records()
+        selected = {
+            delay_id: dict(record)
+            for delay_id, record in records.items()
+            if isinstance(record, dict)
+            and str(record.get("agent") or "") == wanted_agent
+            and (wanted_ids is None or delay_id in wanted_ids)
+        }
+        if not selected:
+            return []
+        for delay_id in selected:
+            records.pop(delay_id, None)
+        if not self._save_state():
+            records.update(selected)
+            raise RuntimeError("Could not persist delayed-message cancellation.")
+        scheduler_logger.info(
+            "Cancelled %s delayed message(s) for %s.",
+            len(selected),
+            wanted_agent,
+        )
+        return list(selected.values())
+
+    async def dispatch_due_delayed_messages(
+        self,
+        runtime_map: dict[str, Any],
+        *,
+        now_ts: float | None = None,
+    ) -> int:
+        current = time.time() if now_ts is None else float(now_ts)
+        async with self._delay_lock:
+            due = [
+                dict(record)
+                for record in self._delayed_message_records().values()
+                if isinstance(record, dict) and float(record.get("due_at") or 0) <= current
+            ]
+        due.sort(
+            key=lambda record: (
+                float(record.get("due_at") or 0),
+                float(record.get("created_at") or 0),
+                str(record.get("id") or ""),
+            )
+        )
+
+        dispatched = 0
+        for snapshot in due:
+            agent_name = str(snapshot.get("agent") or "")
+            runtime = runtime_map.get(agent_name)
+            if runtime is None:
+                continue
+            delay_id = str(snapshot.get("id") or "")
+            async with runtime_pending.pending_lock(runtime):
+                async with self._delay_lock:
+                    records = self._delayed_message_records()
+                    record = records.get(delay_id)
+                    if (
+                        not isinstance(record, dict)
+                        or str(record.get("agent") or "") != agent_name
+                        or float(record.get("due_at") or 0) > current
+                    ):
+                        continue
+                    try:
+                        request_id = await runtime.enqueue_request(
+                            int(record["chat_id"]),
+                            str(record["prompt"]),
+                            "text",
+                            str(record.get("summary") or _safe_excerpt(str(record["prompt"]))),
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        record["attempts"] = int(record.get("attempts") or 0) + 1
+                        record["last_attempt_at"] = current
+                        record["last_error"] = f"{type(exc).__name__}: {exc}"[:500]
+                        self._save_state()
+                        scheduler_logger.error(
+                            "Delayed message %s enqueue failed for %s: %s",
+                            delay_id,
+                            agent_name,
+                            exc,
+                        )
+                        continue
+                    if not request_id:
+                        record["attempts"] = int(record.get("attempts") or 0) + 1
+                        record["last_attempt_at"] = current
+                        record["last_error"] = "enqueue_request returned no request id"
+                        self._save_state()
+                        continue
+
+                    append_entry = getattr(runtime, "append_conversation_entry", None)
+                    if callable(append_entry):
+                        try:
+                            append_entry("user", str(record["prompt"]), "text")
+                        except Exception as exc:
+                            scheduler_logger.warning(
+                                "Delayed message %s transcript append failed for %s: %s",
+                                delay_id,
+                                agent_name,
+                                exc,
+                            )
+                    records.pop(delay_id, None)
+                    if not self._save_state():
+                        scheduler_logger.error(
+                            "Delayed message %s was queued as %s but state cleanup was not persisted.",
+                            delay_id,
+                            request_id,
+                        )
+                    scheduler_logger.info(
+                        "Dispatched delayed message %s for %s as %s.",
+                        delay_id,
+                        agent_name,
+                        request_id,
+                    )
+                    dispatched += 1
+        return dispatched
 
     def _prepare_recovery_state(self) -> bool:
         """Repair interrupted batches and migrate recent pre-batch notices."""
@@ -1255,6 +1543,11 @@ class TaskScheduler:
                         state_changed = True
 
                 self._startup_recovery_pending = False
+
+                # Delayed user messages are a FUTURE layer of the normal
+                # request queue. They intentionally do not participate in
+                # cron/heartbeat recovery and are appended only when due.
+                await self.dispatch_due_delayed_messages(runtime_map, now_ts=now)
 
                 # Process parked-topic follow-ups without creating ad hoc task rows.
                 for rt in runtime_map.values():

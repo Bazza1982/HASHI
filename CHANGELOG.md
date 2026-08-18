@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Persistent `/delay` queue** — `/delay <minutes> <message>` stores an
+  agent-owned FUTURE request and moves it into the existing READY FIFO when
+  due, independently from cron, heartbeat, nudge, and automation jobs. Delays
+  survive restart and offline agents, work across every execution backend,
+  appear in `/status` and `/queue`, and can be cancelled by `/delay`, `/queue`,
+  or `/recall`; destructive lifecycle operations are guarded against orphaning
+  pending records.
 - **Instance-global `/sys` slots** — `/sys global ...` and the compatible
   `/sys g ...` short form manage one atomically persisted ten-slot prompt layer
   shared by all configured Bridge Agents in a HASHI instance. Existing local

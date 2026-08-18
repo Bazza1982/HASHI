@@ -6,7 +6,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
-from orchestrator import runtime_retry, runtime_session
+from orchestrator import runtime_pending, runtime_retry, runtime_session
 
 _STEER_CMD_RE = re.compile(r"^/steer(?:@\w+)?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 
@@ -237,42 +237,13 @@ async def _shutdown_active_backend(runtime: Any) -> str:
 
 
 async def _clear_request_queue(runtime: Any) -> int:
-    dropped = 0
-    queue = getattr(runtime, "queue", None)
-    if queue is None:
-        return 0
-    while not queue.empty():
-        try:
-            queue.get_nowait()
-            queue.task_done()
-            dropped += 1
-        except asyncio.QueueEmpty:
-            break
-    return dropped
+    return await runtime_pending.clear_ready(runtime)
 
 
 async def _recall_request_queue(runtime: Any, count: int | None = None) -> int:
-    """Remove all or the newest N waiting requests while preserving FIFO order."""
-    if count is None:
-        return await _clear_request_queue(runtime)
+    """Compatibility wrapper for recalling READY and FUTURE requests."""
 
-    queue = getattr(runtime, "queue", None)
-    if queue is None or count <= 0:
-        return 0
-
-    waiting: list[Any] = []
-    while not queue.empty():
-        try:
-            waiting.append(queue.get_nowait())
-            queue.task_done()
-        except asyncio.QueueEmpty:
-            break
-
-    dropped = min(count, len(waiting))
-    keep_count = len(waiting) - dropped
-    for item in waiting[:keep_count]:
-        queue.put_nowait(item)
-    return dropped
+    return (await runtime_pending.recall_pending(runtime, count)).total
 
 
 async def _notify_interrupted(
@@ -359,6 +330,7 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     )
 
     dropped = await _clear_request_queue(runtime)
+    delayed_preserved = await runtime_pending.delayed_count(runtime)
 
     continuation_note = (
         " The unfinished task was saved; send “continue” or “继续” to resume it."
@@ -368,7 +340,12 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     await runtime._reply_text(
         update,
         f"Stopped execution. Cleared {dropped} queued messages and killed active backend process tree."
-        f"{continuation_note}",
+        + (
+            f" Preserved {delayed_preserved} delayed message(s); use /recall to cancel them."
+            if delayed_preserved
+            else ""
+        )
+        + f"{continuation_note}",
     )
 
 
@@ -532,6 +509,7 @@ async def cmd_steer(
         request_meta=active_meta,
     )
     dropped = await _clear_request_queue(runtime)
+    delayed_preserved = await runtime_pending.delayed_count(runtime)
 
     # Best-effort re-init so the steered turn can start on all backends.
     backend_manager = getattr(runtime, "backend_manager", None)
@@ -571,7 +549,12 @@ async def cmd_steer(
             update,
             "🎯 Focus applied.\n"
             f"Re-focused the active task; cleared {dropped} queued message(s).\n"
-            "Preserved existing progress and queued an immediate continuation restricted "
+            + (
+                f"Preserved {delayed_preserved} delayed message(s); use /recall to cancel them.\n"
+                if delayed_preserved
+                else ""
+            )
+            + "Preserved existing progress and queued an immediate continuation restricted "
             "to the original user-requested scope. The task must continue until its "
             "requested outcome is complete or genuinely blocked"
             f"{f' (request {request_id})' if request_id else ''}.",
@@ -582,7 +565,12 @@ async def cmd_steer(
             update,
             f"🧭 Steered.\n"
             f"Interrupted active work; cleared {dropped} queued message(s).\n"
-            f"Kept interim progress, thinking, and workspace artefacts.\n"
+            + (
+                f"Preserved {delayed_preserved} delayed message(s); use /recall to cancel them.\n"
+                if delayed_preserved
+                else ""
+            )
+            + f"Kept interim progress, thinking, and workspace artefacts.\n"
             f"Queued continuation with your new direction"
             f"{f' (request {request_id})' if request_id else ''}.",
         )
@@ -619,23 +607,33 @@ async def cmd_recall(runtime: Any, update: Any, context: Any) -> None:
             # valid value beyond that limit necessarily exceeds any realizable queue,
             # so capping it to the current queue size preserves `/recall n` semantics.
             queue = getattr(runtime, "queue", None)
-            count = max(1, queue.qsize() if queue is not None else 0)
+            delayed = await runtime_pending.delayed_count(runtime)
+            count = max(1, (queue.qsize() if queue is not None else 0) + delayed)
 
-    dropped = await _recall_request_queue(runtime, count)
+    removed = await runtime_pending.recall_pending(runtime, count)
+    dropped = removed.total
     runtime.logger.warning(
-        "Manual recall requested for agent %s (requested=%s, dropped=%s, active_task_continues=%s)",
+        "Manual recall requested for agent %s "
+        "(requested=%s, dropped=%s, ready=%s, delayed=%s, active_task_continues=%s)",
         runtime.name,
         count if count is not None else "all",
         dropped,
+        removed.ready,
+        removed.delayed,
         bool(getattr(runtime, "current_request_meta", None) or getattr(runtime, "is_generating", False)),
     )
 
     if dropped:
         scope = f"all {dropped}" if count is None else f"the newest {dropped}"
+        breakdown = (
+            f" ({removed.ready} ready, {removed.delayed} delayed)"
+            if removed.delayed
+            else ""
+        )
         await _reply(
             runtime,
             update,
-            f"↩️ Recalled {scope} queued request(s).\n"
+            f"↩️ Recalled {scope} queued request(s){breakdown}.\n"
             "The current active task was not interrupted and will continue.",
         )
         return
@@ -722,6 +720,7 @@ async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
                 summary="Recovery retry",
             )
         dropped = await _clear_request_queue(runtime)
+        delayed_preserved = await runtime_pending.delayed_count(runtime)
 
         try:
             reset_mode = await runtime_session.reset_for_retry(runtime)
@@ -805,7 +804,12 @@ async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
             update,
             "↻ Recovery retry started.\n"
             f"Stopped stale execution and cleared {dropped} waiting request(s).\n"
-            f"Clean context: /{reset_mode} semantics.\n"
+            + (
+                f"Preserved {delayed_preserved} delayed message(s); use /recall to cancel them.\n"
+                if delayed_preserved
+                else ""
+            )
+            + f"Clean context: /{reset_mode} semantics.\n"
             f"Continuity: {continuity}.\n"
             f"Requeued the last prompt as {request_id}.",
         )

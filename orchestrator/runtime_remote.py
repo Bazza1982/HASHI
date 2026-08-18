@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.command_ui import BACK_LABEL, card_title
-from orchestrator import remote_lifecycle
+from orchestrator import remote_lifecycle, runtime_pending
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
@@ -112,6 +112,16 @@ async def do_move(
     dry_run: bool = False,
 ) -> None:
     chat_id = update.effective_chat.id
+
+    delayed = await runtime_pending.delayed_count(runtime, agent_name=agent_id)
+    if delayed:
+        await runtime._send_text(
+            chat_id,
+            f"Move is blocked while <code>{html.escape(agent_id)}</code> has "
+            f"<code>{delayed}</code> delayed message(s). Use /recall from that agent first.",
+            parse_mode="HTML",
+        )
+        return
 
     await runtime._send_text(chat_id, f"⏳ Moving <code>{agent_id}</code> → <b>{target}</b>…", parse_mode="HTML")
 

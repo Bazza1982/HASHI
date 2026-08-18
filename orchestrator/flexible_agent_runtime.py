@@ -30,7 +30,7 @@ from orchestrator.command_ui import (
     setting_card,
     status_label,
 )
-from orchestrator import runtime_audit, runtime_common
+from orchestrator import runtime_audit, runtime_common, runtime_pending
 from orchestrator import runtime_background_status
 from orchestrator.browser_mode import (
     build_browser_task_prompt,
@@ -2069,6 +2069,13 @@ class FlexibleAgentRuntime:
             if name in orchestrator._runtime_map():
                 await query.answer(f"Stop {name} first.", show_alert=True)
                 return
+            delayed = await runtime_pending.delayed_count(self, agent_name=name)
+            if delayed:
+                await query.answer(
+                    f"Recall {delayed} delayed message(s) from {name} first.",
+                    show_alert=True,
+                )
+                return
             await query.answer(f"Deleted {name}.")
             orchestrator.delete_agent_from_config(name)
 
@@ -2425,6 +2432,15 @@ class FlexibleAgentRuntime:
         if action == "transfer" and self.has_active_transfer():
             await self._reply_text(update, f"Transfer already active.\n{self._transfer_redirect_text()}")
             return
+        if action == "transfer":
+            delayed = await runtime_pending.delayed_count(self)
+            if delayed:
+                await self._reply_text(
+                    update,
+                    f"Transfer is blocked while {delayed} delayed message(s) are pending. "
+                    "Use /recall first.",
+                )
+                return
 
         target_agent = args[0]
         target_instance = self._normalize_instance_name(args[1] if len(args) > 1 else self._detect_instance_name())

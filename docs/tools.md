@@ -51,6 +51,11 @@ Five execution modes:
 - `/start` — inline keyboard to start a stopped agent
 - `/terminate` — shut down this agent
 - `/stop` — cancel current processing
+- `/steer <direction>` — interrupt the active turn, preserve progress, and enqueue an immediate redirected continuation; FUTURE delayed messages remain scheduled
+- `/focus` — re-focus the active or most recent task without expanding its scope; FUTURE delayed messages remain scheduled
+- `/delay <minutes> <message>` — persist a FUTURE message and append it to this agent's normal FIFO when due; `/delay list` and `/delay cancel <id>` inspect or cancel records
+- `/queue [list|show <id>|cancel <id>|clear|history]` — inspect or manage READY and FUTURE pending requests without interrupting the active task
+- `/recall [count]` — remove all or the newest `count` pending requests across READY and FUTURE without changing cron, heartbeat, nudge, or automation jobs
 - `/resend` — replay the previous model or Bridge output without model work
 - `/retry` — stop stale execution, reset context, restore recent handoff continuity, and rerun the last request; see [RETRY_RESEND_COMMANDS.md](RETRY_RESEND_COMMANDS.md)
 - `/model` — switch model (inline keyboard), then optionally choose or keep effort when the model supports it
@@ -170,7 +175,7 @@ backend routing, rollover, migration, and writer ownership.
 - `/skill` maintains standard instruction packages with catalog, validation, install/link, per-agent enable/disable, search, rescan, and recoverable delete/uninstall controls. It does not restore legacy action or toggle package types.
 - Built-in and installed packages move to `state/skill_recovery/` when removed; linked packages are unlinked without touching their source. Structured Job references block removal.
 - Skill detail cards show a cumulative project-wide counter backed by the privacy-bounded `state/skill_usage.jsonl` invocation log plus compatible historical `token_audit.jsonl` records.
-- Cron, heartbeat, nudge, and deterministic automation remain under `/jobs`. Debug, recall state, and Dream remain runtime controls.
+- Cron, heartbeat, nudge, and deterministic automation remain under `/jobs`. `/delay` uses a separate FUTURE message store and never creates or edits `/jobs` records. Debug, recall state, and Dream remain runtime controls.
 - Native HER/Claw Skill discovery and execution are disabled, so HASHI is the only `/skill` owner.
 - Legacy underscore IDs remain accepted for scheduled-job compatibility while new definitions use kebab-case.
 - Delegation skills: `/skill codex <task>`, `/skill claude <task>`, `/skill gemini <task>` for cross-backend delegation.

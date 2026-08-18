@@ -8,6 +8,7 @@ import pytest
 
 from orchestrator.admin_local_testing import execute_local_command, supported_commands
 from orchestrator.runtime_common import QueuedRequest
+from orchestrator.scheduler import TaskScheduler
 
 
 class _FakeRuntime:
@@ -95,6 +96,10 @@ async def test_queue_cancel_removes_pending_item():
     remaining = list(runtime.queue._queue)
     assert [item.request_id for item in remaining] == ["req-0004"]
     assert runtime.queue.qsize() == 1
+    item = runtime.queue.get_nowait()
+    runtime.queue.task_done()
+    assert item.request_id == "req-0004"
+    await asyncio.wait_for(runtime.queue.join(), timeout=0.1)
 
 
 @pytest.mark.asyncio
@@ -127,3 +132,75 @@ async def test_queue_history_uses_runtime_caches():
     text = result["messages"][0]["text"]
     assert "req-last" in text
     assert "Last response text" in text
+
+
+@pytest.mark.asyncio
+async def test_queue_lists_and_clears_ready_and_delayed_items(tmp_path):
+    runtime = _FakeRuntime()
+    runtime.workspace_dir = tmp_path / "workspace"
+    runtime.workspace_dir.mkdir()
+
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=1,
+    )
+    runtime.orchestrator = SimpleNamespace(scheduler=scheduler)
+    await runtime.queue.put(_request("req-ready"))
+    record = await scheduler.schedule_delayed_message(
+        agent_name="zelda",
+        chat_id=123,
+        prompt="later task",
+        delay_minutes=5,
+    )
+
+    listed = await execute_local_command(runtime, "/queue", chat_id=123)
+    text = listed["messages"][0]["text"]
+    assert "<code>2</code> pending" in text
+    assert "req-ready" in text
+    assert record["id"] in text
+    assert "DELAYED" in text
+
+    shown = await execute_local_command(
+        runtime,
+        f"/queue show {record['id']}",
+        chat_id=123,
+    )
+    assert "DELAYED QUEUE ITEM" in shown["messages"][0]["text"]
+    assert "later task" in shown["messages"][0]["text"]
+
+    cleared = await execute_local_command(runtime, "/queue clear", chat_id=123)
+    assert "Cleared 2 pending item" in cleared["messages"][0]["text"]
+    assert runtime.queue.empty()
+    await asyncio.wait_for(runtime.queue.join(), timeout=0.1)
+    assert await scheduler.list_delayed_messages("zelda") == []
+
+
+@pytest.mark.asyncio
+async def test_queue_cancel_removes_delayed_item_through_private_button_adapter(tmp_path):
+    runtime = _FakeRuntime()
+    runtime.workspace_dir = tmp_path / "workspace"
+    runtime.workspace_dir.mkdir()
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=1,
+    )
+    runtime.orchestrator = SimpleNamespace(scheduler=scheduler)
+    record = await scheduler.schedule_delayed_message(
+        agent_name="zelda",
+        chat_id=123,
+        prompt="cancel later",
+        delay_minutes=5,
+    )
+
+    cancelled = await execute_local_command(
+        runtime,
+        f"/queue cancel {record['id']}",
+        chat_id=123,
+    )
+
+    assert "Cancelled 1 pending item" in cancelled["messages"][0]["text"]
+    assert await scheduler.list_delayed_messages("zelda") == []
