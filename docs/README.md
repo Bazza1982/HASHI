@@ -56,6 +56,7 @@ deployment validation continues.
 - [AGENT_FYI.md](AGENT_FYI.md) — Bridge environment FYI (operational reference)
 - [STEER_COMMAND.md](STEER_COMMAND.md) — Telegram `/steer` mid-task course correction (busy wrapper vs idle plain text, error suppression)
 - [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md) — Telegram `/focus` scope correction and `/recall [count]` queued-request withdrawal
+- [DELAY_COMMAND.md](DELAY_COMMAND.md) — persistent `/delay` messages, timing semantics, queue interaction, cancellation, and lifecycle safety
 - [HASHI_PRIVACY_LEVEL_2_PLAN.md](HASHI_PRIVACY_LEVEL_2_PLAN.md) — Level 2 basic-redaction security contract, API-only backend boundary, local model probe, and implementation sequence
 - [initial.md](initial.md) — Onboarding prompt template (onboarding-only)
 - [tools.md](tools.md) — Tools & operations reference

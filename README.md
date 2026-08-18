@@ -656,6 +656,8 @@ HASHI agents respond to both natural language and structured commands:
 | `/steer <direction>` | Interrupt the current turn, preserve progress, and continue with an added direction |
 | `/focus` | Narrow execution back to the original task and keep working until it is complete or genuinely blocked |
 | `/recall [count]` | Remove all queued requests, or up to the newest positive `count`, without interrupting the active task |
+| `/delay <minutes> <message>` | Persist a message for 1–10080 minutes, then append it to the normal request queue without interrupting active work |
+| `/queue [list\|show <id>\|cancel <id>\|clear]` | Inspect or manage READY requests and FUTURE delayed messages |
 | `/reboot [min\|max\|#]` | Hot restart agents |
 | `/rebuild [status [job-id]]` | Incrementally build, verify and safely adopt integrated HER Rust changes without modifying the certified package |
 | `/restart` | Hard restart this HASHI instance through WatchTower supervision |
@@ -670,7 +672,9 @@ HASHI agents respond to both natural language and structured commands:
 
 For detailed task-control behavior and examples, including the difference
 between `/stop`, `/steer`, `/focus`, and `/recall`, see
-[Task-control commands](docs/FOCUS_RECALL_COMMANDS.md).
+[Task-control commands](docs/FOCUS_RECALL_COMMANDS.md). For delayed-message
+examples, timing semantics, persistence, and cancellation, see
+[Persistent delayed messages](docs/DELAY_COMMAND.md).
 
 #### Session & Mode Commands
 
