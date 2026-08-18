@@ -13,7 +13,9 @@ def run_onboarding_gate(paths: BridgePaths, code_root: Path) -> bool:
     agents_path = paths.bridge_home / "agents.json"
     onboarding_done = False
     try:
-        with agents_path.open(encoding="utf-8") as fh:
+        # Keep this gate aligned with ConfigManager: existing Windows-managed
+        # configs may contain a UTF-8 BOM and are still valid HASHI configs.
+        with agents_path.open(encoding="utf-8-sig") as fh:
             cfg = json.load(fh)
             if cfg.get("agents"):
                 onboarding_done = True

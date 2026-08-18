@@ -677,7 +677,9 @@ _onboarding_complete() {
     python3 -c "
 import json, sys
 try:
-    data = json.load(open(sys.argv[1]))
+    # Windows editors and config updaters may preserve a UTF-8 BOM.  The
+    # runtime config loader accepts that format, so the launcher gate must too.
+    data = json.load(open(sys.argv[1], encoding='utf-8-sig'))
     agents = data.get('agents', [])
     # Consider onboarding complete once this instance has a configured agent.
     sys.exit(0 if agents else 1)
