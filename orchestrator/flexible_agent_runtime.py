@@ -4483,7 +4483,34 @@ class FlexibleAgentRuntime:
             return self.backend_manager.get_claw_models(
                 provider or self.get_current_provider()
             )
-        return get_available_models(engine)
+        models = get_available_models(engine)
+        backend_cfg = self._get_backend_cfg(engine, provider)
+        if not backend_cfg:
+            return models
+
+        # Agent-local model rows extend the shared catalog. This lets one Agent
+        # opt into an OpenRouter model without exposing it to every Agent or
+        # removing any globally registered choices.
+        configured_models: list[object] = []
+        raw_models = backend_cfg.get("models")
+        if isinstance(raw_models, list):
+            configured_models.extend(raw_models)
+        configured_models.extend(
+            [backend_cfg.get("model"), backend_cfg.get("default_model")]
+        )
+        for configured_model in configured_models:
+            model = str(configured_model or "").strip()
+            if model and model not in models:
+                models.append(model)
+        return models
+
+    def _get_configured_model_for(self, engine: str) -> str | None:
+        configured = str(
+            (self._get_backend_cfg(engine) or {}).get("model") or ""
+        ).strip()
+        if configured and configured in self._get_available_models_for(engine):
+            return configured
+        return normalize_model(engine, configured)
 
     def _get_available_efforts(self) -> list[str]:
         return get_available_efforts(self.config.active_backend, self.get_current_model())
@@ -4685,10 +4712,7 @@ class FlexibleAgentRuntime:
         with_context: bool,
         current_model: Optional[str] = None,
     ) -> InlineKeyboardMarkup:
-        active_model = current_model or normalize_model(
-            target_engine,
-            (self._get_backend_cfg(target_engine) or {}).get("model"),
-        )
+        active_model = current_model or self._get_configured_model_for(target_engine)
         mode_flag = "c" if with_context else "p"
         buttons = []
         for model in self._get_available_models_for(target_engine):
@@ -4701,10 +4725,7 @@ class FlexibleAgentRuntime:
         return runtime_menu_views.backend_menu_text(active_backend=self.config.active_backend)
 
     def _build_backend_model_prompt(self, target_engine: str, with_context: bool) -> str:
-        current_model = normalize_model(
-            target_engine,
-            (self._get_backend_cfg(target_engine) or {}).get("model"),
-        )
+        current_model = self._get_configured_model_for(target_engine)
         return runtime_menu_views.backend_model_prompt_text(
             backend=target_engine,
             current_model=current_model,
