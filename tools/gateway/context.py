@@ -99,6 +99,7 @@ class GatewayContext:
     secrets: dict[str, Any] = field(default_factory=dict)
     agents_config: list[dict[str, Any]] = field(default_factory=list)
     audit: dict[str, Any] = field(default_factory=dict)
+    vision_enabled: bool = True
 
     @classmethod
     def from_registry(
@@ -110,6 +111,7 @@ class GatewayContext:
         media_roots: list[Path] | None = None,
         workbench_api_base_url: str = "",
         scheduler_api_base_url: str = "",
+        vision_enabled: bool = True,
     ) -> GatewayContext:
         audit = _json_safe(registry.audit_context or {}) or {}
         required_secret_keys = set()
@@ -166,6 +168,7 @@ class GatewayContext:
             secrets=_json_safe(scoped_secrets) or {},
             agents_config=_json_safe(registry.agents_config) or [],
             audit={**audit, "backend": backend},
+            vision_enabled=vision_enabled,
         )
 
     def build_registry(self) -> ToolRegistry:
@@ -199,6 +202,7 @@ def write_gateway_context(
     media_roots: list[Path] | None = None,
     workbench_api_base_url: str = "",
     scheduler_api_base_url: str = "",
+    vision_enabled: bool = True,
 ) -> GatewayContext:
     context = GatewayContext.from_registry(
         registry,
@@ -206,6 +210,7 @@ def write_gateway_context(
         media_roots=media_roots,
         workbench_api_base_url=workbench_api_base_url,
         scheduler_api_base_url=scheduler_api_base_url,
+        vision_enabled=vision_enabled,
     )
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -229,8 +229,8 @@ class ToolGateway:
             content,
         )
 
-    @staticmethod
     def _result(
+        self,
         output: str,
         is_error: bool,
         content: list[dict[str, Any]] | None = None,
@@ -244,6 +244,7 @@ class ToolGateway:
                 safe_content.append({"type": "text", "text": block["text"]})
             elif (
                 kind == "image"
+                and self.context.vision_enabled
                 and block.get("mimeType") in {"image/jpeg", "image/png", "image/gif", "image/webp"}
                 and isinstance(block.get("data"), str)
             ):
