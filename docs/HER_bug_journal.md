@@ -61,9 +61,9 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260813-023` | Fixed — live verification pending | P2 | runtime and adapter HER Habit pipelines can both process one foreground run | `test_her_adapter_declares_habit_pipeline_ownership`; `test_runtime_intake_ineligibility_disables_adapter_habit_pipeline` |
 | `HER-20260813-024` | Fixed — live verification pending | P1 | post-multimedia adapter runner rejected Meditation isolation overrides before inference | `test_her_task_runner_applies_meditation_safety_overrides` |
 | `HER-20260813-025` | Verified | P2 | HER Debug Lab failed in a clean clone without machine-local Ajiao state | `test_optional_operator_baseline_is_clone_portable_and_content_free`; `tests/test_her_debug_lab.py` |
-| `HER-20260813-026` | Reopened; fixed in source — rebuild/live verification pending | P1 | MAX/MAX+ final review could repeatedly delay or fail delivery of an otherwise usable final | `max_final_review_concern_is_nonblocking_and_wording_only`; `max_final_review_rewrite_failure_preserves_candidate_with_warning` |
+| `HER-20260813-026` | Reopened; fixed in source — rebuild/live verification pending | P1 | MAX/MAX+ final review could repeatedly delay or fail delivery of an otherwise usable final | `max_final_review_concern_is_nonblocking_and_wording_only`; `max_final_review_physical_failure_surfaces_exact_provider_error` |
 | `HER-20260813-027` | Fixed — live verification pending | P1 | Habit Meditation model work occupied the foreground execution queue and process slot | `test_habit_meditation_model_work_does_not_block_foreground_task`; `test_habit_meditation_uses_low_effort_tool_free_snapshot` |
-| `HER-20260813-028` | Fixed — live verification pending | P1 | max-iteration handling could replace a usable primary-agent final answer with a mechanical incomplete report | `test_claw_incomplete_max_iterations_preserves_normal_final`; `test_claw_incomplete_dangling_tool_markup_uses_deterministic_report` |
+| `HER-20260813-028` | Reopened; fixed in source — rebuild/live verification pending | P1 | imported HER exit handling could replace primary-model reasoning with an unproven mechanical incomplete report | `repeated_thinking_only_response_is_a_concrete_model_protocol_error`; `test_legacy_incomplete_text_without_provenance_is_rejected`; all-effort exit matrix |
 | `HER-20260814-029` | Fixed — live verification pending | P2 | HIGH/XHIGH shared checkpoints reviewed stale task frames without current tool evidence and repeated the same divergence review | `high_effort_reserves_turns_for_review_and_validation`; `high_effort_deduplicates_repeated_unplanned_tool_reviews` |
 | `HER-20260814-030` | Verified | P1 | fixed-mode planner saw only the incremental current prompt, not the persistent session view used by the primary agent | `fixed_session_planner_sees_resumed_options_at_every_planning_effort`; `medium_plus_plans_replans_and_reports_non_blocking_tool_divergence` |
 | `HER-20260814-031` | Verified | P1 | long fixed sessions could make the planner answer as the conversational agent instead of returning TaskFrame JSON | `planner_request_preserves_session_prefix_and_appends_nonpersistent_control`; fixed-session direct-response effort matrix |
@@ -736,20 +736,22 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   delay delivery, and make the final wording provider call a new failure point even
   though the reviewer was documented as advisory.
 - **Recurrence repair:** independent final review now runs only at MAX/MAX+, never
-  XHIGH. A concern permits at most one tool-free primary-Agent wording revision and
-  can never reopen execution. HER retains the reviewed candidate, falls back to it on
-  provider/protocol failure, always delivers the primary final, and appends the same
-  final with a compact pass, concern (up to three items), or reviewer-unavailable note.
-  Each reviewer provider call has a fail-open 90-second hard deadline. The structured
-  CLI result also records `final_review`; no separate reviewer message is emitted.
+  XHIGH. A concern permits at most one tool-free primary-Agent wording revision and can
+  never reopen execution. Reviewer failure remains fail-open structured telemetry with
+  a 90-second hard deadline. The 2026-08-19 Exit Reasoning repair removed runtime-
+  appended pass/concern/unavailable prose: only the primary Agent may incorporate review
+  facts. A physical failure of that primary wording call surfaces its exact error rather
+  than being silently hidden behind the older candidate. The structured CLI result
+  records `final_review`; no separate reviewer final message is emitted.
 - **Recurrence regression tests:**
   `max_final_review_concern_is_nonblocking_and_wording_only`,
-  `max_final_review_rewrite_failure_preserves_candidate_with_warning`,
+  `max_final_review_physical_failure_surfaces_exact_provider_error`,
   `max_invalid_review_output_never_replaces_the_task_agent_final_answer`, and
   `max_plus_emits_hypothesis_checkpoint_and_three_independent_verdicts`.
 - **Live retest required:** one trivial handoff and one multi-tool MAX+ task on the
   upgraded packaged runtime, including one forced reviewer failure that still returns
-  the primary final with an unavailable note.
+  the primary final without a runtime suffix, plus one primary-finalization provider
+  failure that delivers the exact provider error.
 - **Recurrence count:** 1
 
 ### HER-20260813-027 — Meditation blocked the primary queue
@@ -772,21 +774,71 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 
 ### HER-20260813-028 — incomplete handling discarded a usable final answer
 
-- **Status:** Fixed — live verification pending
+- **Status:** Reopened; fixed in source — rebuild/live verification pending
 - **Severity:** P1
-- **Expected:** iteration exhaustion preserves a normal primary-agent final answer;
-  only dangling tool/protocol output uses a deterministic recovery report.
-- **Actual:** HASHI discarded HER's final text whenever HER classified the run as
-  incomplete, even when all requested operations had succeeded.
-- **Root cause:** completion classification was treated as higher authority than the
-  primary agent's usable final payload.
-- **Fix:** preserve normal final text and append resumable state; retain deterministic
-  fallback only for malformed/dangling tool markup. Continue is preferred after
-  successful uncertain side effects unless evidence proves failure or repetition.
-- **HASHI fix:** `6d69ded6`.
-- **Live retest required:** iteration-ceiling task with successful tools and a usable
-  final, plus a dangling-tool negative control.
-- **Recurrence count:** 0
+- **Recurrence of:** this entry; semantic recurrence after source integration
+- **Originally fixed:** 2026-08-13 by HASHI commit `6d69ded6`.
+- **Recurred:** 2026-08-19 05:40 AEST in a Lily scheduled long-running task.
+- **Known-bad integration:** HASHI commit `6c7fd961` imported the HER `.22` source on
+  2026-08-16 and reintroduced the obsolete deterministic no-final-text path and its
+  tests.
+- **Expected:** every logical boundary receives a final reasoning/reporting opportunity
+  from the exact selected primary model/provider route, with tools disabled and the
+  configured Agent persona intact. Task status, iteration count, tool failures, review,
+  or scheduler origin may inform that model but may never author the last user message.
+  Physical unavailability instead surfaces the selected platform's concrete error.
+- **Actual:** after the provider returned no user-visible final text, native HER created
+  the old English `Execution status: INCOMPLETE` report. It lacked message provenance,
+  so the Python adapter accepted the nonempty runtime text as if the primary model had
+  written it, skipped Persona handling, and appended a mechanically selected `PIVOT`.
+- **User-visible impact:** Lily appeared to produce an obsolete, impersonal failure
+  template after 77 useful iterations and 68 successful tool results. The message was
+  neither Lily's reasoning nor a concrete provider error and could recommend the wrong
+  next action.
+- **First divergent event:** native no-final-text handling promoted runtime-authored
+  fallback prose into the `run_finished.message` field without `message_origin` or a
+  terminal kind.
+- **Root cause:** the source import restored an upstream product policy that treated a
+  deterministic visible report as success. Native tests protected that obsolete policy,
+  while the adapter trusted text presence rather than proving authorship. A second
+  adapter fallback then duplicated decision and Persona responsibility.
+- **Repair:** introduce Exit Reasoning and Reporting in the native runtime; reuse only
+  the selected model/provider/session and disable tools; allow one same-route recovery;
+  classify repeated missing/unsafe output as a model-protocol error; remove native and
+  adapter deterministic reports, runtime-selected `CONTINUE`/`PIVOT`, planning/review
+  suffixes, the adapter's second Persona call, and the Ultra/Dream deterministic final
+  report fallbacks. Successful terminal envelopes now
+  require `terminal_kind=model_report`, `message_origin=primary_model`, and
+  `exit_reasoning_status=embedded|completed`. Physical failures retain concrete error
+  text and provenance, checkpoint when possible, and keep redacted stdout/stderr.
+- **HASHI source fix:** `f311108e`.
+- **Related timeout repair:** the post-tool guard was confirmed to wait for the provider's
+  first response event after a tool result—not for the background tool itself. Its
+  configurable same-route schedule is now 60 seconds then 120 seconds, with provider
+  overrides and no alternate-route fallback.
+- **Regression tests:** native missing-visible-text, tool-request-during-finalization,
+  evidence-ledger, all-effort, final-review physical-failure, provider-error provenance,
+  timeout backoff, adapter provenance rejection, Ultra planning/finalization provenance,
+  Dream renderer failure, exact-provider-error/checkpoint, stdout/stderr preservation,
+  scheduled-silent error delivery, cross-session structured continuation, and `/stop`
+  suppression tests.
+- **Bad-build test result:** the new native model-protocol expectation failed because the
+  known-bad runtime returned a successful deterministic report; the all-effort adapter
+  expectation failed because the known-bad adapter appended `CONTINUE`/`PIVOT` prose.
+- **Fixed-build test result:** Python repository regression passed with 2,430 tests and
+  3 skips; the full Rust workspace/all-target suite passed, including 673 Native Runtime
+  and 222 CLI unit tests. Focused adapter/runtime/cross-session/`/stop`, Ruff, Python
+  compile, Rust formatting, and production Runtime Clippy checks also passed.
+- **Live retest required:** after a supported rebuild/restart, run normal, iteration-limit,
+  one-empty-response, repeated-empty-response, finalization-tool-request, quota/auth
+  physical failure, and scheduled silent-delivery cells on both provider routes. Prove
+  exact selected-route identity, model-authored Persona final or exact physical error,
+  one delivery, and resumable checkpoint behavior.
+- **Secrets/redaction checked:** yes; tests use synthetic canaries and verify credential
+  redaction while retaining error provenance.
+- **Remaining risk:** source is repaired but the running packaged HER has not been rebuilt
+  or live-tested in this change.
+- **Recurrence count:** 1
 
 ### HER-20260811-001 — exact reasoning whitespace was corrupted
 
@@ -856,8 +908,8 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **Affected area:** OpenAI-compatible DeepSeek history translation during tool-free
   visible-finalization recovery.
 - **Expected:** a thinking-only response gets one visible-finalization retry and always
-  reaches `run_finished`; repeated thinking-only responses become
-  `incomplete/no_final_text`.
+  reaches `run_finished`; repeated thinking-only responses become a concrete typed
+  model-protocol error rather than invented visible prose.
 - **Actual:** a reasoning-only assistant history item could be sent back to DeepSeek as
   an invalid assistant message, causing an HTTP error and no terminal event.
 - **Root cause:** reasoning-only assistant history was retained even though DeepSeek
@@ -867,7 +919,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 - **Regression tests:**
   - HER source `deepseek_v4_drops_reasoning_only_assistant_history`
   - HER source `thinking_only_response_gets_one_tool_free_visible_finalization_retry`
-  - HER source `repeated_thinking_only_response_is_incomplete_with_deterministic_report`
+  - HER source `repeated_thinking_only_response_is_a_concrete_model_protocol_error`
 - **Permanent retest:** thinking-only and no-final-text fault fixtures on both providers,
   both models, both modes, and all efforts.
 - **Verification still required:** reproduce the original finalization shape through the
