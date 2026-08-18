@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
 
 from orchestrator import runtime_retry, runtime_session
+
 _STEER_CMD_RE = re.compile(r"^/steer(?:@\w+)?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 
 # Intentional user-driven interrupts that kill the active backend process.
@@ -47,12 +48,61 @@ _FOCUS_DIRECTION = (
 )
 
 
-def mark_user_interrupt(runtime: Any, reason: str) -> None:
+def _background_request_ids(runtime: Any) -> set[str]:
+    """Return request IDs whose detached generations are still being handled."""
+    raw_ids = getattr(runtime, "_background_request_ids", None)
+    if not isinstance(raw_ids, (set, frozenset, list, tuple)):
+        return set()
+    return {str(request_id) for request_id in raw_ids if str(request_id or "").strip()}
+
+
+def _active_request_meta(runtime: Any) -> dict[str, Any] | None:
+    """Resolve foreground metadata, then the newest detached request metadata."""
+    current = getattr(runtime, "current_request_meta", None)
+    if isinstance(current, dict) and current.get("request_id"):
+        return current
+
+    background_ids = _background_request_ids(runtime)
+    if not background_ids:
+        return None
+
+    registry = getattr(runtime, "_request_meta_by_id", None)
+    if isinstance(registry, dict):
+        # Request metadata is inserted in start order. Prefer the most recently
+        # started detached generation when more than one is still outstanding.
+        for request_id, candidate in reversed(tuple(registry.items())):
+            if (
+                str(request_id) in background_ids
+                and isinstance(candidate, dict)
+                and candidate.get("request_id")
+            ):
+                return candidate
+
+    # Runtimes without a metadata registry may retain the request as last_prompt.
+    last_prompt = getattr(runtime, "last_prompt", None)
+    last_request_id = str(getattr(last_prompt, "request_id", None) or "")
+    if last_prompt is not None and last_request_id in background_ids:
+        return {
+            "request_id": last_request_id,
+            "chat_id": getattr(last_prompt, "chat_id", None),
+            "prompt": str(getattr(last_prompt, "prompt", "") or ""),
+            "source": str(getattr(last_prompt, "source", "text") or "text"),
+            "summary": str(getattr(last_prompt, "summary", "") or ""),
+        }
+    return None
+
+
+def mark_user_interrupt(
+    runtime: Any,
+    reason: str,
+    *,
+    request_meta: dict[str, Any] | None = None,
+) -> None:
     """Record that the active turn is being intentionally stopped by the user."""
     reason = str(reason or "").strip()
     if reason not in _USER_INTERRUPT_REASONS:
         return
-    meta = getattr(runtime, "current_request_meta", None)
+    meta = request_meta if isinstance(request_meta, dict) else _active_request_meta(runtime)
     request_id = None
     if isinstance(meta, dict):
         rid = meta.get("request_id")
@@ -231,8 +281,9 @@ async def _notify_interrupted(
     reason: str,
     error: str,
     summary: str,
+    request_meta: dict[str, Any] | None = None,
 ) -> None:
-    meta = getattr(runtime, "current_request_meta", None)
+    meta = request_meta if isinstance(request_meta, dict) else _active_request_meta(runtime)
     notify = getattr(runtime, "_notify_right_brain_interrupted", None)
     if not callable(notify):
         return
@@ -258,8 +309,12 @@ async def _notify_interrupted(
         runtime.logger.warning("Failed to notify interrupted turn for %s: %s", reason, exc)
 
 
-def _capture_original_prompt(runtime: Any) -> str:
-    meta = getattr(runtime, "current_request_meta", None)
+def _capture_original_prompt(
+    runtime: Any,
+    *,
+    request_meta: dict[str, Any] | None = None,
+) -> str:
+    meta = request_meta if isinstance(request_meta, dict) else _active_request_meta(runtime)
     if isinstance(meta, dict):
         prompt = str(meta.get("prompt") or "").strip()
         if prompt:
@@ -283,22 +338,24 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     )
     # Mark before kill so the pipeline can suppress the expected non-zero exit
     # (e.g. Grok CLI code -9 / SIGKILL) instead of showing ❌ Backend error.
+    active_meta = _active_request_meta(runtime)
     busy = _agent_is_busy(runtime)
     interrupted_task = None
     if busy:
         interrupted_task = runtime_retry.remember_interrupted_task(
             runtime,
-            getattr(runtime, "current_request_meta", None),
+            active_meta,
             backend=str(active or ""),
             reason="user_stop",
         )
-        mark_user_interrupt(runtime, "user_stop")
+        mark_user_interrupt(runtime, "user_stop", request_meta=active_meta)
     await _shutdown_active_backend(runtime)
     await _notify_interrupted(
         runtime,
         reason="user_stop",
         error="/stop received while right brain was running",
         summary="Manual stop",
+        request_meta=active_meta,
     )
 
     dropped = await _clear_request_queue(runtime)
@@ -343,8 +400,13 @@ async def _reply(runtime: Any, update: Any, text: str) -> None:
 
 def _agent_is_busy(runtime: Any) -> bool:
     """True when a generation is active or work is already queued."""
-    meta = getattr(runtime, "current_request_meta", None)
-    if isinstance(meta, dict) and meta.get("request_id"):
+    if _active_request_meta(runtime) is not None:
+        return True
+    # Flexible runtimes retain these IDs after a generation detaches and the
+    # foreground queue slot is released. The registry should normally resolve
+    # their metadata, but the IDs remain an authoritative busy signal during
+    # small registration/cleanup races.
+    if _background_request_ids(runtime):
         return True
     if getattr(runtime, "is_generating", False):
         return True
@@ -388,8 +450,13 @@ async def cmd_steer(
         or getattr(runtime.config, "engine", "")
         or ""
     )
+    active_meta = _active_request_meta(runtime)
     busy = _agent_is_busy(runtime)
-    original_prompt = _capture_original_prompt(runtime) if (busy or focus_mode) else ""
+    original_prompt = (
+        _capture_original_prompt(runtime, request_meta=active_meta)
+        if (busy or focus_mode)
+        else ""
+    )
 
     runtime.logger.warning(
         f"Manual {command_name} requested for agent {runtime.name} "
@@ -451,7 +518,7 @@ async def cmd_steer(
 
     # Mark before kill so exit -9 / SIGKILL is not reported as ❌ Backend error.
     interrupt_reason = "user_focus" if focus_mode else "user_steer"
-    mark_user_interrupt(runtime, interrupt_reason)
+    mark_user_interrupt(runtime, interrupt_reason, request_meta=active_meta)
     await _shutdown_active_backend(runtime)
     await _notify_interrupted(
         runtime,
@@ -462,6 +529,7 @@ async def cmd_steer(
             if focus_mode
             else f"Steer: {direction[:120]}"
         ),
+        request_meta=active_meta,
     )
     dropped = await _clear_request_queue(runtime)
 

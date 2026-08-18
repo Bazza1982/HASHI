@@ -208,6 +208,94 @@ async def test_cmd_steer_idle_sends_plain_direction_without_wrapper():
     assert getattr(runtime, "_user_interrupt", None) is None
 
 
+@pytest.mark.asyncio
+async def test_cmd_steer_treats_detached_her_generation_as_busy():
+    replies: list[str] = []
+    enqueued: list[tuple] = []
+    interrupted: list[tuple] = []
+    shutdown = AsyncMock()
+
+    async def _reply(_update, text, **_kwargs):
+        replies.append(text)
+
+    async def _enqueue(chat_id, prompt, source, summary, **_kwargs):
+        enqueued.append((chat_id, prompt, source, summary))
+        return "req-steer-detached"
+
+    def _notify(item, prompt, **kwargs):
+        interrupted.append((item, prompt, kwargs))
+
+    detached_meta = {
+        "request_id": "req-detached",
+        "chat_id": 42,
+        "prompt": "Find the AI detector named in Heidi's meeting summary",
+        "source": "voice_transcript",
+        "summary": "Voice request",
+    }
+    runtime = SimpleNamespace(
+        name="sunny",
+        logger=SimpleNamespace(warning=lambda *a, **k: None),
+        config=SimpleNamespace(active_backend="her", engine="her"),
+        queue=asyncio.Queue(),
+        backend_manager=SimpleNamespace(
+            current_backend=SimpleNamespace(
+                shutdown=shutdown,
+                persistent_session_busy=True,
+            ),
+            initialize_active_backend=AsyncMock(return_value=True),
+        ),
+        current_request_meta=None,
+        _background_request_ids={"req-detached"},
+        _request_meta_by_id={"req-detached": detached_meta},
+        last_prompt=SimpleNamespace(**detached_meta),
+        is_generating=False,
+        _is_authorized_user=lambda _uid: True,
+        _reply_text=_reply,
+        _notify_right_brain_interrupted=_notify,
+        enqueue_request=_enqueue,
+    )
+    msg = SimpleNamespace(text="/steer the name is Heidi", chat=SimpleNamespace(id=42))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1),
+        effective_chat=SimpleNamespace(id=42),
+        effective_message=msg,
+        message=msg,
+    )
+
+    await runtime_control.cmd_steer(
+        runtime,
+        update,
+        SimpleNamespace(args=["the", "name", "is", "Heidi"]),
+    )
+
+    shutdown.assert_awaited_once()
+    assert len(enqueued) == 1
+    chat_id, prompt, source, summary = enqueued[0]
+    assert chat_id == 42
+    assert source == "steer"
+    assert "the name is Heidi" in prompt
+    assert detached_meta["prompt"] in prompt
+    assert summary == "Steer: the name is Heidi"
+    assert replies and "Steered" in replies[0]
+    assert "idle" not in replies[0].lower()
+    assert runtime._user_interrupt["request_id"] == "req-detached"
+    assert interrupted and interrupted[0][0].request_id == "req-detached"
+    assert interrupted[0][2]["reason"] == "user_steer"
+
+
+def test_non_generation_background_work_does_not_make_agent_busy():
+    runtime = SimpleNamespace(
+        current_request_meta=None,
+        is_generating=False,
+        queue=asyncio.Queue(),
+        _background_tasks={object()},
+        _background_request_ids=set(),
+        _request_meta_by_id={},
+    )
+
+    assert runtime_control._agent_is_busy(runtime) is False
+
+
 def test_mark_and_consume_user_interrupt_matches_request():
     runtime = SimpleNamespace(current_request_meta={"request_id": "req-1"})
     runtime_control.mark_user_interrupt(runtime, "user_stop")
