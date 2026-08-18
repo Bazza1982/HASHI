@@ -341,6 +341,98 @@ async def test_hot_restart_fails_when_target_does_not_restart_even_if_others_run
 
 
 @pytest.mark.asyncio
+async def test_hot_restart_aborts_when_agent_stop_exceeds_deadline(monkeypatch):
+    release_stop = asyncio.Event()
+    stop_cancelled = asyncio.Event()
+
+    class Kernel:
+        def __init__(self):
+            self.runtimes = [SimpleNamespace(name="samantha")]
+            self.start_calls = []
+
+        async def stop_agent(self, name, reason):
+            assert name == "samantha"
+            assert reason == "hot-restart:min"
+            while not release_stop.is_set():
+                try:
+                    await release_stop.wait()
+                except asyncio.CancelledError:
+                    stop_cancelled.set()
+            return True, "stopped"
+
+        async def start_agent(self, name):
+            self.start_calls.append(name)
+            return True, "started"
+
+    kernel = Kernel()
+    manager = RebootManager(kernel=kernel, console_handler=None)
+    monkeypatch.setattr(manager, "preflight_project_modules", lambda: [])
+    monkeypatch.setattr(
+        "orchestrator.reboot_manager.AGENT_STOP_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    result = await asyncio.wait_for(
+        manager.hot_restart(
+            {"mode": "min", "agent_name": "samantha", "agent_number": None}
+        ),
+        timeout=0.5,
+    )
+
+    assert result is False
+    await asyncio.sleep(0)
+    assert stop_cancelled.is_set()
+    assert kernel.start_calls == []
+    release_stop.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_hot_restart_restores_only_agents_stopped_before_later_failure(monkeypatch):
+    class Kernel:
+        def __init__(self):
+            self.runtimes = [
+                SimpleNamespace(name="alpha"),
+                SimpleNamespace(name="beta"),
+            ]
+            self.stop_calls = []
+            self.start_calls = []
+
+        async def stop_agent(self, name, reason):
+            self.stop_calls.append((name, reason))
+            if name == "alpha":
+                self.runtimes[:] = [rt for rt in self.runtimes if rt.name != name]
+                return True, "stopped"
+            return False, "cold process restart required"
+
+        async def start_agent(self, name):
+            self.start_calls.append(name)
+            self.runtimes.append(SimpleNamespace(name=name))
+            return True, "started"
+
+    kernel = Kernel()
+    manager = RebootManager(kernel=kernel, console_handler=None)
+    monkeypatch.setattr(manager, "preflight_project_modules", lambda: [])
+    reload_calls = []
+    monkeypatch.setattr(
+        manager,
+        "reload_project_modules",
+        lambda _names: reload_calls.append(True),
+    )
+
+    result = await manager.hot_restart({"mode": "max"})
+
+    assert result is False
+    assert kernel.stop_calls == [
+        ("alpha", "hot-restart:max"),
+        ("beta", "hot-restart:max"),
+    ]
+    assert kernel.start_calls == ["alpha"]
+    assert sorted(runtime.name for runtime in kernel.runtimes) == ["alpha", "beta"]
+    assert reload_calls == []
+
+
+@pytest.mark.asyncio
 async def test_restart_delivery_health_watcher_replaces_existing_task(monkeypatch):
     started = []
 

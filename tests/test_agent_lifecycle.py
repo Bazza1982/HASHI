@@ -47,6 +47,44 @@ async def test_stop_agent_preserves_runtimes_list_identity():
 
 
 @pytest.mark.asyncio
+async def test_stop_agent_times_out_without_removing_still_running_runtime(monkeypatch):
+    release_shutdown = asyncio.Event()
+    shutdown_cancelled = asyncio.Event()
+
+    class StubbornRuntime(DummyRuntime):
+        async def shutdown(self):
+            self.shutdown_called = True
+            while not release_shutdown.is_set():
+                try:
+                    await release_shutdown.wait()
+                except asyncio.CancelledError:
+                    shutdown_cancelled.set()
+
+    runtime = StubbornRuntime("samantha")
+    runtimes = [runtime]
+    kernel = DummyKernel(runtimes)
+    manager = AgentLifecycleManager(kernel)
+    monkeypatch.setattr(
+        "orchestrator.agent_lifecycle.RUNTIME_TEARDOWN_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    ok, message = await asyncio.wait_for(
+        manager.stop_agent("samantha", reason="hot-restart:min"),
+        timeout=0.5,
+    )
+
+    assert ok is False
+    assert "cold process restart required" in message
+    await asyncio.sleep(0)
+    assert shutdown_cancelled.is_set()
+    assert kernel.runtimes is runtimes
+    assert kernel.runtimes == [runtime]
+    release_shutdown.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
 async def test_start_agent_runtime_build_failure_is_logged_to_bridge(monkeypatch):
     class StartKernel(DummyKernel):
         def __init__(self):

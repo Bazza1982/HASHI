@@ -15,6 +15,15 @@ from orchestrator.hot_reload import (
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
+AGENT_STOP_TIMEOUT_SECONDS = 25.0
+AGENT_RESTORE_TIMEOUT_SECONDS = 60.0
+
+
+def _consume_operation_task_result(task: asyncio.Future) -> None:
+    try:
+        task.result()
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
 class RebootManager:
@@ -23,6 +32,65 @@ class RebootManager:
     def __init__(self, kernel, console_handler):
         self.kernel = kernel
         self.console_handler = console_handler
+
+    async def _bounded_operation(self, awaitable, *, timeout_s: float, label: str):
+        task = asyncio.create_task(awaitable, name=label)
+        try:
+            done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+        except asyncio.CancelledError:
+            task.cancel()
+            if not task.done():
+                task.add_done_callback(_consume_operation_task_result)
+            raise
+        if task not in done:
+            task.cancel()
+            task.add_done_callback(_consume_operation_task_result)
+            return False, None, TimeoutError(
+                f"{label} exceeded its {timeout_s:.1f}s deadline"
+            )
+        try:
+            return True, task.result(), None
+        except Exception as exc:
+            return True, None, exc
+
+    async def _restore_stopped_agents(self, names: list[str]) -> None:
+        async def _restore(name: str) -> None:
+            _completed, result, error = await self._bounded_operation(
+                self.kernel.start_agent(name),
+                timeout_s=AGENT_RESTORE_TIMEOUT_SECONDS,
+                label=f"restore-agent-{name}",
+            )
+            if error is not None:
+                main_logger.critical(
+                    "Hot restart rollback could not restore '%s': %s",
+                    name,
+                    error,
+                )
+                bridge_logger.critical(
+                    "Hot restart rollback could not restore '%s': %s",
+                    name,
+                    error,
+                )
+                return
+            ok, message = result
+            if not ok:
+                main_logger.critical(
+                    "Hot restart rollback could not restore '%s': %s",
+                    name,
+                    message,
+                )
+                bridge_logger.critical(
+                    "Hot restart rollback could not restore '%s': %s",
+                    name,
+                    message,
+                )
+
+        if names:
+            main_logger.warning(
+                "Hot restart: restoring already-stopped agents without reloading code: %s",
+                names,
+            )
+            await asyncio.gather(*[_restore(name) for name in names])
 
     def rebuild_hot_managers(self):
         """Transactionally rebuild hot-reloadable managers after module reload."""
@@ -183,12 +251,28 @@ class RebootManager:
             agent_number if agent_number is not None else "-",
             targets,
         )
+        stopped_targets = []
         for name in targets:
-            try:
-                await self.kernel.stop_agent(name, reason=f"hot-restart:{mode}")
-            except Exception as e:
-                main_logger.warning("Hot restart: failed to stop '%s': %s", name, e)
-                bridge_logger.warning("Hot restart failed to stop '%s': %s: %s", name, type(e).__name__, e)
+            _completed, result, error = await self._bounded_operation(
+                self.kernel.stop_agent(name, reason=f"hot-restart:{mode}"),
+                timeout_s=AGENT_STOP_TIMEOUT_SECONDS,
+                label=f"stop-agent-{name}",
+            )
+            if error is None:
+                ok, message = result
+                if ok:
+                    stopped_targets.append(name)
+                    continue
+                error = RuntimeError(message)
+            main_logger.error("Hot restart: failed to stop '%s': %s", name, error)
+            bridge_logger.error("Hot restart failed to stop '%s': %s", name, error)
+            await self._restore_stopped_agents(stopped_targets)
+            print(
+                "\033[38;5;203m  ✗ reboot aborted — an agent did not stop; "
+                "cold restart required\033[0m\n",
+                flush=True,
+            )
+            return False
 
         reload_error: HotReloadError | None = None
         try:
