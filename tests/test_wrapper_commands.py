@@ -170,6 +170,43 @@ def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime
     return runtime, messages
 
 
+def test_agent_specific_openrouter_models_extend_shared_catalog(tmp_path):
+    from orchestrator.flexible_backend_registry import get_available_models
+
+    manager = _make_manager(tmp_path / "agent")
+    manager.config.allowed_backends.append(
+        {
+            "engine": "openrouter-api",
+            "model": "anthropic/claude-sonnet-4.6",
+            "models": [
+                "deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-v3.2-exp",
+            ],
+        }
+    )
+    runtime, _messages = _make_runtime(manager)
+    shared_models = get_available_models("openrouter-api")
+
+    assert FlexibleAgentRuntime._get_available_models_for(
+        runtime, "openrouter-api"
+    ) == [*shared_models, "deepseek/deepseek-v3.2-exp"]
+    assert get_available_models("openrouter-api") == shared_models
+    assert (
+        FlexibleAgentRuntime._get_configured_model_for(runtime, "openrouter-api")
+        == "anthropic/claude-sonnet-4.6"
+    )
+
+    manager.config.allowed_backends[-1]["model"] = "deepseek/deepseek-v3.2-exp"
+    assert (
+        FlexibleAgentRuntime._get_configured_model_for(runtime, "openrouter-api")
+        == "deepseek/deepseek-v3.2-exp"
+    )
+    keyboard = FlexibleAgentRuntime._backend_model_keyboard(
+        runtime, "openrouter-api", False
+    )
+    assert "✓ deepseek/deepseek-v3.2-exp" in str(keyboard)
+
+
 def _update(args: list[str] | None = None, text: str | None = None):
     return (
         SimpleNamespace(
