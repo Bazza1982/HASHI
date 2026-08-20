@@ -1,0 +1,73 @@
+{
+  "active_backend": "her-v2",
+  "allowed_backends": [
+    {
+      "engine": "her-v2",
+      "model": "role-configured",
+      "effort": "high",
+      "tools": {
+        "allowed": ["*"],
+        "max_loops": 25
+      },
+      "her_v2": {
+        "shadow_mode": false,
+        "meditation_enabled": false,
+        "user_idle_timeout_s": 1800,
+        "hard_timeout_s": 36000,
+        "reporting_attempts": 3,
+        "structured_repair_attempts": 3,
+        "max_subagents": 10,
+        "audit_failure_terminal": "ERROR",
+        "profiles": {
+          "lightweight": {
+            "engine": "openrouter-api",
+            "model": "google/gemini-3.1-flash-lite-preview",
+            "reasoning": "low",
+            "timeout_s": 180,
+            "max_attempts": 2
+          },
+          "triage": {
+            "engine": "openrouter-api",
+            "model": "google/gemini-3.1-flash-lite-preview",
+            "reasoning": "high",
+            "timeout_s": 180,
+            "max_attempts": 2
+          },
+          "premium": {
+            "engine": "openrouter-api",
+            "model": "anthropic/claude-sonnet-4.6",
+            "reasoning": "high",
+            "timeout_s": 900,
+            "max_attempts": 2
+          },
+          "reviewer": {
+            "engine": "openrouter-api",
+            "model": "anthropic/claude-opus-4.6",
+            "reasoning": "xhigh",
+            "timeout_s": 900,
+            "max_attempts": 2
+          },
+          "orchestrator": {
+            "engine": "openrouter-api",
+            "model": "anthropic/claude-sonnet-4.6",
+            "reasoning": "high",
+            "timeout_s": 900,
+            "max_attempts": 2
+          }
+        }
+      }
+    },
+    {
+      "engine": "openrouter-api",
+      "model": "google/gemini-3.1-flash-lite-preview"
+    },
+    {
+      "engine": "openrouter-api",
+      "model": "anthropic/claude-sonnet-4.6"
+    },
+    {
+      "engine": "openrouter-api",
+      "model": "anthropic/claude-opus-4.6"
+    }
+  ]
+}

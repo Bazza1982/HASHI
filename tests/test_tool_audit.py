@@ -103,6 +103,42 @@ async def test_tool_registry_writes_success_audit_record(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tool_registry_task_local_audit_context_does_not_mutate_base(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry(
+        allowed_tools=["file_list"],
+        access_root=workspace,
+        workspace_dir=workspace,
+        secrets={},
+        audit_context={
+            "agent_name": "arale",
+            "workspace_dir": str(workspace),
+            "safety_mode": "read_write",
+        },
+    )
+
+    result = await registry.execute_with_audit_context(
+        "file_list",
+        {"path": "."},
+        tool_call_id="call-shadow-read",
+        audit_context={
+            "safety_mode": "read_only",
+            "authority_mode": "her_v2_shadow",
+        },
+    )
+
+    assert result.is_error is False
+    record = json.loads(
+        (workspace / "tool_action_audit.jsonl").read_text(encoding="utf-8")
+    )
+    assert record["agent"] == "arale"
+    assert record["safety_mode"] == "read_only"
+    assert record["authority_mode"] == "her_v2_shadow"
+    assert registry.audit_context["safety_mode"] == "read_write"
+
+
+@pytest.mark.asyncio
 async def test_tool_registry_writes_denied_audit_record(tmp_path):
     registry = ToolRegistry(
         allowed_tools=["file_read"],

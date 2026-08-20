@@ -64,6 +64,7 @@ def build_tool_audit_record(
         "artifact_id": context.get("artifact_id"),
         "workspace_dir": context.get("workspace_dir"),
         "safety_mode": context.get("safety_mode"),
+        "authority_mode": context.get("authority_mode"),
         "status": "failed" if is_error else "success",
         "is_error": bool(is_error),
         "duration_ms": max(0, int(duration_ms)),

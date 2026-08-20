@@ -100,7 +100,7 @@ def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):
     assert "has no explicit type" not in caplog.text
 
 
-def test_legacy_claw_configuration_migrates_to_her(tmp_path):
+def test_retired_her_configuration_ids_resolve_forward_to_v2(tmp_path):
     config_path = tmp_path / "agents.json"
     secrets_path = tmp_path / "secrets.json"
     config_path.write_text(
@@ -142,11 +142,11 @@ def test_legacy_claw_configuration_migrates_to_her(tmp_path):
     assert global_cfg.her_providers["binary_path"] == "/opt/hashi/bin/claw"
     assert global_cfg.claw_providers["binary_path"] == "/opt/hashi/bin/claw"
     assert global_cfg.claw_providers["providers"]["openrouter"]["secret"] == "openrouter_key"
-    assert agents[0].active_backend == "her"
-    assert agents[0].allowed_backends[0]["engine"] == "her"
+    assert agents[0].active_backend == "her-v2"
+    assert agents[0].allowed_backends[0]["engine"] == "her-v2"
 
 
-def test_every_flex_agent_gets_builtin_her_backend(tmp_path):
+def test_flex_agent_does_not_receive_an_implicit_her_backend(tmp_path):
     config_path = tmp_path / "agents.json"
     secrets_path = tmp_path / "secrets.json"
     config_path.write_text(
@@ -171,10 +171,7 @@ def test_every_flex_agent_gets_builtin_her_backend(tmp_path):
 
     _, agents, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
-    her = next(backend for backend in agents[0].allowed_backends if backend["engine"] == "her")
-    assert her["model"] == "deepseek/deepseek-v4-flash"
-    assert her["effort"] == "high"
-    assert her["permission_mode"] == "read-only"
+    assert agents[0].allowed_backends == [{"engine": "gemini-cli"}]
 
 
 def test_enterprise_scheduler_lease_config_is_loaded(tmp_path):

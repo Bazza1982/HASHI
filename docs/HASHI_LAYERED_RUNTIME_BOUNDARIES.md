@@ -51,7 +51,7 @@ Current authoritative owners include:
 |---|---|
 | backend models, effort, aliases, API-gateway eligibility | `orchestrator/flexible_backend_registry.py` |
 | built-in slash handler, menu, help group, alias, sensitivity | `orchestrator/command_specs.py` |
-| cold/hot manager construction | `orchestrator/manager_registry.py` |
+| initial/hot manager construction | `orchestrator/manager_registry.py` |
 | hot-reload discovery, ordering, and source preflight | `orchestrator/hot_reload.py` |
 | shared workspace `state.json` persistence | `orchestrator/workspace_state.py` |
 | instance process lock and PID paths | `orchestrator/pathing.py` |
@@ -163,7 +163,9 @@ Examples:
 Rules:
 
 - Feature work should land here by default.
-- Changes must be adopted by `/reboot min` or `/reboot max` whenever possible.
+- Every function-layer change must be adopted by `/reboot min` or `/reboot max`.
+- A function change without a verified `/reboot` adoption path is incomplete
+  and must not be promoted.
 - Managers may use kernel-owned handles but must not silently replace them.
 - New behavior should be modular and swappable rather than hard-coded into one
   large runtime object.
@@ -266,11 +268,13 @@ the process bootstrap contract itself did not change:
 7. Keep the process lock, kernel identity, and live WhatsApp transport outside
    the warm-service refresh.
 
-Changing process bootstrap, the lock implementation, or native process
-supervision still requires a cold restart. That exception must be explicit in
-the change notes. `orchestrator.hot_reload.COLD_RESTART_MODULES` excludes the
-live process lock and path-identity modules from `/reboot`; pretending to reload
-them would leave the already-held lock unchanged.
+Cold process restart is not an allowed function-change adoption or recovery
+path. Process bootstrap, lock implementation, and native supervision are core
+boundaries rather than function-layer changes. A proposed change to one of
+those boundaries must include an explicit warm-handoff mechanism before it can
+be promoted. `orchestrator.hot_reload.PROCESS_IDENTITY_MODULES` excludes the
+already-held process lock and path-identity objects so `/reboot` cannot falsely
+claim to have replaced them.
 
 Hot reload discovery is also rooted to the checked-out project. A third-party
 module whose name happens to start with `tools.` or `orchestrator.` must never

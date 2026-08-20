@@ -1,0 +1,292 @@
+format: her-v2-architecture-acceptance-v1
+scenarios:
+  - test_id: HER-V2-AA-001
+    title: Direct Response concurrency has one presentation owner
+    design_requirement_id: HER-V2-INV-07
+    design_intention: Immediate Response and Triage may finish in either order without duplicating the answer.
+    invariant_protected: Direct Response is the sole final user-facing answer.
+    risk_or_failure_mode: A speculative Immediate Response and the ordinary final lane both send the same answer.
+    test_level: integration
+    pytest_node_ids:
+      - tests/test_her_v2_runtime.py::test_direct_response_race_delivers_exactly_one_answer
+      - tests/test_her_v2_adapter.py::test_adapter_does_not_send_early_without_resolution_capability
+    user_request: Hello
+    classification_input_or_result: DIRECT_RESPONSE
+    her_effort: max
+    initial_conditions: Immediate Response and Triage run concurrently with both completion orders.
+    injected_disturbance: Task completion order is reversed.
+    required_behaviours: [record_one_classification, deliver_exactly_one_answer, skip_planning_and_tools]
+    prohibited_behaviours: [second_final_message, planning, execution, review]
+    permitted_terminal_states: [COMPLETED]
+    required_terminal_state: COMPLETED
+    ledger_expectations: [classification_is_immutable, no_plan_reference, terminal_completed]
+    logging_and_reasoning_expectations: [both_stage_invocations_correlated, delivery_receipt_recorded]
+    user_facing_expectations: One complete answer, never an acknowledgement plus a duplicate final.
+    reason_this_test_matters: Duplicate answers are a visible authority and delivery-boundary failure.
+
+  - test_id: HER-V2-AA-002
+    title: Confirmation stops before work authority
+    design_requirement_id: HER-V2-TRIAGE-02
+    design_intention: Missing authority is resolved by clarification rather than guessed execution.
+    invariant_protected: Triage alone selects CONFIRMATION_REQUIRED.
+    risk_or_failure_mode: Planning or tools begin before required user input exists.
+    test_level: end_to_end
+    pytest_node_ids: [tests/test_her_v2_runtime.py::test_confirmation_required_never_enters_planning_or_execution]
+    user_request: Change the account
+    classification_input_or_result: CONFIRMATION_REQUIRED
+    her_effort: high
+    initial_conditions: The target account is materially ambiguous.
+    injected_disturbance: Immediate Response is not an adequate clarification.
+    required_behaviours: [request_clarification, preserve_user_authority]
+    prohibited_behaviours: [planning, tool_use, execution, review]
+    permitted_terminal_states: [PENDING_USER_INPUT]
+    required_terminal_state: PENDING_USER_INPUT
+    ledger_expectations: [classification_is_immutable, no_plan_reference]
+    logging_and_reasoning_expectations: [triage_reasoning_correlated, clarification_delivery_recorded]
+    user_facing_expectations: A concrete clarification request with no claim of completed work.
+    reason_this_test_matters: Work without required authority can cause irreversible harm.
+
+  - test_id: HER-V2-AA-003
+    title: Goal and classification survive Planning and Replanning
+    design_requirement_id: HER-V2-INV-01-03
+    design_intention: Models may change the approach but never the active user goal or Triage decision.
+    invariant_protected: User goal and classification are immutable within a turn.
+    risk_or_failure_mode: A tempting Triage interpretation, Habit, or Replan silently substitutes a different objective.
+    test_level: end_to_end
+    pytest_node_ids:
+      - tests/test_her_v2_runtime.py::test_medium_turn_preserves_goal_and_routes_tools_only_to_execution
+      - tests/test_her_v2_runtime.py::test_high_replanning_creates_new_plan_without_reconsulting_habits
+    user_request: Implement the requested feature safely
+    classification_input_or_result: COMPLEX_TASK
+    her_effort: high
+    initial_conditions: Triage returns a different interpretation and initial Planning receives advisory Habits.
+    injected_disturbance: Execution discovers a constraint and requests Replanning.
+    required_behaviours: [preserve_original_goal, preserve_classification, activate_one_new_plan_version]
+    prohibited_behaviours: [goal_replacement, reclassification, habit_reread_during_replan]
+    permitted_terminal_states: [COMPLETED, COMPLETED_WITH_LIMITATIONS, FAILED, ABANDONED]
+    required_terminal_state: COMPLETED
+    ledger_expectations: [same_goal_reference, classification_is_immutable, active_plan_is_v2]
+    logging_and_reasoning_expectations: [old_and_new_plan_events_preserved, execution_evidence_correlated]
+    user_facing_expectations: Report only the requested result and disclosed limitations.
+    reason_this_test_matters: Goal substitution is the highest-severity orchestration failure.
+
+  - test_id: HER-V2-AA-004
+    title: Independent Review remains advisory and bounded
+    design_requirement_id: HER-V2-REVIEW-01
+    design_intention: Review improves evidence without taking workflow or user-facing authority.
+    invariant_protected: The Primary Agent owns execution, remediation, and Finalisation.
+    risk_or_failure_mode: Reviewer FAIL loops forever, uses tools, or becomes the final speaker.
+    test_level: end_to_end
+    pytest_node_ids:
+      - tests/test_her_v2_runtime.py::test_xhigh_review_fail_performs_one_remediation_and_no_second_review
+      - tests/test_her_v2_runtime.py::test_max_review_and_remediation_are_bounded_at_three
+    user_request: Build and independently review the result
+    classification_input_or_result: COMPLEX_TASK
+    her_effort: xhigh_and_max
+    initial_conditions: Execution produces a candidate deliverable.
+    injected_disturbance: Strict Reviewer returns FAIL or becomes unavailable.
+    required_behaviours: [bounded_review, primary_owned_remediation, finalise_from_execution_evidence]
+    prohibited_behaviours: [reviewer_tool_use, reviewer_user_contact, fourth_max_review]
+    permitted_terminal_states: [COMPLETED, COMPLETED_WITH_LIMITATIONS]
+    required_terminal_state: COMPLETED_WITH_LIMITATIONS
+    ledger_expectations: [review_lifecycle_order, bounded_plan_replacement]
+    logging_and_reasoning_expectations: [review_reasoning_correlated, findings_recorded_as_advisory]
+    user_facing_expectations: The Primary Agent reports unresolved findings honestly.
+    reason_this_test_matters: A reviewer with authority would violate the system's ownership model.
+
+  - test_id: HER-V2-AA-005
+    title: Sub-agent authority is bounded in normal mode
+    design_requirement_id: HER-V2-TOOLS-01
+    design_intention: All tools remain HASHI-owned and delegated authority can only narrow.
+    invariant_protected: Sub-agents cannot replan, finalise, delegate, or exceed explicitly delegated authority.
+    risk_or_failure_mode: A model-authored assignment grants itself write access or exceeds the sub-agent ceiling.
+    test_level: integration
+    pytest_node_ids:
+      - tests/test_her_v2_runtime.py::test_high_volume_subagents_are_bounded_and_cannot_replan_or_finalise
+      - tests/test_her_v2_runtime.py::test_normal_mode_honours_bounded_subagent_side_effect_requests
+      - tests/test_her_v2_adapter.py::test_subagent_receives_only_explicitly_delegated_tools
+    user_request: Process a large batch safely
+    classification_input_or_result: HIGH_VOLUME_TASK
+    her_effort: max
+    initial_conditions: A plan proposes bounded parallel assignments and asks for side effects.
+    injected_disturbance: One sub-agent requests Replanning and another requests explicitly delegated write authority.
+    required_behaviours: [bounded_concurrency, explicitly_delegated_authority, return_evidence_to_primary]
+    prohibited_behaviours: [subagent_replan, subagent_finalise, undelegated_tool_use]
+    permitted_terminal_states: [COMPLETED, COMPLETED_WITH_LIMITATIONS, ERROR]
+    required_terminal_state: COMPLETED
+    ledger_expectations: [primary_plan_remains_active, subagents_do_not_own_lifecycle]
+    logging_and_reasoning_expectations: [assignment_envelopes_audited, subagent_reasoning_correlated]
+    user_facing_expectations: Only the Primary Agent reports the aggregated result.
+    reason_this_test_matters: Delegation must never amplify permission or workflow authority.
+
+  - test_id: HER-V2-AA-006
+    title: Stop and Steer cancel the old work graph
+    design_requirement_id: HER-V2-INV-04
+    design_intention: Authorised control reaches primary and sub-agent activity before any new work begins.
+    invariant_protected: Steer creates a new turn; it never mutates the old turn.
+    risk_or_failure_mode: Old tools continue after Stop or old classification leaks into the steered turn.
+    test_level: concurrency_end_to_end
+    pytest_node_ids:
+      - tests/test_her_v2_runtime.py::test_stop_cancels_active_execution_and_records_stopped
+      - tests/test_her_v2_runtime.py::test_stop_cancels_all_active_high_volume_subagents
+      - tests/test_her_v2_runtime.py::test_steer_stops_old_turn_and_new_turn_gets_fresh_triage
+    user_request: Stop the old task, then follow a new instruction
+    classification_input_or_result: COMPLEX_TASK_then_fresh_DIRECT_RESPONSE
+    her_effort: max
+    initial_conditions: Primary or sub-agent execution is active.
+    injected_disturbance: USER_STOP or STEERED control arrives concurrently.
+    required_behaviours: [cancel_all_controlled_tasks, terminalise_old_turn, triage_new_turn]
+    prohibited_behaviours: [orphaned_old_work, inherited_old_plan, inherited_old_classification]
+    permitted_terminal_states: [STOPPED]
+    required_terminal_state: STOPPED
+    ledger_expectations: [old_terminal_reason_recorded, new_turn_has_distinct_identifier]
+    logging_and_reasoning_expectations: [control_reason_correlated, no_post_stop_stage_start]
+    user_facing_expectations: No false success or technical-error claim for an authorised stop.
+    reason_this_test_matters: Cancellation that leaves work running is not real control.
+
+  - test_id: HER-V2-AA-007
+    title: Process restart reconciles without resuming side effects
+    design_requirement_id: HER-V2-INV-06
+    design_intention: Stage-local retry is allowed, but process-restart stack recovery is forbidden.
+    invariant_protected: An interrupted Ledger becomes ERROR and a later Continue is a new turn.
+    risk_or_failure_mode: Startup repeats a tool call or recreates the old execution graph.
+    test_level: restart_integration
+    pytest_node_ids: [tests/test_her_v2_adapter.py::test_adapter_reconciles_old_inflight_ledger_without_resuming_it]
+    user_request: Continue safely after restart
+    classification_input_or_result: fresh_triage_required
+    her_effort: medium
+    initial_conditions: A durable old Ledger is left in EXECUTING.
+    injected_disturbance: Unexpected process interruption and adapter restart.
+    required_behaviours: [mark_old_turn_error, preserve_old_evidence, create_new_turn]
+    prohibited_behaviours: [resume_old_stack, repeat_old_side_effect, reuse_old_turn_id]
+    permitted_terminal_states: [ERROR]
+    required_terminal_state: ERROR
+    ledger_expectations: [old_terminal_reason_is_interruption, new_ledger_is_separate]
+    logging_and_reasoning_expectations: [restart_reconciliation_audited, execution_resumed_false]
+    user_facing_expectations: A later Continue is handled as a fresh request.
+    reason_this_test_matters: Automatic replay after restart can duplicate irreversible actions.
+
+  - test_id: HER-V2-AA-008
+    title: Required audit is durable or execution fails closed
+    design_requirement_id: HER-V2-AUDIT-01
+    design_intention: Primary and fallback audit paths preserve trace truth before side effects continue.
+    invariant_protected: Available reasoning is recorded; unavailable reasoning is explicit and never fabricated.
+    risk_or_failure_mode: Both audit stores fail and the provider or tools still execute.
+    test_level: fault_injection
+    pytest_node_ids:
+      - tests/test_her_v2_core.py::test_audit_falls_back_durably_and_redacts_secrets
+      - tests/test_her_v2_core.py::test_fallback_replay_is_deduplicated
+      - tests/test_her_v2_runtime.py::test_total_audit_failure_prevents_provider_and_side_effects
+    user_request: Perform an externally visible action
+    classification_input_or_result: SIMPLE_TASK
+    her_effort: low
+    initial_conditions: Audit primary, fallback, or both may be unavailable.
+    injected_disturbance: Durable writer failures and replay after recovery.
+    required_behaviours: [fallback_durability, idempotent_replay, fail_closed_on_total_loss]
+    prohibited_behaviours: [fabricated_reasoning, secret_persistence, provider_start_after_total_audit_failure]
+    permitted_terminal_states: [ERROR, STOPPED]
+    required_terminal_state: ERROR
+    ledger_expectations: [terminal_truth_preserved, compact_log_references_only]
+    logging_and_reasoning_expectations: [trace_or_unavailable_marker, turn_stage_provider_attempt_correlation]
+    user_facing_expectations: Never claim that unaudited work completed.
+    reason_this_test_matters: Auditability is a release-blocking execution boundary.
+
+  - test_id: HER-V2-AA-009
+    title: Reporting failure preserves completed execution evidence
+    design_requirement_id: HER-V2-INV-15
+    design_intention: Final prose generation cannot erase work that already completed once.
+    invariant_protected: Execution evidence outranks reporting availability.
+    risk_or_failure_mode: Reporting retries repeat side effects or convert completed work to generic ERROR.
+    test_level: end_to_end_fault_injection
+    pytest_node_ids:
+      - tests/test_her_v2_runtime.py::test_reporting_exhaustion_preserves_completed_execution
+      - tests/test_her_v2_runtime.py::test_reporting_timeout_retries_without_repeating_execution
+    user_request: Perform the action once and report it
+    classification_input_or_result: SIMPLE_TASK
+    her_effort: low
+    initial_conditions: Execution returns a durable receipt.
+    injected_disturbance: Every bounded Finalisation attempt fails or times out.
+    required_behaviours: [preserve_execution_receipt, bound_reporting_retries, avoid_execution_replay]
+    prohibited_behaviours: [repeat_side_effect, discard_evidence, claim_report_delivered]
+    permitted_terminal_states: [COMPLETED_WITH_REPORT_PENDING]
+    required_terminal_state: COMPLETED_WITH_REPORT_PENDING
+    ledger_expectations: [execution_completed_precedes_finalising, report_pending_terminal]
+    logging_and_reasoning_expectations: [each_reporting_attempt_correlated, execution_attempt_count_one]
+    user_facing_expectations: Reconciliation remains possible without a fabricated completion report.
+    reason_this_test_matters: Presentation failure must not destroy operational truth.
+
+  - test_id: HER-V2-AA-010
+    title: Habits Meditation and Dream remain optional and advisory
+    design_requirement_id: HER-V2-INV-12-13
+    design_intention: Learning systems may advise future work but cannot own the live turn.
+    invariant_protected: User intent and current evidence outrank Habits; Dream is never a live dependency.
+    risk_or_failure_mode: Habit advice replaces the goal or background maintenance blocks Finalisation.
+    test_level: integration
+    pytest_node_ids:
+      - tests/test_her_v2_runtime.py::test_high_replanning_creates_new_plan_without_reconsulting_habits
+      - tests/test_her_v2_runtime.py::test_meditation_failure_cannot_change_completed_turn
+      - tests/test_her_v2_runtime.py::test_dream_is_never_a_live_turn_dependency
+    user_request: Complete the current task using current evidence
+    classification_input_or_result: COMPLEX_TASK
+    her_effort: high
+    initial_conditions: Advisory Habit retrieval is available; Meditation or Dream may fail.
+    injected_disturbance: Replanning occurs and optional maintenance raises an exception.
+    required_behaviours: [retrieve_habits_once_for_initial_plan, finalise_without_maintenance, preserve_goal]
+    prohibited_behaviours: [habit_as_authority, habit_reread_on_replan, dream_in_live_path]
+    permitted_terminal_states: [COMPLETED, COMPLETED_WITH_LIMITATIONS]
+    required_terminal_state: COMPLETED
+    ledger_expectations: [learning_systems_do_not_change_lifecycle_or_plan_authority]
+    logging_and_reasoning_expectations: [optional_failure_logged_without_rewriting_turn]
+    user_facing_expectations: The completed answer is not delayed by optional maintenance.
+    reason_this_test_matters: Hidden optional dependencies make the core workflow brittle and unsafe.
+
+  - test_id: HER-V2-AA-011
+    title: False progress and time ceilings cannot keep orphaned work alive
+    design_requirement_id: HER-V2-TIMEOUT-01
+    design_intention: Only new measurable progress refreshes idle time, while the hard ceiling always wins.
+    invariant_protected: Timeouts end controlled work without fabricating completion.
+    risk_or_failure_mode: Repeated status text defeats idle timeout or hard timeout leaves provider work running.
+    test_level: concurrency_fault_injection
+    pytest_node_ids:
+      - tests/test_her_v2_runtime.py::test_repeated_false_progress_cannot_keep_stalled_execution_alive
+      - tests/test_her_v2_runtime.py::test_hard_safety_timeout_cancels_progressing_provider
+    user_request: Run a long task
+    classification_input_or_result: SIMPLE_TASK
+    her_effort: low
+    initial_conditions: Provider emits repeated or continuously novel progress but never completes.
+    injected_disturbance: Idle-progress and hard safety deadlines expire.
+    required_behaviours: [deduplicate_false_progress, cancel_provider, terminalise_truthfully]
+    prohibited_behaviours: [orphaned_provider, success_without_result, unbounded_retry]
+    permitted_terminal_states: [ERROR]
+    required_terminal_state: ERROR
+    ledger_expectations: [terminal_error_with_timeout_reason]
+    logging_and_reasoning_expectations: [timeout_stage_correlated, cancellation_observed]
+    user_facing_expectations: No premature or fabricated completion message.
+    reason_this_test_matters: Liveness text is not proof of useful progress.
+
+  - test_id: HER-V2-AA-012
+    title: Work reasoning and Persona commentary packaging remain separate
+    design_requirement_id: HER-V2-INV-14-17
+    design_intention: Successful stages may offer neutral commentary without lifecycle events or Persona presentation becoming workflow authors.
+    invariant_protected: Persona packaging receives only neutral commentary and one explicit marker block, then typed delivery is idempotent.
+    risk_or_failure_mode: A lifecycle hook generates Persona prose, unmarked Agent instructions leak into packaging, or raw commentary bypasses packaging.
+    test_level: boundary_and_integration
+    pytest_node_ids:
+      - tests/test_her_v2_runtime.py::test_only_successful_stage_results_publish_neutral_commentary
+      - tests/test_her_v2_runtime.py::test_stage_failure_does_not_synthesise_commentary_from_lifecycle_events
+      - tests/test_her_v2_commentary.py::test_commentary_pipeline_packages_before_delivery_and_deduplicates_replay
+      - tests/test_her_persona.py::test_v2_packaging_source_exposes_only_the_explicit_persona_block
+      - tests/test_her_v2_commentary.py::test_generic_delivery_boundary_rejects_raw_commentary_strings
+    user_request: Complete a multi-stage task and keep me informed
+    classification_input_or_result: COMPLEX_TASK
+    her_effort: high
+    initial_conditions: Successful stage results contain optional neutral commentary and agent.md contains marked and unmarked sections.
+    injected_disturbance: Duplicate delivery attempts, invalid commentary, missing markers, and packaging failure.
+    required_behaviours: [validate_neutral_commentary, package_before_delivery, deterministic_minimal_fallback, at_most_once_delivery]
+    prohibited_behaviours: [lifecycle_authored_persona, unmarked_agent_content_in_packager, raw_commentary_delivery, workflow_failure_from_commentary]
+    permitted_terminal_states: [COMPLETED, COMPLETED_WITH_LIMITATIONS, FAILED, ABANDONED]
+    required_terminal_state: COMPLETED
+    ledger_expectations: [commentary_never_changes_lifecycle_or_terminal_state]
+    logging_and_reasoning_expectations: [commentary_result_correlated_without_persona_content]
+    user_facing_expectations: Optional Persona-styled progress preserves the neutral facts and is delivered no more than once.
+    reason_this_test_matters: Presentation coupling can leak private instructions and make optional messaging control real work.

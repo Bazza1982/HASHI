@@ -1,8 +1,16 @@
 from __future__ import annotations
 
-HER_ENGINE = "her"
-LEGACY_HER_ENGINE = "claw-cli"
-CLI_ENGINES = frozenset({"gemini-cli", "claude-cli", "codex-cli", HER_ENGINE, LEGACY_HER_ENGINE, "grok-cli"})
+HER_V2_ENGINE = "her-v2"
+RETIRED_HER_ENGINE_ALIASES = frozenset({"her", "claw-cli"})
+CLI_ENGINES = frozenset(
+    {
+        "gemini-cli",
+        "claude-cli",
+        "codex-cli",
+        HER_V2_ENGINE,
+        "grok-cli",
+    }
+)
 
 BACKEND_REGISTRY: dict[str, dict] = {
     "gemini-cli": {
@@ -65,26 +73,15 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "default_effort": "medium",
         "secret_keys": ["codex-cli_key"],
     },
-    "her": {
+    "her-v2": {
         "label": "HER",
         "privacy_levels": [0, 1],
-        "allow_custom_models": True,
-        "models": [
-            "deepseek/deepseek-v4-flash",
-            "deepseek/deepseek-v4-pro",
-            "openai/gpt-4.1-mini",
-        ],
-        "default_model": "deepseek/deepseek-v4-flash",
-        # HER's upstream Claw providers expose no reasoning-effort control.
-        # low..max+ are single-agent execution budgets; ultra is HER-private
-        # coordinated multi-agent execution (up to ten concurrent workers).
-        "efforts": ["low", "medium", "high", "xhigh", "max", "max+", "ultra"],
-        "default_effort": "high",
-        "secret_keys": [
-            "{agent_name}_openrouter_key",
-            "openrouter-api_key",
-            "openrouter_key",
-        ],
+        "models": ["role-configured"],
+        "default_model": "role-configured",
+        "efforts": ["low", "medium", "high", "xhigh", "max"],
+        "default_effort": "medium",
+        # Each role profile resolves credentials through its concrete provider.
+        "secret_keys": [],
     },
     "grok-cli": {
         "label": "grok",
@@ -202,42 +199,48 @@ def get_backend_entry(engine: str) -> dict:
 
 
 def canonical_backend_engine(engine: str | None) -> str:
-    """Map legacy public IDs to their current HASHI backend ID."""
+    """Resolve retired HER IDs forward to the sole supported HER runtime.
+
+    ``her`` and ``claw-cli`` remain accepted only as configuration migration
+    aliases.  They never select or fall back to the retired HER implementation.
+    """
+
     value = str(engine or "").strip()
-    return HER_ENGINE if value == LEGACY_HER_ENGINE else value
-
-
-def default_her_backend() -> dict:
-    """Return the built-in HER entry added to every flexible HASHI agent."""
-    return {
-        "engine": HER_ENGINE,
-        "provider": "openrouter",
-        "model": str(BACKEND_REGISTRY[HER_ENGINE]["default_model"]),
-        "effort": str(BACKEND_REGISTRY[HER_ENGINE]["default_effort"]),
-        "permission_mode": "read-only",
-    }
+    return HER_V2_ENGINE if value in RETIRED_HER_ENGINE_ALIASES else value
 
 
 def normalize_allowed_backends(backends: list) -> list[dict]:
-    """Normalize legacy config and guarantee that built-in HER is selectable."""
+    """Normalize backend IDs without silently adding an execution backend.
+
+    HER v2 requires explicit provider-role grants, so synthesising a generic
+    HER row would be both unusable and an authority expansion.  If an explicit
+    ``her-v2`` row is present, obsolete alias rows are discarded rather than
+    allowed to shadow its configuration.
+    """
+
     normalized: list[dict] = []
-    her_seen = False
+    explicit_v2 = any(
+        str(
+            (raw if isinstance(raw, str) else dict(raw).get("engine")) or ""
+        ).strip()
+        == HER_V2_ENGINE
+        for raw in backends or []
+    )
     for raw in backends or []:
         item = {"engine": raw} if isinstance(raw, str) else dict(raw)
-        engine = canonical_backend_engine(item.get("engine"))
+        source_engine = str(item.get("engine") or "").strip()
+        if explicit_v2 and source_engine in RETIRED_HER_ENGINE_ALIASES:
+            continue
+        engine = canonical_backend_engine(source_engine)
         if not engine:
             continue
         item["engine"] = engine
-        if engine == HER_ENGINE:
-            her_seen = True
         normalized.append(item)
-    if not her_seen:
-        normalized.append(default_her_backend())
     return normalized
 
 
 def is_cli_backend(engine: str | None) -> bool:
-    return bool(engine and engine in CLI_ENGINES)
+    return canonical_backend_engine(engine) in CLI_ENGINES
 
 
 def get_supported_privacy_levels(engine: str | None) -> tuple[int, ...]:
@@ -342,5 +345,8 @@ def normalize_effort(engine: str, effort: str | None, model: str | None = None) 
 
 
 def get_secret_lookup_order(engine: str, agent_name: str) -> list[str]:
-    raw_keys = get_backend_entry(engine).get("secret_keys") or [f"{engine}_key"]
+    entry = get_backend_entry(engine)
+    raw_keys = entry.get("secret_keys")
+    if raw_keys is None:
+        raw_keys = [f"{canonical_backend_engine(engine)}_key"]
     return [str(key).format(agent_name=agent_name) for key in raw_keys]

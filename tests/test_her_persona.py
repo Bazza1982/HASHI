@@ -4,7 +4,12 @@ import hashlib
 
 import pytest
 
-from adapters.her_persona import load_configured_persona
+from adapters.her_persona import (
+    PERSONA_BLOCK_BEGIN,
+    PERSONA_BLOCK_END,
+    load_configured_persona,
+    load_persona_packaging_source,
+)
 
 
 @pytest.mark.parametrize("relative", ["agent.md", "AGENT.md", "nested/voice.md"])
@@ -62,3 +67,60 @@ def test_persona_audit_fields_never_include_private_content_or_full_path(tmp_pat
     assert fields["persona_source_nonempty"] is True
     assert "PRIVATE PERSONA CONTENT" not in serialized
     assert str(configured) not in serialized
+
+
+def test_v2_packaging_source_exposes_only_the_explicit_persona_block(tmp_path):
+    configured = tmp_path / "agent.md"
+    configured.write_text(
+        "\n".join(
+            [
+                "PRIVATE OPERATION RULE OUTSIDE THE BLOCK",
+                PERSONA_BLOCK_BEGIN,
+                "Use a warm voice and address the user as Captain.",
+                PERSONA_BLOCK_END,
+                "ANOTHER PRIVATE RULE OUTSIDE THE BLOCK",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    source = load_persona_packaging_source(
+        configured,
+        display_name="Navigator",
+    )
+
+    assert source.usable is True
+    assert source.display_name == "Navigator"
+    assert source.guidance == "Use a warm voice and address the user as Captain."
+    assert "PRIVATE OPERATION" not in source.guidance
+    assert "ANOTHER PRIVATE" not in source.guidance
+    assert "Captain" not in repr(source.audit_fields())
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        ("No markers here", "persona_block_missing"),
+        (
+            f"{PERSONA_BLOCK_BEGIN}\n\n{PERSONA_BLOCK_END}",
+            "persona_block_empty",
+        ),
+        (
+            f"{PERSONA_BLOCK_BEGIN}\none\n{PERSONA_BLOCK_BEGIN}\ntwo\n"
+            f"{PERSONA_BLOCK_END}",
+            "persona_block_ambiguous",
+        ),
+    ],
+)
+def test_invalid_v2_persona_blocks_select_minimal_fallback(
+    tmp_path, content, reason
+):
+    configured = tmp_path / "agent.md"
+    configured.write_text(content, encoding="utf-8")
+
+    source = load_persona_packaging_source(configured, display_name="  Zelda  ")
+
+    assert source.usable is False
+    assert source.guidance == ""
+    assert source.display_name == "Zelda"
+    assert source.unavailable_reason == reason

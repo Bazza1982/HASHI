@@ -1962,15 +1962,17 @@ def test_claw_adapter_defaults_to_all_native_tools_and_accepts_wildcard(tmp_path
     assert wildcard._allowed_tools() is None
 
 
-def test_registry_exposes_her_backend_and_legacy_alias():
-    assert get_backend_class("her") is HERAdapter
+def test_registry_never_exposes_retired_her_adapter():
+    from adapters.her_v2 import HERv2Adapter
+
+    assert get_backend_class("her") is HERv2Adapter
     assert is_cli_backend("her")
-    assert allows_custom_models("her")
-    assert get_backend_class("claw-cli") is ClawCLIAdapter
+    assert not allows_custom_models("her")
+    assert get_backend_class("claw-cli") is HERv2Adapter
     assert is_cli_backend("claw-cli")
-    assert allows_custom_models("claw-cli")
+    assert not allows_custom_models("claw-cli")
     assert not allows_custom_models("codex-cli")
-    assert "openrouter_key" in get_secret_lookup_order("claw-cli", "ying")
+    assert get_secret_lookup_order("claw-cli", "ying") == []
 
 
 def test_claw_provider_env_resolves_secret_and_base_url(tmp_path):

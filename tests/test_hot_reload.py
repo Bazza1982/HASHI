@@ -44,7 +44,7 @@ def test_hot_reload_preflight_ignores_sources_outside_code_root(tmp_path):
     )
 
 
-def test_hot_reload_discovery_excludes_cold_process_modules(tmp_path):
+def test_hot_reload_discovery_excludes_live_process_identity_modules(tmp_path):
     runtime_source = tmp_path / "orchestrator" / "runtime_status.py"
     runtime_source.parent.mkdir()
     runtime_source.write_text("STATUS = 'ok'\n", encoding="utf-8")
@@ -87,14 +87,16 @@ def test_hot_reload_discovery_rejects_prefixed_modules_outside_project(tmp_path)
 
 def test_hot_reload_orders_adapter_protocol_before_consumers():
     names = [
-        "adapters.claw_cli",
-        "adapters.her",
+        "adapters.her_v2",
         "adapters.openrouter_api",
         "adapters.base",
         "adapters.her_persona",
         "adapters.stream_io",
         "adapters.stream_events",
         "adapters.deepseek_api",
+        "orchestrator.her_v2.models",
+        "orchestrator.her_v2.interfaces",
+        "orchestrator.her_v2.runtime",
         "orchestrator.runtime_pipeline",
         "orchestrator.flexible_agent_runtime",
     ]
@@ -102,15 +104,20 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
     ordered = sorted(names, key=module_reload_key)
 
     assert ordered.index("adapters.stream_events") < ordered.index("adapters.base")
-    assert ordered.index("adapters.stream_io") < ordered.index("adapters.claw_cli")
-    assert ordered.index("adapters.base") < ordered.index("adapters.claw_cli")
-    assert ordered.index("adapters.her_persona") < ordered.index("adapters.her")
-    assert ordered.index("adapters.her") < ordered.index("adapters.claw_cli")
+    assert ordered.index("adapters.stream_io") < ordered.index("adapters.her_v2")
+    assert ordered.index("adapters.base") < ordered.index("adapters.her_v2")
+    assert ordered.index("adapters.her_persona") < ordered.index("adapters.her_v2")
+    assert ordered.index("orchestrator.her_v2.models") < ordered.index(
+        "orchestrator.her_v2.interfaces"
+    )
+    assert ordered.index("orchestrator.her_v2.interfaces") < ordered.index(
+        "orchestrator.her_v2.runtime"
+    )
+    assert ordered.index("orchestrator.her_v2.runtime") < ordered.index(
+        "adapters.her_v2"
+    )
     assert ordered.index("adapters.openrouter_api") < ordered.index(
         "adapters.deepseek_api"
-    )
-    assert ordered.index("adapters.claw_cli") < ordered.index(
-        "orchestrator.runtime_pipeline"
     )
     assert ordered.index("orchestrator.runtime_pipeline") < ordered.index(
         "orchestrator.flexible_agent_runtime"

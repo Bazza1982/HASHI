@@ -1,6 +1,9 @@
 """Backend adapter registry — maps engine names to adapter classes."""
 
+from orchestrator.flexible_backend_registry import canonical_backend_engine
+
 def get_backend_class(engine_name: str):
+    engine_name = canonical_backend_engine(engine_name)
     if engine_name == "gemini-cli":
         from adapters.gemini_cli import GeminiCLIAdapter
         return GeminiCLIAdapter
@@ -16,9 +19,9 @@ def get_backend_class(engine_name: str):
     elif engine_name == "codex-cli":
         from adapters.codex_cli import CodexCLIAdapter
         return CodexCLIAdapter
-    elif engine_name in {"her", "claw-cli"}:
-        from adapters.her import HERAdapter
-        return HERAdapter
+    elif engine_name == "her-v2":
+        from adapters.her_v2 import HERv2Adapter
+        return HERv2Adapter
     elif engine_name == "grok-cli":
         from adapters.grok_cli import GrokCLIAdapter
         return GrokCLIAdapter

@@ -647,16 +647,43 @@ Tests must prove that the operational hard ceiling stops orphaned execution with
 
 Tests must prove:
 
-- commentary reflects the current stage;
-- commentary makes no premature completion promise;
-- long-running work receives useful updates;
+- a successful Planning, Execution, Replanning, or Review result may carry one
+  optional neutral commentary field;
+- lifecycle transitions, stage-start events, failures, retries, tool telemetry,
+  and finalisation do not synthesise commentary;
+- missing, empty, malformed, or oversized optional commentary does not affect
+  stage validation or workflow outcome;
+- runtime passes neutral commentary through a commentary port and has no
+  Persona source, renderer, packaging prompt, or Telegram dependency;
+- Persona packaging receives only neutral commentary and the exact contents of
+  the configured `<!-- HASHI:PERSONA:BEGIN -->` marker block;
+- content outside that marker block cannot reach the packaging model;
+- missing or invalid markers and packaging failure use the deterministic
+  display-name + `您` fallback;
+- packaging occurs before delivery and concurrent/replayed event IDs are
+  delivered at most once;
+- the Telegram commentary boundary accepts packaged commentary and rejects a
+  raw commentary string;
 - optional commentary failure is logged but does not fail execution;
 - `/verbose` changes presentation, not workflow authority;
 - a final answer is not delivered before Finalisation;
 - `DIRECT_RESPONSE` is the sole exception because its Immediate Response is the final answer;
+- a transport without explicit initial-resolution capability never receives a
+  provisional Immediate Response and therefore cannot duplicate the final;
 - reporting failure follows the dedicated retry and terminal policy.
 
 Exact wording should not be asserted unless a safety, authority, or protocol requirement depends on it.
+Immediate Response, clarification, and Final Report are outside the first
+commentary-packaging release and retain their dedicated delivery tests.
+
+### 11.1 Retired backend isolation
+
+Tests must prove that `her`, `claw-cli`, and `her-v2` all resolve to the HER v2
+adapter and that no registry, normalization, startup, switch, or recovery path
+imports or initializes the retired HER adapter. HER v2 configuration failure
+must fail closed; it must not activate the retired backend. Compatible Habit,
+Meditation, and Dream files may be reused without importing the old execution
+backend.
 
 ## 12. Test Levels and Consolidation Rules
 
@@ -787,6 +814,13 @@ Release must not proceed if any of the following is possible:
 - total audit-persistence failure permits external side effects to continue;
 - Ledger becomes a duplicate audit log;
 - completed work is discarded because Review, commentary, or Reporting failed;
+- a workflow or lifecycle event directly invokes Persona packaging or authors
+  Persona commentary;
+- Persona packaging can observe unmarked Agent instructions, the user request,
+  plans, reasoning traces, or execution evidence beyond the neutral commentary;
+- raw provider or runtime commentary can bypass Persona packaging into the
+  Telegram commentary lane;
+- duplicate commentary event IDs can produce duplicate user delivery;
 - false progress keeps stalled execution alive indefinitely;
 - `ERROR`, `FAILED`, `ABANDONED`, `STOPPED`, or another terminal state is materially confused;
 - Provider or model names are hard-coded into HER orchestration policy;
@@ -884,6 +918,8 @@ Before HER v2 is accepted, the suite must contain logically complete coverage of
 15. Habits, Meditation, and Dream authority boundaries;
 16. provider-neutral role configuration;
 17. at least one production-like canary with safe side effects disabled.
+18. retired-HER unreachability through aliases, startup, switching, and failure
+    handling.
 
 This is a list of required coverage areas, not an instruction to multiply each area into hundreds of tests.
 

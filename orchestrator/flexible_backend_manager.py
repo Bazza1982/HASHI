@@ -66,14 +66,40 @@ class FlexibleBackendManager:
         self._active_provider_override = None
         self.agent_mode = "flex"  # default mode
         self.privacy_level = PrivacyLevel.PROVIDER_TRUST
+        configured_backend = self.config.active_backend
+        allowed_engines = {
+            canonical_backend_engine(backend_cfg.get("engine"))
+            for backend_cfg in self.config.allowed_backends
+            if backend_cfg.get("engine")
+        }
         if self.state_file.exists():
             try:
                 state = self.state_store.read()
+                restore_backend_overrides = True
+                state_needs_repair = False
                 if "active_backend" in state:
-                    self.config.active_backend = canonical_backend_engine(state["active_backend"])
-                if "active_model" in state:
+                    persisted_backend = canonical_backend_engine(state["active_backend"])
+                    if persisted_backend in allowed_engines:
+                        self.config.active_backend = persisted_backend
+                        if state.get("active_backend") != persisted_backend:
+                            state["active_backend"] = persisted_backend
+                            state_needs_repair = True
+                    else:
+                        restore_backend_overrides = False
+                        self.logger.warning(
+                            "Ignoring persisted active backend %r because it is not "
+                            "present in allowed_backends; using configured backend %r.",
+                            state.get("active_backend"),
+                            configured_backend,
+                        )
+                        state["active_backend"] = configured_backend
+                        state_needs_repair = True
+                        if "active_model" in state or "active_provider" in state:
+                            state.pop("active_model", None)
+                            state.pop("active_provider", None)
+                if restore_backend_overrides and "active_model" in state:
                     self._active_model_override = state["active_model"]
-                if "active_provider" in state:
+                if restore_backend_overrides and "active_provider" in state:
                     self._active_provider_override = state["active_provider"]
                 if "agent_mode" in state:
                     self.agent_mode = state["agent_mode"]
@@ -94,6 +120,8 @@ class FlexibleBackendManager:
                             effort = backend_efforts.get("her")
                         if isinstance(effort, str) and effort.strip():
                             backend_cfg["effort"] = effort.strip().lower()
+                if state_needs_repair:
+                    self.state_store.replace(state)
             except Exception as e:
                 self.logger.error(f"Failed to load state.json: {e}")
 
@@ -188,19 +216,21 @@ class FlexibleBackendManager:
 
     def _refresh_current_habit_meditation_config(self) -> None:
         backend = self.current_backend
-        if backend is None or getattr(getattr(backend, "config", None), "engine", None) != "her":
+        engine = str(
+            getattr(getattr(backend, "config", None), "engine", "") or ""
+        )
+        if backend is None or engine != "her-v2":
             return
-        current_extra = getattr(backend.config, "extra", None) or {}
-        provider = str(current_extra.get("provider") or "").strip() or None
+        provider = None
         backend_cfg_raw = self._select_backend_cfg(
-            "her",
+            engine,
             target_model=getattr(backend.config, "model", None),
             target_provider=provider,
         )
         if backend_cfg_raw is None:
-            raise ValueError("HER backend configuration is unavailable.")
+            raise ValueError(f"{engine} backend configuration is unavailable.")
         rebuilt = self._build_adapter_config(
-            "her",
+            engine,
             backend_cfg_raw,
             target_model=getattr(backend.config, "model", None),
             target_provider=provider,
@@ -468,7 +498,7 @@ class FlexibleBackendManager:
         backend_extra.pop("access_scope", None)
         extra = {**agent_extra, **backend_extra}
         habit_override = self.get_habit_meditation_override()
-        if engine == "her" and habit_override is not None:
+        if engine == "her-v2" and habit_override is not None:
             extra["habit_meditation_enabled"] = habit_override
         extra = apply_timeout_layers(
             extra,
@@ -653,7 +683,7 @@ class FlexibleBackendManager:
             target_model=target_model,
             apply_persisted_timeout=False,
         )
-        if engine == "her":
+        if engine == "her-v2":
             # One-shot internal sidecars are not agent runs. Keep globally
             # enabled Habit planning/Meditation out of health probes, wrapper
             # helpers, and other ephemeral HER invocations.
@@ -664,6 +694,7 @@ class FlexibleBackendManager:
             )
             habit_config["enabled"] = False
             extra["habit_meditation"] = habit_config
+            extra["habit_meditation_enabled"] = False
             extra["habit_learning_eligible"] = False
             extra["ephemeral_session"] = True
             adapter_cfg.extra = extra
@@ -817,10 +848,14 @@ class FlexibleBackendManager:
             # V2.2+: inject the canonical ToolRegistry into tool-capable backends.
             # API adapters consume it directly; HER exposes it through the
             # protocol-neutral HASHI Tool Gateway over MCP stdio.
-            if engine in ("openrouter-api", "deepseek-api", "ollama-api", "xai-api", "her"):
+            if engine in (
+                "openrouter-api",
+                "deepseek-api",
+                "ollama-api",
+                "xai-api",
+                "her-v2",
+            ):
                 tools_cfg = self._resolve_tools_config(backend_cfg_raw)
-                if engine == "her" and not tools_cfg:
-                    tools_cfg = {"allowed": ["*"], "max_loops": 25}
                 if tools_cfg:
                     self._attach_tool_registry(tools_cfg, adapter_cfg)
 
@@ -972,7 +1007,7 @@ class FlexibleBackendManager:
                 if isinstance(previous_extra, dict)
                 else None
             )
-        )
+        ) or None
 
         # Cleanly shut down current backend
         if self.current_backend:

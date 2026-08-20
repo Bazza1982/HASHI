@@ -24,6 +24,7 @@ from orchestrator.memory_plus_mode import (
     extract_memory_plus_update_details,
     is_memory_plus_enabled,
 )
+from orchestrator.flexible_backend_registry import canonical_backend_engine
 from orchestrator.runtime_common import _md_to_html, _print_final_response, _safe_excerpt
 from orchestrator.telegram_notifications import disable_notification
 
@@ -845,8 +846,8 @@ def wrap_her_persona_stream(
     from adapters.stream_events import KIND_ACKNOWLEDGEMENT
     from orchestrator.her_message_router import HERMessageRouter
 
-    normalized_backend = str(backend_name or "").strip().lower()
-    if normalized_backend not in {"her", "claw-cli"}:
+    normalized_backend = canonical_backend_engine(backend_name).lower()
+    if normalized_backend != "her-v2":
         return presentation_callback
 
     effort = str(getattr(backend, "effort", "low") or "low").strip().lower()
@@ -1033,10 +1034,10 @@ async def setup_interactive_feedback(
     verbose_delivery_enabled = delivery_requested and runtime._verbose and not delivery_blocked
     think_delivery_enabled = delivery_requested and runtime._think and not delivery_blocked
     backend = runtime.backend_manager.current_backend
-    normalized_backend = str(
-        getattr(runtime.config, "active_backend", "") or ""
-    ).strip().lower()
-    is_her_backend = normalized_backend in {"her", "claw-cli"}
+    normalized_backend = canonical_backend_engine(
+        getattr(runtime.config, "active_backend", "")
+    ).lower()
+    is_her_backend = normalized_backend == "her-v2"
 
     if delivery_requested:
         runtime.logger.info(

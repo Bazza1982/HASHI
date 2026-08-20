@@ -3683,10 +3683,12 @@ class FlexibleAgentRuntime:
         )
 
     def _commentary_available(self) -> bool:
-        return str(getattr(self.config, "active_backend", "") or "").lower() in {
-            "her",
-            "claw-cli",
-        }
+        return (
+            canonical_backend_engine(
+                getattr(self.config, "active_backend", "")
+            )
+            == "her-v2"
+        )
 
     def _set_commentary_enabled(self, enabled: bool) -> None:
         self._commentary = bool(enabled)

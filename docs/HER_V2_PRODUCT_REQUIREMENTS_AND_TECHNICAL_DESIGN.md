@@ -46,7 +46,11 @@ HER v2 replaces the current tightly coupled HER workflow with a smaller, modular
 - HASHI-owned tools, permissions, delivery, logging, and audit;
 - conversational recovery instead of restoring a failed execution stack.
 
-HER v2 must be implemented alongside the current HER implementation until it passes staged certification. Existing HER remains available as the rollback path during migration.
+HER v2 is the sole supported HER execution backend. The former monolithic HER
+implementation is retired and must never be selected as an initialization,
+switching, preflight, recovery, or runtime fallback. The historical public IDs
+`her` and `claw-cli` may resolve forward to `her-v2` only; they cannot revive the
+retired implementation.
 
 ## 3. Core Principles
 
@@ -101,6 +105,44 @@ HER prefers useful progress over perfection of intermediate artefacts:
 - preserve detailed evidence in HASHI logs rather than expanding the Ledger into an audit database.
 
 Lifecycle order remains strict even when stage content is flexible.
+
+### 3.6 Work, commentary, Persona packaging, and delivery
+
+HER v2 keeps four boundaries distinct:
+
+1. A reasoning stage performs its assigned work and may include one optional
+   neutral `commentary` string in its successful structured result.
+2. The commentary lane validates and forwards that string. Lifecycle events,
+   state transitions, retries, failures, and tool telemetry never synthesise
+   Persona messages.
+3. Persona packaging may receive only the validated neutral commentary and the
+   contents of one explicit Persona marker block from the configured
+   `system_md` file:
+
+   ```text
+   <!-- HASHI:PERSONA:BEGIN -->
+   ...presentation guidance only...
+   <!-- HASHI:PERSONA:END -->
+   ```
+
+   Text outside that block is unavailable to the commentary packager.
+4. Commentary delivery accepts only the typed output of Persona packaging.
+   Generic workflow delivery is not a commentary transport.
+
+Commentary is optional presentation, never workflow authority. A missing,
+empty, malformed, oversized, packaging-failed, or delivery-failed commentary
+cannot invalidate, retry, reclassify, replan, stop, or complete a stage. Missing
+or invalid Persona markers and packaging failures use a deterministic minimal
+package based on the configured HASHI display name, the form of address `您`,
+and the unchanged neutral commentary.
+
+This boundary initially governs interim commentary only. Immediate Response,
+clarification, and Final Report retain their dedicated user-facing paths until
+a separately approved design extends Persona packaging to those lanes.
+An Immediate Response may be sent provisionally before Triage only when the
+transport explicitly advertises support for resolving that exact message as a
+final answer, clarification, commentary, or discard. Without that capability,
+HER keeps the response on the ordinary single final-delivery path.
 
 ## 4. Authority Model
 
@@ -688,6 +730,7 @@ Only the primary HER workflow may enter `REPLANNING`.
 HASHI remains responsible for:
 
 - transport and user-message delivery;
+- Persona source resolution and presentation-only packaging;
 - agent configuration and secrets;
 - provider adapters and credentials;
 - Tool Gateway registration and execution;
@@ -712,13 +755,21 @@ HER v2 owns:
 - review/remediation limits;
 - final task-state selection.
 
+HER v2 may validate and publish optional neutral commentary returned by a
+successful reasoning stage. It never reads Persona guidance or packages
+Persona prose inside the orchestration state machine.
+
 ### 20.3 Optional supporting systems
 
 Habits, Meditation, Dream, and optional native executors connect through explicit interfaces. They cannot become mandatory hidden dependencies of the core state machine.
 
 ### 20.4 Compatibility facade
 
-During migration, HER v2 may remain registered as a HASHI backend through a compatibility facade. Internally it must behave as an orchestration policy over provider and tool interfaces rather than reproducing the current monolithic backend design.
+HER v2 remains registered through a thin HASHI compatibility facade. Internally
+it behaves as an orchestration policy over provider and tool interfaces rather
+than reproducing the retired monolithic backend design. Compatibility is limited
+to forward ID aliases and approved Habit, Meditation, and Dream data formats;
+it is not execution fallback compatibility.
 
 ## 21. Migration Strategy
 
@@ -735,10 +786,12 @@ The migration sequence is:
 7. add `xhigh` and `max` Review and remediation;
 8. integrate sub-agents;
 9. integrate Habits, Meditation, and Dream last;
-10. run HER v2 in shadow mode with external side effects disabled;
+10. certify normal-mode execution with HASHI permissions restricting canary
+    side effects;
 11. canary selected agents;
 12. expand rollout only after certification;
-13. retain old HER as a rollback path until HER v2 is proven.
+13. remove every old-HER registration and prove historical IDs resolve only
+    forward to HER v2.
 
 Existing HER code, local experimental commits, and uncommitted Task Control work are reference material. They are not the implementation foundation of HER v2 and must be ported only when a v2 requirement and test justify them.
 
@@ -759,8 +812,14 @@ HER v2 is ready for production rollout only when:
 - provider model names are configurable rather than hard-coded in HER core;
 - reporting failure preserves completed execution evidence;
 - stop terminates primary and sub-agent activity;
-- old HER and HER v2 can be selected independently during migration;
-- canary rollback is tested.
+- the retired HER implementation is unreachable through `her`, `claw-cli`,
+  backend switching, startup preflight, and initialization failure;
+- lifecycle and workflow events cannot generate Persona commentary;
+- Persona packaging receives no request, plan, reasoning trace, execution
+  evidence, lifecycle snapshot, or unmarked `system_md` content;
+- commentary packaging and delivery failures cannot alter workflow outcome;
+- failed HER v2 initialization fails closed or uses an explicitly selected
+  non-HER backend; it never rolls back to retired HER.
 
 ## 23. Locked Runtime Invariants
 
@@ -780,9 +839,14 @@ The following decisions are authoritative for HER v2:
 12. Execution evidence outweighs Habits.
 13. Replanning does not consult Habits again.
 14. Missing optional commentary does not fail execution.
-15. Reporting failure does not discard completed work.
-16. Recovery is conversational, not transactional.
-17. HER core is provider-neutral and modular.
+15. Only successful reasoning-stage output may originate neutral commentary;
+    workflow events never originate Persona speech.
+16. Persona packaging is presentation-only and receives only neutral commentary
+    plus the explicit configured Persona block.
+17. Commentary delivery accepts packaged output only and has no workflow authority.
+18. Reporting failure does not discard completed work.
+19. Recovery is conversational, not transactional.
+20. HER core is provider-neutral and modular.
 
 ## 24. Golden Rule
 

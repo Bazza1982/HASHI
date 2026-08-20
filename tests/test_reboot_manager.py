@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from adapters import claw_cli
+from adapters import registry as backend_registry
 from orchestrator.hot_reload import HotReloadError, module_reload_key
 from orchestrator.reboot_manager import RebootManager
 from orchestrator.service_manager import ServiceManager
@@ -229,21 +229,40 @@ def test_validate_agent_runtime_contract_rejects_stale_tool_registry(monkeypatch
         manager.validate_agent_runtime_contract()
 
 
-def test_validate_agent_runtime_contract_rejects_stale_claw_constant(monkeypatch):
+def test_validate_agent_runtime_contract_rejects_missing_scoped_audit_context(
+    monkeypatch,
+):
     manager = RebootManager(kernel=object(), console_handler=None)
 
-    monkeypatch.setattr(claw_cli, "KIND_ACKNOWLEDGEMENT", "stale")
+    monkeypatch.setattr(
+        "tools.registry.ToolRegistry.execute_with_audit_context",
+        None,
+    )
 
-    with pytest.raises(HotReloadError, match="retained a stale"):
+    with pytest.raises(HotReloadError, match="scoped audit context is unavailable"):
         manager.validate_agent_runtime_contract()
 
 
-def test_validate_agent_runtime_contract_rejects_stale_her_facade(monkeypatch):
+def test_validate_agent_runtime_contract_rejects_missing_her_v2_resolver(monkeypatch):
     manager = RebootManager(kernel=object(), console_handler=None)
 
-    monkeypatch.setattr(claw_cli, "HERAdapter", object())
+    monkeypatch.setattr(backend_registry, "get_backend_class", None)
 
-    with pytest.raises(HotReloadError, match="stale HER adapter class"):
+    with pytest.raises(HotReloadError, match="registry contract unavailable"):
+        manager.validate_agent_runtime_contract()
+
+
+def test_validate_agent_runtime_contract_rejects_retired_her_route(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    current_resolver = backend_registry.get_backend_class
+
+    monkeypatch.setattr(
+        backend_registry,
+        "get_backend_class",
+        lambda engine: object() if engine == "her" else current_resolver(engine),
+    )
+
+    with pytest.raises(HotReloadError, match="retired adapter"):
         manager.validate_agent_runtime_contract()
 
 
@@ -341,7 +360,78 @@ async def test_hot_restart_fails_when_target_does_not_restart_even_if_others_run
 
 
 @pytest.mark.asyncio
-async def test_hot_restart_aborts_when_agent_stop_exceeds_deadline(monkeypatch):
+async def test_hot_restart_reload_failure_restores_agent_and_requires_reboot_retry(
+    monkeypatch,
+    capsys,
+):
+    class ConsoleHandler:
+        def addFilter(self, _filter):
+            pass
+
+        def removeFilter(self, _filter):
+            pass
+
+    class HotServices:
+        def __init__(self):
+            self.refreshed = False
+
+        async def refresh_hot_services(self):
+            self.refreshed = True
+
+    class Kernel:
+        def __init__(self):
+            self.runtimes = [SimpleNamespace(name="arale")]
+            self.whatsapp = None
+            self.global_cfg = SimpleNamespace(workbench_port=18800)
+            self.api_gateway = None
+            self.service_manager = HotServices()
+            self.start_calls = []
+
+        async def stop_agent(self, name, reason):
+            assert name == "arale"
+            assert reason == "hot-restart:min"
+            self.runtimes.clear()
+            return True, "stopped"
+
+        async def start_agent(self, name):
+            self.start_calls.append(name)
+            self.runtimes.append(SimpleNamespace(name=name))
+            return True, "started"
+
+        def _load_config_bundle(self):
+            return None, [SimpleNamespace(name="arale")], None
+
+    kernel = Kernel()
+    manager = RebootManager(kernel=kernel, console_handler=ConsoleHandler())
+    monkeypatch.setattr(manager, "preflight_project_modules", lambda: [])
+    monkeypatch.setattr(
+        manager,
+        "reload_project_modules",
+        lambda _names: (_ for _ in ()).throw(HotReloadError("ABI mismatch")),
+    )
+    monkeypatch.setattr(
+        "orchestrator.banner.show_startup_banner",
+        lambda **_kwargs: None,
+    )
+
+    result = await manager.hot_restart(
+        {"mode": "min", "agent_name": "arale", "agent_number": None}
+    )
+
+    output = capsys.readouterr().out.casefold()
+    assert result is False
+    assert kernel.start_calls == ["arale"]
+    assert [runtime.name for runtime in kernel.runtimes] == ["arale"]
+    assert kernel.service_manager.refreshed is False
+    assert "retry /reboot" in output
+    assert "cold" not in output
+
+
+@pytest.mark.asyncio
+async def test_hot_restart_aborts_when_agent_stop_exceeds_deadline(
+    monkeypatch,
+    capsys,
+):
     release_stop = asyncio.Event()
     stop_cancelled = asyncio.Event()
 
@@ -380,6 +470,9 @@ async def test_hot_restart_aborts_when_agent_stop_exceeds_deadline(monkeypatch):
     )
 
     assert result is False
+    output = capsys.readouterr().out.casefold()
+    assert "retry /reboot" in output
+    assert "cold" not in output
     await asyncio.sleep(0)
     assert stop_cancelled.is_set()
     assert kernel.start_calls == []
@@ -403,7 +496,7 @@ async def test_hot_restart_restores_only_agents_stopped_before_later_failure(mon
             if name == "alpha":
                 self.runtimes[:] = [rt for rt in self.runtimes if rt.name != name]
                 return True, "stopped"
-            return False, "cold process restart required"
+            return False, "runtime is still active"
 
         async def start_agent(self, name):
             self.start_calls.append(name)

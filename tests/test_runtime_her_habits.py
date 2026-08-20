@@ -957,7 +957,7 @@ def test_habit_command_is_visible_but_not_sensitive():
     ]
 
 
-def test_habit_override_persists_and_applies_only_to_her_adapter_config(tmp_path):
+def test_habit_override_persists_and_applies_only_to_her_v2_adapter_config(tmp_path):
     workspace = tmp_path / "agent"
     workspace.mkdir()
     config = FlexibleAgentConfig(
@@ -966,10 +966,10 @@ def test_habit_override_persists_and_applies_only_to_her_adapter_config(tmp_path
         system_md=workspace / "AGENT.md",
         telegram_token_key="zelda",
         allowed_backends=[
-            {"engine": "her", "model": "test-model"},
+            {"engine": "her-v2", "model": "role-configured"},
             {"engine": "codex-cli", "model": "gpt-test"},
         ],
-        active_backend="her",
+        active_backend="her-v2",
         project_root=workspace,
     )
     global_config = GlobalConfig(
@@ -981,7 +981,9 @@ def test_habit_override_persists_and_applies_only_to_her_adapter_config(tmp_path
     )
     manager = FlexibleBackendManager(config, global_config, secrets={})
     manager.current_backend = SimpleNamespace(
-        config=SimpleNamespace(engine="her", model="test-model", extra={}),
+        config=SimpleNamespace(
+            engine="her-v2", model="role-configured", extra={}
+        ),
     )
 
     manager.set_habit_meditation_override(True)
@@ -990,7 +992,7 @@ def test_habit_override_persists_and_applies_only_to_her_adapter_config(tmp_path
     assert manager.current_backend.config.extra["habit_meditation_enabled"] is True
     assert (
         manager._build_adapter_config(
-            "her",
+            "her-v2",
             config.allowed_backends[0],
         ).extra["habit_meditation_enabled"]
         is True

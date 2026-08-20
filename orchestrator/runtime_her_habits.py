@@ -20,8 +20,10 @@ from orchestrator.command_ui import (
     setting_card,
     status_label,
 )
+from orchestrator.flexible_backend_registry import canonical_backend_engine
 
 HABIT_PAGE_SIZE = 5
+HER_HABIT_ENGINES = frozenset({"her-v2"})
 
 
 @dataclass(frozen=True)
@@ -52,16 +54,21 @@ def _active_engine(runtime: Any) -> str:
             getattr(runtime, "backend_manager", None), "current_backend", None
         )
         engine = getattr(getattr(backend, "config", None), "engine", None)
-    return str(engine or "").strip().casefold()
+    return canonical_backend_engine(str(engine or "")).casefold()
 
 
 def _her_adapter(runtime: Any) -> Any | None:
-    if _active_engine(runtime) != "her":
+    if _active_engine(runtime) not in HER_HABIT_ENGINES:
         return None
     backend = getattr(
         getattr(runtime, "backend_manager", None), "current_backend", None
     )
-    if str(getattr(getattr(backend, "config", None), "engine", "")).casefold() != "her":
+    if (
+        canonical_backend_engine(
+            str(getattr(getattr(backend, "config", None), "engine", ""))
+        ).casefold()
+        not in HER_HABIT_ENGINES
+    ):
         return None
     return backend
 
@@ -235,6 +242,17 @@ def _append_audit(runtime: Any, event: str, **fields: Any) -> None:
             event,
             type(exc).__name__,
         )
+    adapter = _her_adapter(runtime)
+    v2_audit = getattr(adapter, "_record_learning_audit", None)
+    if callable(v2_audit):
+        try:
+            v2_audit(event, stage="habit_command", payload=fields)
+        except Exception as exc:  # noqa: BLE001 - legacy audit remains available
+            runtime.logger.warning(
+                "HER v2 Habit command audit failed: event=%s error=%s",
+                event,
+                type(exc).__name__,
+            )
 
 
 def _unavailable_view(runtime: Any) -> tuple[str, InlineKeyboardMarkup]:
@@ -291,6 +309,7 @@ def _home_view(
         card_title("🧠", "HER habits"),
         "",
         f"<b>Current</b> · <b>{status_label(status.effective)}</b>",
+        f"<b>Backend</b> · <code>{html.escape(_active_engine(runtime) or 'unknown')}</code>",
         f"<b>Source</b> · {html.escape(status.source)}",
         f"<b>Active</b> · <code>{len(habits)}</code>",
         f"<b>Archived</b> · <code>{store.archived_count()}</code>",

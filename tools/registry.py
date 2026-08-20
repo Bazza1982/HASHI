@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -132,6 +133,10 @@ class ToolRegistry:
         self.max_loops = max_loops
         self.agents_config = agents_config or []
         self.audit_context = audit_context or {}
+        self._audit_context_override: ContextVar[dict | None] = ContextVar(
+            f"tool_registry_audit_context_{id(self)}",
+            default=None,
+        )
         self.media_roots = [Path(root) for root in (media_roots or [])]
 
         if "*" in allowed_tools:
@@ -151,6 +156,46 @@ class ToolRegistry:
 
     def is_allowed(self, tool_name: str) -> bool:
         return tool_name in self._allowed
+
+    def _effective_audit_context(self) -> dict:
+        override = self._audit_context_override.get()
+        return override if override is not None else self.audit_context
+
+    async def execute_with_audit_context(
+        self,
+        tool_name: str,
+        arguments: dict,
+        tool_call_id: str = "",
+        *,
+        audit_context: dict | None = None,
+    ) -> ToolResult:
+        """Execute with task-local authority and audit metadata."""
+
+        scoped_context = dict(self._effective_audit_context())
+        scoped_context.update(dict(audit_context or {}))
+        token = self._audit_context_override.set(scoped_context)
+        try:
+            return await self.execute(tool_name, arguments, tool_call_id)
+        finally:
+            self._audit_context_override.reset(token)
+
+    def record_delegated_denial(
+        self,
+        tool_name: str,
+        arguments: dict,
+        result: ToolResult,
+        *,
+        audit_context: dict | None = None,
+    ) -> None:
+        """Audit a denial made by a narrower delegated registry."""
+
+        scoped_context = dict(self._effective_audit_context())
+        scoped_context.update(dict(audit_context or {}))
+        token = self._audit_context_override.set(scoped_context)
+        try:
+            self._record_tool_audit(tool_name, arguments, result, time.monotonic())
+        finally:
+            self._audit_context_override.reset(token)
 
     def get_tool_definitions(self, tiers: list[str] | None = None) -> list[dict]:
         """Return OpenAI-format tool definitions filtered to allowed tools.
@@ -235,7 +280,7 @@ class ToolRegistry:
     ) -> ToolResult | None:
         if tool_name not in {"file_read", "file_write", "file_list", "apply_patch"}:
             return None
-        context = self.audit_context or {}
+        context = self._effective_audit_context()
         org_id = str(context.get("org_id") or "").strip()
         project_id = str(context.get("project_id") or "").strip()
         if not org_id or not project_id:
@@ -277,7 +322,7 @@ class ToolRegistry:
     def _check_enterprise_shell_gate(self, tool_name: str, *, tool_call_id: str) -> ToolResult | None:
         if tool_name not in {"bash", "background_job_start"}:
             return None
-        context = self.audit_context or {}
+        context = self._effective_audit_context()
         org_id = str(context.get("org_id") or "").strip()
         project_id = str(context.get("project_id") or "").strip()
         if not org_id or not project_id:
@@ -301,7 +346,7 @@ class ToolRegistry:
     ) -> ToolResult | None:
         if tool_name not in {"http_request", "web_fetch", "web_search"}:
             return None
-        context = self.audit_context or {}
+        context = self._effective_audit_context()
         org_id = str(context.get("org_id") or "").strip()
         project_id = str(context.get("project_id") or "").strip()
         if not org_id or not project_id:
@@ -331,7 +376,7 @@ class ToolRegistry:
         return str(parsed.hostname or "").strip().casefold()
 
     def _enterprise_network_allowed_hosts(self) -> set[str]:
-        context = self.audit_context or {}
+        context = self._effective_audit_context()
         raw_hosts = (
             context.get("enterprise_network_allow_hosts")
             or context.get("network_allow_hosts")
@@ -345,7 +390,7 @@ class ToolRegistry:
     def _check_enterprise_browser_gate(self, tool_name: str, *, tool_call_id: str) -> ToolResult | None:
         if not tool_name.startswith("browser_"):
             return None
-        context = self.audit_context or {}
+        context = self._effective_audit_context()
         org_id = str(context.get("org_id") or "").strip()
         project_id = str(context.get("project_id") or "").strip()
         if not org_id or not project_id:
@@ -370,7 +415,7 @@ class ToolRegistry:
         try:
             from tools.tool_audit import record_tool_action
 
-            audit_context = dict(self.audit_context or {})
+            audit_context = dict(self._effective_audit_context())
             artifact_id = self._register_file_write_artifact(tool_name, arguments, result)
             if artifact_id:
                 audit_context["artifact_id"] = artifact_id
@@ -395,7 +440,7 @@ class ToolRegistry:
     ) -> str | None:
         if tool_name != "file_write" or result.is_error:
             return None
-        context = self.audit_context or {}
+        context = self._effective_audit_context()
         db_path = context.get("enterprise_db_path")
         org_id = context.get("org_id")
         project_id = context.get("project_id")
@@ -513,20 +558,28 @@ class ToolRegistry:
                 arguments,
                 access_root=self.access_root,
                 workspace_dir=self.workspace_dir,
-                audit_context=self.audit_context,
+                audit_context=self._effective_audit_context(),
             )
 
         if tool_name == "background_job_status":
-            return await execute_background_job_status(arguments, audit_context=self.audit_context)
+            return await execute_background_job_status(
+                arguments, audit_context=self._effective_audit_context()
+            )
 
         if tool_name == "background_job_tail":
-            return await execute_background_job_tail(arguments, audit_context=self.audit_context)
+            return await execute_background_job_tail(
+                arguments, audit_context=self._effective_audit_context()
+            )
 
         if tool_name == "background_job_cancel":
-            return await execute_background_job_cancel(arguments, audit_context=self.audit_context)
+            return await execute_background_job_cancel(
+                arguments, audit_context=self._effective_audit_context()
+            )
 
         if tool_name == "background_job_list":
-            return await execute_background_job_list(arguments, audit_context=self.audit_context)
+            return await execute_background_job_list(
+                arguments, audit_context=self._effective_audit_context()
+            )
 
         if tool_name == "telegram_send":
             return await execute_telegram_send(
@@ -548,7 +601,7 @@ class ToolRegistry:
             return await execute_xai_imagine(
                 arguments,
                 secrets=self.secrets,
-                global_config=(self.audit_context or {}).get("global_config"),
+                global_config=self._effective_audit_context().get("global_config"),
             )
 
         if tool_name == "web_search":
@@ -564,7 +617,7 @@ class ToolRegistry:
             return await execute_hashi_scheduler_tool(
                 tool_name,
                 arguments,
-                audit_context=self.audit_context,
+                audit_context=self._effective_audit_context(),
             )
 
         if tool_name.startswith("browser_"):
@@ -608,7 +661,7 @@ class ToolRegistry:
             }
             if tool_name in _browser_dispatch:
                 browser_args = dict(arguments)
-                browser_args.setdefault("_audit", self.audit_context)
+                browser_args.setdefault("_audit", self._effective_audit_context())
                 return await _browser_dispatch[tool_name](browser_args)
             return f"Error: unknown browser tool '{tool_name}'"
 

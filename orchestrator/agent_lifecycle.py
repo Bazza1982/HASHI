@@ -305,7 +305,8 @@ class AgentLifecycleManager:
             stopped = await self.teardown_runtime(runtime)
             if not stopped:
                 message = (
-                    f"Agent '{agent_name}' did not stop cleanly; cold process restart required."
+                    f"Agent '{agent_name}' did not stop cleanly; it remains registered. "
+                    "Resolve the active operation and retry /reboot."
                 )
                 main_logger.error(message)
                 bridge_logger.error("%s (reason=%s)", message, reason)

@@ -25,6 +25,7 @@ KIND_SHELL_EXEC = "shell_exec"
 KIND_TEXT_DELTA = "text_delta"
 KIND_PROGRESS = "progress"
 KIND_ACKNOWLEDGEMENT = "acknowledgement"
+KIND_INITIAL_RESOLUTION = "initial_resolution"
 KIND_REVIEW = "review"
 KIND_VALIDATION = "validation"
 KIND_TESTING = "testing"
@@ -84,8 +85,10 @@ class StreamEvent:
     revision: int | None = None  # planning/replan revision when applicable
     required: bool = False  # bypass optional presentation toggles
     provenance: str = ""  # provider_returned, provider_summary, etc.
+    resolution: str = ""  # final, commentary, clarification, or discard
+    target_event_id: str = ""  # provisional event changed by a control event
 
 
 # Callback signature accepted by generate_response().
 # None means "no streaming" (default / verbose-off path).
-StreamCallback = Optional[Callable[[StreamEvent], Awaitable[None]]]
+StreamCallback = Optional[Callable[[StreamEvent], Awaitable[bool | None]]]

@@ -50,6 +50,59 @@ def _read_state(workspace: Path) -> dict:
     return json.loads((workspace / "state.json").read_text(encoding="utf-8"))
 
 
+def test_stale_persisted_backend_falls_back_to_configured_allowed_backend(
+    tmp_path,
+    caplog,
+):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(
+        json.dumps(
+            {
+                "active_backend": "her",
+                "active_model": "deepseek-v4-flash",
+                "active_provider": "deepseek",
+                "agent_mode": "fixed",
+                "unrelated": {"keep": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="BackendMgr.test-flex"):
+        manager = _make_manager(workspace)
+
+    assert manager.config.active_backend == "codex-cli"
+    assert manager._active_model_override is None
+    assert manager._active_provider_override is None
+    assert manager.agent_mode == "fixed"
+    assert "not present in allowed_backends" in caplog.text
+    state = _read_state(workspace)
+    assert state["active_backend"] == "codex-cli"
+    assert "active_model" not in state
+    assert "active_provider" not in state
+    assert state["unrelated"] == {"keep": True}
+
+
+def test_allowed_persisted_backend_still_overrides_configured_backend(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(
+        json.dumps(
+            {
+                "active_backend": "claude-cli",
+                "active_model": "claude-haiku-4-5",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = _make_manager(workspace)
+
+    assert manager.config.active_backend == "claude-cli"
+    assert manager._active_model_override == "claude-haiku-4-5"
+
+
 def test_save_state_preserves_unknown_keys(tmp_path):
     workspace = tmp_path / "agent"
     workspace.mkdir()
@@ -439,7 +492,7 @@ def test_claw_provider_and_model_persist_as_separate_state(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_failed_claw_provider_switch_rolls_back_full_route(tmp_path):
+async def test_failed_her_alias_switch_never_rolls_back_to_retired_her(tmp_path):
     workspace = tmp_path / "agent"
     workspace.mkdir()
     cfg = FlexibleAgentConfig(
@@ -449,17 +502,16 @@ async def test_failed_claw_provider_switch_rolls_back_full_route(tmp_path):
         telegram_token_key="test-flex",
         allowed_backends=[
             {
-                "engine": "her",
-                "provider": "openrouter",
-                "model": "deepseek/deepseek-v4-flash",
+                "engine": "her-v2",
+                "model": "role-configured",
+                "her_v2": {"profiles": {"configured": {}}},
             },
             {
-                "engine": "her",
-                "provider": "deepseek",
-                "model": "deepseek-v4-pro",
+                "engine": "codex-cli",
+                "model": "gpt-test",
             },
         ],
-        active_backend="her",
+        active_backend="codex-cli",
         project_root=workspace,
     )
     global_cfg = GlobalConfig(
@@ -467,27 +519,23 @@ async def test_failed_claw_provider_switch_rolls_back_full_route(tmp_path):
         base_logs_dir=workspace / "logs",
         base_media_dir=workspace / "media",
         project_root=workspace,
-        her_providers={
-            "providers": {
-                "openrouter": {"base_url": "https://openrouter.invalid/v1"},
-                "deepseek": {"base_url": "https://deepseek.invalid/v1"},
-            }
-        },
     )
     manager = FlexibleBackendManager(cfg, global_cfg, secrets={})
     manager.current_backend = SimpleNamespace(
         config=SimpleNamespace(
-            model="deepseek/deepseek-v4-flash",
-            extra={"provider": "openrouter"},
+            model="gpt-test",
+            extra={},
         )
     )
-    initialize_calls: list[tuple[str | None, str | None]] = []
+    initialize_calls: list[tuple[str, str | None, str | None]] = []
 
     async def fake_shutdown():
         manager.current_backend = None
 
     async def fake_initialize(target_model=None, target_provider=None):
-        initialize_calls.append((target_model, target_provider))
+        initialize_calls.append(
+            (manager.config.active_backend, target_model, target_provider)
+        )
         return len(initialize_calls) > 1
 
     manager.shutdown = fake_shutdown
@@ -495,21 +543,21 @@ async def test_failed_claw_provider_switch_rolls_back_full_route(tmp_path):
 
     switched = await manager.switch_backend(
         "her",
-        target_provider="deepseek",
-        target_model="deepseek-v4-pro",
+        target_model="role-configured",
     )
 
     assert switched is False
     assert initialize_calls == [
-        ("deepseek-v4-pro", "deepseek"),
-        ("deepseek/deepseek-v4-flash", "openrouter"),
+        ("her-v2", "role-configured", None),
+        ("codex-cli", "gpt-test", None),
     ]
-    assert manager.config.active_backend == "her"
-    assert manager._active_provider_override == "openrouter"
-    assert manager._active_model_override == "deepseek/deepseek-v4-flash"
+    assert manager.config.active_backend == "codex-cli"
+    assert manager._active_provider_override is None
+    assert manager._active_model_override == "gpt-test"
     state = _read_state(workspace)
-    assert state["active_provider"] == "openrouter"
-    assert state["active_model"] == "deepseek/deepseek-v4-flash"
+    assert state["active_backend"] == "codex-cli"
+    assert "active_provider" not in state
+    assert state["active_model"] == "gpt-test"
 
 
 def test_save_state_recovers_from_invalid_existing_json(tmp_path):
@@ -660,7 +708,7 @@ def test_create_ephemeral_backend_does_not_replace_current_backend(tmp_path, mon
     assert manager.config.active_backend == original_active
 
 
-def test_ephemeral_her_backend_cannot_enable_habit_learning(tmp_path, monkeypatch):
+def test_ephemeral_her_v2_backend_cannot_enable_habit_learning(tmp_path, monkeypatch):
     import adapters.registry
 
     class FakeBackend:
@@ -672,13 +720,15 @@ def test_ephemeral_her_backend_cannot_enable_habit_learning(tmp_path, monkeypatc
     manager = _make_manager(workspace)
     manager.config.allowed_backends.append(
         {
-            "engine": "her",
-            "model": "deepseek/test",
+            "engine": "her-v2",
+            "model": "role-configured",
             "habit_meditation": {"enabled": True},
         }
     )
 
-    backend = manager.create_ephemeral_backend("her", target_model="deepseek/test")
+    backend = manager.create_ephemeral_backend(
+        "her", target_model="role-configured"
+    )
 
     assert backend.config.extra["habit_meditation"]["enabled"] is False
     assert backend.config.extra["habit_learning_eligible"] is False

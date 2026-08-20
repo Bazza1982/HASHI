@@ -8,11 +8,16 @@ from types import ModuleType
 
 HOT_RELOAD_PREFIXES = ("adapters.", "tools.", "orchestrator.")
 
-# These modules define the identity and lock of the already-running process.
-# Reloading their module objects cannot replace that live bootstrap state and
-# would falsely suggest that a cold-only change had taken effect.
-COLD_RESTART_MODULES = frozenset(
+# These modules define identity objects already owned by the running process.
+# They are not function-layer modules: changing one is incomplete until it has
+# an explicit warm-handoff design.  /reboot must never claim that merely
+# reloading the module replaced an already-held lock or path identity.
+PROCESS_IDENTITY_MODULES = frozenset(
     {
+        # Retired execution modules may remain imported by historical tests or
+        # a pre-upgrade process, but hot reload must never reactivate them.
+        "adapters.her",
+        "adapters.claw_cli",
         "orchestrator.instance_lock",
         "orchestrator.pathing",
     }
@@ -49,10 +54,23 @@ FOUNDATION_PHASES = {
     "orchestrator.ticket_manager": 1,
     "adapters.openrouter_api": 2,
     "adapters.xai_imagine": 2,
-    # HER owns the implementation; the legacy claw_cli facade must reload
-    # afterwards so all of its compatibility exports point at current objects.
-    "adapters.her": 2,
-    "adapters.claw_cli": 3,
+    # HER v2 dependency order. Reload value types first and the facade only
+    # after the provider-neutral runtime graph is coherent.
+    "orchestrator.her_v2.models": 0,
+    "orchestrator.her_v2.audit": 0,
+    "orchestrator.her_v2.progress": 0,
+    "orchestrator.her_v2.config": 1,
+    "orchestrator.her_v2.lifecycle": 1,
+    "orchestrator.her_v2.policy": 1,
+    "orchestrator.her_v2.prompts": 1,
+    "orchestrator.her_v2.interfaces": 2,
+    "orchestrator.her_v2.ledger": 3,
+    "orchestrator.her_v2.learning": 3,
+    "orchestrator.her_v2.structured": 3,
+    "orchestrator.her_v2.commentary": 4,
+    "orchestrator.her_v2.runtime": 4,
+    "orchestrator.her_v2": 5,
+    "adapters.her_v2": 5,
 }
 
 
@@ -79,7 +97,7 @@ def discover_loaded_project_modules(
     root = Path(code_root).resolve() if code_root is not None else None
 
     def is_reloadable_project_module(name: str) -> bool:
-        if name in COLD_RESTART_MODULES:
+        if name in PROCESS_IDENTITY_MODULES:
             return False
         if not any(name.startswith(prefix) for prefix in HOT_RELOAD_PREFIXES):
             return False

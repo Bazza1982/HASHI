@@ -609,6 +609,18 @@ async def execute_dream(
                     )
                     break
             try:
+                v2_audit = getattr(adapter, "_record_learning_audit", None)
+                if callable(v2_audit):
+                    v2_audit(
+                        "dream_write_authorised",
+                        identity=run_id,
+                        stage="dream",
+                        payload={
+                            "run_id": run_id,
+                            "expected_fingerprint": fingerprint,
+                            "group_count": len(groups),
+                        },
+                    )
                 async with adapter._habit_execution_lock:
                     manifest = her_dream.commit_dream_proposal(
                         store=store,
@@ -616,6 +628,19 @@ async def execute_dream(
                         run_id=run_id,
                         expected_fingerprint=fingerprint,
                         groups=groups,
+                    )
+                if callable(v2_audit):
+                    v2_audit(
+                        "dream_commit_completed",
+                        identity=run_id,
+                        stage="dream",
+                        payload={
+                            "run_id": run_id,
+                            "status": manifest.get("status"),
+                            "changed_group_numbers": (
+                                manifest.get("changed_group_numbers") or []
+                            ),
+                        },
                     )
                 break
             except her_dream.StaleDreamState as exc:
@@ -713,12 +738,31 @@ async def execute_undo(
             return False, "No HER Dream changes are currently available to undo."
         run_id = str(latest["run_id"])
     try:
+        v2_audit = getattr(adapter, "_record_learning_audit", None)
+        if callable(v2_audit):
+            v2_audit(
+                "dream_undo_authorised",
+                identity=f"{run_id}:{group_number or 'all'}",
+                stage="dream",
+                payload={"run_id": run_id, "group_number": group_number},
+            )
         async with adapter._habit_execution_lock:
             result = her_dream.undo_dream_run(
                 store=_store(runtime, adapter),
                 journal=journal,
                 run_id=run_id,
                 group_number=group_number,
+            )
+        if callable(v2_audit):
+            v2_audit(
+                "dream_undo_completed",
+                identity=str(result["undo_id"]),
+                stage="dream",
+                payload={
+                    "run_id": run_id,
+                    "undo_id": result["undo_id"],
+                    "group_numbers": result["group_numbers"],
+                },
             )
     except (ValueError, FileNotFoundError, her_dream.DreamUndoConflict) as exc:
         return False, f"Dream undo refused: {exc}"

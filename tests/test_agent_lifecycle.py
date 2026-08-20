@@ -75,7 +75,7 @@ async def test_stop_agent_times_out_without_removing_still_running_runtime(monke
     )
 
     assert ok is False
-    assert "cold process restart required" in message
+    assert "retry /reboot" in message
     await asyncio.sleep(0)
     assert shutdown_cancelled.is_set()
     assert kernel.runtimes is runtimes

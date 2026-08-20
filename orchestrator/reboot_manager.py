@@ -140,8 +140,8 @@ class RebootManager:
         focused on the protocol used by every HER acknowledgement/tool event.
         """
         stream_events = importlib.import_module("adapters.stream_events")
-        her = importlib.import_module("adapters.her")
-        claw_cli = importlib.import_module("adapters.claw_cli")
+        backend_registry = importlib.import_module("adapters.registry")
+        her_v2 = importlib.import_module("adapters.her_v2")
         runtime_pipeline = importlib.import_module("orchestrator.runtime_pipeline")
         runtime_common = importlib.import_module("orchestrator.runtime_common")
         flexible_runtime = importlib.import_module(
@@ -156,15 +156,18 @@ class RebootManager:
                 "Hot reload contract failed: adapters.stream_events does not expose "
                 "KIND_ACKNOWLEDGEMENT='acknowledgement'"
             )
-        if getattr(claw_cli, "KIND_ACKNOWLEDGEMENT", None) != acknowledgement_kind:
+        resolver = getattr(backend_registry, "get_backend_class", None)
+        supported_adapter = getattr(her_v2, "HERv2Adapter", None)
+        if not callable(resolver) or supported_adapter is None:
             raise HotReloadError(
-                "Hot reload contract failed: adapters.claw_cli retained a stale "
-                "acknowledgement event constant"
+                "Hot reload contract failed: HER v2 registry contract unavailable"
             )
-        if getattr(claw_cli, "HERAdapter", None) is not getattr(her, "HERAdapter", None):
+        if any(
+            resolver(engine) is not supported_adapter
+            for engine in ("her-v2", "her", "claw-cli")
+        ):
             raise HotReloadError(
-                "Hot reload contract failed: adapters.claw_cli retained a stale "
-                "HER adapter class"
+                "Hot reload contract failed: a HER ID can reach a stale or retired adapter"
             )
         if not callable(getattr(runtime_pipeline, "setup_interactive_feedback", None)):
             raise HotReloadError(
@@ -200,6 +203,17 @@ class RebootManager:
             raise HotReloadError(
                 "Hot reload contract failed: tools.gateway.context retained a stale "
                 "ToolRegistry class"
+            )
+        if not callable(
+            getattr(
+                getattr(tool_registry, "ToolRegistry", None),
+                "execute_with_audit_context",
+                None,
+            )
+        ):
+            raise HotReloadError(
+                "Hot reload contract failed: ToolRegistry scoped audit context "
+                "is unavailable"
             )
         contract_message = (
             "Hot reload contract verified: HER compatibility facade and runtime pipeline are current."
@@ -269,7 +283,7 @@ class RebootManager:
             await self._restore_stopped_agents(stopped_targets)
             print(
                 "\033[38;5;203m  ✗ reboot aborted — an agent did not stop; "
-                "cold restart required\033[0m\n",
+                "resolve the active operation and retry /reboot\033[0m\n",
                 flush=True,
             )
             return False
@@ -366,11 +380,11 @@ class RebootManager:
         if reload_error is not None:
             main_logger.error(
                 "Hot restart failed; stopped agents were restored with the last usable managers. "
-                "A cold process restart is required before another hot reload."
+                "Repair the reported source/ABI mismatch and retry /reboot."
             )
             print(
                 "\033[38;5;203m  ✗ reboot failed — agents restored where possible; "
-                "cold restart required\033[0m\n",
+                "repair the mismatch and retry /reboot\033[0m\n",
                 flush=True,
             )
             return False

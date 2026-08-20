@@ -20,6 +20,7 @@
 - Live reboot smoke:
   - `/reboot min`
   - `/reboot max`
+  - no function change or failed reload directs the operator to a cold process restart
   - verify agents return to `ONLINE`
   - verify Workbench API, enabled API Gateway, scheduler, delivery watcher, and
     background jobs are recreated and healthy

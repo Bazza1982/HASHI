@@ -98,7 +98,9 @@ The accepted flow is:
 The manager rebuild is transaction-style. If any replacement manager fails to initialize, the kernel keeps the old manager set alive and the failure is logged clearly.
 If source preflight fails, no agent is stopped. If a live reload fails after
 agents were stopped, HASHI restores those agents where possible, leaves warm
-services untouched, reports failure, and requires a cold restart.
+services untouched, and reports the source/ABI mismatch. The operator repairs
+that mismatch and retries `/reboot`; cold process restart is not an adoption or
+recovery path for function changes.
 
 ## Reboot Modes
 
