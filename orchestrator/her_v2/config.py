@@ -44,6 +44,7 @@ DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
     Stage.TRIAGE: "triage",
     Stage.PLANNING: "premium",
     Stage.EXECUTION: "premium",
+    Stage.STRUCTURE_REPAIR: "premium",
     Stage.REPLANNING: "premium",
     Stage.REVIEW: "reviewer",
     Stage.FINALISATION: "premium",

@@ -27,6 +27,7 @@ from .interfaces import (
     NullDreamMaintainer,
     NullHabitAdvisor,
     NullMeditationRunner,
+    ReconciliationRequired,
     RecordingDelivery,
     StageInvocationError,
     StageProvider,
@@ -89,6 +90,9 @@ class _TurnState:
     review_count: int = 0
     stage_invocation_serial: int = 0
     last_review: ReviewFinding | None = None
+    delivery_id: str = ""
+    delivery_kind: str = ""
+    delivery_event_id: str = ""
 
 
 class HERv2Runtime:
@@ -170,6 +174,12 @@ class HERv2Runtime:
                     state, f"AUDIT_PERSISTENCE_FAILURE: {exc}"
                 )
             return await self._error_result(state, str(exc))
+        except ReconciliationRequired as exc:
+            return await self._reconciliation_result(
+                state,
+                str(exc),
+                evidence_refs=exc.evidence_refs,
+            )
         except (LedgerInvariantError, LifecycleViolation) as exc:
             self.ledger_store.save(state.ledger)
             return self._result(
@@ -693,52 +703,30 @@ class HERv2Runtime:
                 "can_delegate": False,
             },
         )
-        request = StageRequest(
-            turn_id=state.ledger.turn_id,
-            request_ref=state.request_ref,
-            stage=Stage.EXECUTION,
-            role=role,
-            attempt=1,
-            goal=state.goal,
-            classification=state.ledger.classification,
-            effort=state.effort,
-            plan_id=state.ledger.plan_id,
-            context={
-                "assignment_id": assignment.assignment_id,
-                "assigned_task": assignment.task,
-                "delegated_tools": list(assignment.tools),
-                "authority": "bounded_execution_only",
-                "may_replan": False,
-                "may_contact_user": False,
-                "may_finalise": False,
-                "may_create_subagents": False,
-                "shadow_mode": self.config.shadow_mode,
-            },
-            allow_tools=bool(assignment.tools),
-            allow_side_effects=side_effects_authorised,
-            progress_callback=self._progress_callback(state),
-        )
+        request_context = {
+            "assignment_id": assignment.assignment_id,
+            "assigned_task": assignment.task,
+            "delegated_tools": list(assignment.tools),
+            "authority": "bounded_execution_only",
+            "may_replan": False,
+            "may_contact_user": False,
+            "may_finalise": False,
+            "may_create_subagents": False,
+            "shadow_mode": self.config.shadow_mode,
+        }
         try:
-            response = await self._await_provider_operation(
+            response, outcome = await self._invoke_stage(
                 state,
-                self.provider.invoke(profile, request),
-                stage=Stage.EXECUTION,
-                timeout_s=profile.timeout_s,
+                Stage.EXECUTION,
+                parse_execution,
+                profile=profile,
+                allow_tools=bool(assignment.tools),
+                allow_side_effects=side_effects_authorised,
+                context=request_context,
+                role_override=role,
+                publish_commentary=False,
             )
-            outcome = parse_execution(response)
-            reasoning_ref = self.audit_log.record_reasoning(
-                event_id=f"{event_prefix}:reasoning",
-                turn_id=state.ledger.turn_id,
-                request_ref=state.request_ref,
-                stage=Stage.EXECUTION.value,
-                role=role,
-                provider=response.provider or profile.engine,
-                model=response.model or profile.model,
-                attempt=1,
-                plan_id=state.ledger.plan_id,
-                trace=response.reasoning_trace,
-            )
-            state.ledger.add_log_ref(reasoning_ref)
+            assert isinstance(outcome, ExecutionOutcome)
             if outcome.disposition is ExecutionDisposition.REPLAN_REQUIRED:
                 outcome = ExecutionOutcome(
                     ExecutionDisposition.FAILED,
@@ -772,7 +760,7 @@ class HERv2Runtime:
                 },
             )
             return result
-        except (TurnStopped, AuditPersistenceError):
+        except (TurnStopped, AuditPersistenceError, ReconciliationRequired):
             raise
         except Exception as exc:
             self._audit(
@@ -897,12 +885,14 @@ class HERv2Runtime:
         allow_side_effects: bool = False,
         attempts: int | None = None,
         context: Mapping[str, Any] | None = None,
+        role_override: str | None = None,
+        publish_commentary: bool = True,
     ) -> tuple[StageResponse, Any]:
         selected = profile or self.config.profile_for(stage)
-        role = (
-            selected.name
-            if profile is not None
-            else self.config.stage_roles.get(stage, selected.name)
+        role = role_override or (
+            selected.name if profile is not None else self.config.stage_roles.get(
+                stage, selected.name
+            )
         )
         # A model invocation that may already have performed an external side
         # effect is never automatically replayed.  Provider adapters may make
@@ -937,12 +927,16 @@ class HERv2Runtime:
                 allow_side_effects=allow_side_effects,
                 progress_callback=self._progress_callback(state),
             )
+            attempt_prefix = (
+                f"{state.ledger.turn_id}:{stage.value}:invocation:"
+                f"{invocation_serial}:attempt:{attempt}"
+            )
             start_ref = self._audit(
                 state,
                 stage=stage.value,
                 role=role,
                 event="stage_started",
-                event_id=f"{state.ledger.turn_id}:{stage.value}:{attempt}:start",
+                event_id=f"{attempt_prefix}:start",
                 provider=selected.engine,
                 model=selected.model,
                 attempt=attempt,
@@ -965,6 +959,7 @@ class HERv2Runtime:
             state.progress.record(
                 "stage_started", f"{stage.value}:{attempt}"
             )
+            response: StageResponse | None = None
             try:
                 response = await self._await_provider_operation(
                     state,
@@ -972,9 +967,30 @@ class HERv2Runtime:
                     stage=stage,
                     timeout_s=selected.timeout_s,
                 )
-                parsed = validator(response)
+                response_ref = self._audit(
+                    state,
+                    stage=stage.value,
+                    role=role,
+                    event="provider_response_received",
+                    event_id=f"{attempt_prefix}:provider-response",
+                    provider=response.provider or selected.engine,
+                    model=response.model or selected.model,
+                    attempt=attempt,
+                    payload={
+                        "text": response.text,
+                        "data": dict(response.data),
+                        "usage": dict(response.usage),
+                        "evidence_refs": list(response.evidence_refs),
+                        "reasoning_available": bool(
+                            response.reasoning_trace
+                            and str(response.reasoning_trace).strip()
+                        ),
+                        "validation_pending": True,
+                    },
+                )
+                state.ledger.add_log_ref(response_ref)
                 reasoning_ref = self.audit_log.record_reasoning(
-                    event_id=f"{state.ledger.turn_id}:{stage.value}:{attempt}:reasoning",
+                    event_id=f"{attempt_prefix}:reasoning",
                     turn_id=state.ledger.turn_id,
                     request_ref=state.request_ref,
                     stage=stage.value,
@@ -986,35 +1002,108 @@ class HERv2Runtime:
                     trace=response.reasoning_trace,
                 )
                 state.ledger.add_log_ref(reasoning_ref)
+                self.ledger_store.save(state.ledger)
+
+                effective_response = response
+                validation_source = "provider_response"
+                try:
+                    parsed = validator(response)
+                except StructuredOutputError as exc:
+                    if not allow_side_effects:
+                        raise
+                    try:
+                        repaired_response, parsed = await self._repair_structure(
+                            state,
+                            target_stage=stage,
+                            validator=validator,
+                            profile=selected,
+                            role=role,
+                            original_attempt=attempt,
+                            original_invocation=invocation_serial,
+                            original_response=response,
+                            validation_error=exc,
+                        )
+                    except (TurnStopped, AuditPersistenceError):
+                        raise
+                    except StageInvocationError as repair_error:
+                        self._audit(
+                            state,
+                            stage=stage.value,
+                            role=role,
+                            event="stage_attempt_failed",
+                            event_id=f"{attempt_prefix}:failed",
+                            provider=response.provider or selected.engine,
+                            model=response.model or selected.model,
+                            attempt=attempt,
+                            payload={
+                                "error_type": type(exc).__name__,
+                                "error": str(exc),
+                                "will_retry": False,
+                                "provider_response_received": True,
+                                "structure_repair_attempted": True,
+                                "structure_repair_error": str(repair_error),
+                                "reconciliation_required": True,
+                            },
+                        )
+                        raise ReconciliationRequired(
+                            f"{stage.value} returned an invalid result after possible "
+                            "side effects, and tool-free structure repair was exhausted; "
+                            "execution outcome requires reconciliation and was not replayed",
+                            evidence_refs=response.evidence_refs,
+                        ) from repair_error
+                    effective_response = StageResponse(
+                        text=repaired_response.text,
+                        data=repaired_response.data,
+                        reasoning_trace=response.reasoning_trace,
+                        provider=response.provider or selected.engine,
+                        model=response.model or selected.model,
+                        usage=response.usage,
+                        evidence_refs=response.evidence_refs,
+                    )
+                    validation_source = "tool_free_structure_repair"
+
                 complete_ref = self._audit(
                     state,
                     stage=stage.value,
                     role=role,
                     event="stage_completed",
-                    event_id=f"{state.ledger.turn_id}:{stage.value}:{attempt}:complete",
-                    provider=response.provider or selected.engine,
-                    model=response.model or selected.model,
+                    event_id=f"{attempt_prefix}:complete",
+                    provider=effective_response.provider or selected.engine,
+                    model=effective_response.model or selected.model,
                     attempt=attempt,
                     payload={
-                        "output": dict(response.data) if response.data else response.text,
-                        "evidence_refs": list(response.evidence_refs),
-                        "reasoning_available": bool(response.reasoning_trace),
+                        "output": (
+                            dict(effective_response.data)
+                            if effective_response.data
+                            else effective_response.text
+                        ),
+                        "evidence_refs": list(effective_response.evidence_refs),
+                        "reasoning_available": bool(
+                            effective_response.reasoning_trace
+                        ),
+                        "validation_source": validation_source,
                     },
                 )
                 state.ledger.add_log_ref(complete_ref)
                 self.ledger_store.save(state.ledger)
-                await self._publish_stage_commentary(
-                    state,
-                    response=response,
-                    stage=stage,
-                    invocation=invocation_serial,
-                    attempt=attempt,
+                if publish_commentary and validation_source == "provider_response":
+                    await self._publish_stage_commentary(
+                        state,
+                        response=effective_response,
+                        stage=stage,
+                        invocation=invocation_serial,
+                        attempt=attempt,
+                    )
+                state.progress.record(
+                    stage.value,
+                    str(effective_response.data or effective_response.text),
                 )
-                state.progress.record(stage.value, str(response.data or response.text))
-                return response, parsed
+                return effective_response, parsed
             except TurnStopped:
                 raise
             except AuditPersistenceError:
+                raise
+            except ReconciliationRequired:
                 raise
             except asyncio.TimeoutError:
                 last_error = StageInvocationError(
@@ -1034,7 +1123,7 @@ class HERv2Runtime:
                     stage=stage.value,
                     role=role,
                     event="stage_attempt_failed",
-                    event_id=f"{state.ledger.turn_id}:{stage.value}:{attempt}:failed",
+                    event_id=f"{attempt_prefix}:failed",
                     provider=selected.engine,
                     model=selected.model,
                     attempt=attempt,
@@ -1042,6 +1131,7 @@ class HERv2Runtime:
                         "error_type": type(last_error).__name__,
                         "error": str(last_error),
                         "will_retry": attempt < limit,
+                        "provider_response_received": response is not None,
                     },
                 )
             except AuditPersistenceError:
@@ -1051,6 +1141,108 @@ class HERv2Runtime:
         raise StageInvocationError(
             f"{stage.value} exhausted {limit} attempt(s): {last_error}"
         )
+
+    async def _repair_structure(
+        self,
+        state: _TurnState,
+        *,
+        target_stage: Stage,
+        validator: Validator,
+        profile: ProviderProfile,
+        role: str,
+        original_attempt: int,
+        original_invocation: int,
+        original_response: StageResponse,
+        validation_error: StructuredOutputError,
+    ) -> tuple[StageResponse, Any]:
+        """Repair only the response envelope; never re-enter side-effect execution."""
+
+        repair_key = (
+            f"{state.ledger.turn_id}:{target_stage.value}:invocation:"
+            f"{original_invocation}:attempt:{original_attempt}:structure-repair"
+        )
+        self._audit(
+            state,
+            stage=target_stage.value,
+            role=role,
+            event="structure_repair_requested",
+            event_id=f"{repair_key}:requested",
+            provider=original_response.provider or profile.engine,
+            model=original_response.model or profile.model,
+            attempt=original_attempt,
+            payload={
+                "repair_target_stage": target_stage.value,
+                "validation_error": str(validation_error),
+                "tools_authorised": False,
+                "side_effects_authorised": False,
+                "original_execution_replayed": False,
+                "original_evidence_refs": list(original_response.evidence_refs),
+            },
+        )
+        repair_context = {
+            "repair_target_stage": target_stage.value,
+            "repair_of_role": role,
+            "repair_of_attempt": original_attempt,
+            "repair_of_invocation": original_invocation,
+            "validation_error": str(validation_error),
+            "original_provider_response": {
+                "text": original_response.text,
+                "data": dict(original_response.data),
+                "provider": original_response.provider or profile.engine,
+                "model": original_response.model or profile.model,
+                "evidence_refs": list(original_response.evidence_refs),
+            },
+            "repair_authority": "structure_only",
+            "original_execution_must_not_be_replayed": True,
+        }
+        try:
+            repaired_response, parsed = await self._invoke_stage(
+                state,
+                Stage.STRUCTURE_REPAIR,
+                validator,
+                profile=profile,
+                allow_tools=False,
+                allow_side_effects=False,
+                attempts=self.config.structured_repair_attempts,
+                context=repair_context,
+                role_override=f"{role}:structure_repair",
+                publish_commentary=False,
+            )
+        except (TurnStopped, AuditPersistenceError):
+            raise
+        except StageInvocationError as exc:
+            self._audit(
+                state,
+                stage=target_stage.value,
+                role=role,
+                event="structure_repair_failed",
+                event_id=f"{repair_key}:failed",
+                provider=profile.engine,
+                model=profile.model,
+                attempt=original_attempt,
+                payload={
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "original_execution_replayed": False,
+                },
+            )
+            raise
+        self._audit(
+            state,
+            stage=target_stage.value,
+            role=role,
+            event="structure_repair_completed",
+            event_id=f"{repair_key}:completed",
+            provider=repaired_response.provider or profile.engine,
+            model=repaired_response.model or profile.model,
+            attempt=original_attempt,
+            payload={
+                "repair_target_stage": target_stage.value,
+                "original_execution_replayed": False,
+                "evidence_refs_preserved": list(original_response.evidence_refs),
+            },
+        )
+        return repaired_response, parsed
 
     async def _publish_stage_commentary(
         self,
@@ -1284,13 +1476,24 @@ class HERv2Runtime:
             )
         if any(item.event_id == event_id for item in state.deliveries):
             return True
+        delivery_id = ""
+        if kind in {"final", "clarification"}:
+            delivery_id = f"{state.ledger.turn_id}:delivery:{kind}"
+            state.delivery_id = delivery_id
+            state.delivery_kind = kind
+            state.delivery_event_id = event_id
         self._audit(
             state,
             stage="delivery",
             role="hashi_transport",
             event="delivery_intent",
             event_id=f"{event_id}:{kind}:intent",
-            payload={"kind": kind, "required": required},
+            payload={
+                "kind": kind,
+                "required": required,
+                "delivery_id": delivery_id or None,
+                "message_event_id": event_id,
+            },
         )
         delivered = False
         disposition = "transport_rejected"
@@ -1303,6 +1506,7 @@ class HERv2Runtime:
                 phase=phase,
                 provenance=provenance,
                 detail=detail,
+                delivery_id=delivery_id,
             )
             if isinstance(raw_receipt, DeliveryReceipt):
                 accepted = bool(raw_receipt.accepted)
@@ -1329,6 +1533,8 @@ class HERv2Runtime:
             "delivered": delivered,
             "disposition": disposition,
             "required": required,
+            "delivery_id": delivery_id or None,
+            "message_event_id": event_id,
         }
         if phase:
             delivery_payload["phase"] = phase
@@ -1361,6 +1567,12 @@ class HERv2Runtime:
         resolver = getattr(self.delivery, "resolve_initial", None)
         if not callable(resolver):
             return False
+        delivery_id = ""
+        if resolution in {"final", "clarification"}:
+            delivery_id = f"{state.ledger.turn_id}:delivery:{resolution}"
+            state.delivery_id = delivery_id
+            state.delivery_kind = resolution
+            state.delivery_event_id = target_event_id
         self._audit(
             state,
             stage="delivery",
@@ -1370,6 +1582,7 @@ class HERv2Runtime:
             payload={
                 "resolution": resolution,
                 "target_event_id": target_event_id,
+                "delivery_id": delivery_id or None,
             },
         )
         accepted = False
@@ -1381,6 +1594,7 @@ class HERv2Runtime:
                 text=text,
                 target_event_id=target_event_id,
                 event_id=event_id,
+                delivery_id=delivery_id,
             )
             if isinstance(raw_receipt, DeliveryReceipt):
                 accepted = bool(raw_receipt.accepted)
@@ -1414,6 +1628,7 @@ class HERv2Runtime:
                 "accepted": accepted,
                 "delivered": delivered,
                 "disposition": disposition,
+                "delivery_id": delivery_id or None,
             },
         )
         if accepted:
@@ -1506,6 +1721,58 @@ class HERv2Runtime:
             error=error,
         )
 
+    async def _reconciliation_result(
+        self,
+        state: _TurnState,
+        error: str,
+        *,
+        evidence_refs: Sequence[str] = (),
+    ) -> TurnResult:
+        for ref in evidence_refs:
+            value = str(ref or "").strip()
+            if value and value not in state.evidence_refs:
+                state.evidence_refs.append(value)
+        limitation = (
+            "Execution may have changed external state, but its result could not be "
+            "validated. HASHI did not replay the execution; operator reconciliation "
+            "is required before retrying or claiming completion."
+        )
+        if limitation not in state.limitations:
+            state.limitations.append(limitation)
+        if not state.ledger.is_terminal:
+            try:
+                ref = self._audit(
+                    state,
+                    stage=Stage.EXECUTION.value,
+                    role="runtime",
+                    event="execution_reconciliation_required",
+                    event_id=f"{state.ledger.turn_id}:execution:reconciliation-required",
+                    payload={
+                        "reason": error,
+                        "evidence_refs": list(state.evidence_refs),
+                        "execution_replayed": False,
+                        "automatic_retry_permitted": False,
+                    },
+                )
+                state.ledger.add_log_ref(ref)
+                await self._transition(
+                    state,
+                    LifecycleState.RECONCILIATION_REQUIRED,
+                    terminal_reason="execution_outcome_unconfirmed",
+                )
+            except AuditPersistenceError:
+                state.ledger.transition(
+                    LifecycleState.RECONCILIATION_REQUIRED,
+                    terminal_reason="execution_outcome_unconfirmed",
+                )
+                self.ledger_store.save(state.ledger)
+        return self._result(
+            state,
+            terminal=TerminalState.RECONCILIATION_REQUIRED,
+            text="",
+            error=error,
+        )
+
     def _schedule_meditation(
         self,
         state: _TurnState,
@@ -1563,6 +1830,9 @@ class HERv2Runtime:
             error=error,
             final_was_immediate=final_was_immediate,
             final_already_delivered=final_already_delivered,
+            delivery_id=state.delivery_id,
+            delivery_kind=state.delivery_kind,
+            delivery_event_id=state.delivery_event_id,
             review_count=state.review_count,
             replan_count=state.replan_count,
         )
@@ -1577,6 +1847,7 @@ def _terminal_reason(state: TerminalState) -> str:
         TerminalState.COMPLETED: "goal_achieved",
         TerminalState.COMPLETED_WITH_LIMITATIONS: "completed_with_disclosed_limitations",
         TerminalState.COMPLETED_WITH_REPORT_PENDING: "report_generation_exhausted",
+        TerminalState.RECONCILIATION_REQUIRED: "execution_outcome_unconfirmed",
         TerminalState.FAILED: "goal_not_achieved",
         TerminalState.ERROR: "technical_failure",
         TerminalState.ABANDONED: "continuation_not_justified",

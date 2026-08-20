@@ -20,6 +20,16 @@ class StructuredOutputError(StageInvocationError):
     pass
 
 
+class ReconciliationRequired(StageInvocationError):
+    """Execution may have changed external state but lacks a trustworthy result."""
+
+    def __init__(self, message: str, *, evidence_refs: Sequence[str] = ()):
+        super().__init__(message, retryable=False)
+        self.evidence_refs = tuple(
+            str(item) for item in evidence_refs if str(item).strip()
+        )
+
+
 class TurnStopped(RuntimeError):
     def __init__(self, reason: str):
         super().__init__(f"HER v2 turn stopped: {reason}")
@@ -52,6 +62,7 @@ class DeliveryPort(Protocol):
         phase: str = "",
         provenance: str = "",
         detail: str = "",
+        delivery_id: str = "",
     ) -> bool | DeliveryReceipt: ...
 
     async def resolve_initial(
@@ -61,6 +72,7 @@ class DeliveryPort(Protocol):
         text: str,
         target_event_id: str,
         event_id: str,
+        delivery_id: str = "",
     ) -> bool | DeliveryReceipt: ...
 
 
@@ -100,8 +112,9 @@ class RecordingDelivery:
         phase: str = "",
         provenance: str = "",
         detail: str = "",
+        delivery_id: str = "",
     ) -> bool:
-        del required, phase, provenance, detail
+        del required, phase, provenance, detail, delivery_id
         if kind in self.fail_kinds:
             return False
         if any(item.event_id == event_id for item in self.records):
@@ -116,8 +129,9 @@ class RecordingDelivery:
         text: str,
         target_event_id: str,
         event_id: str,
+        delivery_id: str = "",
     ) -> DeliveryReceipt:
-        del event_id
+        del event_id, delivery_id
         index = next(
             (
                 index

@@ -199,6 +199,72 @@ def request_meta_for(runtime, request_id: str) -> dict[str, Any]:
     return {}
 
 
+def _her_v2_delivery_metadata(response: Any) -> dict[str, Any]:
+    metadata = getattr(response, "stream_metadata", None)
+    if not isinstance(metadata, dict):
+        return {}
+    her_v2 = metadata.get("her_v2")
+    if not isinstance(her_v2, dict):
+        return {}
+    delivery = her_v2.get("delivery")
+    if not isinstance(delivery, dict) or not str(
+        delivery.get("delivery_id") or ""
+    ).strip():
+        return {}
+    return {
+        **delivery,
+        "final_already_delivered": bool(
+            her_v2.get("final_already_delivered")
+        ),
+    }
+
+
+async def record_her_v2_transport_receipt(
+    runtime: Any,
+    item: Any,
+    response: Any,
+    *,
+    delivered: bool,
+    disposition: str,
+    chunk_count: int = 0,
+    completion_path: str = "foreground",
+    error_type: str = "",
+) -> bool:
+    """Write the ordinary HASHI transport result back to the HER v2 audit."""
+
+    delivery = _her_v2_delivery_metadata(response)
+    if not delivery:
+        return False
+    backend = getattr(getattr(runtime, "backend_manager", None), "current_backend", None)
+    recorder = getattr(backend, "record_transport_delivery_receipt", None)
+    if not callable(recorder):
+        runtime.logger.warning(
+            f"HER v2 transport receipt recorder unavailable: request={item.request_id} "
+            f"delivery_id={delivery['delivery_id']}"
+        )
+        return False
+    try:
+        result = recorder(
+            request_id=str(item.request_id),
+            delivery_id=str(delivery["delivery_id"]),
+            delivered=bool(delivered),
+            disposition=str(disposition or "unknown"),
+            transport="telegram",
+            chunk_count=max(0, int(chunk_count or 0)),
+            completion_path=str(completion_path or "foreground"),
+            error_type=str(error_type or ""),
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        return bool(result)
+    except Exception as exc:  # delivery already happened; preserve and surface audit failure
+        runtime.logger.warning(
+            f"HER v2 transport receipt write failed: request={item.request_id} "
+            f"delivery_id={delivery['delivery_id']} error_type={type(exc).__name__}"
+        )
+        return False
+
+
 def _resolve_her_session_scope(runtime, item) -> str:
     explicit = str(getattr(item, "session_scope", None) or "").strip().lower()
     if explicit in {
@@ -858,6 +924,13 @@ def wrap_her_persona_stream(
         f"think={bool(getattr(runtime, '_think', False))} effort={effort} "
         f"delivery_requested={delivery_requested} blocked={delivery_blocked}"
     )
+    provisional_messages: dict[str, Any] = {}
+    bot = getattr(getattr(runtime, "app", None), "bot", None)
+    initial_resolution_capable = bool(
+        callable(getattr(runtime, "_send_text", None))
+        and callable(getattr(bot, "edit_message_text", None))
+        and callable(getattr(bot, "delete_message", None))
+    )
 
     async def _send_event(event, *, purpose: str, commentary: bool = False):
         await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
@@ -917,6 +990,10 @@ def wrap_her_persona_stream(
                 f"purpose={purpose} text_len={len(text)}"
             )
             return False
+        event_id = str(getattr(event, "event_id", "") or "").strip()
+        message_id = getattr(result, "message_id", None)
+        if event_id and message_id is not None:
+            provisional_messages[event_id] = result
         label = "acknowledgement" if purpose == "task_acknowledgement" else purpose
         _append_her_message_audit(
             runtime,
@@ -940,6 +1017,44 @@ def wrap_her_persona_stream(
 
     async def _control_presenter(event):
         return await _send_event(event, purpose="her_control")
+
+    async def _initial_resolution_presenter(event):
+        target_event_id = str(
+            getattr(event, "target_event_id", "") or ""
+        ).strip()
+        message = provisional_messages.get(target_event_id)
+        message_id = getattr(message, "message_id", None)
+        if message_id is None:
+            return False
+        resolution = str(getattr(event, "resolution", "") or "").strip()
+        try:
+            if resolution == "discard":
+                await runtime.app.bot.delete_message(
+                    chat_id=item.chat_id,
+                    message_id=message_id,
+                )
+                provisional_messages.pop(target_event_id, None)
+                return True
+            raw_text = str(getattr(event, "summary", "") or "").strip()
+            if not raw_text:
+                return False
+            if resolution == "commentary" and not raw_text.startswith("💬"):
+                raw_text = f"💬 {raw_text}"
+            await runtime.app.bot.edit_message_text(
+                chat_id=item.chat_id,
+                message_id=message_id,
+                text=_md_to_html(raw_text),
+                parse_mode="HTML",
+            )
+            if resolution in {"final", "clarification"}:
+                provisional_messages.pop(target_event_id, None)
+            return True
+        except Exception as exc:
+            runtime.logger.warning(
+                f"HER initial resolution failed: request={item.request_id} "
+                f"target_event_id={target_event_id} error_type={type(exc).__name__}"
+            )
+            return False
 
     async def _persist_event(event):
         event_suppression_reason = _her_event_suppression_reason(event)
@@ -995,6 +1110,9 @@ def wrap_her_persona_stream(
         reasoning_presenter=presentation_callback,
         commentary_presenter=_commentary_presenter,
         control_presenter=_control_presenter,
+        initial_resolution_presenter=(
+            _initial_resolution_presenter if initial_resolution_capable else None
+        ),
         verbose_enabled=lambda: bool(getattr(runtime, "_verbose", False)),
         think_enabled=lambda: bool(getattr(runtime, "_think", False)),
         commentary_enabled=lambda: bool(getattr(runtime, "_commentary", True)),
@@ -1004,9 +1122,14 @@ def wrap_her_persona_stream(
     )
 
     async def callback(event):
-        await router.route(event)
+        return await router.route(event)
 
     setattr(callback, "her_message_router", router)
+    setattr(
+        callback,
+        "supports_initial_resolution",
+        router.supports_initial_resolution,
+    )
     return callback
 
 
@@ -1707,6 +1830,13 @@ async def handle_success_delivery(
             delivered=False,
             completion_path="foreground",
         )
+        await record_her_v2_transport_receipt(
+            runtime,
+            item,
+            response,
+            delivered=False,
+            disposition="buffered_during_transfer",
+        )
         return
     runtime_retry.remember_output(runtime, item, visible_text)
     persist_success_memory(
@@ -1727,6 +1857,13 @@ async def handle_success_delivery(
             delivered=False,
             completion_path="foreground",
         )
+        await record_her_v2_transport_receipt(
+            runtime,
+            item,
+            response,
+            delivered=False,
+            disposition="telegram_delivery_not_requested",
+        )
         return
 
     response_text = visible_text
@@ -1746,33 +1883,79 @@ async def handle_success_delivery(
         else:
             cos_handled = True
     _print_final_response(runtime.name, response_text)
-    stream_finalization = await finalize_streamed_answer(
+    her_delivery = _her_v2_delivery_metadata(response)
+    delivered_at_initial_resolution = bool(
+        her_delivery.get("final_already_delivered")
+    )
+    receipt_disposition = "transport_returned_no_receipt"
+    try:
+        if delivered_at_initial_resolution:
+            stream_finalization = StreamFinalization(
+                streamed=False,
+                final_delivered=True,
+                fallback_required=False,
+            )
+            send_elapsed_s, chunk_count = 0.0, 0
+            receipt_disposition = "initial_resolution_delivered"
+        else:
+            stream_finalization = await finalize_streamed_answer(
+                runtime,
+                item,
+                stream_state=answer_stream_state,
+                final_text=response_text,
+            )
+            if stream_finalization.final_delivered:
+                send_elapsed_s = 0.0
+                chunk_count = 1 + stream_finalization.continuation_chunks_sent
+                receipt_disposition = "stream_final_promoted"
+            elif stream_finalization.fallback_required:
+                send_elapsed_s, chunk_count = await runtime.send_long_message(
+                    chat_id=item.chat_id,
+                    text=response_text,
+                    request_id=item.request_id,
+                    purpose="response",
+                )
+                receipt_disposition = (
+                    "transport_delivered"
+                    if chunk_count > 0
+                    else "transport_returned_no_receipt"
+                )
+            else:
+                send_elapsed_s, chunk_count = 0.0, 0
+                receipt_disposition = (
+                    "stream_finalization_failed"
+                    if stream_finalization.error
+                    else "transport_not_attempted"
+                )
+    except Exception as exc:
+        await record_her_v2_transport_receipt(
+            runtime,
+            item,
+            response,
+            delivered=False,
+            disposition="transport_exception",
+            error_type=type(exc).__name__,
+        )
+        raise
+    final_delivered = bool(
+        delivered_at_initial_resolution
+        or stream_finalization.final_delivered
+        or (stream_finalization.fallback_required and chunk_count > 0)
+    )
+    await record_her_v2_transport_receipt(
         runtime,
         item,
-        stream_state=answer_stream_state,
-        final_text=response_text,
+        response,
+        delivered=final_delivered,
+        disposition=receipt_disposition,
+        chunk_count=chunk_count,
     )
-    if stream_finalization.final_delivered:
-        send_elapsed_s = 0.0
-        chunk_count = 1 + stream_finalization.continuation_chunks_sent
-    elif stream_finalization.fallback_required:
-        send_elapsed_s, chunk_count = await runtime.send_long_message(
-            chat_id=item.chat_id,
-            text=response_text,
-            request_id=item.request_id,
-            purpose="response",
-        )
-    else:
-        send_elapsed_s, chunk_count = 0.0, 0
     runtime_cross_session.record_turn_result(
         runtime,
         item,
         assistant_text=response_text,
         response=response,
-        delivered=bool(
-            stream_finalization.final_delivered
-            or (stream_finalization.fallback_required and chunk_count > 0)
-        ),
+        delivered=final_delivered,
         completion_path="foreground",
     )
     await runtime._send_voice_reply(item.chat_id, response_text, item.request_id)

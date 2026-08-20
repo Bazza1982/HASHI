@@ -53,6 +53,7 @@ class LifecycleState(StrEnum):
     COMPLETED = "COMPLETED"
     COMPLETED_WITH_LIMITATIONS = "COMPLETED_WITH_LIMITATIONS"
     COMPLETED_WITH_REPORT_PENDING = "COMPLETED_WITH_REPORT_PENDING"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
     FAILED = "FAILED"
     ERROR = "ERROR"
     ABANDONED = "ABANDONED"
@@ -64,6 +65,7 @@ class TerminalState(StrEnum):
     COMPLETED = "COMPLETED"
     COMPLETED_WITH_LIMITATIONS = "COMPLETED_WITH_LIMITATIONS"
     COMPLETED_WITH_REPORT_PENDING = "COMPLETED_WITH_REPORT_PENDING"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
     FAILED = "FAILED"
     ERROR = "ERROR"
     ABANDONED = "ABANDONED"
@@ -79,6 +81,7 @@ class Stage(StrEnum):
     TRIAGE = "triage"
     PLANNING = "planning"
     EXECUTION = "execution"
+    STRUCTURE_REPAIR = "structure_repair"
     REPLANNING = "replanning"
     REVIEW = "review"
     FINALISATION = "finalisation"
@@ -191,6 +194,9 @@ class TurnResult:
     error: str = ""
     final_was_immediate: bool = False
     final_already_delivered: bool = False
+    delivery_id: str = ""
+    delivery_kind: str = ""
+    delivery_event_id: str = ""
     review_count: int = 0
     replan_count: int = 0
 

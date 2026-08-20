@@ -1198,6 +1198,156 @@ async def test_hard_safety_timeout_cancels_progressing_provider(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_side_effect_execution_bad_json_uses_tool_free_structure_repair_once(
+    tmp_path,
+):
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [
+                StageResponse(
+                    text="The requested change completed, but this is not JSON.",
+                    reasoning_trace="execution reasoning retained before validation",
+                    provider="fake-api",
+                    model="model-lightweight",
+                    evidence_refs=("hashi-tools:receipt-1",),
+                )
+            ],
+            Stage.STRUCTURE_REPAIR: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "The requested change completed.",
+                    "evidence_refs": ["hashi-tools:receipt-1"],
+                }
+            ],
+            Stage.FINALISATION: [{"report": "The requested change completed."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+    runtime = _runtime(
+        tmp_path,
+        provider,
+        config=_config(structured_repair_attempts=2),
+    )
+
+    result = await runtime.run_turn(
+        "Make the requested change once",
+        "request-execution-structure-repair",
+        effort="low",
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    execution_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.EXECUTION
+    ]
+    repair_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.STRUCTURE_REPAIR
+    ]
+    assert len(execution_requests) == 1
+    assert len(repair_requests) == 1
+    assert execution_requests[0].allow_side_effects is True
+    assert repair_requests[0].allow_tools is False
+    assert repair_requests[0].allow_side_effects is False
+    assert repair_requests[0].context["original_execution_must_not_be_replayed"] is True
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    original_response = next(
+        row
+        for row in rows
+        if row["event"] == "provider_response_received"
+        and row["stage"] == "execution"
+    )
+    assert original_response["payload"]["text"].startswith(
+        "The requested change completed"
+    )
+    assert original_response["payload"]["validation_pending"] is True
+    execution_reasoning = next(
+        row
+        for row in rows
+        if row["event"] == "reasoning_trace" and row["stage"] == "execution"
+    )
+    assert execution_reasoning["payload"]["trace"].startswith("execution reasoning")
+    completed = next(
+        row
+        for row in rows
+        if row["event"] == "stage_completed" and row["stage"] == "execution"
+    )
+    assert completed["payload"]["validation_source"] == "tool_free_structure_repair"
+    assert any(row["event"] == "structure_repair_completed" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_exhausted_execution_structure_repair_requires_reconciliation_without_replay(
+    tmp_path,
+):
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [
+                StageResponse(
+                    text="Non-empty execution reply without a JSON object.",
+                    reasoning_trace="available execution reasoning",
+                    provider="fake-api",
+                    model="model-lightweight",
+                    evidence_refs=("hashi-tools:uncertain-1",),
+                )
+            ],
+            Stage.STRUCTURE_REPAIR: [
+                StageResponse(text="still malformed"),
+                StageResponse(text="also malformed"),
+            ],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_config(structured_repair_attempts=2),
+    ).run_turn(
+        "Perform the external action once",
+        "request-reconciliation-required",
+        effort="low",
+    )
+
+    assert result.terminal_state is TerminalState.RECONCILIATION_REQUIRED
+    assert result.ledger["status"] == "RECONCILIATION_REQUIRED"
+    assert result.ledger["terminal_reason"] == "execution_outcome_unconfirmed"
+    assert result.evidence_refs == ("hashi-tools:uncertain-1",)
+    assert "was not replayed" in result.error
+    assert sum(
+        request.stage is Stage.EXECUTION
+        for _profile, request in provider.requests
+    ) == 1
+    assert sum(
+        request.stage is Stage.STRUCTURE_REPAIR
+        for _profile, request in provider.requests
+    ) == 2
+    assert not any(
+        request.stage is Stage.FINALISATION
+        for _profile, request in provider.requests
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    assert any(row["event"] == "structure_repair_failed" for row in rows)
+    reconciliation = next(
+        row for row in rows if row["event"] == "execution_reconciliation_required"
+    )
+    assert reconciliation["payload"]["execution_replayed"] is False
+    assert reconciliation["payload"]["automatic_retry_permitted"] is False
+
+
+@pytest.mark.asyncio
 async def test_structured_output_repair_is_bounded_and_preserves_classification(tmp_path):
     scripts = _initial("SIMPLE_TASK")
     scripts[Stage.TRIAGE] = [

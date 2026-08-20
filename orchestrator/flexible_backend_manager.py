@@ -621,7 +621,11 @@ class FlexibleBackendManager:
         first-match alone would always bind the wrong provider.
         """
         engine = canonical_backend_engine(engine)
-        candidates = [b for b in self.config.allowed_backends if b.get("engine") == engine]
+        candidates = [
+            backend
+            for backend in self.config.allowed_backends
+            if canonical_backend_engine(backend.get("engine")) == engine
+        ]
         if not candidates:
             return None
         model = str(target_model or "").strip()

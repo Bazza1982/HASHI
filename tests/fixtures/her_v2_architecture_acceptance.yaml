@@ -290,3 +290,77 @@ scenarios:
     logging_and_reasoning_expectations: [commentary_result_correlated_without_persona_content]
     user_facing_expectations: Optional Persona-styled progress preserves the neutral facts and is delivered no more than once.
     reason_this_test_matters: Presentation coupling can leak private instructions and make optional messaging control real work.
+
+  - test_id: HER-V2-AA-013
+    title: Malformed side-effect result is audited then repaired without replay
+    design_requirement_id: HER-V2-AUDIT-02
+    design_intention: A provider-format defect must not erase the original execution response or repeat an external action.
+    invariant_protected: Provider response and reasoning are durable before validation; repair has no tools or side-effect authority.
+    risk_or_failure_mode: Invalid JSON skips audit or causes the original Execution call to run twice.
+    test_level: end_to_end_regression
+    pytest_node_ids:
+      - tests/test_her_v2_runtime.py::test_side_effect_execution_bad_json_uses_tool_free_structure_repair_once
+      - tests/test_her_v2_adapter.py::test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
+    user_request: Perform the requested external action once
+    classification_input_or_result: SIMPLE_TASK
+    her_effort: low
+    initial_conditions: Execution has side-effect authority and returns non-JSON text with evidence and reasoning.
+    injected_disturbance: The substantive execution result is wrapped in an invalid protocol envelope.
+    required_behaviours: [persist_response_before_validation, persist_reasoning, invoke_tool_free_structure_repair, preserve_evidence]
+    prohibited_behaviours: [repeat_execution, repair_tool_use, repair_side_effects, unaudited_response_loss]
+    permitted_terminal_states: [COMPLETED]
+    required_terminal_state: COMPLETED
+    ledger_expectations: [one_execution_attempt, execution_completed_after_repaired_validation]
+    logging_and_reasoning_expectations: [provider_response_received_precedes_validation, repair_lineage_correlated]
+    user_facing_expectations: The truthful repaired result is reported once.
+    reason_this_test_matters: Retrying a side-effecting model to fix JSON can duplicate irreversible work.
+
+  - test_id: HER-V2-AA-014
+    title: Unrepairable side-effect result requires reconciliation
+    design_requirement_id: HER-V2-REC-01
+    design_intention: Unknown execution truth is preserved as an explicit terminal state instead of fabricated completion or automatic replay.
+    invariant_protected: Side-effect execution is at most once when its outcome cannot be validated.
+    risk_or_failure_mode: Repair exhaustion enters generic ERROR, Finalises a false result, or retries the side effect.
+    test_level: end_to_end_fault_injection
+    pytest_node_ids:
+      - tests/test_her_v2_runtime.py::test_exhausted_execution_structure_repair_requires_reconciliation_without_replay
+      - tests/test_her_v2_adapter.py::test_adapter_surfaces_reconciliation_required_as_non_success
+    user_request: Perform the external action once
+    classification_input_or_result: SIMPLE_TASK
+    her_effort: low
+    initial_conditions: Execution returns a malformed response after possible tool activity.
+    injected_disturbance: Every bounded tool-free structure-repair response is also malformed.
+    required_behaviours: [preserve_original_evidence, stop_before_finalisation, mark_reconciliation_required, forbid_automatic_retry]
+    prohibited_behaviours: [repeat_execution, claim_completion, discard_uncertain_evidence, enter_finalisation]
+    permitted_terminal_states: [RECONCILIATION_REQUIRED]
+    required_terminal_state: RECONCILIATION_REQUIRED
+    ledger_expectations: [terminal_reconciliation_required, execution_outcome_unconfirmed_reason]
+    logging_and_reasoning_expectations: [original_response_and_reasoning_retained, repair_exhaustion_correlated, replay_false]
+    user_facing_expectations: State clearly requires reconciliation before any retry or completion claim.
+    reason_this_test_matters: An unknown side-effect outcome is neither ordinary failure nor safe retry authority.
+
+  - test_id: HER-V2-AA-015
+    title: Ordinary final transport writes a correlated delivery receipt
+    design_requirement_id: HER-V2-DELIVERY-02
+    design_intention: Deferred final acceptance and actual user transport delivery remain distinct, correlated facts.
+    invariant_protected: One stable delivery_id joins HER intent to the ordinary HASHI send result.
+    risk_or_failure_mode: HER records a deferred event as delivered or the final transport result has no lineage.
+    test_level: boundary_and_integration
+    pytest_node_ids:
+      - tests/test_her_v2_adapter.py::test_adapter_correlates_ordinary_transport_receipt_with_stable_delivery_id
+      - tests/test_runtime_pipeline.py::test_handle_success_delivery_writes_correlated_her_v2_transport_receipt
+      - tests/test_runtime_pipeline.py::test_handle_success_delivery_does_not_duplicate_resolved_direct_response
+      - tests/test_runtime_pipeline.py::test_her_v2_stream_callback_returns_receipts_and_resolves_provisional_message
+    user_request: Return one final answer
+    classification_input_or_result: DIRECT_RESPONSE
+    her_effort: low
+    initial_conditions: HER defers a final event to HASHI or sends a resolvable provisional Immediate Response.
+    injected_disturbance: Stream callback receipts, initial resolution, and the ordinary final send cross separate boundaries.
+    required_behaviours: [stable_delivery_id, explicit_stream_acceptance, actual_transport_receipt, idempotent_receipt_audit]
+    prohibited_behaviours: [deferred_equals_delivered, duplicate_final, uncorrelated_transport_result, duplicate_receipt_record]
+    permitted_terminal_states: [COMPLETED]
+    required_terminal_state: COMPLETED
+    ledger_expectations: [terminal_completed, delivery_does_not_rewrite_lifecycle]
+    logging_and_reasoning_expectations: [delivery_intent_and_transport_receipt_share_id, delivered_boolean_is_transport_truth]
+    user_facing_expectations: Exactly one final answer with no speculative duplicate.
+    reason_this_test_matters: Completion reporting is not auditable unless the real transport outcome is correlated.

@@ -7707,6 +7707,9 @@ class FlexibleAgentRuntime:
         receipt_response = None
         receipt_error = ""
         receipt_delivered = False
+        receipt_disposition = "background_transport_not_attempted"
+        receipt_chunk_count = 0
+        receipt_error_type = ""
         try:
             await runtime_delivery_order.wait_for_turn(self, item.request_id)
             await runtime_background_status.wait_for_delivery(item)
@@ -7814,6 +7817,7 @@ class FlexibleAgentRuntime:
                 )
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=True, text=visible_text)
+                    receipt_disposition = "buffered_during_transfer"
                     return
                 runtime_retry.remember_output(self, item, visible_text)
                 try:
@@ -7917,13 +7921,25 @@ class FlexibleAgentRuntime:
                 _print_final_response(self.name, visible_text)
                 total_s = runtime_pipeline.queued_elapsed_s(item)
                 await self._send_wrapper_verbose_trace(item, safe_core_raw, visible_text, wrapper_result)
-                send_elapsed_s, chunk_count = await self.send_long_message(
-                    chat_id=item.chat_id,
-                    text=visible_text,
-                    request_id=item.request_id,
-                    purpose="bg-response",
-                )
-                receipt_delivered = chunk_count > 0
+                her_delivery = runtime_pipeline._her_v2_delivery_metadata(response)
+                if her_delivery.get("final_already_delivered"):
+                    send_elapsed_s, chunk_count = 0.0, 0
+                    receipt_delivered = True
+                    receipt_disposition = "initial_resolution_delivered"
+                else:
+                    send_elapsed_s, chunk_count = await self.send_long_message(
+                        chat_id=item.chat_id,
+                        text=visible_text,
+                        request_id=item.request_id,
+                        purpose="bg-response",
+                    )
+                    receipt_delivered = chunk_count > 0
+                    receipt_disposition = (
+                        "transport_delivered"
+                        if receipt_delivered
+                        else "transport_returned_no_receipt"
+                    )
+                receipt_chunk_count = chunk_count
                 await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
                 self._schedule_audit_followup(
                     item,
@@ -7975,11 +7991,25 @@ class FlexibleAgentRuntime:
 
         except Exception as e:
             receipt_error = str(e)
+            receipt_error_type = type(e).__name__
+            if not receipt_delivered:
+                receipt_disposition = "transport_exception"
             self._mark_error(str(e))
             self.error_logger.exception(
                 f"Unhandled error in _on_background_complete for {item.request_id}: {e}"
             )
         finally:
+            if receipt_response is not None:
+                await runtime_pipeline.record_her_v2_transport_receipt(
+                    self,
+                    item,
+                    receipt_response,
+                    delivered=receipt_delivered,
+                    disposition=receipt_disposition,
+                    chunk_count=receipt_chunk_count,
+                    completion_path="background",
+                    error_type=receipt_error_type,
+                )
             runtime_cross_session.record_turn_result(
                 self, item, assistant_text=receipt_text, response=receipt_response,
                 error=receipt_error, delivered=receipt_delivered, completion_path="background",

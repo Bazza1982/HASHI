@@ -18,6 +18,7 @@ from adapters.stream_events import (
     DELIVERY_REASONING,
     DELIVERY_TECHNICAL,
     DELIVERY_USER_COMMENTARY,
+    KIND_INITIAL_RESOLUTION,
     StreamEvent,
 )
 
@@ -38,6 +39,7 @@ class HERMessageRouter:
         reasoning_presenter: Presenter | None = None,
         commentary_presenter: Presenter | None = None,
         control_presenter: Presenter | None = None,
+        initial_resolution_presenter: Presenter | None = None,
         verbose_enabled: EnabledProbe | None = None,
         think_enabled: EnabledProbe | None = None,
         commentary_enabled: EnabledProbe | None = None,
@@ -51,6 +53,7 @@ class HERMessageRouter:
         self.reasoning_presenter = reasoning_presenter
         self.commentary_presenter = commentary_presenter
         self.control_presenter = control_presenter
+        self.initial_resolution_presenter = initial_resolution_presenter
         self.verbose_enabled = verbose_enabled or (lambda: False)
         self.think_enabled = think_enabled or (lambda: False)
         self.commentary_enabled = commentary_enabled or (lambda: True)
@@ -59,6 +62,10 @@ class HERMessageRouter:
         self.delivery_blocked = bool(delivery_blocked)
         self.deferred_final: StreamEvent | None = None
         self._accepted_event_ids: set[str] = set()
+
+    @property
+    def supports_initial_resolution(self) -> bool:
+        return self.initial_resolution_presenter is not None
 
     async def _call(self, callback: Presenter | None, event: StreamEvent) -> Any:
         if callback is None:
@@ -116,7 +123,7 @@ class HERMessageRouter:
         )
         return True
 
-    async def route(self, event: StreamEvent) -> None:
+    async def route(self, event: StreamEvent) -> bool:
         """Hand one stream event to exactly one presentation owner."""
 
         try:
@@ -135,41 +142,50 @@ class HERMessageRouter:
                 f"HER stream event rejected from presentation: request={self.request_id} "
                 f"kind={getattr(event, 'kind', '')} delivery_class={delivery_class or 'missing'}",
             )
-            return
+            return False
+        if getattr(event, "kind", None) == KIND_INITIAL_RESOLUTION:
+            if not self.supports_initial_resolution:
+                return False
+            return await self._dispatch(
+                event,
+                purpose="initial_resolution",
+                presenter=self.initial_resolution_presenter,
+            )
         if delivery_class == DELIVERY_INTERNAL:
-            return
+            return False
         if delivery_class == DELIVERY_FINAL:
             self.deferred_final = event
-            return
+            return True
         if delivery_class == DELIVERY_CONTROL:
             if event.required and self.delivery_requested:
-                await self._dispatch(
+                return await self._dispatch(
                     event,
                     purpose="control",
                     presenter=self.control_presenter,
                 )
-            return
+            return False
         if not self.delivery_requested or self.delivery_blocked:
-            return
+            return False
         if delivery_class == DELIVERY_TECHNICAL:
             if self.verbose_enabled():
-                await self._dispatch(
+                return await self._dispatch(
                     event,
                     purpose="technical",
                     presenter=self.technical_presenter,
                 )
-            return
+            return False
         if delivery_class == DELIVERY_REASONING:
             if self.think_enabled():
-                await self._dispatch(
+                return await self._dispatch(
                     event,
                     purpose="reasoning",
                     presenter=self.reasoning_presenter,
                 )
-            return
+            return False
         if delivery_class == DELIVERY_USER_COMMENTARY and self.commentary_enabled():
-            await self._dispatch(
+            return await self._dispatch(
                 event,
                 purpose="task_commentary",
                 presenter=self.commentary_presenter,
             )
+        return False

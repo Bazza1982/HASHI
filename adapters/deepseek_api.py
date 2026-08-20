@@ -9,7 +9,6 @@ Differences from OpenRouter:
   - Current model IDs are deepseek-v4-flash and deepseek-v4-pro
 """
 
-import asyncio
 import json
 
 from adapters.openrouter_api import OpenRouterAdapter, _APIResult
@@ -129,13 +128,11 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 if reasoning_delta:
                     reasoning_chunks.append(reasoning_delta)
                 if reasoning_delta and on_stream_event:
-                    asyncio.create_task(
-                        on_stream_event(
-                            StreamEvent(
-                                kind=KIND_THINKING,
-                                summary=reasoning_delta[:400],
-                                raw_delta=reasoning_delta,
-                            )
+                    await on_stream_event(
+                        StreamEvent(
+                            kind=KIND_THINKING,
+                            summary=reasoning_delta[:400],
+                            raw_delta=reasoning_delta,
                         )
                     )
 
@@ -144,8 +141,8 @@ class DeepSeekAdapter(OpenRouterAdapter):
                     text_chunks.append(content)
                     if on_stream_event:
                         from adapters.stream_events import KIND_TEXT_DELTA
-                        asyncio.create_task(
-                            on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary=content))
+                        await on_stream_event(
+                            StreamEvent(kind=KIND_TEXT_DELTA, summary=content)
                         )
 
                 for tc_delta in (delta.get("tool_calls") or []):

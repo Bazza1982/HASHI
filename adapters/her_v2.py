@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 import uuid
@@ -113,6 +114,13 @@ def _manager_authorises_profile(manager: Any, profile: ProviderProfile) -> bool:
 
 
 def _internal_stage_system_prompt(request: StageRequest) -> str | None:
+    if request.stage is Stage.STRUCTURE_REPAIR:
+        return (
+            "You are the isolated HER v2 structure repair role. Convert only the "
+            "quoted provider response into the requested JSON shape. Tools and side "
+            "effects are forbidden. Preserve uncertainty and never invent execution "
+            "evidence or claim that work completed."
+        )
     if request.role.startswith("sub_agent:"):
         return (
             "You are a bounded HER v2 sub-agent. Follow the supplied assignment and "
@@ -234,6 +242,7 @@ class _AdapterDelivery(DeliveryPort):
         phase: str = "",
         provenance: str = "",
         detail: str = "",
+        delivery_id: str = "",
     ) -> DeliveryReceipt:
         if kind == "commentary":
             raise ValueError(
@@ -277,6 +286,7 @@ class _AdapterDelivery(DeliveryPort):
                 required=required,
                 provenance=provenance or "model_authored",
                 detail=detail,
+                delivery_id=delivery_id,
             )
         )
         if kind in {"final", "clarification"}:
@@ -339,6 +349,7 @@ class _AdapterDelivery(DeliveryPort):
         text: str,
         target_event_id: str,
         event_id: str,
+        delivery_id: str = "",
     ) -> DeliveryReceipt:
         if self.callback is None:
             return DeliveryReceipt(False, False, "stream_callback_unavailable")
@@ -353,6 +364,7 @@ class _AdapterDelivery(DeliveryPort):
                 provenance="runtime_control",
                 resolution=resolution,
                 target_event_id=target_event_id,
+                delivery_id=delivery_id,
             )
         )
         delivered = accepted is True
@@ -729,6 +741,8 @@ class HERv2Adapter(BaseBackend):
         self._audit_log: DurableAuditLog | None = None
         self._learning: HERv2Learning | None = None
         self._active_runtimes: dict[str, HERv2Runtime] = {}
+        self._pending_delivery_receipts: dict[str, dict[str, Any]] = {}
+        self._recorded_delivery_ids: set[str] = set()
         self._initialized = False
         self.effort = "medium"
 
@@ -1182,12 +1196,33 @@ class HERv2Adapter(BaseBackend):
                 "replan_count": result.replan_count,
                 "final_was_immediate": result.final_was_immediate,
                 "final_already_delivered": result.final_already_delivered,
+                "delivery": {
+                    "delivery_id": result.delivery_id,
+                    "kind": result.delivery_kind,
+                    "event_id": result.delivery_event_id,
+                },
                 "evidence_refs": list(result.evidence_refs),
                 "limitations": list(result.limitations),
                 "shadow_mode": self._v2_config.shadow_mode,
             }
         }
+        if result.delivery_id:
+            self._pending_delivery_receipts[result.delivery_id] = {
+                "request_id": str(request_id),
+                "turn_id": result.turn_id,
+                "request_ref": str(result.ledger.get("request_ref") or ""),
+                "kind": result.delivery_kind,
+                "event_id": result.delivery_event_id,
+                "text_sha256": "sha256:"
+                + hashlib.sha256(result.text.encode("utf-8")).hexdigest(),
+            }
+            while len(self._pending_delivery_receipts) > 512:
+                oldest = next(iter(self._pending_delivery_receipts))
+                self._pending_delivery_receipts.pop(oldest, None)
         technical_error = result.terminal_state is TerminalState.ERROR
+        reconciliation_required = (
+            result.terminal_state is TerminalState.RECONCILIATION_REQUIRED
+        )
         report_pending = (
             result.terminal_state is TerminalState.COMPLETED_WITH_REPORT_PENDING
         )
@@ -1198,13 +1233,24 @@ class HERv2Adapter(BaseBackend):
                 "HER v2 completed execution but model-authored reporting exhausted its "
                 "retry limit; evidence is preserved for reconciliation."
             )
+        elif reconciliation_required:
+            error = (
+                "HER v2 cannot confirm the execution outcome after a malformed "
+                "provider result. The side-effecting execution was not replayed; "
+                "operator reconciliation is required before any retry."
+            )
         elif stopped and not error:
             error = "HER v2 turn was stopped by an authorised control path."
         return BackendResponse(
             text=result.text,
             duration_ms=duration_ms,
             error=error or None,
-            is_success=not (technical_error or report_pending or stopped),
+            is_success=not (
+                technical_error
+                or reconciliation_required
+                or report_pending
+                or stopped
+            ),
             stop_reason=result.terminal_state.value.lower(),
             usage=getattr(provider, "usage", None),
             cost_usd=(
@@ -1214,6 +1260,57 @@ class HERv2Adapter(BaseBackend):
             tool_loop_count=int(getattr(provider, "tool_loop_count", 0) or 0),
             stream_metadata=metadata,
         )
+
+    def record_transport_delivery_receipt(
+        self,
+        *,
+        request_id: str,
+        delivery_id: str,
+        delivered: bool,
+        disposition: str,
+        transport: str = "telegram",
+        chunk_count: int = 0,
+        completion_path: str = "foreground",
+        error_type: str = "",
+    ) -> bool:
+        """Correlate the ordinary HASHI send result with the HER v2 audit trail."""
+
+        identifier = str(delivery_id or "").strip()
+        if not identifier or self._audit_log is None:
+            return False
+        if identifier in self._recorded_delivery_ids:
+            return True
+        pending = self._pending_delivery_receipts.get(identifier)
+        if not isinstance(pending, Mapping):
+            return False
+        if str(pending.get("request_id") or "") != str(request_id or ""):
+            return False
+        self._audit_log.append(
+            event_id=f"{identifier}:transport-receipt",
+            turn_id=str(pending.get("turn_id") or ""),
+            request_ref=str(pending.get("request_ref") or ""),
+            stage="delivery",
+            role="hashi_transport",
+            event="transport_delivery_receipt",
+            payload={
+                "delivery_id": identifier,
+                "message_event_id": str(pending.get("event_id") or ""),
+                "kind": str(pending.get("kind") or ""),
+                "transport": str(transport or "unknown"),
+                "delivered": bool(delivered),
+                "disposition": str(disposition or "unknown"),
+                "chunk_count": max(0, int(chunk_count or 0)),
+                "completion_path": str(completion_path or "foreground"),
+                "text_sha256": str(pending.get("text_sha256") or ""),
+                "error_type": str(error_type or "") or None,
+            },
+        )
+        self._pending_delivery_receipts.pop(identifier, None)
+        self._recorded_delivery_ids.add(identifier)
+        if len(self._recorded_delivery_ids) > 1024:
+            self._recorded_delivery_ids.clear()
+            self._recorded_delivery_ids.add(identifier)
+        return True
 
     async def shutdown(self):
         runtime_context = self._runtime_context()

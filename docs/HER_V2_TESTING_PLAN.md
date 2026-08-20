@@ -267,6 +267,9 @@ EXECUTING
 EXECUTING
   -> EXECUTION_COMPLETED
 
+EXECUTING [side-effect result remains unvalidated after isolated repair]
+  -> RECONCILIATION_REQUIRED
+
 EXECUTION_COMPLETED [XHIGH/MAX]
   -> REVIEWING
 
@@ -393,13 +396,14 @@ The terminal-state decision table is:
 | Goal achieved without material limitations | `COMPLETED` |
 | Goal substantially achieved with material limitations | `COMPLETED_WITH_LIMITATIONS` |
 | Work completed but reporting exhausted retries | `COMPLETED_WITH_REPORT_PENDING` |
+| Side-effecting Execution returned, but its result remains unvalidated after tool-free repair | `RECONCILIATION_REQUIRED` |
 | Primary Agent correctly concludes the goal was not achieved | `FAILED` |
 | Technical failure prevents correct execution | `ERROR` |
 | Primary Agent deliberately ends work because continuation is no longer justified | `ABANDONED` |
 | User or authorised control stops the turn | `STOPPED` |
 | Clarification or confirmation is required | `PENDING_USER_INPUT` |
 
-One parameterised decision suite must cover all terminal states. Representative end-to-end scenarios must separately cover the states whose correctness depends on multi-stage evidence, including `COMPLETED_WITH_REPORT_PENDING`, `ABANDONED`, `STOPPED`, and `PENDING_USER_INPUT`.
+One parameterised decision suite must cover all terminal states. Representative end-to-end scenarios must separately cover the states whose correctness depends on multi-stage evidence, including `COMPLETED_WITH_REPORT_PENDING`, `RECONCILIATION_REQUIRED`, `ABANDONED`, `STOPPED`, and `PENDING_USER_INPUT`.
 
 Tests must prove:
 
@@ -577,7 +581,8 @@ The permitted handling sequence is:
 3. extract valid essential content only where unambiguous and safe;
 4. retry with the required structure;
 5. log the original defect and any repair;
-6. produce `ERROR` only when required information remains unavailable and the stage cannot safely continue.
+6. produce `ERROR` when required information remains unavailable and no side-effect result is in doubt;
+7. produce `RECONCILIATION_REQUIRED` when a side-effecting Execution result remains unvalidated, without replaying Execution.
 
 Candidate imperfections include:
 
@@ -600,6 +605,15 @@ Tolerance must never:
 - fabricate mandatory Planning completion;
 - turn reviewer output into Primary Agent authority;
 - silently accept unknown protocol drift.
+
+For a side-effect-authorised Execution response, tests must additionally prove:
+
+- `provider_response_received` and the available reasoning trace are durable before validation;
+- the original Execution provider is invoked exactly once;
+- repair uses the explicit `STRUCTURE_REPAIR` stage with tools and side effects disabled;
+- repaired output retains the original evidence references;
+- repair exhaustion skips Finalisation and records `RECONCILIATION_REQUIRED`;
+- neither repair nor later recovery automatically replays the side effect.
 
 Stage failure after repair exhaustion should be tested through a parameterised fault harness, with a small number of E2E representatives for Planning and Reporting where downstream behaviour materially differs.
 
@@ -670,6 +684,12 @@ Tests must prove:
 - `DIRECT_RESPONSE` is the sole exception because its Immediate Response is the final answer;
 - a transport without explicit initial-resolution capability never receives a
   provisional Immediate Response and therefore cannot duplicate the final;
+- stream callbacks return an explicit acceptance result, and initial-resolution
+  support is advertised only when the provisional transport message can be
+  edited or deleted;
+- every ordinary final send writes its real outcome back to the HER v2 audit
+  under the same stable `delivery_id` used by the deferred delivery intent;
+- a deferred-lane acceptance is never asserted as an actual transport delivery;
 - reporting failure follows the dedicated retry and terminal policy.
 
 Exact wording should not be asserted unless a safety, authority, or protocol requirement depends on it.

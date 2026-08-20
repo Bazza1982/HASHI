@@ -87,6 +87,7 @@ class StreamEvent:
     provenance: str = ""  # provider_returned, provider_summary, etc.
     resolution: str = ""  # final, commentary, clarification, or discard
     target_event_id: str = ""  # provisional event changed by a control event
+    delivery_id: str = ""  # stable transport correlation for final-boundary receipts
 
 
 # Callback signature accepted by generate_response().

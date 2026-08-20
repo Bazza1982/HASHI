@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -236,3 +237,44 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_stream(monkeypatch
     assert response.text == "done"
     assert response.tool_call_count == 1
     assert response.tool_loop_count == 1
+
+
+@pytest.mark.asyncio
+async def test_deepseek_stream_waits_for_reasoning_capture_before_returning(tmp_path):
+    adapter = _adapter(tmp_path)
+
+    class _StreamResponse:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield 'data: {"choices":[{"delta":{"reasoning_content":"reason first"}}]}'
+            yield (
+                'data: {"choices":[{"delta":{"content":"result text"},'
+                '"finish_reason":"stop"}],"usage":{"prompt_tokens":2,'
+                '"completion_tokens":3}}'
+            )
+            yield "data: [DONE]"
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _StreamResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    adapter.client = SimpleNamespace(stream=lambda *args, **kwargs: _StreamContext())
+    events = []
+
+    async def capture(event):
+        await asyncio.sleep(0.01)
+        events.append((event.kind, event.raw_delta or event.summary))
+
+    result = await adapter._stream_api_once({}, {}, capture)
+
+    assert result.text == "result text"
+    assert result.reasoning_content == "reason first"
+    assert events == [
+        ("thinking", "reason first"),
+        ("text_delta", "result text"),
+    ]

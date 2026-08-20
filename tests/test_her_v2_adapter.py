@@ -299,7 +299,126 @@ async def test_adapter_direct_response_uses_final_lane_once(tmp_path):
         "delivered": False,
         "disposition": "deferred_to_final_boundary",
         "required": True,
+        "delivery_id": response.stream_metadata["her_v2"]["delivery"][
+            "delivery_id"
+        ],
+        "message_event_id": response.stream_metadata["her_v2"]["delivery"][
+            "event_id"
+        ],
     }
+
+
+@pytest.mark.asyncio
+async def test_adapter_correlates_ordinary_transport_receipt_with_stable_delivery_id(
+    tmp_path,
+):
+    provider = _DirectProvider()
+    config = _agent_config(tmp_path)
+    setattr(config, "_her_v2_stage_provider", provider)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+
+    async def capture(_event):
+        return None
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response(
+        "Hello", "request-delivery-receipt", on_stream_event=capture
+    )
+    delivery = response.stream_metadata["her_v2"]["delivery"]
+
+    assert delivery["delivery_id"]
+    assert delivery["event_id"]
+    assert adapter.record_transport_delivery_receipt(
+        request_id="request-delivery-receipt",
+        delivery_id=delivery["delivery_id"],
+        delivered=True,
+        disposition="transport_delivered",
+        chunk_count=1,
+    ) is True
+    # The same transport callback is idempotent and cannot duplicate audit truth.
+    assert adapter.record_transport_delivery_receipt(
+        request_id="request-delivery-receipt",
+        delivery_id=delivery["delivery_id"],
+        delivered=True,
+        disposition="transport_delivered",
+        chunk_count=1,
+    ) is True
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "agent" / "her_v2_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    receipts = [
+        row for row in rows if row["event"] == "transport_delivery_receipt"
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["payload"]["delivery_id"] == delivery["delivery_id"]
+    assert receipts[0]["payload"]["message_event_id"] == delivery["event_id"]
+    assert receipts[0]["payload"]["delivered"] is True
+    assert receipts[0]["payload"]["chunk_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_adapter_surfaces_reconciliation_required_as_non_success(tmp_path):
+    class _MalformedExecutionProvider(_DirectProvider):
+        async def invoke(self, profile, request):
+            self.requests.append((profile, request))
+            if request.stage is Stage.IMMEDIATE_RESPONSE:
+                payload = {"message": "I have it."}
+            elif request.stage is Stage.TRIAGE:
+                payload = {"classification": "SIMPLE_TASK", "goal": request.goal}
+            elif request.stage is Stage.EXECUTION:
+                return StageResponse(
+                    text="execution reply without valid JSON",
+                    reasoning_trace="execution trace",
+                    provider=profile.engine,
+                    model=profile.model,
+                    evidence_refs=("hashi-tools:uncertain",),
+                )
+            elif request.stage is Stage.STRUCTURE_REPAIR:
+                return StageResponse(
+                    text="repair reply without valid JSON",
+                    provider=profile.engine,
+                    model=profile.model,
+                )
+            else:
+                raise AssertionError(f"unexpected stage: {request.stage}")
+            return StageResponse(
+                text="",
+                data=payload,
+                provider=profile.engine,
+                model=profile.model,
+            )
+
+    provider = _MalformedExecutionProvider()
+    config = _agent_config(
+        tmp_path,
+        her_v2={"profiles": _profiles(), "structured_repair_attempts": 2},
+    )
+    setattr(config, "_her_v2_stage_provider", provider)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response(
+        "Perform the action once", "request-adapter-reconciliation"
+    )
+
+    assert response.is_success is False
+    assert response.stop_reason == "reconciliation_required"
+    assert "was not replayed" in response.error
+    assert response.stream_metadata["her_v2"]["terminal_state"] == (
+        "RECONCILIATION_REQUIRED"
+    )
+    assert sum(
+        request.stage is Stage.EXECUTION
+        for _profile, request in provider.requests
+    ) == 1
+    assert sum(
+        request.stage is Stage.STRUCTURE_REPAIR
+        for _profile, request in provider.requests
+    ) == 2
 
 
 @pytest.mark.asyncio
@@ -810,6 +929,32 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
             "HER v2 Planner" in planning_backend.sys_prompt
             or "HER v2 Replanner" in planning_backend.sys_prompt
         )
+
+    repair_request = _stage_request(
+        Stage.STRUCTURE_REPAIR,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    repair_request = StageRequest(
+        **{
+            **repair_request.__dict__,
+            "context": {
+                "repair_target_stage": Stage.EXECUTION.value,
+                "original_provider_response": {"text": "not json"},
+                "original_execution_must_not_be_replayed": True,
+            },
+        }
+    )
+    await provider.invoke(profile, repair_request)
+    repair_backend = manager.backends[-1]
+    assert repair_backend.tool_registry is None
+    assert repair_backend.sys_prompt.startswith(
+        "You are the isolated HER v2 structure repair role"
+    )
+    assert '"tools_authorised_for_this_stage": false' in repair_backend.prompt
+    assert '"external_side_effects_authorised_for_this_stage": false' in (
+        repair_backend.prompt
+    )
 
 
 @pytest.mark.asyncio

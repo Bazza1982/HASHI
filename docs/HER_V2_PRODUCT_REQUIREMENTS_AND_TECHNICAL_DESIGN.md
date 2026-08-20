@@ -518,6 +518,9 @@ EXECUTING
 EXECUTING
   -> EXECUTION_COMPLETED
 
+EXECUTING [side-effect result cannot be validated after isolated repair]
+  -> RECONCILIATION_REQUIRED
+
 EXECUTION_COMPLETED [XHIGH/MAX]
   -> REVIEWING
 
@@ -553,6 +556,7 @@ HER v2 uses the following unified terminal states:
 | `COMPLETED` | Required work and reporting completed |
 | `COMPLETED_WITH_LIMITATIONS` | Work concluded with material disclosed limitations |
 | `COMPLETED_WITH_REPORT_PENDING` | Execution completed but user-facing reporting exhausted its retry limit |
+| `RECONCILIATION_REQUIRED` | Execution may have changed external state, but the result could not be validated; automatic replay is forbidden |
 | `FAILED` | Execution ran correctly but concluded that the user's goal could not be achieved |
 | `ERROR` | A technical failure prevented correct execution, including an unexpected process interruption or lifecycle violation |
 | `ABANDONED` | The Primary Agent deliberately concluded that continued execution was no longer justified and recorded the reason |
@@ -633,6 +637,19 @@ HASHI orchestration logs are the authoritative audit source. They must preserve 
 
 Reasoning-trace logging is a required HASHI audit principle. HER must capture every reasoning trace made available by the selected provider or produced as a visible/structured HER reasoning artefact. If a provider does not expose a reasoning trace, HASHI must record that it was unavailable rather than fabricate one.
 
+Every returned provider response is persisted as `provider_response_received`
+before schema validation. The record contains the redacted raw text/data,
+provider/model identity, usage, evidence references, and reasoning-availability
+marker. Available reasoning, or the explicit unavailable marker, is also
+persisted before validation. Consequently, empty, malformed, or schema-invalid
+responses remain auditable even when the stage cannot complete.
+
+User-message delivery has two correlated records. HER first records delivery
+intent with a stable `delivery_id`; the ordinary HASHI final-send boundary then
+appends the actual transport receipt with that same identifier, the transport
+disposition, delivery boolean, and chunk count. Acceptance into a deferred
+final lane is not proof of delivery.
+
 Logs must apply existing HASHI secret-redaction, access-control, retention, and workspace-isolation policies.
 
 ## 17. Failure, Retry, and Recovery
@@ -648,6 +665,14 @@ HER permits bounded retry within the active process and current stage for techni
 - report-generation failure.
 
 Retry limits and delays are configurable. A retry does not change the Triage classification or user goal.
+
+A stage invocation authorised to perform external side effects is never
+replayed merely to repair its output format. If its returned envelope is
+invalid, HER invokes a distinct `STRUCTURE_REPAIR` stage using the original
+response as quoted evidence. That repair stage has no Tool Gateway registry and
+no side-effect authority. If bounded repair cannot establish a valid result,
+the turn becomes `RECONCILIATION_REQUIRED`; it does not enter Finalisation,
+claim completion, or automatically retry Execution.
 
 ### 17.2 No process-restart resumption
 

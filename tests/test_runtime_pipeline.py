@@ -23,6 +23,7 @@ from adapters.stream_events import (
     DELIVERY_USER_COMMENTARY,
     KIND_ACKNOWLEDGEMENT,
     KIND_COMMENTARY,
+    KIND_INITIAL_RESOLUTION,
     KIND_PROGRESS,
     KIND_REVIEW,
     KIND_TEXT_DELTA,
@@ -2586,6 +2587,106 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat():
 
 
 @pytest.mark.asyncio
+async def test_handle_success_delivery_writes_correlated_her_v2_transport_receipt():
+    runtime = _runtime()
+    item = _item(request_id="req-her-v2-receipt", prompt="user text")
+    receipts = []
+
+    def record_transport_delivery_receipt(**fields):
+        receipts.append(fields)
+        return True
+
+    runtime.backend_manager.current_backend.record_transport_delivery_receipt = (
+        record_transport_delivery_receipt
+    )
+    response = SimpleNamespace(
+        text="core text",
+        stream_metadata={
+            "her_v2": {
+                "final_already_delivered": False,
+                "delivery": {
+                    "delivery_id": "turn-1:delivery:final",
+                    "event_id": "turn-1:final",
+                    "kind": "final",
+                },
+            }
+        },
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        response,
+        visible_text="visible text",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0]["request_id"] == item.request_id
+    assert receipts[0]["delivery_id"] == "turn-1:delivery:final"
+    assert receipts[0]["delivered"] is True
+    assert receipts[0]["disposition"] == "transport_delivered"
+    assert receipts[0]["chunk_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_success_delivery_does_not_duplicate_resolved_direct_response():
+    runtime = _runtime()
+    item = _item(request_id="req-her-v2-resolved", prompt="hello")
+    receipts = []
+
+    def record_transport_delivery_receipt(**fields):
+        receipts.append(fields)
+        return True
+
+    runtime.backend_manager.current_backend.record_transport_delivery_receipt = (
+        record_transport_delivery_receipt
+    )
+
+    async def unexpected_send(**_kwargs):
+        raise AssertionError("ordinary final transport must not duplicate resolved initial")
+
+    runtime.send_long_message = unexpected_send
+    response = SimpleNamespace(
+        text="direct answer",
+        stream_metadata={
+            "her_v2": {
+                "final_already_delivered": True,
+                "delivery": {
+                    "delivery_id": "turn-resolved:delivery:final",
+                    "event_id": "turn-resolved:immediate",
+                    "kind": "final",
+                },
+            }
+        },
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        response,
+        visible_text="direct answer",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert receipts[0]["delivered"] is True
+    assert receipts[0]["disposition"] == "initial_resolution_delivered"
+    assert receipts[0]["chunk_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_scheduler_delivery_persists_cross_session_receipt_after_send():
     runtime = _runtime()
     runtime.config.active_backend = "her"
@@ -2677,6 +2778,62 @@ async def test_her_direct_response_stream_event_is_not_sent_before_final_deliver
 
     assert runtime.sent_message["text"] == "complete direct answer"
     assert feedback.her_message_router.deferred_final is not None
+
+
+@pytest.mark.asyncio
+async def test_her_v2_stream_callback_returns_receipts_and_resolves_provisional_message():
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "medium"
+    runtime._commentary = True
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+
+    async def _send_text(chat_id, text, **kwargs):
+        return await runtime.app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=kwargs.get("parse_mode"),
+        )
+
+    runtime._send_text = _send_text
+    item = _item(request_id="req-her-v2-resolution", prompt="hello")
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        item,
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.on_stream_event.supports_initial_resolution is True
+    accepted = await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT,
+            summary="I am checking.",
+            event_id="turn-1:immediate",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_v2",
+            phase="immediate",
+        )
+    )
+    resolved = await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_INITIAL_RESOLUTION,
+            summary="Final direct answer.",
+            event_id="turn-1:immediate:resolution",
+            delivery_class="internal",
+            origin="her_v2",
+            phase="initial_resolution",
+            resolution="final",
+            target_event_id="turn-1:immediate",
+            delivery_id="turn-1:delivery:final",
+        )
+    )
+
+    assert accepted is True
+    assert resolved is True
+    assert len(runtime.app.bot.sent) == 1
+    assert runtime.app.bot.edits[0]["message_id"] == 77
+    assert "Final direct answer" in runtime.app.bot.edits[0]["text"]
 
 
 @pytest.mark.asyncio
