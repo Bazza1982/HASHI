@@ -417,21 +417,29 @@ class HERv2Runtime:
             review_limit=self.config.review_limits[state.effort],
         )
         if policy.planning:
-            habits: Sequence[str] = ()
-            with suppress(Exception):
-                habits = await self.habits.retrieve(
-                    goal=state.goal, turn_id=state.ledger.turn_id
+            planning_context: dict[str, Any] = {
+                "classification": classification.value,
+            }
+            # ``meditation_enabled`` is the compatibility switch for the
+            # whole Habit–Meditation loop, matching /habit off semantics.
+            if self.config.meditation_enabled:
+                habits: Sequence[str] = ()
+                with suppress(Exception):
+                    habits = await self.habits.retrieve(
+                        goal=state.goal, turn_id=state.ledger.turn_id
+                    )
+                planning_context.update(
+                    {
+                        "habits": list(habits),
+                        "habits_are_advisory": True,
+                    }
                 )
             _response, plan = await self._invoke_stage(
                 state,
                 Stage.PLANNING,
                 parse_plan,
                 allow_tools=False,
-                context={
-                    "classification": classification.value,
-                    "habits": list(habits),
-                    "habits_are_advisory": True,
-                },
+                context=planning_context,
             )
             await self._transition(state, LifecycleState.PLANNED)
             self._activate_plan(state, plan, replacement=False)

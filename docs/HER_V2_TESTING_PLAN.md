@@ -478,6 +478,18 @@ Tests must prove:
 - user intent overrides conflicting Habit guidance;
 - Execution evidence overrides Habits;
 - Replanning does not read Habits again;
+- Habit retrieval ranks only title and metadata against the bounded current
+  request and cannot match solely from Bridge conversation background;
+- disabled and request-ineligible turns neither read the catalogue nor add
+  Habit-specific Planning context;
+- `low` effort skips Habit retrieval but still schedules eligible Meditation
+  only after final-delivery-boundary acceptance and terminal persistence;
+- repeated Meditation scheduling for one turn produces one durable job, one
+  model decision, and one idempotent Write;
+- Meditation may share the premium stage's provider backend but selects the
+  configured lightweight/flash model, never the premium/pro execution model;
+- retrieval errors fail open without a synthetic `habit_planning_skipped`
+  audit, while Meditation failures remain invisible to the completed turn;
 - Meditation runs only after eligible execution and cannot modify the completed turn;
 - Meditation failure does not block Finalisation or reporting;
 - Dream runs outside the live critical path;

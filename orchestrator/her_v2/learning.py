@@ -91,10 +91,14 @@ class HERv2Learning:
         self.dream_tasks: set[asyncio.Task] = set()
 
     def bind_turn(
-        self, *, notification_context: Mapping[str, Any] | None = None
+        self,
+        *,
+        learning_eligible: bool = True,
+        notification_context: Mapping[str, Any] | None = None,
     ) -> "HERv2TurnLearning":
         return HERv2TurnLearning(
             owner=self,
+            learning_eligible=bool(learning_eligible),
             notification_context=dict(notification_context or {}),
         )
 
@@ -102,7 +106,13 @@ class HERv2Learning:
         config = self.config_getter()
         if not config.enabled:
             return ()
-        selected = self.store.retrieve(goal, limit=config.retrieval_limit)
+        # Bridge-managed conversation context is useful to the live turn, but
+        # it is not Habit-retrieval authority.  Match only against the current
+        # authoritative request, using the legacy bounded extraction contract.
+        current_request = her_habits.extract_current_request(goal)
+        selected = self.store.retrieve(
+            current_request, limit=config.retrieval_limit
+        )
         context = her_habits.render_habit_advisory_context(selected)
         ref = self._audit(
             event_id=f"{turn_id}:habits:planning-retrieval",
@@ -152,7 +162,9 @@ class HERv2Learning:
         )
         prompt = her_habits.build_meditation_prompt(
             agent_name=self.agent_name,
-            task_prompt=goal,
+            # Meditation is turn-based.  Do not persist Bridge conversation
+            # background into the durable learning job for this turn.
+            task_prompt=her_habits.extract_current_request(goal),
             result=result,
             habits=self.store.load(),
             config=config,
@@ -676,9 +688,12 @@ class HERv2TurnLearning:
     """Request-bound facade carrying delivery context into Meditation."""
 
     owner: HERv2Learning
+    learning_eligible: bool
     notification_context: Mapping[str, Any]
 
     async def retrieve(self, *, goal: str, turn_id: str) -> Sequence[str]:
+        if not self.learning_eligible:
+            return ()
         return await self.owner.retrieve(goal=goal, turn_id=turn_id)
 
     async def meditate(
@@ -691,6 +706,8 @@ class HERv2TurnLearning:
         limitations: Sequence[str],
         terminal_state: TerminalState,
     ) -> None:
+        if not self.learning_eligible:
+            return
         await self.owner.enqueue_meditation(
             turn_id=turn_id,
             goal=goal,

@@ -225,14 +225,22 @@ scenarios:
     pytest_node_ids:
       - tests/test_her_v2_runtime.py::test_high_replanning_creates_new_plan_without_reconsulting_habits
       - tests/test_her_v2_runtime.py::test_meditation_failure_cannot_change_completed_turn
+      - tests/test_her_v2_runtime.py::test_disabled_habit_pipeline_preserves_the_plain_planning_path
+      - tests/test_her_v2_runtime.py::test_habit_retrieval_error_fails_open_without_skip_audit
+      - tests/test_her_v2_runtime.py::test_low_effort_meditation_starts_after_final_delivery_boundary
+      - tests/test_her_v2_adapter.py::test_request_scoped_ineligibility_disables_planning_and_meditation
+      - tests/test_her_v2_learning.py::test_planning_retrieval_ignores_bridge_background
+      - tests/test_her_v2_learning.py::test_meditation_persists_only_the_current_turn_request
+      - tests/test_her_v2_learning.py::test_duplicate_turn_meditation_is_one_model_decision_and_one_write
+      - tests/test_her_v2_adapter.py::test_adapter_runs_durable_meditation_after_completed_turn
       - tests/test_her_v2_runtime.py::test_dream_is_never_a_live_turn_dependency
     user_request: Complete the current task using current evidence
     classification_input_or_result: COMPLEX_TASK
     her_effort: high
     initial_conditions: Advisory Habit retrieval is available; Meditation or Dream may fail.
     injected_disturbance: Replanning occurs and optional maintenance raises an exception.
-    required_behaviours: [retrieve_habits_once_for_initial_plan, finalise_without_maintenance, preserve_goal]
-    prohibited_behaviours: [habit_as_authority, habit_reread_on_replan, dream_in_live_path]
+    required_behaviours: [retrieve_habits_once_for_initial_plan, retrieve_from_current_request_only, disable_ineligible_learning, preserve_low_effort_meditation_order, route_meditation_to_lightweight_model, allow_shared_provider_backend, deduplicate_turn_meditation, fail_open_on_retrieval_error, finalise_without_maintenance, preserve_goal]
+    prohibited_behaviours: [habit_as_authority, bridge_background_as_retrieval_input, habit_reread_on_replan, premium_model_for_meditation, duplicate_meditation_write, meditation_before_terminal_persistence, synthetic_habit_planning_skipped_audit, dream_in_live_path]
     permitted_terminal_states: [COMPLETED, COMPLETED_WITH_LIMITATIONS]
     required_terminal_state: COMPLETED
     ledger_expectations: [learning_systems_do_not_change_lifecycle_or_plan_authority]

@@ -783,6 +783,20 @@ class HERv2Adapter(BaseBackend):
             resolved_extra,
         )
 
+    def _habit_request_eligible(self, request_id: str) -> bool:
+        """Preserve the old HER request-scoped learning exclusion contract."""
+
+        extra = self._extra
+        if (
+            bool(extra.get("ephemeral_session"))
+            or extra.get("habit_learning_eligible") is False
+        ):
+            return False
+        meta = self._runtime_request_meta(request_id)
+        if not meta or "habit_learning_eligible" not in meta:
+            return True
+        return bool(meta.get("habit_learning_eligible"))
+
     def _runtime_request_meta(self, request_id: str) -> dict[str, Any]:
         runtime = self._runtime_context()
         registry = getattr(runtime, "_request_meta_by_id", None)
@@ -1098,15 +1112,24 @@ class HERv2Adapter(BaseBackend):
         provider = self._new_stage_provider(
             on_stream_event=on_stream_event, silent=silent
         )
+        habit_config = self._habit_meditation_config()
+        habit_request_eligible = self._habit_request_eligible(request_id)
+        if habit_config.enabled and not habit_request_eligible:
+            self.logger.info(
+                "HER v2 Habit pipeline skipped by request eligibility: request=%s",
+                request_id,
+            )
         runtime_config = replace(
             self._v2_config,
             meditation_enabled=(
-                self._habit_meditation_config().enabled
+                habit_config.enabled
+                and habit_request_eligible
                 and not self._v2_config.shadow_mode
             ),
         )
         turn_learning = (
             self._learning.bind_turn(
+                learning_eligible=habit_request_eligible,
                 notification_context=self._habit_notification_context(
                     request_id, silent=silent
                 )
@@ -1165,12 +1188,20 @@ class HERv2Adapter(BaseBackend):
             delivery=delivery,
             commentary=commentary,
             habits=(
-                getattr(self.config, "_her_v2_habit_advisor", None)
-                or turn_learning
+                turn_learning
+                if not habit_request_eligible
+                else (
+                    getattr(self.config, "_her_v2_habit_advisor", None)
+                    or turn_learning
+                )
             ),
             meditation=(
-                getattr(self.config, "_her_v2_meditation_runner", None)
-                or turn_learning
+                turn_learning
+                if not habit_request_eligible
+                else (
+                    getattr(self.config, "_her_v2_meditation_runner", None)
+                    or turn_learning
+                )
             ),
             dream=getattr(self.config, "_her_v2_dream_maintainer", None),
             logger=self.logger,

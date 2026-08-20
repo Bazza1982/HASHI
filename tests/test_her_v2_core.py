@@ -232,7 +232,20 @@ def test_provider_profiles_are_configured_and_cannot_recurse_into_her():
     assert config.shadow_mode is False
     assert config.profile_for(Stage.TRIAGE).model == "model-triage"
     assert config.profile_for(Stage.TRIAGE).reasoning == "provider-setting"
+    meditation = config.profile_for(Stage.MEDITATION)
+    premium = config.profile_for(Stage.EXECUTION)
+    assert meditation.name == "lightweight"
+    assert meditation.engine == premium.engine
+    assert meditation.model == "model-lightweight"
+    assert meditation.model != premium.model
     assert config.execution_profile_for(TriageClassification.SIMPLE_TASK).name == "lightweight"
+    with pytest.raises(HERv2ConfigurationError, match="Meditation.*lightweight"):
+        HERv2Config.from_mapping(
+            {
+                "profiles": _profiles(),
+                "stage_roles": {"meditation": "premium"},
+            }
+        )
     with pytest.raises(HERv2ConfigurationError, match="non-HER"):
         ProviderProfile("bad", "her-v2", "recursive")
 

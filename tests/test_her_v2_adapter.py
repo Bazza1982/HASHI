@@ -167,6 +167,20 @@ class _WorkAndMeditationProvider(_DirectProvider):
         )
 
 
+class _PlannedWorkAndMeditationProvider(_WorkAndMeditationProvider):
+    async def invoke(self, profile, request):
+        if request.stage is Stage.PLANNING:
+            self.requests.append((profile, request))
+            return StageResponse(
+                text="",
+                data={"plan": ["Complete the current request safely"]},
+                provider=profile.engine,
+                model=profile.model,
+                reasoning_trace="trace:planning",
+            )
+        return await super().invoke(profile, request)
+
+
 class _StaticPersonaPackager:
     def __init__(self):
         self.commentaries = []
@@ -559,14 +573,60 @@ async def test_adapter_runs_durable_meditation_after_completed_turn(tmp_path):
     assert [habit.title for habit in adapter._her_habit_store().load()] == [
         "Verify before completion"
     ]
-    meditation_request = next(
-        request
-        for _profile, request in provider.requests
+    meditation_profile, meditation_request = next(
+        (profile, request)
+        for profile, request in provider.requests
         if request.stage is Stage.MEDITATION
     )
+    premium_profile = adapter._v2_config.profiles["premium"]
+    assert meditation_profile.name == "lightweight"
+    assert meditation_profile.engine == premium_profile.engine
+    assert meditation_profile.model == "configured/lightweight"
+    assert meditation_profile.model != premium_profile.model
     assert meditation_request.allow_tools is False
     assert meditation_request.allow_side_effects is False
     assert "HER HABIT MEDITATION" in meditation_request.context["maintenance_prompt"]
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_request_scoped_ineligibility_disables_planning_and_meditation(
+    tmp_path, monkeypatch
+):
+    provider = _PlannedWorkAndMeditationProvider()
+    raw = {"profiles": _profiles(), "meditation_enabled": True}
+    config = _agent_config(tmp_path, her_v2=raw, effort="medium")
+    config._hashi_runtime = SimpleNamespace(
+        current_request_meta={
+            "request_id": "request-ineligible-learning",
+            "habit_learning_eligible": False,
+        }
+    )
+    setattr(config, "_her_v2_stage_provider", provider)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize() is True
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("ineligible request must not inspect Habit files")
+
+    monkeypatch.setattr(adapter._her_habit_store(), "retrieve", forbidden_read)
+    response = await adapter.generate_response(
+        "Complete safely", "request-ineligible-learning"
+    )
+    await asyncio.sleep(0)
+
+    assert response.is_success is True
+    planning_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.PLANNING
+    )
+    assert "habits" not in planning_request.context
+    assert "habits_are_advisory" not in planning_request.context
+    assert not any(
+        request.stage is Stage.MEDITATION for _profile, request in provider.requests
+    )
+    assert not adapter._her_meditation_journal().root.exists()
     await adapter.shutdown()
 
 

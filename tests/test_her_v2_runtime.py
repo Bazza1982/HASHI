@@ -418,7 +418,12 @@ async def test_high_replanning_creates_new_plan_without_reconsulting_habits(tmp_
     habits = TrackingHabits()
     provider = ScriptedProvider(scripts)
 
-    result = await _runtime(tmp_path, provider, habits=habits).run_turn(
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_config(meditation_enabled=True),
+        habits=habits,
+    ).run_turn(
         "Implement safely", "request-replan", effort=Effort.HIGH
     )
 
@@ -452,7 +457,12 @@ async def test_review_never_receives_habits_or_retrieves_them_again(tmp_path):
     habits = TrackingHabits()
     provider = ScriptedProvider(scripts)
 
-    result = await _runtime(tmp_path, provider, habits=habits).run_turn(
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_config(meditation_enabled=True),
+        habits=habits,
+    ).run_turn(
         "Complete this carefully", "request-review-no-habits", effort=Effort.XHIGH
     )
 
@@ -1653,6 +1663,152 @@ async def test_dream_is_never_a_live_turn_dependency(tmp_path):
 
     assert result.terminal_state is TerminalState.COMPLETED
     assert dream.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_disabled_habit_pipeline_preserves_the_plain_planning_path(tmp_path):
+    scripts = _initial("COMPLEX_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [{"plan": ["complete the request"]}],
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Done."}
+            ],
+            Stage.FINALISATION: [{"report": "Done."}],
+        }
+    )
+
+    class ForbiddenLearning:
+        async def retrieve(self, **_kwargs):
+            raise AssertionError("disabled Habit pipeline was consulted")
+
+        async def meditate(self, **_kwargs):
+            raise AssertionError("disabled Meditation was scheduled")
+
+    provider = ScriptedProvider(scripts)
+    runtime = _runtime(tmp_path, provider, habits=ForbiddenLearning())
+    result = await runtime.run_turn(
+        "Complete the request", "request-habits-disabled", effort="medium"
+    )
+
+    planning_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.PLANNING
+    )
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert planning_request.context == {"classification": "COMPLEX_TASK"}
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_habit_retrieval_error_fails_open_without_skip_audit(tmp_path):
+    scripts = _initial("COMPLEX_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [{"plan": ["complete the request"]}],
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Done."}
+            ],
+            Stage.FINALISATION: [{"report": "Done."}],
+        }
+    )
+
+    class BrokenRetrieval:
+        def __init__(self):
+            self.calls = 0
+
+        async def retrieve(self, **_kwargs):
+            self.calls += 1
+            raise OSError("injected Habit catalogue failure")
+
+    broken = BrokenRetrieval()
+    meditation = TrackingHabits()
+    provider = ScriptedProvider(scripts)
+    runtime = _runtime(
+        tmp_path,
+        provider,
+        config=_config(meditation_enabled=True),
+        habits=broken,
+        meditation=meditation,
+    )
+    result = await runtime.run_turn(
+        "Complete the request", "request-habit-retrieval-failure", effort="medium"
+    )
+    await asyncio.wait_for(meditation.meditation_started.wait(), timeout=1)
+
+    planning_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.PLANNING
+    )
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert broken.calls == 1
+    assert planning_request.context["habits"] == []
+    audit_events = {
+        json.loads(line)["event"]
+        for line in (tmp_path / "her-v2" / "audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    }
+    assert "habit_planning_skipped" not in audit_events
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_low_effort_meditation_starts_after_final_delivery_boundary(tmp_path):
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Done."}
+            ],
+            Stage.FINALISATION: [{"report": "Done."}],
+        }
+    )
+    order = []
+    persisted_states = []
+
+    class OrderedDelivery(RecordingDelivery):
+        async def deliver(self, **kwargs):
+            accepted = await super().deliver(**kwargs)
+            if kwargs["kind"] == "final":
+                order.append("final_boundary_accepted")
+            return accepted
+
+    class OrderedMeditation:
+        def __init__(self):
+            self.started = asyncio.Event()
+
+        async def meditate(self, **kwargs):
+            persisted_states.append(
+                runtime.ledger_store.load(kwargs["turn_id"]).status.value
+            )
+            order.append("meditation_started")
+            self.started.set()
+
+    class ForbiddenLowEffortRetrieval:
+        async def retrieve(self, **_kwargs):
+            raise AssertionError("low effort must not add an initial Planning read")
+
+    meditation = OrderedMeditation()
+    runtime = _runtime(
+        tmp_path,
+        ScriptedProvider(scripts),
+        config=_config(meditation_enabled=True),
+        delivery=OrderedDelivery(),
+        habits=ForbiddenLowEffortRetrieval(),
+        meditation=meditation,
+    )
+    result = await runtime.run_turn(
+        "Do it", "request-low-meditation-order", effort="low"
+    )
+    await asyncio.wait_for(meditation.started.wait(), timeout=1)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert order == ["final_boundary_accepted", "meditation_started"]
+    assert persisted_states == ["COMPLETED"]
+    await runtime.shutdown()
 
 
 @pytest.mark.asyncio

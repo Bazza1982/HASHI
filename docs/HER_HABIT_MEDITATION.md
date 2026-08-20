@@ -2,21 +2,23 @@
 
 ## Status and boundary
 
-Habit learning is an optional capability of the HER backend only. It is not a
+Habit learning is an optional capability of the HER v2 backend only. It is not a
 HASHI orchestration feature, a Skill, a Dream extension, a shared registry, or a
 cross-backend protocol.
 
-This document describes the **adapter-owned JSON path** implemented by
-`adapters/her_habits.py` and controlled by `/habit`. It is the only active HER
-Planning/Meditation writer in standalone HASHI. The adapter exposes an explicit
-ownership marker so downstream compatibility builds can suppress older
-pipelines instead of running two learning lifecycles. Consequently `/habit off`
-means the HER Habit loop is fully off.
+This document describes the **HER v2 learning-service-owned JSON path**
+implemented by `orchestrator/her_v2/learning.py` and controlled by `/habit`.
+The service reuses the validated records, journals, parsers, and atomic storage
+primitives in `adapters/her_habits.py`; it does not import or revive the retired
+HER execution backend. It is the only active HER Planning/Meditation writer in
+standalone HASHI. The adapter exposes an explicit ownership marker so
+compatibility code can suppress older pipelines instead of running two learning
+lifecycles. Consequently `/habit off` means the HER Habit loop is fully off.
 
 The lifecycle is:
 
 ```text
-Planning → Execution → Meditation → Write
+Initial Planning → Execution → Final delivery boundary → Meditation → Write
 ```
 
 Each agent owns only the Habit files in its own workspace. Relevance, rather
@@ -27,7 +29,8 @@ than a separate scope field, determines whether a Habit is used for a task.
 The default is disabled. Configuration is resolved in this order:
 
 1. `global.her_providers.habit_meditation` supplies the HASHI instance default.
-2. A `habit_meditation` object in an individual HER backend entry overrides it.
+2. `her_v2.habit_meditation` and `her_v2.meditation_enabled` in an individual
+   HER v2 backend entry override it.
 3. The owning agent's persisted `/habit on|off` override supersedes configuration.
 4. `HASHI_HER_HABIT_MEDITATION=on|off` is the final operational override.
 
@@ -72,21 +75,45 @@ Example instance configuration:
 }
 ```
 
-Example backend override:
+Example complete HER v2 backend entry with a disabled backend override:
 
 ```json
 {
-  "engine": "her",
-  "provider": "openrouter",
-  "model": "deepseek/deepseek-v4-flash",
-  "habit_meditation": {"enabled": false}
+  "engine": "her-v2",
+  "model": "role-configured",
+  "her_v2": {
+    "meditation_enabled": false,
+    "profiles": {
+      "lightweight": {
+        "engine": "deepseek-api",
+        "model": "deepseek-v4-flash"
+      },
+      "triage": {
+        "engine": "deepseek-api",
+        "model": "deepseek-v4-flash"
+      },
+      "premium": {
+        "engine": "deepseek-api",
+        "model": "deepseek-v4-pro"
+      },
+      "reviewer": {
+        "engine": "deepseek-api",
+        "model": "deepseek-v4-pro"
+      },
+      "orchestrator": {
+        "engine": "deepseek-api",
+        "model": "deepseek-v4-pro"
+      }
+    }
+  }
 }
 ```
 
-When disabled, HER preserves the original execution path: it does not create a
-Habit directory, alter the task prompt, acquire the Habit execution lock, or
-start a Meditation model call. This invariant applies to every HER effort level.
-Internal one-shot/ephemeral HER backends are always ineligible, including when
+When disabled, HER v2 preserves the original execution path: it does not create a
+Habit directory, add Habit fields to the Planning envelope, acquire the Habit
+execution lock, or start a Meditation model call. This invariant applies to
+every HER effort level.
+Internal one-shot/ephemeral HER v2 backends are always ineligible, including when
 the process-wide environment override is on, so health probes and sidecars
 cannot recursively learn Habits.
 
@@ -98,15 +125,18 @@ agent-wide `/habit` state is on.
 ## Planning
 
 Habit files contain a short title, compact natural-language metadata, and an
-actionable body. Retrieval scores only the title and metadata. The body is read
-only for the small set of matches selected for the current request.
+actionable body. Retrieval scores only the title and metadata. The query is the
+bounded current authoritative request after the final Bridge current-request
+marker; Bridge conversation background is never retrieval input. The body is
+read only for the small set of matches selected for the current request.
 
-Matched records are rendered into a bounded, request-scoped system advisory
-channel used by both TaskFrame planning and primary execution. They are never
-appended to the HER user input, persisted session message, or fallback
-`active_goal`, and are explicitly subordinate to the current user request,
-policies, permissions, and exact-output requirements. Ambient advisory-channel
-values are discarded before the adapter installs its own selection.
+Matched records are rendered into a bounded, request-scoped advisory input for
+initial HER v2 Planning only. Execution, Replanning, Review, and Finalisation do
+not receive or re-read Habits. `low` effort has no Planning stage and therefore
+does not retrieve Habits, but a successfully completed `low` execution remains
+eligible for turn-based Meditation. Habit content is never appended to the
+authoritative user goal and is explicitly subordinate to the current request,
+policies, permissions, and exact-output requirements.
 
 Retrieval and use are deliberately different observations. Recording a selected
 Habit ID proves retrieval only when the same ID is present in the executed
@@ -114,33 +144,38 @@ system advisory context. It does not prove that the model followed the Habit. Be
 use needs its own predeclared, observable next-request output or tool-side-effect
 assertion. A conflicting Habit must lose to the current request.
 
-## Execution and observable evidence
+## Execution and turn evidence
 
-The main HER run is unchanged except for the optional system advisory. After a
-completed run, Meditation receives a bounded trace made from evidence HER can
-actually expose. A HER timeout, non-zero exit, or cancellation after execution
-started can also be reflected on; a pre-execution backend discovery failure
-cannot. Evidence includes:
+The main HER v2 run is unchanged except for the optional initial-Planning
+advisory. After a completed eligible execution, Meditation receives a bounded
+turn capsule containing:
 
-- provider-visible thinking deltas or summaries;
-- redacted-thinking notices;
-- plans and termination diagnostics;
-- tool starts, results, failures, and permission errors;
-- the final response and completion reason.
+- the current authoritative request, without Bridge conversation background;
+- the truthful Execution summary;
+- durable evidence references;
+- disclosed limitations;
+- the completed terminal state.
 
-No design assumption requires unavailable private chain-of-thought.
-Common credential-shaped values are redacted before a queued Meditation prompt
-is stored. This is a narrow leakage guard, not a general-purpose deterministic
-judgement of arbitrary natural-language safety.
+Provider-visible reasoning traces and provider/tool audit details remain in the
+HER v2 audit trail; they are not silently copied out of the audit boundary into
+the Meditation prompt. No design assumption requires unavailable private
+chain-of-thought. Common credential-shaped values are redacted before a queued
+Meditation prompt is stored. This is a narrow leakage guard, not a
+general-purpose deterministic judgement of arbitrary natural-language safety.
 
 ## Meditation
 
-Meditation is scheduled without progress chatter after the user-facing run completes. It uses
-the same configured HER model but an isolated session, read-only permission,
-and a small execution budget. HER requires at least one valid tool when a tool
-filter is supplied, so the subprocess exposes only `read_file`; the Meditation
-prompt instructs the model not to call it. It cannot replace the normal HER
-session checkpoint.
+Meditation is scheduled without progress chatter only after the final response
+has been accepted by HASHI's ordinary final-delivery boundary and the completed
+terminal state has been persisted. The later transport receipt is separate
+audit truth and is not a prerequisite for background learning. The HER v2
+`meditation` stage role is fixed to the configured `lightweight` profile and
+runs in an isolated, tool-free, side-effect-free stage with a bounded timeout.
+It may use the same provider backend as the foreground HER stages; backend
+separation is not required. The selected model must be the lightweight/flash
+variant, not the premium/pro execution variant, because Meditation has no
+execution authority. It cannot alter the completed turn or replace any live
+execution state.
 
 The model may return `create`, `update`, or `delete` actions. An empty action list
 is valid and preferred when the run did not contain a reusable learning event.
@@ -170,14 +205,13 @@ workspaces/<agent>/backend_state/her_habit_meditation/*.json
 ```
 
 HASHI's `request_id` remains a trace field and may repeat after a process
-restart. At the start of each eligible HER foreground execution, HER creates a
-separate 32-hex execution-scoped Meditation `job_id`. Every success, failure,
-timeout, and cancellation exit for that execution reuses the same `job_id`;
-the journal filename, recovery, and write idempotency use it instead of
+restart. Each HER v2 turn has a unique `turn_id`; Meditation derives one stable
+32-hex `job_id` from that turn identity. Every success, failure, timeout, and
+cancellation exit for the turn reuses the same `job_id`; the journal filename,
+recovery, model-decision deduplication, and Write idempotency use it instead of
 `request_id`. Consequently, two runtimes may both process `req-0001` without
-aliasing jobs, while repeated scheduling inside one execution still deduplicates.
-Existing v1 journal files whose IDs were derived from request IDs remain
-readable and recoverable without migration.
+aliasing jobs, while repeated scheduling inside one turn still deduplicates.
+Existing v1 journal files remain readable and recoverable without migration.
 
 Interrupted jobs return to a bounded three-attempt queue and resume when an
 eligible HER adapter initializes again. Once model actions are validated they
@@ -269,7 +303,8 @@ and existing legacy Dream files remain untouched historical data.
 
 Before enabling `habit_meditation.enabled` for an agent:
 
-1. verify the active HER adapter declares `habit_pipeline_owner=adapter`;
+1. verify the active HER v2 adapter declares
+   `habit_pipeline_owner=her_v2_runtime`;
 2. do not treat legacy Dream snapshots or general memory as HER Habit Dream
    state;
 3. verify one foreground prompt and one adapter job journal are produced for an

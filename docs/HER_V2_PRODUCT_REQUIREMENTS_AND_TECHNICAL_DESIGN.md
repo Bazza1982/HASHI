@@ -375,6 +375,21 @@ Habits contain accumulated operational experience such as:
 
 Habits are advisory inputs to initial Planning. They are never user intent, execution evidence, or authority.
 
+Habit retrieval is enabled by the single Habit–Meditation switch. It ranks only
+the title and compact metadata, is bounded by the configured retrieval limit,
+and uses only the current authoritative request after the final Bridge
+current-request marker. Bridge conversation background is not retrieval input.
+The selected Habit bodies may be disclosed to initial Planning only; Execution,
+Replanning, Review, and Finalisation do not receive or re-read them. Because
+`low` effort omits Planning, it omits Habit retrieval while retaining eligible
+post-execution Meditation.
+
+When the capability is disabled, or the request is marked
+`habit_learning_eligible=false` or ephemeral, the runtime does not read the
+catalogue, add Habit-specific Planning context, queue Meditation, or write a
+learning audit that implies those actions occurred. Retrieval failure is
+fail-open and does not create a synthetic `habit_planning_skipped` event.
+
 Priority is:
 
 `User intent > current execution evidence > Habits`
@@ -382,6 +397,23 @@ Priority is:
 ### 10.1 Meditation
 
 Meditation runs after eligible execution cycles and creates candidate Habits from experience. It must not block final reporting or change the completed turn.
+
+The Meditation stage role is fixed to the configured `lightweight` profile and
+therefore routes to the lightweight/flash model rather than the premium/pro
+execution model. Configuration that maps Meditation to another role fails
+closed. Meditation may share the same provider backend with premium foreground
+stages; provider-backend separation is not an independence requirement. Its
+isolation comes from its stage context, tool-free and side-effect-free authority
+envelope, and separate background lifecycle.
+
+Meditation is turn-based: its durable prompt contains the bounded current
+request, truthful Execution summary, evidence references, limitations, and
+terminal state for that completed turn, not Bridge conversation background.
+Reasoning traces and provider/tool audit detail remain in the audit boundary.
+Acceptance by the ordinary final-delivery boundary and terminal persistence
+precede the background model call; the later transport receipt remains separate
+audit truth. A stable job identity deduplicates repeated scheduling for one
+turn, while distinct turns that reuse a request ID remain independent.
 
 ### 10.2 Dream
 

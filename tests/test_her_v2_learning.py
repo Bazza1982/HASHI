@@ -103,6 +103,8 @@ async def test_meditation_persists_validated_habit_and_full_audit(tmp_path):
     assert [habit.title for habit in habits] == ["Verify current state"]
     assert invoker.calls[0]["stage"] is Stage.MEDITATION
     assert "HER HABIT MEDITATION" in invoker.calls[0]["prompt"]
+    assert "configured lightweight/flash model" in invoker.calls[0]["prompt"]
+    assert "same HER backend model" not in invoker.calls[0]["prompt"]
     jobs = list(service.meditation_journal.root.glob("*.json"))
     assert len(jobs) == 1
     job = json.loads(jobs[0].read_text(encoding="utf-8"))
@@ -203,3 +205,138 @@ async def test_habit_retrieval_is_disabled_without_reading_catalogue(tmp_path, m
 
     monkeypatch.setattr(service.store, "retrieve", forbidden_read)
     assert await service.retrieve(goal="anything", turn_id="turn-disabled") == ()
+    assert not (_root / "habits").exists()
+    assert not service.meditation_journal.root.exists()
+
+
+@pytest.mark.asyncio
+async def test_planning_retrieval_ignores_bridge_background(tmp_path):
+    service, _root = _service(tmp_path, ScriptedMaintenance([]))
+    outcomes = service.store.apply_actions(
+        [
+            {
+                "operation": "create",
+                "title": "Remember amberquartz context",
+                "metadata": "Relevant only when amberquartz appears in the current task.",
+                "body": "This background-only Habit must not enter the current plan.",
+            },
+            {
+                "operation": "create",
+                "title": "Handle violetcinder requests",
+                "metadata": "Relevant when violetcinder appears in the current task.",
+                "body": "Use the bounded current-turn procedure.",
+            },
+        ],
+        max_actions=2,
+    )
+    background_id, current_id = [item.split(":", 1)[1] for item in outcomes]
+
+    advisory = await service.retrieve(
+        goal=(
+            "Bridge-managed conversation background mentions amberquartz.\n"
+            "--- CURRENT USER REQUEST — AUTHORITATIVE ---\n"
+            "Please handle the violetcinder request."
+        ),
+        turn_id="turn-current-request-only",
+    )
+
+    assert len(advisory) == 1
+    assert current_id in advisory[0]
+    assert background_id not in advisory[0]
+    assert "violetcinder" in advisory[0]
+    assert "amberquartz" not in advisory[0]
+
+
+@pytest.mark.asyncio
+async def test_meditation_persists_only_the_current_turn_request(tmp_path):
+    invoker = ScriptedMaintenance(['{"actions":[]}'])
+    service, _root = _service(tmp_path, invoker)
+
+    await service.bind_turn().meditate(
+        turn_id="turn-no-bridge-leak",
+        goal=(
+            "Bridge background canary AMBERQUARTZ-CONTEXT.\n"
+            "--- CURRENT USER REQUEST — AUTHORITATIVE ---\n"
+            "Complete the VIOLETCINDER-TURN request."
+        ),
+        summary="The current request completed.",
+        evidence_refs=("receipt:current",),
+        limitations=(),
+        terminal_state=TerminalState.COMPLETED,
+    )
+    await _wait_for_learning(service)
+
+    assert len(invoker.calls) == 1
+    assert "VIOLETCINDER-TURN" in invoker.calls[0]["prompt"]
+    assert "AMBERQUARTZ-CONTEXT" not in invoker.calls[0]["prompt"]
+    [job_path] = list(service.meditation_journal.root.glob("*.json"))
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    assert "VIOLETCINDER-TURN" in job["prompt"]
+    assert "AMBERQUARTZ-CONTEXT" not in job["prompt"]
+    assert job["status"] == "no_change"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_turn_meditation_is_one_model_decision_and_one_write(tmp_path):
+    invoker = ScriptedMaintenance(
+        [
+            json.dumps(
+                {
+                    "actions": [
+                        {
+                            "operation": "create",
+                            "title": "Keep one durable decision",
+                            "metadata": "Use when a turn callback is delivered twice.",
+                            "body": "Reuse the turn job identity instead of learning twice.",
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    service, _root = _service(tmp_path, invoker)
+    learning = service.bind_turn()
+    call = {
+        "turn_id": "turn-idempotent-learning",
+        "goal": "Complete one turn",
+        "summary": "Completed once.",
+        "evidence_refs": ("receipt:one",),
+        "limitations": (),
+        "terminal_state": TerminalState.COMPLETED,
+    }
+
+    await asyncio.gather(learning.meditate(**call), learning.meditate(**call))
+    await _wait_for_learning(service)
+
+    assert len(invoker.calls) == 1
+    assert len(list(service.meditation_journal.root.glob("*.json"))) == 1
+    assert [habit.title for habit in service.store.load()] == [
+        "Keep one durable decision"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ineligible_turn_neither_reads_habits_nor_queues_meditation(
+    tmp_path, monkeypatch
+):
+    invoker = ScriptedMaintenance([])
+    service, _root = _service(tmp_path, invoker)
+    learning = service.bind_turn(learning_eligible=False)
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("ineligible turn must not inspect Habit files")
+
+    monkeypatch.setattr(service.store, "retrieve", forbidden_read)
+    assert await learning.retrieve(goal="anything", turn_id="turn-ineligible") == ()
+    await learning.meditate(
+        turn_id="turn-ineligible",
+        goal="anything",
+        summary="unused",
+        evidence_refs=(),
+        limitations=(),
+        terminal_state=TerminalState.COMPLETED,
+    )
+    await asyncio.sleep(0)
+
+    assert invoker.calls == []
+    assert not service.meditation_journal.root.exists()

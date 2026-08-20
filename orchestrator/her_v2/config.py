@@ -89,6 +89,10 @@ class HERv2Config:
             raise HERv2ConfigurationError(
                 "HER v2 shadow mode has been permanently retired; use normal mode"
             )
+        if self.stage_roles.get(Stage.MEDITATION) != "lightweight":
+            raise HERv2ConfigurationError(
+                "HER v2 Meditation must use the lightweight provider profile"
+            )
         if self.reporting_attempts < 1 or self.structured_repair_attempts < 1:
             raise HERv2ConfigurationError("retry counts must be at least one")
         if self.user_idle_timeout_s <= 0 or self.hard_timeout_s <= 0:
