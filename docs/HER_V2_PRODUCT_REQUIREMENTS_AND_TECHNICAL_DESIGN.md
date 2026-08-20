@@ -1,0 +1,789 @@
+# Hashi Engine Runtime v2
+
+## Product Requirements and Technical Design Specification
+
+| Field | Value |
+|---|---|
+| Status | Approved design baseline |
+| Version | 1.0 |
+| Date | 2026-08-20 |
+| Product | Hashi Engine Runtime (HER) |
+| Implementation baseline | HASHI `origin/main` at `604b826ed0dbb8cb748a617cbcf4c7d0dd7406f4` |
+
+## 1. Purpose
+
+Hashi Engine Runtime (HER) is a provider-neutral orchestration and execution framework for agentic AI systems.
+
+HER separates the following concerns from the underlying model provider:
+
+- task classification;
+- execution policy;
+- planning;
+- execution;
+- replanning;
+- review and remediation;
+- finalisation and reporting;
+- operational learning through Habits, Meditation, and Dream.
+
+HER is designed to work with any provider that can offer one or more suitable model profiles, including lightweight and premium models with provider-specific reasoning controls. Examples include DeepSeek, OpenAI, Anthropic, Gemini, xAI, OpenRouter-routed models, and future providers.
+
+HER does not optimise for a single measure such as speed or maximum quality. It selects an orchestration policy appropriate to the request:
+
+- a greeting should receive an immediate response;
+- a simple tool task should execute efficiently;
+- a complex task should be planned and executed methodically;
+- a high-volume task should use orchestration and parallel execution where beneficial.
+
+## 2. Re-engineering Objective
+
+HER v2 replaces the current tightly coupled HER workflow with a smaller, modular runtime built around:
+
+- an authoritative triage decision;
+- an explicit lifecycle state machine;
+- a lightweight execution ledger;
+- independently replaceable stages;
+- provider-neutral model selection;
+- HASHI-owned tools, permissions, delivery, logging, and audit;
+- conversational recovery instead of restoring a failed execution stack.
+
+HER v2 must be implemented alongside the current HER implementation until it passes staged certification. Existing HER remains available as the rollback path during migration.
+
+## 3. Core Principles
+
+### 3.1 Separation of concerns
+
+HER effort levels are orchestration policies. They are not provider reasoning levels.
+
+Provider reasoning controls remain provider-specific. HER selects the appropriate model profile and provider reasoning setting for each stage without redefining those provider controls as HER effort levels.
+
+### 3.2 Provider neutrality
+
+All execution parameters must be configurable, including:
+
+- provider and model names;
+- model role profiles;
+- provider reasoning settings;
+- idle, stage, retry, and hard safety timeouts;
+- retry limits;
+- replanning triggers and limits;
+- review limits;
+- sub-agent counts;
+- tool and permission policies.
+
+Provider-specific request construction belongs in provider adapters, not in the HER orchestration core.
+
+### 3.3 Modularity
+
+Triage, planning, execution, replanning, review, reporting, Ledger persistence, Habits, Meditation, and Dream must have explicit interfaces and independently testable implementations.
+
+Removing or replacing one optional capability must not break unrelated stages. In particular:
+
+- replanning can change without changing execution;
+- review can change without changing planning;
+- memory and Habit systems can evolve independently;
+- Dream cannot be a required dependency of live request execution.
+
+### 3.4 Goal fidelity
+
+The active user's goal is the highest authority for a turn. Planning, execution, replanning, and review exist only to fulfil that goal.
+
+No stage may intentionally substitute a different objective. If intent is unclear or material authority is missing, Triage must classify the request as `CONFIRMATION_REQUIRED`.
+
+### 3.5 Execution continuity
+
+HER prefers useful progress over perfection of intermediate artefacts:
+
+- retry a technically repairable stage failure within its configured limit;
+- replan when execution evidence invalidates the current approach;
+- do not fail because an optional commentary message was not delivered;
+- do not discard completed work because reporting failed;
+- accept an incomplete Ledger when a turn terminates unexpectedly;
+- preserve detailed evidence in HASHI logs rather than expanding the Ledger into an audit database.
+
+Lifecycle order remains strict even when stage content is flexible.
+
+## 4. Authority Model
+
+### 4.1 User authority
+
+The authoritative request is the user's current instruction together with the applicable conversation context and active system policy.
+
+### 4.2 Triage authority
+
+Triage is the sole authority for classifying a turn. Once the Triage result has been validated and recorded in the Ledger:
+
+- the classification is immutable for that turn;
+- planning may not redefine complexity;
+- execution may not silently change the classification;
+- replanning may change the approach but not the classification;
+- review may not reopen Triage;
+- a suspected misclassification is recorded as evidence but corrected only through a future turn.
+
+This immutability is intentional. Triage quality is improved through prompt refinement, tests, and operational evidence rather than by allowing downstream stages to overrule it.
+
+### 4.3 Plan authority
+
+There is one active plan version at a time.
+
+- Initial planning creates the first plan version.
+- Replanning creates a new plan version.
+- Earlier versions remain historical evidence in HASHI logs.
+- Only the Replanning stage may replace the active plan.
+- Sub-agents may not change or replace the plan.
+
+### 4.4 Primary Agent authority
+
+The Primary Agent owns execution and the user-facing outcome. Review findings are advisory evidence. A reviewer cannot:
+
+- change the user's goal;
+- change the Triage classification;
+- request clarification directly from the user;
+- publish a user-facing final answer;
+- independently authorise additional side effects.
+
+### 4.5 `/steer` authority
+
+`/steer` is treated as stop plus new instructions.
+
+When `/steer` is accepted:
+
+1. the active turn and its sub-agents are stopped;
+2. the old turn reaches terminal state `STOPPED` with reason `STEERED`;
+3. no plan, classification, or goal from the stopped turn remains authoritative;
+4. a new turn begins;
+5. Triage derives the new goal from the latest relevant context together with the steer message;
+6. the new goal may be a replacement, extension, or slight modification of the earlier goal.
+
+The new turn receives a new immutable Triage decision.
+
+## 5. HER Effort Levels
+
+HER effort controls orchestration behaviour, not provider reasoning.
+
+| HER effort | Required orchestration behaviour |
+|---|---|
+| `low` | Fast execution with minimal orchestration; no formal Planning stage |
+| `medium` | Formal planning followed by execution |
+| `high` | Planning, execution, and configurable periodic or evidence-triggered replanning |
+| `xhigh` | High behaviour plus independent review and at most one remediation cycle |
+| `max` | High behaviour plus independent review and at most three review/remediation cycles |
+
+Effort determines the maximum orchestration path available. Triage classifications `DIRECT_RESPONSE` and `CONFIRMATION_REQUIRED` terminate through their dedicated paths without unnecessary planning, regardless of the selected effort.
+
+Provider model and reasoning settings for each stage are selected through configurable role profiles such as `lightweight`, `premium`, and `reviewer`. HER does not hard-code provider model names.
+
+## 6. Stage 1: Initial Processing
+
+Initial processing applies to every HER turn. Two processes begin promptly and independently.
+
+### 6.1 Immediate user response
+
+The Immediate Response is generated by a lightweight model using a non-reasoning or lowest-overhead provider mode.
+
+Its purposes are to:
+
+- respond immediately when the request can be answered directly;
+- acknowledge receipt of work that will continue;
+- demonstrate a conservative understanding of the request;
+- avoid promising an outcome that has not yet been achieved.
+
+The Immediate Response is a real user-facing message, not merely an internal event.
+
+### 6.2 Triage
+
+Triage uses a lightweight model with a high provider reasoning setting. It produces exactly one validated classification:
+
+#### `DIRECT_RESPONSE`
+
+- No tools, planning, or further execution are required.
+- The Immediate Response is accepted as the completed user-facing answer.
+- HER must not send a second final message.
+- The Ledger is finalised and the turn becomes `COMPLETED`.
+
+#### `SIMPLE_TASK`
+
+- Straightforward execution is required.
+- Tools may be required.
+- Lightweight execution models are preferred where capable.
+
+#### `COMPLEX_TASK`
+
+- Multiple steps, uncertainty, dependencies, discovery, or elevated risk are present.
+- Premium execution models are normally preferred.
+
+#### `HIGH_VOLUME_TASK`
+
+- Execution volume is substantial.
+- Parallel orchestration or multiple sub-agents may be appropriate.
+- A premium model acts as orchestrator.
+
+#### `CONFIRMATION_REQUIRED`
+
+- Intent is unclear, authority is missing, or the action carries elevated risk requiring confirmation.
+- HER requests clarification or confirmation.
+- The turn becomes terminal state `PENDING_USER_INPUT`.
+
+### 6.3 Immediate Response and Triage race handling
+
+The Immediate Response and Triage may finish in either order. HER must enforce the following rules:
+
+- the Immediate Response is delivered at most once;
+- if Triage selects `DIRECT_RESPONSE`, that response is the only user-facing completion message;
+- if Triage selects a work classification, the response acts as acknowledgement and execution continues;
+- if Triage selects `CONFIRMATION_REQUIRED`, the clarification request must not duplicate information already adequately requested by the Immediate Response;
+- Ledger finalisation may wait for both results, but user-visible delivery should not wait unnecessarily for Triage.
+
+## 7. Stage 2: Planning
+
+Planning is mandatory for `medium`, `high`, `xhigh`, and `max` work turns. It is not used for `DIRECT_RESPONSE`, `CONFIRMATION_REQUIRED`, or ordinary `low` execution.
+
+Planning uses a premium model with a high provider reasoning setting and considers:
+
+- the immutable Triage result;
+- the authoritative user goal;
+- scope and constraints;
+- success criteria;
+- current conversation context;
+- relevant historical context;
+- advisory Habits;
+- available providers, models, tools, permissions, and sub-agents;
+- retry and timeout strategy;
+- testing and verification strategy;
+- parallelisation opportunities;
+- review requirements implied by HER effort.
+
+The completed plan becomes binding. Only Replanning may replace it.
+
+When planning completes, HER records the plan reference and sends an appropriate progress update. Failure to deliver that optional progress message does not fail the stage.
+
+Planning failures are technical failures. Valid examples include:
+
+- invalid structured output after bounded repair attempts;
+- provider or network failure;
+- schema validation failure;
+- stage timeout.
+
+“The model could not think of a plan” is not a distinct valid failure category. It must resolve to a technical error, a request for required user input already identified by Triage, or a concrete plan.
+
+## 8. Stage 3: Execution
+
+Execution follows the active plan when a formal plan exists. Low-effort execution follows a minimal execution directive derived from the immutable Triage result.
+
+### 8.1 Simple tasks
+
+- Prefer a lightweight capable model.
+- Use only the tools and permissions required by the task.
+- Continue until completion, an authorised stop, an unrecoverable technical error, or a justified unsuccessful outcome.
+
+### 8.2 Complex tasks
+
+- Prefer a premium model.
+- Follow the active plan and record material evidence.
+- Emit measurable progress through tool activity, stage transitions, meaningful Ledger transitions, or user commentary.
+
+### 8.3 High-volume tasks
+
+- A premium model owns orchestration.
+- Sub-agents may use lightweight or premium models according to assigned work.
+- The orchestrator owns task decomposition, assignment, monitoring, result aggregation, and compliance with the active plan.
+- Sub-agents may execute and return evidence but may not replan or alter the goal.
+
+## 9. Stage 4: Replanning
+
+Replanning is available only for `high`, `xhigh`, and `max`, and only for `COMPLEX_TASK` or `HIGH_VOLUME_TASK` turns.
+
+Its purpose is to restore alignment with the immutable user goal and Triage classification when execution evidence shows that the active approach is no longer adequate.
+
+Replanning considers:
+
+- the original request;
+- the immutable Triage result;
+- the active plan;
+- completed and remaining work;
+- tool and execution evidence;
+- failures and newly discovered constraints;
+- reviewer findings when remediation follows review.
+
+Replanning does not consult Habits again. Current execution evidence takes precedence over historical advice.
+
+Triggers are configurable and may include:
+
+- elapsed time since the previous plan decision;
+- meaningful tool-call count;
+- repeated execution failures;
+- material new constraints;
+- failed review requiring remediation.
+
+Replanning limits are configurable. Default ceilings are:
+
+- `high`: 50;
+- `xhigh`: 100;
+- `max`: 200.
+
+These are safety ceilings, not targets.
+
+## 10. Habit System
+
+Habits contain accumulated operational experience such as:
+
+- common mistakes;
+- successful execution patterns;
+- preferred approaches;
+- known pitfalls.
+
+Habits are advisory inputs to initial Planning. They are never user intent, execution evidence, or authority.
+
+Priority is:
+
+`User intent > current execution evidence > Habits`
+
+### 10.1 Meditation
+
+Meditation runs after eligible execution cycles and creates candidate Habits from experience. It must not block final reporting or change the completed turn.
+
+### 10.2 Dream
+
+Dream is a background maintenance process that may:
+
+- consolidate related Habits;
+- merge duplicates;
+- remove obsolete Habits;
+- resolve conflicting guidance;
+- promote useful candidates.
+
+Dream is outside the critical live-execution path.
+
+## 11. Stage 5: Review and Remediation
+
+Independent Review applies to `xhigh` and `max` after execution has produced candidate deliverables.
+
+The reviewer uses a premium model with the maximum appropriate provider reasoning setting and a strict reviewer persona. Review independence is achieved through prompt, role, and context separation; a different model provider is not mandatory.
+
+The reviewer receives:
+
+- the original request;
+- the immutable Triage result;
+- active and historical plan references;
+- execution evidence and deliverables;
+- relevant limitations and permission boundaries.
+
+The reviewer returns one outcome:
+
+### 11.1 `PASS`
+
+The work is complete and quality is acceptable. Proceed to Finalisation.
+
+### 11.2 `CONDITIONAL_PASS`
+
+The work is substantially complete but contains disclosed limitations, caveats, risks, or minor unresolved matters. Proceed to Finalisation and report those limitations clearly.
+
+### 11.3 `FAIL`
+
+The work is incomplete or below the required quality. If the remediation limit permits, perform Replanning and remediation before returning to Review.
+
+Review findings are advisory. The Primary Agent remains responsible for execution and final reporting.
+
+Review limits are strict:
+
+- `xhigh`: one review and at most one remediation cycle;
+- `max`: at most three review/remediation cycles.
+
+After the limit is reached, HER proceeds to Finalisation regardless of the last review outcome and clearly reports unresolved findings.
+
+## 12. Stage 6: Finalisation and Reporting
+
+Finalisation applies to every turn, although `DIRECT_RESPONSE` reuses the Immediate Response and sends no additional final message.
+
+### 12.1 Exit assessment
+
+The Primary Agent assesses:
+
+- the authoritative request;
+- immutable Triage classification;
+- active plan and relevant historical plan references;
+- execution and tool evidence;
+- replanning history;
+- reviewer findings;
+- unresolved limitations;
+- the appropriate terminal state.
+
+Reviewer findings must be considered critically rather than accepted blindly.
+
+### 12.2 User-facing reporting
+
+The report communicates, as applicable:
+
+- results achieved;
+- verification performed;
+- remaining limitations;
+- known issues and risks;
+- assumptions;
+- relevant review findings;
+- the final task state.
+
+Reporting must be honest and must not claim unverified work as complete.
+
+### 12.3 Reporting failure
+
+If execution completed but reporting fails, HER retries reporting within a configurable bounded limit. The default is three attempts.
+
+After retry exhaustion:
+
+- execution evidence remains valid;
+- completed work is not discarded;
+- the terminal state is `COMPLETED_WITH_REPORT_PENDING`;
+- HASHI logs the reporting failure and preserves the completed outcome for later user-visible reconciliation.
+
+## 13. Lifecycle State Machine
+
+### 13.1 States
+
+The canonical lifecycle states are:
+
+- `RECEIVED`
+- `TRIAGED`
+- `PLANNED`
+- `EXECUTING`
+- `REPLANNING`
+- `EXECUTION_COMPLETED`
+- `REVIEWING`
+- `FINALISING`
+- terminal states defined in Section 14
+
+### 13.2 Valid principal transitions
+
+```text
+RECEIVED
+  -> TRIAGED
+
+TRIAGED [DIRECT_RESPONSE]
+  -> FINALISING
+  -> COMPLETED
+
+TRIAGED [CONFIRMATION_REQUIRED]
+  -> PENDING_USER_INPUT
+
+TRIAGED [LOW work]
+  -> EXECUTING
+
+TRIAGED [MEDIUM/HIGH/XHIGH/MAX work]
+  -> PLANNED
+  -> EXECUTING
+
+EXECUTING
+  <-> REPLANNING
+
+EXECUTING
+  -> EXECUTION_COMPLETED
+
+EXECUTION_COMPLETED [XHIGH/MAX]
+  -> REVIEWING
+
+REVIEWING [FAIL with remediation available]
+  -> REPLANNING
+  -> EXECUTING
+  -> EXECUTION_COMPLETED
+  -> REVIEWING
+
+EXECUTION_COMPLETED or REVIEWING
+  -> FINALISING
+  -> TERMINAL
+```
+
+### 13.3 Strict ordering
+
+Lifecycle transitions must follow an explicitly allowed edge. Examples of invalid events include:
+
+- execution completion without execution start;
+- review completion before an execution candidate exists;
+- replanning before an active plan exists;
+- plan replacement outside Replanning;
+- classification replacement after `TRIAGED`.
+
+An invalid transition is a technical `ERROR`. The turn terminates immediately. Content fields may be repaired or omitted according to stage policy, but lifecycle ordering may not be fabricated.
+
+## 14. Terminal States
+
+HER v2 uses the following unified terminal states:
+
+| State | Meaning |
+|---|---|
+| `COMPLETED` | Required work and reporting completed |
+| `COMPLETED_WITH_LIMITATIONS` | Work concluded with material disclosed limitations |
+| `COMPLETED_WITH_REPORT_PENDING` | Execution completed but user-facing reporting exhausted its retry limit |
+| `FAILED` | Execution ran correctly but concluded that the user's goal could not be achieved |
+| `ERROR` | A technical failure prevented correct execution, including an unexpected process interruption or lifecycle violation |
+| `ABANDONED` | The Primary Agent deliberately concluded that continued execution was no longer justified and recorded the reason |
+| `STOPPED` | The user or authorised control path stopped the turn, including `/stop` and `/steer` |
+| `PENDING_USER_INPUT` | Triage determined that clarification or confirmation is required |
+
+`INTERRUPTED` is not a separate terminal state. An intentional interruption is `STOPPED`; an unexpected technical interruption is `ERROR`.
+
+`ERROR` and `FAILED` are distinct:
+
+- `ERROR` means the runtime could not execute correctly;
+- `FAILED` means execution operated correctly and concluded the goal was not achievable.
+
+Reaching a terminal state concludes the turn. It does not guarantee perfect completion or user satisfaction.
+
+## 15. Execution Ledger
+
+### 15.1 Purpose
+
+Each request has a lightweight Execution Ledger. The Ledger is the authoritative operational record of the turn's current lifecycle state. It supports:
+
+- workflow control;
+- current-state visibility;
+- next-turn understanding;
+- references to detailed evidence in HASHI logs.
+
+The Ledger is not the complete audit record.
+
+### 15.2 Minimal record
+
+A representative current snapshot is:
+
+```json
+{
+  "turn_id": "T001",
+  "status": "EXECUTING",
+  "classification": "COMPLEX_TASK",
+  "plan_id": "P001-v2",
+  "last_update": "2026-08-20T12:00:00Z",
+  "log_refs": ["hashi-log:..."],
+  "terminal_reason": null
+}
+```
+
+The Ledger must not store:
+
+- full reasoning traces;
+- full planning or review output;
+- complete tool request and response payloads;
+- duplicated conversation history;
+- a second complete audit trail.
+
+Those records belong in HASHI orchestration logs. The Ledger stores only current control state and references.
+
+### 15.3 Append-only truth
+
+Historical facts are never silently rewritten. If later evidence corrects an earlier interpretation, HASHI appends a correction record and advances the current Ledger snapshot. Detailed history remains reconstructable from logs.
+
+An incomplete Ledger is valid evidence that the turn did not reach a conclusion.
+
+## 16. HASHI Logging and Audit
+
+HASHI orchestration logs are the authoritative audit source. They must preserve all audit information available to HASHI and HER, including:
+
+- user requests and steer instructions;
+- Immediate Response output;
+- Triage prompts, reasoning traces, output, validation, and classification;
+- planning prompts, reasoning traces, plans, and repairs;
+- execution prompts and available reasoning traces;
+- provider requests and responses subject to secret-redaction policy;
+- tool calls, tool results, permissions, and denials;
+- sub-agent assignments and responses;
+- replanning prompts, reasoning traces, and plan versions;
+- reviewer prompts, reasoning traces, findings, and outcomes;
+- finalisation reasoning traces and user-facing reports;
+- lifecycle transitions, retries, timeouts, and errors;
+- model, provider, effort, and request correlation metadata.
+
+Reasoning-trace logging is a required HASHI audit principle. HER must capture every reasoning trace made available by the selected provider or produced as a visible/structured HER reasoning artefact. If a provider does not expose a reasoning trace, HASHI must record that it was unavailable rather than fabricate one.
+
+Logs must apply existing HASHI secret-redaction, access-control, retention, and workspace-isolation policies.
+
+## 17. Failure, Retry, and Recovery
+
+### 17.1 Stage-local retry
+
+HER permits bounded retry within the active process and current stage for technical failures such as:
+
+- transient provider or network errors;
+- invalid structured output;
+- schema repair;
+- retryable tool transport errors;
+- report-generation failure.
+
+Retry limits and delays are configurable. A retry does not change the Triage classification or user goal.
+
+### 17.2 No process-restart resumption
+
+HER does not reconstruct or resume an in-flight execution stack after process restart.
+
+If the process stops unexpectedly:
+
+- the old turn becomes `ERROR` during reconciliation;
+- its incomplete Ledger and HASHI logs are preserved;
+- no old planner, executor, reviewer, or sub-agent continuation is restarted automatically.
+
+A later user request such as “continue” starts a new turn. Its Triage stage may inspect conversation history, the previous Ledger, and HASHI logs to determine remaining work.
+
+Recovery is conversational, not transactional.
+
+## 18. Timeout Model
+
+### 18.1 User timeout
+
+The user timeout represents the maximum permitted period without measurable progress. It is not a total wall-clock runtime limit.
+
+Measurable progress includes:
+
+- a meaningful user commentary update;
+- tool execution or a tool result;
+- a genuine lifecycle or Ledger state transition;
+- a replan event;
+- completion of a substantive execution unit.
+
+No-op retries, heartbeat-only Ledger writes, idle waiting, and unlogged internal loops are not progress.
+
+### 18.2 Stage timeout
+
+Each stage may have an independent configurable timeout. Example defaults may include:
+
+- Planning: five minutes;
+- Review: three minutes;
+- individual tool call: sixty seconds.
+
+### 18.3 Retry timeout
+
+Retry policy controls attempt count, delay, and the time allowed for repair. For example, structured-output repair may allow three attempts.
+
+### 18.4 Hard safety timeout
+
+HASHI may retain a configurable hard safety ceiling to prevent permanently orphaned execution. This ceiling is an operational guard and does not redefine the user timeout as total runtime.
+
+## 19. Sub-Agent Governance
+
+Authority is ordered as:
+
+```text
+User
+  -> Primary Agent
+    -> HER Orchestrator
+      -> Sub-agents
+```
+
+Sub-agents may:
+
+- execute bounded assigned tasks;
+- use explicitly granted tools and permissions;
+- return results and evidence.
+
+Sub-agents may not:
+
+- modify the active plan;
+- trigger Replanning independently;
+- change the Triage classification;
+- change the user goal;
+- communicate a final answer to the user;
+- create additional sub-agents unless explicitly authorised by the orchestrator policy.
+
+Only the primary HER workflow may enter `REPLANNING`.
+
+## 20. Architectural Boundaries
+
+### 20.1 HASHI-owned responsibilities
+
+HASHI remains responsible for:
+
+- transport and user-message delivery;
+- agent configuration and secrets;
+- provider adapters and credentials;
+- Tool Gateway registration and execution;
+- permission and workzone enforcement;
+- queues, cancellation, `/stop`, and `/steer`;
+- timeout enforcement;
+- audit logging and redaction;
+- Workbench and operational status;
+- hot restart and process lifecycle.
+
+### 20.2 HER-owned responsibilities
+
+HER v2 owns:
+
+- Triage;
+- effort-policy resolution;
+- lifecycle-state validation;
+- stage orchestration;
+- lightweight Ledger management;
+- plan version selection;
+- Replanning triggers;
+- review/remediation limits;
+- final task-state selection.
+
+### 20.3 Optional supporting systems
+
+Habits, Meditation, Dream, and optional native executors connect through explicit interfaces. They cannot become mandatory hidden dependencies of the core state machine.
+
+### 20.4 Compatibility facade
+
+During migration, HER v2 may remain registered as a HASHI backend through a compatibility facade. Internally it must behave as an orchestration policy over provider and tool interfaces rather than reproducing the current monolithic backend design.
+
+## 21. Migration Strategy
+
+Implementation starts from HASHI `origin/main` commit `604b826ed0dbb8cb748a617cbcf4c7d0dd7406f4` in a clean, dedicated branch and worktree.
+
+The migration sequence is:
+
+1. freeze this specification and canonical state-transition tests;
+2. implement lifecycle types, Ledger, and transition validation without model calls;
+3. implement Provider Profile and stage interfaces;
+4. deliver `low` Direct Response and Simple Task paths;
+5. add `medium` Planning;
+6. add `high` Replanning;
+7. add `xhigh` and `max` Review and remediation;
+8. integrate sub-agents;
+9. integrate Habits, Meditation, and Dream last;
+10. run HER v2 in shadow mode with external side effects disabled;
+11. canary selected agents;
+12. expand rollout only after certification;
+13. retain old HER as a rollback path until HER v2 is proven.
+
+Existing HER code, local experimental commits, and uncommitted Task Control work are reference material. They are not the implementation foundation of HER v2 and must be ported only when a v2 requirement and test justify them.
+
+## 22. Acceptance Criteria
+
+HER v2 is ready for production rollout only when:
+
+- every Triage classification has deterministic transition tests;
+- a recorded Triage classification cannot be mutated within the turn;
+- Direct Response produces exactly one user-facing response;
+- `/steer` terminates the old turn and starts a separately classified new turn;
+- low, medium, high, xhigh, and max policies follow the required stage matrix;
+- Replanning and Review loops cannot violate lifecycle order;
+- retries are bounded and process restart does not resume an old execution stack;
+- Ledger records remain minimal and auditable through log references;
+- all available reasoning traces are logged and correlated to the turn;
+- tools and permissions remain HASHI-owned;
+- provider model names are configurable rather than hard-coded in HER core;
+- reporting failure preserves completed execution evidence;
+- stop terminates primary and sub-agent activity;
+- old HER and HER v2 can be selected independently during migration;
+- canary rollback is tested.
+
+## 23. Locked Runtime Invariants
+
+The following decisions are authoritative for HER v2:
+
+1. User intent is the highest authority for the active turn.
+2. Triage is authoritative and immutable for that turn.
+3. Planning and Replanning may not change classification or goal.
+4. `/steer` stops the old turn and starts a newly triaged turn with new instructions.
+5. Lifecycle order is strict; stage content is flexible.
+6. Stage-local bounded retry is allowed; process-restart resumption is forbidden.
+7. Immediate Response becomes the sole final user-facing answer for `DIRECT_RESPONSE`.
+8. Review is advisory and never user-facing.
+9. The Primary Agent owns execution and reporting.
+10. The Ledger is minimal operational state; HASHI logs are audit truth.
+11. All available reasoning traces must be logged.
+12. Execution evidence outweighs Habits.
+13. Replanning does not consult Habits again.
+14. Missing optional commentary does not fail execution.
+15. Reporting failure does not discard completed work.
+16. Recovery is conversational, not transactional.
+17. HER core is provider-neutral and modular.
+
+## 24. Golden Rule
+
+> Less blocking, more progress — while preserving immutable Triage authority, strict lifecycle order, complete available reasoning audit, and fidelity to the user's active goal.
