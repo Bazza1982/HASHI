@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
-import yaml
 
 from orchestrator.her_v2.audit import AuditPersistenceError, DurableAuditLog
 from orchestrator.her_v2.config import (
@@ -43,66 +41,29 @@ def _profiles():
     }
 
 
-def test_material_acceptance_scenarios_have_required_traceability_metadata():
-    required = {
-        "test_id",
-        "title",
-        "design_requirement_id",
-        "design_intention",
-        "invariant_protected",
-        "risk_or_failure_mode",
-        "test_level",
-        "user_request",
-        "classification_input_or_result",
-        "her_effort",
-        "initial_conditions",
-        "injected_disturbance",
-        "required_behaviours",
-        "prohibited_behaviours",
-        "permitted_terminal_states",
-        "required_terminal_state",
-        "ledger_expectations",
-        "logging_and_reasoning_expectations",
-        "user_facing_expectations",
-        "reason_this_test_matters",
-    }
-    path = Path(__file__).parent / "fixtures" / "her_v2_architecture_acceptance.yaml"
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    scenarios = payload["scenarios"]
-
-    assert payload["format"] == "her-v2-architecture-acceptance-v1"
-    assert len(scenarios) >= 10
-    assert len({item["test_id"] for item in scenarios}) == len(scenarios)
-    for scenario in scenarios:
-        assert required <= scenario.keys(), scenario["test_id"]
-        assert scenario["pytest_node_ids"], scenario["test_id"]
-        assert scenario["required_behaviours"], scenario["test_id"]
-        assert scenario["prohibited_behaviours"], scenario["test_id"]
-        assert scenario["required_terminal_state"] in scenario["permitted_terminal_states"]
+def test_lifecycle_accepts_every_declared_edge():
+    for source, target in sorted(
+        LifecycleMachine.allowed_edges(),
+        key=lambda edge: (edge[0].value, edge[1].value),
+    ):
+        machine = LifecycleMachine(source)
+        assert machine.transition(target) is target, (source, target)
 
 
-@pytest.mark.parametrize("source,target", sorted(LifecycleMachine.allowed_edges(), key=lambda edge: (edge[0].value, edge[1].value)))
-def test_lifecycle_accepts_every_declared_edge(source, target):
-    machine = LifecycleMachine(source)
-    assert machine.transition(target) is target
-
-
-@pytest.mark.parametrize(
-    "source,target",
-    [
+def test_lifecycle_violation_is_not_silently_repaired():
+    cases = [
         (LifecycleState.RECEIVED, LifecycleState.EXECUTING),
         (LifecycleState.TRIAGED, LifecycleState.REVIEWING),
         (LifecycleState.PLANNED, LifecycleState.FINALISING),
         (LifecycleState.EXECUTION_COMPLETED, LifecycleState.REPLANNING),
         (LifecycleState.COMPLETED, LifecycleState.ERROR),
-    ],
-)
-def test_lifecycle_violation_is_not_silently_repaired(source, target):
-    machine = LifecycleMachine(source)
-    with pytest.raises(LifecycleViolation):
-        machine.transition(target)
-    expected = source if source is LifecycleState.COMPLETED else LifecycleState.ERROR
-    assert machine.state is expected
+    ]
+    for source, target in cases:
+        machine = LifecycleMachine(source)
+        with pytest.raises(LifecycleViolation):
+            machine.transition(target)
+        expected = source if source is LifecycleState.COMPLETED else LifecycleState.ERROR
+        assert machine.state is expected, (source, target)
 
 
 def test_triage_classification_is_immutable_and_plan_replacement_is_replan_only():
@@ -163,32 +124,27 @@ def test_restart_reconciliation_marks_incomplete_turn_error_without_resuming(tmp
     assert store.load("done").status is LifecycleState.COMPLETED
 
 
-@pytest.mark.parametrize(
-    "effort,planning,replanning,review,replans,reviews",
-    [
+def test_effort_is_orchestration_policy_not_provider_reasoning():
+    cases = [
         (Effort.LOW, False, False, False, 0, 0),
         (Effort.MEDIUM, True, False, False, 0, 0),
         (Effort.HIGH, True, True, False, 50, 0),
         (Effort.XHIGH, True, True, True, 100, 1),
         (Effort.MAX, True, True, True, 200, 3),
-    ],
-)
-def test_effort_is_orchestration_policy_not_provider_reasoning(
-    effort, planning, replanning, review, replans, reviews
-):
-    policy = resolve_policy(effort, replan_limit=replans, review_limit=reviews)
-    assert (policy.planning, policy.replanning, policy.review) == (
-        planning,
-        replanning,
-        review,
-    )
-    assert policy.max_replans == replans
-    assert policy.max_reviews == reviews
+    ]
+    for effort, planning, replanning, review, replans, reviews in cases:
+        policy = resolve_policy(effort, replan_limit=replans, review_limit=reviews)
+        assert (policy.planning, policy.replanning, policy.review) == (
+            planning,
+            replanning,
+            review,
+        ), effort
+        assert policy.max_replans == replans, effort
+        assert policy.max_reviews == reviews, effort
 
 
-@pytest.mark.parametrize(
-    "disposition,review,limited,expected",
-    [
+def test_terminal_truth_table():
+    cases = [
         (ExecutionDisposition.COMPLETED, None, False, TerminalState.COMPLETED),
         (
             ExecutionDisposition.COMPLETED_WITH_LIMITATIONS,
@@ -216,15 +172,14 @@ def test_effort_is_orchestration_policy_not_provider_reasoning(
             True,
             TerminalState.COMPLETED_WITH_LIMITATIONS,
         ),
-    ],
-)
-def test_terminal_truth_table(disposition, review, limited, expected):
-    assert (
-        terminal_for_execution(
-            disposition, review_outcome=review, material_limitations=limited
-        )
-        is expected
-    )
+    ]
+    for disposition, review, limited, expected in cases:
+        assert (
+            terminal_for_execution(
+                disposition, review_outcome=review, material_limitations=limited
+            )
+            is expected
+        ), (disposition, review, limited)
 
 
 def test_provider_profiles_are_configured_and_cannot_recurse_into_her():
@@ -250,18 +205,16 @@ def test_provider_profiles_are_configured_and_cannot_recurse_into_her():
         ProviderProfile("bad", "her-v2", "recursive")
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
+def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
+    cases = [
         ("shadow_mode", "false"),
         ("shadow_mode", True),
         ("meditation_enabled", 1),
         ("audit_failure_terminal", "COMPLETED"),
-    ],
-)
-def test_safety_configuration_rejects_ambiguous_or_unsafe_values(field, value):
-    with pytest.raises(HERv2ConfigurationError):
-        HERv2Config.from_mapping({"profiles": _profiles(), field: value})
+    ]
+    for field, value in cases:
+        with pytest.raises(HERv2ConfigurationError):
+            HERv2Config.from_mapping({"profiles": _profiles(), field: value})
 
 
 def test_structured_parser_accepts_prose_wrapper_but_not_missing_object():

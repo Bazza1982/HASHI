@@ -5,9 +5,14 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
+
+pytestmark = [pytest.mark.integration, pytest.mark.platform]
+
 
 def test_install_browser_option_d_linux_writes_default_and_isolated_manifests(tmp_path: Path) -> None:
-    repo_root = Path("/home/lily/projects/hashi")
+    repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "tools" / "install_browser_option_d_linux.sh"
 
     home_dir = tmp_path / "home"

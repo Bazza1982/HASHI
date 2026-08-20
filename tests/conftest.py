@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import inspect
-from pathlib import Path
 
 import pytest
-
-from tests.mocks.test_logger import TestLogger, set_logger
 
 
 @pytest.fixture(scope="session")
@@ -14,22 +11,13 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-@pytest.fixture
-def logger(tmp_path: Path) -> TestLogger:
-    """Provide an isolated logger instance for each test."""
-    test_logger = TestLogger(
-        log_dir=tmp_path / "logs",
-        console_output=False,
-        json_output=True,
-    )
-    set_logger(test_logger)
-    return test_logger
-
-
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Auto-mark async tests so pytest-anyio executes them correctly."""
     anyio_marker = pytest.mark.anyio
+    contract_marker = pytest.mark.contract
     for item in items:
+        if {"contract", "ete"}.intersection(item.path.parts):
+            item.add_marker(contract_marker)
         obj = getattr(item, "obj", None)
         if (
             obj is not None

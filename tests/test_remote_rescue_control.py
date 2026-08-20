@@ -254,6 +254,7 @@ def test_hashi_rescue_start_sanitizes_and_truncates_reason_in_audit(tmp_path):
 def test_hashi_rescue_start_returns_structured_windows_launcher_fields(tmp_path, monkeypatch):
     client = _client(tmp_path, max_level=AuthLevel.L3_RESTART)
     sleep_calls = {"count": 0}
+    status_calls = {"count": 0}
 
     monkeypatch.setattr("remote.api.server.platform.system", lambda: "Windows")
     monkeypatch.setattr(
@@ -272,19 +273,22 @@ def test_hashi_rescue_start_returns_structured_windows_launcher_fields(tmp_path,
             "platform": "windows",
         },
     )
-    monkeypatch.setattr(
-        "remote.api.server._hashi_control_status",
-        lambda: {
+    def fake_status():
+        status_calls["count"] += 1
+        running = status_calls["count"] >= 3
+        return {
             "ok": True,
-            "state": "offline",
-            "hashi_running": False,
+            "state": "online" if running else "offline",
+            "hashi_running": running,
             "pid_file_exists": False,
             "pid": None,
             "pid_alive": False,
             "workbench_url": "http://127.0.0.1:1/api/health",
             "workbench_health": None,
-        },
-    )
+        }
+
+    monkeypatch.setattr("remote.api.server._hashi_control_status", fake_status)
+
     async def fake_sleep(*_args, **_kwargs):
         sleep_calls["count"] += 1
         return None
@@ -301,7 +305,7 @@ def test_hashi_rescue_start_returns_structured_windows_launcher_fields(tmp_path,
     assert body["platform"] == "windows"
     assert body["command"][:2] == ["cmd.exe", "/c"]
     assert "bridge-u.bat" in " ".join(body["command"])
-    assert sleep_calls["count"] >= 1
+    assert sleep_calls["count"] == 1
 
 
 def test_rescue_capabilities_advertise_start_only_when_l3_enabled():

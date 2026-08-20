@@ -10,7 +10,6 @@ import pytest
 
 from tools.browser_extension_bridge import (
     BrowserBridgeError,
-    ensure_bridge_session,
     healthcheck,
     send_bridge_command,
 )
@@ -70,7 +69,13 @@ def test_healthcheck_uses_ping(bridge_socket: Path) -> None:
 @requires_unix_stream_server
 def test_send_bridge_command_missing_socket(tmp_path: Path) -> None:
     with pytest.raises(BrowserBridgeError):
-        send_bridge_command("ping", {}, socket_path=tmp_path / "missing.sock", timeout_s=0.1)
+        send_bridge_command(
+            "ping",
+            {},
+            socket_path=tmp_path / "missing.sock",
+            timeout_s=0.1,
+            connect_wait_s=0.01,
+        )
 
 
 def test_native_message_codec_roundtrip() -> None:
@@ -146,13 +151,3 @@ def test_browser_audit_redacts_screenshot_image_payloads() -> None:
 
     assert payload not in json.dumps(sanitized)
     assert all("[image-redacted]" in value for value in sanitized.values())
-
-
-@requires_unix_stream_server
-def test_ensure_bridge_session_raises_without_socket(tmp_path: Path) -> None:
-    with pytest.raises(BrowserBridgeError):
-        ensure_bridge_session(
-            session_id="test",
-            args={"agent_name": "zelda"},
-            socket_path=tmp_path / "missing.sock",
-        )

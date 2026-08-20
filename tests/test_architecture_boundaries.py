@@ -7,7 +7,6 @@ from remote import port_selection
 
 
 ROOT = Path(__file__).resolve().parent.parent
-ACTIVE_RUNTIME_MAX_LINES = 8059
 PRIVATE_PATH_MARKERS = (
     "/home/lily",
     "/mnt/c/Users/thene",
@@ -30,39 +29,6 @@ def _runtime_python_sources() -> list[Path]:
         ]
     )
     return sources
-
-
-def test_clean_ci_dependencies_cover_runtime_imports_and_async_tests():
-    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
-    project_config = (ROOT / "pyproject.toml").read_text(encoding="utf-8").lower()
-
-    for dependency in ("pyyaml", "pytest-asyncio"):
-        assert dependency in requirements
-    assert "pyyaml" in project_config
-    assert "pytest-asyncio" in project_config
-
-
-def test_main_push_gate_inherits_only_approved_merged_pr_authorization():
-    workflow = (ROOT / ".github" / "workflows" / "architecture-boundaries.yml").read_text(
-        encoding="utf-8"
-    )
-
-    for marker in (
-        "types: [opened, synchronize, reopened, labeled, unlabeled]",
-        "listPullRequestsAssociatedWithCommit",
-        'pull.merged_at && pull.base.ref === targetBranch',
-        'label.name) === "core-change-approved"',
-        "steps.merged_pr_approval.outputs.authorized",
-        'python scripts/check_protected_core_changes.py --base "$BASE_SHA" --authorized',
-        "No associated merged PR; treating this update as a direct push.",
-    ):
-        assert marker in workflow
-
-
-def test_active_runtime_size_ratchet():
-    runtime_path = ROOT / "orchestrator" / "flexible_agent_runtime.py"
-
-    assert len(runtime_path.read_text(encoding="utf-8").splitlines()) <= ACTIVE_RUNTIME_MAX_LINES
 
 
 def test_runtime_and_adapters_do_not_embed_private_machine_paths():

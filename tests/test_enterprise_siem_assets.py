@@ -5,9 +5,12 @@ import json
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SIEM_DIR = ROOT / "deploy" / "siem"
+pytestmark = pytest.mark.contract
 
 
 def test_siem_field_mapping_is_machine_readable():
@@ -50,7 +53,7 @@ def test_splunk_dashboard_xml_is_valid():
     root = dashboard.getroot()
     assert root.tag == "form"
     assert root.find("label").text == "HASHI Enterprise Audit Overview"
-    assert "hashi.enterprise.audit" in (SIEM_DIR / "splunk" / "dashboard.xml").read_text(encoding="utf-8")
+    assert "hashi.enterprise.audit" in "".join(root.itertext())
 
 
 def test_elastic_assets_are_valid_json_lines():
@@ -68,13 +71,3 @@ def test_elastic_assets_are_valid_json_lines():
     assert len(rules) >= 3
     assert all(rule["type"] == "security-rule" for rule in rules)
     assert all(rule["attributes"]["enabled"] is False for rule in rules)
-
-
-def test_otel_routing_example_mentions_hashi_audit_pipeline():
-    text = (SIEM_DIR / "otel" / "otel-collector-routing.example.yaml").read_text(encoding="utf-8")
-
-    assert "logs/hashi_audit" in text
-    assert "event.dataset" in text
-    assert "hashi.enterprise.audit" in text
-    assert "HASHI_AUDIT_EXPORT_FORWARD_TOKEN" in text
-

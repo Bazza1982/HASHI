@@ -239,24 +239,23 @@ pytest -q tests/test_enterprise_audit_contracts.py \
 # 42 passed
 ```
 
-Phase 3 Deployment Package Freeze checks passed:
+Phase 3 Deployment Package Freeze originally included static source/YAML mirror
+tests. Those tests were later retired because they could remain green without
+exercising a renderer, parser, or product behavior. Current revalidation uses
+native artifact tooling plus the remaining behavioral tests:
 
 ```text
 python3 -m py_compile hashi.py tools/enterprise_production_validation_plan.py \
   tools/enterprise_k8s_backend_doctor.py tools/enterprise_k8s_image_smoke_plan.py
 
-pytest -q tests/test_enterprise_deploy_skeleton.py \
-  tests/test_enterprise_helm_chart.py tests/test_enterprise_kubernetes_manifests.py \
-  tests/test_enterprise_ha_rehearsal_assets.py \
-  tests/test_enterprise_k8s_ha_rehearsal_plan.py \
-  tests/test_enterprise_production_validation_plan.py
-# 40 passed
+helm lint deploy/helm/hashi-enterprise
+# Chart rendering is also exercised by .github/workflows/enterprise-helm-render.yml.
+pytest -q tests/contract/test_enterprise_plan_contract.py
 
 pytest -q tests/test_enterprise_backup.py tests/test_hashi_enterprise_cli.py \
   tests/test_enterprise_leases.py tests/test_enterprise_kubernetes_leases.py \
   tests/test_enterprise_k8s_backend_doctor.py \
-  tests/test_enterprise_k8s_image_smoke_plan.py tests/test_enterprise_siem_assets.py
-# 50 passed
+  tests/test_enterprise_siem_assets.py
 ```
 
 The deployment package freeze verified that these alpha assets are present for

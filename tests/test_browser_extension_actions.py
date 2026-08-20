@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
 from tools import browser
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_normalize_extension_bridge_screenshot_data_url() -> None:
@@ -205,25 +201,3 @@ async def test_extension_contract_allows_advertised_action(
     )
 
     assert result == "executed:session:default::momo"
-
-
-def test_extension_source_routes_session_and_scroll_to_real_implementations() -> None:
-    source = (
-        ROOT / "tools" / "chrome_extension" / "hashi_browser_bridge" / "service_worker.js"
-    ).read_text(encoding="utf-8")
-    manifest = json.loads(
-        (ROOT / "tools" / "chrome_extension" / "hashi_browser_bridge" / "manifest.json").read_text(
-            encoding="utf-8"
-        )
-    )
-
-    assert 'const BRIDGE_VERSION = "0.1.5";' in source
-    assert manifest["version"] == "0.1.5"
-    assert 'if (action === "session") {\n    return actionSession(args);' in source
-    assert 'if (action === "scroll") {\n    return actionScroll(args);' in source
-    assert 'if (action === "react") {\n    return actionReact(args);' in source
-    assert '"click", "react", "hover"' in source
-    assert "scrollable[0]" in source
-    assert "reaction click did not produce a verified state change" in source
-    assert 'action === "active_tab" || action === "session_create" || action === "session"' not in source
-    assert "actions: SUPPORTED_ACTIONS" in source

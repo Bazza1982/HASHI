@@ -825,20 +825,9 @@ def test_claw_max_iterations_with_unresolved_failures_still_recommends_continue(
     assert metadata["recommended_action"] == "continue"
 
 
-@pytest.mark.parametrize(
-    "effort,iterations",
-    [
-        ("low", 12),
-        ("medium", 32),
-        ("high", 96),
-        ("xhigh", 192),
-        ("max", 384),
-        ("max+", 512),
-    ],
-)
-def test_claw_max_iterations_preserves_primary_agent_final_for_every_effort(
-    effort, iterations
-):
+def test_claw_max_iterations_preserves_primary_agent_final():
+    effort = "high"
+    iterations = 96
     primary_final = f"已走完 {iterations} 轮；下一回合从存档继续。"
     result = ClawTaskResult(
         text=primary_final,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,10 +13,18 @@ from adapters.claw_cli import build_claw_env
 
 def test_hashi_xai_oauth_module_has_no_hermes_imports():
     source = Path(oauth.__file__).read_text(encoding="utf-8")
-    assert "import hermes" not in source
-    assert "hermes_cli" not in source or source.count("hermes_cli") <= 2
-    assert "from adapters.xai_oauth_credentials" not in source
-    assert "from adapters.xai_api" not in source
+    tree = ast.parse(source)
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            imported.update(f"{module}.{alias.name}" for alias in node.names)
+
+    assert not any(name == "hermes" or name.startswith("hermes.") for name in imported)
+    assert "adapters.xai_oauth_credentials" not in imported
+    assert "adapters.xai_api" not in imported
 
 
 def test_resolve_client_id_prefers_env(monkeypatch):

@@ -61,3 +61,39 @@ Issues = "https://github.com/Bazza1982/hashi/issues"
 
 [project.scripts]
 nagare = "nagare.cli:main"
+
+[tool.pytest.ini_options]
+# Bare pytest is the fast, deterministic core gate. Explicit paths always
+# override this list; wider scopes are selected explicitly by path and marker.
+addopts = ["--strict-markers"]
+testpaths = [
+    "tests/test_api_gateway_preflight.py",
+    "tests/test_architecture_boundaries.py",
+    "tests/test_command_registry.py",
+    "tests/test_her_v2_adapter.py",
+    "tests/test_her_v2_core.py",
+    "tests/test_hot_reload.py",
+    "tests/test_manager_registry.py",
+    "tests/test_model_catalog.py",
+    "tests/test_protocol_ack.py",
+    "tests/test_request_activity.py",
+    "tests/test_runtime_command_binding.py",
+    "tests/test_runtime_lifecycle.py",
+]
+python_files = ["test_*.py"]
+norecursedirs = [
+    ".git",
+    ".venv",
+    "build",
+    "dist",
+    "logs",
+    "superloops",
+    "tmp",
+    "workspaces",
+]
+markers = [
+    "contract: release, packaging, or cross-component contract",
+    "integration: deterministic integration with subprocesses or multiple components",
+    "live: requires an explicitly authorized external service or mutable live system",
+    "platform: requires a named operating system or platform facility",
+]

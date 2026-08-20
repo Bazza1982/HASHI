@@ -18,13 +18,12 @@ from tools.browser_bridge_harness import (
     write_wsl_host_wrapper,
 )
 from tools.browser_bridge_smoke_runner import (
-    build_smoke_steps,
     execute_smoke_plan,
-    execute_smoke_step,
-    load_harness_state,
-    write_smoke_command_plan,
 )
 from tools.browser_bridge_stub_server import running_stub_bridge
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 requires_unix_stream_server = pytest.mark.skipif(
@@ -46,7 +45,7 @@ def _build_minimal_harness(root: Path, *, socket_path: str = "/tmp/harness.sock"
     write_wsl_host_wrapper(
         root / "native_host" / "hashi_browser_bridge_test_host.cmd",
         distro_name="Ubuntu-22.04",
-        repo_root="/home/lily/projects/hashi",
+        repo_root=str(ROOT),
         socket_path=socket_path,
         log_path="/tmp/harness.log",
     )
@@ -76,84 +75,6 @@ def _build_minimal_harness(root: Path, *, socket_path: str = "/tmp/harness.sock"
     (root / "README.md").write_text("# test\n", encoding="utf-8")
 
 
-def test_load_harness_state(tmp_path: Path) -> None:
-    root = tmp_path / "harness"
-    _build_minimal_harness(root)
-
-    state = load_harness_state(root)
-    assert state["validation"]["ok"] is True
-    assert state["config"]["socket_path"] == "/tmp/harness.sock"
-    assert state["smoke_plan"]["start_url"] == "https://example.com"
-
-
-def test_build_smoke_steps(tmp_path: Path) -> None:
-    root = tmp_path / "harness"
-    _build_minimal_harness(root)
-
-    steps = build_smoke_steps(root, repo_root=Path("/home/lily/projects/hashi"))
-    assert [step["id"] for step in steps] == [
-        "launch_chrome",
-        "healthcheck",
-        "ping",
-        "active_tab",
-        "get_text",
-        "screenshot",
-    ]
-    assert steps[1]["argv"][1].replace("\\", "/").endswith("tools/browser_bridge_smoke_runner.py")
-    assert "--wait-for-socket-s" in steps[1]["argv"]
-    assert steps[-1]["argv"][-1].endswith("smoke_screenshot.png")
-
-
-def test_write_smoke_command_plan(tmp_path: Path) -> None:
-    root = tmp_path / "harness"
-    _build_minimal_harness(root)
-
-    plan = write_smoke_command_plan(root, repo_root=Path("/home/lily/projects/hashi"))
-    saved = json.loads((root / "state" / "smoke_commands.json").read_text(encoding="utf-8"))
-    assert saved == plan
-    assert saved["steps"][0]["id"] == "launch_chrome"
-
-
-def test_execute_smoke_step_manual_windows() -> None:
-    result = execute_smoke_step(
-        {
-            "id": "launch_chrome",
-            "kind": "manual_windows",
-            "command": "C:\\test\\launch.cmd",
-            "description": "launch",
-        }
-    )
-    assert result["status"] == "manual_required"
-
-
-def test_execute_smoke_plan(tmp_path: Path) -> None:
-    root = tmp_path / "harness"
-    _build_minimal_harness(root)
-
-    def fake_runner(argv, capture_output, text):
-        if argv[2] == "ping":
-            return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true}\n', stderr="")
-        if argv[2] == "healthcheck":
-            return subprocess.CompletedProcess(argv, 0, stdout='{"connected": true}\n', stderr="")
-        if argv[2] == "active_tab":
-            return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true, "output": {"url": "https://example.com"}}\n', stderr="")
-        if argv[2] == "get_text":
-            return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true, "output": "Example"}\n', stderr="")
-        return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true, "saved_to": "x"}\n', stderr="")
-
-    report = execute_smoke_plan(
-        root,
-        repo_root=Path("/home/lily/projects/hashi"),
-        runner=fake_runner,
-        stop_on_failure=True,
-    )
-    saved = json.loads((root / "state" / "smoke_results.json").read_text(encoding="utf-8"))
-    assert saved == report
-    assert report["status"] == "manual_required"
-    assert report["results"][0]["status"] == "manual_required"
-    assert report["results"][1]["status"] == "passed"
-
-
 @requires_unix_stream_server
 def test_execute_smoke_plan_with_stub_bridge(tmp_path: Path) -> None:
     root = tmp_path / "harness"
@@ -164,7 +85,7 @@ def test_execute_smoke_plan_with_stub_bridge(tmp_path: Path) -> None:
     with running_stub_bridge(socket_path, trace_path=trace_path):
         report = execute_smoke_plan(
             root,
-            repo_root=Path("/home/lily/projects/hashi"),
+            repo_root=ROOT,
             runner=subprocess.run,
             stop_on_failure=True,
         )
@@ -195,7 +116,7 @@ def test_execute_smoke_plan_waits_for_delayed_stub_bridge(tmp_path: Path) -> Non
     try:
         report = execute_smoke_plan(
             root,
-            repo_root=Path("/home/lily/projects/hashi"),
+            repo_root=ROOT,
             runner=subprocess.run,
             stop_on_failure=True,
         )

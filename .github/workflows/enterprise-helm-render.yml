@@ -4,14 +4,10 @@ on:
   push:
     paths:
       - "deploy/helm/hashi-enterprise/**"
-      - "tests/test_enterprise_deploy_skeleton.py"
-      - "tests/test_enterprise_helm_chart.py"
       - ".github/workflows/enterprise-helm-render.yml"
   pull_request:
     paths:
       - "deploy/helm/hashi-enterprise/**"
-      - "tests/test_enterprise_deploy_skeleton.py"
-      - "tests/test_enterprise_helm_chart.py"
       - ".github/workflows/enterprise-helm-render.yml"
 
 jobs:

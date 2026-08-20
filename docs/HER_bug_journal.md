@@ -76,7 +76,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
 | `HER-20260817-038` | Deployed to Arale — live behavior verification pending | P1 | StreamLake's 504 inside an established SSE stream was hard-coded non-retryable and aborted a resumable Arale turn | `stream_message_marks_embedded_gateway_timeout_as_retryable`; `provider_stream_retries_embedded_504_once_and_returns_only_complete_attempt` |
 | `HER-20260817-039` | Deployed to Arale — live behavior verification pending | P1 | a legacy effort gate silently demoted every native Persona commentary at `low` and `medium` to internal despite `/commentary on` | `test_medium_adapter_delivers_native_tool_turn_commentary`; corrected low-through-ultra transport matrix |
 | `HER-20260817-040` | Fixed in source — user-managed reboot/live verification pending | P2 | short HER acknowledgement/commentary messages bypassed Markdown rendering and appeared as literal markup in Telegram | `test_her_short_commentary_renders_markdown_before_telegram_delivery`; `test_her_commentary_uses_long_sender_when_rendered_html_exceeds_limit` |
-| `HER-20260818-041` | Fixed in source — online rebuild/live verification pending | P1 | adapter-appended Habit advice entered the authoritative TaskFrame request and fallback `active_goal` | `habit_advice_stays_outside_authoritative_request_when_planning_falls_back`; `test_enabled_feature_plans_and_schedules_meditation_at_every_effort` |
+| `HER-20260818-041` | Fixed in source — online rebuild/live verification pending | P1 | adapter-appended Habit advice entered the authoritative TaskFrame request and fallback `active_goal` | `habit_advice_stays_outside_authoritative_request_when_planning_falls_back`; `test_enabled_feature_plans_and_schedules_meditation` |
 | `HER-20260818-042` | Fixed in source — rebuild/live verification pending | P2 | a final candidate paired with `StructuredOutput` was delivered first as commentary and then again as final | `final_candidate_with_only_structured_output_is_not_emitted_as_commentary`; commentary-prefix router tests |
 
 ## Historical entries
@@ -1739,7 +1739,7 @@ Statuses: `New`, `Reproduced`, `Root caused`, `Fixed`, `Verified`, `Reopened`, `
   and add a bounded no-progress rule that must dispatch, wait on a concrete blocker, or
   surface a validation finding instead of scheduling another identical observation.
 - **Regression:**
-  `tests/test_her_debug_superloop_template.py::test_in_progress_packet_continuation_cannot_require_new_start_authority`.
+  `tests/test_her_debug_superloop.py::test_in_progress_packet_continuation_cannot_require_new_start_authority`.
 - **Fix:** the template now distinguishes pending phase-task activation from packet
   continuation inside an `in_progress` task, persists campaign-scoped execution
   authority at start, forbids fresh per-packet authority, and caps identical stagnant

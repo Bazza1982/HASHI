@@ -2,17 +2,20 @@
 
 ## HASHI Bridge
 
+- Testing scope follows `docs/TESTING_POLICY.md`; focused, core, offline
+  product, contract, platform, and live results are reported separately.
 - Static compile: `python3 -m py_compile main.py orchestrator/*.py`
-- Full test suite: `pytest -q --ignore=workspaces` (equivalent to bare
-  `pytest` in a clean checkout; prevents local ignored Agent workspaces from
-  being collected as duplicate repositories)
+- Core gate: `python -m pytest -q`
+- Offline product suite for the release candidate: `python -m pytest -q tests -m "not contract and not live and not platform"`
+- Relevant contract and platform scopes are run and reported separately; live
+  scope requires explicit authorization
 - Architecture boundaries:
   - `python scripts/check_protected_core_changes.py --validate-manifest`
   - `python scripts/check_protected_core_changes.py --base main` (or
     `--authorized` only when the current task explicitly approves core edits)
   - architecture-boundary CI is green
-  - `tests/test_architecture_boundaries.py` keeps private paths, old global
-    process files, and active-runtime size from regressing
+  - `tests/test_architecture_boundaries.py` keeps private paths and old global
+    process files from regressing
   - no new model, command, manager, workspace-state, instance-lock, or
     platform fact source duplicates an existing owner
 - Workbench health: `curl http://127.0.0.1:<workbench_port>/api/health`
@@ -45,11 +48,11 @@
   - `python scripts/verify_her_certification.py --source-root <pinned-her-source>`
     passes full Rust workspace tests plus workspace/all-target Clippy with
     warnings denied
-  - `python -m pytest -q tests/test_her_adapter.py tests/test_her_certification_baseline.py tests/test_her_runtime_probe.py tests/test_tool_gateway_mcp.py tests/test_media_read.py tests/test_runtime_media.py`
-  - `python -m pytest -q tests/test_her_habit_meditation.py tests/test_runtime_her_habits.py tests/test_flexible_backend_state.py tests/test_runtime_pipeline.py tests/test_runtime_cross_session.py`
-  - `python -m pytest -q tests/test_her_ultra.py tests/test_her_rebuild.py tests/test_her_rebuild_manager.py tests/test_reboot_manager.py`
-  - `python -m pytest -q tests/test_agent_overview.py tests/test_remote_shared_token.py`
-  - `python -m pytest -q tests/test_her_debug_lab.py tests/test_her_debug_restart_guard.py tests/test_her_debug_superloop_template.py`
+  - HER v2 changes run the touched v2 module plus its direct adapter/runtime
+    consumer; legacy HER compatibility is added only when legacy ownership or
+    a shared boundary changed
+  - the release candidate passes the explicit offline product suite once;
+    repeated overlapping HER bundles are not separate gates
   - `python -m py_compile adapters/her.py adapters/her_habits.py orchestrator/runtime_her_habits.py tools/media_read.py tools/gateway/mcp_stdio.py`
   - Fixed mode proves incremental resume only after a HER session ID exists;
     Flex, Wrapper, Audit, and Dual Brain prove full-context turns do not also
@@ -138,7 +141,12 @@ testing. It does not certify a production enterprise-server rollout.
 - Approval, audit, and export smoke:
   - `pytest -q tests/test_workbench_enterprise_policies.py tests/test_workbench_enterprise_audit.py tests/test_enterprise_audit_ledger.py tests/test_enterprise_audit_export.py tests/test_enterprise_audit_live_export.py`
 - Deployment artifact smoke:
-  - `pytest -q tests/test_enterprise_deploy_skeleton.py tests/test_enterprise_helm_chart.py tests/test_enterprise_production_validation_plan.py tests/test_enterprise_siem_assets.py`
+  - `helm lint deploy/helm/hashi-enterprise`
+  - render the chart through `.github/workflows/enterprise-helm-render.yml`
+  - generate and parse the deployment plans through their dedicated GitHub
+    workflows
+  - `pytest -q tests/contract/test_enterprise_plan_contract.py`
+  - `pytest -q tests/test_enterprise_siem_assets.py`
 - CLI smoke:
   - `python3 hashi.py --help`
   - `python3 hashi.py enterprise --help`

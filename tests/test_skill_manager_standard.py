@@ -41,15 +41,6 @@ def test_repository_catalog_is_standard_and_keeps_high_autonomy_templates():
     } <= ids
     assert ids.isdisjoint({"cron", "heartbeat", "dream", "recall"})
     assert manager.skill_validation_errors() == []
-    assert "--dangerously-skip-permissions" in (
-        project_root / "skills" / "claude" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    assert "--full-auto" in (project_root / "skills" / "codex" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    assert "--approval-mode yolo" in (
-        project_root / "skills" / "gemini" / "SKILL.md"
-    ).read_text(encoding="utf-8")
 
 
 def test_loads_only_standard_skill_packages_and_resolves_legacy_underscore_alias(

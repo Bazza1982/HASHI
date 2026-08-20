@@ -19,9 +19,3 @@ def test_existing_agents_with_utf8_bom_skip_onboarding(tmp_path: Path, monkeypat
     monkeypatch.setattr("orchestrator.onboarding_gate.subprocess.run", fail_if_called)
 
     assert run_onboarding_gate(paths, tmp_path) is False
-
-
-def test_shell_launcher_gate_accepts_utf8_bom() -> None:
-    launcher = Path(__file__).resolve().parents[1] / "bin" / "bridge-u.sh"
-
-    assert "open(sys.argv[1], encoding='utf-8-sig')" in launcher.read_text(encoding="utf-8")

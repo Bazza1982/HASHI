@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from orchestrator.superloop_store import SuperloopStore
 from orchestrator.superloop_waits import SuperloopWaitsService
 
@@ -35,8 +37,5 @@ def test_waits_path_must_stay_under_superloops_root(tmp_path: Path) -> None:
         operator_summary="# summary\n",
     )
     waits = SuperloopWaitsService(store)
-    try:
+    with pytest.raises(ValueError):
         waits.list_waits("sl-test-escape")
-        assert False, "expected ValueError for escaping waits path"
-    except ValueError:
-        pass

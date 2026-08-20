@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from orchestrator.superloop_issues import SuperloopIssuesService
 from orchestrator.superloop_store import SuperloopStore
 
@@ -42,8 +44,5 @@ def test_issues_path_must_stay_under_superloops_root(tmp_path: Path) -> None:
         operator_summary="# summary\n",
     )
     svc = SuperloopIssuesService(store)
-    try:
+    with pytest.raises(ValueError):
         svc.list_issues("sl-test-escape")
-        assert False, "expected ValueError for escaping issues path"
-    except ValueError:
-        pass

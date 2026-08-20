@@ -52,7 +52,10 @@ validation remains pending.
 
 ## Final Alpha Validation Snapshot
 
-The release candidate cut used this local/static validation snapshot:
+The release candidate cut used the following local validation snapshot. The
+original snapshot also counted static source/YAML mirror tests; those modules
+were later retired because they did not execute the represented artifacts.
+Current artifact revalidation uses native tooling:
 
 ```text
 python3 -m py_compile hashi.py setup.py orchestrator/config.py \
@@ -68,11 +71,9 @@ pytest -q tests/test_workbench_enterprise_policies.py \
   tests/test_enterprise_audit_export.py tests/test_enterprise_audit_live_export.py
 # 35 passed
 
-pytest -q tests/test_enterprise_deploy_skeleton.py \
-  tests/test_enterprise_helm_chart.py \
-  tests/test_enterprise_production_validation_plan.py \
-  tests/test_enterprise_siem_assets.py tests/test_hashi_enterprise_cli.py
-# 48 passed
+helm lint deploy/helm/hashi-enterprise
+pytest -q tests/contract/test_enterprise_plan_contract.py
+pytest -q tests/test_enterprise_siem_assets.py tests/test_hashi_enterprise_cli.py
 
 python3 hashi.py --help
 python3 hashi.py enterprise --help

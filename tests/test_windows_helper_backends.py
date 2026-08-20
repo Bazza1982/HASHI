@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.platform
+
 if not hasattr(ctypes, "WinDLL"):
     pytest.skip("Windows helper native backend tests require ctypes.WinDLL", allow_module_level=True)
 

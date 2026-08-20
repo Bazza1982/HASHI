@@ -83,7 +83,7 @@ Optional later: `long_press` = pointerdown + hold_ms + pointerup.
 | Tool schema | `timeout_ms`, `wait_ms`, `x_ratio`, `y_ratio` on hover tool |
 | Playwright fallback | honors `wait_ms` after `page.hover` |
 | CLI | passes timeout/wait/x_ratio/y_ratio into hover |
-| Tests | `tests/test_browser_extension_actions.py`, `tests/test_browser_extension_hover_source.py` |
+| Tests | Python bridge contract plus an explicitly authorized benign live canary |
 
 ### Coordinate caveats
 
@@ -103,7 +103,9 @@ Optional later: `long_press` = pointerdown + hold_ms + pointerup.
 2. LinkedIn feed, unliked post: `hover` main reaction → DOM contains Celebrate.
 3. `click` Celebrate → state Celebrate (not only Like).
 4. Regression: plain Like `click` still works without hover.
-5. Unit/source tests: `pytest tests/test_browser_extension_actions.py tests/test_browser_extension_hover_source.py`.
+5. Focused contract: `pytest -q tests/test_browser_extension_actions.py`.
+6. The service-worker hover itself is proven by the benign live canary, not by
+   source-substring assertions.
 
 ## Decision log
 

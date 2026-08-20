@@ -707,7 +707,9 @@ def test_packaged_her_bridges_media_read_image_into_provider_vision_input(tmp_pa
                                             "type": "function",
                                             "function": {
                                                 "name": "mcp__hashi-tools__media_read",
-                                                "arguments": json.dumps({"path": str(photo)}),
+                                                "arguments": json.dumps(
+                                                    {"path": str(photo), "ocr_mode": "off"}
+                                                ),
                                             },
                                         }
                                     ]

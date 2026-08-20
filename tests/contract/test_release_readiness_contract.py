@@ -8,27 +8,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 NAGARE_ROOT = ROOT / "nagare"
-README = ROOT / "README.md"
-PYPROJECT = ROOT / "pyproject.toml"
-PACKAGE_JSON = ROOT / "nagare-viz" / "package.json"
-
-REQUIRED_DOCS = [
-    ROOT / "docs" / "MIGRATION_FROM_HASHI.md",
-    ROOT / "docs" / "HANDLER_GUIDE.md",
-    ROOT / "docs" / "ADAPTER_GUIDE.md",
-    ROOT / "docs" / "LOGGING.md",
-    ROOT / "docs" / "ROUND_TRIP_CONTRACT.md",
-    ROOT / "docs" / "NAGARE_RELEASE_CHECKLIST.md",
-    ROOT / "docs" / "NAGARE_KNOWN_LIMITATIONS.md",
-]
 
 FORBIDDEN_IMPORT_ROOTS = {"flow", "hashi", "tools"}
-
-
-def test_phase8_required_docs_exist_and_are_non_empty() -> None:
-    for path in REQUIRED_DOCS:
-        assert path.exists(), f"Missing release doc: {path}"
-        assert path.read_text(encoding="utf-8").strip(), f"Empty release doc: {path}"
 
 
 def test_nagare_package_has_no_forbidden_runtime_imports() -> None:
@@ -43,19 +24,6 @@ def test_nagare_package_has_no_forbidden_runtime_imports() -> None:
                 continue
             forbidden = roots & FORBIDDEN_IMPORT_ROOTS
             assert not forbidden, f"{path} imports forbidden runtime module(s): {sorted(forbidden)}"
-
-
-def test_release_metadata_exposes_nagare_cli_and_editor_scripts() -> None:
-    pyproject_text = PYPROJECT.read_text(encoding="utf-8")
-    package_json_text = PACKAGE_JSON.read_text(encoding="utf-8")
-    readme_text = README.read_text(encoding="utf-8")
-
-    assert 'nagare = "nagare.cli:main"' in pyproject_text
-    assert '"build": "tsc -b && vite build"' in package_json_text
-    assert '"test": "vitest run"' in package_json_text
-    assert "Nagare Core And Editor" in readme_text
-
-
 def test_python_module_and_cli_help_resolve() -> None:
     import_result = subprocess.run(
         [sys.executable, "-c", "import nagare; print(nagare.__all__)"],

@@ -39,7 +39,9 @@ async def test_media_read_normalizes_image_to_mcp_image_without_bytes_in_output(
     path = tmp_path / "alpha.png"
     Image.new("RGBA", (40, 30), (255, 0, 0, 80)).save(path)
 
-    result = await _registry(tmp_path).execute("media_read", {"path": str(path)}, "call-1")
+    result = await _registry(tmp_path).execute(
+        "media_read", {"path": str(path), "ocr_mode": "off"}, "call-1"
+    )
 
     assert result.is_error is False
     assert result.content is not None
@@ -146,7 +148,7 @@ async def test_media_read_accepts_explicit_agent_media_root(tmp_path):
     Image.new("RGB", (12, 9), "green").save(path)
 
     result = await _registry(workspace, media_roots=[media]).execute(
-        "media_read", {"path": str(path)}
+        "media_read", {"path": str(path), "ocr_mode": "off"}
     )
 
     assert result.is_error is False
@@ -164,7 +166,9 @@ async def test_media_read_extracts_pdf_text_and_renders_scanned_page(tmp_path):
     document.save(path)
     document.close()
 
-    result = await _registry(tmp_path).execute("media_read", {"path": str(path)})
+    result = await _registry(tmp_path).execute(
+        "media_read", {"path": str(path), "ocr_mode": "off"}
+    )
 
     assert result.is_error is False
     assert result.content is not None

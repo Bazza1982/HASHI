@@ -5,8 +5,6 @@ from types import SimpleNamespace
 
 from orchestrator import runtime_menu_views
 
-ROOT = Path(__file__).resolve().parents[1]
-
 
 class _Slots:
     SLOTS = ("1", "2")
@@ -26,35 +24,6 @@ def _assert_standard_card(text: str, title: str) -> None:
     assert "━━━━━━━━━━━━━━━━" in text
     assert "<b>Current</b> ·" in text
     assert text.index("━━━━━━━━━━━━━━━━") < text.index("<b>Current</b> ·")
-
-
-def test_command_card_divider_is_centralized() -> None:
-    offenders = []
-    for path in (ROOT / "orchestrator").rglob("*.py"):
-        if path.name == "command_ui.py":
-            continue
-        if "━━━━━━━━━━━━━━━━" in path.read_text(encoding="utf-8"):
-            offenders.append(path.relative_to(ROOT).as_posix())
-
-    assert offenders == []
-
-
-def test_active_and_legacy_runtimes_share_critical_menu_renderers() -> None:
-    required = (
-        "runtime_menu_views.parked_topics_text(",
-        "runtime_menu_views.loop_list_text(",
-        "runtime_menu_views.safevoice_menu_text(",
-    )
-    for relative_path in (
-        "orchestrator/flexible_agent_runtime.py",
-        "orchestrator/legacy/bridge_agent_runtime.py",
-    ):
-        source = (ROOT / relative_path).read_text(encoding="utf-8")
-        assert all(call in source for call in required)
-        assert "runtime_sys_prompts.cmd_sys(self, update, context)" in source
-
-    shared_sys_source = (ROOT / "orchestrator/runtime_sys_prompts.py").read_text(encoding="utf-8")
-    assert "runtime_menu_views.sys_slots_text(" in shared_sys_source
 
 
 def test_parked_topics_card_escapes_values_and_keeps_actions_last() -> None:

@@ -326,12 +326,33 @@ async def test_sys_callback_honors_limited_agent_command_policy(tmp_path: Path) 
     assert query.answers == [("/sys is disabled for this Agent.", True)]
 
 
-def test_flexible_and_legacy_runtimes_delegate_sys_to_the_same_module() -> None:
-    root = Path(__file__).resolve().parents[1]
-    for relative in (
-        "orchestrator/flexible_agent_runtime.py",
-        "orchestrator/legacy/bridge_agent_runtime.py",
-    ):
-        source = (root / relative).read_text(encoding="utf-8")
-        assert "runtime_sys_prompts.cmd_sys(self, update, context)" in source
-        assert "runtime_sys_prompts.callback_sys(self, update, context)" in source
+@pytest.mark.asyncio
+async def test_flexible_and_legacy_runtimes_delegate_sys_to_the_same_module(
+    monkeypatch,
+) -> None:
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime
+
+    calls: list[tuple[str, object, object, object]] = []
+
+    async def fake_cmd(runtime, update, context) -> None:
+        calls.append(("command", runtime, update, context))
+
+    async def fake_callback(runtime, update, context) -> None:
+        calls.append(("callback", runtime, update, context))
+
+    monkeypatch.setattr(runtime_sys_prompts, "cmd_sys", fake_cmd)
+    monkeypatch.setattr(runtime_sys_prompts, "callback_sys", fake_callback)
+
+    for runtime_class in (FlexibleAgentRuntime, BridgeAgentRuntime):
+        runtime = object.__new__(runtime_class)
+        update = object()
+        context = object()
+
+        await runtime.cmd_sys(update, context)
+        await runtime.callback_sys(update, context)
+
+        assert calls[-2:] == [
+            ("command", runtime, update, context),
+            ("callback", runtime, update, context),
+        ]

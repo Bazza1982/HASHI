@@ -187,8 +187,9 @@ Move backend preflight:
 Validation:
 
 ```bash
-pytest tests/test_commands.py tests/test_flexible_habits.py
-pytest
+python -m pytest -q tests/test_config.py tests/test_api_gateway_preflight.py \
+  tests/test_command_registry.py
+python -m pytest -q
 ```
 
 Suggested commit:
@@ -248,8 +249,9 @@ Requirements:
 Validation:
 
 ```bash
-pytest tests/test_codex_cli.py tests/test_commands.py tests/test_remote_peer_status.py
-pytest
+python -m pytest -q tests/test_agent_lifecycle.py tests/test_codex_cli.py \
+  tests/test_remote_peer_status.py
+python -m pytest -q
 ```
 
 Suggested commit:

@@ -31,9 +31,6 @@ from adapters.her_habits import (
     resolve_habit_reference,
 )
 
-EFFORTS = ("low", "medium", "high", "xhigh", "max", "max+")
-
-
 def test_her_adapter_declares_habit_pipeline_ownership() -> None:
     assert HERAdapter.habit_pipeline_owner == "adapter"
 
@@ -525,18 +522,16 @@ def test_replayed_create_action_is_idempotent(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("effort", EFFORTS)
 async def test_disabled_feature_preserves_the_exact_her_prompt_and_does_not_meditate(
     tmp_path,
-    effort,
 ):
-    adapter = _adapter(tmp_path, enabled=False, effort=effort)
+    adapter = _adapter(tmp_path, enabled=False)
     _seed_habit(adapter._her_habit_store())
     adapter._run_task_async = AsyncMock(return_value=_task_result())
     adapter._schedule_habit_meditation = Mock()
     prompt = "--- CURRENT USER REQUEST — AUTHORITATIVE ---\nCheck permission handling."
 
-    response = await adapter.generate_response(prompt, request_id=f"off-{effort}")
+    response = await adapter.generate_response(prompt, request_id="off")
 
     assert response.is_success is True
     assert adapter._run_task_async.await_count == 1
@@ -547,18 +542,16 @@ async def test_disabled_feature_preserves_the_exact_her_prompt_and_does_not_medi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("effort", EFFORTS)
-async def test_enabled_feature_plans_and_schedules_meditation_at_every_effort(
+async def test_enabled_feature_plans_and_schedules_meditation(
     tmp_path,
-    effort,
 ):
-    adapter = _adapter(tmp_path, enabled=True, effort=effort)
+    adapter = _adapter(tmp_path, enabled=True)
     habit_id = _seed_habit(adapter._her_habit_store())
     adapter._run_task_async = AsyncMock(return_value=_task_result())
     adapter._schedule_habit_meditation = Mock()
     prompt = "--- CURRENT USER REQUEST — AUTHORITATIVE ---\nCheck filesystem permission before writing."
 
-    response = await adapter.generate_response(prompt, request_id=f"on-{effort}")
+    response = await adapter.generate_response(prompt, request_id="on")
 
     foreground_call = adapter._run_task_async.await_args
     executed_prompt = foreground_call.args[0]

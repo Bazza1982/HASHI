@@ -8,6 +8,7 @@ from orchestrator.enterprise import EnterpriseLeaseStore, run_enterprise_lease_r
 
 
 POSTGRES_TEST_URL = os.environ.get("HASHI_ENTERPRISE_POSTGRES_TEST_URL")
+pytestmark = [pytest.mark.integration, pytest.mark.live]
 
 
 @pytest.mark.skipif(
