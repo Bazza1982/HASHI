@@ -1153,6 +1153,29 @@ Please scan Outlook.""",
     assert "plan_steps" not in backend.prompt
     assert provider.tool_call_count == 0
 
+    system_md.write_text(
+        "FULL AGENT CONTENT WITHOUT A PERSONA BLOCK",
+        encoding="utf-8",
+    )
+    await provider.invoke(
+        profile,
+        _stage_request(
+            Stage.IMMEDIATE_RESPONSE,
+            allow_tools=False,
+            allow_side_effects=False,
+        ),
+    )
+
+    fallback_backend = manager.backends[-1]
+    assert fallback_backend.sys_prompt.startswith(
+        "[persona]\n"
+        "Agent display name: agent. Use a polite tone and address the user as 您.\n"
+        "[persona_end]"
+    )
+    assert "FULL AGENT CONTENT WITHOUT A PERSONA BLOCK" not in (
+        fallback_backend.sys_prompt
+    )
+
 
 @pytest.mark.asyncio
 async def test_raw_provider_commentary_cannot_bypass_persona_packaging():

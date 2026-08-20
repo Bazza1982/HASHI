@@ -136,6 +136,9 @@ cannot invalidate, retry, reclassify, replan, stop, or complete a stage. Missing
 or invalid Persona markers and packaging failures use a deterministic minimal
 package based on the configured HASHI display name, the form of address `您`,
 and the unchanged neutral commentary.
+When the Persona block is unavailable to Immediate Response, its prompt uses
+the same configured display name and polite form of address `您` as its entire
+fallback Persona guidance; it never falls back to the rest of `system_md`.
 
 This boundary governs interim commentary packaging and the Persona input used
 by Immediate Response. Immediate Response is not rewritten by the commentary

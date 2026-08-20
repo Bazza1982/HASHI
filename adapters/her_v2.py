@@ -161,9 +161,17 @@ def _internal_stage_system_prompt(request: StageRequest) -> str | None:
 def _immediate_response_system_prompt(
     source: her_persona.HERPersonaPackagingSource,
 ) -> str:
+    persona_guidance = (
+        source.guidance
+        if source.usable
+        else (
+            f"Agent display name: {source.display_name}. "
+            "Use a polite tone and address the user as 您."
+        )
+    )
     return (
         f"{her_persona.PERSONA_BLOCK_BEGIN}\n"
-        f"{source.guidance}\n"
+        f"{persona_guidance}\n"
         f"{her_persona.PERSONA_BLOCK_END}\n\n"
         "For an obviously direct conversational request, answer it immediately.\n"
         "For work that must continue, provide only a short receipt acknowledgement.\n"

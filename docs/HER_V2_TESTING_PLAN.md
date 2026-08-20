@@ -692,8 +692,9 @@ Tests must prove:
 - Persona packaging receives only neutral commentary and the exact contents of
   the configured `[persona]` marker block;
 - content outside that marker block cannot reach the packaging model;
-- missing or invalid markers and packaging failure use the deterministic
-  display-name + `您` fallback;
+- missing or invalid markers use the deterministic display-name + `您`
+  fallback in both commentary and Immediate Response; commentary packaging
+  failure uses that same fallback;
 - packaging occurs before delivery and concurrent/replayed event IDs are
   delivered at most once;
 - the Telegram commentary boundary accepts packaged commentary and rejects a
