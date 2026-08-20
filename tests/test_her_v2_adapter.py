@@ -954,7 +954,8 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     )
 
     backend = manager.backends[-1]
-    assert backend.tool_registry is registry
+    assert backend.tool_registry.base is registry
+    assert backend.tool_registry.max_loops is None
     assert backend.reasoning_enabled is True
     assert backend.config.extra["reasoning_effort"] == "provider-high"
     assert '"her_effort": "xhigh"' in backend.prompt
@@ -1015,6 +1016,35 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     assert '"external_side_effects_authorised_for_this_stage": false' in (
         repair_backend.prompt
     )
+
+
+@pytest.mark.asyncio
+async def test_hashi_stage_provider_makes_every_effort_tool_loop_unbounded():
+    manager = _FakeManager()
+    registry = _BaseToolRegistry()
+    registry.max_loops = 8
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=registry,
+    )
+    profile = ProviderProfile(
+        "premium", "openrouter-api", "configured/model"
+    )
+    for effort in Effort:
+        request = _stage_request(
+            Stage.EXECUTION,
+            allow_tools=True,
+            allow_side_effects=True,
+        )
+        request = StageRequest(**{**request.__dict__, "effort": effort})
+
+        await provider.invoke(profile, request)
+
+        request_registry = manager.backends[-1].tool_registry
+        assert request_registry.base is registry
+        assert request_registry.max_loops is None
+
+    assert registry.max_loops == 8
 
 
 @pytest.mark.asyncio
@@ -1116,6 +1146,7 @@ async def test_subagent_receives_only_explicitly_delegated_tools():
     await provider.invoke(profile, request)
 
     delegated = manager.backends[-1].tool_registry
+    assert delegated.max_loops is None
     names = {
         item["function"]["name"] for item in delegated.get_tool_definitions()
     }
@@ -1147,6 +1178,7 @@ async def test_shadow_execution_registry_exposes_read_only_tools_only():
     )
 
     shadow_registry = manager.backends[-1].tool_registry
+    assert shadow_registry.max_loops is None
     names = {
         item["function"]["name"] for item in shadow_registry.get_tool_definitions()
     }

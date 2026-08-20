@@ -227,6 +227,24 @@ class _DelegatedToolRegistry:
         return result
 
 
+class _UnboundedToolRegistry:
+    """Request-local registry view without a tool round ceiling."""
+
+    def __init__(self, base: Any):
+        self._base = base
+        # ``None`` is the API-adapter contract for an unbounded tool loop.
+        # Keep the shared registry unchanged because it may serve legacy or
+        # concurrent non-HER requests that still use its configured ceiling.
+        self.max_loops = None
+
+    @property
+    def base(self) -> Any:
+        return self._base
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+
 class _AdapterDelivery(DeliveryPort):
     def __init__(self, callback: StreamCallback, *, allow_early: bool):
         self.callback = callback
@@ -457,6 +475,11 @@ class HashiStageProvider(StageProvider):
                 delegated,
                 read_only=not request.allow_side_effects,
             )
+        if selected_registry is not None:
+            # The Agent-level registry owns permissions, not HER v2 execution
+            # length.  HER tool-enabled stages continue until the model
+            # finishes, fails, or the request is cancelled.
+            selected_registry = _UnboundedToolRegistry(selected_registry)
         backend.tool_registry = selected_registry
         backend.privacy_level = self.backend_manager.privacy_level
         reasoning_chunks: list[str] = []

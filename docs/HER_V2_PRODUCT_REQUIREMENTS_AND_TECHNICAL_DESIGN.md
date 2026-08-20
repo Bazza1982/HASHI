@@ -210,6 +210,13 @@ HER effort controls orchestration behaviour, not provider reasoning.
 | `xhigh` | High behaviour plus independent review and at most one remediation cycle |
 | `max` | High behaviour plus independent review and at most three review/remediation cycles |
 
+HER v2 does not impose a tool-call round or turn ceiling on tool-enabled
+Execution or delegated sub-agent invocations. Once tools are authorised for a
+stage, the provider loop continues until the model completes, the invocation
+fails, or the request is cancelled. Agent-level Tool Registry permissions and
+safety policy still apply, but a generic registry `max_loops` value is not a
+HER v2 termination condition. Effort never changes this rule.
+
 Effort determines the maximum orchestration path available. Triage classifications `DIRECT_RESPONSE` and `CONFIRMATION_REQUIRED` terminate through their dedicated paths without unnecessary planning, regardless of the selected effort.
 
 Provider model and reasoning settings for each stage are selected through configurable role profiles such as `lightweight`, `premium`, and `reviewer`. HER does not hard-code provider model names.

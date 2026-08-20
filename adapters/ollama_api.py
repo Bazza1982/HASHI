@@ -198,7 +198,7 @@ class OllamaAdapter(OpenRouterAdapter):
         self._ensure_client()
 
         use_streaming = on_stream_event is not None
-        max_loops = self.tool_registry.max_loops if self.tool_registry else 1
+        max_loops = self._tool_loop_limit()
 
         messages = [
             {"role": "system", "content": self.sys_prompt},
@@ -210,7 +210,7 @@ class OllamaAdapter(OpenRouterAdapter):
 
         try:
             self._touch_activity()
-            for loop_idx in range(max_loops):
+            for loop_idx in self._tool_loop_indices(max_loops):
                 payload = self._build_payload(messages, use_streaming=use_streaming)
                 if use_streaming:
                     result = await self._stream_api_once(payload, headers, on_stream_event)
@@ -228,7 +228,7 @@ class OllamaAdapter(OpenRouterAdapter):
                 messages.append(assistant_msg)
                 await self._run_tool_calls(result.tool_calls, messages, on_stream_event)
 
-                if loop_idx == max_loops - 1:
+                if max_loops is not None and loop_idx == max_loops - 1:
                     self.logger.warning(f"Tool loop limit ({max_loops}) reached for {request_id}")
 
             duration_ms = round((time.perf_counter() - started) * 1000, 2)

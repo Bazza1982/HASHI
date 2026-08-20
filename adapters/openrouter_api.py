@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from itertools import count
 from pathlib import Path
 from typing import Optional
 
@@ -79,6 +80,18 @@ class OpenRouterAdapter(BaseBackend):
 
     def set_reasoning_enabled(self, enabled: bool) -> None:
         self.reasoning_enabled = bool(enabled)
+
+    def _tool_loop_limit(self) -> int | None:
+        """Resolve the registry ceiling; ``None`` means no round limit."""
+
+        if self.tool_registry is None:
+            return 1
+        configured = getattr(self.tool_registry, "max_loops", 1)
+        return None if configured is None else int(configured)
+
+    @staticmethod
+    def _tool_loop_indices(max_loops: int | None):
+        return count() if max_loops is None else range(max_loops)
 
     def _ensure_client(self):
         if self.client is None or getattr(self.client, "is_closed", False):
@@ -504,7 +517,7 @@ class OpenRouterAdapter(BaseBackend):
         self._ensure_client()
 
         use_streaming = on_stream_event is not None
-        max_loops = self.tool_registry.max_loops if self.tool_registry else 1
+        max_loops = self._tool_loop_limit()
 
         messages = [
             {"role": "system", "content": self.sys_prompt},
@@ -528,7 +541,7 @@ class OpenRouterAdapter(BaseBackend):
         try:
             self._touch_activity()
 
-            for loop_idx in range(max_loops):
+            for loop_idx in self._tool_loop_indices(max_loops):
                 payload = self._build_payload(messages, use_streaming=use_streaming)
 
                 if use_streaming:
@@ -549,9 +562,13 @@ class OpenRouterAdapter(BaseBackend):
 
                 tool_loop_count += 1
                 total_tool_calls += len(result.tool_calls)
+                loop_position = (
+                    str(loop_idx + 1)
+                    if max_loops is None
+                    else f"{loop_idx + 1}/{max_loops}"
+                )
                 self.logger.debug(
-                    f"Tool loop {loop_idx + 1}/{max_loops}: "
-                    f"{len(result.tool_calls)} tool call(s)"
+                    f"Tool loop {loop_position}: {len(result.tool_calls)} tool call(s)"
                 )
 
                 # Append assistant message (with tool_calls) to conversation
@@ -565,7 +582,7 @@ class OpenRouterAdapter(BaseBackend):
                 await self._run_tool_calls(result.tool_calls, messages, on_stream_event)
 
                 # If this was the last allowed loop, break
-                if loop_idx == max_loops - 1:
+                if max_loops is not None and loop_idx == max_loops - 1:
                     result = await self._call_final_after_tool_loop_limit(
                         messages, headers, use_streaming, on_stream_event,
                         request_id, max_loops

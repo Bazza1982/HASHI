@@ -6,8 +6,7 @@
       "model": "role-configured",
       "effort": "high",
       "tools": {
-        "allowed": ["*"],
-        "max_loops": 25
+        "allowed": ["*"]
       },
       "her_v2": {
         "shadow_mode": false,

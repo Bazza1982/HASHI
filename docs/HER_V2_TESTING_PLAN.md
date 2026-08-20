@@ -225,6 +225,14 @@ Representative policy combinations must cover:
 
 This representative matrix replaces a full classification-by-effort Cartesian product unless a production defect justifies an additional combination.
 
+The tool-loop regression is such a production-defect exception. It must prove
+that every tool-enabled HER effort receives an unbounded request-local registry
+view without mutating the shared Agent registry. A focused adapter regression
+must then drive every gateway-managed API adapter beyond a deliberately low
+underlying `max_loops` value and prove that execution still reaches the model's
+own final response. The implementation must use a genuine unbounded loop
+contract, not a large numeric sentinel.
+
 ### 7.6 Lifecycle ordering
 
 The canonical lifecycle states are exactly:
