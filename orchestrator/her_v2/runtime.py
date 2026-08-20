@@ -253,13 +253,6 @@ class HERv2Runtime:
                 Stage.IMMEDIATE_RESPONSE,
                 parse_immediate,
                 allow_tools=False,
-                context={
-                    "instruction": (
-                        "Return JSON with one conservative user-facing field named message. "
-                        "Answer directly only when safe; otherwise acknowledge work without "
-                        "promising completion."
-                    )
-                },
             )
         )
         triage_task = asyncio.create_task(

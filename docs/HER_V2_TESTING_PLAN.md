@@ -690,7 +690,7 @@ Tests must prove:
 - runtime passes neutral commentary through a commentary port and has no
   Persona source, renderer, packaging prompt, or Telegram dependency;
 - Persona packaging receives only neutral commentary and the exact contents of
-  the configured `<!-- HASHI:PERSONA:BEGIN -->` marker block;
+  the configured `[persona]` marker block;
 - content outside that marker block cannot reach the packaging model;
 - missing or invalid markers and packaging failure use the deterministic
   display-name + `您` fallback;
@@ -701,6 +701,9 @@ Tests must prove:
 - optional commentary failure is logged but does not fail execution;
 - `/verbose` changes presentation, not workflow authority;
 - a final answer is not delivered before Finalisation;
+- Immediate Response receives the same `[persona]` block, never the rest of
+  `system_md` or Bridge `/sys` packaging, and its model prompt contains no
+  execution, planning, feasibility, or capability assessment task;
 - `DIRECT_RESPONSE` is the sole exception because its Immediate Response is the final answer;
 - a transport without explicit initial-resolution capability never receives a
   provisional Immediate Response and therefore cannot duplicate the final;

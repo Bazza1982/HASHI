@@ -789,8 +789,12 @@ async def test_adapter_reconciles_old_inflight_ledger_without_resuming_it(tmp_pa
 
 
 class _FakeBackend:
-    def __init__(self):
-        self.config = SimpleNamespace(extra={})
+    def __init__(self, system_md=None):
+        self.config = SimpleNamespace(
+            extra={},
+            name="agent",
+            system_md=system_md,
+        )
         self.tool_registry = "not-set"
         self.privacy_level = None
         self.reasoning_enabled = None
@@ -802,6 +806,8 @@ class _FakeBackend:
         self.reasoning_enabled = enabled
 
     async def initialize(self):
+        if self.config.system_md:
+            self.sys_prompt = Path(self.config.system_md).read_text(encoding="utf-8")
         return True
 
     async def generate_response(
@@ -829,14 +835,15 @@ class _FakeBackend:
 
 
 class _FakeManager:
-    def __init__(self):
+    def __init__(self, system_md=None):
         self.backends = []
         self.privacy_level = 1
+        self.system_md = system_md
 
     def create_ephemeral_backend(self, engine, target_model=None):
         assert engine == "openrouter-api"
         assert target_model == "configured/model"
-        backend = _FakeBackend()
+        backend = _FakeBackend(self.system_md)
         self.backends.append(backend)
         return backend
 
@@ -864,7 +871,7 @@ class _CommentaryManager(_FakeManager):
     def create_ephemeral_backend(self, engine, target_model=None):
         assert engine == "openrouter-api"
         assert target_model == "configured/model"
-        backend = _CommentaryFakeBackend()
+        backend = _CommentaryFakeBackend(self.system_md)
         self.backends.append(backend)
         return backend
 
@@ -1048,8 +1055,19 @@ async def test_hashi_stage_provider_makes_every_effort_tool_loop_unbounded():
 
 
 @pytest.mark.asyncio
-async def test_persona_packaging_is_tool_free_and_receives_only_block_and_neutral_text():
-    manager = _FakeManager()
+async def test_persona_presentation_lanes_receive_only_block_and_minimal_inputs(
+    tmp_path,
+):
+    system_md = tmp_path / "agent.md"
+    system_md.write_text(
+        """FULL AGENT OPERATIONAL CONTENT
+[persona]
+Use a warm voice and address the user as Captain.
+[persona_end]
+PRIVATE WORKFLOW INSTRUCTIONS""",
+        encoding="utf-8",
+    )
+    manager = _FakeManager(system_md)
     provider = HashiStageProvider(
         backend_manager=manager,
         tool_registry=_BaseToolRegistry(),
@@ -1060,6 +1078,58 @@ async def test_persona_packaging_is_tool_free_and_receives_only_block_and_neutra
         "configured/model",
         reasoning="provider-low",
     )
+    immediate_request = _stage_request(
+        Stage.IMMEDIATE_RESPONSE,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    immediate_request = StageRequest(
+        **{
+            **immediate_request.__dict__,
+            "goal": """Bridge-managed context follows.
+
+--- ADDITIONAL SYSTEM CONTEXT ---
+
+GLOBAL SYS CONTENT
+
+--- SYSTEM IDENTITY ---
+
+FULL AGENT OPERATIONAL CONTENT
+
+--- RECENT CONTEXT ---
+
+USER: Earlier context remains available.
+
+--- CURRENT USER REQUEST — AUTHORITATIVE ---
+[FYI: received now]
+
+Please scan Outlook.""",
+        }
+    )
+
+    await provider.invoke(profile, immediate_request)
+
+    immediate_backend = manager.backends[-1]
+    assert immediate_backend.sys_prompt.startswith(
+        "[persona]\nUse a warm voice and address the user as Captain.\n[persona_end]"
+    )
+    assert "For an obviously direct conversational request" in (
+        immediate_backend.sys_prompt
+    )
+    assert "provide only a short receipt acknowledgement" in (
+        immediate_backend.sys_prompt
+    )
+    assert "Do not execute, plan, assess feasibility, or discuss capability" in (
+        immediate_backend.sys_prompt
+    )
+    assert "FULL AGENT OPERATIONAL CONTENT" not in immediate_backend.sys_prompt
+    assert "PRIVATE WORKFLOW INSTRUCTIONS" not in immediate_backend.sys_prompt
+    assert "GLOBAL SYS CONTENT" not in immediate_backend.prompt
+    assert "FULL AGENT OPERATIONAL CONTENT" not in immediate_backend.prompt
+    assert "Earlier context remains available" in immediate_backend.prompt
+    assert "Please scan Outlook" in immediate_backend.prompt
+    assert "tools_authorised_for_this_stage" not in immediate_backend.prompt
+    assert "invocation_role" not in immediate_backend.prompt
 
     rendered = await provider.package_persona_commentary(
         profile,
@@ -1073,6 +1143,10 @@ async def test_persona_packaging_is_tool_free_and_receives_only_block_and_neutra
     assert backend.tool_registry is None
     assert backend.shutdown_called is True
     assert "Address the user as Captain" in backend.sys_prompt
+    assert "[persona]" in backend.sys_prompt
+    assert "[persona_end]" in backend.sys_prompt
+    assert "FULL AGENT OPERATIONAL CONTENT" not in backend.sys_prompt
+    assert "PRIVATE WORKFLOW INSTRUCTIONS" not in backend.sys_prompt
     assert "Address the user as Captain" not in backend.prompt
     assert "The old endpoint was removed" in backend.prompt
     assert "authoritative_user_goal" not in backend.prompt

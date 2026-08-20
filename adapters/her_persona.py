@@ -17,13 +17,13 @@ from adapters import her_habits
 
 MAX_PERSONA_RENDER_CHARS = 24_000
 MAX_PERSONA_PACKAGING_CHARS = 12_000
-PERSONA_BLOCK_BEGIN = "<!-- HASHI:PERSONA:BEGIN -->"
-PERSONA_BLOCK_END = "<!-- HASHI:PERSONA:END -->"
+PERSONA_BLOCK_BEGIN = "[persona]"
+PERSONA_BLOCK_END = "[persona_end]"
 
 
 @dataclass(frozen=True)
 class HERPersonaPackagingSource:
-    """The only Persona material the HER v2 commentary packager may receive."""
+    """The only Persona material an HER v2 presentation lane may receive."""
 
     guidance: str
     display_name: str
@@ -145,7 +145,7 @@ def load_persona_packaging_source(
 
     Missing, repeated, reversed, empty, or oversized markers select the
     deterministic minimal fallback.  Content outside the markers is never
-    returned to the HER v2 commentary packaging lane.
+    returned to an HER v2 presentation lane.
     """
 
     source = load_configured_persona(system_md)

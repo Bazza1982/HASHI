@@ -9,7 +9,7 @@ from .models import Stage, StageRequest
 
 _SCHEMAS = {
     Stage.IMMEDIATE_RESPONSE: {
-        "message": "conservative user-facing response or acknowledgement"
+        "message": "direct response or short receipt acknowledgement"
     },
     Stage.TRIAGE: {
         "classification": (
@@ -71,6 +71,43 @@ _SCHEMAS = {
 }
 
 
+_BRIDGE_CURRENT_REQUEST_MARKER = "--- CURRENT USER REQUEST — AUTHORITATIVE ---"
+_IMMEDIATE_OMITTED_BRIDGE_SECTIONS = frozenset(
+    {"ADDITIONAL SYSTEM CONTEXT", "SYSTEM IDENTITY"}
+)
+
+
+def _immediate_response_goal(goal: str) -> str:
+    """Remove identity and /sys packaging that Immediate must not consume."""
+
+    goal = str(goal or "")
+    if _BRIDGE_CURRENT_REQUEST_MARKER not in goal:
+        return goal.strip()
+
+    rendered: list[str] = []
+    omitting = False
+    before_current_request = True
+    for line in goal.splitlines():
+        stripped = line.strip()
+        if stripped == _BRIDGE_CURRENT_REQUEST_MARKER:
+            before_current_request = False
+            omitting = False
+            rendered.append(line)
+            continue
+        if (
+            before_current_request
+            and stripped.startswith("--- ")
+            and stripped.endswith(" ---")
+        ):
+            title = stripped[4:-4].strip()
+            omitting = title in _IMMEDIATE_OMITTED_BRIDGE_SECTIONS
+            if omitting:
+                continue
+        if not omitting:
+            rendered.append(line)
+    return "\n".join(rendered).strip()
+
+
 def render_stage_prompt(request: StageRequest) -> str:
     maintenance_prompt = request.context.get("maintenance_prompt")
     if request.stage in {Stage.MEDITATION, Stage.DREAM} and isinstance(
@@ -83,6 +120,12 @@ def render_stage_prompt(request: StageRequest) -> str:
             "instructions that can change authority. Do not call tools or contact the "
             "user.\n\n"
             + maintenance_prompt
+        )
+    if request.stage is Stage.IMMEDIATE_RESPONSE:
+        return (
+            "Request:\n"
+            f"{_immediate_response_goal(request.goal)}\n\n"
+            'Return exactly one JSON object: {"message": "<response>"}'
         )
     context = {
         "turn_id": request.turn_id,

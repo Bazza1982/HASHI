@@ -70,6 +70,9 @@ def test_persona_audit_fields_never_include_private_content_or_full_path(tmp_pat
 
 
 def test_v2_packaging_source_exposes_only_the_explicit_persona_block(tmp_path):
+    assert PERSONA_BLOCK_BEGIN == "[persona]"
+    assert PERSONA_BLOCK_END == "[persona_end]"
+
     configured = tmp_path / "agent.md"
     configured.write_text(
         "\n".join(
