@@ -566,7 +566,6 @@ def test_status_text_shows_audit_model_configuration():
                 "model": "claude-opus-4-7",
                 "delivery": "always",
                 "severity_threshold": "low",
-                "timeout_s": 60,
             },
         },
     )
@@ -582,7 +581,7 @@ def test_status_text_shows_audit_model_configuration():
     assert "<b>Auditor</b> · <code>claude-cli / claude-opus-4-7</code>" in text
     assert "<b>Delivery</b> · <code>always</code>" in text
     assert "<b>Threshold</b> · <code>low</code>" in text
-    assert "<b>Timeout</b> · <code>60s</code>" in text
+    assert "<b>Timeout</b>" not in text
 
 
 def test_status_text_shows_wrapper_model_configuration():
@@ -737,7 +736,6 @@ def _make_background_runtime(tmp_path: Path, wrapper_response: BackendResponse |
     runtime._get_system_prompt_text = lambda: "system"
     runtime.typing_loop = FlexibleAgentRuntime.typing_loop.__get__(runtime, FlexibleAgentRuntime)
     runtime._wrapper_enabled = FlexibleAgentRuntime._wrapper_enabled.__get__(runtime, FlexibleAgentRuntime)
-    runtime._wrapper_timeout_s = FlexibleAgentRuntime._wrapper_timeout_s.__get__(runtime, FlexibleAgentRuntime)
     runtime._wrapper_visible_context = FlexibleAgentRuntime._wrapper_visible_context.__get__(runtime, FlexibleAgentRuntime)
     runtime._wrapper_audit_fields = FlexibleAgentRuntime._wrapper_audit_fields.__get__(runtime, FlexibleAgentRuntime)
     runtime._core_memory_assistant_text = FlexibleAgentRuntime._core_memory_assistant_text.__get__(

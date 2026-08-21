@@ -2546,8 +2546,6 @@ def test_protocol_status_counts_only_active_inflight_messages():
         "timed_out": {"state": "timed_out"},
     }
     manager._max_allowed_ttl = 8
-    manager._reply_soft_timeout_seconds = 45
-    manager._reply_hard_timeout_seconds = 180
     manager.get_local_agents_snapshot = lambda: []
     manager.get_local_agent_directory_state = lambda: {}
     manager.get_route_diagnostics = lambda: {}
@@ -2558,6 +2556,29 @@ def test_protocol_status_counts_only_active_inflight_messages():
     assert status["inflight_count"] == 2
     assert status["inflight_total_count"] == 5
     assert status["inflight_terminal_count"] == 3
+    assert "reply_soft_timeout_seconds" not in status
+    assert "reply_hard_timeout_seconds" not in status
+
+
+def test_protocol_ignores_legacy_reply_deadline_instead_of_timing_out():
+    manager = ProtocolManager.__new__(ProtocolManager)
+    manager._inflight = {
+        "active": {
+            "state": "delivered_to_local_queue",
+            "reply_hard_deadline": 1,
+        }
+    }
+    manager._save_inflight = lambda: None
+
+    async def no_change(item, *, now):
+        del item, now
+        return False
+
+    manager._advance_inflight_item = no_change
+
+    asyncio.run(manager._process_inflight_once())
+
+    assert manager._inflight["active"]["state"] == "delivered_to_local_queue"
 
 
 def _reply_payload(**overrides):

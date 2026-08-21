@@ -1477,17 +1477,13 @@ BACKGROUND_JOB_TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "Working directory, absolute or workspace-relative. Default is workspace.",
                     },
-                    "max_runtime_seconds": {
-                        "type": "integer",
-                        "description": "Maximum runtime before timeout. Default is 14400 seconds.",
-                    },
                     "notify_on_complete": {
                         "type": "boolean",
                         "description": "Whether to notify the originating chat on success. Default true.",
                     },
                     "notify_on_failure": {
                         "type": "boolean",
-                        "description": "Whether to notify the originating chat on failure/timeout. Default true.",
+                        "description": "Whether to notify the originating chat on failure. Default true.",
                     },
                     "trigger_agent_on_complete": {
                         "type": "boolean",
@@ -1495,7 +1491,7 @@ BACKGROUND_JOB_TOOL_SCHEMAS = [
                     },
                     "trigger_agent_on_failure": {
                         "type": "boolean",
-                        "description": "Whether to enqueue a one-shot background-job-event for the responsible agent on failure/timeout. Default true.",
+                        "description": "Whether to enqueue a one-shot background-job-event for the responsible agent on failure. Default true.",
                     },
                 },
             },

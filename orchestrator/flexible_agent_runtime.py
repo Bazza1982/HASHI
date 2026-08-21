@@ -2476,7 +2476,11 @@ class FlexibleAgentRuntime:
 
         try:
             _, endpoint = self._resolve_bridge_handoff_endpoint(target_instance, action)
-            timeout = aiohttp.ClientTimeout(total=100)
+            timeout = aiohttp.ClientTimeout(
+                total=None,
+                connect=10,
+                sock_connect=10,
+            )
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(endpoint, json=package) as response:
                     body = await response.json()
@@ -2572,7 +2576,7 @@ class FlexibleAgentRuntime:
         else:
             await self._reply_text(update, "Usage: /cos [on|off]")
 
-    async def cos_query(self, question: str, *, timeout_s: float = 30.0) -> dict[str, Any]:
+    async def cos_query(self, question: str) -> dict[str, Any]:
         """Send a decision query to Lily (Chief of Staff) via hchat and wait for response.
 
         Returns: {"answered": True/False, "response": str or None, "reason": str}
@@ -2622,10 +2626,7 @@ class FlexibleAgentRuntime:
             if request_id is None:
                 return {"answered": False, "response": None, "reason": "enqueue_failed"}
 
-            try:
-                response_text = await asyncio.wait_for(response_future, timeout=timeout_s)
-            except asyncio.TimeoutError:
-                return {"answered": False, "response": None, "reason": "timeout"}
+            response_text = await response_future
 
             if response_text.strip().startswith("COS_DECLINED"):
                 return {"answered": False, "response": response_text, "reason": "declined"}
@@ -5158,7 +5159,6 @@ class FlexibleAgentRuntime:
         *,
         delivery: str | None = None,
         severity_threshold: str | None = None,
-        timeout_s: float | None = None,
         backend: str | None = None,
         model: str | None = None,
     ) -> dict[str, Any]:
@@ -5166,7 +5166,6 @@ class FlexibleAgentRuntime:
             cfg,
             delivery=delivery,
             severity_threshold=severity_threshold,
-            timeout_s=timeout_s,
             backend=backend,
             model=model,
         )
@@ -5457,7 +5456,6 @@ class FlexibleAgentRuntime:
                     "delivery": cfg.delivery,
                     "severity_threshold": cfg.severity_threshold,
                     "fail_policy": cfg.fail_policy,
-                    "timeout_s": cfg.timeout_s,
                 }
             )
             await self._reply_text(
@@ -5469,7 +5467,7 @@ class FlexibleAgentRuntime:
             )
             return
 
-        if action in {"delivery", "threshold", "timeout"}:
+        if action in {"delivery", "threshold"}:
             if len(args) < 2:
                 await self._reply_text(update, f"Usage: /audit {action} <value>")
                 return
@@ -5485,14 +5483,8 @@ class FlexibleAgentRuntime:
                     await self._reply_text(update, "Threshold must be one of: low, medium, high, critical")
                     return
                 audit_block["severity_threshold"] = value
-            else:
-                try:
-                    audit_block["timeout_s"] = max(1.0, float(value))
-                except ValueError:
-                    await self._reply_text(update, "Timeout must be a number of seconds.")
-                    return
             self.backend_manager.update_audit_blocks(audit=audit_block)
-            result_key = {"delivery": "delivery", "threshold": "severity_threshold", "timeout": "timeout_s"}[action]
+            result_key = {"delivery": "delivery", "threshold": "severity_threshold"}[action]
             await self._reply_text(update, f"Audit {action} updated to `{audit_block[result_key]}`.", parse_mode="Markdown")
             return
 
@@ -7429,9 +7421,6 @@ class FlexibleAgentRuntime:
     def _wrapper_enabled(self) -> bool:
         return runtime_wrapper.wrapper_enabled(self)
 
-    def _wrapper_timeout_s(self) -> float:
-        return runtime_wrapper.wrapper_timeout_s(self)
-
     def _wrapper_visible_context(self, context_window: int) -> list[dict[str, str]]:
         return runtime_wrapper.wrapper_visible_context(self, context_window)
 
@@ -7505,9 +7494,6 @@ class FlexibleAgentRuntime:
 
     def _audit_enabled(self) -> bool:
         return runtime_audit.audit_enabled(self)
-
-    def _audit_timeout_s(self) -> float:
-        return runtime_audit.audit_timeout_s(self)
 
     def _audit_visible_context(self, context_window: int) -> list[dict[str, str]]:
         return runtime_audit.audit_visible_context(self, context_window)

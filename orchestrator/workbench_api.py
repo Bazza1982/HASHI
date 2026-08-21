@@ -2859,7 +2859,6 @@ class WorkbenchApiServer:
         agent_name = (payload.get("agent") or payload.get("agentId") or "").strip()
         text = (payload.get("text") or "").strip()
         source = (payload.get("source") or "browser-api").strip()
-        timeout_s = max(5.0, min(float(payload.get("timeout_s") or 120.0), 600.0))
         runtime = runtime_map.get(agent_name)
         if runtime is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
@@ -2884,18 +2883,7 @@ class WorkbenchApiServer:
 
         runtime.register_request_listener(request_id, _listener)
 
-        try:
-            result = await asyncio.wait_for(completion_future, timeout=timeout_s)
-        except asyncio.TimeoutError:
-            return web.json_response(
-                {
-                    "ok": False,
-                    "request_id": request_id,
-                    "status": "timeout",
-                    "error": f"browser request did not complete within {int(timeout_s)}s",
-                },
-                status=504,
-            )
+        result = await completion_future
 
         response_payload = {
             "ok": bool(result.get("success")),
@@ -3155,11 +3143,7 @@ class WorkbenchApiServer:
             ack_future.set_result(self._classify_transfer_ack(transfer_id, result, mode=mode))
 
         runtime.register_request_listener(request_id, _listener)
-        timeout_s = max(10.0, min(float(payload.get("timeout_s") or 90.0), 180.0))
-        try:
-            ack_result = await asyncio.wait_for(ack_future, timeout=timeout_s)
-        except asyncio.TimeoutError:
-            ack_result = {"ok": False, "error": f"target did not acknowledge {mode} within {int(timeout_s)}s"}
+        ack_result = await ack_future
 
         if not ack_result.get("ok"):
             error_text = str(ack_result.get("error") or f"{mode} failed")
@@ -3227,7 +3211,7 @@ class WorkbenchApiServer:
         if lily_runtime is None or not getattr(lily_runtime, "startup_success", False):
             return web.json_response({"ok": False, "error": "lily is offline", "reason": "lily_offline"}, status=503)
 
-        cos_result = await lily_runtime.cos_query(question, timeout_s=float(payload.get("timeout_s") or 30.0))
+        cos_result = await lily_runtime.cos_query(question)
         return web.json_response({"ok": cos_result.get("answered", False), **cos_result})
 
     async def handle_bridge_transfer_get(self, request):
@@ -3646,7 +3630,6 @@ class WorkbenchApiServer:
                 notify_on_failure=bool(payload.get("notify_on_failure", True)),
                 trigger_agent_on_complete=bool(payload.get("trigger_agent_on_complete", True)),
                 trigger_agent_on_failure=bool(payload.get("trigger_agent_on_failure", True)),
-                max_runtime_seconds=int(payload.get("max_runtime_seconds") or 3600),
             )
         except FileNotFoundError as exc:
             return web.json_response({"ok": False, "error": f"cwd not found: {exc}"}, status=400)

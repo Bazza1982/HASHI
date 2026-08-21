@@ -99,7 +99,6 @@ def format_status_mode_block(mode: str, state: Mapping[str, Any], detailed: bool
             f"<b>Auditor</b> · <code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
             f"<b>Delivery</b> · <code>{html.escape(cfg.delivery)}</code>",
             f"<b>Threshold</b> · <code>{html.escape(cfg.severity_threshold)}</code>",
-            f"<b>Timeout</b> · <code>{cfg.timeout_s:g}s</code>",
             "",
         ]
         if detailed:

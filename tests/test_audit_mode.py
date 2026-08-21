@@ -68,7 +68,7 @@ def test_load_audit_config_reads_state_and_defaults():
     assert config.context_window == 5
     assert config.delivery == "always"
     assert config.severity_threshold == "high"
-    assert config.timeout_s == 12.5
+    assert not hasattr(config, "timeout_s")
 
 
 def test_audit_prompt_is_observer_only_and_contains_criteria():
@@ -262,18 +262,25 @@ async def test_audit_processor_success_path_calls_audit_backend():
 
 
 @pytest.mark.asyncio
-async def test_audit_processor_timeout_fails_closed_to_no_user_block():
+async def test_audit_processor_allows_slow_backend_to_complete():
     async def slow_invoker(**kwargs):
         await asyncio.sleep(0.05)
-        return SimpleNamespace(text='{"status":"pass","findings":[]}', is_success=True)
+        return SimpleNamespace(
+            text=(
+                '{"status":"pass","max_severity":"none",'
+                '"triggered_sensors":[],"summary":"ok",'
+                '"audit_reasoning":"No issue found.","findings":[]}'
+            ),
+            is_success=True,
+        )
 
-    processor = AuditProcessor(backend_invoker=slow_invoker, timeout_s=0.001)
+    processor = AuditProcessor(backend_invoker=slow_invoker)
 
     result = await processor.process(request_id="req-2", source="text", user_request="hi", core_raw="hello")
 
-    assert result.audit_used is False
-    assert result.audit_failed is True
-    assert result.fallback_reason == "timeout"
+    assert result.audit_used is True
+    assert result.audit_failed is False
+    assert result.status == "pass"
 
 
 def test_notification_threshold_and_report_format():

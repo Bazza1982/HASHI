@@ -41,14 +41,6 @@ def memory_plus_response_writer_enabled(runtime: Any) -> bool:
     return memory_plus_enabled(runtime) and getattr(runtime.backend_manager, "agent_mode", "flex") != "dual-brain"
 
 
-def wrapper_timeout_s(runtime: Any) -> float:
-    try:
-        value = float((runtime.config.extra or {}).get("wrapper_timeout_s", 30.0))
-    except (TypeError, ValueError):
-        value = 30.0
-    return value if value > 0 else 30.0
-
-
 def wrapper_visible_context(runtime: Any, context_window: int) -> list[dict[str, str]]:
     if context_window <= 0:
         return []
@@ -257,7 +249,6 @@ async def apply_wrapper_to_visible_text(runtime: Any, item: Any, visible_text: s
     processor = WrapperProcessor(
         cfg,
         backend_invoker=runtime.backend_manager.generate_ephemeral_response,
-        timeout_s=wrapper_timeout_s(runtime),
     )
 
     stop_wrapper_typing = None

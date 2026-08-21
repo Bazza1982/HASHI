@@ -277,19 +277,19 @@ async def test_wrapper_processor_failure_falls_back_to_core_raw():
 
 
 @pytest.mark.asyncio
-async def test_wrapper_processor_timeout_falls_back_to_core_raw():
+async def test_wrapper_processor_allows_slow_backend_to_complete():
     async def slow_invoker(**kwargs):
         await asyncio.sleep(0.05)
         return SimpleNamespace(text="late", is_success=True)
 
-    processor = WrapperProcessor(backend_invoker=slow_invoker, timeout_s=0.001)
+    processor = WrapperProcessor(backend_invoker=slow_invoker)
 
     result = await processor.process(request_id="req-3", source="text", core_raw="Core raw answer")
 
-    assert result.final_text == "Core raw answer"
-    assert result.wrapper_used is False
-    assert result.wrapper_failed is True
-    assert result.fallback_reason == "timeout"
+    assert result.final_text == "late"
+    assert result.wrapper_used is True
+    assert result.wrapper_failed is False
+    assert result.fallback_reason is None
 
 
 @pytest.mark.asyncio

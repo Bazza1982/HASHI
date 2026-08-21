@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from aiohttp import ClientSession, web
+from aiohttp import ClientSession, ClientTimeout, web
 
 from browser_gateway.audit import OLLAuditLogger
 from browser_gateway.store import BrowserGatewayStore
@@ -145,15 +145,14 @@ class BrowserGatewayServer:
         agent: str,
         text: str,
         source: str,
-        timeout_s: float,
     ) -> dict[str, Any]:
         body = {
             "agent": agent,
             "text": text,
             "source": source,
-            "timeout_s": timeout_s,
         }
-        async with ClientSession() as session:
+        timeout = ClientTimeout(total=None, connect=10.0, sock_connect=10.0)
+        async with ClientSession(timeout=timeout) as session:
             async with session.post(f"{self.workbench_url}/api/browser/chat/send", json=body) as resp:
                 try:
                     payload = await resp.json()
@@ -327,7 +326,6 @@ class BrowserGatewayServer:
         note = str(payload.get("note") or "").strip()
         plaintext_bytes = int(payload.get("plaintext_bytes") or 0)
         notify_agent = bool(payload.get("notify_agent", True))
-        timeout_s = max(5.0, min(float(payload.get("timeout_s") or 120.0), 600.0))
 
         if not thread_id or not filename or not ciphertext_b64:
             return self._json({"ok": False, "error": "thread_id, filename, and ciphertext_b64 are required"}, status=400)
@@ -407,7 +405,6 @@ class BrowserGatewayServer:
                 agent=thread["agent_id"],
                 text=reference_text,
                 source=source_tag,
-                timeout_s=timeout_s,
             )
             self.store.complete_message(
                 user_message_id,
@@ -450,7 +447,6 @@ class BrowserGatewayServer:
         payload = await request.json()
         thread_id = str(payload.get("thread_id") or "").strip()
         text = str(payload.get("text") or "").strip()
-        timeout_s = max(5.0, min(float(payload.get("timeout_s") or 120.0), 600.0))
         if not thread_id or not text:
             return self._json({"ok": False, "error": "thread_id and text are required"}, status=400)
 
@@ -474,7 +470,6 @@ class BrowserGatewayServer:
             agent=thread["agent_id"],
             text=text,
             source=source_tag,
-            timeout_s=timeout_s,
         )
         assistant_message_id = self.store.append_message(
             thread_id,

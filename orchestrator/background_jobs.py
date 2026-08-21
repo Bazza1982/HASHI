@@ -19,7 +19,7 @@ TERMINAL_STATES = {
     "succeeded",
     "failed",
     "cancelled",
-    "timeout",
+    "timeout",  # Legacy records only; current jobs have no wall-clock ceiling.
     "abandoned_after_restart",
     "adoption_failed",
     "policy_denied",
@@ -27,7 +27,6 @@ TERMINAL_STATES = {
 }
 NONTERMINAL_STATES = {"created", "starting", "running", "cancel_requested"}
 DEFAULT_MAX_STREAM_BYTES = 5 * 1024 * 1024
-DEFAULT_MAX_RUNTIME_SECONDS = 4 * 60 * 60
 
 
 def utc_now() -> str:
@@ -308,7 +307,6 @@ class BackgroundJobManager:
         notify_on_failure: bool = True,
         trigger_agent_on_complete: bool = True,
         trigger_agent_on_failure: bool = True,
-        max_runtime_seconds: int = DEFAULT_MAX_RUNTIME_SECONDS,
         max_stdout_bytes: int = DEFAULT_MAX_STREAM_BYTES,
         max_stderr_bytes: int = DEFAULT_MAX_STREAM_BYTES,
     ) -> BackgroundJobRecord:
@@ -334,7 +332,6 @@ class BackgroundJobManager:
             "env_keys": [],
         }
         policy = {
-            "max_runtime_seconds": int(max_runtime_seconds),
             "max_stdout_bytes": int(max_stdout_bytes),
             "max_stderr_bytes": int(max_stderr_bytes),
         }
@@ -451,19 +448,14 @@ class BackgroundJobManager:
         )
         self._stream_tasks[job_id] = [stdout_task, stderr_task]
         try:
-            try:
-                await asyncio.wait_for(process.wait(), timeout=int(record.policy["max_runtime_seconds"]))
-                latest_state = (self.store.get(job_id) or record).state
-                if latest_state in {"cancel_requested", "cancelled"}:
-                    state = "cancelled"
-                    error = None
-                else:
-                    state = "succeeded" if process.returncode == 0 else "failed"
-                    error = None if process.returncode == 0 else f"process exited with {process.returncode}"
-            except asyncio.TimeoutError:
-                await self._terminate_process_group(process, grace_seconds=2.0)
-                state = "timeout"
-                error = "max_runtime_seconds exceeded"
+            await process.wait()
+            latest_state = (self.store.get(job_id) or record).state
+            if latest_state in {"cancel_requested", "cancelled"}:
+                state = "cancelled"
+                error = None
+            else:
+                state = "succeeded" if process.returncode == 0 else "failed"
+                error = None if process.returncode == 0 else f"process exited with {process.returncode}"
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
             latest = self.store.get(job_id)
             process_meta = dict((latest or record).process)

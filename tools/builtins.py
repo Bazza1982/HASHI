@@ -503,7 +503,6 @@ async def execute_background_job_start(
         "summary": context.get("request_summary"),
         "tool": "background_job_start",
     }
-    max_runtime = int(args.get("max_runtime_seconds") or 4 * 60 * 60)
     agent = str(args.get("agent") or context.get("agent_name") or "unknown")
     manager = _background_manager_from_context(audit_context)
     if manager is None:
@@ -521,7 +520,6 @@ async def execute_background_job_start(
                 "notify_on_failure": bool(args.get("notify_on_failure", True)),
                 "trigger_agent_on_complete": bool(args.get("trigger_agent_on_complete", True)),
                 "trigger_agent_on_failure": bool(args.get("trigger_agent_on_failure", True)),
-                "max_runtime_seconds": max(1, max_runtime),
             },
         )
         if error:
@@ -548,7 +546,6 @@ async def execute_background_job_start(
         notify_on_failure=bool(args.get("notify_on_failure", True)),
         trigger_agent_on_complete=bool(args.get("trigger_agent_on_complete", True)),
         trigger_agent_on_failure=bool(args.get("trigger_agent_on_failure", True)),
-        max_runtime_seconds=max(1, max_runtime),
     )
     payload = _job_summary(record)
     payload["follow_up"] = {

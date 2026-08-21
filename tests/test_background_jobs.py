@@ -31,6 +31,7 @@ async def test_background_job_records_success_and_logs(tmp_path: Path):
     assert saved is not None
     assert saved.state == "succeeded"
     assert saved.returncode == 0
+    assert "max_runtime_seconds" not in saved.policy
     assert "hello background" in manager.tail(record.job_id)
     assert Path(saved.logs["stdout_path"]).exists()
 

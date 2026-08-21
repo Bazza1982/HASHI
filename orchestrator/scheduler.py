@@ -16,7 +16,6 @@ from orchestrator.superloop_scheduler import advance_superloops_once
 scheduler_logger = logging.getLogger("BridgeU.Scheduler")
 
 SCHEDULER_JOB_TIMEOUT_S = 30
-SCHEDULER_ACTION_TIMEOUT_S = 1860  # Bounds Jobs-owned automations and legacy scheduled Skill prompts.
 PARKED_FOLLOWUP_TIMEOUT_S = 15
 CRON_CATCHUP_THRESHOLD_S = 3600
 LEGACY_RECOVERY_MIGRATION_MAX_AGE_S = 24 * 60 * 60
@@ -773,15 +772,17 @@ class TaskScheduler:
 
         register(request_id, _on_result)
 
-    async def _run_scheduler_action(self, action_coro, *, task_kind: str, task_id: str, agent_name: str, timeout_s: int = SCHEDULER_JOB_TIMEOUT_S) -> bool:
+    async def _run_scheduler_action(
+        self,
+        action_coro,
+        *,
+        task_kind: str,
+        task_id: str,
+        agent_name: str,
+    ) -> bool:
         try:
-            await asyncio.wait_for(action_coro, timeout=timeout_s)
+            await action_coro
             return True
-        except asyncio.TimeoutError:
-            scheduler_logger.error(
-                f"{task_kind} {task_id} for {agent_name} timed out after {timeout_s}s; scheduler will continue."
-            )
-            return False
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1138,7 +1139,6 @@ class TaskScheduler:
                 task_kind="Heartbeat",
                 task_id=task_id,
                 agent_name=agent_name,
-                timeout_s=SCHEDULER_ACTION_TIMEOUT_S,
             )
         if action.startswith("skill:"):
             skill_id = action.split(":", 1)[1]
@@ -1152,7 +1152,6 @@ class TaskScheduler:
                 task_kind="Heartbeat",
                 task_id=task_id,
                 agent_name=agent_name,
-                timeout_s=SCHEDULER_ACTION_TIMEOUT_S,
             )
         return await self._run_scheduler_action(
             rt.enqueue_request(
@@ -1222,7 +1221,6 @@ class TaskScheduler:
                 task_kind="Cron",
                 task_id=task_id,
                 agent_name=agent_name,
-                timeout_s=SCHEDULER_ACTION_TIMEOUT_S,
             )
         if action.startswith("automation:"):
             automation_id = action.split(":", 1)[1]
@@ -1236,7 +1234,6 @@ class TaskScheduler:
                 task_kind="Cron",
                 task_id=task_id,
                 agent_name=agent_name,
-                timeout_s=SCHEDULER_ACTION_TIMEOUT_S,
             )
         if action.startswith("skill:"):
             skill_id = action.split(":", 1)[1]
@@ -1250,7 +1247,6 @@ class TaskScheduler:
                 task_kind="Cron",
                 task_id=task_id,
                 agent_name=agent_name,
-                timeout_s=SCHEDULER_ACTION_TIMEOUT_S,
             )
 
         prompt = cron.get("prompt", "")

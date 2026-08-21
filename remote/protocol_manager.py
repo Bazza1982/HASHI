@@ -91,6 +91,8 @@ DEFAULT_CAPABILITIES = [
 TERMINAL_INFLIGHT_STATES = {
     "reply_sent",
     "failed",
+    # Read-only compatibility for records written before reply wall-clock
+    # ceilings were retired. New protocol messages never enter this state.
     "timed_out",
     "abandoned_after_restart",
     "reply_delivered_locally",
@@ -117,8 +119,6 @@ class ProtocolManager:
         handshake_timeout_seconds: int = 8,
         poll_interval_seconds: float = 0.5,
         settle_window_seconds: float = 2.0,
-        reply_soft_timeout_seconds: int = 45,
-        reply_hard_timeout_seconds: int = 180,
         use_tls: bool = True,
     ):
         self._hashi_root = hashi_root
@@ -130,8 +130,6 @@ class ProtocolManager:
         self._handshake_timeout_seconds = max(2, int(handshake_timeout_seconds))
         self._poll_interval_seconds = max(0.2, float(poll_interval_seconds))
         self._settle_window_seconds = max(0.5, float(settle_window_seconds))
-        self._reply_soft_timeout_seconds = max(5, int(reply_soft_timeout_seconds))
-        self._reply_hard_timeout_seconds = max(self._reply_soft_timeout_seconds, int(reply_hard_timeout_seconds))
         self._use_tls = bool(use_tls)
         self._bootstrap_retry_seconds = 60.0
         self._state_dir = Path.home() / ".hashi-remote"
@@ -185,8 +183,6 @@ class ProtocolManager:
             "inflight_total_count": total_inflight_count,
             "inflight_terminal_count": total_inflight_count - active_inflight_count,
             "max_allowed_ttl": self._max_allowed_ttl,
-            "reply_soft_timeout_seconds": self._reply_soft_timeout_seconds,
-            "reply_hard_timeout_seconds": self._reply_hard_timeout_seconds,
         }
 
     @property
@@ -949,8 +945,6 @@ class ProtocolManager:
             "assistant_segments": [],
             "reply_target_agent": from_agent,
             "settle_deadline": 0,
-            "reply_soft_deadline": time.time() + self._reply_soft_timeout_seconds,
-            "reply_hard_deadline": time.time() + self._reply_hard_timeout_seconds,
             "updated_at": int(time.time()),
             "ttl": normalized_ttl,
         }
@@ -1123,12 +1117,6 @@ class ProtocolManager:
         for message_id, item in list(self._inflight.items()):
             state = str(item.get("state") or "")
             if state in TERMINAL_INFLIGHT_STATES:
-                continue
-            if now >= float(item.get("reply_hard_deadline") or 0):
-                item["state"] = "timed_out"
-                item["updated_at"] = int(now)
-                self._inflight[message_id] = item
-                dirty = True
                 continue
             if state == "reply_failed" and item.get("reply_text"):
                 sent = await self._send_agent_reply(item, str(item.get("reply_text") or ""))

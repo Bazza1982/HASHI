@@ -26,12 +26,6 @@ def audit_enabled(runtime: Any) -> bool:
     return getattr(runtime.backend_manager, "agent_mode", "flex") == "audit"
 
 
-def audit_timeout_s(runtime: Any) -> float:
-    state = runtime.backend_manager.get_state_snapshot()
-    cfg = load_audit_config(state)
-    return cfg.timeout_s
-
-
 def audit_core_model_choices(runtime: Any) -> list[tuple[str, str, str, str]]:
     return runtime._filter_allowed_model_choices(
         [
@@ -184,7 +178,6 @@ def audit_block_with(
     *,
     delivery: str | None = None,
     severity_threshold: str | None = None,
-    timeout_s: float | None = None,
     backend: str | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
@@ -195,7 +188,6 @@ def audit_block_with(
         "delivery": delivery or cfg.delivery,
         "severity_threshold": severity_threshold or cfg.severity_threshold,
         "fail_policy": cfg.fail_policy,
-        "timeout_s": cfg.timeout_s if timeout_s is None else timeout_s,
     }
 
 
@@ -210,7 +202,6 @@ def audit_status_text(state: dict, criteria: dict) -> str:
         f"• Audit: <code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
         f"• Delivery: <code>{cfg.delivery}</code>",
         f"• Severity threshold: <code>{cfg.severity_threshold}</code>",
-        f"• Timeout: <code>{cfg.timeout_s:g}s</code>",
         "",
         "Default testing posture is <code>always</code> delivery and <code>low</code> threshold.",
         "Tap buttons below to change audit visibility/sensitivity, core model, or audit model.",
@@ -421,7 +412,6 @@ async def run_audit_followup(
     processor = AuditProcessor(
         cfg,
         backend_invoker=runtime.backend_manager.generate_ephemeral_response,
-        timeout_s=runtime._audit_timeout_s(),
     )
     audit_result = await processor.process(
         request_id=item.request_id,

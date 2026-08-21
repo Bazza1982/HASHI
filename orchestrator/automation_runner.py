@@ -15,7 +15,6 @@ AUTOMATION_SCRIPTS = {
 LEGACY_AUTOMATION_SCRIPTS = {
     "remote-guard": Path("skills/remote_guard/remote_guard.py"),
 }
-AUTOMATION_TIMEOUT_S = 1800.0
 _AUTOMATION_LOCKS: dict[str, asyncio.Lock] = {}
 
 
@@ -34,7 +33,6 @@ async def run_automation(
     automation_id: str,
     args: str = "",
     extra_env: dict[str, str] | None = None,
-    timeout_s: float | None = None,
 ) -> tuple[bool, str]:
     """Run one Jobs-owned deterministic automation with legacy ID aliases."""
 
@@ -72,12 +70,6 @@ async def run_automation(
         # configured argument payload as one positional value.
         cmd.append(args.strip())
 
-    effective_timeout_s = float(
-        AUTOMATION_TIMEOUT_S if timeout_s is None else timeout_s
-    )
-    if effective_timeout_s <= 0:
-        return False, "Automation timeout must be greater than zero."
-
     resolved_workspace = workspace_dir.resolve()
     lock_key = f"{resolved_workspace}::{canonical_id}"
     lock = _AUTOMATION_LOCKS.setdefault(lock_key, asyncio.Lock())
@@ -104,10 +96,7 @@ async def run_automation(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=effective_timeout_s,
-            )
+            stdout, stderr = await proc.communicate()
         except asyncio.CancelledError:
             if proc is not None:
                 with suppress(Exception):
@@ -115,16 +104,6 @@ async def run_automation(
                 with suppress(Exception):
                     await proc.wait()
             raise
-        except asyncio.TimeoutError:
-            if proc is not None:
-                with suppress(Exception):
-                    proc.kill()
-                with suppress(Exception):
-                    await proc.wait()
-            return False, (
-                f"Automation '{canonical_id}' timed out after "
-                f"{effective_timeout_s:g}s."
-            )
         except OSError as exc:
             return False, f"Automation '{canonical_id}' failed to start: {exc}"
 

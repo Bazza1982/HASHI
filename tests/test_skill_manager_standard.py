@@ -536,7 +536,7 @@ async def test_jobs_automation_runner_reports_nonzero_exit_without_running_arbit
 
 
 @pytest.mark.asyncio
-async def test_jobs_automation_runner_is_single_flight_and_times_out_cleanly(
+async def test_jobs_automation_runner_is_single_flight_without_absolute_timeout(
     tmp_path: Path,
 ):
     script = tmp_path / "skills" / "agent-audit" / "scripts" / "agent_audit.py"
@@ -561,10 +561,9 @@ async def test_jobs_automation_runner_is_single_flight_and_times_out_cleanly(
     assert duplicate == (False, "Automation 'agent-audit' is already running.")
     assert await first == (True, "done")
 
-    timed_out = await run_automation(
+    completed_again = await run_automation(
         project_root=tmp_path,
         workspace_dir=workspace,
         automation_id="agent-audit",
-        timeout_s=0.01,
     )
-    assert timed_out == (False, "Automation 'agent-audit' timed out after 0.01s.")
+    assert completed_again == (True, "done")

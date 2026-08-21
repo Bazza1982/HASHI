@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -15,7 +14,6 @@ DEFAULT_WRAPPER_BACKEND = "claude-cli"
 DEFAULT_WRAPPER_MODEL = "claude-haiku-4-5"
 DEFAULT_CONTEXT_WINDOW = 3
 MAX_CONTEXT_WINDOW = 20
-DEFAULT_WRAPPER_TIMEOUT_S = 30.0
 MAX_WRAPPER_USER_REQUEST_CHARS = 2400
 SESSION_RESET_SOURCE = "session_reset"
 DEFAULT_WRAPPER_STYLE_SLOT_ID = "9"
@@ -211,11 +209,9 @@ class WrapperProcessor:
         config: WrapperConfig | None = None,
         *,
         backend_invoker: BackendInvoker | None = None,
-        timeout_s: float = DEFAULT_WRAPPER_TIMEOUT_S,
     ):
         self.config = config or WrapperConfig()
         self.backend_invoker = backend_invoker
-        self.timeout_s = timeout_s
 
     def build_payload(
         self,
@@ -289,18 +285,13 @@ class WrapperProcessor:
 
         start = time.perf_counter()
         try:
-            response = await asyncio.wait_for(
-                self.backend_invoker(
-                    engine=effective_config.wrapper_backend,
-                    model=effective_config.wrapper_model,
-                    prompt=prompt,
-                    request_id=f"{request_id}:wrapper",
-                    silent=silent,
-                ),
-                timeout=self.timeout_s,
+            response = await self.backend_invoker(
+                engine=effective_config.wrapper_backend,
+                model=effective_config.wrapper_model,
+                prompt=prompt,
+                request_id=f"{request_id}:wrapper",
+                silent=silent,
             )
-        except asyncio.TimeoutError:
-            return _failed_result(core_raw, "timeout", _elapsed_ms(start))
         except Exception as exc:
             return _failed_result(core_raw, f"exception:{type(exc).__name__}", _elapsed_ms(start))
 
@@ -443,7 +434,6 @@ __all__ = [
     "DEFAULT_CONTEXT_WINDOW",
     "DEFAULT_CORE_BACKEND",
     "DEFAULT_CORE_MODEL",
-    "DEFAULT_WRAPPER_TIMEOUT_S",
     "DEFAULT_WRAPPER_BACKEND",
     "DEFAULT_WRAPPER_MODEL",
     "DEFAULT_WRAPPER_STYLE_SLOT_ID",

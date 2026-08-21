@@ -146,7 +146,7 @@ async def test_browser_gateway_file_upload_notifies_agent(tmp_path: Path):
         audit_log=tmp_path / "oll_gateway.audit.jsonl",
     )
 
-    async def _fake_send_to_workbench(*, agent: str, text: str, source: str, timeout_s: float):
+    async def _fake_send_to_workbench(*, agent: str, text: str, source: str):
         assert agent == "akane"
         assert "attachment_id:" in text
         return {

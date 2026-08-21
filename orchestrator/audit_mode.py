@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from dataclasses import dataclass, field
@@ -16,7 +15,6 @@ DEFAULT_AUDIT_BACKEND = "claude-cli"
 DEFAULT_AUDIT_MODEL = "claude-sonnet-4-6"
 DEFAULT_CONTEXT_WINDOW = 3
 MAX_CONTEXT_WINDOW = 20
-DEFAULT_AUDIT_TIMEOUT_S = 60.0
 SESSION_RESET_SOURCE = "session_reset"
 DEFAULT_AUDIT_CRITERION_SLOT_ID = "9"
 DEFAULT_AUDIT_CRITERION_SLOT_TEXT = (
@@ -79,7 +77,6 @@ class AuditConfig:
     delivery: str = "always"
     severity_threshold: str = "low"
     fail_policy: str = "passthrough"
-    timeout_s: float = DEFAULT_AUDIT_TIMEOUT_S
 
 
 @dataclass(frozen=True)
@@ -206,7 +203,6 @@ def load_audit_config(state: Mapping[str, Any] | None) -> AuditConfig:
         delivery=_read_choice(audit_map, "delivery", "always", AUDIT_DELIVERIES),
         severity_threshold=_read_choice(audit_map, "severity_threshold", "low", set(AUDIT_SEVERITIES)),
         fail_policy=_read_nonempty_str(audit_map, "fail_policy", "passthrough"),
-        timeout_s=_read_timeout(audit_map.get("timeout_s"), DEFAULT_AUDIT_TIMEOUT_S),
     )
 
 
@@ -354,11 +350,9 @@ class AuditProcessor:
         config: AuditConfig | None = None,
         *,
         backend_invoker: BackendInvoker | None = None,
-        timeout_s: float | None = None,
     ):
         self.config = config or AuditConfig()
         self.backend_invoker = backend_invoker
-        self.timeout_s = timeout_s if timeout_s is not None else self.config.timeout_s
 
     def build_prompt_text(
         self,
@@ -421,18 +415,13 @@ class AuditProcessor:
 
         start = time.perf_counter()
         try:
-            response = await asyncio.wait_for(
-                self.backend_invoker(
-                    engine=effective_config.audit_backend,
-                    model=effective_config.audit_model,
-                    prompt=prompt,
-                    request_id=f"{request_id}:audit",
-                    silent=silent,
-                ),
-                timeout=self.timeout_s,
+            response = await self.backend_invoker(
+                engine=effective_config.audit_backend,
+                model=effective_config.audit_model,
+                prompt=prompt,
+                request_id=f"{request_id}:audit",
+                silent=silent,
             )
-        except asyncio.TimeoutError:
-            return _failed_result("timeout", _elapsed_ms(start))
         except Exception as exc:
             return _failed_result(f"exception:{type(exc).__name__}", _elapsed_ms(start))
 
@@ -713,14 +702,6 @@ def _read_context_window(value: Any) -> int:
     except (TypeError, ValueError):
         return DEFAULT_CONTEXT_WINDOW
     return max(0, min(parsed, MAX_CONTEXT_WINDOW))
-
-
-def _read_timeout(value: Any, default: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
 
 
 def _read_list(value: Any) -> list[Any]:
