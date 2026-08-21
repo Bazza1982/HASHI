@@ -91,11 +91,8 @@ def test_settings_cards_keep_current_value_before_facts_and_escape_names() -> No
         agent_name="agent<one>",
         backend_name="codex<cli>",
         idle_minutes=30,
-        hard_minutes=120,
         default_idle_minutes=5,
-        default_hard_minutes=30,
         idle_source="user <override>",
-        hard_source="backend & config",
     )
     wol = runtime_menu_views.wol_targets_text(
         [{"name": "pc<1>", "label": "Desk & PC", "description": "Main <host>"}],
@@ -109,7 +106,7 @@ def test_settings_cards_keep_current_value_before_facts_and_escape_names() -> No
     assert "agent&lt;one&gt;" in timeout
     assert "codex&lt;cli&gt;" in timeout
     assert "user &lt;override&gt;" in timeout
-    assert "backend &amp; config" in timeout
+    assert "no-progress detector, not a total execution clock" in timeout
     assert "HASHI&amp;2" in wol
     assert "pc&lt;1&gt;" in wol and "Desk &amp; PC" in wol and "Main &lt;host&gt;" in wol
 
