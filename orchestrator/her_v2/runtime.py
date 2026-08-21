@@ -263,13 +263,6 @@ class HERv2Runtime:
                 Stage.TRIAGE,
                 parse_triage,
                 allow_tools=False,
-                context={
-                    "instruction": (
-                        "Return JSON with classification and optional goal interpretation "
-                        "or clarification. Classification must be exactly one HER v2 "
-                        "classification."
-                    )
-                },
             )
         )
         immediate_pair = None

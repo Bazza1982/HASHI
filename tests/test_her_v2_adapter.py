@@ -942,6 +942,105 @@ def _stage_request(stage, *, allow_tools, allow_side_effects=False):
 
 
 @pytest.mark.asyncio
+async def test_triage_receives_complete_policy_and_minimal_turn_prompt():
+    manager = _FakeManager()
+    provider = HashiStageProvider(backend_manager=manager)
+    profile = ProviderProfile(
+        "triage",
+        "openrouter-api",
+        "configured/model",
+        reasoning="provider-low",
+    )
+    request = _stage_request(
+        Stage.TRIAGE,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "goal": "Earlier context already contains the result. Please check it.",
+        }
+    )
+
+    await provider.invoke(profile, request)
+
+    backend = manager.backends[-1]
+    assert backend.sys_prompt.startswith(
+        "You are the authoritative HER v2 Triage classifier."
+    )
+    assert "Do not answer the request, acknowledge it, plan it, execute it" in (
+        backend.sys_prompt
+    )
+    assert "supplied context already contains a reliable result" in backend.sys_prompt
+    assert 'merely because the user says "check"' in backend.sys_prompt
+    assert "current, recent, live, or externally stored information" in (
+        backend.sys_prompt
+    )
+    assert "Choose exactly one classification" in backend.sys_prompt
+    for classification in (
+        "DIRECT_RESPONSE",
+        "SIMPLE_TASK",
+        "COMPLEX_TASK",
+        "HIGH_VOLUME_TASK",
+        "CONFIRMATION_REQUIRED",
+    ):
+        assert classification in backend.sys_prompt
+    for decision_boundary in (
+        "A bounded and straightforward execution step is required",
+        "multiple dependent steps, discovery, comparison, validation",
+        "substantial execution volume or many independent items",
+        "goal, target, scope, required choice, or authority is materially unclear",
+    ):
+        assert decision_boundary in backend.sys_prompt
+    assert "conservatively choose SIMPLE_TASK" in backend.sys_prompt
+    assert "Return only the required JSON object" in backend.sys_prompt
+
+    assert backend.prompt == """Authoritative user request and supplied context:
+
+Earlier context already contains the result. Please check it.
+
+Return exactly one JSON object matching this shape:
+
+{
+  "classification": "DIRECT_RESPONSE | SIMPLE_TASK | COMPLEX_TASK | HIGH_VOLUME_TASK | CONFIRMATION_REQUIRED",
+  "goal": "optional concise interpretation of the current request, or null when unnecessary",
+  "clarification": "a concrete question required only for CONFIRMATION_REQUIRED; otherwise null"
+}"""
+    assert "For Planning, Execution, Replanning, and Review" not in backend.prompt
+    assert "her_effort" not in backend.prompt
+    assert "tools_authorised_for_this_stage" not in backend.prompt
+    assert "external_side_effects_authorised_for_this_stage" not in backend.prompt
+    assert "invocation_role" not in backend.prompt
+    assert "turn_id" not in backend.prompt
+    assert "request_ref" not in backend.prompt
+
+    retry_request = StageRequest(
+        **{
+            **request.__dict__,
+            "attempt": 2,
+            "context": {
+                "previous_structure_error": {
+                    "attempt": 1,
+                    "error_type": "StructuredOutputError",
+                    "error": "provider returned an empty structured response",
+                },
+                "retry_instruction": "legacy generic instruction",
+            },
+        }
+    )
+
+    await provider.invoke(profile, retry_request)
+
+    retry_prompt = manager.backends[-1].prompt
+    assert retry_prompt.startswith(backend.prompt)
+    assert "The previous output was rejected" in retry_prompt
+    assert '"attempt": 1' in retry_prompt
+    assert "provider returned an empty structured response" in retry_prompt
+    assert "legacy generic instruction" not in retry_prompt
+
+
+@pytest.mark.asyncio
 async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning():
     manager = _FakeManager()
     registry = object()

@@ -16,8 +16,14 @@ _SCHEMAS = {
             "DIRECT_RESPONSE | SIMPLE_TASK | COMPLEX_TASK | "
             "HIGH_VOLUME_TASK | CONFIRMATION_REQUIRED"
         ),
-        "goal": "your concise interpretation; the original request remains authoritative",
-        "clarification": "required only for CONFIRMATION_REQUIRED",
+        "goal": (
+            "optional concise interpretation of the current request, or null when "
+            "unnecessary"
+        ),
+        "clarification": (
+            "a concrete question required only for CONFIRMATION_REQUIRED; otherwise "
+            "null"
+        ),
     },
     Stage.PLANNING: {
         "plan": ["ordered, concrete action"],
@@ -127,6 +133,27 @@ def render_stage_prompt(request: StageRequest) -> str:
             "Request:\n"
             f"{_immediate_response_goal(request.goal)}\n\n"
             'Return exactly one JSON object: {"message": "<response>"}'
+        )
+    if request.stage is Stage.TRIAGE:
+        prompt = (
+            "Authoritative user request and supplied context:\n\n"
+            f"{request.goal}\n\n"
+            "Return exactly one JSON object matching this shape:\n\n"
+            f"{json.dumps(_SCHEMAS[Stage.TRIAGE], ensure_ascii=False, indent=2)}"
+        )
+        previous_error = request.context.get("previous_structure_error")
+        if not isinstance(previous_error, dict):
+            return prompt
+        retry_feedback = {
+            "attempt": previous_error.get("attempt"),
+            "error": previous_error.get("error"),
+        }
+        return (
+            f"{prompt}\n\n"
+            "The previous output was rejected for the following validation issue. "
+            "Correct the JSON envelope and classify the same request under the system "
+            "rules:\n"
+            f"{json.dumps(retry_feedback, ensure_ascii=False, sort_keys=True)}"
         )
     context = {
         "turn_id": request.turn_id,
