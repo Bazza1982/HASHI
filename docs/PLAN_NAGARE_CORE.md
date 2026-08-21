@@ -167,7 +167,7 @@ nagare-core/
 
 ### 4.2 Protocols
 
-The current protocol sketch is directionally right but too thin. The execution boundary must preserve semantics like timeout, retries, structured failure, cancellation, and artifacts.
+The current protocol sketch is directionally right but too thin. The execution boundary must preserve structured failure, explicit cancellation, progress, and artifacts without introducing an absolute runtime or retry ceiling.
 
 Minimum direction for `StepHandler`:
 
@@ -183,7 +183,6 @@ class StepHandler(Protocol):
         prompt: str,
         context: dict[str, Any],
         config: dict[str, Any],
-        timeout_seconds: int | None,
         logger: Any | None = None,
     ) -> dict[str, Any]:
         """Return a structured result including status, outputs, and failure metadata."""
@@ -861,4 +860,3 @@ Nagare v1.0 is done when:
 - unsupported YAML survives without silent damage
 - debugging information is sufficient to trace failures across layers
 - the remaining limitations are documented rather than hidden
-

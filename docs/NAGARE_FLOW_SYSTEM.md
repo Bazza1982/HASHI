@@ -386,7 +386,6 @@ backend_manager.set_model_override(worker_id="analyst_01", model="claude-opus-4-
 
 # Per-run backend extra options
 backend_extra:
-  timeout_seconds: 300
   access_scope: local_only
   tools: [read_file, write_file, bash]
 ```
@@ -569,7 +568,6 @@ steps:
     artifacts_produced:
       - key: analysis
         filename: analysis.json
-    timeout_seconds: 300
 
   - id: step_02
     name: "Generate output"
@@ -581,12 +579,11 @@ steps:
     artifacts_produced:
       - key: final_output
         filename: output.md
-    timeout_seconds: 600
 
 error_handling:
   debug_agent: worker_01
-  max_attempts: 3
-  retry_strategy: prompt_adjustment
+  on_unrecoverable:
+    message: "Workflow step cannot be recovered: {failed_step_id} — {error}"
 
 success_criteria:
   - "step_02 completed with artifacts_produced"

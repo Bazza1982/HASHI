@@ -24,11 +24,10 @@ class DeterministicStepHandler:
         agent_id: str,
         task_message: dict,
         agent_md_path: str,
-        timeout_seconds: int = 600,
         backend: str = "claude-cli",
         model: str = "",
     ) -> dict:
-        del agent_md_path, timeout_seconds, backend, model
+        del agent_md_path, backend, model
 
         payload = task_message.get("payload", {})
         run_id = task_message["run_id"]

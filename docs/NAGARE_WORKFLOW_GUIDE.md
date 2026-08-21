@@ -312,7 +312,6 @@ workers:
     backend: claude-cli
     model: claude-opus-4-6
     backend_extra:
-      timeout_seconds: 300    # Override default 600s timeout for this worker
       access_scope: local_only  # Restrict file system access
 ```
 
@@ -389,7 +388,6 @@ steps:
     skip_if: ""                 # Optional. Skip this step if condition is true.
                                 # Uses artifact and pre_flight variable access.
 
-    timeout_seconds: 300        # Optional. Default: 600. Override per step.
 ```
 
 ### 7.2 Step Dependency DAG
@@ -593,32 +591,28 @@ If a step is re-run (e.g., after a failure and retry), the engine creates a new 
 ```yaml
 error_handling:
   debug_agent: debug_01         # Worker ID of the debug agent.
-  max_attempts: 3               # Max retry attempts per step (default: 1).
-  retry_strategy: prompt_adjustment  # Simple mode: engine adjusts prompt on retry.
+  on_unrecoverable:
+    action: notify_human_interface
+    target: akane
+    message: "Workflow step cannot be recovered: {failed_step_id}. Error: {error}"
 ```
 
-### 10.2 Per-Attempt Retry Strategies
+Nagare does not stop recovery because elapsed time or an attempt counter was
+exhausted. A recovered step is re-executed, and a correctable failure returns
+to the Debug Agent. The loop ends only for an explicit stop, an infrastructure
+failure, or an explicit `not recovered` result from the Debug Agent.
 
-For fine-grained control over each retry:
+### 10.2 Recovery Contract
+
+Configure only the agent and the explicit-unrecoverable notification:
 
 ```yaml
 error_handling:
   debug_agent: debug_01
-  max_attempts: 3
-  retry_strategy:
-    attempt_1: >
-      Analyze error via debug_01. If prompt interpretation issue,
-      clarify ambiguous instructions and retry.
-    attempt_2: >
-      If step timed out, simplify prompt (remove optional requirements).
-      Reduce target length. Switch to fallback mode.
-    attempt_3: >
-      Minimal viable attempt: relaxed quality threshold, notify user of
-      degraded output.
-  on_max_exceeded:
+  on_unrecoverable:
     action: notify_human_interface
     target: akane
-    message: "Workflow failed after 3 attempts. Step: {failed_step_id}, Error: {error}"
+    message: "Workflow step cannot be recovered. Step: {failed_step_id}, Error: {error}"
 ```
 
 ### 10.3 Failure Flow
@@ -628,13 +622,13 @@ Step fails
     ↓
 debug_01 agent analyzes the failure
     ↓
-Engine applies retry_strategy for this attempt
+Debug Agent applies a concrete recovery
     ↓
-Step retried (attempt 2 of 3)
+Step re-executed
     ↓
-If still failing after max_attempts:
+If still correctable, return to Debug without a fixed count ceiling
     ↓
-on_max_exceeded.action = notify_human_interface
+If Debug explicitly reports unrecoverable, on_unrecoverable.action = notify_human_interface
     → HChat message sent to the human interface agent
     → Workflow status set to FAILED
 ```
@@ -642,7 +636,6 @@ on_max_exceeded.action = notify_human_interface
 ### 10.4 What Counts as a Failure
 
 - Step subprocess exits with non-zero status
-- Step times out (exceeds `timeout_seconds`)
 - Step output doesn't parse as valid JSON when JSON is expected
 - Step output doesn't include `"status": "completed"`
 - Quality gate criteria not met (see Section 11)
@@ -821,7 +814,6 @@ steps:
         - key: extracted_text
           path: extracted_text.txt
           type: text
-    timeout_seconds: 120
 ```
 
 ### 15.4 Registering the Callable in Python
@@ -1000,8 +992,8 @@ PRE_FLIGHT     ← human Q&A happens here
 CONFIRMED      ← all inputs locked
     │
 RUNNING        ← steps execute
-    ├── step fails → DEBUG → retry (up to max_attempts)
-    │                      → FAILED (if max exceeded)
+    ├── step fails → DEBUG ↔ re-execute (no fixed attempt ceiling)
+    │                      → FAILED (only when explicitly unrecoverable)
     ├── _pause signal → PAUSED → (delete _pause) → RUNNING
     └── _stop signal → ABORTED
     │
@@ -1152,7 +1144,6 @@ steps:
         - key: article_analysis
           path: article_analysis.json
           type: json
-    timeout_seconds: 120
 
   # Step 2: Translate
   - id: translate
@@ -1189,7 +1180,6 @@ steps:
         - key: translation_notes
           path: translation_notes.json
           type: json
-    timeout_seconds: 600
 
   # Step 3: Quality review (independent reviewer — different vendor)
   - id: review
@@ -1238,22 +1228,16 @@ steps:
       type: auto
       criteria:
         - "review_result.passed == true"
-    timeout_seconds: 300
 
 # ================================================================
 # error_handling
 # ================================================================
 error_handling:
   debug_agent: debug_01
-  max_attempts: 3
-  retry_strategy:
-    attempt_1: "Analyze failure. If quality gate failed, pass reviewer feedback to translator and retry translation step."
-    attempt_2: "Simplify: reduce style requirements, focus on accuracy only."
-    attempt_3: "Minimum viable: accuracy only, no style matching. Notify user."
-  on_max_exceeded:
+  on_unrecoverable:
     action: notify_human_interface
     target: akane
-    message: "Translation workflow failed after 3 attempts. Step: {failed_step_id}. Error: {error}"
+    message: "Translation workflow cannot recover step {failed_step_id}. Error: {error}"
 
 # ================================================================
 # success_criteria
@@ -1329,8 +1313,8 @@ Before saving a new workflow, verify:
 
 **Error Handling**
 - [ ] `error_handling.debug_agent` references a valid worker ID
-- [ ] `max_attempts` is 2-3 for production workflows
-- [ ] `on_max_exceeded` sends a notification so the failure doesn't go unnoticed
+- [ ] No absolute timeout or fixed retry/turn/token ceiling is configured
+- [ ] `on_unrecoverable` sends a notification so an explicit terminal failure doesn't go unnoticed
 
 **Quality Gates**
 - [ ] Quality gates use `type: json` artifacts only

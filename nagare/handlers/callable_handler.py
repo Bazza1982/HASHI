@@ -84,17 +84,16 @@ class CallableStepHandler:
         agent_id: str,
         task_message: dict,
         agent_md_path: str,
-        timeout_seconds: int = 600,
         backend: str = "callable",
         model: str = "",
     ) -> dict:
         """Execute a registered callable. Conforms to StepHandler protocol."""
-        del agent_md_path, timeout_seconds, backend, model  # unused
+        del agent_md_path, backend, model  # unused
 
         step_id = task_message.get("payload", {}).get("step_id", "unknown")
 
         # Auto-setup loop: if callable is missing and setup_manager is wired,
-        # ask AI to implement it (up to MAX_RETRIES times) before giving up.
+        # ask AI to implement it until success or explicit workflow stop.
         if agent_id not in self._registry and self._setup_manager is not None:
             return self._execute_with_auto_setup(agent_id, step_id, task_message)
 
@@ -118,18 +117,17 @@ class CallableStepHandler:
     ) -> dict:
         """
         Retry loop that asks the AI to implement the callable, waits for code
-        delivery, and re-executes. Escalates to human after MAX_RETRIES.
+        delivery, and re-executes without a fixed attempt ceiling.
         """
-        from nagare.engine.callable_setup_manager import MAX_RETRIES
-
         self._emit("callable_not_found", agent_id=agent_id, step_id=step_id)
         mgr = self._setup_manager  # guaranteed non-None by caller
 
-        for attempt in range(1, MAX_RETRIES + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             logger.info(
-                "Callable auto-setup attempt %d/%d for agent_id='%s'",
+                "Callable auto-setup attempt %d for agent_id='%s'",
                 attempt,
-                MAX_RETRIES,
                 agent_id,
             )
             self._emit(
@@ -137,21 +135,10 @@ class CallableStepHandler:
                 agent_id=agent_id,
                 step_id=step_id,
                 attempt=attempt,
-                max_retries=MAX_RETRIES,
             )
 
             event = mgr.request_setup(agent_id, task_message, attempt=attempt)
-            delivered = mgr.wait_for_setup(agent_id, event)
-
-            if not delivered:
-                self._emit(
-                    "callable_setup_timeout",
-                    agent_id=agent_id,
-                    step_id=step_id,
-                    attempt=attempt,
-                )
-                mgr.increment_retry(agent_id)
-                continue
+            mgr.wait_for_setup(agent_id, event)
 
             fn = mgr.pop_pending_callable(agent_id)
             if fn is None:
@@ -183,27 +170,6 @@ class CallableStepHandler:
                 attempt=attempt,
                 error=result.get("error", ""),
             )
-
-        # All retries exhausted
-        logger.error(
-            "Callable auto-setup exhausted %d attempts for agent_id='%s', escalating",
-            MAX_RETRIES,
-            agent_id,
-        )
-        mgr.escalate_to_human(agent_id, task_message)
-        self._emit(
-            "callable_setup_exhausted",
-            agent_id=agent_id,
-            step_id=step_id,
-            max_retries=MAX_RETRIES,
-        )
-        return {
-            "status": "failed",
-            "error": (
-                f"Callable auto-setup failed after {MAX_RETRIES} attempts "
-                f"for agent_id='{agent_id}'. Human escalation sent."
-            ),
-        }
 
     def _invoke(self, agent_id: str, step_id: str, task_message: dict) -> dict:
         """Execute a callable that is already in self._registry."""

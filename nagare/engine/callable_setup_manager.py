@@ -5,11 +5,11 @@ When a workflow step targets a callable (backend: callable) that has no Python
 function registered, this manager drives an automated AI-implementation loop:
 
   1. Sends step context to an AI agent via the notifier (HChat)
-  2. Blocks the runner thread on a threading.Event with a configurable timeout
+  2. Blocks the runner thread until code arrives or the workflow is explicitly stopped
   3. When the AI POSTs code to POST /runs/{run_id}/callables/{agent_id}, the
      manager exec()s it, stores the compiled function, and fires the event
   4. The blocked thread wakes, registers the function, and retries execution
-  5. Retries up to MAX_RETRIES (default 3) times before escalating to human
+  5. Repeats correctable implementation attempts without a fixed count ceiling
 
 State (retry counts, outcomes) is persisted to:
     flow/runs/{run_id}/callable_setup.json
@@ -30,9 +30,6 @@ from typing import Any
 
 from nagare.protocols.notifier import Notifier, NullNotifier
 
-
-MAX_RETRIES = 3
-WAIT_TIMEOUT_SECONDS = 300  # per attempt (5 minutes)
 
 logger = logging.getLogger(__name__)
 
@@ -99,31 +96,25 @@ class CallableSetupManager:
         event: threading.Event,
     ) -> bool:
         """
-        Block until code is delivered or timeout expires.
-        Returns True if code was delivered, False on timeout.
+        Block until code is delivered. Workflow cancellation remains the
+        external stop authority; elapsed wall-clock time is not one.
         """
-        delivered = event.wait(timeout=WAIT_TIMEOUT_SECONDS)
-        if not delivered:
-            logger.warning(
-                "Callable setup timed out after %ds for agent_id='%s'",
-                WAIT_TIMEOUT_SECONDS,
-                agent_id,
-            )
-        return delivered
+        event.wait()
+        return True
 
     def escalate_to_human(self, agent_id: str, task_message: dict) -> None:
         """
-        Called after MAX_RETRIES exhausted — notify human operator.
+        Compatibility helper for an explicit human escalation request.
         """
         step_id = task_message.get("payload", {}).get("step_id", "?")
         step_prompt = task_message.get("payload", {}).get("prompt", "")
         msg = (
-            f"🚨 Callable auto-setup FAILED after {MAX_RETRIES} attempts\n\n"
+            "🚨 Callable auto-setup needs human assistance\n\n"
             f"agent_id: {agent_id}\n"
             f"step_id: {step_id}\n"
             f"run_id: {self.run_id}\n"
             f"step prompt:\n{step_prompt[:500]}\n\n"
-            f"The AI agent was unable to implement a working callable in {MAX_RETRIES} tries.\n"
+            "The AI agent reported that it cannot safely continue automatically.\n"
             f"Please implement manually and POST to:\n"
             f"  {self.api_base_url}/runs/{self.run_id}/callables/{agent_id}\n"
             f"  Body: {{\"code\": \"def run(task_message): ...\"}}"
@@ -233,7 +224,7 @@ class CallableSetupManager:
         input_artifacts = task_message.get("payload", {}).get("input_artifacts", {})
         output_spec = task_message.get("payload", {}).get("output_spec", [])
 
-        retry_note = f" (attempt {attempt}/{MAX_RETRIES})" if attempt > 1 else ""
+        retry_note = f" (attempt {attempt})" if attempt > 1 else ""
 
         prompt = (
             f"🤖 Callable auto-setup needed{retry_note}\n\n"
@@ -253,8 +244,8 @@ class CallableSetupManager:
             f"POST the code to:\n"
             f"  {self.api_base_url}/runs/{self.run_id}/callables/{agent_id}\n"
             f"  Body: {{\"code\": \"<your Python code>\"}}\n\n"
-            f"The runner thread is blocked waiting for your implementation "
-            f"(timeout: {WAIT_TIMEOUT_SECONDS}s).\n"
+            "The runner thread is waiting for your implementation without an "
+            "absolute execution deadline.\n"
             f"run_id: {self.run_id}"
         )
 

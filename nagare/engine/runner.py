@@ -109,9 +109,6 @@ class FlowRunner:
         self._aborted = False
         self._pre_flight_data: dict = {}
         self._step_results: dict = {}  # step_id → result dict (for skip_if evaluation)
-        self._human_wait_deadline: Optional[float] = None   # NAGARE-TIMEOUT-001
-        self._human_wait_defaults: dict = {}                # NAGARE-TIMEOUT-001: fallback defaults
-        self._timeout_assumptions: list = []                # NAGARE-TIMEOUT-001: log of auto-assumed values
         self.notifier = notifier or NullNotifier()
         self.evaluator = evaluator or NullEvaluator()
         self.step_handler = step_handler or SubprocessStepHandler(
@@ -288,10 +285,6 @@ class FlowRunner:
             self._notify_human(f"⏸️ 工作流已暂停，等待恢复。删除 _pause 文件或调用 resume() 恢复。" + (f"\n原因: {reason}" if reason else ""))
 
             while self._pause_signal.exists() and not self._stop_signal.exists():
-                # NAGARE-TIMEOUT-001: 检查 wait_for_human 超时
-                if self._human_wait_deadline is not None and time.time() > self._human_wait_deadline:
-                    self._handle_human_timeout()
-                    break
                 time.sleep(2)
 
             # 暂停期间可能收到停止信号
@@ -368,28 +361,10 @@ class FlowRunner:
             f"请回答后写入 {response_file} 并删除 _pause 文件恢复。"
         )
 
-        # 解析超时配置（NAGARE-TIMEOUT-001）
-        # 优先级：step.wait_for_human_timeout > workflow.pre_flight.human_response_timeout_seconds > 默认 300s
-        timeout_secs = (
-            step.get("wait_for_human_timeout_seconds")
-            or self.workflow.get("pre_flight", {}).get("human_response_timeout_seconds")
-            or 300
-        )
-        self._human_wait_deadline = time.time() + timeout_secs
-        # 尝试读取 worker 提供的 smart defaults（文件名约定：_human_defaults.json）
-        defaults_file = self._run_dir / "_human_defaults.json"
-        if defaults_file.exists():
-            try:
-                self._human_wait_defaults = json.loads(defaults_file.read_text(encoding="utf-8"))
-            except Exception:
-                self._human_wait_defaults = {}
-        else:
-            self._human_wait_defaults = {}
-
         # 自动暂停
         self._pause_signal.write_text(f"等待 human 回答来自 {step['id']} 的问题", encoding="utf-8")
         self.logger.info(
-            f"[WaitForHuman] 已暂停，等待 human 回答 {len(questions)} 个问题（超时 {timeout_secs}s）"
+            f"[WaitForHuman] 已暂停，等待 human 回答 {len(questions)} 个问题（无绝对时限）"
         )
 
         # _check_signals 会在下次循环中捕获暂停并等待
@@ -444,44 +419,6 @@ class FlowRunner:
         else:
             self.logger.warning(f"[WaitForHuman] 回答文件不存在: {response_file}，以空回答继续")
         self._pending_human_response = None
-        self._human_wait_deadline = None   # NAGARE-TIMEOUT-001: 清空超时状态
-        self._human_wait_defaults = {}
-
-    def _handle_human_timeout(self):
-        """
-        NAGARE-TIMEOUT-001: wait_for_human 超时处理。
-
-        关键设计原则：pre-flight 是工作流的前置控制门，必须等待所有问题被人工回答。
-        超时只是一个提醒机制，不允许自动用默认值继续——无论问题是否有默认值。
-        工作流在收到人工回答前始终保持暂停状态。
-        """
-        step_id = "unknown"
-        questions = []
-        try:
-            query_file = self._run_dir / "_human_query.json"
-            if query_file.exists():
-                qdata = json.loads(query_file.read_text(encoding="utf-8"))
-                step_id = qdata.get("from_step", "unknown")
-                questions = qdata.get("questions", [])
-        except Exception:
-            pass
-
-        # 延长等待时间（再等 300s），重新提醒并继续等待
-        self._human_wait_deadline = time.time() + 300
-        self.logger.warning(
-            f"[WaitForHuman] ⏱️ 超时提醒，继续等待人工回答（step={step_id}）"
-        )
-        q_text = "\n".join(
-            f"  {i+1}. {q.get('question', q.get('key', 'unknown'))}"
-            for i, q in enumerate(questions)
-        ) if questions else "  （详见 _human_query.json）"
-        self._notify_human(
-            f"⏱️ 步骤 {step_id} 等待超时提醒——工作流仍在暂停，等待您回答以下问题：\n"
-            f"{q_text}\n\n"
-            f"请回答后写入 {self._run_dir}/_human_response.json 并删除 _pause 文件恢复。\n"
-            f"（将在 5 分钟后再次提醒）"
-        )
-        # 不清除 pause，不写入任何默认值，继续等待
 
     # =========================================================================
     # 内部执行逻辑
@@ -566,6 +503,7 @@ class FlowRunner:
         """解析 DAG，按依赖顺序执行所有步骤"""
         steps = self.workflow.get("steps", [])
         step_map = {s["id"]: s for s in steps}
+        total = len(steps)
         completed = set()
         failed = set()
 
@@ -576,8 +514,6 @@ class FlowRunner:
         self.logger.info(f"[FlowRunner] trace_id={self.trace_id}")
 
         self._pending_human_response = None  # 初始化
-        self._human_wait_deadline = None     # NAGARE-TIMEOUT-001
-        self._human_wait_defaults = {}       # NAGARE-TIMEOUT-001
 
         while True:
             # 检查外部信号（停止/暂停）
@@ -663,7 +599,7 @@ class FlowRunner:
                     self._notify_step_event(step, "❌ 失败", f"[{error_type}] {error_msg}")
 
                     # 基础设施故障（非任务级别）→ debug agent 无法修复，直接通知 human
-                    if error_type in ("unexpected", "cli_error", "cli_not_found", "timeout", "exception"):
+                    if error_type in ("unexpected", "cli_error", "cli_not_found", "exception"):
                         self._notify_human(
                             f"🚨 基础设施故障 | {step['id']}\n"
                             f"类型: {error_type}\n"
@@ -678,34 +614,64 @@ class FlowRunner:
                             "run_id": self.run_id
                         }
 
-                    # 任务级别失败 → 触发 debug agent
-                    recovered = self._handle_failure(step, result)
-                    if recovered:
+                    # 任务级别失败 → 由 Debug Agent 持续恢复。次数不构成
+                    # 终止权限；只有明确不可恢复、基础设施故障或外部 stop
+                    # 才能结束这条执行路径。
+                    while True:
+                        recovered = self._handle_failure(step, result)
+                        if not recovered:
+                            self._escalate_to_orchestrator(step, result)
+                            return {
+                                "success": False,
+                                "error": f"步骤 {step['id']} 失败且 Debug Agent 明确无法恢复",
+                                "run_id": self.run_id,
+                            }
+
                         failed.discard(step["id"])
                         self._notify_step_event(step, "🔧 Debug 恢复成功", "重新执行中...")
-                        # 重新执行
                         result = self._execute_step(step)
                         self._step_results[step["id"]] = result
                         if result["success"]:
                             completed.add(step["id"])
                             done = len(completed)
-                            self._notify_step_event(step, f"✅ 重试成功 ({done}/{total})", step.get("name", ""))
-                        else:
-                            failed.add(step["id"])
-                            self._notify_step_event(step, "❌ 重试仍失败", str(result.get("error", ""))[:200])
+                            self._notify_step_event(
+                                step,
+                                f"✅ 恢复后成功 ({done}/{total})",
+                                step.get("name", ""),
+                            )
+                            self._handle_wait_for_human(step, result)
+                            break
+
+                        failed.add(step["id"])
+                        retry_error_type = result.get("error_type", "unknown")
+                        retry_error = str(result.get("error", ""))[:200]
+                        self._notify_step_event(
+                            step,
+                            "❌ 恢复后仍失败",
+                            f"[{retry_error_type}] {retry_error}",
+                        )
+                        if retry_error_type in {
+                            "unexpected",
+                            "cli_error",
+                            "cli_not_found",
+                            "exception",
+                        }:
                             self._escalate_to_orchestrator(step, result)
                             return {
                                 "success": False,
-                                "error": f"步骤 {step['id']} 在 Debug 恢复后仍然失败",
-                                "run_id": self.run_id
+                                "error": (
+                                    f"步骤 {step['id']} 恢复后遇到基础设施故障 "
+                                    f"[{retry_error_type}]: {retry_error}"
+                                ),
+                                "error_type": retry_error_type,
+                                "run_id": self.run_id,
                             }
-                    else:
-                        self._escalate_to_orchestrator(step, result)
-                        return {
-                            "success": False,
-                            "error": f"步骤 {step['id']} 失败且无法恢复",
-                            "run_id": self.run_id
-                        }
+                        if self._check_signals() == "stopped":
+                            return {
+                                "success": False,
+                                "error": "工作流已被紧急停止",
+                                "run_id": self.run_id,
+                            }
 
             # 并行执行
             elif parallel_steps:
@@ -860,7 +826,6 @@ class FlowRunner:
         """调用 Debug Agent 处理失败步骤，返回是否成功恢复"""
         error_handling = self.workflow.get("error_handling", {})
         debug_agent = error_handling.get("debug_agent")
-        max_attempts = error_handling.get("max_attempts", 3)
 
         if not debug_agent:
             self.logger.warning("[Debug] 未配置 debug_agent，跳过自动恢复")
@@ -882,7 +847,6 @@ class FlowRunner:
                 "error": failure_result.get("error"),
                 "step_definition": step,
             },
-            "max_attempts": max_attempts,
             "workflow_path": str(self.workflow_path)
         }
 
@@ -950,9 +914,9 @@ class FlowRunner:
         """向 Orchestrator 上报无法恢复的失败"""
         orchestrator_id = self.workflow.get("agents", {}).get("orchestrator", {}).get("id", "akane")
         error_handling = self.workflow.get("error_handling", {})
-        msg_template = error_handling.get("on_max_exceeded", {}).get(
+        msg_template = error_handling.get("on_unrecoverable", {}).get(
             "message",
-            "工作流步骤失败（已耗尽重试）：{failed_step_id} — {error}"
+            "工作流步骤失败且无法继续恢复：{failed_step_id} — {error}"
         )
         error_msg = str(failure_result.get("error", ""))
         message = msg_template.replace("{failed_step_id}", step["id"]).replace("{error}", error_msg)
@@ -990,7 +954,6 @@ class FlowRunner:
             return {"status": "failed", "error": f"未定义的 worker: {agent_id}"}
 
         agent_md_path = worker_def.get("agent_md", f"flow/agents/{agent_id}/AGENT.md")
-        timeout = message.get("timeout_seconds", 600)
         backend = worker_def.get("backend", "claude-cli")
         model = worker_def.get("model", "")
 
@@ -998,7 +961,6 @@ class FlowRunner:
             agent_id=agent_id,
             task_message=message,
             agent_md_path=agent_md_path,
-            timeout_seconds=timeout,
             backend=backend,
             model=model,
         )
@@ -1040,7 +1002,6 @@ class FlowRunner:
                 "output_spec": step.get("output", {}).get("artifacts", []),
                 "params": self._resolve_params(step)
             },
-            "timeout_seconds": step.get("timeout_seconds", 600),
             "ts": utc_now()
         }
 

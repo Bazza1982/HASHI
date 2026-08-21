@@ -154,12 +154,6 @@ steps:
               type:
                 type: enum
                 values: [json, file, directory]
-      timeout_seconds:
-        type: integer
-        default: 600
-        min: 60
-        max: 3600
-        description: "步骤超时时间（秒）"
       notify:
         type: boolean
         default: true
@@ -230,14 +224,7 @@ error_handling:
     debug_agent:
       type: string
       must_reference: "agents.workers[].id"
-    max_attempts:
-      type: integer
-      default: 3
-      min: 1
-      max: 5
-    retry_strategy:
-      type: map[string, string]
-    on_max_exceeded:
+    on_unrecoverable:
       type: object
       fields:
         action:
@@ -297,5 +284,5 @@ validation_rules:
   - name: "no_redundant_preflight"
     description: "pre_flight.collect_from_human 不应包含系统能自主推断的问题"
 
-  - name: "timeout_reasonable"
-    description: "timeout_seconds 应在 60-3600 之间，且与任务规模匹配"
+  - name: "no_absolute_execution_ceiling"
+    description: "步骤不得配置总时长或固定重试次数；仅显式停止或不可恢复结果可终止恢复"

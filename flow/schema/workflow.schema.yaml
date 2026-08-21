@@ -99,22 +99,13 @@ steps:
       criteria: [string]      # 自动检查标准列表
       human_prompt: string    # 当 type=human 时，发给用户的确认消息
 
-    timeout_seconds: int      # 步骤超时（默认 600）
-
 # =============================================================================
 # 错误处理
 # =============================================================================
 
 error_handling:
   debug_agent: string         # debug agent id
-  max_attempts: int           # 最大重试次数（默认 3，可调）
-
-  retry_strategy:             # 每次重试的策略
-    attempt_1: string         # 如 "分析错误日志，调整 prompt 重试"
-    attempt_2: string         # 如 "切换到备用 model 重试"
-    attempt_3: string         # 如 "将步骤拆分为更小任务重试"
-
-  on_max_exceeded:            # 超过最大次数后的处理
+  on_unrecoverable:           # Debug Agent 明确报告无法恢复后的处理
     action: string            # notify_orchestrator | abort | skip_step
     message: string           # 通知消息模板
 
@@ -243,7 +234,8 @@ evaluation:
 #
 # error_handling:
 #   debug_agent: debug_01
-#   max_attempts: 3
+#   on_unrecoverable:
+#     action: notify_orchestrator
 #
 # success_criteria:
 #   - "步骤 compile 状态为 completed"

@@ -118,3 +118,76 @@ def test_nagare_runner_executes_fixture_with_injected_protocols(tmp_path, monkey
 def test_flow_compatibility_imports_resolve_to_extracted_core() -> None:
     assert FlowTaskState is TaskState
     assert FlowWorkerDispatcher is NagareWorkerDispatcher
+
+
+def test_nagare_debug_recovery_has_no_fixed_attempt_or_timeout_ceiling(tmp_path) -> None:
+    workflow_path = tmp_path / "unbounded-recovery.yaml"
+    workflow_path.write_text(
+        """
+workflow:
+  id: unbounded-recovery
+  name: Unbounded recovery
+  version: 1.0.0
+pre_flight:
+  collect_from_human: []
+agents:
+  orchestrator:
+    id: orchestrator
+  workers:
+    - id: worker
+      agent_md: worker.md
+      backend: claude-cli
+      model: test
+    - id: debug
+      agent_md: debug.md
+      backend: claude-cli
+      model: test
+steps:
+  - id: work
+    name: Work
+    agent: worker
+    depends: []
+    prompt: Finish the work.
+    output:
+      artifacts: []
+error_handling:
+  debug_agent: debug
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class RecoveringHandler:
+        def __init__(self) -> None:
+            self.worker_calls = 0
+            self.debug_calls = 0
+
+        # Deliberately has no timeout argument: FlowRunner must not inject one.
+        def execute(self, agent_id, task_message, agent_md_path, backend="claude-cli", model=""):
+            del agent_md_path, backend, model
+            if agent_id == "debug":
+                self.debug_calls += 1
+                return {"status": "recovered"}
+            self.worker_calls += 1
+            if self.worker_calls <= 4:
+                return {
+                    "status": "failed",
+                    "error_type": "task_error",
+                    "error_message": "correctable failure",
+                }
+            return {"status": "completed", "artifacts_produced": {}}
+
+    handler = RecoveringHandler()
+    runner = FlowRunner(
+        str(workflow_path),
+        run_id="run-unbounded-recovery",
+        runs_root=tmp_path / "runs",
+        repo_root=tmp_path,
+        step_handler=handler,
+    )
+    runner.workflow["inter_step_wait_seconds"] = 0
+
+    result = runner.start()
+
+    assert result["success"] is True
+    assert handler.worker_calls == 5
+    assert handler.debug_calls == 4

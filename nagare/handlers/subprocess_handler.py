@@ -47,8 +47,7 @@ class SubprocessStepHandler:
         self.event_logger = event_logger
 
     def execute(self, agent_id: str, task_message: dict, agent_md_path: str,
-                timeout_seconds: int = 600, backend: str = "claude-cli",
-                model: str = "") -> dict:
+                backend: str = "claude-cli", model: str = "") -> dict:
         """
         调度任务给指定 worker。
 
@@ -56,7 +55,6 @@ class SubprocessStepHandler:
             agent_id: worker 标识符
             task_message: 符合 agent.schema.yaml 的任务消息
             agent_md_path: worker AGENT.md 文件路径（相对于 hashi root）
-            timeout_seconds: 最大等待秒数
             backend: 后端类型 ("claude-cli" 或 "codex-cli")
             model: 模型标识符（如 "claude-opus-4-6", "gpt-5.4"）
 
@@ -94,7 +92,6 @@ class SubprocessStepHandler:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             worker_dir=worker_dir,
-            timeout_seconds=timeout_seconds,
             backend=backend,
             model=model,
         )
@@ -182,7 +179,7 @@ class SubprocessStepHandler:
         return "\n".join(lines)
 
     def _run_cli(self, agent_id: str, task_id: str, system_prompt: str,
-                 user_prompt: str, worker_dir: Path, timeout_seconds: int,
+                 user_prompt: str, worker_dir: Path,
                  backend: str = "claude-cli", model: str = "") -> dict:
         """调用 CLI 执行任务，根据 backend 选择 claude 或 codex，解析结果"""
         log_dir = worker_dir / "logs"
@@ -226,7 +223,6 @@ class SubprocessStepHandler:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=timeout_seconds,
                 cwd=str(worker_dir),
                 env=child_env,
             )
@@ -280,26 +276,6 @@ class SubprocessStepHandler:
                 self._emit_handler_result(agent_id, task_id, backend, model, started_at, result)
                 return result
 
-        except subprocess.TimeoutExpired as e:
-            # 超时时也保存已有输出到日志
-            try:
-                partial_stdout = (e.stdout or "") if hasattr(e, "stdout") else ""
-                partial_stderr = (e.stderr or "") if hasattr(e, "stderr") else ""
-                with open(log_file, "w", encoding="utf-8") as f:
-                    f.write(f"=== TIMEOUT after {timeout_seconds}s ===\n\n"
-                            f"=== STDOUT (partial) ===\n{partial_stdout}\n\n"
-                            f"=== STDERR (partial) ===\n{partial_stderr}\n")
-            except Exception:
-                pass
-            result = {
-                "status": "failed",
-                "error_type": "timeout",
-                "error_message": f"Worker {agent_id} 超时 ({timeout_seconds}s)",
-                "suggested_fix": "增加 timeout_seconds 或简化任务",
-                "ts": utc_now(),
-            }
-            self._emit_handler_result(agent_id, task_id, backend, model, started_at, result)
-            return result
         except FileNotFoundError:
             result = {
                 "status": "failed",

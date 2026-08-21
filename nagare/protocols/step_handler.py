@@ -9,7 +9,6 @@ class StepHandler(Protocol):
         agent_id: str,
         task_message: dict,
         agent_md_path: str,
-        timeout_seconds: int = 600,
         backend: str = "claude-cli",
         model: str = "",
     ) -> dict:

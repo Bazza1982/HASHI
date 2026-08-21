@@ -75,7 +75,6 @@ class RoutingStepHandler:
         agent_id: str,
         task_message: dict,
         agent_md_path: str,
-        timeout_seconds: int = 600,
         backend: str = "claude-cli",
         model: str = "",
     ) -> dict:
@@ -85,7 +84,6 @@ class RoutingStepHandler:
                 agent_id=agent_id,
                 task_message=task_message,
                 agent_md_path=agent_md_path,
-                timeout_seconds=timeout_seconds,
                 backend=backend,
                 model=model,
             )
@@ -95,7 +93,6 @@ class RoutingStepHandler:
             agent_id=agent_id,
             task_message=task_message,
             agent_md_path=agent_md_path,
-            timeout_seconds=timeout_seconds,
             backend=backend,
             model=model,
         )

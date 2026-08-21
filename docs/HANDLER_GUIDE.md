@@ -11,7 +11,6 @@ def execute(
     agent_id: str,
     task_message: dict,
     agent_md_path: str,
-    timeout_seconds: int = 600,
     backend: str = "claude-cli",
     model: str = "",
 ) -> dict:
@@ -73,8 +72,8 @@ from pathlib import Path
 
 
 class EchoHandler:
-    def execute(self, agent_id, task_message, agent_md_path, timeout_seconds=600, backend="claude-cli", model=""):
-        del agent_id, agent_md_path, timeout_seconds, backend, model
+    def execute(self, agent_id, task_message, agent_md_path, backend="claude-cli", model=""):
+        del agent_id, agent_md_path, backend, model
         step_id = task_message["payload"]["step_id"]
         output_path = Path("/tmp") / f"{step_id}.txt"
         output_path.write_text(f"completed {step_id}\n", encoding="utf-8")
