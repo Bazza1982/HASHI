@@ -23,6 +23,7 @@ class QueuedRequest:
     habit_learning_eligible: bool = True
     skill_id: str | None = None
     skill_usage_event_id: str | None = None
+    scheduler_context: dict[str, str] | None = None
 
 
 def _safe_excerpt(text: str, limit: int = 160) -> str:

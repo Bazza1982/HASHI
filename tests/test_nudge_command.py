@@ -170,6 +170,7 @@ async def test_scheduler_nudge_enqueues_only_when_runtime_idle(tmp_path):
     request_id, payload = runtime.enqueued[0]
     assert payload["summary"] == f"Nudge Task [{job['id']}]"
     assert payload["source"] == "scheduler"
+    assert "scheduler_context" not in payload
     assert request_id in runtime.listeners
     data = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
     assert data["nudges"][0]["nudge_meta"]["count"] == 1

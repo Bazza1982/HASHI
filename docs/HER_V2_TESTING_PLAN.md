@@ -257,6 +257,33 @@ One focused case must make a high-effort `SIMPLE_TASK` request Replanning,
 prove that the second execution may use the configured primary execution
 profile, and prove that the recorded classification remains `SIMPLE_TASK`.
 
+#### 7.5.1 Scheduled-job request policy
+
+Cron and heartbeat regressions must prove that:
+
+- a prompt job without an override resolves to HER v2 `low` for scheduled,
+  manual Run, and recovery replay paths;
+- every valid `her_v2_effort` override is preserved and wins for that request;
+- the Agent's configured effort remains unchanged and is used by the next
+  ordinary request;
+- provider model and reasoning selection are identical before and after the
+  execution-effort override unless an independent route rule requires a
+  different profile;
+- prompt skills preserve the same scheduler context as direct prompt jobs;
+- invalid overrides are rejected on import, enable, manual Run, and scheduled
+  dispatch before the request is queued;
+- nudge, delayed, and ordinary requests do not acquire scheduled-job effort
+  from a source string or summary heuristic;
+- Workbench and Telegram manual Run preserve the explicit cron/heartbeat kind;
+- request and response audit metadata records configured effort, effective
+  effort, resolution reason, job identity, and trigger.
+
+Tests based on the former assumption that cron or heartbeat prompt work always
+inherits the current Agent effort must be updated to assert this request-local
+policy. Tests must not infer scheduled-job policy merely from `source` or
+human-readable summary text. Existing nudge tests should remain as negative
+coverage, because nudges are continuations rather than routine job executions.
+
 The tool-loop regression is such a production-defect exception. It must prove
 that every tool-enabled HER effort receives an unbounded request-local registry
 view without mutating the shared Agent registry. A focused adapter regression
@@ -1087,6 +1114,9 @@ Before HER v2 is accepted, the suite must contain logically complete coverage of
     `/provider` atomically resolves both slots, `/model` defines Quick/Pro and
     independently assigns model/reasoning per effective route, `/effort` cannot
     mutate reasoning, and non-HER `/model` behaviour remains unchanged.
+20. scheduled-job policy separation: cron/heartbeat prompt work uses a
+    request-local low default or explicit override across scheduled, manual,
+    and recovery entry points without affecting nudges or later user turns.
 
 This is a list of required coverage areas, not an instruction to multiply each area into hundreds of tests.
 

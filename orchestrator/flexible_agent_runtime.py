@@ -620,7 +620,9 @@ class FlexibleAgentRuntime:
                 "scheduler-retry",
                 retry_summary,
                 silent=item.silent,
-                is_retry=True, habit_learning_eligible=item.habit_learning_eligible,
+                is_retry=True,
+                habit_learning_eligible=item.habit_learning_eligible,
+                scheduler_context=item.scheduler_context,
             )
             if retry_request_id:
                 self.logger.warning(
@@ -665,8 +667,10 @@ class FlexibleAgentRuntime:
         silent: bool = False,
         is_retry: bool = False,
         deliver_to_telegram: bool = True,
-        skip_memory_injection: bool = False, habit_learning_eligible: bool = True,
+        skip_memory_injection: bool = False,
+        habit_learning_eligible: bool = True,
         skill_id: str | None = None,
+        scheduler_context: Mapping[str, str] | None = None,
     ):
         if not prompt or not prompt.strip():
             self.error_logger.error(f"Rejected empty prompt from {source} (summary={summary!r})")
@@ -681,8 +685,12 @@ class FlexibleAgentRuntime:
             silent=silent,
             is_retry=is_retry,
             deliver_to_telegram=deliver_to_telegram,
-            skip_memory_injection=skip_memory_injection, habit_learning_eligible=habit_learning_eligible,
+            skip_memory_injection=skip_memory_injection,
+            habit_learning_eligible=habit_learning_eligible,
             skill_id=skill_id,
+            scheduler_context=(
+                dict(scheduler_context) if scheduler_context else None
+            ),
         )
         usage_recorder = getattr(
             getattr(self, "skill_manager", None), "record_skill_usage", None
@@ -1478,7 +1486,14 @@ class FlexibleAgentRuntime:
         else:
             await self._reply_text(update_or_query, text, parse_mode="HTML", reply_markup=markup)
 
-    async def invoke_scheduler_skill(self, skill_id: str, args: str, task_id: str) -> tuple[bool, str | None]:
+    async def invoke_scheduler_skill(
+        self,
+        skill_id: str,
+        args: str,
+        task_id: str,
+        *,
+        scheduler_context: Mapping[str, str] | None = None,
+    ) -> tuple[bool, str | None]:
         if str(skill_id or "").casefold() == "dream":
             # Legacy scheduled Dream jobs must never reach the retired generic
             # memory/AGENT.md writer. Route them through native HER Dream.
@@ -1516,6 +1531,11 @@ class FlexibleAgentRuntime:
             self.error_logger.error(message)
             return False, message
         prompt = self.skill_manager.build_prompt_for_skill(skill, args or "")
+        scheduler_kwargs = (
+            {"scheduler_context": dict(scheduler_context)}
+            if scheduler_context
+            else {}
+        )
         await self.enqueue_request(
             chat_id=self._primary_chat_id(),
             prompt=prompt,
@@ -1523,6 +1543,7 @@ class FlexibleAgentRuntime:
             summary=f"Skill Task [{task_id}]",
             silent=False,
             skill_id=skill.id,
+            **scheduler_kwargs,
         )
         return True, f"Scheduled prompt skill queued: {skill.id}"
 
@@ -3505,8 +3526,17 @@ class FlexibleAgentRuntime:
         except URLError as e:
             return False, f"Connection failed ({host}:{wb_port}): {e}"
 
-    async def _run_job_now(self, job: dict[str, Any]) -> tuple[bool, str]:
+    async def _run_job_now(
+        self,
+        job: dict[str, Any],
+        *,
+        kind: str | None = None,
+    ) -> tuple[bool, str]:
         from orchestrator.job_ownership import ownership_mismatch_label
+        from orchestrator.her_v2.request_policy import (
+            build_scheduler_request_context,
+            infer_scheduler_job_kind,
+        )
 
         mismatch = ownership_mismatch_label(job)
         if mismatch:
@@ -3538,10 +3568,20 @@ class FlexibleAgentRuntime:
                 task_id=job.get("id", "manual"),
             )
         if action.startswith("skill:"):
+            try:
+                resolved_kind = infer_scheduler_job_kind(job, kind)
+                scheduler_context = build_scheduler_request_context(
+                    job,
+                    kind=resolved_kind,
+                    trigger="manual",
+                )
+            except ValueError as exc:
+                return False, f"Invalid scheduler policy for {job.get('id')}: {exc}"
             return await self.invoke_scheduler_skill(
                 skill_id=action.split(":", 1)[1],
                 args=job.get("args", "") or job.get("prompt", ""),
                 task_id=job.get("id", "manual"),
+                scheduler_context=scheduler_context,
             )
         prompt = job.get("prompt", "")
         if not prompt.strip():
@@ -3552,12 +3592,24 @@ class FlexibleAgentRuntime:
                 purpose="skill-job-run",
             )
             return False, f"Job {job.get('id')} has no prompt."
-        summary_prefix = "Heartbeat Task" if "interval_seconds" in job else "Cron Task"
+        try:
+            resolved_kind = infer_scheduler_job_kind(job, kind)
+            scheduler_context = build_scheduler_request_context(
+                job,
+                kind=resolved_kind,
+                trigger="manual",
+            )
+        except ValueError as exc:
+            return False, f"Invalid scheduler policy for {job.get('id')}: {exc}"
+        summary_prefix = (
+            "Heartbeat Task" if resolved_kind == "heartbeat" else "Cron Task"
+        )
         await self.enqueue_request(
             chat_id=self._primary_chat_id(),
             prompt=prompt,
             source="scheduler",
             summary=f"{summary_prefix} [{job.get('id')}]",
+            scheduler_context=scheduler_context,
         )
         return True, f"Queued {summary_prefix.lower()} [{job.get('id')}]"
 
@@ -3581,7 +3633,7 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, f"{kind} job not found for this agent: {task_id}")
             return
         await self._reply_text(update, f"Running {kind} job now: {task_id}")
-        await self._run_job_now(job)
+        await self._run_job_now(job, kind=kind)
 
     async def cmd_cron(self, update: Update, context: Any):
         await self._handle_job_command(update, "cron", list(context.args or []))

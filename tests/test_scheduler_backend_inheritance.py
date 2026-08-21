@@ -32,7 +32,7 @@ async def test_legacy_underscore_action_id_routes_to_jobs_automation():
 
 
 @pytest.mark.asyncio
-async def test_scheduled_prompt_skill_retains_agent_current_backend(tmp_path):
+async def test_scheduled_prompt_skill_retains_backend_and_job_context(tmp_path):
     skill = SkillDefinition(
         id="legacy-pinned-skill",
         name="Legacy pinned skill",
@@ -59,6 +59,11 @@ async def test_scheduled_prompt_skill_retains_agent_current_backend(tmp_path):
         skill_id=skill.id,
         args="now",
         task_id="cron-1",
+        scheduler_context={
+            "kind": "cron",
+            "task_id": "cron-1",
+            "trigger": "scheduled",
+        },
     )
 
     assert ok is True
@@ -71,11 +76,16 @@ async def test_scheduled_prompt_skill_retains_agent_current_backend(tmp_path):
         summary="Skill Task [cron-1]",
         silent=False,
         skill_id="legacy-pinned-skill",
+        scheduler_context={
+            "kind": "cron",
+            "task_id": "cron-1",
+            "trigger": "scheduled",
+        },
     )
 
 
 @pytest.mark.asyncio
-async def test_legacy_scheduled_prompt_skill_retains_agent_current_backend(tmp_path):
+async def test_legacy_scheduled_prompt_skill_retains_backend_and_job_context(tmp_path):
     skill = SkillDefinition(
         id="legacy-pinned-skill",
         name="Legacy pinned skill",
@@ -106,6 +116,12 @@ async def test_legacy_scheduled_prompt_skill_retains_agent_current_backend(tmp_p
         skill_id=skill.id,
         args="now",
         task_id="cron-1",
+        scheduler_context={
+            "kind": "cron",
+            "task_id": "cron-1",
+            "trigger": "recovery",
+            "her_v2_effort_override": "high",
+        },
     )
 
     assert ok is True
@@ -118,4 +134,10 @@ async def test_legacy_scheduled_prompt_skill_retains_agent_current_backend(tmp_p
         summary="Skill Task [cron-1]",
         silent=False,
         skill_id="legacy-pinned-skill",
+        scheduler_context={
+            "kind": "cron",
+            "task_id": "cron-1",
+            "trigger": "recovery",
+            "her_v2_effort_override": "high",
+        },
     )

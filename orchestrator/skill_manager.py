@@ -14,6 +14,12 @@ from uuid import uuid4
 
 import yaml
 
+from orchestrator.her_v2.request_policy import (
+    HER_V2_JOB_EFFORT_FIELD,
+    job_effort_policy,
+    normalize_job_effort,
+    normalize_job_effort_in_place,
+)
 from orchestrator.job_ownership import ownership_mismatch_label
 
 
@@ -947,6 +953,7 @@ class SkillManager:
         action: str,
         enabled: bool,
         note: str,
+        her_v2_effort: str | None = None,
     ) -> dict[str, Any]:
         """Create or update one owned fixed-wall-clock cron definition."""
 
@@ -966,6 +973,12 @@ class SkillManager:
                 "updated_at": self._now(),
             }
         )
+        if her_v2_effort is not None:
+            normalized_effort = normalize_job_effort(her_v2_effort)
+            if normalized_effort is None:
+                job.pop(HER_V2_JOB_EFFORT_FIELD, None)
+            else:
+                job[HER_V2_JOB_EFFORT_FIELD] = normalized_effort.value
         job.pop("time", None)
         if existing is None:
             job["created_at"] = job["updated_at"]
@@ -1069,6 +1082,15 @@ class SkillManager:
             action = job.get("action", "enqueue_prompt")
             note = job.get("note") or ""
             lines.append(f"- {job.get('id')} [{enabled}] {schedule} -> {action}")
+            if kind in {"cron", "heartbeat"}:
+                try:
+                    effort_policy = job_effort_policy(job)
+                    lines.append(
+                        "  HER v2 effort: "
+                        f"{effort_policy['effective']} ({effort_policy['source']})"
+                    )
+                except ValueError as exc:
+                    lines.append(f"  HER v2 effort: INVALID ({exc})")
             if note:
                 lines.append(f"  {note}")
         return "\n".join(lines)
@@ -1083,6 +1105,10 @@ class SkillManager:
                 if job.get("id") != task_id:
                     continue
                 if enabled:
+                    try:
+                        normalize_job_effort_in_place(job)
+                    except ValueError as exc:
+                        return False, f"Refusing to enable {task_id}: {exc}."
                     mismatch = ownership_mismatch_label(job)
                     if mismatch:
                         return False, f"Refusing to enable {task_id}: {mismatch}."
@@ -1095,6 +1121,11 @@ class SkillManager:
             if job.get("id") != task_id:
                 continue
             if enabled:
+                if kind in {"cron", "heartbeat"}:
+                    try:
+                        normalize_job_effort_in_place(job)
+                    except ValueError as exc:
+                        return False, f"Refusing to enable {task_id}: {exc}."
                 mismatch = ownership_mismatch_label(job)
                 if mismatch:
                     return False, f"Refusing to enable {task_id}: {mismatch}."
@@ -1198,6 +1229,11 @@ class SkillManager:
         tasks = self._load_tasks()
         key = self._task_key_for_kind(kind)
         job = dict(job)
+        if kind in {"cron", "heartbeat"}:
+            try:
+                normalize_job_effort_in_place(job)
+            except ValueError as exc:
+                return False, f"Invalid imported job: {exc}."
         mismatch = ownership_mismatch_label(job)
         if mismatch:
             job["enabled"] = False
@@ -1277,6 +1313,7 @@ class SkillManager:
             return (
                 f"Active mode: OFF\n"
                 f"Interval: {default_minutes} min (default)\n"
+                "HER v2 effort: low (scheduled job default)\n"
                 f"Usage: /active on [{default_minutes}] | /active off"
             )
         interval_minutes = max(
@@ -1288,10 +1325,21 @@ class SkillManager:
             if not job.get("enabled", False) and interval_minutes == default_minutes
             else ""
         )
+        try:
+            effort_policy = job_effort_policy(job)
+            effort_source = (
+                "job override"
+                if effort_policy["source"] == "job_override"
+                else "scheduled job default"
+            )
+            effort_label = f"{effort_policy['effective']} ({effort_source})"
+        except ValueError as exc:
+            effort_label = f"INVALID ({exc})"
         return (
             f"Active mode: {state}\n"
             f"Interval: {interval_minutes} min{reset_note}\n"
             f"Job: {job.get('id')}\n"
+            f"HER v2 effort: {effort_label}\n"
             f"Usage: /active on [{default_minutes}] | /active off"
         )
 

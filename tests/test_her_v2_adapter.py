@@ -184,6 +184,38 @@ class _PlannedWorkAndMeditationProvider(_WorkAndMeditationProvider):
         return await super().invoke(profile, request)
 
 
+class _EffortPolicyProvider:
+    def __init__(self):
+        self.requests = []
+
+    async def invoke(self, profile, request):
+        self.requests.append((profile, request))
+        payload = {
+            Stage.IMMEDIATE_RESPONSE: {"message": "I have it."},
+            Stage.TRIAGE: {
+                "classification": "SIMPLE_TASK",
+                "goal": request.goal,
+            },
+            Stage.PLANNING: {"plan": ["Execute the scheduled specification"]},
+            Stage.EXECUTION: {
+                "disposition": "COMPLETED",
+                "summary": "Completed.",
+                "evidence_refs": ["receipt:effort-policy"],
+            },
+            Stage.REVIEW: {"outcome": "PASS", "summary": "Verified."},
+            Stage.FINALISATION: {"report": "Completed and verified."},
+        }.get(request.stage)
+        if payload is None:
+            raise AssertionError(f"unexpected stage: {request.stage}")
+        return StageResponse(
+            text="",
+            data=payload,
+            provider=profile.engine,
+            model=profile.model,
+            reasoning_trace=f"trace:{request.stage.value}",
+        )
+
+
 class _StaticPersonaPackager:
     def __init__(self):
         self.commentaries = []
@@ -337,6 +369,86 @@ async def test_adapter_direct_response_uses_final_lane_once(tmp_path):
             "event_id"
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_scheduler_effort_is_request_scoped_and_provider_reasoning_is_unchanged(
+    tmp_path,
+):
+    provider = _EffortPolicyProvider()
+    runtime_context = SimpleNamespace(
+        current_request_meta={
+            "request_id": "request-scheduled-low",
+            "scheduler_context": {
+                "kind": "cron",
+                "task_id": "nightly-report",
+                "trigger": "scheduled",
+            },
+        }
+    )
+    config = _agent_config(tmp_path, effort="max")
+    config._hashi_runtime = runtime_context
+    config._her_v2_stage_provider = provider
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize() is True
+
+    scheduled = await adapter.generate_response(
+        "Run the nightly report",
+        "request-scheduled-low",
+    )
+
+    assert scheduled.is_success is True
+    scheduled_stages = [request.stage for _profile, request in provider.requests]
+    assert Stage.PLANNING not in scheduled_stages
+    assert Stage.REVIEW not in scheduled_stages
+    assert Stage.EXECUTION in scheduled_stages
+    assert Stage.FINALISATION in scheduled_stages
+    assert scheduled.stream_metadata["her_v2"]["effort"] == {
+        "configured": "max",
+        "effective": "low",
+        "reason": "scheduled_job_default",
+        "scheduler_kind": "cron",
+        "scheduler_task_id": "nightly-report",
+        "scheduler_trigger": "scheduled",
+    }
+    scheduled_execution_profile = next(
+        profile
+        for profile, request in provider.requests
+        if request.stage is Stage.EXECUTION
+    )
+
+    provider.requests.clear()
+    runtime_context.current_request_meta = {
+        "request_id": "request-ordinary-max",
+        "source": "text",
+    }
+    ordinary = await adapter.generate_response(
+        "Complete the ordinary request",
+        "request-ordinary-max",
+    )
+
+    assert ordinary.is_success is True
+    ordinary_stages = [request.stage for _profile, request in provider.requests]
+    assert Stage.PLANNING in ordinary_stages
+    assert Stage.REVIEW in ordinary_stages
+    assert ordinary.stream_metadata["her_v2"]["effort"] == {
+        "configured": "max",
+        "effective": "max",
+        "reason": "agent_default",
+    }
+    ordinary_execution_profile = next(
+        profile
+        for profile, request in provider.requests
+        if request.stage is Stage.EXECUTION
+    )
+    assert scheduled_execution_profile.model == ordinary_execution_profile.model
+    assert (
+        scheduled_execution_profile.reasoning
+        == ordinary_execution_profile.reasoning
+        == "provider-lightweight"
+    )
+    assert adapter.effort == "max"
+    await adapter.shutdown()
 
 
 @pytest.mark.asyncio

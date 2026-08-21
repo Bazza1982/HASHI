@@ -390,6 +390,9 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         **skill_usage_audit_fields(item),
         "session_scope": _resolve_her_session_scope(runtime, item),
     }
+    scheduler_context = getattr(item, "scheduler_context", None)
+    if isinstance(scheduler_context, dict) and scheduler_context:
+        request_meta["scheduler_context"] = dict(scheduler_context)
     runtime.current_request_meta = request_meta
     registry = getattr(runtime, "_request_meta_by_id", None)
     if not isinstance(registry, dict):

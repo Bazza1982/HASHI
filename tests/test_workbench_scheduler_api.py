@@ -28,8 +28,8 @@ class _FakeRuntime:
         self.skill_manager = skill_manager
         self.reruns = []
 
-    async def _run_job_now(self, job):
-        self.reruns.append(dict(job))
+    async def _run_job_now(self, job, *, kind=None):
+        self.reruns.append((kind, dict(job)))
         return True, f"Queued cron task [{job['id']}]"
 
 
@@ -126,6 +126,11 @@ async def test_scheduler_list_and_status_use_hashi_authority(tmp_path):
             "replayable_count": 1,
         }
     ]
+    assert list_payload["jobs"][0]["her_v2_effort_policy"] == {
+        "effective": "low",
+        "source": "scheduled_job_default",
+        "applies_to": "her-v2",
+    }
 
     status = await server.handle_agent_scheduler_status(
         _FakeRequest(query={"kind": "cron", "job_id": "daily-report"})
@@ -209,4 +214,6 @@ async def test_scheduler_gateway_rerun_requires_exact_single_job_authorization(t
     payload = json.loads(accepted.text)
     assert accepted.status == 200
     assert payload["ok"] is True
-    assert [job["id"] for job in runtime.reruns] == ["daily-report"]
+    assert [(kind, job["id"]) for kind, job in runtime.reruns] == [
+        ("cron", "daily-report")
+    ]

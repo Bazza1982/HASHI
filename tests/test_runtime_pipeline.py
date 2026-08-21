@@ -389,6 +389,26 @@ def test_begin_queue_item_preserves_explicit_habit_ineligibility():
     )
 
 
+def test_begin_queue_item_preserves_explicit_scheduler_context():
+    runtime = _runtime()
+    scheduler_context = {
+        "kind": "cron",
+        "task_id": "daily-report",
+        "trigger": "manual",
+        "her_v2_effort_override": "medium",
+    }
+    item = _item(scheduler_context=scheduler_context)
+
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    assert runtime.current_request_meta["scheduler_context"] == scheduler_context
+    assert (
+        runtime._request_meta_by_id[item.request_id]["scheduler_context"]
+        == scheduler_context
+    )
+    assert runtime.current_request_meta["scheduler_context"] is not scheduler_context
+
+
 def test_begin_queue_item_uses_monotonic_queue_age(monkeypatch):
     runtime = _runtime()
     item = _item(queued_monotonic=40.0)

@@ -3333,6 +3333,8 @@ class WorkbenchApiServer:
         return None
 
     def _scheduler_job_record(self, *, agent_name: str, kind: str, job: dict) -> dict:
+        from orchestrator.her_v2.request_policy import job_effort_policy
+
         task_id = str(job.get("id") or "")
         scheduler = self._task_scheduler()
         state = getattr(scheduler, "state", {}) if scheduler is not None else {}
@@ -3365,6 +3367,17 @@ class WorkbenchApiServer:
                             ),
                         }
                     )
+        effort_policy = None
+        if kind in {"cron", "heartbeat"}:
+            try:
+                effort_policy = job_effort_policy(job)
+            except ValueError as exc:
+                effort_policy = {
+                    "effective": None,
+                    "source": "invalid",
+                    "applies_to": "her-v2",
+                    "error": str(exc),
+                }
         return {
             "kind": kind,
             "job_id": task_id,
@@ -3373,6 +3386,7 @@ class WorkbenchApiServer:
             "last_run": last_run,
             "last_run_at": self._scheduler_last_run_at(last_run),
             "pending_recovery": pending_recovery,
+            "her_v2_effort_policy": effort_policy,
         }
 
     async def handle_agent_scheduler_jobs(self, request):
@@ -3545,7 +3559,7 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error": "job not found for agent"}, status=404)
 
         try:
-            ok, message = await runtime._run_job_now(job)
+            ok, message = await runtime._run_job_now(job, kind=kind)
         except Exception as e:
             return web.json_response({"ok": False, "error": f"{type(e).__name__}: {e}"}, status=500)
         status_code = 200 if ok else 409

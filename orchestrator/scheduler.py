@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from orchestrator import runtime_pending, scheduler_recovery
+from orchestrator.her_v2.request_policy import build_scheduler_request_context
 from orchestrator.job_ownership import ownership_mismatch_label
 from orchestrator.runtime_common import _safe_excerpt
 from orchestrator.superloop_scheduler import advance_superloops_once
@@ -1112,6 +1113,7 @@ class TaskScheduler:
         runtime_map: dict,
         scheduled_for: datetime | None = None,
         recovery_batch_id: str | None = None,
+        request_trigger: str | None = None,
     ) -> bool:
         """Run one due heartbeat. Returns True when last_run should advance."""
         task_id = hb["id"]
@@ -1140,6 +1142,22 @@ class TaskScheduler:
                 task_id=task_id,
                 agent_name=agent_name,
             )
+        try:
+            scheduler_context = build_scheduler_request_context(
+                hb,
+                kind="heartbeat",
+                trigger=(
+                    request_trigger
+                    or ("recovery" if scheduled_for is not None else "scheduled")
+                ),
+            )
+        except ValueError as exc:
+            scheduler_logger.error(
+                "Heartbeat %s has invalid HER v2 effort policy: %s",
+                task_id,
+                exc,
+            )
+            return False
         if action.startswith("skill:"):
             skill_id = action.split(":", 1)[1]
             args = recovery_header + (hb.get("args", "") or prompt)
@@ -1148,6 +1166,7 @@ class TaskScheduler:
                     skill_id=skill_id,
                     args=args,
                     task_id=task_id,
+                    scheduler_context=scheduler_context,
                 ),
                 task_kind="Heartbeat",
                 task_id=task_id,
@@ -1159,6 +1178,7 @@ class TaskScheduler:
                 prompt=recovery_header + prompt,
                 source="scheduler-recovery" if scheduled_for is not None else "scheduler",
                 summary=f"Heartbeat Recovery [{task_id}]" if scheduled_for is not None else f"Heartbeat Task [{task_id}]",
+                scheduler_context=scheduler_context,
             ),
             task_kind="Heartbeat",
             task_id=task_id,
@@ -1174,6 +1194,7 @@ class TaskScheduler:
         now_dt: datetime,
         scheduled_for: datetime | None = None,
         recovery_batch_id: str | None = None,
+        request_trigger: str | None = None,
     ) -> bool:
         """Run one due cron while preserving loop and action semantics."""
         task_id = cron["id"]
@@ -1235,6 +1256,22 @@ class TaskScheduler:
                 task_id=task_id,
                 agent_name=agent_name,
             )
+        try:
+            scheduler_context = build_scheduler_request_context(
+                cron,
+                kind="cron",
+                trigger=(
+                    request_trigger
+                    or ("recovery" if scheduled_for is not None else "scheduled")
+                ),
+            )
+        except ValueError as exc:
+            scheduler_logger.error(
+                "Cron %s has invalid HER v2 effort policy: %s",
+                task_id,
+                exc,
+            )
+            return False
         if action.startswith("skill:"):
             skill_id = action.split(":", 1)[1]
             args = recovery_header + (cron.get("args", "") or cron.get("prompt", ""))
@@ -1243,6 +1280,7 @@ class TaskScheduler:
                     skill_id=skill_id,
                     args=args,
                     task_id=task_id,
+                    scheduler_context=scheduler_context,
                 ),
                 task_kind="Cron",
                 task_id=task_id,
@@ -1267,6 +1305,7 @@ class TaskScheduler:
                 prompt=recovery_header + prompt,
                 source="scheduler-recovery" if scheduled_for is not None else "scheduler",
                 summary=f"Cron Recovery [{task_id}]" if scheduled_for is not None else f"Cron Task [{task_id}]",
+                scheduler_context=scheduler_context,
             ),
             task_kind="Cron",
             task_id=task_id,
@@ -1485,7 +1524,11 @@ class TaskScheduler:
                     if len(missed_items) == 1 and not missed_items[0]["requires_prompt"]:
                         item = missed_items[0]
                         if item["kind"] == "heartbeat":
-                            ok = await self._fire_heartbeat_job(item["job"], runtime_map=runtime_map)
+                            ok = await self._fire_heartbeat_job(
+                                item["job"],
+                                runtime_map=runtime_map,
+                                request_trigger="recovery",
+                            )
                             if ok:
                                 self.state["heartbeats"][item["task_id"]] = now
                                 state_changed = True
@@ -1495,6 +1538,7 @@ class TaskScheduler:
                                 runtime_map=runtime_map,
                                 tasks=tasks,
                                 now_dt=now_dt,
+                                request_trigger="recovery",
                             )
                             self.state["crons"][item["task_id"]] = now
                             state_changed = True

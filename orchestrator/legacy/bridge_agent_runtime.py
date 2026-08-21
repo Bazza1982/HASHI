@@ -246,6 +246,7 @@ class BridgeAgentRuntime:
         deliver_to_telegram: bool = True,
         skip_memory_injection: bool = False,
         skill_id: str | None = None,
+        scheduler_context: dict[str, str] | None = None,
     ):
         if not prompt or not prompt.strip():
             self.error_logger.error(
@@ -265,6 +266,9 @@ class BridgeAgentRuntime:
             deliver_to_telegram=deliver_to_telegram,
             skip_memory_injection=skip_memory_injection,
             skill_id=skill_id,
+            scheduler_context=(
+                dict(scheduler_context) if scheduler_context else None
+            ),
         )
         usage_recorder = getattr(
             getattr(self, "skill_manager", None), "record_skill_usage", None
@@ -329,6 +333,7 @@ class BridgeAgentRuntime:
                 retry_summary,
                 silent=item.silent,
                 is_retry=True,
+                scheduler_context=item.scheduler_context,
             )
             if retry_request_id:
                 self.logger.warning(
@@ -890,7 +895,14 @@ class BridgeAgentRuntime:
         else:
             await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
-    async def invoke_scheduler_skill(self, skill_id: str, args: str, task_id: str) -> tuple[bool, str | None]:
+    async def invoke_scheduler_skill(
+        self,
+        skill_id: str,
+        args: str,
+        task_id: str,
+        *,
+        scheduler_context: dict[str, str] | None = None,
+    ) -> tuple[bool, str | None]:
         from orchestrator.automation_runner import is_automation
 
         if is_automation(skill_id):
@@ -924,6 +936,11 @@ class BridgeAgentRuntime:
             self.error_logger.error(message)
             return False, message
         prompt = self.skill_manager.build_prompt_for_skill(skill, args or "")
+        scheduler_kwargs = (
+            {"scheduler_context": dict(scheduler_context)}
+            if scheduler_context
+            else {}
+        )
         await self.enqueue_request(
             chat_id=self.global_config.authorized_id,
             prompt=prompt,
@@ -931,6 +948,7 @@ class BridgeAgentRuntime:
             summary=f"Skill Task [{task_id}]",
             silent=False,
             skill_id=skill.id,
+            **scheduler_kwargs,
         )
         return True, f"Scheduled prompt skill queued: {skill.id}"
 
@@ -2001,6 +2019,10 @@ class BridgeAgentRuntime:
                     "summary": item.summary,
                     "started_at": datetime.now().isoformat(),
                 }
+                if item.scheduler_context:
+                    self.current_request_meta["scheduler_context"] = dict(
+                        item.scheduler_context
+                    )
                 remote_backend_block = self._remote_backend_block_reason(item.source)
                 if remote_backend_block:
                     self.error_logger.warning(remote_backend_block)
@@ -3609,7 +3631,7 @@ class BridgeAgentRuntime:
                     await query.answer("Unknown job", show_alert=True)
                     return
                 await query.answer("Running job now")
-                await self._run_job_now(job)
+                await self._run_job_now(job, kind=kind)
                 return
             if action == "transfer":
                 markup = self._build_job_transfer_keyboard(kind, task_id)
@@ -3839,8 +3861,17 @@ class BridgeAgentRuntime:
         except URLError as e:
             return False, f"Connection failed ({host}:{wb_port}): {e}"
 
-    async def _run_job_now(self, job: dict[str, Any]) -> tuple[bool, str]:
+    async def _run_job_now(
+        self,
+        job: dict[str, Any],
+        *,
+        kind: str | None = None,
+    ) -> tuple[bool, str]:
         from orchestrator.job_ownership import ownership_mismatch_label
+        from orchestrator.her_v2.request_policy import (
+            build_scheduler_request_context,
+            infer_scheduler_job_kind,
+        )
 
         mismatch = ownership_mismatch_label(job)
         if mismatch:
@@ -3870,10 +3901,20 @@ class BridgeAgentRuntime:
                 task_id=job.get("id", "manual"),
             )
         if action.startswith("skill:"):
+            try:
+                resolved_kind = infer_scheduler_job_kind(job, kind)
+                scheduler_context = build_scheduler_request_context(
+                    job,
+                    kind=resolved_kind,
+                    trigger="manual",
+                )
+            except ValueError as exc:
+                return False, f"Invalid scheduler policy for {job.get('id')}: {exc}"
             return await self.invoke_scheduler_skill(
                 skill_id=action.split(":", 1)[1],
                 args=job.get("args", "") or job.get("prompt", ""),
                 task_id=job.get("id", "manual"),
+                scheduler_context=scheduler_context,
             )
         prompt = job.get("prompt", "")
         if not prompt.strip():
@@ -3884,12 +3925,24 @@ class BridgeAgentRuntime:
                 purpose="skill-job-run",
             )
             return False, f"Job {job.get('id')} has no prompt."
-        summary_prefix = "Heartbeat Task" if "interval_seconds" in job else "Cron Task"
+        try:
+            resolved_kind = infer_scheduler_job_kind(job, kind)
+            scheduler_context = build_scheduler_request_context(
+                job,
+                kind=resolved_kind,
+                trigger="manual",
+            )
+        except ValueError as exc:
+            return False, f"Invalid scheduler policy for {job.get('id')}: {exc}"
+        summary_prefix = (
+            "Heartbeat Task" if resolved_kind == "heartbeat" else "Cron Task"
+        )
         await self.enqueue_request(
             chat_id=self.global_config.authorized_id,
             prompt=prompt,
             source="scheduler",
             summary=f"{summary_prefix} [{job.get('id')}]",
+            scheduler_context=scheduler_context,
         )
         return True, f"Queued {summary_prefix.lower()} [{job.get('id')}]"
 
@@ -3912,7 +3965,7 @@ class BridgeAgentRuntime:
             await update.message.reply_text(f"{kind} job not found for this agent: {task_id}")
             return
         await update.message.reply_text(f"Running {kind} job now: {task_id}")
-        await self._run_job_now(job)
+        await self._run_job_now(job, kind=kind)
 
     async def cmd_cron(self, update, context):
         await self._handle_job_command(update, "cron", list(context.args or []))

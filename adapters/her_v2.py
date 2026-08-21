@@ -59,6 +59,7 @@ from orchestrator.her_v2.presentation import (
     RequiredPersonaRenderer,
     RequiredUserMessage,
 )
+from orchestrator.her_v2.request_policy import resolve_request_effort
 from orchestrator.her_v2.runtime import HERv2Runtime
 
 
@@ -1401,6 +1402,29 @@ class HERv2Adapter(BaseBackend):
                 error="HER v2 is not initialized",
                 is_success=False,
             )
+        try:
+            effort_resolution = resolve_request_effort(
+                self.effort,
+                self._runtime_request_meta(request_id),
+            )
+        except ValueError as exc:
+            return BackendResponse(
+                text="",
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                error=f"Invalid HER v2 request effort policy: {exc}",
+                is_success=False,
+            )
+        self.logger.info(
+            "HER v2 effort resolved request=%s configured=%s effective=%s "
+            "reason=%s scheduler_kind=%s scheduler_task_id=%s trigger=%s",
+            request_id,
+            effort_resolution.configured.value,
+            effort_resolution.effective.value,
+            effort_resolution.reason,
+            effort_resolution.scheduler_kind or "none",
+            effort_resolution.scheduler_task_id or "none",
+            effort_resolution.scheduler_trigger or "none",
+        )
         provider = self._new_stage_provider(
             on_stream_event=on_stream_event, silent=silent
         )
@@ -1520,7 +1544,9 @@ class HERv2Adapter(BaseBackend):
         self._active_runtimes[request_id] = runtime
         try:
             result = await runtime.run_turn(
-                prompt, request_id, effort=Effort(self.effort)
+                prompt,
+                request_id,
+                effort=effort_resolution.effective,
             )
         finally:
             self._active_runtimes.pop(request_id, None)
@@ -1546,6 +1572,7 @@ class HERv2Adapter(BaseBackend):
                 "evidence_refs": list(result.evidence_refs),
                 "limitations": list(result.limitations),
                 "shadow_mode": self._v2_config.shadow_mode,
+                "effort": effort_resolution.metadata(),
             }
         }
         if result.delivery_id:

@@ -165,7 +165,51 @@ async def test_simultaneous_heartbeats_after_startup_run_normally_instead_of_gro
         "Heartbeat Task [heartbeat-0]",
         "Heartbeat Task [heartbeat-1]",
     ]
+    assert [
+        payload["scheduler_context"]
+        for _request_id, payload in runtime.enqueued
+    ] == [
+        {
+            "kind": "heartbeat",
+            "task_id": "heartbeat-0",
+            "trigger": "scheduled",
+        },
+        {
+            "kind": "heartbeat",
+            "task_id": "heartbeat-1",
+            "trigger": "scheduled",
+        },
+    ]
     assert scheduler.state["missed_heartbeats"] == {}
+
+
+@pytest.mark.asyncio
+async def test_single_recent_startup_catchup_is_marked_as_recovery(tmp_path):
+    heartbeat = {
+        "id": "heartbeat-1",
+        "agent": "zelda",
+        "enabled": True,
+        "interval_seconds": 60,
+        "prompt": "run heartbeat",
+    }
+    runtime = _FakeRuntime()
+    scheduler = TaskScheduler(
+        tasks_path=_write_tasks(tmp_path, heartbeats=[heartbeat], crons=[]),
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+    )
+    scheduler.state["heartbeats"][heartbeat["id"]] = time.time() - 120
+
+    await _run_one_scheduler_pass(scheduler)
+
+    assert len(runtime.enqueued) == 1
+    assert runtime.enqueued[0][1]["summary"] == "Heartbeat Task [heartbeat-1]"
+    assert runtime.enqueued[0][1]["scheduler_context"] == {
+        "kind": "heartbeat",
+        "task_id": "heartbeat-1",
+        "trigger": "recovery",
+    }
 
 
 def test_hourly_cron_occurrence_capture_counts_all_seven_missed_turns():
@@ -279,6 +323,7 @@ async def test_recovery_reply_replays_latest_selected_occurrences_and_keeps_cont
         "prompt": "say hello",
         "note": "Send one short hello",
         "recovery": {"max_replay": 24},
+        "her_v2_effort": "high",
     }
     runtime = _FakeRuntime()
     scheduler = TaskScheduler(
@@ -316,8 +361,48 @@ async def test_recovery_reply_replays_latest_selected_occurrences_and_keeps_cont
         "2026-08-09T04:08+10:00",
         "2026-08-09T05:08+10:00",
     ]
+    assert [
+        payload["scheduler_context"]
+        for _request_id, payload in runtime.enqueued
+    ] == [
+        {
+            "kind": "cron",
+            "task_id": "hourly-hello",
+            "trigger": "recovery",
+            "her_v2_effort_override": "high",
+        }
+    ] * 3
     assert batch["status"] == "resolved"
     context = scheduler.build_recovery_context("zelda")
     assert "RECENTLY RESOLVED RECOVERY BATCHES" in context
     assert "executed=3" in context
     assert "missed=7" in context
+
+
+@pytest.mark.asyncio
+async def test_scheduled_job_with_invalid_effort_is_not_queued(tmp_path):
+    cron = {
+        "id": "broken-cron",
+        "agent": "zelda",
+        "enabled": True,
+        "schedule": "0 12 * * *",
+        "prompt": "Run",
+        "her_v2_effort": "turbo",
+    }
+    runtime = _FakeRuntime()
+    scheduler = TaskScheduler(
+        tasks_path=_write_tasks(tmp_path, heartbeats=[], crons=[cron]),
+        state_path=tmp_path / "scheduler_state.json",
+        runtimes=[runtime],
+        authorized_id=123,
+    )
+
+    ok = await scheduler._fire_cron_job(
+        cron,
+        runtime_map={"zelda": runtime},
+        tasks={"heartbeats": [], "crons": [cron], "nudges": []},
+        now_dt=datetime(2026, 8, 21, 12, 0),
+    )
+
+    assert ok is False
+    assert runtime.enqueued == []

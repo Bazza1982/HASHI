@@ -359,6 +359,109 @@ def test_dependency_scan_includes_managed_active_heartbeats(tmp_path: Path):
     ] == ("momo-active-heartbeat")
 
 
+def test_cron_effort_override_is_canonical_and_survives_transfer_and_import(
+    tmp_path: Path,
+):
+    manager = SkillManager(tmp_path, tmp_path / "tasks.json")
+    created = manager.upsert_cron_job(
+        task_id="nightly-report",
+        agent_name="momo",
+        schedule="0 1 * * *",
+        action="enqueue_prompt",
+        enabled=True,
+        note="Nightly report",
+        her_v2_effort="HIGH",
+    )
+
+    assert created["her_v2_effort"] == "high"
+    transferred, _message, transferred_job = manager.transfer_job(
+        "cron",
+        "nightly-report",
+        "zelda",
+    )
+    assert transferred is True
+    assert transferred_job is not None
+    assert transferred_job["her_v2_effort"] == "high"
+
+    remote_root = tmp_path / "remote"
+    remote_manager = SkillManager(remote_root, remote_root / "tasks.json")
+    imported, import_message = remote_manager.import_job(
+        "cron",
+        {**transferred_job, "her_v2_effort": "XHIGH"},
+    )
+
+    assert imported is True, import_message
+    assert remote_manager.get_job("cron", transferred_job["id"])[
+        "her_v2_effort"
+    ] == "xhigh"
+
+
+def test_invalid_job_effort_is_rejected_on_import_and_enable(tmp_path: Path):
+    tasks_path = tmp_path / "tasks.json"
+    tasks_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "heartbeats": [],
+                "nudges": [],
+                "crons": [
+                    {
+                        "id": "broken-cron",
+                        "agent": "momo",
+                        "enabled": False,
+                        "schedule": "0 1 * * *",
+                        "prompt": "Run",
+                        "her_v2_effort": "turbo",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = SkillManager(tmp_path, tasks_path)
+
+    enabled, enable_message = manager.set_job_enabled(
+        "cron",
+        "broken-cron",
+        enabled=True,
+    )
+    imported, import_message = manager.import_job(
+        "heartbeat",
+        {
+            "id": "broken-heartbeat",
+            "agent": "momo",
+            "enabled": False,
+            "interval_seconds": 60,
+            "prompt": "Run",
+            "her_v2_effort": "not-an-effort",
+        },
+    )
+
+    assert enabled is False
+    assert "Refusing to enable" in enable_message
+    assert imported is False
+    assert "Invalid imported job" in import_message
+    assert manager.get_job("cron", "broken-cron")["enabled"] is False
+    assert manager.get_job("heartbeat", "broken-heartbeat") is None
+
+
+def test_active_heartbeat_describes_low_default_before_and_after_creation(
+    tmp_path: Path,
+):
+    manager = SkillManager(tmp_path, tmp_path / "tasks.json")
+
+    assert "HER v2 effort: low (scheduled job default)" in (
+        manager.describe_active_heartbeat("momo")
+    )
+
+    ok, _message = manager.set_active_heartbeat("momo", enabled=True, minutes=15)
+
+    assert ok is True
+    assert "HER v2 effort: low (scheduled job default)" in (
+        manager.describe_active_heartbeat("momo")
+    )
+
+
 def test_skill_callback_keys_keep_max_length_names_within_telegram_limit(
     tmp_path: Path,
 ):

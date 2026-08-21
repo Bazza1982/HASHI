@@ -307,6 +307,29 @@ infer, normalize, or persist a provider reasoning value. Conversely, changing a
 provider, model slot, or provider reasoning setting must not change HER effort.
 Non-HER backends retain their established `/model` behaviour.
 
+### 5.2 Scheduled-job execution policy
+
+Cron and heartbeat prompt work defaults to HER v2 `low` effort. These jobs
+already persist their execution specification, so repeating formal Planning or
+independent Review on every routine occurrence is unnecessary by default.
+
+The scheduler attaches an explicit request-local context containing the job
+kind, task id, and trigger (`scheduled`, `manual`, or `recovery`). An optional
+job field, `her_v2_effort`, may override the default with any valid HER effort
+value. The same policy applies whether the occurrence is automatic, manually
+run from Telegram or Workbench, or replayed from recovery.
+
+This resolution is request-scoped. It must not mutate the Agent's configured
+effort, and a later ordinary request must still use that configured value.
+It also must not select or rewrite provider model or reasoning settings.
+Ordinary user turns, delayed messages, and nudge continuations do not receive
+scheduled-job context and therefore retain the Agent effort. Deterministic
+scheduler actions that bypass the Agent backend, including automation,
+transcript export, and HER Dream, do not consume this policy.
+
+Invalid `her_v2_effort` values are rejected before prompt work is queued. They
+must not be silently coerced to `low` or allowed to change global Agent state.
+
 ## 6. Stage 1: Initial Processing
 
 Initial processing applies to every HER turn. Two processes begin promptly and independently.
@@ -1025,6 +1048,9 @@ HER v2 is ready for production rollout only when:
 - Direct Response produces exactly one user-facing response;
 - `/steer` terminates the old turn and starts a separately classified new turn;
 - low, medium, high, xhigh, and max policies follow the required stage matrix;
+- cron and heartbeat prompt work defaults to request-local `low` effort across
+  scheduled, manual, and recovery triggers; valid job overrides win without
+  changing provider reasoning or leaking into later ordinary turns;
 - Replanning and Review loops cannot violate lifecycle order;
 - retries have no attempt/time ceiling, terminate correctly on no-progress idle
   or non-retryable failure, and process restart does not resume an old stack;

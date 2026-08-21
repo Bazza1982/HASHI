@@ -222,6 +222,23 @@ background job, but the resulting process instance must be owned by
 `BackgroundJobManager`. Cron/heartbeat/nudge definitions and process execution
 records are separate concepts.
 
+HER v2 adds one request policy at this boundary for Agent-backed prompt work:
+
+- cron and heartbeat prompt/skill invocations default to `low` HER execution
+  effort because their persisted job definition already supplies the routine
+  execution specification;
+- an optional per-job `her_v2_effort` value may select `low`, `medium`, `high`,
+  `xhigh`, or `max`;
+- scheduled occurrences, recovery replays, and manual Run actions use the same
+  job policy;
+- the scheduler passes explicit nested request metadata instead of changing
+  the Agent's global adapter setting or inferring policy from summary text;
+- provider reasoning is independent and unchanged;
+- nudge continuations, delayed messages, and ordinary user requests are not
+  scheduled prompt jobs and retain the Agent's configured effort;
+- deterministic automation, transcript export, and HER Dream actions bypass
+  this prompt policy because they do not enter the ordinary HER v2 turn.
+
 ### HASHI Remote Terminal Execution
 
 Relevant files:
