@@ -360,6 +360,91 @@ async def test_hot_restart_fails_when_target_does_not_restart_even_if_others_run
 
 
 @pytest.mark.asyncio
+async def test_min_hot_restart_promotes_to_all_running_agents_for_class_abi_change(
+    monkeypatch,
+):
+    class ConsoleHandler:
+        def addFilter(self, _filter):
+            pass
+
+        def removeFilter(self, _filter):
+            pass
+
+    class HotServices:
+        def __init__(self):
+            self.refreshed = False
+
+        async def refresh_hot_services(self):
+            self.refreshed = True
+
+    class Kernel:
+        def __init__(self):
+            self.runtimes = [
+                SimpleNamespace(name="zelda"),
+                SimpleNamespace(name="sunny"),
+            ]
+            self.whatsapp = None
+            self.global_cfg = SimpleNamespace(workbench_port=18800)
+            self.api_gateway = None
+            self.service_manager = HotServices()
+            self.stop_calls = []
+            self.start_calls = []
+
+        async def stop_agent(self, name, reason):
+            self.stop_calls.append((name, reason))
+            self.runtimes[:] = [
+                runtime for runtime in self.runtimes if runtime.name != name
+            ]
+            return True, "stopped"
+
+        async def start_agent(self, name):
+            self.start_calls.append(name)
+            self.runtimes.append(SimpleNamespace(name=name))
+            return True, "started"
+
+        def _load_config_bundle(self):
+            return (
+                None,
+                [SimpleNamespace(name="zelda"), SimpleNamespace(name="sunny")],
+                None,
+            )
+
+    kernel = Kernel()
+    manager = RebootManager(kernel=kernel, console_handler=ConsoleHandler())
+    monkeypatch.setattr(
+        manager,
+        "preflight_project_modules",
+        lambda: ["orchestrator.her_v2.config"],
+    )
+    monkeypatch.setattr(
+        "orchestrator.reboot_manager.detect_loaded_class_interface_changes",
+        lambda _module_names: [
+            "orchestrator.her_v2.config.HERv2Config.profile_for_route (new method)"
+        ],
+    )
+    monkeypatch.setattr(manager, "reload_project_modules", lambda _names: None)
+    monkeypatch.setattr(manager, "validate_agent_runtime_contract", lambda: None)
+    monkeypatch.setattr(manager, "rebuild_hot_managers", lambda: None)
+    monkeypatch.setattr(
+        "orchestrator.banner.show_startup_banner",
+        lambda **_kwargs: None,
+    )
+
+    result = await manager.hot_restart(
+        {"mode": "min", "agent_name": "zelda", "agent_number": None}
+    )
+
+    assert result is True
+    assert kernel.stop_calls == [
+        ("zelda", "hot-restart:min"),
+        ("sunny", "hot-restart:min"),
+    ]
+    assert kernel.start_calls == ["zelda", "sunny"]
+    assert sorted(runtime.name for runtime in kernel.runtimes) == ["sunny", "zelda"]
+    assert kernel.service_manager.refreshed is True
+
+
+@pytest.mark.asyncio
 async def test_hot_restart_reload_failure_restores_agent_and_requires_reboot_retry(
     monkeypatch,
     capsys,

@@ -9,6 +9,7 @@ import sys
 from orchestrator.bootstrap_logging import AnimMute
 from orchestrator.hot_reload import (
     HotReloadError,
+    detect_loaded_class_interface_changes,
     discover_loaded_project_modules,
     preflight_module_sources,
 )
@@ -247,6 +248,9 @@ class RebootManager:
 
         try:
             module_names = self.preflight_project_modules()
+            class_interface_changes = detect_loaded_class_interface_changes(
+                module_names
+            )
         except HotReloadError as exc:
             main_logger.error("%s", exc)
             bridge_logger.error("Hot restart preflight rejected: %s", exc)
@@ -256,6 +260,41 @@ class RebootManager:
                 flush=True,
             )
             return False
+
+        running_names = [runtime.name for runtime in self.kernel.runtimes]
+        targeted_mode = mode in {"min", "number"}
+        targets_are_running = bool(targets) and all(
+            name in running_names for name in targets
+        )
+        if (
+            targeted_mode
+            and targets_are_running
+            and class_interface_changes
+            and targets != running_names
+        ):
+            original_targets = list(targets)
+            targets = running_names
+            change_preview = ", ".join(class_interface_changes[:8])
+            if len(class_interface_changes) > 8:
+                change_preview += (
+                    f", +{len(class_interface_changes) - 8} more"
+                )
+            promotion_message = (
+                "Hot restart: promoted targeted %s reboot from %s to all running "
+                "agents before reload because loaded class interfaces changed: %s"
+            )
+            main_logger.warning(
+                promotion_message,
+                mode,
+                original_targets,
+                change_preview,
+            )
+            bridge_logger.warning(
+                promotion_message,
+                mode,
+                original_targets,
+                change_preview,
+            )
 
         main_logger.info("Hot restart: stopping %s agent(s): %s", len(targets), targets)
         bridge_logger.warning(

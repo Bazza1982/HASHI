@@ -6,6 +6,7 @@ import pytest
 
 from orchestrator.hot_reload import (
     HotReloadError,
+    detect_loaded_class_interface_changes,
     discover_loaded_project_modules,
     module_reload_key,
     preflight_module_sources,
@@ -164,4 +165,88 @@ def test_hot_reload_refreshes_stream_event_vocabulary_before_adapters():
         "adapters.base",
         "adapters.codex_cli",
         "orchestrator.flexible_agent_runtime",
+    ]
+
+
+def test_hot_reload_detects_new_method_on_loaded_config_class(tmp_path):
+    source = tmp_path / "config.py"
+    source.write_text(
+        "class HERv2Config:\n"
+        "    def profile_for(self, stage):\n"
+        "        return stage\n"
+        "\n"
+        "    def profile_for_route(self, route, *, base_profile=None):\n"
+        "        return route\n",
+        encoding="utf-8",
+    )
+    module = types.ModuleType("orchestrator.her_v2.config")
+    module.__file__ = str(source)
+
+    class HERv2Config:
+        def profile_for(self, stage):
+            return stage
+
+    HERv2Config.__module__ = module.__name__
+    module.HERv2Config = HERv2Config
+
+    assert detect_loaded_class_interface_changes(
+        [module.__name__], modules={module.__name__: module}
+    ) == [
+        "orchestrator.her_v2.config.HERv2Config.profile_for_route (new method)"
+    ]
+
+
+def test_hot_reload_ignores_function_body_only_change(tmp_path):
+    source = tmp_path / "runtime.py"
+    source.write_text(
+        "class Runtime:\n"
+        "    def execute(self, request, *, effort=None):\n"
+        "        return 'new implementation'\n",
+        encoding="utf-8",
+    )
+    module = types.ModuleType("orchestrator.runtime_example")
+    module.__file__ = str(source)
+
+    class Runtime:
+        def execute(self, request, *, effort=None):
+            return "old implementation"
+
+    Runtime.__module__ = module.__name__
+    module.Runtime = Runtime
+
+    assert (
+        detect_loaded_class_interface_changes(
+            [module.__name__], modules={module.__name__: module}
+        )
+        == []
+    )
+
+
+def test_hot_reload_detects_signature_and_dataclass_field_changes(tmp_path):
+    source = tmp_path / "state.py"
+    source.write_text(
+        "class RuntimeState:\n"
+        "    generation: int\n"
+        "\n"
+        "    def bind(self, request, *, context=None):\n"
+        "        return request\n",
+        encoding="utf-8",
+    )
+    module = types.ModuleType("orchestrator.runtime_state")
+    module.__file__ = str(source)
+
+    class RuntimeState:
+        __dataclass_fields__ = {"request": object()}
+
+        def bind(self, request):
+            return request
+
+    RuntimeState.__module__ = module.__name__
+    module.RuntimeState = RuntimeState
+
+    assert detect_loaded_class_interface_changes(
+        [module.__name__], modules={module.__name__: module}
+    ) == [
+        "orchestrator.runtime_state.RuntimeState.generation (new field)",
+        "orchestrator.runtime_state.RuntimeState.bind (signature changed)",
     ]

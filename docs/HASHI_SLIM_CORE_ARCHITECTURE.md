@@ -104,7 +104,14 @@ recovery path for function changes.
 
 ## Reboot Modes
 
-`/reboot min` restarts the requesting agent and reloads project code.
+`/reboot min` normally restarts the requesting agent and reloads project code.
+Before stopping any agent, HASHI compares class members and callable signatures
+declared by the source about to be loaded with the classes currently held in
+memory. If a loaded class interface changed, the transaction is promoted to
+restart every running agent. Python module dictionaries are process-global, so
+leaving another agent alive across that reload could combine a new consumer
+with an old class instance. Function-body-only changes keep the targeted
+behavior.
 
 `/reboot max` restarts all running agents and reloads project code.
 
