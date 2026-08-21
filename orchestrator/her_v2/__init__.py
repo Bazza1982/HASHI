@@ -28,6 +28,11 @@ from .models import (
     TriageClassification,
     TurnResult,
 )
+from .presentation import (
+    RenderedRequiredMessage,
+    RequiredPersonaRenderer,
+    RequiredUserMessage,
+)
 from .runtime import HERv2Runtime
 
 __all__ = [
@@ -54,6 +59,9 @@ __all__ = [
     "PackagedCommentary",
     "PersonaCommentaryPipeline",
     "ProviderProfile",
+    "RenderedRequiredMessage",
+    "RequiredPersonaRenderer",
+    "RequiredUserMessage",
     "ReviewOutcome",
     "Stage",
     "TerminalState",

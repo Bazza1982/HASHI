@@ -39,6 +39,10 @@ from orchestrator.her_v2.models import (
     StageResponse,
     TriageClassification,
 )
+from orchestrator.her_v2.presentation import (
+    RenderedRequiredMessage,
+    RequiredUserMessage,
+)
 from orchestrator import runtime_her_dream, runtime_her_habits
 
 
@@ -192,6 +196,20 @@ class _StaticPersonaPackager:
             stage=commentary.stage,
             text=f"Persona update: {commentary.text}",
             provenance="persona_packager",
+        )
+
+
+class _StaticRequiredPersonaRenderer:
+    def __init__(self):
+        self.messages: list[RequiredUserMessage] = []
+
+    async def render(self, message):
+        self.messages.append(message)
+        return RenderedRequiredMessage(
+            source_event_id=message.event_id,
+            kind=message.kind,
+            text=f"Persona {message.kind}: {message.text}",
+            provenance="test_required_persona",
         )
 
 
@@ -464,6 +482,41 @@ async def test_adapter_packages_only_structured_stage_commentary_before_delivery
     assert [(item.stage, item.text) for item in packager.commentaries] == [
         (Stage.EXECUTION, "The requested work is verified and complete."),
     ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_routes_validated_final_through_required_persona_renderer(
+    tmp_path,
+):
+    provider = _WorkAndMeditationProvider()
+    renderer = _StaticRequiredPersonaRenderer()
+    config = _agent_config(tmp_path, effort="low")
+    setattr(config, "_her_v2_stage_provider", provider)
+    setattr(config, "_her_v2_required_persona_renderer", renderer)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response(
+        "Complete and verify it",
+        "request-required-persona-final",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is True
+    assert response.text == "Persona final: Completed and verified."
+    assert [(message.kind, message.text) for message in renderer.messages] == [
+        ("final", "Completed and verified.")
+    ]
+    final_events = [event for event in events if event.delivery_class == DELIVERY_FINAL]
+    assert len(final_events) == 1
+    assert final_events[0].summary == response.text
+    assert final_events[0].provenance == "test_required_persona"
+    assert final_events[0].detail == "persona_rendering_fallback=false"
+    assert response.stream_metadata["her_v2"]["delivery"]["delivery_id"]
 
 
 @pytest.mark.asyncio
@@ -1104,6 +1157,25 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
             or "HER v2 Replanner" in planning_backend.sys_prompt
         )
 
+    await provider.invoke(
+        profile,
+        _stage_request(
+            Stage.FINALISATION,
+            allow_tools=False,
+            allow_side_effects=False,
+        ),
+    )
+    finalisation_backend = manager.backends[-1]
+    assert finalisation_backend.tool_registry is None
+    assert finalisation_backend.sys_prompt.startswith(
+        "You are the neutral HER v2 Final Reporter"
+    )
+    assert "do not imitate a Persona" in finalisation_backend.sys_prompt
+    assert "separate presentation-only boundary" in finalisation_backend.sys_prompt
+    assert "configured agent persona" not in finalisation_backend.sys_prompt
+    assert '"report"' in finalisation_backend.prompt
+    assert "neutral Persona-free final response" in finalisation_backend.prompt
+
     repair_request = _stage_request(
         Stage.STRUCTURE_REPAIR,
         allow_tools=False,
@@ -1270,6 +1342,58 @@ Please scan Outlook.""",
     assert "The old endpoint was removed" in backend.prompt
     assert "authoritative_user_goal" not in backend.prompt
     assert "plan_steps" not in backend.prompt
+    assert provider.tool_call_count == 0
+
+    final_report = (
+        "## Verified result\n\n"
+        "- Path: `C:\\\\Work\\\\report.md`\n"
+        "- Receipt: `job-42`"
+    )
+    required_rendered = await provider.package_persona_required_message(
+        profile,
+        persona_block="Address the user as Captain and use a warm voice.",
+        neutral_message=final_report,
+        message_kind="final",
+        request_id="request-1:persona-package:final:1",
+    )
+
+    required_backend = manager.backends[-1]
+    assert required_rendered
+    assert required_backend.tool_registry is None
+    assert required_backend.shutdown_called is True
+    assert "HER V2 REQUIRED MESSAGE PERSONA RENDERING" in (
+        required_backend.sys_prompt
+    )
+    assert "Address the user as Captain" in required_backend.sys_prompt
+    assert "Preserve the original Markdown structure" in required_backend.sys_prompt
+    assert "Do not add a question, invitation, next step" in (
+        required_backend.sys_prompt
+    )
+    assert "FULL AGENT OPERATIONAL CONTENT" not in required_backend.sys_prompt
+    assert "PRIVATE WORKFLOW INSTRUCTIONS" not in required_backend.sys_prompt
+    assert required_backend.prompt.startswith(
+        "VALIDATED FINAL REPORT (quoted, read-only)"
+    )
+    assert final_report in required_backend.prompt
+    assert "Address the user as Captain" not in required_backend.prompt
+    assert provider.tool_call_count == 0
+
+    await provider.package_persona_required_message(
+        profile,
+        persona_block="Address the user as Captain and use a warm voice.",
+        neutral_message="Which account should be changed?",
+        message_kind="clarification",
+        request_id="request-1:persona-package:clarification:2",
+    )
+
+    clarification_backend = manager.backends[-1]
+    assert "Keep it as the same clarification question" in (
+        clarification_backend.sys_prompt
+    )
+    assert clarification_backend.prompt.startswith(
+        "VALIDATED CLARIFICATION QUESTION (quoted, read-only)"
+    )
+    assert clarification_backend.tool_registry is None
     assert provider.tool_call_count == 0
 
     system_md.write_text(

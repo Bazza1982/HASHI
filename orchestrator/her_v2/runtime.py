@@ -58,6 +58,12 @@ from .models import (
     terminal_lifecycle,
 )
 from .policy import replan_eligible, resolve_policy, terminal_for_execution
+from .presentation import (
+    RenderedRequiredMessage,
+    RequiredMessageValidationError,
+    RequiredPersonaRenderer,
+    RequiredUserMessage,
+)
 from .progress import ProgressTracker
 from .structured import (
     parse_execution,
@@ -95,6 +101,8 @@ class _TurnState:
     delivery_kind: str = ""
     delivery_event_id: str = ""
     execution_capability_escalated: bool = False
+    late_immediate_source_task: asyncio.Task | None = None
+    late_immediate_delivery_task: asyncio.Task | None = None
 
 
 class HERv2Runtime:
@@ -109,6 +117,7 @@ class HERv2Runtime:
         audit_log: DurableAuditLog,
         delivery: DeliveryPort | None = None,
         commentary: CommentaryPort | None = None,
+        required_persona: RequiredPersonaRenderer | None = None,
         habits: HabitAdvisor | None = None,
         meditation: MeditationRunner | None = None,
         dream: DreamMaintainer | None = None,
@@ -120,6 +129,7 @@ class HERv2Runtime:
         self.audit_log = audit_log
         self.delivery = delivery or RecordingDelivery()
         self.commentary = commentary or NullCommentaryPort()
+        self.required_persona = required_persona
         self.habits = habits or NullHabitAdvisor()
         self.meditation = meditation or NullMeditationRunner()
         # Dream is intentionally owned by a background maintenance caller.  It
@@ -333,21 +343,47 @@ class HERv2Runtime:
         self._record_triage(state, triage.classification)
         state.progress.record("classification", triage.classification.value)
 
-        # Triage is authoritative.  Immediate Response is required only when
-        # Triage makes it the direct final answer; work and clarification must
-        # not wait for, or fail with, an optional presentation lane.
-        immediate_skipped = False
+        # Triage is authoritative, but winning this race does not cancel a
+        # still-useful Immediate Response.  Work begins without waiting while
+        # the optional acknowledgement remains owned by this turn.
+        immediate_pending_for_work = False
         if immediate_pair is None and immediate_error is None:
             if triage.classification is TriageClassification.DIRECT_RESPONSE:
                 await consume_immediate()
             elif immediate_task.done():
                 await consume_immediate()
+            elif triage.classification in WORK_CLASSIFICATIONS:
+                immediate_pending_for_work = True
+                self._audit(
+                    state,
+                    stage=Stage.IMMEDIATE_RESPONSE.value,
+                    role=self.config.stage_roles[Stage.IMMEDIATE_RESPONSE],
+                    event="optional_stage_continues",
+                    event_id=f"{state.ledger.turn_id}:immediate:continues",
+                    payload={
+                        "classification": triage.classification.value,
+                        "reason": "triage_completed_before_optional_immediate_response",
+                        "authoritative_path_waited": False,
+                        "delivery_when_ready": "acknowledgement",
+                    },
+                )
             else:
                 immediate_task.cancel()
                 await asyncio.gather(immediate_task, return_exceptions=True)
-                immediate_skipped = True
+                self._audit(
+                    state,
+                    stage=Stage.IMMEDIATE_RESPONSE.value,
+                    role=self.config.stage_roles[Stage.IMMEDIATE_RESPONSE],
+                    event="optional_stage_superseded",
+                    event_id=f"{state.ledger.turn_id}:immediate:superseded",
+                    payload={
+                        "classification": triage.classification.value,
+                        "reason": "authoritative_clarification_ready",
+                        "authoritative_path_waited": False,
+                    },
+                )
 
-        if immediate_error is not None or immediate_skipped:
+        if immediate_error is not None:
             self._audit(
                 state,
                 stage=Stage.IMMEDIATE_RESPONSE.value,
@@ -356,11 +392,7 @@ class HERv2Runtime:
                 event_id=f"{state.ledger.turn_id}:immediate:degraded",
                 payload={
                     "classification": triage.classification.value,
-                    "reason": (
-                        str(immediate_error)
-                        if immediate_error is not None
-                        else "triage_completed_before_optional_immediate_response"
-                    ),
+                    "reason": str(immediate_error),
                     "authoritative_path_continued": (
                         triage.classification
                         is not TriageClassification.DIRECT_RESPONSE
@@ -381,6 +413,21 @@ class HERv2Runtime:
             _immediate_response, immediate_text = immediate_pair
             assert isinstance(immediate_text, str)
 
+        clarification = triage.clarification
+        clarification_provenance = ""
+        clarification_detail = ""
+        if triage.classification is TriageClassification.CONFIRMATION_REQUIRED:
+            (
+                clarification,
+                clarification_provenance,
+                clarification_detail,
+            ) = await self._render_required_message(
+                state,
+                kind="clarification",
+                text=triage.clarification,
+                event_id=f"{state.ledger.turn_id}:clarification",
+            )
+
         immediate_resolution_delivered = False
         if immediate_delivered_early:
             if triage.classification is TriageClassification.DIRECT_RESPONSE:
@@ -388,7 +435,7 @@ class HERv2Runtime:
                 resolution_text = immediate_text
             elif triage.classification is TriageClassification.CONFIRMATION_REQUIRED:
                 resolution = "clarification"
-                resolution_text = triage.clarification
+                resolution_text = clarification
             else:
                 resolution = "commentary"
                 resolution_text = immediate_text
@@ -432,9 +479,9 @@ class HERv2Runtime:
             )
 
         if triage.classification is TriageClassification.CONFIRMATION_REQUIRED:
-            clarification = triage.clarification
             if not immediate_resolution_delivered and (
-                _normalise_text(clarification) != _normalise_text(immediate_text)
+                _normalise_text(triage.clarification)
+                != _normalise_text(immediate_text)
             ):
                 await self._deliver(
                     state,
@@ -442,6 +489,8 @@ class HERv2Runtime:
                     text=clarification,
                     event_id=f"{state.ledger.turn_id}:clarification",
                     required=True,
+                    provenance=clarification_provenance,
+                    detail=clarification_detail,
                 )
             await self._transition(
                 state,
@@ -457,7 +506,106 @@ class HERv2Runtime:
 
         if triage.classification not in WORK_CLASSIFICATIONS:
             raise StageInvocationError("Triage returned an unsupported work classification")
-        return await self._run_work(state, triage.classification)
+        if not immediate_pending_for_work:
+            return await self._run_work(state, triage.classification)
+
+        late_immediate = asyncio.create_task(
+            self._deliver_pending_immediate(state, immediate_task)
+        )
+        state.late_immediate_source_task = immediate_task
+        state.late_immediate_delivery_task = late_immediate
+        try:
+            return await self._run_work(state, triage.classification)
+        finally:
+            await self._settle_late_immediate(
+                state,
+                reason="authoritative_work_path_ended_before_immediate_response",
+                deliver_if_source_ready=False,
+            )
+
+    async def _deliver_pending_immediate(
+        self,
+        state: _TurnState,
+        immediate_task: asyncio.Task,
+    ) -> None:
+        """Deliver a Triage-late Immediate response without blocking work."""
+
+        try:
+            _response, immediate_text = await immediate_task
+        except asyncio.CancelledError:
+            raise
+        except TurnStopped:
+            return
+        except StageInvocationError as exc:
+            self._audit(
+                state,
+                stage=Stage.IMMEDIATE_RESPONSE.value,
+                role=self.config.stage_roles[Stage.IMMEDIATE_RESPONSE],
+                event="optional_stage_degraded",
+                event_id=f"{state.ledger.turn_id}:immediate:degraded",
+                payload={
+                    "classification": (
+                        state.ledger.classification.value
+                        if state.ledger.classification
+                        else None
+                    ),
+                    "reason": str(exc),
+                    "authoritative_path_continued": True,
+                },
+            )
+            return
+        assert isinstance(immediate_text, str)
+        await self._deliver(
+            state,
+            kind="acknowledgement",
+            text=immediate_text,
+            event_id=f"{state.ledger.turn_id}:immediate",
+            required=False,
+        )
+
+    async def _settle_late_immediate(
+        self,
+        state: _TurnState,
+        *,
+        reason: str,
+        deliver_if_source_ready: bool,
+    ) -> None:
+        """Order or supersede a Triage-late acknowledgement before resolution."""
+
+        source_task = state.late_immediate_source_task
+        delivery_task = state.late_immediate_delivery_task
+        if source_task is None or delivery_task is None:
+            return
+        if delivery_task.done() or (
+            deliver_if_source_ready and source_task.done()
+        ):
+            try:
+                await delivery_task
+            finally:
+                state.late_immediate_source_task = None
+                state.late_immediate_delivery_task = None
+            return
+
+        delivery_task.cancel()
+        await asyncio.gather(delivery_task, return_exceptions=True)
+        state.late_immediate_source_task = None
+        state.late_immediate_delivery_task = None
+        self._audit(
+            state,
+            stage=Stage.IMMEDIATE_RESPONSE.value,
+            role=self.config.stage_roles[Stage.IMMEDIATE_RESPONSE],
+            event="optional_stage_superseded",
+            event_id=f"{state.ledger.turn_id}:immediate:superseded",
+            payload={
+                "classification": (
+                    state.ledger.classification.value
+                    if state.ledger.classification
+                    else None
+                ),
+                "reason": reason,
+                "authoritative_path_waited": False,
+            },
+        )
 
     async def _run_work(
         self, state: _TurnState, classification: TriageClassification
@@ -585,13 +733,30 @@ class HERv2Runtime:
                 desired_terminal = TerminalState.ERROR
                 state.limitations.append(f"Final reporting failed: {exc}")
 
+        report_provenance = ""
+        report_detail = ""
         if report:
+            await self._settle_late_immediate(
+                state,
+                reason="final_report_ready_before_immediate_response",
+                deliver_if_source_ready=True,
+            )
+            report, report_provenance, report_detail = (
+                await self._render_required_message(
+                    state,
+                    kind="final",
+                    text=report,
+                    event_id=f"{state.ledger.turn_id}:final",
+                )
+            )
             await self._deliver(
                 state,
                 kind="final",
                 text=report,
                 event_id=f"{state.ledger.turn_id}:final",
                 required=True,
+                provenance=report_provenance,
+                detail=report_detail,
             )
         await self._transition(
             state,
@@ -621,13 +786,25 @@ class HERv2Runtime:
     ) -> TurnResult:
         """Pause truthfully when execution discovers missing user authority."""
 
-        clarification = execution.clarification
+        await self._settle_late_immediate(
+            state,
+            reason="authoritative_clarification_ready",
+            deliver_if_source_ready=True,
+        )
+        clarification, provenance, detail = await self._render_required_message(
+            state,
+            kind="clarification",
+            text=execution.clarification,
+            event_id=f"{state.ledger.turn_id}:execution:clarification",
+        )
         await self._deliver(
             state,
             kind="clarification",
             text=clarification,
             event_id=f"{state.ledger.turn_id}:execution:clarification",
             required=True,
+            provenance=provenance,
+            detail=detail,
         )
         await self._transition(
             state,
@@ -1627,6 +1804,114 @@ class HERv2Runtime:
         for limitation in execution.limitations:
             if limitation not in state.limitations:
                 state.limitations.append(limitation)
+
+    async def _render_required_message(
+        self,
+        state: _TurnState,
+        *,
+        kind: str,
+        text: str,
+        event_id: str,
+    ) -> tuple[str, str, str]:
+        """Render Persona without granting presentation workflow authority."""
+
+        message = RequiredUserMessage(
+            event_id=event_id,
+            turn_id=state.ledger.turn_id,
+            kind=kind,
+            text=text,
+        )
+        if self.required_persona is None:
+            self._audit(
+                state,
+                stage="persona_presentation",
+                role="required_message_renderer",
+                event="required_persona_render_skipped",
+                event_id=f"{event_id}:persona:skipped",
+                payload={
+                    "kind": kind,
+                    "reason": "renderer_unavailable",
+                    "source_text_sha256": hashlib.sha256(
+                        message.text.encode("utf-8")
+                    ).hexdigest(),
+                    "workflow_authority_changed": False,
+                },
+            )
+            return message.text, "unrendered_required_message", (
+                "persona_rendering_fallback=true; "
+                "error_type=renderer_unavailable"
+            )
+
+        self._audit(
+            state,
+            stage="persona_presentation",
+            role="required_message_renderer",
+            event="required_persona_render_started",
+            event_id=f"{event_id}:persona:start",
+            payload={
+                "kind": kind,
+                "source_text_sha256": hashlib.sha256(
+                    message.text.encode("utf-8")
+                ).hexdigest(),
+                "workflow_authority_changed": False,
+            },
+        )
+        try:
+            rendered = await self.required_persona.render(message)
+            if not isinstance(rendered, RenderedRequiredMessage):
+                raise RequiredMessageValidationError(
+                    "required Persona renderer returned an untyped result"
+                )
+            if rendered.source_event_id != message.event_id:
+                raise RequiredMessageValidationError(
+                    "required Persona renderer changed the source identity"
+                )
+            if rendered.kind != message.kind:
+                raise RequiredMessageValidationError(
+                    "required Persona renderer changed the delivery kind"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - validated content must survive
+            rendered = RenderedRequiredMessage(
+                source_event_id=message.event_id,
+                kind=message.kind,
+                text=message.text,
+                provenance="required_message_identity_fallback",
+                fallback=True,
+                error_type=type(exc).__name__,
+            )
+            self.logger.warning(
+                "HER v2 required Persona rendering degraded safely: %s", exc
+            )
+
+        self._audit(
+            state,
+            stage="persona_presentation",
+            role="required_message_renderer",
+            event="required_persona_render_completed",
+            event_id=f"{event_id}:persona:complete",
+            payload={
+                "kind": kind,
+                "source_text_sha256": hashlib.sha256(
+                    message.text.encode("utf-8")
+                ).hexdigest(),
+                "rendered_text_sha256": hashlib.sha256(
+                    rendered.text.encode("utf-8")
+                ).hexdigest(),
+                "provenance": rendered.provenance,
+                "fallback": rendered.fallback,
+                "error_type": rendered.error_type or None,
+                "workflow_authority_changed": False,
+            },
+        )
+        detail = (
+            "persona_rendering_fallback=true; "
+            f"error_type={rendered.error_type or 'unknown'}"
+            if rendered.fallback
+            else "persona_rendering_fallback=false"
+        )
+        return rendered.text, rendered.provenance, detail
 
     async def _deliver(
         self,

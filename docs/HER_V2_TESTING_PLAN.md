@@ -189,7 +189,19 @@ For `DIRECT_RESPONSE`, tests must prove:
 - no Planning, tools, Execution, Review, or second final message occurs;
 - the turn reaches `COMPLETED`.
 
-For work classifications, tests must prove that the Immediate Response acts as a conservative acknowledgement and work continues.
+For work classifications, tests must prove that the Immediate Response acts as
+a conservative acknowledgement and work continues. When Triage finishes first,
+the test must prove all of the following independently:
+
+- execution starts without waiting for Immediate Response;
+- the pending Immediate Response is not cancelled solely because Triage won the
+  race;
+- if it finishes while work is active, it is delivered exactly once as an
+  acknowledgement;
+- if the required final result finishes first, the pending Immediate Response is
+  cancelled or suppressed as superseded and no late acknowledgement appears;
+- supersession is audited separately from malformed or unavailable optional-stage
+  degradation.
 
 For `CONFIRMATION_REQUIRED`, tests must prove that clarification is requested without duplicating an adequate request already delivered by the Immediate Response, and the turn reaches `PENDING_USER_INPUT`.
 
@@ -739,14 +751,17 @@ Tests must prove:
   and finalisation do not synthesise commentary;
 - missing, empty, malformed, or oversized optional commentary does not affect
   stage validation or workflow outcome;
-- runtime passes neutral commentary through a commentary port and has no
-  Persona source, renderer, packaging prompt, or Telegram dependency;
-- Persona packaging receives only neutral commentary and the exact contents of
-  the configured `[persona]` marker block;
+- runtime passes neutral commentary through a commentary port and typed
+  validated Final Reports and clarifications through a required-message
+  presentation interface; it has no Persona source, packaging prompt, or
+  Telegram dependency;
+- each Persona invocation receives the exact contents of the configured
+  `[persona]` marker block and exactly one eligible source message: neutral
+  commentary, a validated Final Report, or a validated clarification;
 - content outside that marker block cannot reach the packaging model;
 - missing or invalid markers use the deterministic display-name + `您`
-  fallback in both commentary and Immediate Response; commentary packaging
-  failure uses that same fallback;
+  fallback in commentary, Immediate Response, Final Report, and clarification;
+  packaging failure uses the same unchanged-source fallback;
 - packaging occurs before delivery and concurrent/replayed event IDs are
   delivered at most once;
 - the Telegram commentary boundary accepts packaged commentary and rejects a
@@ -754,10 +769,24 @@ Tests must prove:
 - optional commentary failure is logged but does not fail execution;
 - `/verbose` changes presentation, not workflow authority;
 - a final answer is not delivered before Finalisation;
+- Finalisation first returns and validates the structured neutral `report`; the
+  extracted report is Persona-rendered only afterward;
+- Final Report and clarification remain typed required-message lanes rather
+  than optional commentary, and Persona rendering cannot change their kind,
+  source event, delivery requirement, terminal state, or stable delivery ID;
+- required-message rendering preserves Markdown, code blocks, inline code,
+  links, paths, identifiers, numbers, facts, uncertainty, and limitations;
+- required-message renderer failure, missing Persona, invalid typed output, or
+  empty output falls back deterministically without losing the validated report
+  or clarification or changing the workflow result;
 - Immediate Response receives the same `[persona]` block, never the rest of
   `system_md` or Bridge `/sys` packaging, and its model prompt contains no
   execution, planning, feasibility, or capability assessment task;
+- Immediate Response has no tool authority, does not repeat that private control
+  fact to the user, and never emits a tool call, tool-control envelope, tool
+  syntax, or executable command;
 - `DIRECT_RESPONSE` is the sole exception because its Immediate Response is the final answer;
+- the `DIRECT_RESPONSE` Immediate answer is not Persona-rendered a second time;
 - a transport without explicit initial-resolution capability never receives a
   provisional Immediate Response and therefore cannot duplicate the final;
 - stream callbacks return an explicit acceptance result across registered
@@ -769,9 +798,10 @@ Tests must prove:
 - a deferred-lane acceptance is never asserted as an actual transport delivery;
 - reporting failure follows the dedicated retry and terminal policy.
 
-Exact wording should not be asserted unless a safety, authority, or protocol requirement depends on it.
-Immediate Response, clarification, and Final Report are outside the first
-commentary-packaging release and retain their dedicated delivery tests.
+Exact wording should not be asserted unless a safety, authority, preservation,
+or protocol requirement depends on it. Commentary, required-message rendering,
+and Immediate Response share one Persona source contract but retain separate
+typed delivery tests.
 
 ### 11.1 Retired backend isolation
 
@@ -805,6 +835,7 @@ Use contract tests for:
 - capability-based provider eligibility and Tool Gateway authority;
 - Tool Registry read-only capability metadata;
 - transport receipt normalisation;
+- required Final Report and clarification Persona-renderer contracts;
 - Ledger/log separation;
 - reasoning-trace correlation;
 - fallback-spool durability and deduplication;
@@ -920,10 +951,14 @@ Release must not proceed if any of the following is possible:
 - total audit-persistence failure permits external side effects to continue;
 - Ledger becomes a duplicate audit log;
 - completed work is discarded because Review, commentary, or Reporting failed;
-- a workflow or lifecycle event directly invokes Persona packaging or authors
-  Persona commentary;
-- Persona packaging can observe unmarked Agent instructions, the user request,
-  plans, reasoning traces, or execution evidence beyond the neutral commentary;
+- a workflow or lifecycle event synthesises Persona content without a validated
+  eligible source message, or authors Persona commentary directly;
+- Persona packaging can observe unmarked Agent instructions, the raw user
+  request, plans, reasoning traces, or lifecycle state, or receives anything
+  beyond one eligible source message and the explicit Persona block;
+- required Final Report or clarification rendering changes validated facts,
+  message kind, source identity, required-delivery semantics, terminal state, or
+  stable delivery identity;
 - raw provider or runtime commentary can bypass Persona packaging into the
   Telegram commentary lane;
 - duplicate commentary event IDs can produce duplicate user delivery;

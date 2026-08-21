@@ -18,6 +18,10 @@ from orchestrator.her_v2.models import (
     TerminalState,
     TriageClassification,
 )
+from orchestrator.her_v2.presentation import (
+    RenderedRequiredMessage,
+    RequiredUserMessage,
+)
 from orchestrator.her_v2.runtime import HERv2Runtime
 
 
@@ -147,6 +151,23 @@ class ExplodingDream:
         raise RuntimeError("dream unavailable")
 
 
+class RecordingRequiredPersonaRenderer:
+    def __init__(self, *, error=None):
+        self.error = error
+        self.messages: list[RequiredUserMessage] = []
+
+    async def render(self, message):
+        self.messages.append(message)
+        if self.error is not None:
+            raise self.error
+        return RenderedRequiredMessage(
+            source_event_id=message.event_id,
+            kind=message.kind,
+            text=f"Persona {message.kind}:\n\n{message.text}",
+            provenance="test_persona_renderer",
+        )
+
+
 def _runtime(
     tmp_path,
     provider,
@@ -158,6 +179,7 @@ def _runtime(
     dream=None,
     audit=None,
     commentary=None,
+    required_persona=None,
 ):
     root = tmp_path / "her-v2"
     return HERv2Runtime(
@@ -168,6 +190,7 @@ def _runtime(
         or DurableAuditLog(root / "audit.jsonl", root / "audit-fallback.jsonl"),
         delivery=delivery or RecordingDelivery(),
         commentary=commentary,
+        required_persona=required_persona,
         habits=habits,
         meditation=meditation if meditation is not None else habits,
         dream=dream,
@@ -219,6 +242,131 @@ async def test_direct_response_race_delivers_exactly_one_answer(tmp_path, delays
 
 
 @pytest.mark.asyncio
+async def test_direct_response_is_not_repackaged_by_required_persona_renderer(tmp_path):
+    renderer = RecordingRequiredPersonaRenderer()
+    result = await _runtime(
+        tmp_path,
+        ScriptedProvider(_initial("DIRECT_RESPONSE")),
+        required_persona=renderer,
+    ).run_turn("Hello", "request-direct-no-repackage", effort="low")
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.text == "I have it."
+    assert renderer.messages == []
+
+
+@pytest.mark.asyncio
+async def test_triage_first_work_starts_without_waiting_and_delivers_late_immediate(
+    tmp_path,
+):
+    release_immediate = asyncio.Event()
+    execution_started = asyncio.Event()
+    release_execution = asyncio.Event()
+    acknowledgement_delivered = asyncio.Event()
+
+    async def delayed_immediate(_request):
+        await release_immediate.wait()
+        return {"message": "I have it and will check now."}
+
+    async def blocked_execution(_request):
+        execution_started.set()
+        await release_execution.wait()
+        return {"disposition": "COMPLETED", "summary": "Checked."}
+
+    class SignallingDelivery(RecordingDelivery):
+        async def deliver(self, **kwargs):
+            accepted = await super().deliver(**kwargs)
+            if kwargs["kind"] == "acknowledgement":
+                acknowledgement_delivered.set()
+            return accepted
+
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [delayed_immediate],
+        Stage.TRIAGE: [{"classification": "SIMPLE_TASK"}],
+        Stage.EXECUTION: [blocked_execution],
+        Stage.FINALISATION: [{"report": "Checked and complete."}],
+    }
+    provider = ScriptedProvider(scripts)
+    delivery = SignallingDelivery()
+    turn = asyncio.create_task(
+        _runtime(tmp_path, provider, delivery=delivery).run_turn(
+            "Check it", "request-triage-first-immediate-late", effort="low"
+        )
+    )
+
+    await asyncio.wait_for(execution_started.wait(), timeout=1)
+    assert acknowledgement_delivered.is_set() is False
+    release_immediate.set()
+    await asyncio.wait_for(acknowledgement_delivered.wait(), timeout=1)
+    release_execution.set()
+    result = await asyncio.wait_for(turn, timeout=1)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert [(item.kind, item.text) for item in delivery.records] == [
+        ("acknowledgement", "I have it and will check now."),
+        ("final", "Checked and complete."),
+    ]
+    assert provider.cancelled[Stage.IMMEDIATE_RESPONSE] == 0
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    continued = next(row for row in rows if row["event"] == "optional_stage_continues")
+    assert continued["payload"] == {
+        "classification": "SIMPLE_TASK",
+        "reason": "triage_completed_before_optional_immediate_response",
+        "authoritative_path_waited": False,
+        "delivery_when_ready": "acknowledgement",
+    }
+    assert not any(row["event"] == "optional_stage_degraded" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_final_completion_supersedes_a_still_pending_immediate_response(tmp_path):
+    immediate_started = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def blocked_immediate(_request):
+        immediate_started.set()
+        await never_release.wait()
+        return {"message": "Too late."}
+
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [blocked_immediate],
+        Stage.TRIAGE: [{"classification": "SIMPLE_TASK"}],
+        Stage.EXECUTION: [{"disposition": "COMPLETED", "summary": "Done."}],
+        Stage.FINALISATION: [{"report": "Done."}],
+    }
+    provider = ScriptedProvider(scripts)
+    result = await asyncio.wait_for(
+        _runtime(tmp_path, provider).run_turn(
+            "Do it", "request-final-supersedes-immediate", effort="low"
+        ),
+        timeout=1,
+    )
+
+    assert immediate_started.is_set() is True
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert [(item.kind, item.text) for item in result.delivery_records] == [
+        ("final", "Done.")
+    ]
+    assert provider.cancelled[Stage.IMMEDIATE_RESPONSE] == 1
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    superseded = next(
+        row
+        for row in rows
+        if row["event"] == "optional_stage_superseded"
+        and row["payload"]["reason"]
+        == "final_report_ready_before_immediate_response"
+    )
+    assert superseded["payload"]["authoritative_path_waited"] is False
+    assert not any(row["event"] == "optional_stage_degraded" for row in rows)
+
+
+@pytest.mark.asyncio
 async def test_confirmation_required_never_enters_planning_or_execution(tmp_path):
     scripts = _initial(
         "CONFIRMATION_REQUIRED", clarification="Which account should be changed?"
@@ -238,6 +386,45 @@ async def test_confirmation_required_never_enters_planning_or_execution(tmp_path
         request.stage not in {Stage.PLANNING, Stage.EXECUTION}
         for _profile, request in provider.requests
     )
+
+
+@pytest.mark.asyncio
+async def test_triage_clarification_is_persona_rendered_without_changing_authority(
+    tmp_path,
+):
+    renderer = RecordingRequiredPersonaRenderer()
+    scripts = _initial(
+        "CONFIRMATION_REQUIRED",
+        clarification="Which account should be changed?",
+    )
+
+    result = await _runtime(
+        tmp_path,
+        ScriptedProvider(scripts),
+        required_persona=renderer,
+    ).run_turn("Change the account", "request-rendered-confirmation", effort="high")
+
+    assert result.terminal_state is TerminalState.PENDING_USER_INPUT
+    assert result.text == (
+        "Persona clarification:\n\nWhich account should be changed?"
+    )
+    assert [(message.kind, message.text) for message in renderer.messages] == [
+        ("clarification", "Which account should be changed?")
+    ]
+    clarification = next(
+        item for item in result.delivery_records if item.kind == "clarification"
+    )
+    assert clarification.text == result.text
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    rendered = next(
+        row for row in rows if row["event"] == "required_persona_render_completed"
+    )
+    assert rendered["payload"]["kind"] == "clarification"
+    assert rendered["payload"]["provenance"] == "test_persona_renderer"
+    assert rendered["payload"]["workflow_authority_changed"] is False
 
 
 @pytest.mark.asyncio
@@ -374,6 +561,96 @@ async def test_medium_turn_preserves_goal_and_routes_tools_only_to_execution(tmp
         for _profile, call in provider.requests
         if call.stage is not Stage.EXECUTION
     )
+
+
+@pytest.mark.asyncio
+async def test_validated_final_report_is_persona_rendered_before_required_delivery(
+    tmp_path,
+):
+    raw_report = (
+        "## Result\n\n"
+        "- Status: complete\n"
+        "- Path: `C:\\\\Work\\\\report.md`\n"
+        "- Receipt: `job-42`"
+    )
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Completed with receipt job-42.",
+                }
+            ],
+            Stage.FINALISATION: [{"report": raw_report}],
+        }
+    )
+    renderer = RecordingRequiredPersonaRenderer()
+
+    result = await _runtime(
+        tmp_path,
+        ScriptedProvider(scripts),
+        required_persona=renderer,
+    ).run_turn("Complete it", "request-render-final", effort="low")
+
+    expected = f"Persona final:\n\n{raw_report}"
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.text == expected
+    assert [(message.kind, message.text) for message in renderer.messages] == [
+        ("final", raw_report)
+    ]
+    final = next(item for item in result.delivery_records if item.kind == "final")
+    assert final.text == expected
+    assert result.ledger["status"] == "COMPLETED"
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    delivery = next(
+        row
+        for row in rows
+        if row["event"] == "delivery_result"
+        and row["payload"]["kind"] == "final"
+    )
+    assert delivery["payload"]["provenance"] == "test_persona_renderer"
+
+
+@pytest.mark.asyncio
+async def test_required_persona_failure_preserves_validated_report_and_terminal_state(
+    tmp_path,
+):
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Completed."}
+            ],
+            Stage.FINALISATION: [{"report": "Completed with receipt 42."}],
+        }
+    )
+    renderer = RecordingRequiredPersonaRenderer(error=RuntimeError("offline"))
+
+    result = await _runtime(
+        tmp_path,
+        ScriptedProvider(scripts),
+        required_persona=renderer,
+    ).run_turn("Complete it", "request-final-render-fallback", effort="low")
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.text == "Completed with receipt 42."
+    assert result.delivery_records[-1].text == result.text
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    rendered = next(
+        row for row in rows if row["event"] == "required_persona_render_completed"
+    )
+    assert rendered["payload"]["fallback"] is True
+    assert rendered["payload"]["provenance"] == (
+        "required_message_identity_fallback"
+    )
+    assert rendered["payload"]["error_type"] == "RuntimeError"
 
 
 @pytest.mark.asyncio
@@ -1354,6 +1631,36 @@ async def test_execution_can_pause_for_newly_discovered_user_authority(tmp_path)
         request.stage in {Stage.REVIEW, Stage.FINALISATION}
         for _profile, request in provider.requests
     )
+
+
+@pytest.mark.asyncio
+async def test_execution_discovered_clarification_uses_required_persona_lane(tmp_path):
+    scripts = _initial("SIMPLE_TASK")
+    scripts[Stage.EXECUTION] = [
+        {
+            "disposition": "NEEDS_USER_INPUT",
+            "summary": "Two accounts match.",
+            "clarification": "Which account should be changed?",
+        }
+    ]
+    renderer = RecordingRequiredPersonaRenderer()
+
+    result = await _runtime(
+        tmp_path,
+        ScriptedProvider(scripts),
+        required_persona=renderer,
+    ).run_turn("Change the account", "request-execution-rendered-input", effort="low")
+
+    assert result.terminal_state is TerminalState.PENDING_USER_INPUT
+    assert result.text == (
+        "Persona clarification:\n\nWhich account should be changed?"
+    )
+    assert [(message.kind, message.text) for message in renderer.messages] == [
+        ("clarification", "Which account should be changed?")
+    ]
+    assert result.delivery_records[-1].kind == "clarification"
+    assert result.delivery_records[-1].text == result.text
+    assert result.ledger["terminal_reason"] == "execution_user_input_required"
 
 
 @pytest.mark.asyncio

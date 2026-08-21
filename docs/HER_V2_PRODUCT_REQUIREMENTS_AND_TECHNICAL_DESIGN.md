@@ -142,16 +142,15 @@ repeating the same request.
 
 ### 3.6 Work, commentary, Persona packaging, and delivery
 
-HER v2 keeps four boundaries distinct:
+HER v2 keeps five boundaries distinct:
 
 1. A reasoning stage performs its assigned work and may include one optional
    neutral `commentary` string in its successful structured result.
 2. The commentary lane validates and forwards that string. Lifecycle events,
    state transitions, retries, failures, and tool telemetry never synthesise
    Persona messages.
-3. Persona packaging may receive only the validated neutral commentary and the
-   contents of one explicit Persona marker block from the configured
-   `system_md` file:
+3. Persona source resolution extracts only one explicit Persona marker block
+   from the configured `system_md` file:
 
    ```text
    [persona]
@@ -159,25 +158,34 @@ HER v2 keeps four boundaries distinct:
    [persona_end]
    ```
 
-   Text outside that block is unavailable to the commentary packager and the
-   Immediate Response model.
+   Text outside that block is unavailable to the commentary packager, required
+   message renderer, and Immediate Response model.
 4. Commentary delivery accepts only the typed output of Persona packaging.
    Generic workflow delivery is not a commentary transport.
+5. A validated Final Report or clarification enters a separate typed required
+   message lane. Its Persona renderer receives only that report or question and
+   the extracted Persona block. It cannot change the message kind, source event,
+   workflow authority, terminal assessment, or required-delivery semantics.
 
 Commentary is optional presentation, never workflow authority. A missing,
 empty, malformed, oversized, packaging-failed, or delivery-failed commentary
 cannot invalidate, retry, reclassify, replan, stop, or complete a stage. Missing
 or invalid Persona markers and packaging failures use a deterministic minimal
 package based on the configured HASHI display name, the form of address `您`,
-and the unchanged neutral commentary.
+and the unchanged validated source message. Required Final Reports and
+clarifications use the same fail-open presentation rule: rendering failure
+preserves the validated report or question and cannot change workflow state.
 When the Persona block is unavailable to Immediate Response, its prompt uses
 the same configured display name and polite form of address `您` as its entire
 fallback Persona guidance; it never falls back to the rest of `system_md`.
 
-This boundary governs interim commentary packaging and the Persona input used
-by Immediate Response. Immediate Response is not rewritten by the commentary
-packager; it receives the same extracted block directly. Clarification and
-Final Report retain their dedicated user-facing paths.
+This boundary governs interim commentary packaging, required Final Report and
+clarification rendering, and the Persona input used by Immediate Response.
+Immediate Response is not rewritten by either packager; it receives the same
+extracted block directly and, for `DIRECT_RESPONSE`, becomes the sole final
+answer. Clarification and Final Report retain dedicated required-message paths;
+they do not become optional commentary merely because they share the isolated
+Persona rendering core.
 An Immediate Response may be sent provisionally before Triage only when the
 transport explicitly advertises support for editing that exact message into a
 final answer, clarification, or commentary. Discard is a narrower transport
@@ -284,6 +292,10 @@ Immediate-specific behaviour below. The rest of `system_md` and the Bridge
 
 - for an obviously direct conversational request, answer immediately;
 - for work that must continue, provide only a short receipt acknowledgement;
+- tool access and tool authority are absent and this is private behavioural
+  information that must not be repeated to the user;
+- never call a tool or emit tool syntax, a tool-control envelope, or an
+  executable command;
 - do not execute, plan, assess feasibility, or discuss capability, because the
   actual work belongs to a later stage.
 
@@ -337,6 +349,15 @@ The Immediate Response and Triage may finish in either order. HER must enforce t
 - the Immediate Response is delivered at most once;
 - if Triage selects `DIRECT_RESPONSE`, that response is the only user-facing completion message;
 - if Triage selects a work classification, the response acts as acknowledgement and execution continues;
+- when Triage finishes first for a work classification, work starts immediately
+  without awaiting Immediate Response, but the pending response is not cancelled
+  merely because it lost the race;
+- a Triage-late Immediate Response is delivered exactly once as acknowledgement
+  when it becomes ready while work is still active;
+- if the final report, an authoritative clarification, stop, or other terminal
+  resolution supersedes a still-pending Immediate Response, HER cancels or
+  suppresses it and records the supersession instead of reporting a stage
+  failure;
 - if Triage selects `CONFIRMATION_REQUIRED`, the clarification request must not duplicate information already adequately requested by the Immediate Response;
 - Triage remains mandatory and authoritative;
 - work and clarification paths do not wait for a still-pending Immediate
@@ -577,6 +598,23 @@ The report communicates, as applicable:
 - the final task state.
 
 Reporting must be honest and must not claim unverified work as complete.
+
+The Finalisation model returns a neutral structured report, normally
+`{"report": "..."}`. After the compatibility membrane and report schema have
+validated that result, HER extracts the report and creates a typed required
+final message. HASHI then renders that message through the isolated Persona
+boundary using only the report and the explicit `[persona]` block. Rendering
+must preserve Markdown, code, links, paths, identifiers, numbers, facts,
+uncertainty, limitations, and the terminal boundary. The rendered text remains
+the same required final delivery with the same stable delivery identity.
+
+Persona rendering is presentation-only and fail-open. A missing Persona block,
+provider error, invalid rendered envelope, or empty rendered result uses a
+deterministic Persona fallback containing the unchanged validated report. It
+does not retry execution, reopen Finalisation, or alter the selected terminal
+state. Validated Triage and Execution clarification questions follow the same
+required-message rule. A Direct Response is already Persona-authored by
+Immediate Response and is never rendered a second time.
 
 ### 12.3 Reporting failure
 
@@ -901,8 +939,10 @@ HER v2 owns:
 - final task-state selection.
 
 HER v2 may validate and publish optional neutral commentary returned by a
-successful reasoning stage. It never reads Persona guidance or packages
-Persona prose inside the orchestration state machine.
+successful reasoning stage. It may also submit a typed validated Final Report
+or clarification to an injected required-message presentation interface. It
+never reads Persona guidance or authors Persona prose inside the orchestration
+state machine; HASHI owns source extraction, isolated rendering, and fallback.
 
 ### 20.3 Optional supporting systems
 
@@ -960,8 +1000,12 @@ HER v2 is ready for production rollout only when:
 - the retired HER implementation is unreachable through `her`, `claw-cli`,
   backend switching, startup preflight, and initialization failure;
 - lifecycle and workflow events cannot generate Persona commentary;
-- Persona packaging receives no request, plan, reasoning trace, execution
-  evidence, lifecycle snapshot, or unmarked `system_md` content;
+- Persona packaging receives no raw request, plan, reasoning trace, lifecycle
+  snapshot, or unmarked `system_md` content. It receives exactly one eligible
+  source message: neutral commentary, a validated Final Report, or a validated
+  clarification;
+- required Final Report and clarification rendering preserves delivery kind,
+  source identity, validated content, terminal state, and fallback delivery;
 - commentary packaging and delivery failures cannot alter workflow outcome;
 - failed HER v2 initialization fails closed or uses an explicitly selected
   non-HER backend; it never rolls back to retired HER.
@@ -986,9 +1030,11 @@ The following decisions are authoritative for HER v2:
 14. Missing optional commentary does not fail execution.
 15. Only successful reasoning-stage output may originate neutral commentary;
     workflow events never originate Persona speech.
-16. Persona packaging is presentation-only and receives only neutral commentary
-    plus the explicit configured Persona block.
-17. Commentary delivery accepts packaged output only and has no workflow authority.
+16. Persona packaging is presentation-only and receives only one eligible
+    message plus the explicit configured Persona block: neutral commentary, a
+    validated Final Report, or a validated clarification.
+17. Commentary remains optional; Final Report and clarification remain typed
+    required messages. Rendering cannot change their workflow authority.
 18. Reporting failure does not discard completed work.
 19. Recovery is conversational, not transactional.
 20. HER core is provider-neutral and modular.

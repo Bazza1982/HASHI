@@ -71,7 +71,10 @@ _SCHEMAS = {
         ),
     },
     Stage.FINALISATION: {
-        "report": "honest user-facing result, verification, and limitations"
+        "report": (
+            "neutral Persona-free final response preserving requested Markdown, "
+            "results, verification, uncertainty, and limitations"
+        )
     },
     Stage.MEDITATION: {"actions": []},
     Stage.DREAM: {"groups": []},
