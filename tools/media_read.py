@@ -61,6 +61,14 @@ class MediaProbe:
     has_video: bool = False
 
 
+@dataclass(frozen=True)
+class NormalizedImage:
+    data: bytes
+    original_format: str
+    original_size: tuple[int, int]
+    normalized_size: tuple[int, int]
+
+
 def _within(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -205,12 +213,8 @@ def _image_block(encoded: bytes) -> dict[str, str]:
     }
 
 
-def _read_image(
-    path: Path,
-    *,
-    ocr_mode: str = "auto",
-    ocr_languages: tuple[str, ...] | None = None,
-) -> StructuredToolOutput:
+def normalize_image(path: Path) -> NormalizedImage:
+    """Decode and bound one image for a downstream local vision model."""
     from PIL import Image
 
     _check_size(path, IMAGE_MAX_BYTES, "image")
@@ -234,6 +238,25 @@ def _read_image(
         raise MediaReadError("image dimensions exceed Pillow's decode safety limit") from exc
     except Exception as exc:
         raise MediaReadError(f"image decode failed: {exc}") from exc
+    return NormalizedImage(
+        data=encoded,
+        original_format=original_format,
+        original_size=original_size,
+        normalized_size=normalized_size,
+    )
+
+
+def _read_image(
+    path: Path,
+    *,
+    ocr_mode: str = "auto",
+    ocr_languages: tuple[str, ...] | None = None,
+) -> StructuredToolOutput:
+    normalized = normalize_image(path)
+    encoded = normalized.data
+    original_format = normalized.original_format
+    original_size = normalized.original_size
+    normalized_size = normalized.normalized_size
 
     ocr_result: OCRResult | None = None
     if ocr_mode != "off":

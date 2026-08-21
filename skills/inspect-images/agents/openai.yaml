@@ -1,0 +1,4 @@
+interface:
+  display_name: "Inspect Images"
+  short_description: "Inspect non-text visual meaning with a local vision tool"
+  default_prompt: "Inspect the attached image only when visual understanding is needed."

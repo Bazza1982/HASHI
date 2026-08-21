@@ -41,6 +41,9 @@ class BackendCapabilities:
     # Assistant answer deltas. Kept for local observers; Telegram no longer
     # presents live answer previews.
     supports_answer_stream: bool = False
+    # True when the selected model receives images directly from its provider.
+    # Text-only models can instead opt into HASHI's vision_inspect tool.
+    supports_native_vision: bool = False
 
 
 @dataclass
@@ -76,6 +79,13 @@ class BaseBackend(ABC):
         self.api_key = api_key
         self._validate_timeout_configuration()
         self.capabilities = self._define_capabilities()
+        image_input = str(
+            (getattr(self.config, "extra", {}) or {}).get("image_input") or "none"
+        ).strip().casefold()
+        if image_input not in {"none", "native", "tool"}:
+            raise ValueError("image_input must be one of: none, native, tool")
+        self.image_input_mode = image_input
+        self.capabilities.supports_native_vision = image_input == "native"
         self._console_write_warned = False
         # epoch-seconds; updated by adapter whenever backend produces output.
         # Used by the runtime escalation loop to detect stalled sub-processes.

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from remote.api.server import create_app
+from remote.api.server import _merge_attachment_text, create_app
 from remote.security.pairing import PairingManager
 from remote.security.shared_token import build_auth_headers
 from remote.terminal.executor import TerminalExecutor
@@ -62,6 +62,24 @@ def _signed_headers(token: str, *, method: str, path: str, from_instance: str, b
         )
     )
     return headers
+
+
+def test_image_attachment_summary_exposes_opaque_image_reference():
+    merged = _merge_attachment_text(
+        {"text": "please inspect"},
+        [
+            {
+                "attachment_id": "img-1",
+                "filename": "photo.jpg",
+                "mime_type": "image/jpeg",
+                "size_bytes": 123,
+            }
+        ],
+        message_id="msg-image",
+    )
+
+    assert "image_ref=attachment:msg-image:img-1" in merged["text"]
+    assert "stored_path" not in merged["text"]
 
 
 def test_attachment_upload_and_commit_delivers_via_existing_protocol_path(tmp_path):
@@ -127,6 +145,9 @@ def test_attachment_upload_and_commit_delivers_via_existing_protocol_path(tmp_pa
     assert delivered["body"]["attachments"][0]["attachment_id"] == "att-1"
     assert "[Remote attachments]" in delivered["body"]["text"]
     assert "report.txt" in delivered["body"]["text"]
+    assert "attachment_id=att-1" in delivered["body"]["text"]
+    assert "attachment_ref=attachment:msg-1:att-1" in delivered["body"]["text"]
+    assert "image_ref=" not in delivered["body"]["text"]
 
     manifest_headers = build_auth_headers(
         shared_token=token,

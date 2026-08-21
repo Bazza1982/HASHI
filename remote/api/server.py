@@ -307,20 +307,34 @@ def _decode_file_push_content(payload: FilePushPayload) -> tuple[bytes, str]:
     return data, digest
 
 
-def _attachment_summary_lines(attachments: list[dict[str, Any]]) -> list[str]:
+def _attachment_summary_lines(
+    attachments: list[dict[str, Any]], *, message_id: str
+) -> list[str]:
     lines = ["", "[Remote attachments]"]
     for item in attachments:
         filename = str(item.get("filename") or "attachment")
         size_bytes = int(item.get("size_bytes") or 0)
         mime_type = str(item.get("mime_type") or "application/octet-stream")
-        lines.append(f"- {filename} ({mime_type}, {size_bytes} bytes)")
+        attachment_id = str(item.get("attachment_id") or "attachment")
+        attachment_ref = f"attachment:{message_id}:{attachment_id}"
+        line = (
+            f"- {filename} ({mime_type}, {size_bytes} bytes); "
+            f"attachment_id={attachment_id}; attachment_ref={attachment_ref}"
+        )
+        if mime_type.casefold().startswith("image/"):
+            line += f"; image_ref={attachment_ref}"
+        lines.append(line)
     return lines
 
 
-def _merge_attachment_text(body: dict[str, Any], attachments: list[dict[str, Any]]) -> dict[str, Any]:
+def _merge_attachment_text(
+    body: dict[str, Any], attachments: list[dict[str, Any]], *, message_id: str
+) -> dict[str, Any]:
     merged = dict(body or {})
     base_text = str((body or {}).get("text") or "").strip()
-    attachment_block = "\n".join(_attachment_summary_lines(attachments))
+    attachment_block = "\n".join(
+        _attachment_summary_lines(attachments, message_id=message_id)
+    )
     merged["text"] = f"{base_text}{attachment_block}" if base_text else attachment_block.strip()
     merged["attachments"] = attachments
     return merged
@@ -999,7 +1013,11 @@ def create_app(
                     content={"ok": False, "error": f"Target instance '{payload.to_instance}' not in peer registry"},
                 )
             forward_payload = payload.model_dump()
-            forward_payload["body"] = _merge_attachment_text(payload.body, normalized_attachments)
+            forward_payload["body"] = _merge_attachment_text(
+                payload.body,
+                normalized_attachments,
+                message_id=payload.message_id,
+            )
             forward_payload["attachments"] = normalized_attachments
             last_exc = None
             for url in candidate_urls:
@@ -1027,7 +1045,11 @@ def create_app(
             from_agent=payload.from_agent,
             to_instance=payload.to_instance,
             to_agent=payload.to_agent,
-            body=_merge_attachment_text(payload.body, normalized_attachments),
+            body=_merge_attachment_text(
+                payload.body,
+                normalized_attachments,
+                message_id=payload.message_id,
+            ),
             hop_count=payload.hop_count,
             ttl=payload.ttl,
             route_trace=payload.route_trace,

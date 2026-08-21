@@ -20,6 +20,7 @@ from tools.schemas import TOOL_SCHEMA_MAP, ALL_TOOL_NAMES
 # schemas are included in the API payload.
 TOOL_TIERS: dict[str, list[str]] = {
     "core": ["bash", "file_read", "file_write", "file_list"],
+    "vision": ["vision_inspect"],
     "system": ["process_list", "process_kill", "apply_patch"],
     "background": [
         "background_job_start", "background_job_status", "background_job_tail",
@@ -140,6 +141,8 @@ class ToolRegistry:
             # context. A wildcard on other backends must not broaden their
             # capabilities merely because the schema exists globally.
             self._allowed.discard("media_read")
+            # Local vision is opt-in and requires explicit provider config.
+            self._allowed.discard("vision_inspect")
         else:
             self._allowed = set(allowed_tools) & set(ALL_TOOL_NAMES)
             unknown = set(allowed_tools) - set(ALL_TOOL_NAMES) - {"*"}
@@ -233,14 +236,17 @@ class ToolRegistry:
         *,
         tool_call_id: str,
     ) -> ToolResult | None:
-        if tool_name not in {"file_read", "file_write", "file_list", "apply_patch"}:
+        if tool_name not in {"file_read", "file_write", "file_list", "apply_patch", "vision_inspect"}:
             return None
         context = self.audit_context or {}
         org_id = str(context.get("org_id") or "").strip()
         project_id = str(context.get("project_id") or "").strip()
         if not org_id or not project_id:
             return None
-        raw_path = str((arguments or {}).get("path") or "").strip()
+        path_key = "image_ref" if tool_name == "vision_inspect" else "path"
+        raw_path = str((arguments or {}).get(path_key) or "").strip()
+        if tool_name == "vision_inspect" and raw_path.startswith("attachment:"):
+            return None
         if not raw_path:
             return None
         root = (
@@ -477,6 +483,17 @@ class ToolRegistry:
                 access_root=self.access_root,
                 workspace_dir=self.workspace_dir,
                 media_roots=self.media_roots,
+            )
+
+        if tool_name == "vision_inspect":
+            from tools.vision_inspect import execute_vision_inspect
+
+            return await execute_vision_inspect(
+                arguments,
+                access_root=self.access_root,
+                workspace_dir=self.workspace_dir,
+                media_roots=self.media_roots,
+                options=opts.get("vision_inspect", {}),
             )
 
         if tool_name == "file_write":

@@ -852,6 +852,14 @@ class FlexibleBackendManager:
         else:
             merged_allowed = list(global_allowed | backend_allowed)
 
+        configured_mode = str(backend_cfg_raw.get("image_input") or "").strip().casefold()
+        if not configured_mode:
+            configured_mode = "tool" if "vision_inspect" in merged_allowed else "none"
+        if configured_mode not in {"none", "native", "tool"}:
+            raise ValueError("image_input must be one of: none, native, tool")
+        if configured_mode != "tool" and "*" not in merged_allowed:
+            merged_allowed = [name for name in merged_allowed if name != "vision_inspect"]
+
         if not merged_allowed:
             return None
 
@@ -901,6 +909,7 @@ class FlexibleBackendManager:
                     "global_config": self.global_config,
                     "_runtime": getattr(self, "runtime", None),
                 },
+                media_roots=self._vision_media_roots(adapter_cfg),
             )
             self.current_backend.tool_registry = registry
             self.logger.info(
@@ -908,6 +917,22 @@ class FlexibleBackendManager:
             )
         except Exception as e:
             self.logger.error(f"Failed to attach ToolRegistry: {e}")
+
+    def _vision_media_roots(self, adapter_cfg) -> list[Path]:
+        """Return agent media and remote attachment roots without broadening file tools."""
+        roots: list[Path] = []
+        base_media_dir = getattr(self.global_config, "base_media_dir", None)
+        if base_media_dir:
+            roots.append(Path(base_media_dir) / str(adapter_cfg.name))
+        project_root = (
+            getattr(self.global_config, "project_root", None) or self.config.project_root
+        )
+        instance_id = str(
+            getattr(self.global_config, "instance_id", None) or "hashi"
+        ).strip().lower()
+        if project_root:
+            roots.append(Path(project_root) / "state" / "remote_attachments" / instance_id)
+        return roots
 
     async def switch_backend(
         self,

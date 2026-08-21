@@ -130,6 +130,41 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "vision_inspect",
+            "description": (
+                "Understand non-text visual meaning in one attached or authorized local image. "
+                "Use only when the current model cannot natively see the image and the answer "
+                "depends on objects, people, actions, scene context, or spatial relationships. "
+                "Use OCR instead when only visible text is needed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_ref": {
+                        "type": "string",
+                        "description": (
+                            "Image reference from the attachment summary, normally "
+                            "attachment:<message_id>:<attachment_id>, or an authorized local path."
+                        ),
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "The specific visual question to answer about the image.",
+                    },
+                    "detail": {
+                        "type": "string",
+                        "enum": ["brief", "standard", "detailed"],
+                        "description": "Visual analysis depth; standard is the default.",
+                    },
+                },
+                "required": ["image_ref", "question"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "file_write",
             "description": (
                 "Write content to a file, creating it or overwriting if it exists. "
