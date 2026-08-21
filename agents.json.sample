@@ -2,6 +2,19 @@
   "global": {
     "authorized_id": 0,
     "workbench_port": 18802,
+    "default_tools": {
+      "allowed": ["*", "vision_inspect"],
+      "max_loops": 25,
+      "vision_inspect": {
+        "provider": "openrouter",
+        "endpoint": "https://openrouter.ai/api/v1",
+        "allowed_hosts": ["openrouter.ai"],
+        "model": "anthropic/claude-sonnet-4.6",
+        "api_key_secret": "openrouter-api_key",
+        "timeout_seconds": 90,
+        "max_output_tokens": 512
+      }
+    },
     "her_providers": {
       "max_permission_mode": "workspace-write",
       "providers": {

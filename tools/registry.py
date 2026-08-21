@@ -169,14 +169,17 @@ class ToolRegistry:
         )
         self.media_roots = [Path(root) for root in (media_roots or [])]
 
+        explicitly_allowed = set(allowed_tools) - {"*"}
         if "*" in allowed_tools:
             self._allowed = set(ALL_TOOL_NAMES)
             # media_read is injected explicitly into the HER-only gateway
             # context. A wildcard on other backends must not broaden their
             # capabilities merely because the schema exists globally.
-            self._allowed.discard("media_read")
+            if "media_read" not in explicitly_allowed:
+                self._allowed.discard("media_read")
             # Local vision is opt-in and requires explicit provider config.
-            self._allowed.discard("vision_inspect")
+            if "vision_inspect" not in explicitly_allowed:
+                self._allowed.discard("vision_inspect")
         else:
             self._allowed = set(allowed_tools) & set(ALL_TOOL_NAMES)
             unknown = set(allowed_tools) - set(ALL_TOOL_NAMES) - {"*"}
@@ -582,6 +585,7 @@ class ToolRegistry:
                 workspace_dir=self.workspace_dir,
                 media_roots=self.media_roots,
                 options=opts.get("vision_inspect", {}),
+                secrets=self.secrets,
             )
 
         if tool_name == "file_write":

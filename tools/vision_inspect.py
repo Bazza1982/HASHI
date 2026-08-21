@@ -195,6 +195,84 @@ class LlamaCppVisionProvider:
         return _parse_answer(message.get("content") if isinstance(message, dict) else None)
 
 
+class OpenRouterVisionProvider(LlamaCppVisionProvider):
+    """Use an explicitly authorized OpenRouter vision model as the VLM."""
+
+    def __init__(
+        self,
+        options: dict[str, Any],
+        *,
+        secrets: dict[str, Any],
+        client: httpx.AsyncClient | None = None,
+    ):
+        super().__init__(options, client=client)
+        secret_name = str(options.get("api_key_secret") or "openrouter_key").strip()
+        self.api_key = str((secrets or {}).get(secret_name) or "").strip()
+        if not self.api_key:
+            raise VisionInspectError(
+                f"OpenRouter vision credential {secret_name!r} is unavailable"
+            )
+
+    async def inspect(
+        self,
+        *,
+        image_bytes: bytes,
+        question: str,
+        detail: str,
+    ) -> VisionAnswer:
+        prompt = (
+            "Analyze the real visual content of this image. Focus on objects, people, "
+            "actions, scene context, and spatial relationships relevant to the question. "
+            "Do not merely transcribe visible text and do not guess hidden facts. "
+            "Return JSON with keys answer, observations, and uncertainties.\n"
+            f"Detail level: {detail}.\nQuestion: {question}"
+        )
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/jpeg;base64,"
+                                + base64.b64encode(image_bytes).decode("ascii")
+                            },
+                        },
+                    ],
+                }
+            ],
+            "temperature": 0.1,
+            "max_tokens": min(
+                2_048,
+                max(64, int(self.options.get("max_output_tokens", _DETAIL_TOKENS[detail]))),
+            ),
+            "response_format": {"type": "json_object"},
+        }
+        owns_client = self._client is None
+        client = self._client or httpx.AsyncClient(timeout=self.timeout)
+        try:
+            response = await client.post(
+                f"{self.endpoint}/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise VisionInspectError(f"OpenRouter vision request failed: {exc}") from exc
+        finally:
+            if owns_client:
+                await client.aclose()
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise VisionInspectError("OpenRouter vision response contained no choices")
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        return _parse_answer(message.get("content") if isinstance(message, dict) else None)
+
+
 def _attachment_path(image_ref: str, media_roots: list[Path]) -> Path:
     match = _ATTACHMENT_REF_RE.fullmatch(image_ref)
     if match is None:
@@ -260,6 +338,7 @@ async def execute_vision_inspect(
     workspace_dir: Path,
     media_roots: list[Path],
     options: dict[str, Any],
+    secrets: dict[str, Any] | None = None,
     provider: VisionProvider | None = None,
 ) -> str:
     """Inspect one authorized image and return bounded semantic evidence as JSON."""
@@ -287,9 +366,17 @@ async def execute_vision_inspect(
             raise VisionInspectError("vision_inspect accepts image files only")
         normalized = normalize_image(path)
         provider_name = str(options.get("provider") or "llama_cpp").strip().casefold()
-        if provider_name not in {"llama_cpp", "llama.cpp"}:
+        if provider_name not in {"llama_cpp", "llama.cpp", "openrouter"}:
             raise VisionInspectError(f"unsupported vision provider: {provider_name}")
-        selected_provider = provider or LlamaCppVisionProvider(options)
+        if provider is not None:
+            selected_provider = provider
+        elif provider_name == "openrouter":
+            selected_provider = OpenRouterVisionProvider(
+                options,
+                secrets=dict(secrets or {}),
+            )
+        else:
+            selected_provider = LlamaCppVisionProvider(options)
         answer = await selected_provider.inspect(
             image_bytes=normalized.data,
             question=question,

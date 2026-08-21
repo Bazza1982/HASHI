@@ -14,6 +14,7 @@ from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from tools.registry import ToolRegistry
 from tools.vision_inspect import (
     LlamaCppVisionProvider,
+    OpenRouterVisionProvider,
     VisionAnswer,
     VisionInspectError,
     execute_vision_inspect,
@@ -62,9 +63,13 @@ def _write_attachment(root: Path, *, message_id: str = "msg-1", attachment_id: s
 
 def test_vision_tool_is_explicitly_opt_in(tmp_path):
     wildcard = ToolRegistry(["*"], tmp_path, tmp_path, {})
+    wildcard_with_explicit_vision = ToolRegistry(
+        ["*", "vision_inspect"], tmp_path, tmp_path, {}
+    )
     explicit = ToolRegistry(["vision_inspect"], tmp_path, tmp_path, {})
 
     assert wildcard.is_allowed("vision_inspect") is False
+    assert wildcard_with_explicit_vision.is_allowed("vision_inspect") is True
     assert explicit.is_allowed("vision_inspect") is True
     assert explicit.get_tool_definitions()[0]["function"]["name"] == "vision_inspect"
 
@@ -165,6 +170,71 @@ def test_llama_cpp_provider_blocks_unlisted_remote_host():
         LlamaCppVisionProvider({"endpoint": "http://example.com:8081/v1"})
 
 
+@pytest.mark.asyncio
+async def test_openrouter_provider_uses_named_secret_and_multimodal_payload():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "answer": "Three rabbits.",
+                                    "observations": ["Three rabbit shapes are visible."],
+                                    "uncertainties": [],
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        provider = OpenRouterVisionProvider(
+            {
+                "endpoint": "https://openrouter.ai/api/v1",
+                "allowed_hosts": ["openrouter.ai"],
+                "model": "vision-test",
+                "api_key_secret": "vision_key",
+            },
+            secrets={"vision_key": "secret-value"},
+            client=client,
+        )
+        answer = await provider.inspect(
+            image_bytes=b"jpeg",
+            question="How many rabbits?",
+            detail="brief",
+        )
+    finally:
+        await client.aclose()
+
+    assert answer.answer == "Three rabbits."
+    assert captured["authorization"] == "Bearer secret-value"
+    assert captured["payload"]["model"] == "vision-test"
+    assert captured["payload"]["messages"][0]["content"][1]["image_url"][
+        "url"
+    ].startswith("data:image/jpeg;base64,")
+
+
+def test_openrouter_provider_fails_fast_without_credential():
+    with pytest.raises(VisionInspectError, match="credential"):
+        OpenRouterVisionProvider(
+            {
+                "endpoint": "https://openrouter.ai/api/v1",
+                "allowed_hosts": ["openrouter.ai"],
+            },
+            secrets={},
+        )
+
+
 def test_backend_declares_configured_native_vision(tmp_path):
     config = AgentConfig(
         name="vision",
@@ -217,6 +287,48 @@ def test_backend_manager_exposes_vision_only_in_tool_mode(tmp_path):
 
     assert native is not None and native["allowed"] == ["file_read"]
     assert tool is not None and set(tool["allowed"]) == {"file_read", "vision_inspect"}
+
+
+def test_backend_manager_preserves_explicit_vision_with_wildcard(tmp_path):
+    manager = _manager(tmp_path)
+
+    resolved = manager._resolve_tools_config(
+        {
+            "engine": "her-v2",
+            "tools": {"allowed": ["*", "vision_inspect"]},
+        }
+    )
+
+    assert resolved is not None
+    assert resolved["allowed"] == ["*", "vision_inspect"]
+
+
+def test_backend_manager_loads_global_vision_defaults_from_bom_config(tmp_path):
+    config_path = tmp_path / "agents.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "global": {
+                    "default_tools": {
+                        "allowed": ["*", "vision_inspect"],
+                        "vision_inspect": {"provider": "openrouter"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8-sig",
+    )
+    manager = _manager(tmp_path)
+    manager.global_config.config_path = config_path
+    manager._agents_json_global = manager._load_agents_json_global()
+
+    resolved = manager._resolve_tools_config(
+        {"engine": "her-v2", "tools": {"allowed": ["*"]}}
+    )
+
+    assert resolved is not None
+    assert resolved["allowed"] == ["*", "vision_inspect"]
+    assert resolved["vision_inspect"] == {"provider": "openrouter"}
 
 
 def test_backend_manager_builds_scoped_vision_media_roots(tmp_path):

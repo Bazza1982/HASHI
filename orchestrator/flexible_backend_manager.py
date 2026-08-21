@@ -68,7 +68,10 @@ class FlexibleBackendManager:
         try:
             cfg_path = getattr(self.global_config, 'config_path', None)
             if cfg_path and Path(cfg_path).exists():
-                raw = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+                # ConfigManager accepts the UTF-8 BOM used by the live
+                # agents.json. Keep this secondary read consistent; otherwise
+                # global default_tools silently disappear after agent startup.
+                raw = json.loads(Path(cfg_path).read_text(encoding="utf-8-sig"))
                 return raw.get("global", {})
         except Exception:
             pass
@@ -1143,7 +1146,14 @@ class FlexibleBackendManager:
         global_allowed = set(global_tools.get("allowed", []))
         backend_allowed = set(backend_tools.get("allowed", []))
         if "*" in global_allowed or "*" in backend_allowed:
-            merged_allowed = ["*"]
+            # Wildcards remain fail-closed for media tools inside ToolRegistry.
+            # Preserve only explicit media opt-ins alongside the wildcard so
+            # configured vision cannot silently disappear during this merge.
+            explicit_media = sorted(
+                (global_allowed | backend_allowed)
+                & {"media_read", "vision_inspect"}
+            )
+            merged_allowed = ["*", *explicit_media]
         else:
             merged_allowed = list(global_allowed | backend_allowed)
 
