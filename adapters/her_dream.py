@@ -1190,30 +1190,3 @@ def recover_interrupted_runs(
                     error=undo["error"],
                 )
     return recovered
-
-
-def render_deterministic_report(
-    manifest: Mapping[str, Any],
-) -> str:
-    run_id = str(manifest.get("run_id") or "unknown")
-    status = str(manifest.get("status") or "unknown")
-    lines = []
-    heading = (
-        "Dream completed" if status in {"completed", "no_change"} else "Dream result"
-    )
-    lines.append(f"🌙 {heading} · run {run_id}")
-    lines.append("")
-    facts = [str(item) for item in manifest.get("report_facts") or []]
-    for index, fact in enumerate(facts, start=1):
-        lines.append(f"{index}. {fact}")
-    changed = [int(item) for item in manifest.get("changed_group_numbers") or []]
-    if changed:
-        lines.extend(
-            [
-                "",
-                f"Undo: /dream undo {run_id}",
-                "Changes: "
-                + " · ".join(f"/dream undo {run_id} {number}" for number in changed),
-            ]
-        )
-    return "\n".join(lines).strip()

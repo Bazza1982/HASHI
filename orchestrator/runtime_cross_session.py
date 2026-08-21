@@ -272,9 +272,6 @@ def _pending_interaction(
     labels = _choice_labels(assistant_text)
     if labels:
         return {"kind": "choice", "labels": labels}
-    recommendation = str(metadata.get("recommended_action") or "").strip().upper()
-    if recommendation == "CONTINUE" or status == "incomplete":
-        return {"kind": "continuation", "token": "CONTINUE"}
     if _QUESTION_END_RE.search(assistant_text.rstrip()):
         return {"kind": "question"}
     return None

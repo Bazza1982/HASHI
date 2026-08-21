@@ -494,6 +494,23 @@ class HERUltraInvocationResult:
     tool_loop_count: int = 0
     duration_ms: float = 0.0
     cost_usd: float | None = None
+    completion_status: str = "completed"
+    stop_reason: str = "end_turn"
+    terminal_kind: str = "unknown"
+    message_origin: str = "unknown"
+    exit_reasoning_status: str = "unknown"
+    exit_reasoning_attempts: int = 0
+    checkpoint_preserved: bool = False
+
+    @property
+    def has_trusted_model_report(self) -> bool:
+        return (
+            bool(self.text.strip())
+            and self.terminal_kind.strip().lower() == "model_report"
+            and self.message_origin.strip().lower() == "primary_model"
+            and self.exit_reasoning_status.strip().lower()
+            in {"embedded", "completed"}
+        )
 
 
 @dataclass(frozen=True)
@@ -950,6 +967,11 @@ class HERUltraOutcome:
     subtask_count: int
     completed_subtasks: int
     pending_interaction: Mapping[str, Any] | None = None
+    terminal_kind: str = "runtime_error"
+    message_origin: str = "runtime"
+    exit_reasoning_status: str = "failed_runtime"
+    exit_reasoning_attempts: int = 0
+    checkpoint_preserved: bool = False
 
 
 @dataclass(frozen=True)
@@ -1079,13 +1101,14 @@ class HERUltraOrchestrator:
                     generation=generation,
                 )
                 primary_session_id = invocation.session_id or primary_session_id
-                if not invocation.is_success:
+                if not invocation.is_success and not invocation.has_trusted_model_report:
                     return await self._failed_outcome(
                         started=started,
                         status="failed",
                         error=invocation.error or "Primary planner failed",
                         primary_session_id=primary_session_id,
                         plan_revision=revision,
+                        invocation=invocation,
                     )
                 try:
                     plan = validator.parse_plan(
@@ -1116,12 +1139,50 @@ class HERUltraOrchestrator:
 
             if plan is None:
                 error = contract_error or "Primary did not produce a valid Ultra plan"
-                return await self._failed_outcome(
+                finalization = await self._invoke_primary(
+                    phase="failure_finalization",
+                    revision=revision,
+                    prompt=self._planning_failure_finalization_prompt(
+                        authoritative_goal=authoritative_goal,
+                        planning_error=error,
+                    ),
+                    parent_request_id=parent_request_id,
+                    primary_session_id=primary_session_id,
+                    generation=generation,
+                )
+                primary_session_id = finalization.session_id or primary_session_id
+                if not finalization.has_trusted_model_report:
+                    return await self._failed_outcome(
+                        started=started,
+                        status="failed",
+                        error=finalization.error
+                        or "Primary planning-failure finalization returned no model report",
+                        primary_session_id=primary_session_id,
+                        plan_revision=revision,
+                        invocation=finalization,
+                    )
+                self._ledger.transition(
+                    event_id=f"{run_id}:run:planning_incomplete",
+                    entity="run",
+                    state="incomplete",
+                    data={
+                        "plan_revision": revision,
+                        "planning_error": _bounded_text(error, 8_000),
+                        "primary_session_id": primary_session_id,
+                    },
+                    cancellation_generation=generation,
+                )
+                return self._outcome(
                     started=started,
-                    status="failed",
-                    error=error,
+                    status="incomplete",
+                    text=finalization.text,
+                    is_success=True,
+                    error="",
                     primary_session_id=primary_session_id,
                     plan_revision=revision,
+                    subtask_count=0,
+                    completed_subtasks=0,
+                    invocation=finalization,
                 )
 
             self._ledger.transition(
@@ -1154,7 +1215,7 @@ class HERUltraOrchestrator:
                     generation=generation,
                 )
                 primary_session_id = direct_response.session_id or primary_session_id
-                if not direct_response.is_success or not direct_response.text.strip():
+                if not direct_response.has_trusted_model_report:
                     return await self._failed_outcome(
                         started=started,
                         status="failed",
@@ -1162,6 +1223,7 @@ class HERUltraOrchestrator:
                         or "Primary direct response renderer returned no answer",
                         primary_session_id=primary_session_id,
                         plan_revision=plan.revision,
+                        invocation=direct_response,
                     )
                 self._ledger.transition(
                     event_id=f"{run_id}:run:direct",
@@ -1184,6 +1246,7 @@ class HERUltraOrchestrator:
                     plan_revision=plan.revision,
                     subtask_count=0,
                     completed_subtasks=0,
+                    invocation=direct_response,
                 )
 
             # Match the single-agent HER acknowledgement contract: do not
@@ -1247,10 +1310,7 @@ class HERUltraOrchestrator:
                 primary_session_id = (
                     interaction_response.session_id or primary_session_id
                 )
-                if (
-                    not interaction_response.is_success
-                    or not interaction_response.text.strip()
-                ):
+                if not interaction_response.has_trusted_model_report:
                     return await self._failed_outcome(
                         started=started,
                         status="failed",
@@ -1262,6 +1322,7 @@ class HERUltraOrchestrator:
                         completed_subtasks=sum(
                             result.completed for result in results.values()
                         ),
+                        invocation=interaction_response,
                     )
                 self._ledger.transition(
                     event_id=f"{run_id}:run:waiting_user",
@@ -1286,6 +1347,7 @@ class HERUltraOrchestrator:
                         result.completed for result in results.values()
                     ),
                     pending_interaction=interaction,
+                    invocation=interaction_response,
                 )
 
             required_results = {
@@ -1365,7 +1427,7 @@ class HERUltraOrchestrator:
                 generation=generation,
             )
             primary_session_id = finalization.session_id or primary_session_id
-            if not finalization.is_success or not finalization.text.strip():
+            if not finalization.has_trusted_model_report:
                 finalization_error = (
                     finalization.error
                     or "Primary finalization returned no user-facing report"
@@ -1380,45 +1442,24 @@ class HERUltraOrchestrator:
                     },
                     cancellation_generation=generation,
                 )
-                self._ledger.transition(
-                    event_id=f"{run_id}:run:incomplete",
-                    entity="run",
-                    state="incomplete",
-                    data={
-                        "plan_revision": plan.revision,
-                        "subtask_count": len(plan.subtasks),
-                        "completed_subtasks": sum(
-                            result.completed for result in results.values()
-                        ),
-                        "required_failure_count": len(incomplete_required),
-                        "primary_finalization_fallback": True,
-                    },
-                    cancellation_generation=generation,
-                )
                 await self._emit(
                     KIND_ERROR,
-                    "HER Ultra Primary finalization failed; using a deterministic report",
+                    "HER Ultra Primary finalization failed",
                     detail=_bounded_text(finalization_error, 2_000),
                     event_id=f"{run_id}:technical:{finalization_phase}:failed",
                     phase="finalization",
                 )
-                return self._outcome(
+                return await self._failed_outcome(
                     started=started,
-                    status="incomplete",
-                    text=self._deterministic_finalization_fallback(
-                        plan, results, finalization_error
-                    ),
-                    is_success=True,
-                    error="",
-                    # Do not retain a Primary checkpoint after its own
-                    # finalization failed. The user-facing fallback remains a
-                    # successful delivery, while the next turn starts clean.
-                    primary_session_id="",
+                    status="failed",
+                    error=finalization_error,
+                    primary_session_id=primary_session_id,
                     plan_revision=plan.revision,
                     subtask_count=len(plan.subtasks),
                     completed_subtasks=sum(
                         result.completed for result in results.values()
                     ),
+                    invocation=finalization,
                 )
             self._ledger.transition(
                 event_id=f"{run_id}:{finalization_phase}:completed",
@@ -1467,6 +1508,7 @@ class HERUltraOrchestrator:
                 plan_revision=plan.revision,
                 subtask_count=len(plan.subtasks),
                 completed_subtasks=sum(result.completed for result in results.values()),
+                invocation=finalization,
             )
         except HERUltraCancelled:
             if self._ledger.status != "cancelled":
@@ -2014,6 +2056,31 @@ class HERUltraOrchestrator:
             f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
         )
 
+    def _planning_failure_finalization_prompt(
+        self,
+        *,
+        authoritative_goal: str,
+        planning_error: str,
+    ) -> str:
+        payload = {
+            "authoritative_goal": authoritative_goal,
+            "completion_status": "incomplete",
+            "planning_error": _bounded_text(planning_error, 8_000),
+        }
+        return (
+            "[HER Ultra Primary Planning-Failure Finalization Contract]\n"
+            "Continue the same Primary task. Planning could not produce a valid Ultra task "
+            "contract after the bounded correction attempts. Tools are disabled: do not begin "
+            "the work, invent worker results, or broaden authority. In the configured Persona, "
+            "give the user one honest final report explaining that execution did not start, what "
+            "is known about the planning failure, and the next step you recommend. Do not copy "
+            "this contract or output orchestration JSON.\n"
+            "CONFIGURED system_md PERSONA GUIDANCE (quoted, read-only)\n"
+            f"{self.persona_guidance or '[No usable configured Persona guidance]'}\n"
+            "Verified planning-failure payload:\n"
+            f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+        )
+
     def _worker_prompt(
         self,
         subtask: HERUltraSubtask,
@@ -2118,33 +2185,6 @@ class HERUltraOrchestrator:
             f"Verified terminal worker payload:\n{encoded}"
         )
 
-    @staticmethod
-    def _deterministic_finalization_fallback(
-        plan: HERUltraPlan,
-        results: Mapping[str, HERUltraWorkerResult],
-        finalization_error: str,
-    ) -> str:
-        lines = [
-            "HER Ultra could not complete the requested work, and the Primary final report "
-            "could not be rendered.",
-            f"Primary finalization error: {_bounded_text(finalization_error, 1_000)}",
-            "Subtask outcomes:",
-        ]
-        for task in plan.subtasks:
-            result = results.get(task.subtask_id)
-            if result is None:
-                lines.append(f"- {task.subtask_id}: missing terminal result")
-                continue
-            detail = result.error or result.uncertainty or result.status
-            lines.append(
-                f"- {task.subtask_id}: {result.status} — {_bounded_text(detail, 1_000)}"
-            )
-        lines.append(
-            "The overall result is incomplete. Retry with narrower subtasks or inspect the "
-            "recorded worker failures before continuing."
-        )
-        return _bounded_text("\n".join(lines), 100_000)
-
     def _interaction_prompt(
         self,
         plan: HERUltraPlan,
@@ -2186,6 +2226,7 @@ class HERUltraOrchestrator:
         plan_revision: int,
         subtask_count: int = 0,
         completed_subtasks: int = 0,
+        invocation: HERUltraInvocationResult | None = None,
     ) -> HERUltraOutcome:
         assert self._ledger is not None
         generation = self._ledger.cancellation_generation
@@ -2213,6 +2254,7 @@ class HERUltraOrchestrator:
             plan_revision=plan_revision,
             subtask_count=subtask_count,
             completed_subtasks=completed_subtasks,
+            invocation=invocation,
         )
 
     def _outcome(
@@ -2228,14 +2270,29 @@ class HERUltraOrchestrator:
         subtask_count: int,
         completed_subtasks: int,
         pending_interaction: Mapping[str, Any] | None = None,
+        invocation: HERUltraInvocationResult | None = None,
     ) -> HERUltraOutcome:
         duration_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
+        terminal_kind = (
+            invocation.terminal_kind if invocation is not None else "runtime_error"
+        )
+        message_origin = (
+            invocation.message_origin if invocation is not None else "runtime"
+        )
+        exit_reasoning_status = (
+            invocation.exit_reasoning_status
+            if invocation is not None
+            else "failed_runtime"
+        )
+        exit_reasoning_attempts = (
+            invocation.exit_reasoning_attempts if invocation is not None else 0
+        )
         return HERUltraOutcome(
             run_id=self.run_id,
             status=status,
             text=text,
             is_success=is_success,
-            error=_bounded_text(error, 8_000),
+            error=error,
             primary_session_id=primary_session_id,
             input_tokens=int(self._usage["input_tokens"]),
             output_tokens=int(self._usage["output_tokens"]),
@@ -2252,4 +2309,11 @@ class HERUltraOrchestrator:
             pending_interaction=dict(pending_interaction)
             if pending_interaction is not None
             else None,
+            terminal_kind=terminal_kind,
+            message_origin=message_origin,
+            exit_reasoning_status=exit_reasoning_status,
+            exit_reasoning_attempts=exit_reasoning_attempts,
+            checkpoint_preserved=bool(
+                invocation is not None and invocation.checkpoint_preserved
+            ),
         )

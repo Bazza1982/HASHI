@@ -1766,7 +1766,11 @@ async def handle_backend_error(
             "summary": item.summary,
         },
     )
-    if item.silent:
+    # Silent suppresses routine success chatter, never a concrete terminal
+    # failure for a request that has a user delivery target. Provider/model
+    # failures must not disappear merely because the originating job was
+    # scheduled or otherwise marked silent.
+    if item.silent and not item.deliver_to_telegram:
         runtime_cross_session.record_turn_result(
             runtime,
             item,

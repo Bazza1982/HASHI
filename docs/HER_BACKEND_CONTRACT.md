@@ -85,9 +85,10 @@ authorization-preserving fallback frame and returns control to the primary Agent
 primary Agent continues from the authoritative request and canonical turn context under
 the unchanged runtime permission policy. It must ask the user when that context cannot
 safely resolve a material ambiguity. `planning_status=failed` and the bounded diagnostic
-are exported in JSON, kept in cross-session receipts and made visible beside the primary
-Agent's persona-authored result. A planning or review failure alone never proves that
-task execution failed or succeeded.
+are exported in JSON, kept in cross-session receipts, and exposed through technical
+telemetry when requested; HASHI does not append planning prose to the primary Agent's
+answer. A planning or review failure alone never proves that task execution failed or
+succeeded.
 
 Task planning is internal control state. The initial `TaskAcknowledgement` may be
 presented once; later `TaskPlan` revisions remain technical telemetry. Only an explicit
@@ -166,6 +167,76 @@ final answer and `remaining_work` must be empty. HER returns that answer once wi
 second execution generation. Semantic compaction runs only when another model call is
 required, so completed answers are never held behind a maintenance provider call.
 
+## Exit Reasoning and Reporting
+
+Every logical turn boundary ends in a primary-model-owned user report. A natural
+tool-free answer and a validated `direct_response` already satisfy this step. An
+iteration ceiling, budget boundary, permission denial, tool failure, pending user
+decision, dangling tool markup, or missing visible text instead starts an explicit
+tool-free Exit Reasoning and Reporting call. That call receives the authoritative
+request, preserved task frame, conversation, and tool-result ledger and must answer in
+the configured Agent persona. The model—not HER or HASHI—decides how to summarize the
+evidence and whether to recommend continuing, changing approach, asking the user, or
+stopping.
+
+The route is frozen for the whole turn: exit reasoning reuses the exact selected model,
+provider client, credentials, endpoint, reasoning configuration, permission envelope,
+and session. HER must never discover or invoke an alternate model or provider merely to
+obtain a final report. Tools are disabled and a finalization call cannot start new work.
+If the selected model requests tools or returns no safe visible answer, HER gives that
+same route one bounded tool-free recovery opportunity. A repeated failure becomes a
+typed model-protocol error; no runtime-authored `INCOMPLETE`, `CONTINUE`, `PIVOT`, review
+note, or Persona imitation may replace it.
+
+A successful terminal envelope must prove all of these fields:
+
+- `terminal_kind=model_report`;
+- `message_origin=primary_model`;
+- `exit_reasoning_status=embedded|completed`;
+- `exit_reasoning_attempts`, where zero means the accepted answer was already the
+  model's natural/direct final.
+
+HASHI rejects a nonempty message that lacks this provenance instead of mistaking legacy
+runtime prose for model output. `completion_status=completed|incomplete` describes task
+state only; it is never proof of message authorship and never selects a recommendation.
+Scheduled, background, fixed, flex, and every effort from LOW through ULTRA use this
+same terminal contract. Ultra planning exhaustion receives a tool-free Primary report;
+direct, interaction, assembly, and failure-finalization outputs carry the same
+provenance, and a failed Primary finalization cannot fall back to deterministic prose.
+HER Dream completion and Undo reports likewise require a selected-model Persona result;
+renderer failure surfaces its concrete error instead of a neutral completion report.
+Cross-session continuation is activated only by an explicit
+structured `pending_interaction`; an `incomplete` status or legacy
+`recommended_action=continue` cannot manufacture an unresolved prompt.
+
+Failure to obtain a valid primary-model report is the only terminal path without a
+Persona report. A provider/auth/quota/network failure returns the selected platform's
+concrete error text and provider provenance, subject only to credential redaction; it is
+not translated or wrapped in a generic runtime report. A repeated empty/unsafe model
+response is a concrete model-protocol error. A local process/protocol failure likewise
+identifies itself as runtime-originated rather than pretending to be a provider message.
+Stream JSON uses
+`terminal_kind=provider_error|model_protocol_error|runtime_error`, records
+`message_origin=provider|runtime`, and marks
+`exit_reasoning_status=failed_physical|failed_protocol|failed_runtime` to distinguish
+selected-platform unavailability, unusable model output, and local runtime failure.
+HASHI preserves redacted stdout and stderr independently and delivers a concrete error
+for any request that has a user delivery target, even when routine scheduled success
+chatter was marked silent. A successfully persisted failure checkpoint remains
+resumable. Explicit `/stop` remains a user control acknowledgement: its expected child
+termination is not misreported as a provider failure.
+
+The post-tool stall guard is not a tool or background-script execution timeout. It
+starts only after the tool result exists and waits for the selected provider to begin
+its next response. The first same-route attempt waits at least 60 seconds; the one safe
+stream replay waits at least 120 seconds. Global environment settings
+`CLAW_POST_TOOL_STALL_TIMEOUT_SECONDS` and
+`CLAW_POST_TOOL_RETRY_STALL_TIMEOUT_SECONDS`, their `_ANTHROPIC`, `_OPENAI`, and `_XAI`
+provider overrides, or the HASHI agent extras `post_tool_stall_timeout_sec`,
+`post_tool_retry_stall_timeout_sec`, and corresponding `_by_provider` maps may increase
+those values. Stale values below the approved floors are clamped. HASHI's user-selected
+idle and hard timeouts remain the authoritative outer limits.
+
 Semantic compaction remains capacity-driven at the existing context threshold. Before
 starting its provider call, HER derives an internal deadline from HASHI's effective
 `/timeout` idle policy, caps it by the request's remaining hard timeout, and reserves a
@@ -195,15 +266,15 @@ inputs and outputs remain addressable by stable evidence IDs; the compact review
 is only an index, and truncation never makes older raw evidence inaccessible. MAX+ may
 also expose a disposable, network-isolated `ReviewRun`, but only for an exact command
 declared in the initial task profile. Reviewer `pass`, `revise`, and `block` verdicts are
-advisory. Final review never reopens task execution, calls tools, vetoes delivery, or
-turns an otherwise usable result into a runtime error. A concern may cause at most one
-tool-free wording revision by the primary Agent; HER retains the reviewed candidate and
-falls back to it if that revision fails. The same final response ends with a compact
-`pass`, non-blocking concern (up to three items), or reviewer-unavailable note. The
-reviewer never sends a second final message and never replaces the primary Agent's
-judgment. Every independent reviewer provider call has a 90-second hard deadline; a
-timeout follows the same reviewer-unavailable, fail-open path. Provider-returned
-encrypted or redacted reasoning is never reconstructed.
+advisory. Final review never reopens task execution, calls tools, or sends a second final
+message. Reviewer timeout, invalid output, and unavailability fail open and remain
+structured telemetry rather than runtime-authored prose. A supported concern may cause
+at most one tool-free wording revision by the primary Agent; only that Agent may
+incorporate the concern into the user-facing answer. If this primary exit-reasoning call
+physically fails, the exact provider/runtime error contract above applies instead of
+silently returning a stale candidate. Every independent reviewer provider call has a
+90-second hard deadline. Provider-returned encrypted or redacted reasoning is never
+reconstructed.
 
 HIGH self-review and the shared mid-task replanning checkpoints use the same immutable
 task evidence store through a bounded inline ledger of current-turn tool inputs and
@@ -370,11 +441,12 @@ reorders or deletes history to make an invalid request appear valid.
 
 Every stream-json run that emitted `run_started` emits exactly one final
 `run_finished`, including HTTP/auth and malformed/truncated provider-stream failures.
-Protocol failures identify the last safe event and use a stable public message. Failed
-`run_finished` events retain redacted `http_status`, `error_type`,
-`provider_request_id`, semantic `error_message`, bounded `body_snippet`, and
-`retryable` fields when available. HASHI correlates those fields and bounded
-stderr with its own request ID in `backend_state/her_diagnostics.jsonl`.
+Protocol failures identify the last safe event. The terminal `message` and
+`error_message` preserve the concrete provider or local error instead of replacing it
+with a generic public sentence. Failed `run_finished` events retain redacted
+`http_status`, `error_type`, `provider_request_id`, bounded `body_snippet`, and
+`retryable` fields when available. HASHI correlates those fields plus separately bounded
+stdout and stderr with its own request ID in `backend_state/her_diagnostics.jsonl`.
 Redaction targets configured credential values and bearer tokens; status,
 provider trace IDs, error types, and diagnostic prose remain intact.
 

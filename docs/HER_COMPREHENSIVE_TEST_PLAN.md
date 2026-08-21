@@ -255,12 +255,14 @@ prove exact edge behavior before any paid API run:
 5. Assistant deltas concatenate exactly to the promoted final answer.
 6. Tool start/end pairs are balanced and correlated by ID.
 7. Structured permission events never print an interactive prompt into JSONL.
-8. Thinking-only output receives one tool-free visible-finalization retry.
-9. Repeated thinking-only output ends as `incomplete/no_final_text` with a deterministic
-   report and a terminal event.
+8. Thinking-only output receives one tool-free Exit Reasoning retry on the exact same
+   model/provider route.
+9. Repeated thinking-only output ends as a typed `model_protocol_error` with the concrete
+   reason and one terminal event; no runtime-authored final report is invented.
 10. Reasoning-only assistant history is not sent as an invalid DeepSeek history message.
 11. Provider 400, 401, 403, 408, 429, 500, truncated SSE, malformed JSON, connection reset,
-    and delayed response produce the expected sanitized outcome.
+    and delayed response preserve the concrete provider/local error with only secret
+    redaction and correct provenance.
 12. Native limits 12/32/96/192/384/512 are hit exactly using a scripted model.
 13. MAX+ iteration-ceiling handling is tested; neither an internal wall-clock nor
     cumulative token usage terminates the task.
@@ -283,12 +285,32 @@ prove exact edge behavior before any paid API run:
     the omitted raw result instead of resending the ledger.
 21. `revise` and `block` verdicts reach the primary agent as advisory feedback. Exhausting
     review revisions still produces an agent-owned, uncertainty-aware final answer; a final
-    reviewer `pass` is not required. Every independent-review provider request carries the
-    90-second hard deadline, and timeout/error/invalid output takes the same fail-open final path.
+    reviewer `pass` is not required. Reviewer timeout/error/invalid output fails open as
+    structured telemetry, while a physical failure of the primary Agent's subsequent Exit
+    Reasoning call surfaces the exact error. Every independent-review provider request
+    carries the 90-second hard deadline.
 22. Only a MAX+ profile that selects `isolated_recheck`, independent review, and exact test
     commands receives `ReviewRun`. Unplanned commands are denied, the source workspace is
     not writable, network is unavailable, and no unsafe fallback runs when isolation is
     absent.
+23. Every successful final at LOW through ULTRA, fixed/flex, and scheduled/direct paths has
+    `terminal_kind=model_report`, `message_origin=primary_model`, and an accepted
+    `exit_reasoning_status`; missing provenance rejects even nonempty legacy text.
+24. Negative assertions forbid `Execution status: INCOMPLETE`, runtime-selected
+    `CONTINUE`/`PIVOT`, adapter Persona imitation, and runtime-appended review/planning prose.
+25. A failed stream checkpoints before terminal delivery when possible, retains redacted
+    stdout and stderr separately, and delivers the exact concrete error for a request with
+    a user target even when scheduled success output is marked silent. Provider, repeated
+    unusable model output, and local runtime failures respectively carry
+    `failed_physical`, `failed_protocol`, and `failed_runtime`; `/stop` remains the explicit
+    suppression exception for expected process termination.
+26. Post-tool response-start timeout defaults to 60 seconds, retries the identical safe
+    request once with 120 seconds, honors global/provider overrides only above those floors,
+    and never changes the selected model, provider, endpoint, or authority.
+27. Ultra planning exhaustion ends in a tool-free Primary report; Ultra direct,
+    interaction, assembly, and failure-finalization outputs carry provenance. Primary
+    physical failure remains an exact error with any persisted checkpoint, never a
+    deterministic success. Dream completion/Undo renderer failure follows the same rule.
 
 ### Layer B — staged live cells
 
@@ -524,22 +546,23 @@ Telegram messages, session-file size, compaction count, and latency drift.
 
 ## 11. Exit and fault matrix
 
-Every terminal path must have a deterministic expected status and user message.
+Every terminal path must have a contractually defined status, message owner, and
+provenance; logical report wording remains the primary model's decision.
 
 | Fault or boundary | Expected behavior |
 | --- | --- |
-| normal provider end | `completed`, provider stop recorded, one final answer |
-| native iteration ceiling | `incomplete/max_iterations`, verified partial work listed, continuation offered |
-| repeated thinking-only response | `incomplete/no_final_text`, deterministic visible report |
-| one thinking-only response | one tool-free visible-finalization retry, then normal terminal event |
-| provider 400 invalid history | sanitized error or recovered visible finalization; never raw prompt leakage |
-| 401/403 | fail closed with route/auth diagnosis; no secret text |
-| 429/5xx/transient reset | bounded retry; side effects not duplicated; final state explicit |
-| malformed/truncated stream | protocol failure naming the last safe event; no invented completion |
-| tool error loop | Gateway guard stops loop and asks for partial report |
+| normal provider end | `completed`, provider stop recorded, provenance identifies one primary-model final |
+| native iteration ceiling | `incomplete/max_iterations`; same selected model reports evidence and chooses its recommendation |
+| repeated thinking-only response | typed `model_protocol_error`; no invented visible report |
+| one thinking-only response | one same-route, tool-free Exit Reasoning retry, then normal terminal event |
+| provider 400 invalid history | exact provider error with secret redaction, or same-route recovered model final; never prompt leakage |
+| 401/403 | exact selected-platform auth error; no fallback provider and no secret text |
+| 429/5xx/transient reset | bounded same-route retry; side effects not duplicated; second error remains exact |
+| malformed/truncated stream | concrete protocol failure naming the last safe event; no invented completion |
+| tool error loop | Gateway guard records evidence; primary model performs Exit Reasoning |
 | `/stop` | child process terminates, original task persists, no generic failure delivery |
 | kill after tool success | tool result remains auditable; next turn verifies before retrying |
-| missing `run_finished` | request fails closed; error is sanitized and identifies protocol failure |
+| missing `run_finished` | request fails closed with a concrete local protocol error; no Persona fabrication |
 | valid `run_finished` then stderr noise | completed result remains authoritative |
 | HASHI delivery retry | backend is not rerun; final message delivered at most once |
 | `/new` | old session cleared; new canary-leak probe is clean |
