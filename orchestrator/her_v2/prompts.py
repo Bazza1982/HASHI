@@ -40,12 +40,13 @@ _SCHEMAS = {
     Stage.EXECUTION: {
         "disposition": (
             "COMPLETED | COMPLETED_WITH_LIMITATIONS | FAILED | "
-            "ABANDONED | REPLAN_REQUIRED"
+            "ABANDONED | REPLAN_REQUIRED | USER_INPUT_REQUIRED"
         ),
         "summary": "truthful result based only on actual execution evidence",
         "evidence_refs": [],
         "limitations": [],
         "replan_reason": "required only for REPLAN_REQUIRED",
+        "clarification": "required only for USER_INPUT_REQUIRED",
         "commentary": (
             "optional concise neutral user-facing update based only on this "
             "completed stage result; omit when no useful update exists"

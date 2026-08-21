@@ -64,6 +64,9 @@ class BackendResponse:
     tool_call_count: int = 0
     tool_loop_count: int = 0
     stream_metadata: Optional[dict[str, Any]] = None
+    # Keep new fields at the end so older positional construction remains valid.
+    # Consumers must still apply their own semantic schema to provider-native data.
+    structured_data: Optional[dict[str, Any]] = None
 
 
 class BaseBackend(ABC):

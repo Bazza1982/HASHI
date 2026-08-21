@@ -5,7 +5,12 @@ import time
 from typing import Any
 
 from adapters.base import BackendResponse, TokenUsage
-from adapters.openrouter_api import OpenRouterAdapter, _APIResult
+from adapters.openrouter_api import (
+    OpenRouterAdapter,
+    _APIResult,
+    _assistant_content_text,
+    _message_structured_data,
+)
 from adapters.stream_events import KIND_TEXT_DELTA, KIND_THINKING, StreamEvent
 from adapters.xai_imagine import generate_xai_image, is_imagine_image_model
 from adapters.xai_oauth_credentials import (
@@ -248,7 +253,7 @@ class XaiApiAdapter(OpenRouterAdapter):
         choice = choices[0]
         message = choice.get("message") or {}
         finish_reason = choice.get("finish_reason") or "stop"
-        ai_text = message.get("content") or ""
+        ai_text = _assistant_content_text(message.get("content"))
         reasoning_content = str(message.get("reasoning_content") or message.get("reasoning") or "")
         tool_calls = message.get("tool_calls") or None
         usage = data.get("usage") or {}
@@ -260,6 +265,7 @@ class XaiApiAdapter(OpenRouterAdapter):
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
             thinking_tokens=comp_details.get("reasoning_tokens", 0),
+            structured_data=_message_structured_data(message),
         )
         result.reasoning_content = reasoning_content
         return result
@@ -279,7 +285,13 @@ class XaiApiAdapter(OpenRouterAdapter):
         if on_stream_event is not None:
             reasoning = str(getattr(result, "reasoning_content", "") or "").strip()
             if reasoning:
-                await on_stream_event(StreamEvent(kind=KIND_THINKING, summary=reasoning[:400]))
+                await on_stream_event(
+                    StreamEvent(
+                        kind=KIND_THINKING,
+                        summary=reasoning[:400],
+                        raw_delta=reasoning,
+                    )
+                )
             if result.text:
                 await on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary=result.text))
 
@@ -522,6 +534,7 @@ class XaiApiAdapter(OpenRouterAdapter):
         ]
         headers = self._xai_headers()
         last_text = ""
+        last_structured_data = None
         result = None
         total_prompt = 0
         total_completion = 0
@@ -544,6 +557,7 @@ class XaiApiAdapter(OpenRouterAdapter):
                 total_thinking += result.thinking_tokens
 
                 last_text = result.text
+                last_structured_data = result.structured_data
                 if not result.tool_calls or not self.tool_registry:
                     break
 
@@ -568,6 +582,7 @@ class XaiApiAdapter(OpenRouterAdapter):
                     total_completion += result.completion_tokens
                     total_thinking += result.thinking_tokens
                     last_text = result.text
+                    last_structured_data = result.structured_data
                     break
 
             from adapters.base import BackendResponse, TokenUsage
@@ -581,6 +596,7 @@ class XaiApiAdapter(OpenRouterAdapter):
             return BackendResponse(
                 text=last_text,
                 duration_ms=duration_ms,
+                structured_data=last_structured_data,
                 is_success=True,
                 stop_reason=result.finish_reason if result else "stop",
                 usage=usage,

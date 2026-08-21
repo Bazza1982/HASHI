@@ -169,13 +169,12 @@ Meditation is scheduled without progress chatter only after the final response
 has been accepted by HASHI's ordinary final-delivery boundary and the completed
 terminal state has been persisted. The later transport receipt is separate
 audit truth and is not a prerequisite for background learning. The HER v2
-`meditation` stage role is fixed to the configured `lightweight` profile and
-runs in an isolated, tool-free, side-effect-free stage with a bounded timeout.
-It may use the same provider backend as the foreground HER stages; backend
-separation is not required. The selected model must be the lightweight/flash
-variant, not the premium/pro execution variant, because Meditation has no
-execution authority. It cannot alter the completed turn or replace any live
-execution state.
+`meditation` stage role uses its explicitly configured and Agent-granted
+provider profile. It runs in an isolated, tool-free, side-effect-free stage
+with a bounded timeout. It may use the same provider backend or profile as a
+foreground HER stage; neither backend separation nor a literal profile name
+is the safety boundary. Meditation has no execution authority and cannot alter
+the completed turn or replace any live execution state.
 
 The model may return `create`, `update`, or `delete` actions. An empty action list
 is valid and preferred when the run did not contain a reusable learning event.

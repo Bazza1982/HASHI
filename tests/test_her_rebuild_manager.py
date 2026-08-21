@@ -265,6 +265,7 @@ def test_recovery_defers_interrupted_rollback_for_startup_reconciliation(
     assert store.get(created.job_id).state == RebuildStage.ROLLING_BACK
 
 
+@pytest.mark.asyncio
 async def test_offline_status_is_strictly_read_only_during_active_build(
     tmp_path: Path, capsys
 ) -> None:
@@ -289,6 +290,7 @@ async def test_offline_status_is_strictly_read_only_during_active_build(
     assert store.get(created.job_id).state == RebuildStage.BUILDING
 
 
+@pytest.mark.asyncio
 async def test_offline_status_does_not_create_state_when_no_job_exists(
     tmp_path: Path, capsys
 ) -> None:
@@ -461,6 +463,7 @@ def test_manager_reconciles_interrupted_selection_before_agent_startup(
     assert reconciled[0].details["cold_start_reconciled"] is True
 
 
+@pytest.mark.asyncio
 async def test_submit_rejects_live_non_her_target_before_toolchain_probe(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -497,6 +500,7 @@ async def test_submit_rejects_live_non_her_target_before_toolchain_probe(
     assert probed is False
 
 
+@pytest.mark.asyncio
 async def test_manager_builds_verifies_adopts_and_notifies_transactionally(
     tmp_path: Path,
 ) -> None:

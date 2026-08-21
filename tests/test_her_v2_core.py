@@ -155,6 +155,12 @@ def test_terminal_truth_table():
         (ExecutionDisposition.FAILED, None, False, TerminalState.FAILED),
         (ExecutionDisposition.ABANDONED, None, False, TerminalState.ABANDONED),
         (
+            ExecutionDisposition.USER_INPUT_REQUIRED,
+            None,
+            False,
+            TerminalState.PENDING_USER_INPUT,
+        ),
+        (
             ExecutionDisposition.COMPLETED,
             ReviewOutcome.CONDITIONAL_PASS,
             False,
@@ -182,7 +188,7 @@ def test_terminal_truth_table():
         ), (disposition, review, limited)
 
 
-def test_provider_profiles_are_configured_and_cannot_recurse_into_her():
+def test_provider_profiles_route_by_configuration_and_cannot_recurse_into_her():
     config = HERv2Config.from_mapping({"profiles": _profiles()})
     assert config.shadow_mode is False
     assert config.profile_for(Stage.TRIAGE).model == "model-triage"
@@ -194,13 +200,13 @@ def test_provider_profiles_are_configured_and_cannot_recurse_into_her():
     assert meditation.model == "model-lightweight"
     assert meditation.model != premium.model
     assert config.execution_profile_for(TriageClassification.SIMPLE_TASK).name == "lightweight"
-    with pytest.raises(HERv2ConfigurationError, match="Meditation.*lightweight"):
-        HERv2Config.from_mapping(
-            {
-                "profiles": _profiles(),
-                "stage_roles": {"meditation": "premium"},
-            }
-        )
+    configured = HERv2Config.from_mapping(
+        {
+            "profiles": _profiles(),
+            "stage_roles": {"meditation": "premium"},
+        }
+    )
+    assert configured.profile_for(Stage.MEDITATION).name == "premium"
     with pytest.raises(HERv2ConfigurationError, match="non-HER"):
         ProviderProfile("bad", "her-v2", "recursive")
 

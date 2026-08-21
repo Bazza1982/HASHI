@@ -896,6 +896,46 @@ async def answer_preview_loop(
         await _edit()
 
 
+def _transport_accepted(result: Any) -> bool:
+    """Normalize supported transport receipts without guessing from truthiness."""
+
+    if result is None:
+        return False
+    if isinstance(result, bool):
+        return result
+    if isinstance(result, int):
+        return result > 0
+    if isinstance(result, str):
+        return bool(result.strip())
+    if isinstance(result, dict):
+        for key in ("accepted", "delivered", "ok"):
+            if key in result:
+                return result.get(key) is True
+        return result.get("message_id") is not None
+    if isinstance(result, (tuple, list)):
+        if len(result) >= 2 and isinstance(result[1], int):
+            return result[1] > 0
+        return any(_transport_accepted(item) for item in result)
+    for key in ("accepted", "delivered", "ok"):
+        accepted = getattr(result, key, None)
+        if isinstance(accepted, bool):
+            return accepted
+    return getattr(result, "message_id", None) is not None
+
+
+def _transport_message_id(result: Any) -> Any | None:
+    if result is None or isinstance(result, bool):
+        return None
+    if isinstance(result, dict):
+        return result.get("message_id")
+    message_id = getattr(result, "message_id", None)
+    if message_id is not None:
+        return message_id
+    if isinstance(result, (str, int)):
+        return result
+    return None
+
+
 def wrap_her_persona_stream(
     runtime,
     item,
@@ -929,7 +969,6 @@ def wrap_her_persona_stream(
     initial_resolution_capable = bool(
         callable(getattr(runtime, "_send_text", None))
         and callable(getattr(bot, "edit_message_text", None))
-        and callable(getattr(bot, "delete_message", None))
     )
 
     async def _send_event(event, *, purpose: str, commentary: bool = False):
@@ -954,7 +993,7 @@ def wrap_her_persona_stream(
                     _request_id=item.request_id,
                     _purpose=purpose,
                 )
-                transport_accepted = result is not None
+                transport_accepted = _transport_accepted(result)
             else:
                 result = await runtime.send_long_message(
                     item.chat_id,
@@ -962,11 +1001,7 @@ def wrap_her_persona_stream(
                     request_id=item.request_id,
                     purpose=purpose,
                 )
-                transport_accepted = bool(
-                    isinstance(result, tuple)
-                    and len(result) >= 2
-                    and int(result[1] or 0) > 0
-                )
+                transport_accepted = _transport_accepted(result)
         except Exception as exc:
             _append_her_message_audit(
                 runtime,
@@ -991,9 +1026,9 @@ def wrap_her_persona_stream(
             )
             return False
         event_id = str(getattr(event, "event_id", "") or "").strip()
-        message_id = getattr(result, "message_id", None)
+        message_id = _transport_message_id(result)
         if event_id and message_id is not None:
-            provisional_messages[event_id] = result
+            provisional_messages[event_id] = message_id
         label = "acknowledgement" if purpose == "task_acknowledgement" else purpose
         _append_her_message_audit(
             runtime,
@@ -1022,14 +1057,16 @@ def wrap_her_persona_stream(
         target_event_id = str(
             getattr(event, "target_event_id", "") or ""
         ).strip()
-        message = provisional_messages.get(target_event_id)
-        message_id = getattr(message, "message_id", None)
+        message_id = provisional_messages.get(target_event_id)
         if message_id is None:
             return False
         resolution = str(getattr(event, "resolution", "") or "").strip()
         try:
             if resolution == "discard":
-                await runtime.app.bot.delete_message(
+                delete_message = getattr(runtime.app.bot, "delete_message", None)
+                if not callable(delete_message):
+                    return False
+                await delete_message(
                     chat_id=item.chat_id,
                     message_id=message_id,
                 )

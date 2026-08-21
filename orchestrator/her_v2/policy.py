@@ -40,10 +40,10 @@ def resolve_policy(
 def replan_eligible(
     classification: TriageClassification, policy: EffortPolicy
 ) -> bool:
-    return policy.replanning and classification in {
-        TriageClassification.COMPLEX_TASK,
-        TriageClassification.HIGH_VOLUME_TASK,
-    }
+    # Classification describes the task and remains immutable.  Replanning is
+    # an orchestration capability selected by effort, not a second classifier.
+    del classification
+    return policy.replanning
 
 
 def terminal_for_execution(
@@ -56,6 +56,8 @@ def terminal_for_execution(
         return TerminalState.FAILED
     if disposition is ExecutionDisposition.ABANDONED:
         return TerminalState.ABANDONED
+    if disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
+        return TerminalState.PENDING_USER_INPUT
     if disposition is ExecutionDisposition.REPLAN_REQUIRED:
         return TerminalState.COMPLETED_WITH_LIMITATIONS
     if (

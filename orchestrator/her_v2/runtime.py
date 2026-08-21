@@ -66,6 +66,7 @@ from .structured import (
     parse_report,
     parse_review,
     parse_triage,
+    resolve_stage_response,
 )
 
 
@@ -93,6 +94,7 @@ class _TurnState:
     delivery_id: str = ""
     delivery_kind: str = ""
     delivery_event_id: str = ""
+    execution_capability_escalated: bool = False
 
 
 class HERv2Runtime:
@@ -263,52 +265,66 @@ class HERv2Runtime:
                 allow_tools=False,
                 context={
                     "instruction": (
-                        "Return JSON with classification, goal, and optional clarification. "
-                        "Classification must be exactly one HER v2 classification."
+                        "Return JSON with classification and optional goal interpretation "
+                        "or clarification. Classification must be exactly one HER v2 "
+                        "classification."
                     )
                 },
             )
         )
         immediate_pair = None
         triage_pair = None
-        immediate_attempted_early = False
+        immediate_error: StageInvocationError | None = None
+        immediate_delivery_attempted_early = False
         immediate_delivered_early = False
+
+        async def consume_immediate() -> None:
+            nonlocal immediate_pair, immediate_error
+            try:
+                immediate_pair = await immediate_task
+            except StageInvocationError as exc:
+                immediate_error = exc
+
         try:
             done, _pending = await asyncio.wait(
                 {immediate_task, triage_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if immediate_task in done and triage_task not in done:
-                immediate_pair = await immediate_task
-                immediate_attempted_early = True
-                immediate_delivered_early = await self._deliver(
-                    state,
-                    kind="immediate",
-                    text=immediate_pair[1],
-                    event_id=f"{state.ledger.turn_id}:immediate",
-                    required=False,
-                )
-            if triage_task in done:
-                triage_pair = await triage_task
-            if immediate_pair is None:
-                immediate_pair = await immediate_task
-            if triage_pair is None:
-                triage_pair = await triage_task
+                await consume_immediate()
+                if immediate_pair is not None:
+                    immediate_delivery_attempted_early = True
+                    immediate_delivered_early = await self._deliver(
+                        state,
+                        kind="immediate",
+                        text=immediate_pair[1],
+                        event_id=f"{state.ledger.turn_id}:immediate",
+                        required=False,
+                    )
+            triage_pair = await triage_task
         except BaseException:
             immediate_task.cancel()
             triage_task.cancel()
             await asyncio.gather(
                 immediate_task, triage_task, return_exceptions=True
             )
+            if immediate_delivered_early:
+                with suppress(Exception):
+                    await self._resolve_initial(
+                        state,
+                        resolution="discard",
+                        text="",
+                        target_event_id=f"{state.ledger.turn_id}:immediate",
+                        event_id=f"{state.ledger.turn_id}:immediate:discard",
+                    )
             raise
-        _immediate_response, immediate_text = immediate_pair
+
         _triage_response, triage = triage_pair
-        assert isinstance(immediate_text, str)
         assert isinstance(triage, TriageDecision)
 
         # Triage's model-authored goal is evidence, not authority.  Every
         # downstream request continues to receive the immutable user request.
-        if _normalise_text(triage.goal) != _normalise_text(state.goal):
+        if triage.goal and _normalise_text(triage.goal) != _normalise_text(state.goal):
             self._audit(
                 state,
                 stage=Stage.TRIAGE.value,
@@ -323,6 +339,54 @@ class HERv2Runtime:
             )
         self._record_triage(state, triage.classification)
         state.progress.record("classification", triage.classification.value)
+
+        # Triage is authoritative.  Immediate Response is required only when
+        # Triage makes it the direct final answer; work and clarification must
+        # not wait for, or fail with, an optional presentation lane.
+        immediate_skipped = False
+        if immediate_pair is None and immediate_error is None:
+            if triage.classification is TriageClassification.DIRECT_RESPONSE:
+                await consume_immediate()
+            elif immediate_task.done():
+                await consume_immediate()
+            else:
+                immediate_task.cancel()
+                await asyncio.gather(immediate_task, return_exceptions=True)
+                immediate_skipped = True
+
+        if immediate_error is not None or immediate_skipped:
+            self._audit(
+                state,
+                stage=Stage.IMMEDIATE_RESPONSE.value,
+                role=self.config.stage_roles[Stage.IMMEDIATE_RESPONSE],
+                event="optional_stage_degraded",
+                event_id=f"{state.ledger.turn_id}:immediate:degraded",
+                payload={
+                    "classification": triage.classification.value,
+                    "reason": (
+                        str(immediate_error)
+                        if immediate_error is not None
+                        else "triage_completed_before_optional_immediate_response"
+                    ),
+                    "authoritative_path_continued": (
+                        triage.classification
+                        is not TriageClassification.DIRECT_RESPONSE
+                    ),
+                },
+            )
+        if (
+            triage.classification is TriageClassification.DIRECT_RESPONSE
+            and immediate_pair is None
+        ):
+            raise StageInvocationError(
+                "direct response requires a valid Immediate Response: "
+                f"{immediate_error or 'response unavailable'}"
+            )
+
+        immediate_text = ""
+        if immediate_pair is not None:
+            _immediate_response, immediate_text = immediate_pair
+            assert isinstance(immediate_text, str)
 
         immediate_resolution_delivered = False
         if immediate_delivered_early:
@@ -348,7 +412,9 @@ class HERv2Runtime:
             if triage.classification is TriageClassification.DIRECT_RESPONSE
             else "acknowledgement"
         )
-        if not immediate_attempted_early or not immediate_delivered_early:
+        if immediate_text and (
+            not immediate_delivery_attempted_early or not immediate_delivered_early
+        ):
             await self._deliver(
                 state,
                 kind=immediate_kind,
@@ -472,6 +538,8 @@ class HERv2Runtime:
             self._merge_execution_evidence(state, execution)
 
         self._merge_execution_evidence(state, execution)
+        if execution.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
+            return await self._execution_input_result(state, execution)
         await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
 
         review_outcome: ReviewOutcome | None = None
@@ -479,6 +547,8 @@ class HERv2Runtime:
             execution, review_outcome = await self._review_and_remediate(
                 state, classification, execution, policy.max_reviews, policy.max_replans
             )
+            if execution.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
+                return await self._execution_input_result(state, execution)
 
         await self._transition(state, LifecycleState.FINALISING)
         desired_terminal = terminal_for_execution(
@@ -551,6 +621,32 @@ class HERv2Runtime:
             ),
         )
 
+    async def _execution_input_result(
+        self,
+        state: _TurnState,
+        execution: ExecutionOutcome,
+    ) -> TurnResult:
+        """Pause truthfully when execution discovers missing user authority."""
+
+        clarification = execution.clarification
+        await self._deliver(
+            state,
+            kind="clarification",
+            text=clarification,
+            event_id=f"{state.ledger.turn_id}:execution:clarification",
+            required=True,
+        )
+        await self._transition(
+            state,
+            LifecycleState.PENDING_USER_INPUT,
+            terminal_reason="execution_user_input_required",
+        )
+        return self._result(
+            state,
+            terminal=TerminalState.PENDING_USER_INPUT,
+            text=clarification,
+        )
+
     async def _execute_once(
         self, state: _TurnState, classification: TriageClassification
     ) -> ExecutionOutcome:
@@ -561,7 +657,11 @@ class HERv2Runtime:
                 for ref in result.evidence_refs:
                     if ref not in state.evidence_refs:
                         state.evidence_refs.append(ref)
-        profile = self.config.execution_profile_for(classification)
+        profile = (
+            self.config.profile_for(Stage.EXECUTION)
+            if state.execution_capability_escalated
+            else self.config.execution_profile_for(classification)
+        )
         _response, execution = await self._invoke_stage(
             state,
             Stage.EXECUTION,
@@ -574,6 +674,7 @@ class HERv2Runtime:
                 "active_plan": state.active_plan,
                 "plan_id": state.ledger.plan_id,
                 "authority": "primary_agent",
+                "execution_capability_escalated": state.execution_capability_escalated,
                 "shadow_mode": self.config.shadow_mode,
                 "sub_agent_results": [
                     {
@@ -595,6 +696,7 @@ class HERv2Runtime:
                 tuple(dict.fromkeys((*execution.evidence_refs, *_response.evidence_refs))),
                 execution.limitations,
                 execution.replan_reason,
+                execution.clarification,
             )
         return execution
 
@@ -728,12 +830,19 @@ class HERv2Runtime:
                 publish_commentary=False,
             )
             assert isinstance(outcome, ExecutionOutcome)
-            if outcome.disposition is ExecutionDisposition.REPLAN_REQUIRED:
+            if outcome.disposition in {
+                ExecutionDisposition.REPLAN_REQUIRED,
+                ExecutionDisposition.USER_INPUT_REQUIRED,
+            }:
                 outcome = ExecutionOutcome(
                     ExecutionDisposition.FAILED,
-                    "Sub-agent requested prohibited Replanning; request returned as evidence.",
+                    "Sub-agent requested prohibited orchestration authority; request returned as evidence.",
                     outcome.evidence_refs,
-                    (outcome.replan_reason,),
+                    tuple(
+                        item
+                        for item in (outcome.replan_reason, outcome.clarification)
+                        if item
+                    ),
                 )
             evidence_refs = tuple(
                 dict.fromkeys((*outcome.evidence_refs, *response.evidence_refs))
@@ -809,6 +918,29 @@ class HERv2Runtime:
         )
         state.replan_count += 1
         self._activate_plan(state, plan, replacement=True)
+        if (
+            classification is TriageClassification.SIMPLE_TASK
+            and not state.execution_capability_escalated
+        ):
+            state.execution_capability_escalated = True
+            self._audit(
+                state,
+                stage=Stage.REPLANNING.value,
+                role=self.config.stage_roles[Stage.REPLANNING],
+                event="execution_capability_escalated",
+                event_id=(
+                    f"{state.ledger.turn_id}:replan:{state.replan_count}:"
+                    "capability-escalated"
+                ),
+                payload={
+                    "classification": classification.value,
+                    "classification_changed": False,
+                    "execution_profile": self.config.profile_for(
+                        Stage.EXECUTION
+                    ).name,
+                    "reason": reason,
+                },
+            )
 
     async def _review_and_remediate(
         self,
@@ -869,6 +1001,8 @@ class HERv2Runtime:
             await self._transition(state, LifecycleState.EXECUTING)
             execution = await self._execute_once(state, classification)
             self._merge_execution_evidence(state, execution)
+            if execution.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
+                return execution, last_outcome
             await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
             if state.effort is Effort.XHIGH:
                 return execution, last_outcome
@@ -908,11 +1042,21 @@ class HERv2Runtime:
             )
         )
         last_error: Exception | None = None
+        structure_retry_feedback: Mapping[str, Any] | None = None
         state.stage_invocation_serial += 1
         invocation_serial = state.stage_invocation_serial
         for attempt in range(1, limit + 1):
             if state.control.stopped:
                 raise TurnStopped(state.control.reason)
+            attempt_context = dict(context or {})
+            if structure_retry_feedback is not None:
+                attempt_context["previous_structure_error"] = dict(
+                    structure_retry_feedback
+                )
+                attempt_context["retry_instruction"] = (
+                    "Correct only the reported response-envelope defect. Preserve "
+                    "the authoritative goal, classification, evidence, and uncertainty."
+                )
             request = StageRequest(
                 turn_id=state.ledger.turn_id,
                 request_ref=state.request_ref,
@@ -923,7 +1067,7 @@ class HERv2Runtime:
                 classification=state.ledger.classification,
                 effort=state.effort,
                 plan_id=state.ledger.plan_id,
-                context=dict(context or {}),
+                context=attempt_context,
                 allow_tools=allow_tools,
                 allow_side_effects=allow_side_effects,
                 progress_callback=self._progress_callback(state),
@@ -952,7 +1096,7 @@ class HERv2Runtime:
                     "provider_reasoning": selected.reasoning,
                     "allow_tools": allow_tools,
                     "allow_side_effects": allow_side_effects,
-                    "context": dict(context or {}),
+                    "context": attempt_context,
                 },
             )
             state.ledger.add_log_ref(start_ref)
@@ -1008,7 +1152,30 @@ class HERv2Runtime:
                 effective_response = response
                 validation_source = "provider_response"
                 try:
-                    parsed = validator(response)
+                    resolution = resolve_stage_response(response, validator)
+                    effective_response = resolution.response
+                    parsed = resolution.parsed
+                    validation_source = resolution.source
+                    if resolution.recovered:
+                        self._audit(
+                            state,
+                            stage=stage.value,
+                            role=role,
+                            event="structured_response_compatibility_applied",
+                            event_id=f"{attempt_prefix}:compatibility",
+                            provider=response.provider or selected.engine,
+                            model=response.model or selected.model,
+                            attempt=attempt,
+                            payload={
+                                "validation_source": resolution.source,
+                                "rejected_candidates": [
+                                    {"source": source, "error": error}
+                                    for source, error in resolution.rejected_candidates
+                                ],
+                                "authority_changed": False,
+                                "reasoning_exposed_to_user": False,
+                            },
+                        )
                 except StructuredOutputError as exc:
                     if not allow_side_effects:
                         raise
@@ -1087,7 +1254,10 @@ class HERv2Runtime:
                 )
                 state.ledger.add_log_ref(complete_ref)
                 self.ledger_store.save(state.ledger)
-                if publish_commentary and validation_source == "provider_response":
+                if publish_commentary and validation_source not in {
+                    "reasoning_recovery",
+                    "tool_free_structure_repair",
+                }:
                     await self._publish_stage_commentary(
                         state,
                         response=effective_response,
@@ -1112,6 +1282,12 @@ class HERv2Runtime:
                 )
             except (StructuredOutputError, StageInvocationError) as exc:
                 last_error = exc
+                if isinstance(exc, StructuredOutputError):
+                    structure_retry_feedback = {
+                        "attempt": attempt,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
                 if isinstance(exc, StageInvocationError) and not exc.retryable:
                     limit = attempt
             except Exception as exc:
@@ -1853,5 +2029,5 @@ def _terminal_reason(state: TerminalState) -> str:
         TerminalState.ERROR: "technical_failure",
         TerminalState.ABANDONED: "continuation_not_justified",
         TerminalState.STOPPED: "authorised_stop",
-        TerminalState.PENDING_USER_INPUT: "confirmation_required",
+        TerminalState.PENDING_USER_INPUT: "user_input_required",
     }[state]

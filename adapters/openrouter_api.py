@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 import httpx
 
@@ -36,6 +36,37 @@ class _APIResult:
     completion_tokens: int = 0
     thinking_tokens: int = 0
     reasoning_content: str = ""
+    structured_data: dict[str, Any] | None = None
+
+
+def _assistant_content_text(content: Any) -> str:
+    """Normalize common OpenAI-compatible content shapes into assistant text."""
+
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, Mapping):
+        for key in ("text", "output_text", "content"):
+            if key in content:
+                return _assistant_content_text(content.get(key))
+        return json.dumps(dict(content), ensure_ascii=False)
+    if isinstance(content, list):
+        return "".join(_assistant_content_text(item) for item in content)
+    return str(content)
+
+
+def _message_structured_data(message: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Preserve an API-native parsed object without granting it authority."""
+
+    for key in ("parsed", "structured_output"):
+        value = message.get(key)
+        if isinstance(value, Mapping):
+            return dict(value)
+    content = message.get("content")
+    if isinstance(content, Mapping):
+        return dict(content)
+    return None
 
 
 def _tool_target_path(arguments: dict) -> str | None:
@@ -352,20 +383,28 @@ class OpenRouterAdapter(BaseBackend):
         choice = choices[0]
         message = choice.get("message") or {}
         finish_reason = choice.get("finish_reason") or "stop"
-        ai_text = message.get("content") or ""
+        ai_text = _assistant_content_text(message.get("content"))
 
         # Emit reasoning if present
         if on_stream_event is not None:
             reasoning_text = str(message.get("reasoning") or "").strip()
             if reasoning_text:
                 await on_stream_event(
-                    StreamEvent(kind=KIND_THINKING, summary=reasoning_text[:400])
+                    StreamEvent(
+                        kind=KIND_THINKING,
+                        summary=reasoning_text[:400],
+                        raw_delta=reasoning_text,
+                    )
                 )
             for detail in message.get("reasoning_details") or []:
                 snippet = self._summarize_reasoning_detail(detail)
                 if snippet:
                     await on_stream_event(
-                        StreamEvent(kind=KIND_THINKING, summary=snippet[:400])
+                        StreamEvent(
+                            kind=KIND_THINKING,
+                            summary=snippet[:400],
+                            raw_delta=self._reasoning_detail_delta(detail),
+                        )
                     )
 
         tool_calls = message.get("tool_calls") or None
@@ -380,6 +419,7 @@ class OpenRouterAdapter(BaseBackend):
             text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             thinking_tokens=thinking_tokens,
+            structured_data=_message_structured_data(message),
         )
 
     # ------------------------------------------------------------------
@@ -438,40 +478,39 @@ class OpenRouterAdapter(BaseBackend):
                 reasoning_details = delta.get("reasoning_details") or []
 
                 if reasoning_text and on_stream_event:
-                    asyncio.create_task(
-                        on_stream_event(
-                            StreamEvent(
-                                kind=KIND_THINKING,
-                                summary=reasoning_text[:400],
-                                raw_delta=reasoning_text,
-                            )
+                    await on_stream_event(
+                        StreamEvent(
+                            kind=KIND_THINKING,
+                            summary=reasoning_text[:400],
+                            raw_delta=reasoning_text,
                         )
                     )
                 elif reasoning_details and on_stream_event:
                     for detail in reasoning_details:
                         raw_delta = self._reasoning_detail_delta(detail)
                         if raw_delta:
-                            asyncio.create_task(
-                                on_stream_event(
-                                    StreamEvent(
-                                        kind=KIND_THINKING,
-                                        summary=raw_delta[:400],
-                                        raw_delta=raw_delta,
-                                    )
+                            await on_stream_event(
+                                StreamEvent(
+                                    kind=KIND_THINKING,
+                                    summary=raw_delta[:400],
+                                    raw_delta=raw_delta,
                                 )
                             )
                             continue
                         snippet = self._summarize_reasoning_detail(detail)
                         if snippet:
-                            asyncio.create_task(
-                                on_stream_event(StreamEvent(kind=KIND_THINKING, summary=snippet[:400]))
+                            await on_stream_event(
+                                StreamEvent(
+                                    kind=KIND_THINKING,
+                                    summary=snippet[:400],
+                                )
                             )
 
                 if content:
                     text_chunks.append(content)
                     if on_stream_event:
-                        asyncio.create_task(
-                            on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary=content))
+                        await on_stream_event(
+                            StreamEvent(kind=KIND_TEXT_DELTA, summary=content)
                         )
 
                 # Accumulate tool_calls deltas
@@ -531,6 +570,7 @@ class OpenRouterAdapter(BaseBackend):
         }
 
         last_text = ""
+        last_structured_data = None
         # Accumulate token usage across all tool loops
         total_prompt = 0
         total_completion = 0
@@ -555,6 +595,7 @@ class OpenRouterAdapter(BaseBackend):
                 total_thinking += result.thinking_tokens
 
                 last_text = result.text
+                last_structured_data = result.structured_data
 
                 # No tool calls — we're done
                 if not result.tool_calls or not self.tool_registry:
@@ -591,6 +632,7 @@ class OpenRouterAdapter(BaseBackend):
                     total_completion += result.completion_tokens
                     total_thinking += result.thinking_tokens
                     last_text = result.text
+                    last_structured_data = result.structured_data
                     break
 
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -603,6 +645,7 @@ class OpenRouterAdapter(BaseBackend):
             return BackendResponse(
                 text=last_text,
                 duration_ms=duration_ms,
+                structured_data=last_structured_data,
                 is_success=True,
                 stop_reason=result.finish_reason if "result" in dir() else "stop",
                 usage=usage,

@@ -17,7 +17,12 @@ from typing import Optional
 
 import httpx
 
-from adapters.openrouter_api import OpenRouterAdapter, _APIResult
+from adapters.openrouter_api import (
+    OpenRouterAdapter,
+    _APIResult,
+    _assistant_content_text,
+    _message_structured_data,
+)
 from adapters.base import BackendCapabilities, BackendResponse
 from adapters.stream_events import (
     KIND_TEXT_DELTA,
@@ -111,16 +116,27 @@ class OllamaAdapter(OpenRouterAdapter):
         choice = choices[0]
         message = choice.get("message") or {}
         finish_reason = choice.get("finish_reason") or "stop"
-        ai_text = message.get("content") or ""
+        ai_text = _assistant_content_text(message.get("content"))
 
         # Emit reasoning/thinking if present
         if on_stream_event is not None:
             reasoning_text = str(message.get("reasoning") or "").strip()
             if reasoning_text:
-                await on_stream_event(StreamEvent(kind=KIND_THINKING, summary=reasoning_text[:400]))
+                await on_stream_event(
+                    StreamEvent(
+                        kind=KIND_THINKING,
+                        summary=reasoning_text[:400],
+                        raw_delta=reasoning_text,
+                    )
+                )
 
         tool_calls = message.get("tool_calls") or None
-        return _APIResult(text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason)
+        return _APIResult(
+            text=ai_text,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            structured_data=_message_structured_data(message),
+        )
 
     async def _stream_api_once(self, payload, headers, on_stream_event) -> _APIResult:
         text_chunks: list[str] = []
@@ -154,13 +170,11 @@ class OllamaAdapter(OpenRouterAdapter):
                 # Emit reasoning/thinking chunks
                 reasoning_delta = str(delta.get("reasoning") or "")
                 if reasoning_delta and on_stream_event:
-                    asyncio.create_task(
-                        on_stream_event(
-                            StreamEvent(
-                                kind=KIND_THINKING,
-                                summary=reasoning_delta[:400],
-                                raw_delta=reasoning_delta,
-                            )
+                    await on_stream_event(
+                        StreamEvent(
+                            kind=KIND_THINKING,
+                            summary=reasoning_delta[:400],
+                            raw_delta=reasoning_delta,
                         )
                     )
 
@@ -168,8 +182,8 @@ class OllamaAdapter(OpenRouterAdapter):
                 if content:
                     text_chunks.append(content)
                     if on_stream_event:
-                        asyncio.create_task(
-                            on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary=content))
+                        await on_stream_event(
+                            StreamEvent(kind=KIND_TEXT_DELTA, summary=content)
                         )
 
                 for tc_delta in (delta.get("tool_calls") or []):
@@ -206,6 +220,7 @@ class OllamaAdapter(OpenRouterAdapter):
         ]
         headers = self._ollama_headers()
         last_text = ""
+        last_structured_data = None
         result = None
 
         try:
@@ -218,6 +233,7 @@ class OllamaAdapter(OpenRouterAdapter):
                     result = await self._call_api_once(payload, headers, on_stream_event)
 
                 last_text = result.text
+                last_structured_data = result.structured_data
                 if not result.tool_calls or not self.tool_registry:
                     break
 
@@ -235,6 +251,7 @@ class OllamaAdapter(OpenRouterAdapter):
             return BackendResponse(
                 text=last_text,
                 duration_ms=duration_ms,
+                structured_data=last_structured_data,
                 is_success=True,
                 stop_reason=result.finish_reason if result else "stop",
             )

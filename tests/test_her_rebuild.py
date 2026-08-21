@@ -304,6 +304,7 @@ def _fake_cargo_script(path: Path, *, body: str) -> Path:
     return path
 
 
+@pytest.mark.asyncio
 async def test_toolchain_probe_uses_allowlisted_environment(tmp_path: Path) -> None:
     toolchain_dir = tmp_path / "toolchain"
     toolchain_dir.mkdir()
@@ -326,12 +327,14 @@ print({version!r})
     assert identity.rustc_version == "rustc 1.90.0"
 
 
+@pytest.mark.asyncio
 async def test_toolchain_probe_reports_missing_executables(tmp_path: Path) -> None:
     with pytest.raises(HERRebuildError) as caught:
         await inspect_toolchain(environment={"PATH": str(tmp_path)})
     assert caught.value.failure_kind == FailureKind.TOOLCHAIN_MISSING
 
 
+@pytest.mark.asyncio
 async def test_build_controller_runs_isolated_fake_cargo(tmp_path: Path) -> None:
     layout = _source_layout(tmp_path)
     fake_cargo = _fake_cargo_script(
@@ -379,6 +382,7 @@ print("SECRET_PRESENT", "OPENAI_API_KEY" in os.environ)
     assert process_events[-1] == ("finished", None)
 
 
+@pytest.mark.asyncio
 async def test_quick_verifier_checks_local_identity_doctor_and_stream_json(
     tmp_path: Path,
 ) -> None:
@@ -427,6 +431,7 @@ else:
     assert result["checks"]["stream_json"]["events"] == 1
 
 
+@pytest.mark.asyncio
 async def test_build_controller_reports_compiler_failure_without_secret(
     tmp_path: Path,
 ) -> None:
@@ -457,6 +462,7 @@ sys.exit(7)
     assert "private-value" not in (caught.value.diagnostics or "")
 
 
+@pytest.mark.asyncio
 async def test_build_controller_timeout_terminates_process(tmp_path: Path) -> None:
     layout = _source_layout(tmp_path)
     fake_cargo = _fake_cargo_script(
@@ -486,6 +492,7 @@ time.sleep(30)
     assert caught.value.failure_kind == FailureKind.CARGO_TIMEOUT
 
 
+@pytest.mark.asyncio
 async def test_build_controller_rejects_source_change_during_build(
     tmp_path: Path,
 ) -> None:
@@ -522,6 +529,7 @@ output.write_bytes(b"uncorrelated")
     assert caught.value.failure_kind == FailureKind.FINGERPRINT_FAILED
 
 
+@pytest.mark.asyncio
 async def test_build_controller_bounds_local_log_without_blocking_cargo(
     tmp_path: Path,
 ) -> None:
@@ -561,6 +569,7 @@ print("x" * 10000)
     assert artifact.build_log_path.stat().st_size <= 1024
 
 
+@pytest.mark.asyncio
 async def test_build_controller_cancellation_terminates_cargo(tmp_path: Path) -> None:
     layout = _source_layout(tmp_path)
     pid_path = tmp_path / "cargo.pid"

@@ -250,7 +250,7 @@ async def test_distinct_scheduled_events_are_not_globally_deduplicated_by_text()
 
 
 @pytest.mark.asyncio
-async def test_missing_delivery_class_is_audited_but_not_presented():
+async def test_legacy_event_without_delivery_class_uses_registered_kind_mapping():
     order = []
     router = HERMessageRouter(
         request_id="req-invalid",
@@ -262,9 +262,35 @@ async def test_missing_delivery_class_is_audited_but_not_presented():
         persist_event=lambda event: order.append(("persist", event.kind)),
     )
 
-    await router.route(StreamEvent(kind=KIND_PROGRESS, summary="legacy HER event"))
+    event = StreamEvent(kind=KIND_PROGRESS, summary="legacy HER event")
+    await router.route(event)
 
-    assert order == [("persist", KIND_PROGRESS)]
+    assert order == [("persist", KIND_PROGRESS), ("present", KIND_PROGRESS)]
+    assert event.delivery_class == DELIVERY_TECHNICAL
+
+
+@pytest.mark.asyncio
+async def test_her_v2_event_still_requires_explicit_delivery_authority():
+    presented = []
+    router = HERMessageRouter(
+        request_id="req-v2-invalid",
+        logger=SimpleNamespace(
+            info=lambda _message: None, warning=lambda _message: None
+        ),
+        technical_presenter=lambda event: presented.append(event.kind),
+        verbose_enabled=lambda: True,
+    )
+
+    accepted = await router.route(
+        StreamEvent(
+            kind=KIND_PROGRESS,
+            summary="missing authority",
+            origin="her_v2:test",
+        )
+    )
+
+    assert accepted is False
+    assert presented == []
 
 
 @pytest.mark.asyncio

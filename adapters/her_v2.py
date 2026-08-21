@@ -59,34 +59,83 @@ from orchestrator.her_v2.runtime import HERv2Runtime
 HER_V2_DISPLAY_NAME = "HASHI Engine Runtime v2"
 HER_V2_VERSION = "2.0.0-alpha.1"
 COMMENTARY_PACKAGING_TIMEOUT_S = 30.0
-_GATEWAY_MANAGED_ENGINES = frozenset(
-    {"openrouter-api", "deepseek-api", "ollama-api", "xai-api"}
-)
-_READ_ONLY_TOOLS = frozenset(
-    {
-        "file_read",
-        "file_list",
-        "web_search",
-        "web_fetch",
-        "process_list",
-        "background_job_status",
-        "background_job_tail",
-        "background_job_list",
-        "hashi_scheduler_list",
-        "hashi_scheduler_status",
-        "hashi_scheduler_run_history",
-        "browser_screenshot",
-        "browser_get_text",
-        "browser_get_html",
-        "browser_get_attribute",
-        "desktop_screenshot",
-        "desktop_info",
-        "windows_screenshot",
-        "windows_info",
-        "windows_window_list",
-        "media_read",
-    }
-)
+
+
+def _backend_tool_control(backend: Any) -> tuple[bool, bool]:
+    """Return declared tool capability and HASHI isolation capability."""
+
+    capabilities = getattr(backend, "capabilities", None)
+    supports_tools = bool(getattr(capabilities, "supports_tool_use", False))
+    controls_tools = hasattr(backend, "tool_registry")
+    return supports_tools, controls_tools
+
+
+def _install_system_prompt(backend: Any, prompt: str) -> bool:
+    setter = getattr(backend, "set_system_prompt", None)
+    if callable(setter):
+        setter(prompt)
+        return True
+    if hasattr(backend, "sys_prompt"):
+        backend.sys_prompt = prompt
+        return True
+    return False
+
+
+def _normalise_backend_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        for key in ("text", "output_text", "content"):
+            if key in value:
+                return _normalise_backend_text(value.get(key))
+        import json
+
+        return json.dumps(dict(value), ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        return "".join(_normalise_backend_text(item) for item in value)
+    return str(value)
+
+
+def _provider_structured_data(response: BackendResponse) -> Mapping[str, Any]:
+    direct = getattr(response, "structured_data", None)
+    if isinstance(direct, Mapping):
+        return dict(direct)
+    metadata = getattr(response, "stream_metadata", None)
+    if isinstance(metadata, Mapping):
+        for key in ("structured_data", "parsed", "structured_output"):
+            value = metadata.get(key)
+            if isinstance(value, Mapping):
+                return dict(value)
+    return {}
+
+
+def _registry_allowed_names(registry: Any) -> tuple[str, ...]:
+    names = getattr(registry, "allowed_tool_names", None)
+    if callable(names):
+        return tuple(str(item) for item in names() if str(item).strip())
+    definitions = getattr(registry, "get_tool_definitions", None)
+    if not callable(definitions):
+        return ()
+    result: list[str] = []
+    try:
+        available = definitions(tiers=None)
+    except TypeError:
+        # Older or third-party registries may not expose tier filtering.
+        available = definitions()
+    for item in available:
+        if not isinstance(item, Mapping):
+            continue
+        name = str((item.get("function") or {}).get("name") or "").strip()
+        if name:
+            result.append(name)
+    return tuple(result)
+
+
+def _registry_is_read_only(registry: Any, tool_name: str) -> bool:
+    probe = getattr(registry, "is_read_only", None)
+    return bool(callable(probe) and probe(tool_name) is True)
 
 
 def _manager_authorises_profile(manager: Any, profile: ProviderProfile) -> bool:
@@ -196,7 +245,9 @@ class _DelegatedToolRegistry:
             name for name in requested if bool(getattr(base, "is_allowed")(name))
         }
         if read_only:
-            self._allowed.intersection_update(_READ_ONLY_TOOLS)
+            self._allowed = {
+                name for name in self._allowed if _registry_is_read_only(base, name)
+            }
         self.max_loops = int(getattr(base, "max_loops", 1) or 1)
         self.audit_context = dict(getattr(base, "audit_context", {}) or {})
         if read_only:
@@ -442,11 +493,6 @@ class HashiStageProvider(StageProvider):
     async def invoke(
         self, profile: ProviderProfile, request: StageRequest
     ) -> StageResponse:
-        if profile.engine not in _GATEWAY_MANAGED_ENGINES:
-            raise StageInvocationError(
-                f"provider engine {profile.engine!r} is not certified for the HASHI Tool Gateway boundary",
-                retryable=False,
-            )
         try:
             backend = self.backend_manager.create_ephemeral_backend(
                 profile.engine, target_model=profile.model
@@ -470,10 +516,17 @@ class HashiStageProvider(StageProvider):
             normalized = str(profile.reasoning or "").strip().casefold()
             backend.set_reasoning_enabled(normalized not in {"", "none", "off", "false", "0"})
 
-        if not hasattr(backend, "tool_registry"):
+        supports_tools, controls_tools = _backend_tool_control(backend)
+        if request.allow_tools and not supports_tools:
             await backend.shutdown()
             raise StageInvocationError(
-                f"provider engine {profile.engine!r} cannot prove HASHI Tool Gateway ownership",
+                f"provider engine {profile.engine!r} does not support requested tool use",
+                retryable=False,
+            )
+        if supports_tools and not controls_tools:
+            await backend.shutdown()
+            raise StageInvocationError(
+                f"provider engine {profile.engine!r} cannot prove HASHI tool isolation",
                 retryable=False,
             )
         selected_registry = self.tool_registry if request.allow_tools else None
@@ -484,8 +537,9 @@ class HashiStageProvider(StageProvider):
             if delegated is None:
                 delegated = sorted(
                     name
-                    for name in _READ_ONLY_TOOLS
+                    for name in _registry_allowed_names(selected_registry)
                     if bool(getattr(selected_registry, "is_allowed")(name))
+                    and _registry_is_read_only(selected_registry, name)
                 )
             if not isinstance(delegated, list):
                 await backend.shutdown()
@@ -502,7 +556,8 @@ class HashiStageProvider(StageProvider):
             # length.  HER tool-enabled stages continue until the model
             # finishes, fails, or the request is cancelled.
             selected_registry = _UnboundedToolRegistry(selected_registry)
-        backend.tool_registry = selected_registry
+        if controls_tools:
+            backend.tool_registry = selected_registry
         backend.privacy_level = self.backend_manager.privacy_level
         reasoning_chunks: list[str] = []
 
@@ -537,12 +592,8 @@ class HashiStageProvider(StageProvider):
                 raise StageInvocationError(
                     f"failed to initialize {profile.engine}/{profile.model}"
                 )
+            stage_prompt = render_stage_prompt(request)
             if request.stage is Stage.IMMEDIATE_RESPONSE:
-                if not hasattr(backend, "sys_prompt"):
-                    raise StageInvocationError(
-                        f"provider engine {profile.engine!r} cannot install the Immediate Persona",
-                        retryable=False,
-                    )
                 backend_config = backend.config
                 backend_extra = dict(getattr(backend_config, "extra", None) or {})
                 source = her_persona.load_persona_packaging_source(
@@ -552,13 +603,17 @@ class HashiStageProvider(StageProvider):
                         or getattr(backend_config, "name", None)
                     ),
                 )
-                backend.sys_prompt = _immediate_response_system_prompt(source)
+                system_prompt = _immediate_response_system_prompt(source)
+                if not _install_system_prompt(backend, system_prompt):
+                    stage_prompt = f"{system_prompt}\n\n{stage_prompt}"
             else:
                 internal_prompt = _internal_stage_system_prompt(request)
-                if internal_prompt is not None and hasattr(backend, "sys_prompt"):
-                    backend.sys_prompt = internal_prompt
+                if internal_prompt is not None and not _install_system_prompt(
+                    backend, internal_prompt
+                ):
+                    stage_prompt = f"{internal_prompt}\n\n{stage_prompt}"
             response = await backend.generate_response(
-                render_stage_prompt(request),
+                stage_prompt,
                 f"{request.turn_id}:{request.stage.value}:{request.attempt}",
                 is_retry=request.attempt > 1,
                 silent=self.silent,
@@ -582,7 +637,8 @@ class HashiStageProvider(StageProvider):
                 else ()
             )
             return StageResponse(
-                text=response.text,
+                text=_normalise_backend_text(response.text),
+                data=_provider_structured_data(response),
                 reasoning_trace="".join(reasoning_chunks).strip() or None,
                 provider=profile.engine,
                 model=profile.model,
@@ -620,11 +676,6 @@ class HashiStageProvider(StageProvider):
     ) -> str:
         """Package neutral prose in an isolated, tool-free invocation."""
 
-        if profile.engine not in _GATEWAY_MANAGED_ENGINES:
-            raise StageInvocationError(
-                f"commentary provider engine {profile.engine!r} is not certified",
-                retryable=False,
-            )
         backend = None
         try:
             backend = self.backend_manager.create_ephemeral_backend(
@@ -641,12 +692,14 @@ class HashiStageProvider(StageProvider):
                 backend.set_reasoning_enabled(
                     normalized not in {"", "none", "off", "false", "0"}
                 )
-            if not hasattr(backend, "tool_registry"):
+            supports_tools, controls_tools = _backend_tool_control(backend)
+            if supports_tools and not controls_tools:
                 raise StageInvocationError(
                     f"commentary provider {profile.engine!r} cannot prove tool isolation",
                     retryable=False,
                 )
-            backend.tool_registry = None
+            if controls_tools:
+                backend.tool_registry = None
             backend.privacy_level = self.backend_manager.privacy_level
             prompt = "NEUTRAL COMMENTARY (quoted, read-only)\n" + neutral_commentary
 
@@ -658,12 +711,7 @@ class HashiStageProvider(StageProvider):
                 raise StageInvocationError(
                     f"failed to initialize commentary provider {profile.engine}/{profile.model}"
                 )
-            if not hasattr(backend, "sys_prompt"):
-                raise StageInvocationError(
-                    f"commentary provider {profile.engine!r} cannot install the configured Persona",
-                    retryable=False,
-                )
-            backend.sys_prompt = f"""HER V2 PERSONA PACKAGING — PRESENTATION ONLY
+            system_prompt = f"""HER V2 PERSONA PACKAGING — PRESENTATION ONLY
 
 Rewrite one already-authored neutral user-facing commentary message using only the
 language, self-reference, form of address, tone, formatting, and warmth defined by the
@@ -676,6 +724,8 @@ or the Persona block. Return only the packaged commentary message.
 {persona_block}
 {her_persona.PERSONA_BLOCK_END}
 """
+            if not _install_system_prompt(backend, system_prompt):
+                prompt = f"{system_prompt}\n\n{prompt}"
             response = await asyncio.wait_for(
                 backend.generate_response(
                     prompt,
@@ -918,10 +968,6 @@ class HERv2Adapter(BaseBackend):
             if injected is None:
                 manager = self._backend_manager()
                 for profile in self._v2_config.profiles.values():
-                    if profile.engine not in _GATEWAY_MANAGED_ENGINES:
-                        raise HERv2ConfigurationError(
-                            f"profile {profile.name!r} uses uncertified engine {profile.engine!r}"
-                        )
                     if not _manager_authorises_profile(manager, profile):
                         raise HERv2ConfigurationError(
                             f"profile {profile.name!r} provider/model does not have an exact grant in this Agent's allowed_backends"

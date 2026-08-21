@@ -76,6 +76,13 @@ All execution parameters must be configurable, including:
 
 Provider-specific request construction belongs in provider adapters, not in the HER orchestration core.
 
+Provider eligibility is determined by declared capability and enforceable
+isolation, never by a hard-coded engine-name list. A stage that requests tools
+requires both tool-use capability and a HASHI-controlled Tool Registry. A
+tool-free stage may use a backend with no tool capability; a tool-capable
+backend must prove that HASHI can disable its tools. Provider/model grants
+remain exact security authority after canonical identifier resolution.
+
 ### 3.3 Modularity
 
 Triage, planning, execution, replanning, review, reporting, Ledger persistence, Habits, Meditation, and Dream must have explicit interfaces and independently testable implementations.
@@ -86,12 +93,16 @@ Removing or replacing one optional capability must not break unrelated stages. I
 - review can change without changing planning;
 - memory and Habit systems can evolve independently;
 - Dream cannot be a required dependency of live request execution.
+- optional Immediate Response failure cannot block a successful work or
+  clarification Triage path;
+- transport, Persona packaging, and provider envelope compatibility cannot
+  become hidden execution authority.
 
 ### 3.4 Goal fidelity
 
 The active user's goal is the highest authority for a turn. Planning, execution, replanning, and review exist only to fulfil that goal.
 
-No stage may intentionally substitute a different objective. If intent is unclear or material authority is missing, Triage must classify the request as `CONFIRMATION_REQUIRED`.
+No stage may intentionally substitute a different objective. If intent is unclear or material authority is missing, Triage must classify the request as `CONFIRMATION_REQUIRED`. If execution later discovers information or authority that Triage could not have known was missing, Execution may return `USER_INPUT_REQUIRED`; the current turn then reaches `PENDING_USER_INPUT` without changing its recorded classification.
 
 ### 3.5 Execution continuity
 
@@ -105,6 +116,29 @@ HER prefers useful progress over perfection of intermediate artefacts:
 - preserve detailed evidence in HASHI logs rather than expanding the Ledger into an audit database.
 
 Lifecycle order remains strict even when stage content is flexible.
+
+### 3.7 Structured-response compatibility membrane
+
+Provider transport shape is not HER authority. Before stage schema validation,
+HER applies one deterministic compatibility membrane:
+
+1. collect provider-native parsed data and JSON objects from formal assistant
+   text;
+2. apply only registered wrapper, alias, list, and plain-presentation
+   normalisations;
+3. validate every candidate against the same target-stage semantic schema;
+4. if no formal candidate validates, inspect provider-exposed reasoning only
+   for a JSON control envelope and never expose that reasoning as user text;
+5. accept exactly one semantic result, deduplicating equivalent copies;
+6. reject multiple conflicting valid results as ambiguous;
+7. audit the selected carrier and every rejected candidate without changing
+   goal, classification, evidence, permissions, or lifecycle authority.
+
+Reasoning recovery is therefore a bounded carrier fallback, not permission to
+infer a classification from prose. Plain text is accepted only for inherently
+user-facing Immediate Response and Finalisation outputs. A retry receives the
+previous validation defect so it can correct the envelope instead of blindly
+repeating the same request.
 
 ### 3.6 Work, commentary, Persona packaging, and delivery
 
@@ -145,9 +179,11 @@ by Immediate Response. Immediate Response is not rewritten by the commentary
 packager; it receives the same extracted block directly. Clarification and
 Final Report retain their dedicated user-facing paths.
 An Immediate Response may be sent provisionally before Triage only when the
-transport explicitly advertises support for resolving that exact message as a
-final answer, clarification, commentary, or discard. Without that capability,
-HER keeps the response on the ordinary single final-delivery path.
+transport explicitly advertises support for editing that exact message into a
+final answer, clarification, or commentary. Discard is a narrower transport
+capability and requires deletion support; an unsupported discard is reported as
+presentation degradation and never changes workflow authority. Without edit
+capability, HER keeps the response on the ordinary single final-delivery path.
 
 ## 4. Authority Model
 
@@ -202,6 +238,14 @@ When `/steer` is accepted:
 6. the new goal may be a replacement, extension, or slight modification of the earlier goal.
 
 The new turn receives a new immutable Triage decision.
+
+### 4.6 Tool capability authority
+
+The HASHI Tool Registry owns tool permission and safety metadata. HER requests
+delegation by capability and intersects it with the Registry's current grants.
+A custom or newly added tool may enter a read-only stage only when the Registry
+explicitly reports it as read-only; an unknown tool fails closed. HER must not
+maintain a separate tool-name safety list.
 
 ## 5. HER Effort Levels
 
@@ -294,7 +338,12 @@ The Immediate Response and Triage may finish in either order. HER must enforce t
 - if Triage selects `DIRECT_RESPONSE`, that response is the only user-facing completion message;
 - if Triage selects a work classification, the response acts as acknowledgement and execution continues;
 - if Triage selects `CONFIRMATION_REQUIRED`, the clarification request must not duplicate information already adequately requested by the Immediate Response;
-- Ledger finalisation may wait for both results, but user-visible delivery should not wait unnecessarily for Triage.
+- Triage remains mandatory and authoritative;
+- work and clarification paths do not wait for a still-pending Immediate
+  Response and do not fail when that optional response is malformed or
+  unavailable;
+- `DIRECT_RESPONSE` still requires valid Immediate Response content because it
+  is the sole final answer.
 
 ## 7. Stage 2: Planning
 
@@ -351,9 +400,23 @@ Execution follows the active plan when a formal plan exists. Low-effort executio
 - The orchestrator owns task decomposition, assignment, monitoring, result aggregation, and compliance with the active plan.
 - Sub-agents may execute and return evidence but may not replan or alter the goal.
 
+### 8.4 Execution-discovered user input
+
+Execution may return `USER_INPUT_REQUIRED` only with a concrete clarification
+question and truthful evidence explaining why progress cannot safely continue.
+HER delivers that question, transitions directly from `EXECUTING` to
+`PENDING_USER_INPUT`, and does not Review or Finalise the incomplete work.
+Bounded sub-agents may not use this disposition to contact the user; they return
+the missing-information finding to the Primary Agent as evidence.
+
 ## 9. Stage 4: Replanning
 
-Replanning is available only for `high`, `xhigh`, and `max`, and only for `COMPLEX_TASK` or `HIGH_VOLUME_TASK` turns.
+Replanning is available only for `high`, `xhigh`, and `max`. Eligibility is an
+effort policy, not a second classification gate. A `SIMPLE_TASK` remains
+immutably classified as simple but may replan when execution evidence proves
+that the original approach lacks a required capability. After that replan, HER
+may select the configured primary execution profile without changing the
+classification.
 
 Its purpose is to restore alignment with the immutable user goal and Triage classification when execution evidence shows that the active approach is no longer adequate.
 
@@ -419,13 +482,10 @@ Priority is:
 
 Meditation runs after eligible execution cycles and creates candidate Habits from experience. It must not block final reporting or change the completed turn.
 
-The Meditation stage role is fixed to the configured `lightweight` profile and
-therefore routes to the lightweight/flash model rather than the premium/pro
-execution model. Configuration that maps Meditation to another role fails
-closed. Meditation may share the same provider backend with premium foreground
-stages; provider-backend separation is not an independence requirement. Its
-isolation comes from its stage context, tool-free and side-effect-free authority
-envelope, and separate background lifecycle.
+The Meditation stage role is configurable and may use any granted provider
+profile. Its safety and independence come from its stage context, tool-free and
+side-effect-free authority envelope, and separate background lifecycle—not
+from a profile being literally named `lightweight`.
 
 Meditation is turn-based: its durable prompt contains the bounded current
 request, truthful Execution summary, evidence references, limitations, and
@@ -571,6 +631,9 @@ EXECUTING
 EXECUTING
   -> EXECUTION_COMPLETED
 
+EXECUTING [new user information or authority is required]
+  -> PENDING_USER_INPUT
+
 EXECUTING [side-effect result cannot be validated after isolated repair]
   -> RECONCILIATION_REQUIRED
 
@@ -614,7 +677,7 @@ HER v2 uses the following unified terminal states:
 | `ERROR` | A technical failure prevented correct execution, including an unexpected process interruption or lifecycle violation |
 | `ABANDONED` | The Primary Agent deliberately concluded that continued execution was no longer justified and recorded the reason |
 | `STOPPED` | The user or authorised control path stopped the turn, including `/stop` and `/steer` |
-| `PENDING_USER_INPUT` | Triage determined that clarification or confirmation is required |
+| `PENDING_USER_INPUT` | Triage or later Execution determined that clarification, confirmation, or missing authority is required |
 
 `INTERRUPTED` is not a separate terminal state. An intentional interruption is `STOPPED`; an unexpected technical interruption is `ERROR`.
 
@@ -718,6 +781,10 @@ HER permits bounded retry within the active process and current stage for techni
 - report-generation failure.
 
 Retry limits and delays are configurable. A retry does not change the Triage classification or user goal.
+
+Before a non-side-effect retry, HER records and supplies the prior validation
+error to the next attempt. Compatible carrier recovery occurs before retry and
+is recorded as such; it is not described as a model repair.
 
 A stage invocation authorised to perform external side effects is never
 replayed merely to repair its output format. If its returned envelope is

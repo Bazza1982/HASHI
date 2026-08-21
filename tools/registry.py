@@ -53,6 +53,35 @@ TOOL_TIERS: dict[str, list[str]] = {
     ],
 }
 
+# Tool safety belongs to the Tool Registry, not to orchestrators that consume
+# it.  Per-tool configuration may explicitly add read-only custom tools; the
+# built-in defaults remain fail-closed for every mutating or unknown action.
+READ_ONLY_TOOL_NAMES = frozenset(
+    {
+        "background_job_list",
+        "background_job_status",
+        "background_job_tail",
+        "browser_get_attribute",
+        "browser_get_html",
+        "browser_get_text",
+        "browser_screenshot",
+        "desktop_info",
+        "desktop_screenshot",
+        "file_list",
+        "file_read",
+        "hashi_scheduler_list",
+        "hashi_scheduler_run_history",
+        "hashi_scheduler_status",
+        "media_read",
+        "process_list",
+        "web_fetch",
+        "web_search",
+        "windows_info",
+        "windows_screenshot",
+        "windows_window_list",
+    }
+)
+
 def resolve_tiers(tier_names: list[str]) -> list[str]:
     """Expand tier names into a flat list of tool names."""
     tools = []
@@ -156,6 +185,20 @@ class ToolRegistry:
 
     def is_allowed(self, tool_name: str) -> bool:
         return tool_name in self._allowed
+
+    def allowed_tool_names(self) -> tuple[str, ...]:
+        """Expose names only; permission and execution remain registry-owned."""
+
+        return tuple(sorted(self._allowed))
+
+    def is_read_only(self, tool_name: str) -> bool:
+        """Return explicit safety capability for delegated/shadow execution."""
+
+        name = str(tool_name or "").strip()
+        configured = self.tool_options.get(name, {})
+        if isinstance(configured, dict) and "read_only" in configured:
+            return configured.get("read_only") is True
+        return name in READ_ONLY_TOOL_NAMES
 
     def _effective_audit_context(self) -> dict:
         override = self._audit_context_override.get()

@@ -86,7 +86,8 @@ This plan covers:
 - process-restart reconciliation without execution-stack resumption;
 - Habits, Meditation, and Dream boundaries;
 - provider-neutral configuration;
-- structured-output tolerance and repair.
+- capability-negotiated provider and read-only tool routing;
+- structured-output carrier compatibility, ambiguity rejection, and repair.
 
 This plan does not attempt to test:
 
@@ -192,6 +193,16 @@ For work classifications, tests must prove that the Immediate Response acts as a
 
 For `CONFIRMATION_REQUIRED`, tests must prove that clarification is requested without duplicating an adequate request already delivered by the Immediate Response, and the turn reaches `PENDING_USER_INPUT`.
 
+Fault tests must also prove that:
+
+- malformed, unavailable, or still-pending Immediate Response does not block a
+  valid work or clarification Triage result;
+- Triage remains mandatory;
+- `DIRECT_RESPONSE` fails truthfully when its required Immediate content cannot
+  be validated;
+- a provisionally delivered Immediate Response is discarded when mandatory
+  Triage fails and the transport supports discard.
+
 ### 7.5 Classification, effort, and provider routing
 
 Tests must prove that classification and effort remain separate concerns:
@@ -209,6 +220,11 @@ The default routing policy should prefer:
 
 Tests must allow explicitly configured, policy-compliant fallback or override behaviour. They must not hard-code one provider or model name as the only valid implementation.
 
+Provider boundary tests must select by declared capability: tool use plus HASHI
+tool isolation for tool-enabled stages, proven tool isolation for tool-capable
+no-tool stages, and safe acceptance of a previously unknown engine that has no
+tool capability. Engine-name allowlists are not an acceptance invariant.
+
 Representative policy combinations must cover:
 
 | Classification | Effort | Required path |
@@ -225,10 +241,14 @@ Representative policy combinations must cover:
 
 This representative matrix replaces a full classification-by-effort Cartesian product unless a production defect justifies an additional combination.
 
+One focused case must make a high-effort `SIMPLE_TASK` request Replanning,
+prove that the second execution may use the configured primary execution
+profile, and prove that the recorded classification remains `SIMPLE_TASK`.
+
 The tool-loop regression is such a production-defect exception. It must prove
 that every tool-enabled HER effort receives an unbounded request-local registry
 view without mutating the shared Agent registry. A focused adapter regression
-must then drive every gateway-managed API adapter beyond a deliberately low
+must then drive every currently supported Tool Registry API adapter beyond a deliberately low
 underlying `max_loops` value and prove that execution still reaches the model's
 own final response. The implementation must use a genuine unbounded loop
 contract, not a large numeric sentinel.
@@ -274,6 +294,9 @@ EXECUTING
 
 EXECUTING
   -> EXECUTION_COMPLETED
+
+EXECUTING [new user information or authority is required]
+  -> PENDING_USER_INPUT
 
 EXECUTING [side-effect result remains unvalidated after isolated repair]
   -> RECONCILIATION_REQUIRED
@@ -326,6 +349,9 @@ Tests must prove that Replanning:
 - does not consult Habits again;
 - records a new plan version;
 - returns to Execution rather than finalising directly.
+- is controlled by effort policy rather than excluding an immutable
+  `SIMPLE_TASK` classification;
+- may escalate execution capability without mutating classification.
 
 Default safety ceilings are:
 
@@ -368,6 +394,9 @@ Tests must prove:
 - reviewer calls are side-effect-free unless the governing design explicitly changes;
 - sub-agent authority is no greater than the authority delegated by the Primary Agent and orchestrator;
 - tool denial becomes evidence and cannot be rewritten as successful execution.
+- read-only delegation consumes Tool Registry capability metadata, so an
+  explicitly read-only custom tool is accepted without adding its name to HER;
+- unknown tools and tools lacking read-only metadata remain denied.
 
 ### 7.11 Stop authority
 
@@ -409,7 +438,7 @@ The terminal-state decision table is:
 | Technical failure prevents correct execution | `ERROR` |
 | Primary Agent deliberately ends work because continuation is no longer justified | `ABANDONED` |
 | User or authorised control stops the turn | `STOPPED` |
-| Clarification or confirmation is required | `PENDING_USER_INPUT` |
+| Triage or Execution requires clarification, confirmation, or missing authority | `PENDING_USER_INPUT` |
 
 One parameterised decision suite must cover all terminal states. Representative end-to-end scenarios must separately cover the states whose correctness depends on multi-stage evidence, including `COMPLETED_WITH_REPORT_PENDING`, `RECONCILIATION_REQUIRED`, `ABANDONED`, `STOPPED`, and `PENDING_USER_INPUT`.
 
@@ -421,6 +450,9 @@ Tests must prove:
 - intentional stop is `STOPPED`, not `ERROR`;
 - unexpected interruption is `ERROR`, not a separate `INTERRUPTED` state;
 - rejection of a request after correct execution judgement is `FAILED` unless a higher policy defines a different terminal category.
+- execution-discovered user input transitions directly from `EXECUTING`,
+  preserves evidence and classification, and does not enter Review or
+  Finalisation.
 
 ### 7.14 Ledger minimality
 
@@ -596,13 +628,16 @@ Structured output imperfections must not create unnecessary hard failures, but t
 
 The permitted handling sequence is:
 
-1. parse normally;
+1. collect provider-native parsed data and formal assistant-text candidates;
 2. apply an explicitly registered deterministic normalisation;
-3. extract valid essential content only where unambiguous and safe;
-4. retry with the required structure;
-5. log the original defect and any repair;
-6. produce `ERROR` when required information remains unavailable and no side-effect result is in doubt;
-7. produce `RECONCILIATION_REQUIRED` when a side-effecting Execution result remains unvalidated, without replaying Execution.
+3. validate all formal candidates and accept one semantic result only;
+4. when no formal candidate validates, inspect provider-exposed reasoning only
+   for a valid target-stage JSON control envelope;
+5. reject conflicting valid candidates rather than choosing by field order;
+6. retry with the previous validation defect included;
+7. log the original defect, selected carrier, rejected candidates, and any repair;
+8. produce `ERROR` when required information remains unavailable and no side-effect result is in doubt;
+9. produce `RECONCILIATION_REQUIRED` when a side-effecting Execution result remains unvalidated, without replaying Execution.
 
 Candidate imperfections include:
 
@@ -613,6 +648,12 @@ Candidate imperfections include:
 - explicitly approved casing or enum aliases;
 - duplicated non-authoritative fields;
 - correct substantive content in an invalid wrapper.
+- non-empty but invalid provider data beside valid formal assistant text;
+- provider-native parsed objects and common text-content block shapes;
+- a single target-stage JSON control envelope returned only in exposed
+  reasoning when formal output is empty or invalid;
+- plain text for inherently user-facing Immediate Response and Finalisation;
+- string-or-list fields normalised without splitting a string into characters.
 
 The suite must not create a case for every permutation. Each accepted repair rule requires a named compatibility reason or production regression.
 
@@ -625,6 +666,15 @@ Tolerance must never:
 - fabricate mandatory Planning completion;
 - turn reviewer output into Primary Agent authority;
 - silently accept unknown protocol drift.
+- expose reasoning recovery text to the user;
+- choose between semantically conflicting valid carriers.
+
+The deterministic compatibility suite should be one compact table covering
+registered carriers, wrappers, aliases, and list forms, plus explicit conflict
+and unstructured-prose rejection cases. Runtime regressions separately prove
+Sunny-style reasoning recovery, source audit, Immediate/Triage failure
+isolation, and retry feedback. Do not duplicate the same carrier permutations
+across parser, runtime, adapter, and end-to-end suites.
 
 For a side-effect-authorised Execution response, tests must additionally prove:
 
@@ -669,6 +719,8 @@ Tests must cover representative Planning, Review, provider, tool, and reporting 
 
 - retries remain within the current stage;
 - retries are bounded;
+- a structured retry receives the prior validation error and a
+  structure-only correction instruction;
 - retry does not change goal or classification;
 - exhausted retry chooses the correct stage and terminal outcome;
 - stage-local retry is not process-restart recovery.
@@ -708,9 +760,10 @@ Tests must prove:
 - `DIRECT_RESPONSE` is the sole exception because its Immediate Response is the final answer;
 - a transport without explicit initial-resolution capability never receives a
   provisional Immediate Response and therefore cannot duplicate the final;
-- stream callbacks return an explicit acceptance result, and initial-resolution
-  support is advertised only when the provisional transport message can be
-  edited or deleted;
+- stream callbacks return an explicit acceptance result across registered
+  receipt shapes, and initial-resolution support is advertised when the
+  provisional transport message can be edited; discard additionally requires
+  delete capability;
 - every ordinary final send writes its real outcome back to the HER v2 audit
   under the same stable `delivery_id` used by the deferred delivery intent;
 - a deferred-lane acceptance is never asserted as an actual transport delivery;
@@ -741,6 +794,7 @@ Use table-driven tests for:
 - Replan and Review counters;
 - retry limits;
 - structured normalisation rules;
+- compatible response-carrier selection and ambiguity rejection;
 - stop eligibility by state.
 
 ### 12.2 Contract and boundary tests
@@ -748,7 +802,9 @@ Use table-driven tests for:
 Use contract tests for:
 
 - provider-role configuration;
-- Tool Gateway authority;
+- capability-based provider eligibility and Tool Gateway authority;
+- Tool Registry read-only capability metadata;
+- transport receipt normalisation;
 - Ledger/log separation;
 - reasoning-trace correlation;
 - fallback-spool durability and deduplication;
@@ -782,6 +838,12 @@ Avoid:
 - 50, 100, or 200 real model Replans merely to prove counters;
 - a full Classification × Effort Cartesian suite without a named risk;
 - separate tests for scenarios that differ only in irrelevant wording.
+- assertions that an optional profile must have a particular literal name;
+- engine-name allowlist assertions where capability is the actual boundary;
+- assertions that optional Immediate Response and authoritative Triage must
+  share one failure fate;
+- assertions tied only to one provider's envelope or one transport receipt
+  class when registered compatible shapes have the same meaning.
 
 An exception requires a documented material risk or production regression.
 
@@ -912,6 +974,8 @@ Examples include:
 - restart repeating a side effect;
 - reviewer authority breach;
 - completed work discarded because of malformed output;
+- valid structured control output trapped in an alternate provider carrier;
+- optional presentation failure blocking authoritative execution;
 - timeout false-positive or false-progress loop;
 - `/stop` leaving a sub-agent running.
 

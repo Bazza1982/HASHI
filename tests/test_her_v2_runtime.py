@@ -241,6 +241,80 @@ async def test_confirmation_required_never_enters_planning_or_execution(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("classification", "clarification"),
+    [
+        ("SIMPLE_TASK", ""),
+        ("CONFIRMATION_REQUIRED", "Which account should be changed?"),
+    ],
+)
+async def test_optional_immediate_failure_does_not_block_authoritative_triage(
+    tmp_path,
+    classification,
+    clarification,
+):
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [
+            StageInvocationError("invalid Immediate envelope", retryable=False)
+        ],
+        Stage.TRIAGE: [
+            {
+                "classification": classification,
+                "clarification": clarification,
+            }
+        ],
+    }
+    if classification == "SIMPLE_TASK":
+        scripts.update(
+            {
+                Stage.EXECUTION: [
+                    {"disposition": "COMPLETED", "summary": "Done."}
+                ],
+                Stage.FINALISATION: [{"report": "Done."}],
+            }
+        )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Continue through the authoritative path",
+        f"request-optional-immediate-{classification.lower()}",
+        effort="low",
+    )
+
+    expected = (
+        TerminalState.COMPLETED
+        if classification == "SIMPLE_TASK"
+        else TerminalState.PENDING_USER_INPUT
+    )
+    assert result.terminal_state is expected
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    degraded = next(row for row in rows if row["event"] == "optional_stage_degraded")
+    assert degraded["payload"]["authoritative_path_continued"] is True
+
+
+@pytest.mark.asyncio
+async def test_direct_response_still_requires_valid_immediate_content(tmp_path):
+    provider = ScriptedProvider(
+        {
+            Stage.IMMEDIATE_RESPONSE: [
+                StageInvocationError("empty direct answer", retryable=False)
+            ],
+            Stage.TRIAGE: [{"classification": "DIRECT_RESPONSE"}],
+        }
+    )
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Hello", "request-direct-missing-immediate", effort="low"
+    )
+
+    assert result.terminal_state is TerminalState.ERROR
+    assert "direct response requires a valid Immediate Response" in result.error
+
+
+@pytest.mark.asyncio
 async def test_early_immediate_is_promoted_to_clarification_without_duplication(
     tmp_path,
 ):
@@ -661,7 +735,7 @@ async def test_high_volume_subagents_are_bounded_and_cannot_replan_or_finalise(t
         if item["assignment_id"] == "research-b"
     )
     assert prohibited["disposition"] == "FAILED"
-    assert "Sub-agent requested prohibited Replanning" in prohibited["summary"]
+    assert "prohibited orchestration authority" in prohibited["summary"]
     assert result.terminal_state is TerminalState.COMPLETED
     assert result.evidence_refs == ("sub:a", "primary:synthesis")
 
@@ -1208,6 +1282,124 @@ async def test_hard_safety_timeout_cancels_progressing_provider(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_triage_recovers_unambiguous_control_json_from_reasoning(tmp_path):
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [{"message": "I have it."}],
+        Stage.TRIAGE: [
+            StageResponse(
+                text="",
+                reasoning_trace=(
+                    "The task requires work.\n"
+                    '{"classification":"COMPLEX_TASK","goal":"Diagnose the fault"}'
+                ),
+                provider="fake-api",
+                model="model-triage",
+            )
+        ],
+        Stage.EXECUTION: [
+            {"disposition": "COMPLETED", "summary": "Fault diagnosed."}
+        ],
+        Stage.FINALISATION: [{"report": "Fault diagnosed."}],
+    }
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Diagnose the fault", "request-reasoning-recovery", effort="low"
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.classification is TriageClassification.COMPLEX_TASK
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    compatibility = next(
+        row
+        for row in rows
+        if row["event"] == "structured_response_compatibility_applied"
+        and row["stage"] == "triage"
+    )
+    assert compatibility["payload"]["validation_source"] == "reasoning_recovery"
+    assert compatibility["payload"]["reasoning_exposed_to_user"] is False
+    completed = next(
+        row
+        for row in rows
+        if row["event"] == "stage_completed" and row["stage"] == "triage"
+    )
+    assert completed["payload"]["validation_source"] == "reasoning_recovery"
+
+
+@pytest.mark.asyncio
+async def test_execution_can_pause_for_newly_discovered_user_authority(tmp_path):
+    scripts = _initial("SIMPLE_TASK")
+    scripts[Stage.EXECUTION] = [
+        {
+            "disposition": "NEEDS_USER_INPUT",
+            "summary": "Two accounts match the supplied name.",
+            "clarification": "Which account should be changed?",
+            "evidence_refs": ["lookup:accounts"],
+        }
+    ]
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Change the account", "request-execution-user-input", effort="low"
+    )
+
+    assert result.terminal_state is TerminalState.PENDING_USER_INPUT
+    assert result.text == "Which account should be changed?"
+    assert result.evidence_refs == ("lookup:accounts",)
+    assert result.ledger["terminal_reason"] == "execution_user_input_required"
+    assert not any(
+        request.stage in {Stage.REVIEW, Stage.FINALISATION}
+        for _profile, request in provider.requests
+    )
+
+
+@pytest.mark.asyncio
+async def test_simple_classification_can_escalate_execution_capability_without_mutation(
+    tmp_path,
+):
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [{"plan": ["attempt safely"]}],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "REPLAN_REQUIRED",
+                    "summary": "The lightweight route cannot verify the dependency.",
+                    "replan_reason": "premium capability required",
+                },
+                {"disposition": "COMPLETED", "summary": "Verified and completed."},
+            ],
+            Stage.REPLANNING: [{"plan": ["use the capable verification route"]}],
+            Stage.FINALISATION: [{"report": "Verified and completed."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Complete the simple request", "request-simple-escalation", effort="high"
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.classification is TriageClassification.SIMPLE_TASK
+    execution_profiles = [
+        profile.name
+        for profile, request in provider.requests
+        if request.stage is Stage.EXECUTION
+    ]
+    assert execution_profiles == ["lightweight", "premium"]
+    second_execution = [
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.EXECUTION
+    ][1]
+    assert second_execution.classification is TriageClassification.SIMPLE_TASK
+    assert second_execution.context["execution_capability_escalated"] is True
+
+
+@pytest.mark.asyncio
 async def test_side_effect_execution_bad_json_uses_tool_free_structure_repair_once(
     tmp_path,
 ):
@@ -1385,7 +1577,14 @@ async def test_structured_output_repair_is_bounded_and_preserves_classification(
     )
 
     assert result.classification is TriageClassification.SIMPLE_TASK
-    assert sum(call.stage is Stage.TRIAGE for _profile, call in provider.requests) == 2
+    triage_requests = [
+        call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
+    ]
+    assert len(triage_requests) == 2
+    assert triage_requests[1].context["previous_structure_error"]["attempt"] == 1
+    assert "no valid JSON" in triage_requests[1].context[
+        "previous_structure_error"
+    ]["error"]
 
 
 @pytest.mark.asyncio

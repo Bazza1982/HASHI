@@ -801,6 +801,7 @@ class _FakeBackend:
         self.shutdown_called = False
         self.prompt = ""
         self.sys_prompt = "configured agent persona"
+        self.capabilities = SimpleNamespace(supports_tool_use=True)
 
     def set_reasoning_enabled(self, enabled):
         self.reasoning_enabled = enabled
@@ -889,6 +890,12 @@ class _BaseToolRegistry:
 
     def is_allowed(self, name):
         return name in {"file_read", "file_write", "bash", "http_request"}
+
+    def allowed_tool_names(self):
+        return ("file_read", "file_write", "bash", "http_request")
+
+    def is_read_only(self, name):
+        return name == "file_read"
 
     def get_tool_definitions(self, tiers=None):
         del tiers
@@ -1208,17 +1215,87 @@ async def test_raw_provider_commentary_cannot_bypass_persona_packaging():
 
 
 @pytest.mark.asyncio
-async def test_hashi_stage_provider_rejects_non_gateway_cli_before_invocation():
-    manager = _FakeManager()
+async def test_hashi_stage_provider_rejects_tool_backend_without_isolation_capability():
+    class UnisolatedBackend:
+        def __init__(self):
+            self.config = SimpleNamespace(extra={})
+            self.capabilities = SimpleNamespace(supports_tool_use=True)
+            self.shutdown_called = False
+
+        async def shutdown(self):
+            self.shutdown_called = True
+
+    class CapabilityManager:
+        privacy_level = 1
+
+        def __init__(self):
+            self.backends = []
+
+        def create_ephemeral_backend(self, _engine, target_model=None):
+            del target_model
+            backend = UnisolatedBackend()
+            self.backends.append(backend)
+            return backend
+
+    manager = CapabilityManager()
     provider = HashiStageProvider(backend_manager=manager)
     profile = ProviderProfile("premium", "codex-cli", "gpt-configured")
 
-    with pytest.raises(StageInvocationError, match="not certified"):
+    with pytest.raises(StageInvocationError, match="cannot prove HASHI tool isolation"):
         await provider.invoke(
             profile,
             _stage_request(Stage.EXECUTION, allow_tools=True),
         )
-    assert manager.backends == []
+    assert manager.backends[0].shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_hashi_stage_provider_accepts_unknown_engine_by_safe_capability():
+    class ToolFreeBackend:
+        def __init__(self):
+            self.config = SimpleNamespace(extra={}, system_md=None, name="safe")
+            self.capabilities = SimpleNamespace(supports_tool_use=False)
+            self.prompt = ""
+            self.shutdown_called = False
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(self, prompt, *_args, **_kwargs):
+            self.prompt = prompt
+            return BackendResponse(
+                text="",
+                duration_ms=1,
+                structured_data={"outcome": "PASS", "summary": "verified"},
+            )
+
+        async def shutdown(self):
+            self.shutdown_called = True
+
+    class CapabilityManager:
+        privacy_level = 1
+
+        def __init__(self):
+            self.backends = []
+
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert (engine, target_model) == ("new-provider", "model-safe")
+            backend = ToolFreeBackend()
+            self.backends.append(backend)
+            return backend
+
+    manager = CapabilityManager()
+    provider = HashiStageProvider(backend_manager=manager)
+
+    result = await provider.invoke(
+        ProviderProfile("reviewer", "new-provider", "model-safe"),
+        _stage_request(Stage.REVIEW, allow_tools=False),
+    )
+
+    assert result.text == ""
+    assert result.data == {"outcome": "PASS", "summary": "verified"}
+    assert "independent strict HER v2 Reviewer" in manager.backends[0].prompt
+    assert manager.backends[0].shutdown_called is True
 
 
 @pytest.mark.asyncio
@@ -1257,9 +1334,25 @@ async def test_subagent_receives_only_explicitly_delegated_tools():
 
 
 @pytest.mark.asyncio
-async def test_shadow_execution_registry_exposes_read_only_tools_only():
+async def test_read_only_delegation_uses_registry_capability_not_her_name_list():
+    class RegistryWithCustomReadOnlyTool(_BaseToolRegistry):
+        def is_allowed(self, name):
+            return name == "custom_inspector" or super().is_allowed(name)
+
+        def allowed_tool_names(self):
+            return (*super().allowed_tool_names(), "custom_inspector")
+
+        def is_read_only(self, name):
+            return name == "custom_inspector" or super().is_read_only(name)
+
+        def get_tool_definitions(self, tiers=None):
+            return [
+                *super().get_tool_definitions(tiers=tiers),
+                {"type": "function", "function": {"name": "custom_inspector"}},
+            ]
+
     manager = _FakeManager()
-    base_registry = _BaseToolRegistry()
+    base_registry = RegistryWithCustomReadOnlyTool()
     provider = HashiStageProvider(
         backend_manager=manager, tool_registry=base_registry
     )
@@ -1279,7 +1372,7 @@ async def test_shadow_execution_registry_exposes_read_only_tools_only():
     names = {
         item["function"]["name"] for item in shadow_registry.get_tool_definitions()
     }
-    assert names == {"file_read"}
+    assert names == {"file_read", "custom_inspector"}
     allowed = await shadow_registry.execute(
         "file_read", {"path": "a"}, "call-read"
     )

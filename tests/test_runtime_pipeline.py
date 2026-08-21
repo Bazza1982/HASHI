@@ -2837,6 +2837,123 @@ async def test_her_v2_stream_callback_returns_receipts_and_resolves_provisional_
 
 
 @pytest.mark.asyncio
+async def test_her_v2_initial_resolution_accepts_mapping_receipt_and_edit_only_transport():
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "medium"
+    runtime._commentary = True
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+    edits = []
+
+    async def edit_message_text(**kwargs):
+        edits.append(kwargs)
+
+    runtime.app.bot = SimpleNamespace(edit_message_text=edit_message_text)
+
+    async def _send_text(_chat_id, _text, **_kwargs):
+        return {"ok": True, "message_id": 88}
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(request_id="req-her-v2-edit-only"),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.on_stream_event.supports_initial_resolution is True
+    accepted = await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT,
+            summary="Checking.",
+            event_id="turn-edit:immediate",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_v2",
+        )
+    )
+    resolved = await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_INITIAL_RESOLUTION,
+            summary="Complete.",
+            event_id="turn-edit:resolution",
+            delivery_class="internal",
+            origin="her_v2",
+            resolution="final",
+            target_event_id="turn-edit:immediate",
+        )
+    )
+
+    assert accepted is True
+    assert resolved is True
+    assert edits[0]["message_id"] == 88
+
+
+@pytest.mark.asyncio
+async def test_her_v2_edit_only_transport_rejects_unsupported_discard_explicitly():
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "medium"
+    runtime._commentary = True
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+
+    async def edit_message_text(**_kwargs):
+        return None
+
+    runtime.app.bot = SimpleNamespace(edit_message_text=edit_message_text)
+
+    async def _send_text(_chat_id, _text, **_kwargs):
+        return {"accepted": True, "message_id": 89}
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(request_id="req-her-v2-edit-only-discard"),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT,
+            summary="Checking.",
+            event_id="turn-edit-discard:immediate",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_v2",
+        )
+    ) is True
+    assert await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_INITIAL_RESOLUTION,
+            summary="",
+            event_id="turn-edit-discard:resolution",
+            delivery_class="internal",
+            origin="her_v2",
+            resolution="discard",
+            target_event_id="turn-edit-discard:immediate",
+        )
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("receipt", "accepted"),
+    [
+        ({"accepted": True}, True),
+        ({"ok": False, "message_id": 4}, False),
+        (SimpleNamespace(accepted=True), True),
+        ([101, 102], True),
+        (("text", 2), True),
+        (("text", 0), False),
+        (None, False),
+    ],
+)
+def test_transport_receipt_normalisation_is_shape_compatible_but_explicit(
+    receipt,
+    accepted,
+):
+    assert runtime_pipeline._transport_accepted(receipt) is accepted
+
+
+@pytest.mark.asyncio
 async def test_finalize_streamed_answer_promotes_placeholder_to_final_text():
     runtime = _runtime()
     item = _item()

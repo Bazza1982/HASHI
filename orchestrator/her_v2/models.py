@@ -101,6 +101,7 @@ class ExecutionDisposition(StrEnum):
     FAILED = "FAILED"
     ABANDONED = "ABANDONED"
     REPLAN_REQUIRED = "REPLAN_REQUIRED"
+    USER_INPUT_REQUIRED = "USER_INPUT_REQUIRED"
 
 
 @dataclass(frozen=True)
@@ -124,7 +125,7 @@ class StageRequest:
 
 @dataclass(frozen=True)
 class StageResponse:
-    text: str
+    text: str = ""
     data: Mapping[str, Any] = field(default_factory=dict)
     reasoning_trace: str | None = None
     provider: str = ""
@@ -147,6 +148,7 @@ class ExecutionOutcome:
     evidence_refs: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     replan_reason: str = ""
+    clarification: str = ""
 
 
 @dataclass(frozen=True)

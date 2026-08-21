@@ -11,7 +11,12 @@ Differences from OpenRouter:
 
 import json
 
-from adapters.openrouter_api import OpenRouterAdapter, _APIResult
+from adapters.openrouter_api import (
+    OpenRouterAdapter,
+    _APIResult,
+    _assistant_content_text,
+    _message_structured_data,
+)
 from adapters.stream_events import KIND_THINKING, StreamEvent
 
 _DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
@@ -60,14 +65,20 @@ class DeepSeekAdapter(OpenRouterAdapter):
         choice = choices[0]
         message = choice.get("message") or {}
         finish_reason = choice.get("finish_reason") or "stop"
-        ai_text = message.get("content") or ""
+        ai_text = _assistant_content_text(message.get("content"))
         reasoning_content = str(message.get("reasoning_content") or "")
 
         # DeepSeek uses "reasoning_content" for thinking tokens
         if on_stream_event is not None:
             reasoning = reasoning_content.strip()
             if reasoning:
-                await on_stream_event(StreamEvent(kind=KIND_THINKING, summary=reasoning[:400]))
+                await on_stream_event(
+                    StreamEvent(
+                        kind=KIND_THINKING,
+                        summary=reasoning[:400],
+                        raw_delta=reasoning,
+                    )
+                )
 
         tool_calls = message.get("tool_calls") or None
 
@@ -85,6 +96,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason,
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 thinking_tokens=thinking_tokens,
+                structured_data=_message_structured_data(message),
             ),
             reasoning_content,
         )
@@ -191,6 +203,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
         ]
         headers = self._deepseek_headers()
         last_text = ""
+        last_structured_data = None
         result = None
         total_prompt = 0
         total_completion = 0
@@ -212,6 +225,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 total_thinking += result.thinking_tokens
 
                 last_text = result.text
+                last_structured_data = result.structured_data
                 if not result.tool_calls or not self.tool_registry:
                     break
 
@@ -236,6 +250,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
                     total_completion += result.completion_tokens
                     total_thinking += result.thinking_tokens
                     last_text = result.text
+                    last_structured_data = result.structured_data
                     break
 
             from adapters.base import BackendResponse, TokenUsage
@@ -248,6 +263,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
             return BackendResponse(
                 text=last_text,
                 duration_ms=duration_ms,
+                structured_data=last_structured_data,
                 is_success=True,
                 stop_reason=result.finish_reason if result else "stop",
                 usage=usage,

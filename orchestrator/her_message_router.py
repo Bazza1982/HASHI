@@ -20,6 +20,7 @@ from adapters.stream_events import (
     DELIVERY_USER_COMMENTARY,
     KIND_INITIAL_RESOLUTION,
     StreamEvent,
+    legacy_delivery_class,
 )
 
 
@@ -126,6 +127,19 @@ class HERMessageRouter:
     async def route(self, event: StreamEvent) -> bool:
         """Hand one stream event to exactly one presentation owner."""
 
+        delivery_class = str(getattr(event, "delivery_class", "") or "")
+        if not delivery_class:
+            origin = str(getattr(event, "origin", "") or "")
+            if not origin.startswith("her_v2"):
+                delivery_class = legacy_delivery_class(
+                    str(getattr(event, "kind", "") or "")
+                )
+                event.delivery_class = delivery_class
+                self._log(
+                    "info",
+                    f"HER legacy delivery class normalised: request={self.request_id} "
+                    f"kind={getattr(event, 'kind', '')} delivery_class={delivery_class}",
+                )
         try:
             await self._call(self.persist_event, event)
         except Exception as exc:
@@ -134,8 +148,6 @@ class HERMessageRouter:
                 f"HER stream persistence failed safely: request={self.request_id} "
                 f"kind={getattr(event, 'kind', '')} error_type={type(exc).__name__}",
             )
-
-        delivery_class = str(getattr(event, "delivery_class", "") or "")
         if delivery_class not in DELIVERY_CLASSES:
             self._log(
                 "warning",
