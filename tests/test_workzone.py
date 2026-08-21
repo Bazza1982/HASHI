@@ -180,15 +180,20 @@ def test_tool_registry_uses_external_workzone_as_access_root_when_outside_scope(
 
 def test_tool_registry_wildcard_survives_global_default_merge():
     manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
-    manager._load_global_raw = lambda: {
+    manager._agents_json_global = {
         "default_tools": {"allowed": ["telegram_send_file"], "max_loops": 5}
     }
+    warnings = []
+    manager.logger = SimpleNamespace(
+        warning=lambda *args, **kwargs: warnings.append((args, kwargs))
+    )
 
     merged = manager._resolve_tools_config(
         {"tools": {"allowed": ["*"], "max_loops": 25}}
     )
 
-    assert merged == {"allowed": ["*"], "max_loops": 25}
+    assert merged == {"allowed": ["*"]}
+    assert len(warnings) == 1
 
 
 def test_tool_registry_wildcard_excludes_explicit_opt_in_tools(tmp_path: Path):
@@ -208,7 +213,7 @@ def test_tool_registry_wildcard_excludes_explicit_opt_in_tools(tmp_path: Path):
     manager._attach_tool_registry({"allowed": ["*"], "max_loops": 25}, adapter_cfg)
 
     registry = manager.current_backend.tool_registry
-    assert registry.max_loops == 25
+    assert registry.max_loops is None
     assert set(registry._allowed) == set(ALL_TOOL_NAMES) - {
         "media_read",
         "vision_inspect",
