@@ -96,6 +96,26 @@ def _is_her_backend(runtime: Any, backend: Any) -> bool:
     return backend_engine in {"her", "claw-cli"}
 
 
+def _backend_accepts_media_bridge(backend: Any, media_kind: str, filename: str) -> bool:
+    capabilities = getattr(backend, "capabilities", None)
+    if bool(getattr(capabilities, "supports_files", False)):
+        return True
+
+    registry = getattr(backend, "tool_registry", None)
+    is_allowed = getattr(registry, "is_allowed", None)
+    if not callable(is_allowed):
+        return False
+
+    kind = str(media_kind or "").strip().casefold()
+    if kind == "photo" or (kind == "document" and is_image_file(filename)):
+        return bool(is_allowed("vision_inspect") or is_allowed("media_read"))
+    if kind in {"audio", "video", "voice"}:
+        return bool(is_allowed("media_read"))
+    if kind == "document":
+        return bool(is_allowed("file_read") or is_allowed("media_read"))
+    return False
+
+
 def _available_media_path(media_dir: Path, filename: str) -> Path:
     # Telegram filenames are user-controlled. Keep every download inside the
     # agent media directory and avoid overwriting same-named batch items.
@@ -111,6 +131,16 @@ def _available_media_path(media_dir: Path, filename: str) -> Path:
         if not alternative.exists():
             return alternative
     raise RuntimeError(f"could not allocate a unique media filename for {safe_name!r}")
+
+
+def _transport_metadata(update: Any, filename: str) -> dict[str, Any]:
+    message = getattr(update, "message", None)
+    return {
+        "filename": str(filename or ""),
+        "update_id": getattr(update, "update_id", None),
+        "message_id": getattr(message, "message_id", None),
+        "media_group_id": getattr(message, "media_group_id", None),
+    }
 
 
 async def download_media(runtime: Any, file_id: str, filename: str) -> Path:
@@ -155,23 +185,32 @@ async def handle_media_message(
         await runtime._reply_text(update, runtime._transfer_redirect_text())
         return
     backend = getattr(runtime.backend_manager, "current_backend", None)
-    if backend and not backend.capabilities.supports_files:
+    if backend and not _backend_accepts_media_bridge(backend, media_kind, filename):
         await runtime._reply_text(update, f"Current backend does not support {media_kind.lower()} attachments yet.")
         return
     _print_user_message(runtime.name, summary, media_tag=media_kind)
+    chat_id = update.effective_chat.id
+    reservation_id = runtime_long.reserve_media(
+        runtime,
+        chat_id,
+        media_kind.lower(),
+        summary,
+        transport_metadata=_transport_metadata(update, filename),
+    )
     try:
         local_path = await runtime.download_media(file_id, filename)
         rendered_prompt = prompt.replace("{local_path}", str(local_path))
-        if runtime_long.collect_media(
+        if reservation_id is not None and runtime_long.complete_media(
             runtime,
-            update.effective_chat.id,
+            reservation_id,
             rendered_prompt,
-            media_kind.lower(),
-            summary,
+            local_path=local_path,
         ):
             return
-        await runtime.enqueue_request(update.effective_chat.id, rendered_prompt, media_kind.lower(), summary)
+        await runtime.enqueue_request(chat_id, rendered_prompt, media_kind.lower(), summary)
     except Exception as e:
+        if reservation_id is not None:
+            runtime_long.discard_media_reservation(runtime, reservation_id)
         runtime.error_logger.exception(f"{media_kind} handler failed for '{filename}': {e}")
         try:
             await runtime._reply_text(update, f"Failed to process {media_kind.lower()} message.")
@@ -357,6 +396,13 @@ async def handle_sticker(runtime: Any, update: Any, context: Any):
     emoji = sticker.emoji or ""
     prompt, summary = build_media_prompt("sticker", "sticker", emoji=emoji)
     _print_user_message(runtime.name, emoji or "sticker", media_tag="Sticker")
-    if runtime_long.collect_media(runtime, update.effective_chat.id, prompt, "sticker", summary):
+    if runtime_long.collect_media(
+        runtime,
+        update.effective_chat.id,
+        prompt,
+        "sticker",
+        summary,
+        transport_metadata=_transport_metadata(update, "sticker"),
+    ):
         return
     await runtime.enqueue_request(update.effective_chat.id, prompt, "sticker", summary)

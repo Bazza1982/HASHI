@@ -4,6 +4,7 @@ import html
 import re
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -24,6 +25,7 @@ class QueuedRequest:
     skill_id: str | None = None
     skill_usage_event_id: str | None = None
     scheduler_context: dict[str, str] | None = None
+    request_metadata: dict[str, Any] | None = None
 
 
 def _safe_excerpt(text: str, limit: int = 160) -> str:

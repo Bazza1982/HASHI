@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -23,9 +24,17 @@ def _runtime():
         _long_buffer_kinds=[],
         _long_buffer_summaries=[],
         _long_buffer_ids=[],
+        _long_buffer_metadata=[],
         _long_buffer_active=False,
+        _long_buffer_state="idle",
         _long_buffer_chat_id=None,
+        _long_batch_id=None,
         _long_buffer_timeout_task=None,
+        _long_finalize_task=None,
+        _long_finalize_update=None,
+        _long_finalize_reason=None,
+        _long_pending_media_ids=set(),
+        _long_batch_quiet_seconds=0,
         _long_pending_voice_keys=set(),
         _pending_voice={},
     )
@@ -114,6 +123,9 @@ def test_multimodal_batch_preserves_item_order_and_requests_one_response():
     assert "/tmp/contract.pdf" in submission.prompt
     assert "/tmp/photo.jpg" in submission.prompt
     assert "and respond" not in submission.prompt
+    assert "do not inspect an attachment merely because it exists" in submission.prompt
+    assert "Each Transport receipt below proves intake only" in submission.prompt
+    assert "Read or inspect every referenced file before replying" not in submission.prompt
 
 
 @pytest.mark.asyncio
@@ -189,6 +201,40 @@ async def test_cmd_end_waits_for_safevoice_confirmation():
     assert runtime.enqueued == []
     assert runtime._long_buffer_active is True
     assert "Confirm or discard 1 pending voice transcript" in runtime.replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_cmd_end_waits_for_reserved_media_before_finalizing():
+    runtime = _runtime()
+    runtime._long_batch_quiet_seconds = 0.01
+    runtime_long.begin_batch(runtime, 123, "Compare the incoming image.")
+    reservation_id = runtime_long.reserve_media(
+        runtime,
+        123,
+        "photo",
+        "incoming.jpg",
+        transport_metadata={"message_id": 77, "media_group_id": "album-1"},
+    )
+
+    await runtime_long.cmd_end(runtime, _update(), SimpleNamespace())
+    await asyncio.sleep(0.03)
+
+    assert reservation_id is not None
+    assert runtime.enqueued == []
+    assert runtime._long_buffer_state == runtime_long.LONG_BATCH_CLOSING
+
+    assert runtime_long.complete_media(
+        runtime,
+        reservation_id,
+        "User sent a photo (saved at /tmp/incoming.jpg). View the image and respond.",
+    ) is True
+    await asyncio.sleep(0.03)
+
+    assert len(runtime.enqueued) == 1
+    metadata = runtime.enqueued[0]["request_metadata"]
+    assert metadata["media_count"] == 1
+    assert metadata["attachment_receipts"][0]["status"] == "received"
+    assert metadata["attachment_receipts"][0]["media_group_id"] == "album-1"
 
 
 @pytest.mark.asyncio

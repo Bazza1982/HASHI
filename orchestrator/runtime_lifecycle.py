@@ -121,6 +121,24 @@ async def shutdown(runtime: Any) -> None:
         runtime._scheduled_retry_tasks,
         label="retry-tasks",
     )
+    long_batch_tasks = {
+        task
+        for task in (
+            getattr(runtime, "_long_buffer_timeout_task", None),
+            getattr(runtime, "_long_finalize_task", None),
+        )
+        if isinstance(task, asyncio.Task)
+    }
+    clean = (
+        await _cancel_tasks(
+            runtime,
+            long_batch_tasks,
+            label="long-batch-tasks",
+        )
+        and clean
+    )
+    runtime._long_buffer_timeout_task = None
+    runtime._long_finalize_task = None
     clean = (
         await _cancel_tasks(
             runtime,

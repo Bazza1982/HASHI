@@ -393,6 +393,9 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
     scheduler_context = getattr(item, "scheduler_context", None)
     if isinstance(scheduler_context, dict) and scheduler_context:
         request_meta["scheduler_context"] = dict(scheduler_context)
+    request_metadata = getattr(item, "request_metadata", None)
+    if isinstance(request_metadata, dict) and request_metadata:
+        request_meta["request_metadata"] = dict(request_metadata)
     runtime.current_request_meta = request_meta
     registry = getattr(runtime, "_request_meta_by_id", None)
     if not isinstance(registry, dict):

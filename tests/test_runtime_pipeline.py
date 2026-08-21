@@ -409,6 +409,22 @@ def test_begin_queue_item_preserves_explicit_scheduler_context():
     assert runtime.current_request_meta["scheduler_context"] is not scheduler_context
 
 
+def test_begin_queue_item_preserves_multimodal_request_metadata():
+    metadata = {
+        "batch_id": "long-1",
+        "media_count": 5,
+        "attachment_receipts": [{"receipt_id": f"photo-{index}"} for index in range(5)],
+    }
+    runtime = _runtime()
+    item = _item(request_metadata=metadata)
+
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    assert runtime.current_request_meta["request_metadata"] == metadata
+    assert runtime._request_meta_by_id[item.request_id]["request_metadata"] == metadata
+    assert runtime.current_request_meta["request_metadata"] is not metadata
+
+
 def test_begin_queue_item_uses_monotonic_queue_age(monkeypatch):
     runtime = _runtime()
     item = _item(queued_monotonic=40.0)

@@ -20,6 +20,43 @@ class _Logger:
 
 
 @pytest.mark.asyncio
+async def test_shutdown_cancels_long_batch_timeout_and_finalize_tasks():
+    async def _wait_forever():
+        await asyncio.Event().wait()
+
+    async def _shutdown_backend():
+        return None
+
+    timeout_task = asyncio.create_task(_wait_forever())
+    finalize_task = asyncio.create_task(_wait_forever())
+    await asyncio.sleep(0)
+    shutdown_states = []
+    runtime = SimpleNamespace(
+        name="zelda",
+        logger=_Logger(),
+        error_logger=_Logger(),
+        is_shutting_down=False,
+        _scheduled_retry_tasks=set(),
+        _persona_background_status_tasks=set(),
+        _background_tasks=set(),
+        _long_buffer_timeout_task=timeout_task,
+        _long_finalize_task=finalize_task,
+        process_task=None,
+        backend_manager=SimpleNamespace(shutdown=_shutdown_backend),
+        startup_success=False,
+        _mark_runtime_shutdown=lambda clean: shutdown_states.append(clean),
+    )
+
+    await runtime_lifecycle.shutdown(runtime)
+
+    assert timeout_task.cancelled()
+    assert finalize_task.cancelled()
+    assert runtime._long_buffer_timeout_task is None
+    assert runtime._long_finalize_task is None
+    assert shutdown_states == [True]
+
+
+@pytest.mark.asyncio
 async def test_shutdown_marks_unclean_and_finishes_when_queue_ignores_cancel(monkeypatch):
     release_queue = asyncio.Event()
     queue_cancelled = asyncio.Event()

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -56,9 +57,10 @@ class _FlakyBot(_Bot):
         return self.file
 
 
-def _update(**message_fields):
+def _update(*, update_id=None, **message_fields):
     message = SimpleNamespace(**message_fields)
     return SimpleNamespace(
+        update_id=update_id,
         effective_chat=SimpleNamespace(id=123),
         effective_user=SimpleNamespace(id=1),
         message=message,
@@ -82,10 +84,18 @@ def _runtime(tmp_path: Path):
         _long_buffer_kinds=[],
         _long_buffer_summaries=[],
         _long_buffer_ids=[],
+        _long_buffer_metadata=[],
         _long_buffer_active=False,
+        _long_buffer_state="idle",
         _long_buffer_chat_id=None,
+        _long_batch_id=None,
         _long_pending_voice_keys=set(),
+        _long_pending_media_ids=set(),
         _long_buffer_timeout_task=None,
+        _long_finalize_task=None,
+        _long_finalize_update=None,
+        _long_finalize_reason=None,
+        _long_batch_quiet_seconds=0,
     )
     runtime._is_authorized_user = lambda user_id: user_id == 1
     runtime._record_active_chat = lambda update: None
@@ -251,6 +261,55 @@ async def test_multiple_documents_and_task_enqueue_as_one_request_on_end(tmp_pat
     assert "contract.pdf" in request["prompt"]
     assert request["prompt"].index("authority.pdf") < request["prompt"].index("contract.pdf")
     assert "Return one consolidated response" in request["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_end_before_five_photo_album_still_enqueues_one_multimodal_request(tmp_path):
+    runtime = _runtime(tmp_path)
+    # DeepSeek-style text-only backends can still accept images when the
+    # explicit vision bridge is available; intake must not require native vision.
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        capabilities=SimpleNamespace(supports_files=False),
+        tool_registry=SimpleNamespace(
+            is_allowed=lambda tool_name: tool_name == "vision_inspect"
+        ),
+    )
+    runtime._long_batch_quiet_seconds = 0.01
+    runtime_long.begin_batch(runtime, 123)
+    runtime_long.collect_text(runtime, 123, "Compare all five images and report once.")
+    end_update = _update(update_id=500, message_id=50, text="/end")
+
+    await runtime_long.cmd_end(runtime, end_update, SimpleNamespace())
+
+    for index in range(5):
+        photo_update = _update(
+            update_id=501 + index,
+            message_id=51 + index,
+            media_group_id="album-five",
+            photo=[SimpleNamespace(file_id=f"photo-{index + 1}")],
+            caption="",
+        )
+        await runtime_media.handle_photo(runtime, photo_update, SimpleNamespace())
+
+    await asyncio.sleep(0.04)
+
+    assert len(runtime.enqueued) == 1
+    request = runtime.enqueued[0]
+    assert request["source"] == "multimodal"
+    assert request["request_metadata"]["media_count"] == 5
+    receipts = request["request_metadata"]["attachment_receipts"]
+    assert len(receipts) == 5
+    assert {receipt["media_group_id"] for receipt in receipts} == {"album-five"}
+    assert [receipt["message_id"] for receipt in receipts] == [51, 52, 53, 54, 55]
+    assert len({receipt["receipt_id"] for receipt in receipts}) == 5
+    assert len({receipt["local_path"] for receipt in receipts}) == 5
+    assert all(receipt["status"] == "received" for receipt in receipts)
+    assert all(receipt["size_bytes"] == 5 for receipt in receipts)
+    assert all(len(receipt["sha256"]) == 64 for receipt in receipts)
+    assert request["prompt"].count("[Transport receipt]") == 5
+    assert "Compare all five images and report once." in request["prompt"]
+    assert "Read or inspect every referenced file before replying" not in request["prompt"]
+    assert all(item["source"] != "photo" for item in runtime.enqueued)
 
 
 @pytest.mark.asyncio

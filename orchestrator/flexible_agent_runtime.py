@@ -224,9 +224,17 @@ class FlexibleAgentRuntime:
         self._long_buffer_kinds: list[str] = []
         self._long_buffer_summaries: list[str] = []
         self._long_buffer_ids: list[str | None] = []
+        self._long_buffer_metadata: list[dict[str, Any] | None] = []
         self._long_buffer_active: bool = False
+        self._long_buffer_state: str = "idle"
         self._long_buffer_chat_id: int | None = None
+        self._long_batch_id: str | None = None
         self._long_buffer_timeout_task: asyncio.Task | None = None
+        self._long_finalize_task: asyncio.Task | None = None
+        self._long_finalize_update: Any | None = None
+        self._long_finalize_reason: str | None = None
+        self._long_pending_media_ids: set[str] = set()
+        self._long_batch_quiet_seconds: float = 2.0
         self._long_pending_voice_keys: set[str] = set()
         # Hashi Remote subprocess
         self._remote_process: asyncio.subprocess.Process | None = None
@@ -671,6 +679,7 @@ class FlexibleAgentRuntime:
         habit_learning_eligible: bool = True,
         skill_id: str | None = None,
         scheduler_context: Mapping[str, str] | None = None,
+        request_metadata: Mapping[str, Any] | None = None,
     ):
         if not prompt or not prompt.strip():
             self.error_logger.error(f"Rejected empty prompt from {source} (summary={summary!r})")
@@ -690,6 +699,9 @@ class FlexibleAgentRuntime:
             skill_id=skill_id,
             scheduler_context=(
                 dict(scheduler_context) if scheduler_context else None
+            ),
+            request_metadata=(
+                dict(request_metadata) if request_metadata else None
             ),
         )
         usage_recorder = getattr(
