@@ -263,7 +263,6 @@ Required `error` emission cases:
 - local `/api/chat` enqueue fails
 - reply correlation is missing for an inbound `agent_reply`
 - handshake rejected or incompatible
-- hard timeout reached before terminal completion
 
 Minimum `error.body` fields:
 
@@ -363,7 +362,6 @@ Required terminal states:
 - `completed`
 - `failed`
 - `rejected`
-- `timed_out`
 - `abandoned_after_restart`
 
 Required intermediate states:
@@ -383,7 +381,7 @@ Recommended reply collection rules:
 5. When no new assistant transcript entry appears for `settle_window_seconds`, sidecar marks `completed` and emits one merged `agent_reply`.
 6. If an explicit assistant error entry or runtime error marker is observed, sidecar marks `failed`.
 7. If the assistant text is a refusal or a system policy block, sidecar marks `rejected`.
-8. If no assistant output reaches terminal state before timeout, sidecar marks `timed_out`.
+8. Elapsed time alone never changes a live reply collection into a terminal state.
 9. If sidecar restarts before a non-terminal inflight item is safely resumed,
    it must mark that item `abandoned_after_restart` or explicitly rebind it to
    a valid resumed correlation record. This must not be left ambiguous.
@@ -391,8 +389,6 @@ Recommended reply collection rules:
 Default timing values for v1:
 
 - `poll_interval_seconds = 0.5`
-- `reply_soft_timeout_seconds = 45`
-- `reply_hard_timeout_seconds = 180`
 - `settle_window_seconds = 2.0`
 - `dedupe_success_ttl_seconds = 600`
 - `dedupe_retry_ttl_seconds = 180`
@@ -588,8 +584,6 @@ The correlation store should persist at minimum:
 - `state`
 - `created_at`
 - `updated_at`
-- `reply_soft_deadline`
-- `reply_hard_deadline`
 - `attempt_count`
 
 ### Workstream 8: Add remote-only activation / restart path
@@ -703,7 +697,7 @@ Preferred mapping from protocol-facing errors to operator-facing Hchat results:
 | `target_agent_unavailable` | `target_agent_unavailable`, `local_enqueue_failed` on confirmed-live target |
 | `auth_failed` | `auth_required`, `auth_failed`, invalid signature / missing trust |
 | `delivery_rejected` | explicit policy refusal, invalid payload, TTL rejection |
-| `delivery_timed_out` | reply soft/hard timeout without terminal success |
+| `delivery_timed_out` | bounded transport acknowledgement failed; this never terminates remote agent execution |
 | `internal_error` | unexpected local or remote exception outside the classified set |
 
 Operator and user-facing surfaces should present:
@@ -855,7 +849,7 @@ The upgrade is complete only when the following are true:
 - Return address is explicit as `agent@instance`
 - Duplicate inbound remote messages do not create duplicate agent work
 - Reply traffic does not loop
-- Reply collection can distinguish `completed`, `failed`, `rejected`, and `timed_out`
+- Reply collection can distinguish `completed`, `failed`, and `rejected` without an elapsed-time terminal state
 - Sidecar restart can recover inflight remote requests and continue transcript catch-up
 - Peer rediscovery after offline/online cycle automatically triggers re-handshake
 - Peer protocol/capability/version change automatically triggers re-handshake

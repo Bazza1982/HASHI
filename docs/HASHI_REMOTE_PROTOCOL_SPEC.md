@@ -319,8 +319,6 @@ The receiver must also persist:
 - `transcript_path`
 - `transcript_offset_at_enqueue`
 - `state = queued`
-- `reply_soft_deadline`
-- `reply_hard_deadline`
 
 ### Neutral local prompt format
 
@@ -345,15 +343,16 @@ Avoid raw `[hchat from ...]` as the local injected prompt for protocol traffic.
 - `completed`
 - `failed`
 - `rejected`
-- `timed_out`
 - `abandoned_after_restart`
 
 ### Default timing values
 
 - `poll_interval_seconds = 0.5`
 - `settle_window_seconds = 2.0`
-- `reply_soft_timeout_seconds = 45`
-- `reply_hard_timeout_seconds = 180`
+
+Reply collection has no elapsed-time deadline. It remains correlated until an
+authoritative completion/failure, an explicit stop, or process restart
+reconciliation.
 
 ### Collection rules
 
@@ -364,14 +363,12 @@ Avoid raw `[hchat from ...]` as the local injected prompt for protocol traffic.
 5. When no new assistant entry arrives during the settle window, state becomes `completed`.
 6. If transcript or runtime metadata indicates backend/tool failure, state becomes `failed`.
 7. If the assistant output is an explicit refusal or policy block, state becomes `rejected`.
-8. If hard timeout is reached before a terminal state, state becomes `timed_out`.
 
 ### Reply payload generation
 
 - `completed` -> send `agent_reply` with merged assistant output
 - `failed` -> send `error` with failure classification
 - `rejected` -> send `agent_reply` with refusal classification metadata
-- `timed_out` -> send `error` with timeout classification
 
 ## Reply Rules
 
@@ -424,7 +421,6 @@ Fallback when the original local agent is unavailable:
 - local enqueue failure
 - missing reply correlation for inbound `agent_reply`
 - handshake rejected or incompatible
-- hard timeout before terminal reply state
 
 ### Required `error.body`
 
@@ -515,7 +511,7 @@ On startup, the sidecar must reload inflight correlations and for each non-termi
 
 1. reopen transcript from persisted `transcript_offset_at_enqueue`
 2. scan forward to the last persisted `last_seen_offset`
-3. continue polling until a terminal state is reached or hard timeout expires
+3. continue polling until a terminal state or an explicit operator stop is reached
 4. if transcript file rotated or disappeared, mark `abandoned_after_restart`
 5. never emit a second `agent_reply` for the same `message_id`
 

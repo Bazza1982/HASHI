@@ -616,8 +616,6 @@ does not change the primary process terminal state.
   "policy": {
     "auth_level": "L2_WRITE",
     "workspace_root": "/home/lily/projects/example",
-    "max_runtime_seconds": 14400,
-    "idle_timeout_seconds": 1800,
     "max_stdout_bytes": 5242880,
     "max_stderr_bytes": 5242880
   },
