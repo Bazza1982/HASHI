@@ -17,7 +17,6 @@ from orchestrator.flexible_backend_registry import canonical_backend_engine
 from orchestrator.privacy_levels import PrivacyPolicyError, require_backend_compatibility
 
 _MAX_STATUS_CHARS = 800
-_RENDER_TIMEOUT_SECONDS = 90.0
 _TOOL_FREE_API_ENGINES = frozenset(
     {"deepseek-api", "ollama-api", "openrouter-api", "xai-api"}
 )
@@ -131,7 +130,6 @@ async def _invoke_renderer(runtime: Any, prompt: str, request_id: str) -> Any:
         return await isolated_renderer(
             prompt,
             request_id=f"{request_id}:background-persona",
-            timeout_seconds=_RENDER_TIMEOUT_SECONDS,
         )
 
     context = _tool_free_api_context(runtime)
@@ -142,15 +140,12 @@ async def _invoke_renderer(runtime: Any, prompt: str, request_id: str) -> Any:
     if context is None or not callable(tool_free_renderer):
         raise RuntimeError("no tool-free Persona renderer is available")
     engine, model = context
-    return await asyncio.wait_for(
-        tool_free_renderer(
-            engine=engine,
-            model=model,
-            prompt=prompt,
-            request_id=f"{request_id}:background-persona",
-            silent=True,
-        ),
-        timeout=_RENDER_TIMEOUT_SECONDS,
+    return await tool_free_renderer(
+        engine=engine,
+        model=model,
+        prompt=prompt,
+        request_id=f"{request_id}:background-persona",
+        silent=True,
     )
 
 
@@ -272,9 +267,9 @@ async def _deliver(
 ) -> None:
     try:
         status = None
-        # One retry covers a Persona edit that lands while the pre-render is in
-        # flight. A transient render failure still remains bounded and fail-safe.
-        for _attempt in range(2):
+        # Persona edits are meaningful progress, so they may trigger another
+        # render without introducing a fixed attempt ceiling.
+        while True:
             source = _persona_source(runtime)
             status = _cached_status(runtime, source)
             if status is not None:
@@ -289,6 +284,15 @@ async def _deliver(
             if generation_task in done:
                 await _delete_placeholder(runtime, item, placeholder)
                 return
+            rendered = await render_task
+            if rendered is None:
+                current = _persona_source(runtime)
+                if (
+                    current.usable
+                    and current.content_sha256 != source.content_sha256
+                ):
+                    continue
+                break
 
         if generation_task.done() or status is None:
             await _delete_placeholder(runtime, item, placeholder)

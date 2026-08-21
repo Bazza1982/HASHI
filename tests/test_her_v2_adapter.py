@@ -52,7 +52,6 @@ def _profiles():
             "engine": "openrouter-api",
             "model": f"configured/{name}",
             "reasoning": f"provider-{name}",
-            "max_attempts": 1,
         }
         for name in ("lightweight", "triage", "premium", "reviewer", "orchestrator")
     }
@@ -395,6 +394,10 @@ async def test_adapter_correlates_ordinary_transport_receipt_with_stable_deliver
 @pytest.mark.asyncio
 async def test_adapter_surfaces_reconciliation_required_as_non_success(tmp_path):
     class _MalformedExecutionProvider(_DirectProvider):
+        def __init__(self):
+            super().__init__()
+            self.repair_calls = 0
+
         async def invoke(self, profile, request):
             self.requests.append((profile, request))
             if request.stage is Stage.IMMEDIATE_RESPONSE:
@@ -410,6 +413,11 @@ async def test_adapter_surfaces_reconciliation_required_as_non_success(tmp_path)
                     evidence_refs=("hashi-tools:uncertain",),
                 )
             elif request.stage is Stage.STRUCTURE_REPAIR:
+                self.repair_calls += 1
+                if self.repair_calls > 1:
+                    raise StageInvocationError(
+                        "repair provider rejected request", retryable=False
+                    )
                 return StageResponse(
                     text="repair reply without valid JSON",
                     provider=profile.engine,
@@ -427,7 +435,7 @@ async def test_adapter_surfaces_reconciliation_required_as_non_success(tmp_path)
     provider = _MalformedExecutionProvider()
     config = _agent_config(
         tmp_path,
-        her_v2={"profiles": _profiles(), "structured_repair_attempts": 2},
+        her_v2={"profiles": _profiles()},
     )
     setattr(config, "_her_v2_stage_provider", provider)
     adapter = HERv2Adapter(config, _global_config(tmp_path))

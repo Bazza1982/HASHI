@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -73,7 +74,8 @@ class HERv2Learning:
             self.workspace_dir, logger=self.logger
         )
         self.meditation_journal = her_habits.HERMeditationJournal(
-            self.workspace_dir, logger=self.logger
+            self.workspace_dir,
+            logger=self.logger,
         )
         self.dream_journal = her_dream.HERDreamJournal(
             self.workspace_dir, logger=self.logger
@@ -297,7 +299,10 @@ class HERv2Learning:
                 if phase == "meditate":
                     prompt = str(job.get("prompt") or "")
                     actions: list[Mapping[str, Any]] | None = None
-                    for validation_attempt in (1, 2):
+                    validation_attempt = 0
+                    validation_idle_started = time.monotonic()
+                    while actions is None:
+                        validation_attempt += 1
                         self._audit(
                             event_id=(
                                 f"{turn_id}:meditation:{job_id}:"
@@ -319,7 +324,7 @@ class HERv2Learning:
                             prompt,
                             turn_id,
                             f"{job_id}:attempt:{validation_attempt}",
-                            config.meditation_timeout_seconds,
+                            config.meditation_idle_timeout_seconds,
                         )
                         self.audit_log.record_reasoning(
                             event_id=(
@@ -359,13 +364,28 @@ class HERv2Learning:
                             )
                             break
                         except her_habits.MeditationValidationError as exc:
-                            if validation_attempt == 2:
+                            idle_for = time.monotonic() - validation_idle_started
+                            if idle_for >= float(
+                                config.meditation_idle_timeout_seconds
+                            ):
                                 raise
                             prompt = her_habits.build_meditation_correction_prompt(
                                 rejected_output=response.text,
                                 error=exc,
                             )
-                    assert actions is not None
+                            await asyncio.sleep(
+                                min(
+                                    5.0,
+                                    0.25 * (2 ** min(validation_attempt - 1, 5)),
+                                    max(
+                                        0.0,
+                                        float(
+                                            config.meditation_idle_timeout_seconds
+                                        )
+                                        - idle_for,
+                                    ),
+                                )
+                            )
                     async with self.habit_execution_lock:
                         baseline = self.store.capture_action_baseline(
                             actions,
@@ -532,6 +552,7 @@ class HERv2Learning:
 
     async def _run_notification(self, job_id: str) -> None:
         assert self.notification_sender is not None
+        idle_started = time.monotonic()
         while True:
             job = self.meditation_journal.claim_notification(job_id)
             if job is None:
@@ -586,8 +607,17 @@ class HERv2Learning:
                 notification = current.get("notification") or {}
                 if notification.get("status") != "pending":
                     return
+                idle_window = float(
+                    self.config_getter().meditation_idle_timeout_seconds
+                )
+                if time.monotonic() - idle_started >= idle_window:
+                    return
                 await asyncio.sleep(
-                    min(10.0, 2.0 ** int(notification.get("attempts") or 1))
+                    min(
+                        10.0,
+                        2.0 ** int(notification.get("attempts") or 1),
+                        max(0.0, idle_window - (time.monotonic() - idle_started)),
+                    )
                 )
 
     def _record_notification_audits(

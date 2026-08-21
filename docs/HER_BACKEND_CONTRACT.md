@@ -1,8 +1,16 @@
-# HASHI Engine Runtime (HER) Backend Contract
+# LEGACY HASHI Engine Runtime (HER v1) Backend Contract
 
-Status: active for certified HER `0.1.0-hashi.22`; earlier unreleased integration
+Status: frozen legacy reference for certified HER `0.1.0-hashi.22`; earlier unreleased integration
 checkpoint recorded in
 [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md)
+
+> **LEGACY ISOLATION NOTICE:** Except for the explicitly labelled “HER v2
+> provider, model, and effort contract” subsection, this document describes the
+> retired HER v1/Claw implementation. Its iteration ceilings, time budgets,
+> hard/stage timeouts, retry counts, tool-call caps, token caps, sub-agent caps,
+> and finalisation reserves are historical compatibility behaviour. They are
+> not HER v2 requirements and must never be imported or applied to HER v2 or a
+> direct backend. HER v2 rejects those legacy configuration fields.
 
 HER is derived from the MIT-licensed Claw runtime. The upstream copyright and
 license notice ships with every packaged HER release as `CLAW_LICENSE`.
@@ -166,16 +174,20 @@ HER v2 effort controls orchestration policy, not provider reasoning depth:
 | `xhigh` | required | evidence-triggered and bounded | at most one remediation cycle |
 | `max` | required | evidence-triggered and bounded | at most three remediation cycles |
 
-The configured `max_subagents` and stage policy remain hard ceilings. Effort can
-make deeper orchestration available but cannot expand provider/model grants,
-tool authority, workzone authority, timeout authority, or provider reasoning.
+Replanning and Review/remediation are the only count-based HER v2 ceilings.
+There is no `max_subagents`, stage timeout, whole-turn hard timeout, retry-count
+limit, tool-round limit, turn limit, time budget, cumulative token budget, or
+output-token budget. Effort can make deeper orchestration available but cannot
+expand provider/model grants, tool authority, workzone authority, or provider
+reasoning. The meaningful-progress idle window remains a liveness detector and
+is never an elapsed-runtime budget.
 
 For a validated `direct_response` profile, the acknowledgement field is the complete
 final answer and `remaining_work` must be empty. HER returns that answer once without a
 second execution generation. Semantic compaction runs only when another model call is
 required, so completed answers are never held behind a maintenance provider call.
 
-## Exit Reasoning and Reporting
+## Legacy HER v1 Exit Reasoning and Reporting
 
 Every logical turn boundary ends in a primary-model-owned user report. A natural
 tool-free answer and a validated `direct_response` already satisfy this step. An

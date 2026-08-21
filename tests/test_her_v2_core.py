@@ -334,6 +334,55 @@ def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
             HERv2Config.from_mapping({"profiles": _profiles(), field: value})
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "hard_timeout_s",
+        "max_attempts",
+        "max_completion_tokens",
+        "max_iterations",
+        "max_loops",
+        "max_output_tokens",
+        "max_subagents",
+        "max_tokens",
+        "reporting_attempts",
+        "retry_limit",
+        "stage_timeout_s",
+        "structured_repair_attempts",
+        "time_budget_s",
+        "token_budget",
+    ],
+)
+def test_her_v2_rejects_removed_legacy_execution_limits(field):
+    with pytest.raises(HERv2ConfigurationError, match="removed execution limit"):
+        HERv2Config.from_mapping({"profiles": _profiles(), field: 1})
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "max_attempts",
+        "max_completion_tokens",
+        "max_loops",
+        "max_output_tokens",
+        "max_tokens",
+        "timeout_s",
+    ],
+)
+def test_her_v2_provider_profiles_reject_removed_execution_limits(field):
+    profiles = _profiles()
+    profiles["premium"][field] = 1
+    with pytest.raises(HERv2ConfigurationError, match="removed execution limit"):
+        HERv2Config.from_mapping({"profiles": profiles})
+
+
+def test_her_v2_provider_profiles_reject_nested_execution_limits():
+    profiles = _profiles()
+    profiles["premium"]["options"] = {"request_timeout_s": 300}
+    with pytest.raises(HERv2ConfigurationError, match="request_timeout_s"):
+        HERv2Config.from_mapping({"profiles": profiles})
+
+
 def test_structured_parser_accepts_prose_wrapper_but_not_missing_object():
     assert extract_json_object('Result follows: {"classification":"DIRECT_RESPONSE"}.')[
         "classification"

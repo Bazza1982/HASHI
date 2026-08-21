@@ -1,6 +1,10 @@
-"""HER-only Ultra effort contracts and orchestration.
+"""LEGACY HER v1-only Ultra effort contracts and orchestration.
 
-Ultra is intentionally implemented inside the HER backend.  HASHI submits one
+This module is reachable only from :mod:`adapters.her`, the retired HER v1
+compatibility backend. Its worker-count, retry, and wall-clock ceilings are
+legacy policy and must never be applied by HER v2 or direct backends.
+
+Ultra is intentionally implemented inside the legacy HER backend. HASHI submits one
 backend request and receives one backend response; the planner, isolated worker
 sessions, evidence collection, and assembly remain private to HER.
 

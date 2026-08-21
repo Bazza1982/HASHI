@@ -64,8 +64,6 @@ from orchestrator.her_v2.runtime import HERv2Runtime
 
 HER_V2_DISPLAY_NAME = "HASHI Engine Runtime v2"
 HER_V2_VERSION = "2.0.0-alpha.1"
-COMMENTARY_PACKAGING_TIMEOUT_S = 30.0
-REQUIRED_PERSONA_PACKAGING_TIMEOUT_S = 60.0
 
 
 def _backend_tool_control(backend: Any) -> tuple[bool, bool]:
@@ -309,7 +307,9 @@ class _DelegatedToolRegistry:
             self._allowed = {
                 name for name in self._allowed if _registry_is_read_only(base, name)
             }
-        self.max_loops = int(getattr(base, "max_loops", 1) or 1)
+        # Delegation narrows authority only; it must never reintroduce the
+        # retired shared-registry tool-round ceiling.
+        self.max_loops = None
         self.audit_context = dict(getattr(base, "audit_context", {}) or {})
         if read_only:
             self.audit_context.update(
@@ -628,12 +628,18 @@ class HashiStageProvider(StageProvider):
                 trace = str(event.raw_delta or event.summary or "")
                 if trace:
                     reasoning_chunks.append(trace)
-            elif request.progress_callback is not None:
-                request.progress_callback(event.kind, event.summary, True)
             # Structured JSON answer deltas are internal.  Reasoning and
-            # execution activity retain their normal HASHI presentation owners.
+            # invalid envelope retries are not meaningful execution progress.
             if event.kind == KIND_TEXT_DELTA:
                 return
+            if (
+                owner != DELIVERY_REASONING
+                and event.kind != KIND_THINKING
+                and request.progress_callback is not None
+            ):
+                request.progress_callback(event.kind, event.summary, True)
+            # Reasoning and execution activity retain their normal HASHI
+            # presentation owners.
             if self.on_stream_event is None:
                 return
             if not event.delivery_class:
@@ -757,7 +763,6 @@ or the Persona block. Return only the packaged commentary message.
             request_id=request_id,
             message_label="commentary",
             max_chars=MAX_PACKAGED_COMMENTARY_CHARS,
-            timeout_s=COMMENTARY_PACKAGING_TIMEOUT_S,
         )
 
     async def package_persona_required_message(
@@ -806,7 +811,6 @@ control envelope.
             request_id=request_id,
             message_label=kind,
             max_chars=MAX_RENDERED_REQUIRED_MESSAGE_CHARS,
-            timeout_s=REQUIRED_PERSONA_PACKAGING_TIMEOUT_S,
         )
 
     async def _package_persona_text(
@@ -818,7 +822,6 @@ control envelope.
         request_id: str,
         message_label: str,
         max_chars: int,
-        timeout_s: float,
     ) -> str:
         """Run one isolated, tool-free Persona presentation invocation."""
 
@@ -858,14 +861,11 @@ control envelope.
                 )
             if not _install_system_prompt(backend, system_prompt):
                 prompt = f"{system_prompt}\n\n{prompt}"
-            response = await asyncio.wait_for(
-                backend.generate_response(
-                    prompt,
-                    request_id,
-                    silent=True,
-                    on_stream_event=_discard_stream,
-                ),
-                timeout=min(profile.timeout_s, timeout_s),
+            response = await backend.generate_response(
+                prompt,
+                request_id,
+                silent=True,
+                on_stream_event=_discard_stream,
             )
             if not response.is_success:
                 raise StageInvocationError(
@@ -1014,7 +1014,6 @@ class HERv2Adapter(BaseBackend):
     """HASHI facade for the provider-neutral, pure-Python HER v2 runtime."""
 
     DEFAULT_IDLE_TIMEOUT_SEC = 30 * 60
-    DEFAULT_HARD_TIMEOUT_SEC = 10 * 60 * 60
     habit_pipeline_owner = "her_v2_runtime"
 
     def _define_capabilities(self) -> BackendCapabilities:
@@ -1242,8 +1241,11 @@ class HERv2Adapter(BaseBackend):
         prompt: str,
         turn_id: str,
         request_id: str,
-        timeout_s: float,
+        timeout_s: float | None,
     ) -> StageResponse:
+        # ``timeout_s`` remains in the legacy maintenance callback signature,
+        # but HER v2 never treats it as a wall-clock execution ceiling.
+        del timeout_s
         if self._v2_config is None:
             raise StageInvocationError("HER v2 is not initialized", retryable=False)
         profile = self._v2_config.profile_for(stage)
@@ -1266,10 +1268,7 @@ class HERv2Adapter(BaseBackend):
             allow_tools=False,
             allow_side_effects=False,
         )
-        return await asyncio.wait_for(
-            provider.invoke(profile, request),
-            timeout=max(1.0, float(timeout_s)),
-        )
+        return await provider.invoke(profile, request)
 
     def _her_habit_store(self):
         if self._learning is None:
@@ -1336,7 +1335,6 @@ class HERv2Adapter(BaseBackend):
         prompt: str,
         *,
         request_id: str,
-        timeout_seconds: float = 600.0,
     ) -> StageResponse:
         if self._learning is None or self._audit_log is None or self._v2_config is None:
             raise RuntimeError("HER v2 Dream services are not initialized")
@@ -1359,7 +1357,7 @@ class HERv2Adapter(BaseBackend):
                 prompt,
                 turn_id,
                 request_id,
-                timeout_seconds,
+                None,
             )
         self._audit_log.record_reasoning(
             event_id=f"{turn_id}:reasoning",
@@ -1415,6 +1413,10 @@ class HERv2Adapter(BaseBackend):
             )
         runtime_config = replace(
             self._v2_config,
+            # The shared /timeout command is idle-only.  Bind its live value
+            # into the actual HER v2 runtime instead of leaving an unrelated
+            # outer adapter setting that cannot affect execution.
+            user_idle_timeout_s=float(self.IDLE_TIMEOUT_SEC),
             meditation_enabled=(
                 habit_config.enabled
                 and habit_request_eligible
@@ -1570,8 +1572,9 @@ class HERv2Adapter(BaseBackend):
         error = result.error
         if report_pending:
             error = (
-                "HER v2 completed execution but model-authored reporting exhausted its "
-                "retry limit; evidence is preserved for reconciliation."
+                "HER v2 completed execution but model-authored reporting ended on "
+                "a non-retryable failure or no-progress idle boundary; evidence is "
+                "preserved for reconciliation."
             )
         elif reconciliation_required:
             error = (

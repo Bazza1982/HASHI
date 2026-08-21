@@ -444,7 +444,7 @@ The terminal-state decision table is:
 |---|---|
 | Goal achieved without material limitations | `COMPLETED` |
 | Goal substantially achieved with material limitations | `COMPLETED_WITH_LIMITATIONS` |
-| Work completed but reporting exhausted retries | `COMPLETED_WITH_REPORT_PENDING` |
+| Work completed but reporting cannot continue before a non-retryable or idle-progress boundary | `COMPLETED_WITH_REPORT_PENDING` |
 | Side-effecting Execution returned, but its result remains unvalidated after tool-free repair | `RECONCILIATION_REQUIRED` |
 | Primary Agent correctly concludes the goal was not achieved | `FAILED` |
 | Technical failure prevents correct execution | `ERROR` |
@@ -457,7 +457,7 @@ One parameterised decision suite must cover all terminal states. Representative 
 Tests must prove:
 
 - an unsuccessful but technically correct search is `FAILED`, not `ERROR`;
-- exhausted provider availability is `ERROR`, not `FAILED`;
+- non-retryable provider unavailability is `ERROR`, not `FAILED`;
 - Review `FAIL` does not automatically become terminal `FAILED`;
 - intentional stop is `STOPPED`, not `ERROR`;
 - unexpected interruption is `ERROR`, not a separate `INTERRUPTED` state;
@@ -603,7 +603,8 @@ Cover:
 
 - `xhigh` Review `FAIL`, one remediation, then Finalisation without a second Review;
 - `max` Review rounds stopping at the configured limit;
-- unavailable reviewer after retry exhaustion, with completed work preserved.
+- unavailable reviewer after a non-retryable failure or no-progress idle
+  boundary, with completed work preserved.
 
 ### Journey G: Completed work with reporting failure
 
@@ -611,7 +612,9 @@ Required:
 
 - execution is not repeated;
 - evidence remains available;
-- reporting retries are bounded;
+- reporting succeeds after more attempts than any retired fixed retry ceiling;
+- a non-retryable failure or no-progress idle boundary preserves the completed
+  execution without replaying it;
 - terminal `COMPLETED_WITH_REPORT_PENDING`.
 
 ### Journey H: Stop and Steer
@@ -656,7 +659,7 @@ Candidate imperfections include:
 - missing optional fields;
 - approved additional fields;
 - prose surrounding otherwise valid structured content;
-- truncated output where bounded retry can repair it;
+- truncated output where retry can repair it before no-progress idle expiry;
 - explicitly approved casing or enum aliases;
 - duplicated non-authoritative fields;
 - correct substantive content in an invalid wrapper.
@@ -729,21 +732,30 @@ False progress includes:
 
 Tests must prove that false progress cannot keep a stalled turn alive indefinitely.
 
-### 10.2 Stage and retry timeouts
+### 10.2 No fixed execution ceilings
 
-Tests must cover representative Planning, Review, provider, tool, and reporting timeouts. They must prove:
+Tests must prove that Planning, Review, provider invocation, structure repair,
+reporting, tool loops, and sub-agent execution are not ended by elapsed runtime
+or a fixed attempt/count budget. They must prove:
 
 - retries remain within the current stage;
-- retries are bounded;
+- a retryable stage can succeed after more attempts than the retired retry cap;
 - a structured retry receives the prior validation error and a
   structure-only correction instruction;
 - retry does not change goal or classification;
-- exhausted retry chooses the correct stage and terminal outcome;
+- non-retryable failure and no-progress idle expiry choose the correct stage
+  and terminal outcome;
 - stage-local retry is not process-restart recovery.
 
-### 10.3 Hard safety timeout
+Required regressions include:
 
-Tests must prove that the operational hard ceiling stops orphaned execution without redefining the user timeout as total runtime.
+- meaningful progress continuing beyond every former stage or whole-turn
+  duration succeeds;
+- reporting succeeds on attempt four or later without repeating Execution;
+- more than the former sub-agent ceiling is accepted when authority permits;
+- tool use continues beyond the former tool-round ceiling;
+- removed limit fields are rejected by HER v2 configuration rather than
+  silently restored.
 
 ## 11. Commentary and User Delivery
 
@@ -829,7 +841,7 @@ Use table-driven tests for:
 - terminal-state decisions;
 - effort-policy selection;
 - Replan and Review counters;
-- retry limits;
+- retry/no-progress behaviour;
 - structured normalisation rules;
 - compatible response-carrier selection and ambiguity rejection;
 - stop eligibility by state.
@@ -1042,7 +1054,8 @@ The release report should state:
 - Replan and Review limits verified;
 - production defects converted into regression scenarios;
 - scenarios where useful work survives non-critical imperfections;
-- scenarios where HER correctly stops at a genuine hard boundary;
+- scenarios where HER correctly stops at authority, non-retryable, explicit
+  stop, or no-progress idle boundaries;
 - remaining observation-only risks.
 
 Coverage percentage remains useful for locating accidental gaps, but it is not evidence that HER behaviour is correct.
@@ -1062,7 +1075,7 @@ Before HER v2 is accepted, the suite must contain logically complete coverage of
 9. Tool Gateway, permission, workzone, reviewer, and sub-agent boundaries;
 10. primary and fallback reasoning-audit persistence;
 11. meaningful-progress and false-progress Timeout behaviour;
-12. bounded retry and repair exhaustion;
+12. unbounded retry with non-retryable and no-progress idle termination;
 13. Replan and Review limits;
 14. completed-work preservation;
 15. Habits, Meditation, and Dream authority boundaries;

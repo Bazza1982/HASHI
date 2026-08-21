@@ -18,7 +18,6 @@ from adapters.her_habits import (
     HABIT_METADATA_MAX_CHARS,
     HABIT_MEDITATION_ENV,
     HABIT_TITLE_MAX_CHARS,
-    MAX_MEDITATION_ATTEMPTS,
     HabitMeditationConfig,
     HERHabitStore,
     HERMeditationJournal,
@@ -476,7 +475,7 @@ def test_observable_trace_redacts_common_secret_shapes():
     assert "[REDACTED" in trace
 
 
-def test_durable_journal_recovers_and_stops_after_bounded_attempts(tmp_path):
+def test_durable_journal_recovers_without_retry_ceiling(tmp_path):
     journal = HERMeditationJournal(tmp_path)
     job_id = "1" * 32
     job_id, queued = journal.enqueue(
@@ -495,16 +494,17 @@ def test_durable_journal_recovers_and_stops_after_bounded_attempts(tmp_path):
 
     assert journal.claim(job_id) == "meditate"
     assert HERMeditationJournal(tmp_path).recover_interrupted_jobs() == 1
-    for attempt in range(1, MAX_MEDITATION_ATTEMPTS + 1):
+    for attempt in range(1, 7):
         if attempt > 1:
             assert journal.claim(job_id) == "meditate"
         journal.mark_pending(job_id, reason="runtime_shutdown")
 
     job = journal.get(job_id)
     assert job is not None
-    assert job["status"] == "failed"
-    assert job["attempts"] == MAX_MEDITATION_ATTEMPTS
-    assert job["error_code"] == "retry_exhausted"
+    assert job["status"] == "pending"
+    assert job["attempts"] == 6
+    assert job["error_code"] == "runtime_shutdown"
+    assert journal.claim(job_id) == "meditate"
 
 
 def test_replayed_create_action_is_idempotent(tmp_path):
@@ -1102,7 +1102,7 @@ async def test_meditation_runs_independently_without_blocking_foreground(
     )
     timeout_config = HabitMeditationConfig(
         enabled=True,
-        meditation_timeout_seconds=0.05,
+        meditation_idle_timeout_seconds=0.05,
     )
     assert adapter._spawn_habit_meditation_job(
         job_id,

@@ -805,7 +805,7 @@ async def test_notification_delivery_retries_are_bounded_and_audited(
             "operation": "create",
             "title": "Retry a temporary notification failure",
             "metadata": "Relevant when Telegram delivery fails temporarily.",
-            "body": "Retry a bounded number of times and retain detailed audit evidence.",
+            "body": "Retry until delivery succeeds or the no-progress idle boundary is reached.",
         }
     ]
     journal.enqueue(

@@ -12,46 +12,32 @@
         "shadow_mode": false,
         "meditation_enabled": false,
         "user_idle_timeout_s": 1800,
-        "hard_timeout_s": 36000,
-        "reporting_attempts": 3,
-        "structured_repair_attempts": 3,
-        "max_subagents": 10,
         "audit_failure_terminal": "ERROR",
         "profiles": {
           "lightweight": {
             "engine": "openrouter-api",
             "model": "google/gemini-3.1-flash-lite-preview",
-            "reasoning": "low",
-            "timeout_s": 180,
-            "max_attempts": 2
+            "reasoning": "low"
           },
           "triage": {
             "engine": "openrouter-api",
             "model": "google/gemini-3.1-flash-lite-preview",
-            "reasoning": "high",
-            "timeout_s": 180,
-            "max_attempts": 2
+            "reasoning": "high"
           },
           "premium": {
             "engine": "openrouter-api",
             "model": "anthropic/claude-sonnet-4.6",
-            "reasoning": "high",
-            "timeout_s": 900,
-            "max_attempts": 2
+            "reasoning": "high"
           },
           "reviewer": {
             "engine": "openrouter-api",
             "model": "anthropic/claude-opus-4.6",
-            "reasoning": "xhigh",
-            "timeout_s": 900,
-            "max_attempts": 2
+            "reasoning": "xhigh"
           },
           "orchestrator": {
             "engine": "openrouter-api",
             "model": "anthropic/claude-sonnet-4.6",
-            "reasoning": "high",
-            "timeout_s": 900,
-            "max_attempts": 2
+            "reasoning": "high"
           }
         }
       }

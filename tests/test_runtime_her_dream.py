@@ -41,13 +41,11 @@ class FakeDreamAdapter:
         prompt: str,
         *,
         request_id: str,
-        timeout_seconds: float = 600.0,
     ) -> Any:
         self.calls.append(
             {
                 "prompt": prompt,
                 "request_id": request_id,
-                "timeout_seconds": timeout_seconds,
                 "write_lock_held": self._habit_execution_lock.locked(),
             }
         )
@@ -330,23 +328,27 @@ async def test_dream_no_change_delivers_persona_text_without_contract_validation
 
 
 @pytest.mark.asyncio
-async def test_dream_corrects_one_invalid_proposal_then_commits(tmp_path):
+async def test_dream_repairs_beyond_removed_validation_attempt_cap(tmp_path):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
     habit_id = _seed_habit(adapter._store, title="Obsolete Habit")
     runtime.config.system_md.write_text("Use a warm voice.", encoding="utf-8")
+    invalid = json.dumps(
+        {
+            "groups": [
+                {
+                    "operation": "archive",
+                    "habit_id": habit_id,
+                    "reason": "x" * 501,
+                }
+            ]
+        }
+    )
     adapter.responses = [
-        json.dumps(
-            {
-                "groups": [
-                    {
-                        "operation": "archive",
-                        "habit_id": habit_id,
-                        "reason": "x" * 501,
-                    }
-                ]
-            }
-        ),
+        invalid,
+        invalid,
+        invalid,
+        invalid,
         json.dumps(
             {
                 "groups": [
@@ -370,11 +372,11 @@ async def test_dream_corrects_one_invalid_proposal_then_commits(tmp_path):
     assert report == "The obsolete Habit has been archived."
     assert manifest is not None and manifest["status"] == "completed"
     assert adapter._store.get(habit_id) is None
-    assert [call["request_id"] for call in adapter.calls[:2]] == [
-        f"{manifest['run_id']}:analysis:1",
-        f"{manifest['run_id']}:analysis:2",
+    assert [call["request_id"] for call in adapter.calls[:5]] == [
+        f"{manifest['run_id']}:analysis:{attempt}"
+        for attempt in range(1, 6)
     ]
-    assert "exceeds 500 characters" in adapter.calls[1]["prompt"]
+    assert "exceeds 500 characters" in adapter.calls[4]["prompt"]
     audit = adapter._journal.audit_path.read_text(encoding="utf-8")
     assert "dream_validation_retry" in audit
 
@@ -565,19 +567,23 @@ async def test_persona_report_accepts_natural_message_without_exact_echo(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_dream_retries_once_after_concurrent_habit_change(tmp_path):
+async def test_dream_retries_beyond_removed_stale_catalogue_cap(tmp_path):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
     habit_id = _seed_habit(adapter._store)
     runtime.config.system_md.write_text("Use a calm voice.", encoding="utf-8")
 
-    def first_response(_prompt: str, _request_id: str) -> str:
+    mutation = 0
+
+    def concurrent_response(_prompt: str, _request_id: str) -> str:
+        nonlocal mutation
+        mutation += 1
         adapter._store.apply_actions(
             [
                 {
                     "operation": "update",
                     "habit_id": habit_id,
-                    "body": "A concurrent Meditation committed a newer canonical behaviour.",
+                    "body": f"Concurrent canonical behaviour revision {mutation}.",
                 }
             ],
             max_actions=1,
@@ -595,7 +601,10 @@ async def test_dream_retries_once_after_concurrent_habit_change(tmp_path):
         )
 
     adapter.responses = [
-        first_response,
+        concurrent_response,
+        concurrent_response,
+        concurrent_response,
+        concurrent_response,
         '{"groups":[]}',
         "The fresh catalogue is settled; no unsafe overwrite occurred.",
     ]
@@ -610,7 +619,7 @@ async def test_dream_retries_once_after_concurrent_habit_change(tmp_path):
     assert adapter._store.get(habit_id) is not None
     assert report.startswith("The fresh catalogue is settled")
     run = adapter._journal.get_run(str(manifest["run_id"]))
-    assert len(run["attempts"]) == 2
+    assert len(run["attempts"]) == 5
     assert "dream_stale_retry" in adapter._journal.audit_path.read_text(
         encoding="utf-8"
     )

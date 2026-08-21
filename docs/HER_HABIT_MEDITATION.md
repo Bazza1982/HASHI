@@ -68,7 +68,7 @@ Example instance configuration:
         "max_actions": 3,
         "max_trace_chars": 24000,
         "max_catalog_habits": 200,
-        "meditation_timeout_seconds": 180
+        "meditation_idle_timeout_seconds": 180
       }
     }
   }
@@ -283,7 +283,8 @@ conflict. HASHI validates and commits the proposal; the model never writes
 Habit files.
 
 Before a commit, Dream verifies a catalogue fingerprint under the Habit write
-lock and retries stale analysis once. Every attempt, raw output, validation,
+lock and repeats stale analysis while the catalogue continues to change. It
+does not apply a fixed retry count. Every attempt, raw output, validation,
 before-state snapshot, transaction manifest, report fact, and full or partial
 undo is retained under:
 

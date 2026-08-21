@@ -22,14 +22,91 @@ class HERv2ConfigurationError(ValueError):
     pass
 
 
+REMOVED_HER_V2_LIMIT_FIELDS = frozenset(
+    {
+        "absolute_timeout_s",
+        "attempt_limit",
+        "deadline_s",
+        "execution_timeout_s",
+        "hard_timeout_sec",
+        "hard_timeout_s",
+        "max_attempts",
+        "max_calls",
+        "max_completion_tokens",
+        "max_iterations",
+        "max_loops",
+        "max_new_tokens",
+        "max_output_tokens",
+        "max_retries",
+        "max_rounds",
+        "max_steps",
+        "max_subagents",
+        "max_tokens",
+        "max_tool_iterations",
+        "max_turns",
+        "output_token_limit",
+        "process_timeout",
+        "reporting_attempts",
+        "request_timeout_s",
+        "retries",
+        "retry_attempts",
+        "retry_limit",
+        "stage_timeout_sec",
+        "stage_timeout_s",
+        "structured_repair_attempts",
+        "timeout",
+        "timeout_seconds",
+        "timeout_s",
+        "time_budget_s",
+        "total_timeout_s",
+        "token_budget",
+        "turn_limit",
+        "wall_clock_timeout_s",
+    }
+)
+
+REMOVED_HER_V2_PROFILE_LIMIT_FIELDS = frozenset(
+    REMOVED_HER_V2_LIMIT_FIELDS
+)
+
+
+def _reject_removed_limits(
+    raw: Mapping[str, Any],
+    *,
+    fields: frozenset[str],
+    location: str,
+) -> None:
+    found: set[str] = set()
+
+    def visit(value: Any, prefix: str = "") -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                name = str(key)
+                path = f"{prefix}.{name}" if prefix else name
+                if name in fields:
+                    found.add(path)
+                visit(item, path)
+        elif isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                visit(item, f"{prefix}[{index}]")
+
+    visit(raw)
+    if not found:
+        return
+    raise HERv2ConfigurationError(
+        f"{location} contains removed execution limit field(s): "
+        f"{', '.join(sorted(found))}. HER v2 permits only idle-progress liveness "
+        "detection plus the explicitly designed Replan and Review limits; "
+        "legacy HER ceilings must not be applied."
+    )
+
+
 @dataclass(frozen=True)
 class ProviderProfile:
     name: str
     engine: str
     model: str
     reasoning: str | None = None
-    timeout_s: float = 300.0
-    max_attempts: int = 2
     options: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -43,10 +120,11 @@ class ProviderProfile:
             raise HERv2ConfigurationError(
                 f"profile {self.name!r} must select a model"
             )
-        if self.timeout_s <= 0:
-            raise HERv2ConfigurationError("provider timeout must be positive")
-        if self.max_attempts < 1:
-            raise HERv2ConfigurationError("provider attempts must be at least one")
+        _reject_removed_limits(
+            self.options,
+            fields=REMOVED_HER_V2_PROFILE_LIMIT_FIELDS,
+            location=f"her_v2.profiles.{self.name}.options",
+        )
 
 
 DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
@@ -71,8 +149,6 @@ class HERv2Config:
     slot_models: Mapping[str, str] = field(default_factory=dict)
     route_model_slots: Mapping[Route, str] = field(default_factory=dict)
     route_reasoning: Mapping[Route, str] = field(default_factory=dict)
-    reporting_attempts: int = 3
-    structured_repair_attempts: int = 3
     replan_limits: Mapping[Effort, int] = field(
         default_factory=lambda: {
             Effort.LOW: 0,
@@ -92,10 +168,8 @@ class HERv2Config:
         }
     )
     user_idle_timeout_s: float = 1800.0
-    hard_timeout_s: float = 36000.0
     audit_failure_terminal: TerminalState = TerminalState.ERROR
     meditation_enabled: bool = False
-    max_subagents: int = 10
     shadow_mode: bool = False
 
     def __post_init__(self) -> None:
@@ -103,16 +177,8 @@ class HERv2Config:
             raise HERv2ConfigurationError(
                 "HER v2 shadow mode has been permanently retired; use normal mode"
             )
-        if self.reporting_attempts < 1 or self.structured_repair_attempts < 1:
-            raise HERv2ConfigurationError("retry counts must be at least one")
-        if self.user_idle_timeout_s <= 0 or self.hard_timeout_s <= 0:
-            raise HERv2ConfigurationError("timeouts must be positive")
-        if self.hard_timeout_s < self.user_idle_timeout_s:
-            raise HERv2ConfigurationError(
-                "hard timeout must be greater than or equal to idle timeout"
-            )
-        if self.max_subagents < 1 or self.max_subagents > 10:
-            raise HERv2ConfigurationError("max_subagents must be between one and ten")
+        if self.user_idle_timeout_s <= 0:
+            raise HERv2ConfigurationError("idle-progress timeout must be positive")
         if self.audit_failure_terminal not in {
             TerminalState.ERROR,
             TerminalState.STOPPED,
@@ -133,6 +199,11 @@ class HERv2Config:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> HERv2Config:
+        _reject_removed_limits(
+            raw,
+            fields=REMOVED_HER_V2_LIMIT_FIELDS,
+            location="her_v2",
+        )
         profiles_raw = raw.get("profiles")
         if not isinstance(profiles_raw, Mapping) or not profiles_raw:
             raise HERv2ConfigurationError("her_v2.profiles must be a non-empty object")
@@ -140,12 +211,15 @@ class HERv2Config:
         for name, value in profiles_raw.items():
             if not isinstance(value, Mapping):
                 raise HERv2ConfigurationError(f"profile {name!r} must be an object")
+            _reject_removed_limits(
+                value,
+                fields=REMOVED_HER_V2_PROFILE_LIMIT_FIELDS,
+                location=f"her_v2.profiles.{name}",
+            )
             known = {
                 "engine",
                 "model",
                 "reasoning",
-                "timeout_s",
-                "max_attempts",
             }
             profiles[str(name)] = ProviderProfile(
                 name=str(name),
@@ -156,8 +230,6 @@ class HERv2Config:
                     if value.get("reasoning") is not None
                     else None
                 ),
-                timeout_s=float(value.get("timeout_s", 300.0)),
-                max_attempts=int(value.get("max_attempts", 2)),
                 options={key: item for key, item in value.items() if key not in known},
             )
 
@@ -274,19 +346,15 @@ class HERv2Config:
             slot_models=slot_models,
             route_model_slots=route_model_slots,
             route_reasoning=route_reasoning,
-            reporting_attempts=int(raw.get("reporting_attempts", 3)),
-            structured_repair_attempts=int(raw.get("structured_repair_attempts", 3)),
             replan_limits=replan_limits,
             review_limits=review_limits,
             user_idle_timeout_s=float(raw.get("user_idle_timeout_s", 1800.0)),
-            hard_timeout_s=float(raw.get("hard_timeout_s", 36000.0)),
             audit_failure_terminal=_audit_failure_terminal(
                 raw.get("audit_failure_terminal", "ERROR")
             ),
             meditation_enabled=_strict_bool(
                 raw.get("meditation_enabled", False), "meditation_enabled"
             ),
-            max_subagents=int(raw.get("max_subagents", 10)),
             shadow_mode=_strict_bool(raw.get("shadow_mode", False), "shadow_mode"),
         )
 

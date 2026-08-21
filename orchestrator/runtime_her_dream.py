@@ -5,6 +5,7 @@ import hashlib
 import html
 import json
 import re
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from adapters import her_dream, her_persona
+from adapters import her_dream, her_habits, her_persona
 from orchestrator import runtime_her_habits
 from orchestrator.command_ui import REFRESH_LABEL, card_title, status_label
 from orchestrator.scheduler import next_cron_occurrence, validate_cron_schedule
@@ -443,7 +444,6 @@ REPORT CONTEXT (quoted, read-only)
     result = await adapter.run_habit_dream_model(
         prompt,
         request_id=f"{report_id}:persona",
-        timeout_seconds=180,
     )
     report = str(result.text or "").strip()
     if not report:
@@ -508,7 +508,18 @@ async def execute_dream(
         raise RuntimeError("HER Dream run lock is unavailable")
     async with _tracked_dream_task(adapter, journal, run_id), run_lock:
         attempt_sequence = 0
-        for stale_attempt in (1, 2):
+        config_getter = getattr(adapter, "_habit_meditation_config", None)
+        learning_config = (
+            config_getter()
+            if callable(config_getter)
+            else her_habits.HabitMeditationConfig()
+        )
+        validation_idle_s = float(
+            learning_config.meditation_idle_timeout_seconds
+        )
+        stale_attempt = 0
+        while True:
+            stale_attempt += 1
             raw_output = ""
             habits = store.load()
             fingerprint = her_dream.catalog_fingerprint(habits)
@@ -538,7 +549,10 @@ async def execute_dream(
                     sys_guidance=sys_guidance,
                     recent_user_requests=requests,
                 )
-                for validation_attempt in (1, 2):
+                validation_attempt = 0
+                validation_idle_started = time.monotonic()
+                while True:
+                    validation_attempt += 1
                     attempt_sequence += 1
                     try:
                         result = await adapter.run_habit_dream_model(
@@ -584,27 +598,35 @@ async def execute_dream(
                                 "error": str(exc),
                             },
                         )
-                        if validation_attempt == 1:
-                            journal.append_audit(
-                                "dream_validation_retry",
-                                run_id=run_id,
-                                failed_attempt=attempt_sequence,
-                                error=str(exc),
+                        idle_for = time.monotonic() - validation_idle_started
+                        if idle_for >= validation_idle_s:
+                            journal.mark_failed(
+                                run_id,
+                                error=f"{type(exc).__name__}: {exc}",
                             )
-                            prompt = her_dream.build_dream_correction_prompt(
-                                rejected_output=raw_output,
-                                error=exc,
+                            return (
+                                False,
+                                str(exc),
+                                journal.get_run(run_id),
                             )
-                            continue
-                        journal.mark_failed(
-                            run_id,
-                            error=f"{type(exc).__name__}: {exc}",
+                        journal.append_audit(
+                            "dream_validation_retry",
+                            run_id=run_id,
+                            failed_attempt=attempt_sequence,
+                            error=str(exc),
                         )
-                        return (
-                            False,
-                            str(exc),
-                            journal.get_run(run_id),
+                        prompt = her_dream.build_dream_correction_prompt(
+                            rejected_output=raw_output,
+                            error=exc,
                         )
+                        await asyncio.sleep(
+                            min(
+                                5.0,
+                                0.25 * (2 ** min(validation_attempt - 1, 5)),
+                                max(0.0, validation_idle_s - idle_for),
+                            )
+                        )
+                        continue
                     journal.record_attempt(
                         run_id,
                         attempt=attempt_sequence,
@@ -655,13 +677,6 @@ async def execute_dream(
                     attempt=stale_attempt,
                     error=str(exc),
                 )
-                if stale_attempt == 2:
-                    journal.mark_failed(run_id, status="stale", error=str(exc))
-                    return (
-                        False,
-                        str(exc),
-                        journal.get_run(run_id),
-                    )
                 continue
             except Exception as exc:  # noqa: BLE001 - rollback evidence is already durable
                 run = journal.get_run(run_id)

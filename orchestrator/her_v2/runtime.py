@@ -173,12 +173,7 @@ class HERv2Runtime:
         if current is not None:
             self._turn_tasks[identity] = current
         try:
-            return await asyncio.wait_for(
-                self._run_turn(state), timeout=self.config.hard_timeout_s
-            )
-        except asyncio.TimeoutError:
-            control.stop("HARD_SAFETY_TIMEOUT")
-            return await self._error_result(state, "hard safety timeout exhausted")
+            return await self._run_turn(state)
         except TurnStopped as exc:
             return await self._stopped_result(state, exc.reason)
         except AuditPersistenceError as exc:
@@ -705,7 +700,6 @@ class HERv2Runtime:
                 Stage.FINALISATION,
                 parse_report,
                 allow_tools=False,
-                attempts=self.config.reporting_attempts,
                 context={
                     "required_terminal_state": desired_terminal.value,
                     "execution_summary": execution.summary,
@@ -884,11 +878,6 @@ class HERv2Runtime:
         if not isinstance(raw_assignments, list):
             raise StageInvocationError(
                 "high-volume plan sub_agents must be a list", retryable=False
-            )
-        if len(raw_assignments) > self.config.max_subagents:
-            raise StageInvocationError(
-                f"high-volume plan exceeds the {self.config.max_subagents} sub-agent limit",
-                retryable=False,
             )
         assignments: list[SubAgentAssignment] = []
         seen: set[str] = set()
@@ -1189,7 +1178,6 @@ class HERv2Runtime:
         profile: ProviderProfile | None = None,
         allow_tools: bool,
         allow_side_effects: bool = False,
-        attempts: int | None = None,
         context: Mapping[str, Any] | None = None,
         role_override: str | None = None,
         publish_commentary: bool = True,
@@ -1200,23 +1188,13 @@ class HERv2Runtime:
                 stage, selected.name
             )
         )
-        # A model invocation that may already have performed an external side
-        # effect is never automatically replayed.  Provider adapters may make
-        # their own provably pre-side-effect transport retry, but orchestration
-        # cannot safely assume an unknown execution attempt was side-effect-free.
-        limit = (
-            1
-            if allow_side_effects
-            else int(
-                attempts
-                or max(selected.max_attempts, self.config.structured_repair_attempts)
-            )
-        )
         last_error: Exception | None = None
         structure_retry_feedback: Mapping[str, Any] | None = None
         state.stage_invocation_serial += 1
         invocation_serial = state.stage_invocation_serial
-        for attempt in range(1, limit + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             if state.control.stopped:
                 raise TurnStopped(state.control.reason)
             attempt_context = dict(context or {})
@@ -1273,7 +1251,9 @@ class HERv2Runtime:
             state.ledger.add_log_ref(start_ref)
             self.ledger_store.save(state.ledger)
             state.progress.record(
-                "stage_started", f"{stage.value}:{attempt}"
+                "stage_started",
+                stage.value,
+                meaningful=attempt == 1,
             )
             response: StageResponse | None = None
             try:
@@ -1281,7 +1261,6 @@ class HERv2Runtime:
                     state,
                     self.provider.invoke(selected, request),
                     stage=stage,
-                    timeout_s=selected.timeout_s,
                 )
                 response_ref = self._audit(
                     state,
@@ -1386,7 +1365,7 @@ class HERv2Runtime:
                         )
                         raise ReconciliationRequired(
                             f"{stage.value} returned an invalid result after possible "
-                            "side effects, and tool-free structure repair was exhausted; "
+                            "side effects, and tool-free structure repair could not continue; "
                             "execution outcome requires reconciliation and was not replayed",
                             evidence_refs=response.evidence_refs,
                         ) from repair_error
@@ -1447,10 +1426,6 @@ class HERv2Runtime:
                 raise
             except ReconciliationRequired:
                 raise
-            except asyncio.TimeoutError:
-                last_error = StageInvocationError(
-                    f"{stage.value} timed out after {selected.timeout_s:g}s"
-                )
             except (StructuredOutputError, StageInvocationError) as exc:
                 last_error = exc
                 if isinstance(exc, StructuredOutputError):
@@ -1459,12 +1434,19 @@ class HERv2Runtime:
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                     }
-                if isinstance(exc, StageInvocationError) and not exc.retryable:
-                    limit = attempt
             except Exception as exc:
                 last_error = StageInvocationError(
                     f"{stage.value} provider failure: {type(exc).__name__}: {exc}"
                 )
+            # Attempts are deliberately not count-bounded. A retryable,
+            # side-effect-free stage may continue until success, explicit
+            # stop, or the meaningful-progress idle boundary. Side-effecting
+            # execution is never replayed here.
+            will_retry = bool(
+                not allow_side_effects
+                and isinstance(last_error, StageInvocationError)
+                and last_error.retryable
+            )
             try:
                 self._audit(
                     state,
@@ -1478,17 +1460,22 @@ class HERv2Runtime:
                     payload={
                         "error_type": type(last_error).__name__,
                         "error": str(last_error),
-                        "will_retry": attempt < limit,
+                        "will_retry": will_retry,
                         "provider_response_received": response is not None,
                     },
                 )
             except AuditPersistenceError:
                 raise
-            if attempt >= limit:
-                break
-        raise StageInvocationError(
-            f"{stage.value} exhausted {limit} attempt(s): {last_error}"
-        )
+            if not will_retry:
+                raise StageInvocationError(
+                    f"{stage.value} failed: {last_error}",
+                    retryable=False,
+                ) from last_error
+            await self._wait_for_stage_retry(
+                state,
+                stage=stage,
+                attempt=attempt,
+            )
 
     async def _repair_structure(
         self,
@@ -1555,7 +1542,6 @@ class HERv2Runtime:
                 profile=repair_profile,
                 allow_tools=False,
                 allow_side_effects=False,
-                attempts=self.config.structured_repair_attempts,
                 context=repair_context,
                 role_override=f"{role}:structure_repair",
                 publish_commentary=False,
@@ -1700,29 +1686,50 @@ class HERv2Runtime:
 
         return _record
 
+    async def _wait_for_stage_retry(
+        self,
+        state: _TurnState,
+        *,
+        stage: Stage,
+        attempt: int,
+    ) -> None:
+        """Back off without turning retry count or elapsed runtime into a ceiling."""
+
+        idle_remaining = self.config.user_idle_timeout_s - state.progress.idle_for()
+        if idle_remaining <= 0:
+            raise StageInvocationError(
+                f"{stage.value} exceeded the user idle-progress timeout",
+                retryable=False,
+            )
+        delay = min(5.0, 0.25 * (2 ** min(max(0, attempt - 1), 5)))
+        try:
+            stopped = await asyncio.wait_for(
+                state.control.stop_event.wait(),
+                timeout=min(delay, idle_remaining),
+            )
+        except asyncio.TimeoutError:
+            stopped = False
+        if stopped or state.control.stopped:
+            raise TurnStopped(state.control.reason)
+        if state.progress.expired(self.config.user_idle_timeout_s):
+            raise StageInvocationError(
+                f"{stage.value} exceeded the user idle-progress timeout",
+                retryable=False,
+            )
+
     async def _await_provider_operation(
         self,
         state: _TurnState,
         operation,
         *,
         stage: Stage,
-        timeout_s: float,
     ) -> StageResponse:
         task = asyncio.create_task(state.control.run_cancellable(operation))
-        loop = asyncio.get_running_loop()
-        started = loop.time()
         try:
             while not task.done():
-                stage_remaining = float(timeout_s) - (loop.time() - started)
                 idle_remaining = (
                     self.config.user_idle_timeout_s - state.progress.idle_for()
                 )
-                if stage_remaining <= 0:
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-                    raise asyncio.TimeoutError(
-                        f"{stage.value} stage timeout exhausted"
-                    )
                 if idle_remaining <= 0:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
@@ -1733,7 +1740,7 @@ class HERv2Runtime:
                 try:
                     await asyncio.wait_for(
                         asyncio.shield(task),
-                        timeout=min(stage_remaining, idle_remaining, 0.25),
+                        timeout=min(idle_remaining, 0.25),
                     )
                 except asyncio.TimeoutError:
                     continue
@@ -2306,7 +2313,7 @@ def _terminal_reason(state: TerminalState) -> str:
     return {
         TerminalState.COMPLETED: "goal_achieved",
         TerminalState.COMPLETED_WITH_LIMITATIONS: "completed_with_disclosed_limitations",
-        TerminalState.COMPLETED_WITH_REPORT_PENDING: "report_generation_exhausted",
+        TerminalState.COMPLETED_WITH_REPORT_PENDING: "report_generation_pending",
         TerminalState.RECONCILIATION_REQUIRED: "execution_outcome_unconfirmed",
         TerminalState.FAILED: "goal_not_achieved",
         TerminalState.ERROR: "technical_failure",

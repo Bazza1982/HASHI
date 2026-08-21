@@ -67,12 +67,18 @@ All execution parameters must be configurable, including:
 - provider and model names;
 - model role profiles;
 - provider reasoning settings;
-- idle, stage, retry, and hard safety timeouts;
-- retry limits;
+- the meaningful-progress idle window;
 - replanning triggers and limits;
 - review limits;
-- sub-agent counts;
 - tool and permission policies.
+
+HER v2 has exactly two count-based orchestration ceilings: Replanning and
+Review/remediation, as defined by effort policy. It has no total execution
+clock, stage clock, retry-attempt ceiling, report-attempt ceiling, structure-
+repair-attempt ceiling, tool-round ceiling, sub-agent-count ceiling, turn
+ceiling, cumulative token budget, or per-request output-token ceiling. Legacy
+HER/Claw fields representing those ceilings are invalid HER v2 configuration
+and must be rejected rather than silently applied.
 
 Provider-specific request construction belongs in provider adapters, not in the HER orchestration core.
 
@@ -108,7 +114,8 @@ No stage may intentionally substitute a different objective. If intent is unclea
 
 HER prefers useful progress over perfection of intermediate artefacts:
 
-- retry a technically repairable stage failure within its configured limit;
+- retry a technically repairable, side-effect-free stage while it remains
+  retryable and the turn has not crossed its no-progress idle boundary;
 - replan when execution evidence invalidates the current approach;
 - do not fail because an optional commentary message was not delivered;
 - do not discard completed work because reporting failed;
@@ -407,7 +414,7 @@ Planning uses a premium model with a high provider reasoning setting and conside
 - relevant historical context;
 - advisory Habits;
 - available providers, models, tools, permissions, and sub-agents;
-- retry and timeout strategy;
+- recovery and meaningful-progress strategy;
 - testing and verification strategy;
 - parallelisation opportunities;
 - review requirements implied by HER effort.
@@ -418,10 +425,11 @@ When planning completes, HER records the plan reference and sends an appropriate
 
 Planning failures are technical failures. Valid examples include:
 
-- invalid structured output after bounded repair attempts;
+- invalid structured output that remains unrepaired at the no-progress idle
+  boundary or ends in a non-retryable provider failure;
 - provider or network failure;
 - schema validation failure;
-- stage timeout.
+- meaningful-progress idle expiration.
 
 “The model could not think of a plan” is not a distinct valid failure category. It must resolve to a technical error, a request for required user input already identified by Triage, or a concrete plan.
 
@@ -645,9 +653,11 @@ Immediate Response and is never rendered a second time.
 
 ### 12.3 Reporting failure
 
-If execution completed but reporting fails, HER retries reporting within a configurable bounded limit. The default is three attempts.
+If execution completed but reporting fails, HER retries a retryable reporting
+failure without an attempt-count ceiling. Retries end only on success, explicit
+stop, a non-retryable failure, or the meaningful-progress idle boundary.
 
-After retry exhaustion:
+If reporting cannot complete:
 
 - execution evidence remains valid;
 - completed work is not discarded;
@@ -736,7 +746,7 @@ HER v2 uses the following unified terminal states:
 |---|---|
 | `COMPLETED` | Required work and reporting completed |
 | `COMPLETED_WITH_LIMITATIONS` | Work concluded with material disclosed limitations |
-| `COMPLETED_WITH_REPORT_PENDING` | Execution completed but user-facing reporting exhausted its retry limit |
+| `COMPLETED_WITH_REPORT_PENDING` | Execution completed but user-facing reporting ended on a non-retryable failure or no-progress idle boundary |
 | `RECONCILIATION_REQUIRED` | Execution may have changed external state, but the result could not be validated; automatic replay is forbidden |
 | `FAILED` | Execution ran correctly but concluded that the user's goal could not be achieved |
 | `ERROR` | A technical failure prevented correct execution, including an unexpected process interruption or lifecycle violation |
@@ -837,7 +847,7 @@ Logs must apply existing HASHI secret-redaction, access-control, retention, and 
 
 ### 17.1 Stage-local retry
 
-HER permits bounded retry within the active process and current stage for technical failures such as:
+HER permits retry within the active process and current stage for technical failures such as:
 
 - transient provider or network errors;
 - invalid structured output;
@@ -845,7 +855,8 @@ HER permits bounded retry within the active process and current stage for techni
 - retryable tool transport errors;
 - report-generation failure.
 
-Retry limits and delays are configurable. A retry does not change the Triage classification or user goal.
+Retry delays may back off, but attempt count and elapsed execution time are not
+ceilings. A retry does not change the Triage classification or user goal.
 
 Before a non-side-effect retry, HER records and supplies the prior validation
 error to the next attempt. Compatible carrier recovery occurs before retry and
@@ -855,7 +866,8 @@ A stage invocation authorised to perform external side effects is never
 replayed merely to repair its output format. If its returned envelope is
 invalid, HER invokes a distinct `STRUCTURE_REPAIR` stage using the original
 response as quoted evidence. That repair stage has no Tool Gateway registry and
-no side-effect authority. If bounded repair cannot establish a valid result,
+no side-effect authority. If repair ends at a non-retryable failure or the
+no-progress idle boundary without establishing a valid result,
 the turn becomes `RECONCILIATION_REQUIRED`; it does not enter Finalisation,
 claim completion, or automatically retry Execution.
 
@@ -889,21 +901,18 @@ Measurable progress includes:
 
 No-op retries, heartbeat-only Ledger writes, idle waiting, and unlogged internal loops are not progress.
 
-### 18.2 Stage timeout
+### 18.2 Prohibited execution clocks and budgets
 
-Each stage may have an independent configurable timeout. Example defaults may include:
+There is no stage timeout, retry timeout, whole-turn hard timeout, time budget,
+turn budget, tool-round budget, sub-agent budget, cumulative token budget, or
+output-token budget in HER v2. Meaningful activity may continue for arbitrarily
+long elapsed time. A process-level operator stop and the no-progress idle
+detector are liveness controls, not total-runtime ceilings.
 
-- Planning: five minutes;
-- Review: three minutes;
-- individual tool call: sixty seconds.
-
-### 18.3 Retry timeout
-
-Retry policy controls attempt count, delay, and the time allowed for repair. For example, structured-output repair may allow three attempts.
-
-### 18.4 Hard safety timeout
-
-HASHI may retain a configurable hard safety ceiling to prevent permanently orphaned execution. This ceiling is an operational guard and does not redefine the user timeout as total runtime.
+Transport operations may retain connection/read inactivity and protocol safety
+guards. Such guards must be scoped to the individual transport or parser, must
+not be presented as an HER execution budget, and must not cancel a turn that is
+still producing meaningful progress.
 
 ## 19. Sub-Agent Governance
 
@@ -946,7 +955,7 @@ HASHI remains responsible for:
 - Tool Gateway registration and execution;
 - permission and workzone enforcement;
 - queues, cancellation, `/stop`, and `/steer`;
-- timeout enforcement;
+- meaningful-progress idle enforcement;
 - audit logging and redaction;
 - Workbench and operational status;
 - hot restart and process lifecycle.
@@ -1017,7 +1026,8 @@ HER v2 is ready for production rollout only when:
 - `/steer` terminates the old turn and starts a separately classified new turn;
 - low, medium, high, xhigh, and max policies follow the required stage matrix;
 - Replanning and Review loops cannot violate lifecycle order;
-- retries are bounded and process restart does not resume an old execution stack;
+- retries have no attempt/time ceiling, terminate correctly on no-progress idle
+  or non-retryable failure, and process restart does not resume an old stack;
 - Ledger records remain minimal and auditable through log references;
 - all available reasoning traces are logged and correlated to the turn;
 - tools and permissions remain HASHI-owned;
@@ -1046,7 +1056,8 @@ The following decisions are authoritative for HER v2:
 3. Planning and Replanning may not change classification or goal.
 4. `/steer` stops the old turn and starts a newly triaged turn with new instructions.
 5. Lifecycle order is strict; stage content is flexible.
-6. Stage-local bounded retry is allowed; process-restart resumption is forbidden.
+6. Stage-local retry has no attempt or elapsed-time ceiling; only explicit stop,
+   non-retryable failure, or no-progress idle expiration may end it.
 7. Immediate Response becomes the sole final user-facing answer for `DIRECT_RESPONSE`.
 8. Review is advisory and never user-facing.
 9. The Primary Agent owns execution and reporting.

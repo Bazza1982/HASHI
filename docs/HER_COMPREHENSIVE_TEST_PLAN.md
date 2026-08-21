@@ -1,4 +1,11 @@
-# HER × DeepSeek Comprehensive Certification Plan
+# LEGACY HER v1 × DeepSeek Comprehensive Certification Plan
+
+> **FROZEN LEGACY TEST REFERENCE:** This plan validates the retired native
+> HER v1/Claw artifact. Its iteration, MAX+, retry, timeout, tool, token,
+> sub-agent, and finalisation ceilings must never be copied into or executed as
+> policy for HER v2. HER v2 is governed by `HER_V2_TESTING_PLAN.md`, where only
+> Replanning and Review/remediation have fixed counts and execution liveness is
+> idle/no-progress based.
 
 Status: executable test design
 Target: HASHI2 / Ajiao isolated test workzone

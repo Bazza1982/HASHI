@@ -26,8 +26,10 @@ MEDITATION_JOB_FORMAT = "her-habit-meditation-job-v1"
 HABIT_AUDIT_FORMAT = "her-habit-audit-v1"
 HABIT_MEDITATION_ENV = "HASHI_HER_HABIT_MEDITATION"
 HABIT_ADVISORY_CONTEXT_ENV = "HASHI_HER_HABIT_ADVISORY_CONTEXT"
-MAX_MEDITATION_ATTEMPTS = 3
-MAX_HABIT_NOTIFICATION_ATTEMPTS = 3
+# LEGACY HER V1 JOURNAL METADATA ONLY. Existing files may still contain these
+# historical values, but no current execution path applies them.
+LEGACY_MAX_MEDITATION_ATTEMPTS = 3
+LEGACY_MAX_HABIT_NOTIFICATION_ATTEMPTS = 3
 HABIT_TITLE_MAX_CHARS = 48
 HABIT_TITLE_MAX_WORDS = 10
 HABIT_METADATA_MAX_CHARS = 400
@@ -126,12 +128,12 @@ def _bounded_int(value: Any, default: int, *, minimum: int, maximum: int) -> int
     return min(maximum, max(minimum, parsed))
 
 
-def _bounded_float(value: Any, default: float, *, minimum: float, maximum: float) -> float:
+def _minimum_float(value: Any, default: float, *, minimum: float) -> float:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         parsed = default
-    return min(maximum, max(minimum, parsed))
+    return max(minimum, parsed)
 
 
 def _config_mapping(value: Any) -> dict[str, Any]:
@@ -155,7 +157,7 @@ class HabitMeditationConfig:
     max_actions: int = 3
     max_trace_chars: int = 24_000
     max_catalog_habits: int = 200
-    meditation_timeout_seconds: float = 180.0
+    meditation_idle_timeout_seconds: float = 180.0
 
     @classmethod
     def resolve(
@@ -210,11 +212,15 @@ class HabitMeditationConfig:
                 minimum=20,
                 maximum=1_000,
             ),
-            meditation_timeout_seconds=_bounded_float(
-                merged.get("meditation_timeout_seconds"),
+            meditation_idle_timeout_seconds=_minimum_float(
+                merged.get(
+                    "meditation_idle_timeout_seconds",
+                    # Configuration migration alias. It no longer denotes an
+                    # absolute wall-clock ceiling.
+                    merged.get("meditation_timeout_seconds"),
+                ),
                 180.0,
                 minimum=15.0,
-                maximum=900.0,
             ),
         )
 
@@ -1105,7 +1111,11 @@ def reset_habit_state(
 class HERMeditationJournal:
     """Durable, agent-local journal for asynchronous Meditation work."""
 
-    def __init__(self, workspace_dir: Path, logger: Any | None = None):
+    def __init__(
+        self,
+        workspace_dir: Path,
+        logger: Any | None = None,
+    ):
         self.root = Path(workspace_dir) / "backend_state" / "her_habit_meditation"
         self.logger = logger
 
@@ -1195,7 +1205,6 @@ class HERMeditationJournal:
             "request_id": normalized_request_id,
             "status": "pending",
             "attempts": 0,
-            "max_attempts": MAX_MEDITATION_ATTEMPTS,
             "max_actions": max_actions,
             "prompt": redact_bounded_text(prompt, limit=180_000),
             "actions": None,
@@ -1238,7 +1247,6 @@ class HERMeditationJournal:
             "status": "skipped" if reason else "waiting",
             "reason": reason,
             "attempts": 0,
-            "max_attempts": MAX_HABIT_NOTIFICATION_ATTEMPTS,
             "chat_id": chat_id,
             "verbose_at_start": verbose_at_start,
             "silent": silent,
@@ -1300,16 +1308,10 @@ class HERMeditationJournal:
                 continue
             if payload["status"] != "running":
                 continue
-            attempts = int(payload["attempts"])
-            if attempts >= MAX_MEDITATION_ATTEMPTS:
-                payload["status"] = "failed"
-                payload["error_code"] = "retry_exhausted"
-                payload["error_summary"] = "Meditation retry limit reached"
-            else:
-                payload["status"] = "pending"
-                payload["error_code"] = "runtime_interrupted"
-                payload["error_summary"] = "Meditation interrupted before completion"
-                recovered += 1
+            payload["status"] = "pending"
+            payload["error_code"] = "runtime_interrupted"
+            payload["error_summary"] = "Meditation interrupted before completion"
+            recovered += 1
             payload["updated_at"] = _utc_now()
             self._write(payload)
         return recovered
@@ -1319,13 +1321,6 @@ class HERMeditationJournal:
         if payload["status"] == "applying":
             return "apply"
         if payload["status"] != "pending":
-            return None
-        if int(payload["attempts"]) >= MAX_MEDITATION_ATTEMPTS:
-            payload["status"] = "failed"
-            payload["error_code"] = "retry_exhausted"
-            payload["error_summary"] = "Meditation retry limit reached"
-            payload["updated_at"] = _utc_now()
-            self._write(payload)
             return None
         payload["status"] = "running"
         payload["attempts"] = int(payload["attempts"]) + 1
@@ -1360,14 +1355,9 @@ class HERMeditationJournal:
         payload = self._read(job_id)
         if payload["status"] != "running":
             return
-        if int(payload["attempts"]) >= MAX_MEDITATION_ATTEMPTS:
-            payload["status"] = "failed"
-            payload["error_code"] = "retry_exhausted"
-            payload["error_summary"] = "Meditation retry limit reached"
-        else:
-            payload["status"] = "pending"
-            payload["error_code"] = _clean_text(reason, limit=80) or "interrupted"
-            payload["error_summary"] = _clean_text(reason, limit=500) or "interrupted"
+        payload["status"] = "pending"
+        payload["error_code"] = _clean_text(reason, limit=80) or "interrupted"
+        payload["error_summary"] = _clean_text(reason, limit=500) or "interrupted"
         payload["updated_at"] = _utc_now()
         self._write(payload)
 
@@ -1470,17 +1460,6 @@ class HERMeditationJournal:
         }:
             return None
         attempts = int(notification.get("attempts") or 0)
-        maximum = int(
-            notification.get("max_attempts") or MAX_HABIT_NOTIFICATION_ATTEMPTS
-        )
-        if attempts >= maximum:
-            notification["status"] = "failed"
-            notification["reason"] = "retry_exhausted"
-            notification["updated_at"] = _utc_now()
-            payload["notification"] = notification
-            payload["updated_at"] = _utc_now()
-            self._write(payload)
-            return None
         notification["status"] = "sending"
         notification["attempts"] = attempts + 1
         notification["reason"] = None
@@ -1511,12 +1490,8 @@ class HERMeditationJournal:
         notification = payload.get("notification")
         if not isinstance(notification, dict) or notification.get("status") != "sending":
             return
-        attempts = int(notification.get("attempts") or 0)
-        maximum = int(
-            notification.get("max_attempts") or MAX_HABIT_NOTIFICATION_ATTEMPTS
-        )
-        notification["status"] = "failed" if attempts >= maximum else "pending"
-        notification["reason"] = "retry_exhausted" if attempts >= maximum else "delivery_failed"
+        notification["status"] = "pending"
+        notification["reason"] = "delivery_failed"
         notification["error_summary"] = redact_bounded_text(reason, limit=500)
         notification["updated_at"] = _utc_now()
         payload["notification"] = notification

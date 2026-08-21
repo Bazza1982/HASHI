@@ -26,24 +26,17 @@ from orchestrator.her_v2.runtime import HERv2Runtime
 
 
 def _config(**overrides):
-    profile_timeout_s = overrides.pop("profile_timeout_s", 2)
-    profile_timeouts = overrides.pop("profile_timeouts", {})
     profiles = {
         name: {
             "engine": "fake-api",
             "model": f"model-{name}",
             "reasoning": f"reasoning-{name}",
-            "max_attempts": 1,
-            "timeout_s": profile_timeouts.get(name, profile_timeout_s),
         }
         for name in ("lightweight", "triage", "premium", "reviewer", "orchestrator")
     }
     raw = {
         "profiles": profiles,
-        "structured_repair_attempts": 1,
-        "reporting_attempts": 3,
         "user_idle_timeout_s": 10,
-        "hard_timeout_s": 20,
         "shadow_mode": False,
     }
     raw.update(overrides)
@@ -1120,29 +1113,38 @@ async def test_high_volume_subagents_are_bounded_and_cannot_replan_or_finalise(t
 
 
 @pytest.mark.asyncio
-async def test_high_volume_subagent_limit_is_a_hard_boundary(tmp_path):
+async def test_high_volume_subagents_have_no_fixed_count_ceiling(tmp_path):
     scripts = _initial("HIGH_VOLUME_TASK")
-    scripts[Stage.PLANNING] = [
+    scripts.update(
         {
-            "plan": ["too much delegation"],
-            "sub_agents": [
-                {"id": f"sub-{index}", "task": f"task {index}"}
-                for index in range(3)
+            Stage.PLANNING: [
+                {
+                    "plan": ["delegate all independent work", "synthesise"],
+                    "sub_agents": [
+                        {"id": f"sub-{index}", "task": f"task {index}"}
+                        for index in range(3)
+                    ],
+                }
             ],
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Work completed."}
+                for _index in range(4)
+            ],
+            Stage.REVIEW: [{"outcome": "PASS", "summary": "Verified."}],
+            Stage.FINALISATION: [{"report": "All delegated work completed."}],
         }
-    ]
+    )
     provider = ScriptedProvider(scripts)
-    config = _config(max_subagents=2)
 
-    result = await _runtime(tmp_path, provider, config=config).run_turn(
-        "Large task", "request-subagent-limit", effort=Effort.MAX
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Large task", "request-subagents-unbounded", effort=Effort.MAX
     )
 
-    assert result.terminal_state is TerminalState.ERROR
-    assert "exceeds the 2 sub-agent limit" in result.error
-    assert not any(
-        request.role.startswith("sub_agent:") for _profile, request in provider.requests
-    )
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert sum(
+        request.role.startswith("sub_agent:")
+        for _profile, request in provider.requests
+    ) == 3
 
 
 @pytest.mark.asyncio
@@ -1236,9 +1238,13 @@ async def test_reporting_exhaustion_preserves_completed_execution(tmp_path):
                     "evidence_refs": ["receipt:123"],
                 }
             ],
-            Stage.FINALISATION: [
-                StageInvocationError("report provider unavailable") for _ in range(3)
-            ],
+                Stage.FINALISATION: [
+                    StageInvocationError("report provider unavailable"),
+                    StageInvocationError("report provider still unavailable"),
+                    StageInvocationError(
+                        "report provider rejected request", retryable=False
+                    ),
+                ],
         }
     )
     provider = ScriptedProvider(scripts)
@@ -1459,7 +1465,7 @@ async def test_invalid_optional_commentary_does_not_invalidate_stage_result(tmp_
         tmp_path,
         ScriptedProvider(scripts),
         commentary=commentary,
-        config=_config(user_idle_timeout_s=0.03, hard_timeout_s=5),
+        config=_config(user_idle_timeout_s=0.03),
     ).run_turn("Complete quickly", "request-slow-commentary", effort="low")
 
     assert result.terminal_state is TerminalState.COMPLETED
@@ -1472,14 +1478,15 @@ async def test_stage_failure_does_not_synthesise_commentary_from_lifecycle_event
     tmp_path,
 ):
     scripts = _initial("COMPLEX_TASK")
-    scripts[Stage.PLANNING] = [StageInvocationError("planner provider unavailable")]
+    scripts[Stage.PLANNING] = [
+        StageInvocationError("planner provider unavailable", retryable=False)
+    ]
     commentary = RecordingCommentaryPort()
 
     result = await _runtime(
         tmp_path,
         ScriptedProvider(scripts),
         commentary=commentary,
-        config=_config(structured_repair_attempts=1),
     ).run_turn("Plan and execute", "request-planning-failure", effort="medium")
 
     assert result.terminal_state is TerminalState.ERROR
@@ -1504,7 +1511,7 @@ async def test_meaningful_progress_keeps_long_execution_alive(tmp_path):
     result = await _runtime(
         tmp_path,
         ScriptedProvider(scripts),
-        config=_config(user_idle_timeout_s=0.05, hard_timeout_s=5),
+        config=_config(user_idle_timeout_s=0.05),
     ).run_turn("Long but active", "request-progress", effort="low")
     assert result.terminal_state is TerminalState.COMPLETED
 
@@ -1522,7 +1529,7 @@ async def test_repeated_false_progress_cannot_keep_stalled_execution_alive(tmp_p
     result = await _runtime(
         tmp_path,
         provider,
-        config=_config(user_idle_timeout_s=0.05, hard_timeout_s=5),
+        config=_config(user_idle_timeout_s=0.05),
     ).run_turn("Stalled task", "request-false-progress", effort="low")
 
     assert result.terminal_state is TerminalState.ERROR
@@ -1551,29 +1558,34 @@ async def test_reviewer_technical_failure_does_not_discard_execution(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_planning_stage_timeout_is_bounded_and_terminal_error(tmp_path):
+async def test_slow_planning_has_no_stage_wall_clock_ceiling(tmp_path):
     scripts = _initial("COMPLEX_TASK")
-    scripts[Stage.PLANNING] = [{"plan": ["too slow"]}]
+    scripts.update(
+        {
+            Stage.PLANNING: [{"plan": ["slow but valid"]}],
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Plan completed."}
+            ],
+            Stage.FINALISATION: [{"report": "Plan completed."}],
+        }
+    )
     provider = ScriptedProvider(scripts, delays={Stage.PLANNING: 0.05})
 
     result = await _runtime(
         tmp_path,
         provider,
-        config=_config(profile_timeouts={"premium": 0.01}),
-    ).run_turn("Plan this", "request-plan-timeout", effort="medium")
+        config=_config(user_idle_timeout_s=0.2),
+    ).run_turn("Plan this", "request-slow-plan", effort="medium")
 
-    assert result.terminal_state is TerminalState.ERROR
-    assert "planning timed out" in result.error
+    assert result.terminal_state is TerminalState.COMPLETED
     assert sum(
         request.stage is Stage.PLANNING for _profile, request in provider.requests
     ) == 1
-    assert not any(
-        request.stage is Stage.EXECUTION for _profile, request in provider.requests
-    )
+    assert any(request.stage is Stage.EXECUTION for _profile, request in provider.requests)
 
 
 @pytest.mark.asyncio
-async def test_review_timeout_preserves_execution_and_reaches_finalisation(tmp_path):
+async def test_slow_review_has_no_stage_wall_clock_ceiling(tmp_path):
     scripts = _initial("COMPLEX_TASK")
     scripts.update(
         {
@@ -1581,10 +1593,8 @@ async def test_review_timeout_preserves_execution_and_reaches_finalisation(tmp_p
             Stage.EXECUTION: [
                 {"disposition": "COMPLETED", "summary": "Work completed."}
             ],
-            Stage.REVIEW: [{"outcome": "PASS", "summary": "Too late."}],
-            Stage.FINALISATION: [
-                {"report": "Completed; independent Review timed out."}
-            ],
+            Stage.REVIEW: [{"outcome": "PASS", "summary": "Reviewed."}],
+            Stage.FINALISATION: [{"report": "Completed and reviewed."}],
         }
     )
     provider = ScriptedProvider(scripts, delays={Stage.REVIEW: 0.05})
@@ -1592,16 +1602,18 @@ async def test_review_timeout_preserves_execution_and_reaches_finalisation(tmp_p
     result = await _runtime(
         tmp_path,
         provider,
-        config=_config(profile_timeouts={"reviewer": 0.01}),
-    ).run_turn("Complete and review", "request-review-timeout", effort="xhigh")
+        config=_config(user_idle_timeout_s=0.2),
+    ).run_turn("Complete and review", "request-slow-review", effort="xhigh")
 
-    assert result.terminal_state is TerminalState.COMPLETED_WITH_LIMITATIONS
-    assert result.text == "Completed; independent Review timed out."
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.text == "Completed and reviewed."
     assert result.review_count == 1
 
 
 @pytest.mark.asyncio
-async def test_reporting_timeout_retries_without_repeating_execution(tmp_path):
+async def test_reporting_retries_beyond_removed_attempt_cap_without_repeating_execution(
+    tmp_path,
+):
     scripts = _initial("SIMPLE_TASK")
     scripts.update(
         {
@@ -1612,20 +1624,22 @@ async def test_reporting_timeout_retries_without_repeating_execution(tmp_path):
                     "evidence_refs": ["receipt:timeout-case"],
                 }
             ],
-            Stage.FINALISATION: [{"report": "Too late."}],
+            Stage.FINALISATION: [
+                StageInvocationError("report transport failed"),
+                StageInvocationError("report transport failed again"),
+                StageInvocationError("report transport failed a third time"),
+                {"report": "Completed after recovery."},
+            ],
         }
     )
-    provider = ScriptedProvider(scripts, delays={Stage.FINALISATION: 0.05})
+    provider = ScriptedProvider(scripts)
 
-    result = await _runtime(
-        tmp_path,
-        provider,
-        config=_config(
-            profile_timeouts={"premium": 0.01}, reporting_attempts=2
-        ),
-    ).run_turn("Perform once", "request-report-timeout", effort="low")
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Perform once", "request-report-retries", effort="low"
+    )
 
-    assert result.terminal_state is TerminalState.COMPLETED_WITH_REPORT_PENDING
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.text == "Completed after recovery."
     assert result.evidence_refs == ("receipt:timeout-case",)
     assert sum(
         request.stage is Stage.EXECUTION for _profile, request in provider.requests
@@ -1633,31 +1647,34 @@ async def test_reporting_timeout_retries_without_repeating_execution(tmp_path):
     assert sum(
         request.stage is Stage.FINALISATION
         for _profile, request in provider.requests
-    ) == 2
+    ) == 4
 
 
 @pytest.mark.asyncio
-async def test_hard_safety_timeout_cancels_progressing_provider(tmp_path):
-    async def never_finishes(request):
-        index = 0
-        while True:
+async def test_meaningfully_progressing_execution_has_no_total_runtime_ceiling(tmp_path):
+    async def finishes_after_sustained_progress(request):
+        for index in range(40):
             request.progress_callback("tool_result", f"evidence-{index}", True)
-            index += 1
             await asyncio.sleep(0.005)
+        return {"disposition": "COMPLETED", "summary": "Long work completed."}
 
     scripts = _initial("SIMPLE_TASK")
-    scripts[Stage.EXECUTION] = [never_finishes]
+    scripts.update(
+        {
+            Stage.EXECUTION: [finishes_after_sustained_progress],
+            Stage.FINALISATION: [{"report": "Long work completed."}],
+        }
+    )
     provider = ScriptedProvider(scripts)
 
     result = await _runtime(
         tmp_path,
         provider,
-        config=_config(user_idle_timeout_s=0.03, hard_timeout_s=0.15),
-    ).run_turn("Never finish", "request-hard-timeout", effort="low")
+        config=_config(user_idle_timeout_s=0.03),
+    ).run_turn("Finish eventually", "request-no-total-timeout", effort="low")
 
-    assert result.terminal_state is TerminalState.ERROR
-    assert "hard safety timeout" in result.error
-    assert provider.cancelled[Stage.EXECUTION] == 1
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert provider.cancelled[Stage.EXECUTION] == 0
 
 
 @pytest.mark.asyncio
@@ -1839,7 +1856,6 @@ async def test_side_effect_execution_bad_json_uses_tool_free_structure_repair_on
         tmp_path,
         provider,
         config=_config(
-            structured_repair_attempts=2,
             slot_models={
                 "fast": "quick-route-model",
                 "pro": "pro-route-model",
@@ -1910,7 +1926,7 @@ async def test_side_effect_execution_bad_json_uses_tool_free_structure_repair_on
 
 
 @pytest.mark.asyncio
-async def test_exhausted_execution_structure_repair_requires_reconciliation_without_replay(
+async def test_failed_execution_structure_repair_requires_reconciliation_without_replay(
     tmp_path,
 ):
     scripts = _initial("SIMPLE_TASK")
@@ -1927,17 +1943,15 @@ async def test_exhausted_execution_structure_repair_requires_reconciliation_with
             ],
             Stage.STRUCTURE_REPAIR: [
                 StageResponse(text="still malformed"),
-                StageResponse(text="also malformed"),
+                StageInvocationError(
+                    "repair provider rejected request", retryable=False
+                ),
             ],
         }
     )
     provider = ScriptedProvider(scripts)
 
-    result = await _runtime(
-        tmp_path,
-        provider,
-        config=_config(structured_repair_attempts=2),
-    ).run_turn(
+    result = await _runtime(tmp_path, provider).run_turn(
         "Perform the external action once",
         "request-reconciliation-required",
         effort="low",
@@ -1974,10 +1988,15 @@ async def test_exhausted_execution_structure_repair_requires_reconciliation_with
 
 
 @pytest.mark.asyncio
-async def test_structured_output_repair_is_bounded_and_preserves_classification(tmp_path):
+async def test_structured_output_repair_has_no_attempt_cap_and_preserves_classification(
+    tmp_path,
+):
     scripts = _initial("SIMPLE_TASK")
     scripts[Stage.TRIAGE] = [
         StageResponse(text="not json"),
+        StageResponse(text="still not json"),
+        StageResponse(text="not json on the third attempt"),
+        StageResponse(text="not json on the fourth attempt"),
         StageResponse(
             text='prefix {"classification":"simple-task","goal":"Do it"} suffix',
             reasoning_trace=None,
@@ -1993,10 +2012,15 @@ async def test_structured_output_repair_is_bounded_and_preserves_classification(
             Stage.FINALISATION: [{"report": "Done."}],
         }
     )
-    config = _config(structured_repair_attempts=2)
+    config = _config()
     provider = ScriptedProvider(scripts)
+    runtime = _runtime(tmp_path, provider, config=config)
 
-    result = await _runtime(tmp_path, provider, config=config).run_turn(
+    async def _no_delay(*_args, **_kwargs):
+        await asyncio.sleep(0)
+
+    runtime._wait_for_stage_retry = _no_delay
+    result = await runtime.run_turn(
         "Do it", "request-repair", effort=Effort.LOW
     )
 
@@ -2004,7 +2028,7 @@ async def test_structured_output_repair_is_bounded_and_preserves_classification(
     triage_requests = [
         call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
     ]
-    assert len(triage_requests) == 2
+    assert len(triage_requests) == 5
     assert triage_requests[1].context["previous_structure_error"]["attempt"] == 1
     assert "no valid JSON" in triage_requests[1].context[
         "previous_structure_error"

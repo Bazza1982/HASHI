@@ -1,3 +1,10 @@
+"""LEGACY HER v1 compatibility backend.
+
+All iteration, retry, tool-call, token, and wall-clock ceilings in this module
+belong exclusively to the retired HER v1/Claw execution contract. They must
+never be imported, copied, or applied by HER v2 or any direct backend.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -58,8 +65,8 @@ DELIVERY_FINAL = getattr(_stream_events, "DELIVERY_FINAL", "final")
 DELIVERY_CONTROL = getattr(_stream_events, "DELIVERY_CONTROL", "control")
 DELIVERY_INTERNAL = getattr(_stream_events, "DELIVERY_INTERNAL", "internal")
 
-DEFAULT_CLAW_TIMEOUT_SEC = 30
-DEFAULT_CLAW_TASK_TIMEOUT_SEC = 1800
+LEGACY_DEFAULT_CLAW_TIMEOUT_SEC = 30
+LEGACY_DEFAULT_CLAW_TASK_TIMEOUT_SEC = 1800
 VALID_PERMISSION_MODES = {"read-only", "workspace-write", "danger-full-access"}
 PERMISSION_MODE_RANK = {"read-only": 0, "workspace-write": 1, "danger-full-access": 2}
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -129,7 +136,7 @@ CLAW_ENV_ALLOWLIST = (
     *OS_ENV_ALLOWLIST,
 )
 
-CLAW_EXECUTION_EFFORT_ITERATIONS = {
+LEGACY_CLAW_EXECUTION_EFFORT_ITERATIONS = {
     "low": 12,
     "medium": 32,
     "high": 96,
@@ -138,7 +145,7 @@ CLAW_EXECUTION_EFFORT_ITERATIONS = {
     "max+": 512,
 }
 HER_EXECUTION_EFFORTS = frozenset(
-    {*CLAW_EXECUTION_EFFORT_ITERATIONS, _her_ultra.HER_ULTRA_EFFORT}
+    {*LEGACY_CLAW_EXECUTION_EFFORT_ITERATIONS, _her_ultra.HER_ULTRA_EFFORT}
 )
 
 HER_COMMENTARY_FIRST_UPDATE_S = 90.0
@@ -1963,7 +1970,7 @@ def run_claw_json_command(
     cwd: str | os.PathLike[str],
     binary_path: str | os.PathLike[str] | None = None,
     env: Mapping[str, str] | None = None,
-    timeout_s: float = DEFAULT_CLAW_TIMEOUT_SEC,
+    timeout_s: float = LEGACY_DEFAULT_CLAW_TIMEOUT_SEC,
     stdin_text: str | None = None,
 ) -> ClawCommandResult:
     binary = find_claw_binary(binary_path, env=env)
@@ -2046,7 +2053,7 @@ def run_claw_task(
     skip_permissions: bool = False,
     binary_path: str | os.PathLike[str] | None = None,
     env: Mapping[str, str] | None = None,
-    timeout_s: float = DEFAULT_CLAW_TASK_TIMEOUT_SEC,
+    timeout_s: float = LEGACY_DEFAULT_CLAW_TASK_TIMEOUT_SEC,
 ) -> ClawTaskResult:
     """Run one HER prompt and return the machine-readable result."""
     if permission_mode not in VALID_PERMISSION_MODES:
@@ -2168,7 +2175,7 @@ def run_claw_version(
     env: Mapping[str, str] | None = None,
     *,
     binary_path: str | os.PathLike[str] | None = None,
-    timeout_s: float = DEFAULT_CLAW_TIMEOUT_SEC,
+    timeout_s: float = LEGACY_DEFAULT_CLAW_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     return run_claw_json_command(
         ["version", "--output-format", "json"],
@@ -2184,7 +2191,7 @@ def run_claw_doctor(
     env: Mapping[str, str] | None = None,
     *,
     binary_path: str | os.PathLike[str] | None = None,
-    timeout_s: float = DEFAULT_CLAW_TIMEOUT_SEC,
+    timeout_s: float = LEGACY_DEFAULT_CLAW_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     return run_claw_json_command(
         ["doctor", "--output-format", "json"],
@@ -2200,7 +2207,7 @@ def run_claw_status(
     env: Mapping[str, str] | None = None,
     *,
     binary_path: str | os.PathLike[str] | None = None,
-    timeout_s: float = DEFAULT_CLAW_TIMEOUT_SEC,
+    timeout_s: float = LEGACY_DEFAULT_CLAW_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     return run_claw_json_command(
         ["status", "--output-format", "json"],
@@ -2216,7 +2223,7 @@ def run_claw_state(
     env: Mapping[str, str] | None = None,
     *,
     binary_path: str | os.PathLike[str] | None = None,
-    timeout_s: float = DEFAULT_CLAW_TIMEOUT_SEC,
+    timeout_s: float = LEGACY_DEFAULT_CLAW_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     return run_claw_json_command(
         ["state", "--output-format", "json"],
@@ -2228,10 +2235,11 @@ def run_claw_state(
 
 
 class HERAdapter(BaseBackend):
-    """HASHI Engine Runtime (HER), derived from the MIT-licensed Claw runtime."""
+    """LEGACY HER v1, derived from the MIT-licensed Claw runtime."""
 
     DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
     DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
+    USES_LEGACY_HARD_TIMEOUT = True
     DEFAULT_POST_TOOL_STALL_TIMEOUT_SEC = 60
     DEFAULT_POST_TOOL_RETRY_STALL_TIMEOUT_SEC = 120
     habit_pipeline_owner = "adapter"
@@ -2921,7 +2929,10 @@ class HERAdapter(BaseBackend):
                                     "CLAW_EXECUTION_EFFORT": "low",
                                 },
                             ),
-                            timeout=config.meditation_timeout_seconds,
+                            # LEGACY HER V1 ONLY: this retired adapter kept an
+                            # absolute maintenance clock. Backend selection can
+                            # no longer route requests into this implementation.
+                            timeout=config.meditation_idle_timeout_seconds,
                         )
                         try:
                             actions = _her_habits.parse_meditation_actions(
@@ -3349,7 +3360,7 @@ class HERAdapter(BaseBackend):
         raw = self._extra.get("ultra")
         raw = raw if isinstance(raw, Mapping) else {}
         requested = str(raw.get("primary_inner_effort") or "high").strip().lower()
-        if requested not in CLAW_EXECUTION_EFFORT_ITERATIONS:
+        if requested not in LEGACY_CLAW_EXECUTION_EFFORT_ITERATIONS:
             self.logger.warning(
                 "Ignoring invalid HER Ultra primary_inner_effort=%r; using high.",
                 requested,
@@ -3357,11 +3368,11 @@ class HERAdapter(BaseBackend):
             return "high"
         return requested
 
-    def _max_tool_iterations(self) -> int:
+    def _legacy_max_tool_iterations(self) -> int:
         inner_effort = self._single_agent_effort()
         raw_max_iterations = self._extra.get(
             "max_tool_iterations",
-            CLAW_EXECUTION_EFFORT_ITERATIONS.get(inner_effort, 96),
+            LEGACY_CLAW_EXECUTION_EFFORT_ITERATIONS.get(inner_effort, 96),
         )
         try:
             max_iterations = int(raw_max_iterations)
@@ -3380,7 +3391,7 @@ class HERAdapter(BaseBackend):
         # foreground selection path below. Never inherit an ambient or
         # provider-configured value into unrelated HER requests.
         env.pop(HER_HABIT_ADVISORY_CONTEXT_ENV, None)
-        env["CLAW_MAX_TOOL_ITERATIONS"] = str(self._max_tool_iterations())
+        env["CLAW_MAX_TOOL_ITERATIONS"] = str(self._legacy_max_tool_iterations())
         env["CLAW_TASK_PLANNING"] = "0" if inner_effort == "low" else "1"
         env["CLAW_EXECUTION_EFFORT"] = inner_effort
         env["HASHI_MANAGED_TRANSPORT"] = "1"
@@ -3752,7 +3763,7 @@ class HERAdapter(BaseBackend):
     @staticmethod
     def _ultra_task_env(effort: str) -> dict[str, str]:
         normalized = str(effort or "high").strip().lower()
-        iterations = CLAW_EXECUTION_EFFORT_ITERATIONS.get(normalized, 96)
+        iterations = LEGACY_CLAW_EXECUTION_EFFORT_ITERATIONS.get(normalized, 96)
         return {
             "CLAW_EXECUTION_EFFORT": normalized,
             "CLAW_MAX_TOOL_ITERATIONS": str(iterations),
@@ -4137,7 +4148,7 @@ RUNTIME FACTS (quoted, read-only)
             "claw_stop_reason": stop_reason,
             "claw_execution_effort": _her_ultra.HER_ULTRA_EFFORT,
             "claw_inner_execution_effort": config.primary_inner_effort,
-            "claw_max_iterations": CLAW_EXECUTION_EFFORT_ITERATIONS[
+            "claw_max_iterations": LEGACY_CLAW_EXECUTION_EFFORT_ITERATIONS[
                 config.primary_inner_effort
             ],
             "her_session_scope": session_scope,
@@ -4628,7 +4639,7 @@ RUNTIME FACTS (quoted, read-only)
                 "exit_reasoning_status": result.exit_reasoning_status or "unknown",
                 "exit_reasoning_attempts": result.exit_reasoning_attempts,
                 "claw_execution_effort": self.effort,
-                "claw_max_iterations": self._max_tool_iterations(),
+                "claw_max_iterations": self._legacy_max_tool_iterations(),
                 "her_session_scope": session_scope,
                 "her_session_id": result.session_id or "",
                 "her_model": result.model,
