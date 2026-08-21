@@ -1123,7 +1123,20 @@ Please scan Outlook.""",
     assert "For an obviously direct conversational request" in (
         immediate_backend.sys_prompt
     )
-    assert "provide only a short receipt acknowledgement" in (
+    assert "has no tool access or tool authority" in immediate_backend.sys_prompt
+    assert "private control information for your behaviour only" in (
+        immediate_backend.sys_prompt
+    )
+    assert "never repeat or explain tool availability" in (
+        immediate_backend.sys_prompt
+    )
+    assert "Never call a tool or emit a tool call, tool-control envelope" in (
+        immediate_backend.sys_prompt
+    )
+    assert "requires checking, execution, or new evidence" in (
+        immediate_backend.sys_prompt
+    )
+    assert "return only a short receipt acknowledgement" in (
         immediate_backend.sys_prompt
     )
     assert "Do not execute, plan, assess feasibility, or discuss capability" in (
