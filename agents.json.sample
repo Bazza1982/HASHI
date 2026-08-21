@@ -4,15 +4,13 @@
     "workbench_port": 18802,
     "default_tools": {
       "allowed": ["*", "vision_inspect"],
-      "max_loops": 25,
       "vision_inspect": {
         "provider": "openrouter",
         "endpoint": "https://openrouter.ai/api/v1",
         "allowed_hosts": ["openrouter.ai"],
         "model": "anthropic/claude-sonnet-4.6",
         "api_key_secret": "openrouter-api_key",
-        "timeout_seconds": 90,
-        "max_output_tokens": 512
+        "idle_timeout_seconds": 90
       }
     },
     "her_providers": {
@@ -327,13 +325,11 @@
           "image_input": "tool",
           "tools": {
             "allowed": ["bash", "file_read", "file_write", "web_search", "web_fetch", "vision_inspect"],
-            "max_loops": 15,
             "vision_inspect": {
               "provider": "llama_cpp",
               "endpoint": "http://127.0.0.1:8081/v1",
               "model": "qwen3-vl-2b-instruct",
-              "timeout_seconds": 90,
-              "max_output_tokens": 512
+              "idle_timeout_seconds": 90
             }
           }
         }

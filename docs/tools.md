@@ -17,7 +17,8 @@ Five execution modes:
   - Legacy fixed emergency fields: `name`, `type: "fixed"`, `engine`, `workspace_dir`, `system_md`, `model`, `is_active`; startup also requires `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`
   - Optional: `display_name`, `emoji`, `typing_message`, `typing_parse_mode`, `effort`, `resume_policy`
   - `access_scope` — filesystem boundary: `"workspace"` (agent dir only), `"project"` (repo root), `"drive"` (full `C:\`)
-  - `process_timeout` — hard kill timeout in seconds (default 120)
+  - `idle_timeout_sec` — maximum seconds without meaningful backend activity;
+    this is not a total execution clock
   - `background_mode` — detach to background with escalating placeholders and an `agent.md`-authored transition status (`true`/`false`)
   - `background_detach_after` — seconds before detaching
   - `escalation_thresholds` — array of seconds for placeholder messages (e.g. `[30, 60, 90, 150]`)
@@ -266,8 +267,7 @@ python tools/browser_cli.py evaluate   --url https://site.com --script "() => do
   "engine": "openrouter-api",
   "tools": {
     "allowed": ["browser_screenshot", "browser_get_text", "browser_get_html",
-                "browser_click", "browser_fill", "browser_evaluate"],
-    "max_loops": 10
+                "browser_click", "browser_fill", "browser_evaluate"]
   }
 }
 ```
@@ -326,8 +326,7 @@ Tools listed in `agents.json` → `global.default_tools.allowed` are automatical
 {
   "global": {
     "default_tools": {
-      "allowed": ["telegram_send_file"],
-      "max_loops": 5
+      "allowed": ["telegram_send_file"]
     }
   }
 }

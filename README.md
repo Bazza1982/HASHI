@@ -908,8 +908,7 @@ API-backed agents can execute local actions via the tool system:
   "tools": {
     "allowed": ["bash", "file_read", "file_write", "file_list", "apply_patch",
                 "web_search", "web_fetch", "http_request",
-                "process_list", "process_kill", "telegram_send"],
-    "max_loops": 15
+                "process_list", "process_kill", "telegram_send"]
   }
 }
 ```

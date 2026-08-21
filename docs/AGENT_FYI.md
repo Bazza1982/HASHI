@@ -312,8 +312,7 @@ DISPLAY=:10 ~/projects/hashi2/tools/bin/usecomputer press "ctrl+s"
 **For OpenRouter API agents** — add the `desktop` tier to `agents.json`:
 ```json
 "tools": {
-  "tiers": ["core", "desktop"],
-  "max_loops": 15
+  "tiers": ["core", "desktop"]
 }
 ```
 
@@ -358,8 +357,7 @@ This tier is one of the backends that `/usecomputer` may choose when real Window
 **For OpenRouter API agents** — add the `windows_use` tier to `agents.json`:
 ```json
 "tools": {
-  "tiers": ["core", "windows_use"],
-  "max_loops": 15
+  "tiers": ["core", "windows_use"]
 }
 ```
 

@@ -21,7 +21,7 @@
       "model": "claude-sonnet-4-6",
       "is_active": true,
       "access_scope": "workspace",
-      "process_timeout": 120
+      "idle_timeout_sec": 120
     }
   ]
 }
