@@ -24,7 +24,7 @@ from tools.media_read import (
 _ATTACHMENT_REF_RE = re.compile(
     r"^attachment:(?P<message>[A-Za-z0-9._-]+):(?P<attachment>[A-Za-z0-9._-]+)$"
 )
-_DETAIL_TOKENS = {"brief": 256, "standard": 512, "detailed": 768}
+_DETAIL_LEVELS = {"brief", "standard", "detailed"}
 _MAX_QUESTION_CHARS = 2_000
 _MAX_ITEM_CHARS = 1_500
 _MAX_ITEMS = 20
@@ -134,9 +134,16 @@ class LlamaCppVisionProvider:
         self.options = dict(options or {})
         self.endpoint = _validated_endpoint(self.options)
         self.model = str(self.options.get("model") or "qwen3-vl-2b-instruct")
-        self.timeout = float(self.options.get("timeout_seconds", 90))
-        if not 1 <= self.timeout <= 600:
-            raise VisionInspectError("timeout_seconds must be between 1 and 600")
+        # HTTPX applies this as per-network-operation inactivity, not as a
+        # wall-clock cap on the whole vision task. The old key is read only as
+        # a configuration migration alias.
+        raw_idle_timeout = self.options.get(
+            "idle_timeout_seconds",
+            self.options.get("timeout_seconds", 90),
+        )
+        self.idle_timeout = float(raw_idle_timeout)
+        if self.idle_timeout <= 0:
+            raise VisionInspectError("idle_timeout_seconds must be positive")
         self._client = client
 
     async def inspect(
@@ -171,14 +178,10 @@ class LlamaCppVisionProvider:
                 }
             ],
             "temperature": 0.1,
-            "max_tokens": min(
-                2_048,
-                max(64, int(self.options.get("max_output_tokens", _DETAIL_TOKENS[detail]))),
-            ),
             "response_format": {"type": "json_object"},
         }
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=self.timeout)
+        client = self._client or httpx.AsyncClient(timeout=self.idle_timeout)
         try:
             response = await client.post(f"{self.endpoint}/chat/completions", json=payload)
             response.raise_for_status()
@@ -245,14 +248,10 @@ class OpenRouterVisionProvider(LlamaCppVisionProvider):
                 }
             ],
             "temperature": 0.1,
-            "max_tokens": min(
-                2_048,
-                max(64, int(self.options.get("max_output_tokens", _DETAIL_TOKENS[detail]))),
-            ),
             "response_format": {"type": "json_object"},
         }
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=self.timeout)
+        client = self._client or httpx.AsyncClient(timeout=self.idle_timeout)
         try:
             response = await client.post(
                 f"{self.endpoint}/chat/completions",
@@ -353,7 +352,7 @@ async def execute_vision_inspect(
             raise VisionInspectError("question is required")
         if len(question) > _MAX_QUESTION_CHARS:
             raise VisionInspectError("question exceeds 2000 characters")
-        if detail not in _DETAIL_TOKENS:
+        if detail not in _DETAIL_LEVELS:
             raise VisionInspectError("detail must be brief, standard, or detailed")
         path = _resolve_image(
             image_ref,

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,6 @@ from adapters.stream_events import (
 class GrokCLIAdapter(BaseBackend):
     MAX_PROMPT_ARG_CHARS = 24000
     DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
-    DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
     SUPPORTED_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
     DEFAULT_REASONING_EFFORT = "medium"
 
@@ -122,7 +122,7 @@ class GrokCLIAdapter(BaseBackend):
             await asyncio.gather(*self._active_read_tasks, return_exceptions=True)
         self._active_read_tasks = []
 
-    def _build_cmd(self, prompt: str) -> list[str]:
+    def _build_cmd(self, prompt: str, *, prompt_file: Path | None = None) -> list[str]:
         permission_mode = self._extra_str("grok_permission_mode", "bypassPermissions")
         cmd = [
             self.cmd_base,
@@ -158,11 +158,12 @@ class GrokCLIAdapter(BaseBackend):
                 cmd.extend([flag, option_value])
         if self._session_mode and self._session_id:
             cmd.extend(["--resume", self._session_id])
-        # Bind the prompt to the option in one argv entry. Grok CLI 0.2.117
-        # rejects a separate `-p` value when the prompt starts with `-` (for
-        # example HASHI's `--- CURRENT USER REQUEST` bridge marker), treating
-        # the prompt as another command-line option before inference starts.
-        cmd.append(f"--single={prompt}")
+        if prompt_file is not None:
+            cmd.extend(["--prompt-file", str(prompt_file)])
+        else:
+            # Bind the prompt to the option in one argv entry. Grok CLI 0.2.117
+            # rejects a separate `-p` value when the prompt starts with `-`.
+            cmd.append(f"--single={prompt}")
         return cmd
 
     def _extract_content_text(self, value: Any) -> str:
@@ -358,7 +359,32 @@ class GrokCLIAdapter(BaseBackend):
         on_stream_event: StreamCallback = None,
     ) -> BackendResponse:
         started = time.perf_counter()
-        cmd = self._build_cmd(prompt)
+        prompt_file: Path | None = None
+        if (
+            os.name == "nt"
+            or "\n" in prompt
+            or "\r" in prompt
+            or len(prompt) > self.MAX_PROMPT_ARG_CHARS
+        ):
+            # Grok exposes a native prompt-file transport. Use it for long or
+            # multiline requests so neither Windows cmd.exe nor POSIX argv
+            # limits can truncate the task. The file is closed before spawn,
+            # which is required on Windows, and removed in ``finally``.
+            Path(self.config.workspace_dir).mkdir(parents=True, exist_ok=True)
+            handle = tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=".grok_prompt_",
+                suffix=".txt",
+                dir=str(self.config.workspace_dir),
+                delete=False,
+            )
+            try:
+                handle.write(prompt)
+                prompt_file = Path(handle.name)
+            finally:
+                handle.close()
+        cmd = self._build_cmd(prompt, prompt_file=prompt_file)
         stdout_lines: list[str] = []
         stderr_chunks: list[bytes] = []
         deltas: list[str] = []
@@ -430,11 +456,7 @@ class GrokCLIAdapter(BaseBackend):
                     stderr_task,
                     return_exceptions=True,
                 )
-                error = (
-                    f"Grok CLI was idle for {self.IDLE_TIMEOUT_SEC}s with no output."
-                    if timeout_kind == "idle"
-                    else f"Grok CLI exceeded hard timeout of {self.HARD_TIMEOUT_SEC}s."
-                )
+                error = f"Grok CLI was idle for {self.IDLE_TIMEOUT_SEC}s with no output."
                 return BackendResponse(
                     text="",
                     error=error,
@@ -533,6 +555,8 @@ class GrokCLIAdapter(BaseBackend):
         finally:
             self.current_proc = None
             self._active_read_tasks = []
+            if prompt_file is not None:
+                prompt_file.unlink(missing_ok=True)
 
     def _extract_last_text_from_stdout(self, stdout_lines: list[str]) -> str:
         for line in reversed(stdout_lines):

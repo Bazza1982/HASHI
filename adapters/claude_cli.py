@@ -19,7 +19,6 @@ from adapters.stream_events import (
 class ClaudeCLIAdapter(BaseBackend):
     MAX_PROMPT_ARG_CHARS = 24000
     DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
-    DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -392,20 +391,16 @@ class ClaudeCLIAdapter(BaseBackend):
         stdout_task = asyncio.create_task(_read_stdout())
         self._active_read_tasks = [stdout_task, stderr_task]
 
-        hard_deadline = started + self.HARD_TIMEOUT_SEC
         while proc.returncode is None:
-            remaining_hard = hard_deadline - time.perf_counter()
-            if remaining_hard <= 0:
-                timeout_kind = "hard"
+            idle_for = self._last_activity_age()
+            if idle_for >= self.IDLE_TIMEOUT_SEC:
+                timeout_kind = "idle"
                 break
-            wait_slice = min(5.0, remaining_hard)
+            wait_slice = min(5.0, max(0.1, self.IDLE_TIMEOUT_SEC - idle_for))
             try:
                 await asyncio.wait_for(proc.wait(), timeout=wait_slice)
             except asyncio.TimeoutError:
-                idle_for = time.time() - (self.last_activity_at or time.time())
-                if idle_for >= self.IDLE_TIMEOUT_SEC:
-                    timeout_kind = "idle"
-                    break
+                continue
 
         if timeout_kind is not None:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -428,11 +423,7 @@ class ClaudeCLIAdapter(BaseBackend):
             return BackendResponse(
                 text="",
                 duration_ms=duration_ms,
-                error=(
-                    f"Claude CLI was idle for {self.IDLE_TIMEOUT_SEC}s with no output."
-                    if timeout_kind == "idle"
-                    else f"Claude CLI exceeded hard timeout of {self.HARD_TIMEOUT_SEC}s."
-                ),
+                error=f"Claude CLI was idle for {self.IDLE_TIMEOUT_SEC}s with no output.",
                 is_success=False,
             )
 
@@ -499,34 +490,7 @@ class ClaudeCLIAdapter(BaseBackend):
         silent: bool,
     ) -> BackendResponse:
         """Original blocking communicate() path — used when no stream callback."""
-        try:
-            stdout_data, stderr_data = await asyncio.wait_for(
-                proc.communicate(stdin_data),
-                timeout=self.HARD_TIMEOUT_SEC,
-            )
-        except asyncio.TimeoutError:
-            duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            pid = getattr(proc, "pid", "unknown")
-            proc_snapshot = await self._describe_process(pid) if pid != "unknown" else "<unknown pid>"
-            diagnostic = self._timeout_diagnostic("hard", started_monotonic=started)
-            self.logger.error(
-                f"Claude request {request_id} timed out "
-                f"(pid={pid}, duration_ms={duration_ms}, stateless=True, "
-                f"retry={is_retry}, stdin={stdin_data is not None}, "
-                f"cmd={cmd}, {diagnostic}, process_snapshot={self._preview_text(proc_snapshot, 700)})"
-            )
-            await self.force_kill_process_tree(
-                proc,
-                logger=self.logger,
-                reason=f"timeout:{request_id}",
-            )
-            self.current_proc = None
-            return BackendResponse(
-                text="",
-                duration_ms=duration_ms,
-                error="Claude CLI timed out while generating a response.",
-                is_success=False,
-            )
+        stdout_data, stderr_data = await proc.communicate(stdin_data)
 
         returncode = proc.returncode
         self.current_proc = None
@@ -587,30 +551,7 @@ class ClaudeCLIAdapter(BaseBackend):
         )
         self.current_proc = proc
         self._touch_activity()
-        try:
-            stdout_data, stderr_data = await asyncio.wait_for(
-                proc.communicate(stdin_data),
-                timeout=self.HARD_TIMEOUT_SEC,
-            )
-        except asyncio.TimeoutError:
-            duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            diagnostic = self._timeout_diagnostic("hard", started_monotonic=started)
-            self.logger.error(
-                f"Claude fallback request {request_id} hard-timed out "
-                f"(duration_ms={duration_ms}, {diagnostic})"
-            )
-            await self.force_kill_process_tree(
-                proc,
-                logger=self.logger,
-                reason=f"fallback-timeout:{request_id}",
-            )
-            self.current_proc = None
-            return BackendResponse(
-                text="",
-                duration_ms=duration_ms,
-                error="Claude CLI timed out while retrying fallback invocation.",
-                is_success=False,
-            )
+        stdout_data, stderr_data = await proc.communicate(stdin_data)
         returncode = proc.returncode
         self.current_proc = None
         duration_ms = round((time.perf_counter() - started) * 1000, 2)

@@ -57,7 +57,9 @@ def test_gateway_context_is_owner_only_and_reconstructs_registry(tmp_path):
 
     assert (path.stat().st_mode & 0o777) == 0o600
     assert context.agent == "momo"
-    assert context.max_calls == 8
+    # The retired HER v1 gateway owns its isolated historical circuit breaker;
+    # ToolRegistry.max_loops is no longer a source of active execution limits.
+    assert context.max_calls == 100
     loaded = load_gateway_context(path)
     assert loaded.build_registry().is_allowed("browser_click")
     assert "global_config" not in loaded.audit

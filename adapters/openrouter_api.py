@@ -83,12 +83,6 @@ def _file_resource(arguments: dict) -> str:
 
 
 class OpenRouterAdapter(BaseBackend):
-    MAX_TOOL_LOOPS = 25
-    TOOL_LOOP_LIMIT_FINAL_PROMPT = (
-        "Tool loop limit reached. Use the tool results already shown above and "
-        "write the best final answer now. Do not call any more tools."
-    )
-
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
             supports_sessions=False,
@@ -111,18 +105,6 @@ class OpenRouterAdapter(BaseBackend):
 
     def set_reasoning_enabled(self, enabled: bool) -> None:
         self.reasoning_enabled = bool(enabled)
-
-    def _tool_loop_limit(self) -> int | None:
-        """Resolve the registry ceiling; ``None`` means no round limit."""
-
-        if self.tool_registry is None:
-            return 1
-        configured = getattr(self.tool_registry, "max_loops", 1)
-        return None if configured is None else int(configured)
-
-    @staticmethod
-    def _tool_loop_indices(max_loops: int | None):
-        return count() if max_loops is None else range(max_loops)
 
     def _ensure_client(self):
         if self.client is None or getattr(self.client, "is_closed", False):
@@ -328,37 +310,6 @@ class OpenRouterAdapter(BaseBackend):
             return f"Error: tool call requires approval by enterprise policy: {tool_name}"
         return f"Error: tool call blocked by enterprise policy: {tool_name}"
 
-    async def _call_final_after_tool_loop_limit(
-        self,
-        messages: list[dict],
-        headers: dict,
-        use_streaming: bool,
-        on_stream_event: StreamCallback,
-        request_id: str,
-        max_loops: int,
-    ) -> _APIResult:
-        self.logger.warning(
-            f"Tool loop limit ({max_loops}) reached for request {request_id}; "
-            "requesting final no-tools answer"
-        )
-        if on_stream_event:
-            await self._emit(
-                on_stream_event, KIND_PROGRESS,
-                f"⚠️ Tool loop limit ({max_loops}) reached; asking for final answer"
-            )
-        final_messages = [
-            *messages,
-            {"role": "user", "content": self.TOOL_LOOP_LIMIT_FINAL_PROMPT},
-        ]
-        payload = self._build_payload(
-            final_messages,
-            use_streaming=use_streaming,
-            tool_tiers=[],
-        )
-        if use_streaming:
-            return await self._stream_api_once(payload, headers, on_stream_event)
-        return await self._call_api_once(payload, headers, on_stream_event)
-
     # ------------------------------------------------------------------
     # Non-streaming single API call
     # ------------------------------------------------------------------
@@ -556,8 +507,6 @@ class OpenRouterAdapter(BaseBackend):
         self._ensure_client()
 
         use_streaming = on_stream_event is not None
-        max_loops = self._tool_loop_limit()
-
         messages = [
             {"role": "system", "content": self.sys_prompt},
             {"role": "user", "content": prompt},
@@ -581,7 +530,7 @@ class OpenRouterAdapter(BaseBackend):
         try:
             self._touch_activity()
 
-            for loop_idx in self._tool_loop_indices(max_loops):
+            for loop_idx in count():
                 payload = self._build_payload(messages, use_streaming=use_streaming)
 
                 if use_streaming:
@@ -603,13 +552,8 @@ class OpenRouterAdapter(BaseBackend):
 
                 tool_loop_count += 1
                 total_tool_calls += len(result.tool_calls)
-                loop_position = (
-                    str(loop_idx + 1)
-                    if max_loops is None
-                    else f"{loop_idx + 1}/{max_loops}"
-                )
                 self.logger.debug(
-                    f"Tool loop {loop_position}: {len(result.tool_calls)} tool call(s)"
+                    f"Tool loop {loop_idx + 1}: {len(result.tool_calls)} tool call(s)"
                 )
 
                 # Append assistant message (with tool_calls) to conversation
@@ -621,19 +565,6 @@ class OpenRouterAdapter(BaseBackend):
 
                 # Execute tools, append results
                 await self._run_tool_calls(result.tool_calls, messages, on_stream_event)
-
-                # If this was the last allowed loop, break
-                if max_loops is not None and loop_idx == max_loops - 1:
-                    result = await self._call_final_after_tool_loop_limit(
-                        messages, headers, use_streaming, on_stream_event,
-                        request_id, max_loops
-                    )
-                    total_prompt += result.prompt_tokens
-                    total_completion += result.completion_tokens
-                    total_thinking += result.thinking_tokens
-                    last_text = result.text
-                    last_structured_data = result.structured_data
-                    break
 
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             from adapters.base import TokenUsage

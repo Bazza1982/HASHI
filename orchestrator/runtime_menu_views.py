@@ -1016,31 +1016,27 @@ def timeout_menu_text(
     agent_name: str,
     backend_name: str,
     idle_minutes: int,
-    hard_minutes: int,
     default_idle_minutes: int,
-    default_hard_minutes: int,
     idle_source: str,
-    hard_source: str,
 ) -> str:
     return setting_card(
         "⏱️",
         "Backend timeout",
-        current=f"idle <code>{idle_minutes} min</code> · hard <code>{hard_minutes} min</code>",
+        current=f"idle <code>{idle_minutes} min</code>",
         facts=[
-            f"<b>Defaults</b> · idle <code>{default_idle_minutes} min</code> · hard <code>{default_hard_minutes} min</code>",
+            f"<b>Default idle window</b> · <code>{default_idle_minutes} min</code>",
             f"<b>Agent</b> · <code>{html.escape(agent_name)}</code>",
             f"<b>Backend</b> · <code>{html.escape(backend_name)}</code>",
-            f"<b>Sources</b> · idle <code>{html.escape(idle_source)}</code> · hard <code>{html.escape(hard_source)}</code>",
+            f"<b>Source</b> · <code>{html.escape(idle_source)}</code>",
             "<b>Scope</b> · this agent and backend",
         ],
         consequence=(
-            "User overrides survive steering, backend recreation, hot reload and restart until /timeout reset. "
-            "Dual-brain memory passes are unaffected."
+            "This is a no-progress detector, not a total execution clock. Any "
+            "meaningful model or tool activity refreshes it. The override survives "
+            "steering, backend recreation, hot reload and restart until /timeout reset."
         ),
         action=(
             _command("/timeout 60", "set idle to 60 minutes")
-            + "\n"
-            + _command("/timeout 60 1440", "set idle and hard limits")
             + "\n"
             + _command("/timeout reset", "clear the user override")
         ),

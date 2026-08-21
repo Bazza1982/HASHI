@@ -14,7 +14,6 @@ from adapters.codex_cli import CodexCLIAdapter
 from adapters.gemini_cli import GeminiCLIAdapter
 from adapters.grok_cli import GrokCLIAdapter
 from adapters.timeout_policy import (
-    HARD_TIMEOUT_KEY,
     IDLE_TIMEOUT_KEY,
     apply_timeout_layers,
     refresh_timeout_extra,
@@ -30,7 +29,6 @@ from orchestrator.workspace_state import WorkspaceStateStore
 
 class _Backend(BaseBackend):
     DEFAULT_IDLE_TIMEOUT_SEC = 60
-    DEFAULT_HARD_TIMEOUT_SEC = 600
 
     def _define_capabilities(self):
         return BackendCapabilities(False, False, False, False, True)
@@ -65,27 +63,36 @@ def _backend(tmp_path, *, extra=None):
     return _Backend(config, SimpleNamespace())
 
 
-def test_long_running_cli_defaults_are_one_hour_and_twenty_four_hours():
+def test_active_cli_defaults_use_one_hour_idle_liveness_only():
     for adapter_class in (
         CodexCLIAdapter,
         ClaudeCLIAdapter,
         GeminiCLIAdapter,
         GrokCLIAdapter,
-        ClawCLIAdapter,
     ):
         assert adapter_class.DEFAULT_IDLE_TIMEOUT_SEC == 60 * 60
-        assert adapter_class.DEFAULT_HARD_TIMEOUT_SEC == 24 * 60 * 60
+        assert adapter_class.USES_LEGACY_HARD_TIMEOUT is False
+
+    # The retired class may still be imported for old integrations, but the
+    # backend registry aliases ``her``/``claw-cli`` to HER v2 before selection.
+    assert ClawCLIAdapter.USES_LEGACY_HARD_TIMEOUT is True
 
 
-def test_backend_rejects_hard_timeout_below_idle_timeout(tmp_path):
-    with pytest.raises(ValueError, match="greater than or equal"):
-        _backend(
-            tmp_path,
-            extra={
-                IDLE_TIMEOUT_KEY: 120,
-                HARD_TIMEOUT_KEY: 60,
-            },
-        )
+@pytest.mark.asyncio
+async def test_active_backend_does_not_apply_legacy_hard_timeout(tmp_path):
+    backend = _backend(
+        tmp_path,
+        extra={
+            IDLE_TIMEOUT_KEY: 60,
+            "hard_timeout_sec": 0,
+        },
+    )
+    task = asyncio.create_task(asyncio.sleep(0.01))
+
+    assert await backend._wait_for_task_with_timeouts(
+        task,
+        started_monotonic=time.perf_counter(),
+    ) is None
 
 
 def test_timeout_state_preserves_other_workspace_fields_and_resets_one_backend(tmp_path):
@@ -101,19 +108,14 @@ def test_timeout_state_preserves_other_workspace_fields_and_resets_one_backend(t
         store,
         "codex-cli",
         idle_seconds=3600,
-        hard_seconds=360000,
     )
     set_timeout_override(
         store,
         "claude-cli",
         idle_seconds=7200,
-        hard_seconds=172800,
     )
 
-    assert saved == {
-        IDLE_TIMEOUT_KEY: 3600,
-        HARD_TIMEOUT_KEY: 360000,
-    }
+    assert saved == {IDLE_TIMEOUT_KEY: 3600}
     assert read_timeout_override(store, "codex-cli") == saved
     clear_timeout_override(store, "codex-cli")
 
@@ -126,13 +128,14 @@ def test_timeout_state_preserves_other_workspace_fields_and_resets_one_backend(t
 
 def test_refresh_timeout_extra_restores_configured_values_after_reset(tmp_path):
     extra = apply_timeout_layers(
-        {IDLE_TIMEOUT_KEY: 600, HARD_TIMEOUT_KEY: 7200},
+        {IDLE_TIMEOUT_KEY: 600, "hard_timeout_sec": 7200},
         engine="codex-cli",
-        agent_extra={IDLE_TIMEOUT_KEY: 600, HARD_TIMEOUT_KEY: 7200},
-        persisted_override={IDLE_TIMEOUT_KEY: 3600, HARD_TIMEOUT_KEY: 360000},
+        agent_extra={IDLE_TIMEOUT_KEY: 600, "hard_timeout_sec": 7200},
+        persisted_override={IDLE_TIMEOUT_KEY: 3600, "hard_timeout_sec": 360000},
     )
     backend = _backend(tmp_path, extra=extra)
-    assert timeout_policy_snapshot(backend).hard_seconds == 360000
+    assert timeout_policy_snapshot(backend).idle_seconds == 3600
+    assert "hard_timeout_sec" not in backend.config.extra
 
     refresh_timeout_extra(
         backend.config.extra,
@@ -142,7 +145,7 @@ def test_refresh_timeout_extra_restores_configured_values_after_reset(tmp_path):
 
     policy = timeout_policy_snapshot(backend)
     assert policy.idle_seconds == 600
-    assert policy.hard_seconds == 7200
+    assert "hard_timeout_sec" not in backend.config.extra
 
 
 @pytest.mark.asyncio
@@ -150,7 +153,7 @@ async def test_timeout_monitor_reports_kind_values_sources_and_activity_age(tmp_
     extra = apply_timeout_layers(
         {},
         engine="codex-cli",
-        persisted_override={IDLE_TIMEOUT_KEY: 1, HARD_TIMEOUT_KEY: 30},
+        persisted_override={IDLE_TIMEOUT_KEY: 1, "hard_timeout_sec": 30},
     )
     backend = _backend(tmp_path, extra=extra)
     backend.last_activity_at = time.time() - 2
@@ -170,8 +173,7 @@ async def test_timeout_monitor_reports_kind_values_sources_and_activity_age(tmp_
     assert timeout_kind == "idle"
     assert "kind=idle" in diagnostic
     assert "idle_timeout_s=1" in diagnostic
-    assert "hard_timeout_s=30" in diagnostic
     assert "idle_source=user_override" in diagnostic
-    assert "hard_source=user_override" in diagnostic
+    assert "hard_timeout" not in diagnostic
     assert "last_output_age_s=" in diagnostic
     assert "total_runtime_s=" in diagnostic

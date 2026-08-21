@@ -14,6 +14,11 @@ from tools.schemas import ALL_TOOL_NAMES
 CONTEXT_SCHEMA_VERSION = 4
 _COMPATIBLE_CONTEXT_SCHEMA_VERSIONS = frozenset({3, CONTEXT_SCHEMA_VERSION})
 
+# LEGACY HER V1 ONLY. The subprocess Tool Gateway is not part of HER v2 or any
+# direct API backend. Its circuit breakers remain solely to contain a retired
+# compatibility protocol and must never be imported as active-runtime policy.
+LEGACY_HER_GATEWAY_MAX_CALLS = 100
+
 _TOOL_SECRET_KEYS = {
     "web_search": {"brave_api_key"},
     "xai_imagine": {"xai_api_key", "XAI_API_KEY", "xai_oauth_refresh_token"},
@@ -147,7 +152,11 @@ class GatewayContext:
             allowed_tools=sorted(allowed_tools),
             workbench_api_base_url=effective_workbench_url,
             scheduler_api_base_url=effective_workbench_url,
-            max_calls=max(1, int(registry.max_loops) * 4),
+            max_calls=(
+                max(1, int(registry.max_loops) * 4)
+                if registry.max_loops is not None
+                else LEGACY_HER_GATEWAY_MAX_CALLS
+            ),
             max_identical_calls=max(
                 1,
                 int(
@@ -187,6 +196,8 @@ class GatewayContext:
             workspace_dir=Path(self.workspace_dir),
             secrets=self.secrets,
             tool_options=self.tool_options,
+            # Kept inside the legacy HER gateway subprocess only. Direct API
+            # adapters and HER v2 always receive ``max_loops=None``.
             max_loops=max(1, self.max_calls // 4),
             agents_config=self.agents_config,
             audit_context=audit,

@@ -177,7 +177,7 @@ class ToolGateway:
         self.call_count += 1
         if self.call_count > self.context.max_calls:
             return self._result(
-                f"Error: HASHI tool gateway stopped after {self.context.max_calls} calls; report partial progress.",
+                f"Error: legacy HER v1 tool gateway stopped after {self.context.max_calls} calls; report partial progress.",
                 True,
             )
 
@@ -201,13 +201,13 @@ class ToolGateway:
         ).hexdigest()
         if self.fingerprints[fingerprint] >= self.context.max_identical_calls:
             return self._result(
-                f"Error: repeated identical call to '{name}' stopped after "
+                f"Error: legacy HER v1 gateway repeated identical call to '{name}' stopped after "
                 f"{self.context.max_identical_calls} attempts; inspect state and report partial progress.",
                 True,
             )
         if self.consecutive_errors >= self.context.max_consecutive_errors:
             return self._result(
-                f"Error: tool circuit breaker opened after {self.context.max_consecutive_errors} consecutive failures; "
+                f"Error: legacy HER v1 tool circuit breaker opened after {self.context.max_consecutive_errors} consecutive failures; "
                 "stop retrying and report the failures.",
                 True,
             )

@@ -219,26 +219,24 @@ def test_timeout_priority_is_user_then_backend_then_agent(tmp_path):
     adapter_cfg = manager._build_adapter_config("codex-cli", backend_cfg)
 
     assert adapter_cfg.extra[IDLE_TIMEOUT_KEY] == 1500
-    assert adapter_cfg.extra[HARD_TIMEOUT_KEY] == 9000
+    assert HARD_TIMEOUT_KEY not in adapter_cfg.extra
     assert adapter_cfg.extra[TIMEOUT_POLICY_META_KEY]["sources"] == {
         IDLE_TIMEOUT_KEY: USER_OVERRIDE_SOURCE,
-        HARD_TIMEOUT_KEY: USER_OVERRIDE_SOURCE,
     }
 
     manager.state_store.replace({})
     adapter_cfg = manager._build_adapter_config("codex-cli", backend_cfg)
     assert adapter_cfg.extra[IDLE_TIMEOUT_KEY] == 1200
-    assert adapter_cfg.extra[HARD_TIMEOUT_KEY] == 8000
+    assert HARD_TIMEOUT_KEY not in adapter_cfg.extra
     assert adapter_cfg.extra[TIMEOUT_POLICY_META_KEY]["sources"] == {
         IDLE_TIMEOUT_KEY: BACKEND_CONFIG_SOURCE,
-        HARD_TIMEOUT_KEY: BACKEND_CONFIG_SOURCE,
     }
 
     backend_cfg.pop("process_timeout")
     backend_cfg.pop("hard_timeout_sec")
     adapter_cfg = manager._build_adapter_config("codex-cli", backend_cfg)
     assert adapter_cfg.extra[IDLE_TIMEOUT_KEY] == 600
-    assert adapter_cfg.extra[HARD_TIMEOUT_KEY] == 7200
+    assert HARD_TIMEOUT_KEY not in adapter_cfg.extra
 
 
 @pytest.mark.asyncio
@@ -247,7 +245,6 @@ async def test_timeout_override_survives_recreation_and_is_scoped_per_backend(tm
 
     class FakeBackend(BaseBackend):
         DEFAULT_IDLE_TIMEOUT_SEC = 3600
-        DEFAULT_HARD_TIMEOUT_SEC = 86400
 
         def _define_capabilities(self):
             return BackendCapabilities(False, False, False, False, True)
@@ -278,18 +275,12 @@ async def test_timeout_override_survives_recreation_and_is_scoped_per_backend(tm
 
     saved = manager.set_active_timeout_override(
         idle_seconds=3600,
-        hard_seconds=360000,
     )
 
     assert saved.idle_seconds == 3600
-    assert saved.hard_seconds == 360000
     assert saved.idle_source == USER_OVERRIDE_SOURCE
-    assert saved.hard_source == USER_OVERRIDE_SOURCE
     state = _read_state(workspace)
-    assert state["backend_timeouts"]["codex-cli"] == {
-        IDLE_TIMEOUT_KEY: 3600,
-        HARD_TIMEOUT_KEY: 360000,
-    }
+    assert state["backend_timeouts"]["codex-cli"] == {IDLE_TIMEOUT_KEY: 3600}
 
     reloaded = _make_manager(workspace)
     assert await reloaded.initialize_active_backend() is True
@@ -297,18 +288,17 @@ async def test_timeout_override_survives_recreation_and_is_scoped_per_backend(tm
 
     assert await reloaded.switch_backend("claude-cli") is True
     claude_policy = reloaded.get_active_timeout_policy()
-    assert claude_policy.hard_seconds == 86400
-    reloaded.set_active_timeout_override(idle_seconds=7200, hard_seconds=172800)
+    assert claude_policy.idle_seconds == 3600
+    reloaded.set_active_timeout_override(idle_seconds=7200)
 
     assert await reloaded.switch_backend("codex-cli") is True
-    assert reloaded.get_active_timeout_policy().hard_seconds == 360000
+    assert reloaded.get_active_timeout_policy().idle_seconds == 3600
 
     reset = reloaded.clear_active_timeout_override()
     assert reset.idle_seconds == 3600
-    assert reset.hard_seconds == 86400
     state = _read_state(workspace)
     assert "codex-cli" not in state["backend_timeouts"]
-    assert state["backend_timeouts"]["claude-cli"][HARD_TIMEOUT_KEY] == 172800
+    assert state["backend_timeouts"]["claude-cli"] == {IDLE_TIMEOUT_KEY: 7200}
 
 
 def test_provider_prefixed_model_is_normalized_for_adapter_resolution(tmp_path):

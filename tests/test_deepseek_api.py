@@ -165,25 +165,31 @@ async def test_openrouter_tool_execution_blocks_file_write_approval_required(tmp
 
 
 @pytest.mark.asyncio
-async def test_deepseek_tool_loop_limit_requests_final_no_tools_answer(monkeypatch, tmp_path):
+async def test_deepseek_ignores_retired_tool_loop_ceiling(monkeypatch, tmp_path):
     adapter = _adapter(tmp_path)
     adapter.tool_registry.max_loops = 1
     seen_payloads = []
-    tool_calls = [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "file_list", "arguments": '{"path": "/tmp"}'},
-        }
-    ]
+    def tool_calls(index):
+        return [
+            {
+                "id": f"call_{index}",
+                "type": "function",
+                "function": {
+                    "name": "file_list",
+                    "arguments": '{"path": "/tmp"}',
+                },
+            }
+        ]
 
     async def fake_call(payload, headers, on_stream_event):
         seen_payloads.append(payload)
-        if len(seen_payloads) == 1:
-            assert "tools" in payload
-            return _APIResult(text="", tool_calls=tool_calls, finish_reason="tool_calls")
-        assert "tools" not in payload
-        assert payload["messages"][-1]["content"].startswith("Tool loop limit reached.")
+        assert "tools" in payload
+        if len(seen_payloads) <= 2:
+            return _APIResult(
+                text="",
+                tool_calls=tool_calls(len(seen_payloads)),
+                finish_reason="tool_calls",
+            )
         return _APIResult(text="final answer", tool_calls=None, finish_reason="stop")
 
     monkeypatch.setattr(adapter, "_call_api_once", fake_call)
@@ -192,9 +198,9 @@ async def test_deepseek_tool_loop_limit_requests_final_no_tools_answer(monkeypat
 
     assert response.is_success is True
     assert response.text == "final answer"
-    assert response.tool_call_count == 1
-    assert response.tool_loop_count == 1
-    assert len(seen_payloads) == 2
+    assert response.tool_call_count == 2
+    assert response.tool_loop_count == 2
+    assert len(seen_payloads) == 3
 
 
 @pytest.mark.asyncio

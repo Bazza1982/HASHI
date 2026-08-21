@@ -170,6 +170,17 @@ def test_llama_cpp_provider_blocks_unlisted_remote_host():
         LlamaCppVisionProvider({"endpoint": "http://example.com:8081/v1"})
 
 
+def test_vision_provider_uses_unbounded_configurable_idle_timeout():
+    provider = LlamaCppVisionProvider(
+        {
+            "endpoint": "http://127.0.0.1:8081/v1",
+            "idle_timeout_seconds": 3_600,
+        }
+    )
+
+    assert provider.idle_timeout == 3_600
+
+
 @pytest.mark.asyncio
 async def test_openrouter_provider_uses_named_secret_and_multimodal_payload():
     captured = {}

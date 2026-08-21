@@ -10,6 +10,7 @@ Differences from OpenRouter:
 """
 
 import json
+from itertools import count
 
 from adapters.openrouter_api import (
     OpenRouterAdapter,
@@ -195,8 +196,6 @@ class DeepSeekAdapter(OpenRouterAdapter):
         self._ensure_client()
 
         use_streaming = on_stream_event is not None
-        max_loops = self._tool_loop_limit()
-
         messages = [
             {"role": "system", "content": self.sys_prompt},
             {"role": "user", "content": prompt},
@@ -213,7 +212,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
 
         try:
             self._touch_activity()
-            for loop_idx in self._tool_loop_indices(max_loops):
+            for loop_idx in count():
                 payload = self._build_payload(messages, use_streaming=use_streaming)
                 if use_streaming:
                     result = await self._stream_api_once(payload, headers, on_stream_event)
@@ -240,18 +239,6 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 assistant_msg["tool_calls"] = result.tool_calls
                 messages.append(assistant_msg)
                 await self._run_tool_calls(result.tool_calls, messages, on_stream_event)
-
-                if max_loops is not None and loop_idx == max_loops - 1:
-                    result = await self._call_final_after_tool_loop_limit(
-                        messages, headers, use_streaming, on_stream_event,
-                        request_id, max_loops
-                    )
-                    total_prompt += result.prompt_tokens
-                    total_completion += result.completion_tokens
-                    total_thinking += result.thinking_tokens
-                    last_text = result.text
-                    last_structured_data = result.structured_data
-                    break
 
             from adapters.base import BackendResponse, TokenUsage
             duration_ms = round((time.perf_counter() - started) * 1000, 2)

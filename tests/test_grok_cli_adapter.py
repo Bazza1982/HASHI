@@ -36,6 +36,7 @@ def _write_fake_grok(tmp_path: Path, *, fail_version: bool = False) -> Path:
     script.write_text(
         f"""#!{sys.executable}
 import json
+from pathlib import Path
 import sys
 import time
 
@@ -43,6 +44,8 @@ import time
 
 prompt_arg = next((arg for arg in sys.argv if arg.startswith('--single=')), '')
 prompt = prompt_arg.split('=', 1)[1] if prompt_arg else ''
+if '--prompt-file' in sys.argv:
+    prompt = Path(sys.argv[sys.argv.index('--prompt-file') + 1]).read_text(encoding='utf-8')
 if 'stall' in prompt:
     time.sleep(20)
     raise SystemExit(0)
@@ -125,7 +128,7 @@ async def test_grok_enforces_idle_timeout_and_logs_effective_policy(tmp_path, ca
     assert "idle for 1s" in response.error
     assert "kind=idle" in caplog.text
     assert "idle_timeout_s=1" in caplog.text
-    assert "hard_timeout_s=30" in caplog.text
+    assert "hard_timeout" not in caplog.text
     assert "last_output_age_s=" in caplog.text
     assert "total_runtime_s=" in caplog.text
 
@@ -242,6 +245,19 @@ async def test_grok_streaming_json_reconstructs_final_answer_and_emits_deltas(tm
     assert [event.summary for event in text_events] == ["Hel", "lo"]
     thinking_events = [event for event in events if event.kind == KIND_THINKING]
     assert [event.summary for event in thinking_events] == ["thinking"]
+
+
+@pytest.mark.asyncio
+async def test_grok_long_prompt_uses_full_cross_platform_file_transport(tmp_path):
+    fake_grok = _write_fake_grok(tmp_path)
+    adapter = GrokCLIAdapter(_agent_config(tmp_path), SimpleNamespace(grok_cmd=str(fake_grok)))
+    prompt = ("x" * (adapter.MAX_PROMPT_ARG_CHARS + 1)) + " tool-events"
+
+    response = await adapter.generate_response(prompt, "req-grok-long")
+
+    assert response.is_success is True
+    assert response.text == "done"
+    assert not list(tmp_path.glob(".grok_prompt_*.txt"))
 
 
 @pytest.mark.asyncio

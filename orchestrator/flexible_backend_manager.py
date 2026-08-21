@@ -11,7 +11,6 @@ from adapters.timeout_policy import (
     TimeoutPolicySnapshot,
     apply_timeout_layers,
     timeout_policy_snapshot,
-    validate_timeout_pair,
 )
 from orchestrator.backend_timeout import (
     clear_timeout_override,
@@ -854,18 +853,12 @@ class FlexibleBackendManager:
         self,
         *,
         idle_seconds: int,
-        hard_seconds: int | None = None,
     ) -> TimeoutPolicySnapshot:
         policy = self.get_active_timeout_policy()
-        validate_timeout_pair(
-            idle_seconds,
-            hard_seconds if hard_seconds is not None else policy.hard_seconds,
-        )
         set_timeout_override(
             self.state_store,
             policy.engine,
             idle_seconds=idle_seconds,
-            hard_seconds=hard_seconds,
         )
         self._save_state()
         self._refresh_current_backend_timeout_config(policy.engine)
@@ -1145,7 +1138,8 @@ class FlexibleBackendManager:
         """Merge global default_tools with per-backend tools config.
 
         Priority: per-backend 'allowed' list extends (not replaces) global defaults.
-        Per-backend max_loops and tool_options override global ones.
+        Per-backend tool options override global ones. Historical ``max_loops``
+        values are discarded because active execution has no tool-round cap.
         """
         global_raw = getattr(self, '_agents_json_global', None) or {}
         global_tools = global_raw.get("default_tools", {})
@@ -1185,6 +1179,12 @@ class FlexibleBackendManager:
         # Backend-specific settings override global
         merged = dict(global_tools)
         merged.update(backend_tools)
+        if "max_loops" in merged:
+            self.logger.warning(
+                "Ignoring removed tools.max_loops execution ceiling for %s",
+                backend_cfg_raw.get("engine") or "backend",
+            )
+            merged.pop("max_loops", None)
         merged["allowed"] = merged_allowed
         return merged
 
@@ -1200,11 +1200,9 @@ class FlexibleBackendManager:
             workzone_dir = (adapter_cfg.extra or {}).get("workzone_dir")
             workspace_dir = Path(workzone_dir).expanduser().resolve() if workzone_dir else adapter_cfg.workspace_dir
             access_root = access_root_for_workzone(adapter_cfg.resolve_access_root(), workspace_dir if workzone_dir else None)
-            max_loops = int(tools_cfg.get("max_loops", 25))
-
             # Per-tool options (e.g. bash.timeout_max, file_write.max_file_size_kb)
             tool_options = {k: v for k, v in tools_cfg.items()
-                            if k not in ("allowed", "max_loops")}
+                            if k != "allowed"}
 
             # Inject agent token and authorized_id for telegram_send_file tool
             enriched_secrets = dict(self.secrets)
@@ -1220,7 +1218,7 @@ class FlexibleBackendManager:
                 workspace_dir=workspace_dir,
                 secrets=enriched_secrets,
                 tool_options=tool_options,
-                max_loops=max_loops,
+                max_loops=None,
                 audit_context={
                     "agent_name": getattr(adapter_cfg, "name", workspace_dir.name),
                     "workspace_dir": str(workspace_dir),
@@ -1232,7 +1230,8 @@ class FlexibleBackendManager:
             )
             self.current_backend.tool_registry = registry
             self.logger.info(
-                f"ToolRegistry attached: allowed={allowed}, max_loops={max_loops}"
+                "ToolRegistry attached with unbounded tool rounds: allowed=%s",
+                allowed,
             )
         except Exception as e:
             self.logger.error(f"Failed to attach ToolRegistry: {e}")

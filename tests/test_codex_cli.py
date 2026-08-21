@@ -250,6 +250,14 @@ def test_codex_add_dir_uses_workzone_when_workzone_on(tmp_path):
     assert cmd[cmd.index("--add-dir") + 1] == str(workzone.resolve())
 
 
+def test_codex_long_prompt_is_preserved_and_switched_to_stdin(tmp_path):
+    adapter = _build_adapter(tmp_path)
+    prompt = "z" * (adapter.LONG_PROMPT_STDIN_THRESHOLD + 10_000)
+
+    assert adapter._should_use_stdin_transport(prompt) is True
+    assert adapter._sanitize_for_codex(prompt) == prompt
+
+
 def test_codex_resume_is_used_only_in_explicit_session_mode(tmp_path):
     adapter = _build_adapter(tmp_path)
     adapter._session_id = "thread-existing"

@@ -5,6 +5,7 @@ from typing import Any, Mapping, MutableMapping
 
 
 IDLE_TIMEOUT_KEY = "idle_timeout_sec"
+# LEGACY HER V1 ONLY. Active backends strip and ignore this field.
 HARD_TIMEOUT_KEY = "hard_timeout_sec"
 LEGACY_TIMEOUT_KEY = "process_timeout"
 TIMEOUT_POLICY_META_KEY = "_hashi_timeout_policy"
@@ -18,11 +19,8 @@ DEFAULT_SOURCE = "program default"
 class TimeoutPolicySnapshot:
     engine: str
     idle_seconds: int
-    hard_seconds: int
     default_idle_seconds: int
-    default_hard_seconds: int
     idle_source: str
-    hard_source: str
 
 
 def parse_positive_timeout(value: Any, *, label: str) -> int:
@@ -35,7 +33,12 @@ def parse_positive_timeout(value: Any, *, label: str) -> int:
     return parsed
 
 
-def validate_timeout_pair(idle_seconds: Any, hard_seconds: Any) -> tuple[int, int]:
+def validate_legacy_her_timeout_pair(
+    idle_seconds: Any,
+    hard_seconds: Any,
+) -> tuple[int, int]:
+    """Validate the retired HER v1 dual-timeout contract only."""
+
     idle = parse_positive_timeout(idle_seconds, label="idle timeout")
     hard = parse_positive_timeout(hard_seconds, label="hard timeout")
     if hard < idle:
@@ -100,7 +103,10 @@ def apply_timeout_layers(
     configured: dict[str, Any] = {}
     configured_sources: dict[str, str] = {}
     effective_sources: dict[str, str] = {}
-    for key in (IDLE_TIMEOUT_KEY, HARD_TIMEOUT_KEY):
+    configured_keys = [IDLE_TIMEOUT_KEY]
+    if str(engine) == "her":
+        configured_keys.append(HARD_TIMEOUT_KEY)
+    for key in configured_keys:
         found, value, source = _configured_timeout_value(
             key=key,
             agent_extra=agent_layer,
@@ -112,7 +118,7 @@ def apply_timeout_layers(
             configured[key] = value
             merged[key] = value
 
-        if key in override:
+        if key == IDLE_TIMEOUT_KEY and key in override:
             merged[key] = parse_positive_timeout(override[key], label=key.replace("_", " "))
             effective_sources[key] = USER_OVERRIDE_SOURCE
 
@@ -154,12 +160,15 @@ def refresh_timeout_extra(
         extra.pop(key, None)
 
     sources: dict[str, str] = {}
-    for key in (IDLE_TIMEOUT_KEY, HARD_TIMEOUT_KEY):
+    configured_keys = [IDLE_TIMEOUT_KEY]
+    if str(engine) == "her":
+        configured_keys.append(HARD_TIMEOUT_KEY)
+    for key in configured_keys:
         source = str(configured_sources.get(key) or DEFAULT_SOURCE)
         sources[key] = source
         if key in configured:
             extra[key] = configured[key]
-        if key in override:
+        if key == IDLE_TIMEOUT_KEY and key in override:
             extra[key] = parse_positive_timeout(override[key], label=key.replace("_", " "))
             sources[key] = USER_OVERRIDE_SOURCE
 
@@ -179,19 +188,12 @@ def timeout_policy_snapshot(backend: Any) -> TimeoutPolicySnapshot:
     meta = extra.get(TIMEOUT_POLICY_META_KEY)
     sources = dict(meta.get("sources") or {}) if isinstance(meta, dict) else {}
     explicit_idle = IDLE_TIMEOUT_KEY in extra or LEGACY_TIMEOUT_KEY in extra
-    explicit_hard = HARD_TIMEOUT_KEY in extra
     return TimeoutPolicySnapshot(
         engine=str(getattr(getattr(backend, "config", None), "engine", "unknown")),
         idle_seconds=int(backend.IDLE_TIMEOUT_SEC),
-        hard_seconds=int(backend.HARD_TIMEOUT_SEC),
         default_idle_seconds=int(getattr(type(backend), "DEFAULT_IDLE_TIMEOUT_SEC", 1800)),
-        default_hard_seconds=int(getattr(type(backend), "DEFAULT_HARD_TIMEOUT_SEC", 36000)),
         idle_source=str(
             sources.get(IDLE_TIMEOUT_KEY)
             or (AGENT_CONFIG_SOURCE if explicit_idle else DEFAULT_SOURCE)
-        ),
-        hard_source=str(
-            sources.get(HARD_TIMEOUT_KEY)
-            or (AGENT_CONFIG_SOURCE if explicit_hard else DEFAULT_SOURCE)
         ),
     )

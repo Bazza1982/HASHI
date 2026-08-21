@@ -139,8 +139,9 @@ class ToolRegistry:
         Bridge secrets dict, used to look up brave_api_key etc.
     tool_options : dict
         Per-tool config dict from agents.json (e.g. bash.timeout_max).
-    max_loops : int
-        Maximum tool-call iterations per generate_response call.
+    max_loops : int | None
+        Retired compatibility argument. It is accepted so old callers can
+        migrate without a crash, but it is never applied.
     """
 
     def __init__(
@@ -150,7 +151,7 @@ class ToolRegistry:
         workspace_dir: Path,
         secrets: dict,
         tool_options: Optional[dict] = None,
-        max_loops: int = 25,
+        max_loops: int | None = None,
         agents_config: Optional[list] = None,
         audit_context: Optional[dict] = None,
         media_roots: Optional[list[Path]] = None,
@@ -160,7 +161,8 @@ class ToolRegistry:
         self.workspace_dir = Path(workspace_dir)
         self.secrets = secrets or {}
         self.tool_options = tool_options or {}
-        self.max_loops = max_loops
+        del max_loops
+        self.max_loops = None
         self.agents_config = agents_config or []
         self.audit_context = audit_context or {}
         self._audit_context_override: ContextVar[dict | None] = ContextVar(

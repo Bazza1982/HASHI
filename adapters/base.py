@@ -74,7 +74,10 @@ class BackendResponse:
 
 class BaseBackend(ABC):
     DEFAULT_IDLE_TIMEOUT_SEC = 1800
+    # Compatibility value for the explicitly isolated HER v1 adapter. Active
+    # backends do not enforce an absolute request clock.
     DEFAULT_HARD_TIMEOUT_SEC = 36000
+    USES_LEGACY_HARD_TIMEOUT = False
 
     def __init__(self, agent_config, global_config, api_key: str = None):
         self.config = agent_config
@@ -135,8 +138,11 @@ class BaseBackend(ABC):
     @property
     def HARD_TIMEOUT_SEC(self) -> int:
         """
-        Absolute wall-clock cap for a single backend request.
-        Configurable via `hard_timeout_sec`.
+        Legacy HER v1 absolute wall-clock cap.
+
+        Active backends must not consult this property. It remains on the base
+        interface only so the retired HER v1 compatibility adapter can be
+        selected without duplicating its historical configuration parser.
         """
         extra = getattr(self.config, "extra", {}) or {}
         hard = self._coerce_timeout(
@@ -150,7 +156,8 @@ class BaseBackend(ABC):
 
     def _validate_timeout_configuration(self) -> None:
         _ = self.IDLE_TIMEOUT_SEC
-        _ = self.HARD_TIMEOUT_SEC
+        if self.USES_LEGACY_HARD_TIMEOUT:
+            _ = self.HARD_TIMEOUT_SEC
 
     def _timeout_source(self, key: str) -> str:
         extra = getattr(self.config, "extra", {}) or {}
@@ -171,12 +178,17 @@ class BaseBackend(ABC):
         total_runtime = max(0.0, time.perf_counter() - started_monotonic)
         last_output_age = self._last_activity_age()
         idle_source = self._timeout_source(IDLE_TIMEOUT_KEY).replace(" ", "_")
+        diagnostic = (
+            f"kind={timeout_kind}, idle_timeout_s={self.IDLE_TIMEOUT_SEC}, "
+            f"idle_source={idle_source}, last_output_age_s={last_output_age:.2f}, "
+            f"total_runtime_s={total_runtime:.2f}"
+        )
+        if not self.USES_LEGACY_HARD_TIMEOUT:
+            return diagnostic
         hard_source = self._timeout_source(HARD_TIMEOUT_KEY).replace(" ", "_")
         return (
-            f"kind={timeout_kind}, idle_timeout_s={self.IDLE_TIMEOUT_SEC}, "
-            f"idle_source={idle_source}, hard_timeout_s={self.HARD_TIMEOUT_SEC}, "
-            f"hard_source={hard_source}, last_output_age_s={last_output_age:.2f}, "
-            f"total_runtime_s={total_runtime:.2f}"
+            f"{diagnostic}, legacy_her_hard_timeout_s={self.HARD_TIMEOUT_SEC}, "
+            f"legacy_her_hard_source={hard_source}"
         )
 
     async def _wait_for_task_with_timeouts(
@@ -185,17 +197,13 @@ class BaseBackend(ABC):
         *,
         started_monotonic: float,
     ) -> str | None:
-        """Wait for a task while enforcing both output-idle and wall-clock caps."""
+        """Wait for a task using meaningful output idleness only."""
         while not task.done():
-            total_runtime = max(0.0, time.perf_counter() - started_monotonic)
-            if total_runtime >= self.HARD_TIMEOUT_SEC:
-                return "hard"
             idle_for = self._last_activity_age()
             if idle_for >= self.IDLE_TIMEOUT_SEC:
                 return "idle"
             wait_slice = min(
                 5.0,
-                max(0.1, self.HARD_TIMEOUT_SEC - total_runtime),
                 max(0.1, self.IDLE_TIMEOUT_SEC - idle_for),
             )
             try:

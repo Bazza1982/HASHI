@@ -17,9 +17,8 @@ from adapters.stream_events import (
 
 
 class CodexCLIAdapter(BaseBackend):
-    MAX_PROMPT_CHARS = 24000
+    LONG_PROMPT_STDIN_THRESHOLD = 24000
     DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
-    DEFAULT_HARD_TIMEOUT_SEC = 24 * 60 * 60
     POST_TURN_COMPLETION_GRACE_SEC = 15
 
     def _define_capabilities(self) -> BackendCapabilities:
@@ -53,7 +52,11 @@ class CodexCLIAdapter(BaseBackend):
         self._last_usage: TokenUsage | None = None
 
     def _should_use_stdin_transport(self, prompt: str) -> bool:
-        if "\n" in prompt or "\r" in prompt:
+        if (
+            "\n" in prompt
+            or "\r" in prompt
+            or len(prompt) > self.LONG_PROMPT_STDIN_THRESHOLD
+        ):
             return True
         if os.name != "nt":
             return False
@@ -104,12 +107,6 @@ class CodexCLIAdapter(BaseBackend):
     def should_bootstrap_on_startup(self) -> bool:
         return False
 
-    def _clip_text(self, text: str, limit: int) -> str:
-        text = (text or "").strip()
-        if len(text) <= limit:
-            return text
-        return text[: limit - 32].rstrip() + "\n\n[truncated for Codex prompt size]"
-
     # Patterns that Codex CLI's internal chunker may misinterpret as chunk
     # separators, causing "Separator is not found, and chunk exceed the limit".
     # We replace them with visually similar but parser-safe alternatives.
@@ -144,35 +141,6 @@ class CodexCLIAdapter(BaseBackend):
             if not replaced:
                 out.append(line)
         return "\n".join(out)
-
-    def _truncate_prompt(self, prompt: str) -> str:
-        if len(prompt) <= self.MAX_PROMPT_CHARS:
-            return prompt
-
-        separators = [
-            "\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n",
-            "\n\n--- NEW REQUEST ---\n",
-            "\n\nRespond to the following user request while following that context:\n",
-        ]
-        for separator in separators:
-            if separator in prompt:
-                context_part, request_part = prompt.split(separator, 1)
-                request_part = request_part.strip()
-                request_budget = min(max(len(request_part), 4000), 8000)
-                request_budget = min(request_budget, self.MAX_PROMPT_CHARS // 2)
-                kept_request = request_part[-request_budget:]
-                context_budget = self.MAX_PROMPT_CHARS - len(separator) - len(kept_request) - 64
-                kept_context = self._clip_text(context_part, max(context_budget, 1000))
-                self.logger.warning(
-                    "Codex prompt exceeded safe size; truncated context before CLI execution."
-                )
-                return (
-                    f"{kept_context}\n\n[context trimmed for Codex size]"
-                    f"{separator}{kept_request}"
-                )
-
-        self.logger.warning("Codex prompt exceeded safe size; keeping tail only before CLI execution.")
-        return prompt[-self.MAX_PROMPT_CHARS:]
 
     def _emit_stream_event(self, event: StreamEvent | None, on_stream_event: StreamCallback) -> None:
         if event is None or on_stream_event is None:
@@ -365,7 +333,9 @@ class CodexCLIAdapter(BaseBackend):
         if output_path.exists():
             output_path.unlink()
 
-        built_prompt = self._sanitize_for_codex(self._truncate_prompt(prompt))
+        # Prompt size selects a transport, never a content ceiling. Long input
+        # is streamed over stdin unchanged on Linux and Windows.
+        built_prompt = self._sanitize_for_codex(prompt)
         stdin_data = None
         prompt_arg = built_prompt
         if self._should_use_stdin_transport(built_prompt):
@@ -454,18 +424,16 @@ class CodexCLIAdapter(BaseBackend):
                 await proc.stdin.drain()
                 proc.stdin.close()
 
-            hard_deadline = started + self.HARD_TIMEOUT_SEC
             while proc.returncode is None and timeout_kind is None:
                 now_perf = time.perf_counter()
-                idle_for = max(0.0, time.time() - (self.last_activity_at or time.time()))
+                idle_for = self._last_activity_age()
                 if idle_for >= self.IDLE_TIMEOUT_SEC:
                     timeout_kind = "idle"
                     break
-                remaining_hard = hard_deadline - time.perf_counter()
-                if remaining_hard <= 0:
-                    timeout_kind = "hard"
-                    break
-                wait_slice = min(5.0, remaining_hard, max(0.1, self.IDLE_TIMEOUT_SEC - idle_for))
+                wait_slice = min(
+                    5.0,
+                    max(0.1, self.IDLE_TIMEOUT_SEC - idle_for),
+                )
                 if turn_completed_at is not None:
                     remaining_turn = (turn_completed_at + self.POST_TURN_COMPLETION_GRACE_SEC) - now_perf
                     if remaining_turn <= 0:
@@ -498,8 +466,6 @@ class CodexCLIAdapter(BaseBackend):
                 response = self._extract_response_text(output_path, stdout_lines)
                 error_text = (
                     f"Codex CLI was idle for {self.IDLE_TIMEOUT_SEC}s with no output."
-                    if timeout_kind == "idle"
-                    else f"Codex CLI exceeded hard timeout of {self.HARD_TIMEOUT_SEC}s."
                 )
                 return BackendResponse(
                     text="",

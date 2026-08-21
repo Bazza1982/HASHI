@@ -3,10 +3,8 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from adapters.timeout_policy import (
-    HARD_TIMEOUT_KEY,
     IDLE_TIMEOUT_KEY,
     parse_positive_timeout,
-    validate_timeout_pair,
 )
 from orchestrator.workspace_state import WorkspaceStateStore
 
@@ -27,11 +25,9 @@ def timeout_override_from_state(state: Mapping[str, Any], engine: str) -> dict[s
         raise ValueError(f"timeout override for {engine} must be an object")
 
     override: dict[str, int] = {}
-    for key in (IDLE_TIMEOUT_KEY, HARD_TIMEOUT_KEY):
+    for key in (IDLE_TIMEOUT_KEY,):
         if key in raw:
             override[key] = parse_positive_timeout(raw[key], label=key.replace("_", " "))
-    if IDLE_TIMEOUT_KEY in override and HARD_TIMEOUT_KEY in override:
-        validate_timeout_pair(override[IDLE_TIMEOUT_KEY], override[HARD_TIMEOUT_KEY])
     return override
 
 
@@ -44,18 +40,12 @@ def set_timeout_override(
     engine: str,
     *,
     idle_seconds: int | None = None,
-    hard_seconds: int | None = None,
 ) -> dict[str, int]:
-    if idle_seconds is None and hard_seconds is None:
-        raise ValueError("at least one timeout value is required")
+    if idle_seconds is None:
+        raise ValueError("idle timeout value is required")
     normalized_idle = (
         parse_positive_timeout(idle_seconds, label="idle timeout")
         if idle_seconds is not None
-        else None
-    )
-    normalized_hard = (
-        parse_positive_timeout(hard_seconds, label="hard timeout")
-        if hard_seconds is not None
         else None
     )
     saved: dict[str, int] = {}
@@ -68,8 +58,8 @@ def set_timeout_override(
         current = dict(raw_current) if isinstance(raw_current, Mapping) else {}
         if normalized_idle is not None:
             current[IDLE_TIMEOUT_KEY] = normalized_idle
-        if normalized_hard is not None:
-            current[HARD_TIMEOUT_KEY] = normalized_hard
+        # Permanently migrate away any historical wall-clock override.
+        current.pop("hard_timeout_sec", None)
         saved = timeout_override_from_state(
             {BACKEND_TIMEOUT_STATE_KEY: {engine: current}},
             engine,
