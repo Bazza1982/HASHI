@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from orchestrator.flexible_backend_registry import (
@@ -18,7 +18,7 @@ from orchestrator.flexible_backend_registry import (
 )
 
 from .config import DEFAULT_STAGE_ROLES
-from .models import Stage
+from .models import DEFAULT_ROUTES_BY_STAGE, ROUTE_STAGES, Route, Stage
 
 HER_V2_CONFIGURATION_STATE_KEY = "her_v2_configuration"
 HER_V2_MODEL_SLOTS = ("fast", "pro")
@@ -119,6 +119,56 @@ def profile_model_slots(raw: Mapping[str, Any]) -> dict[str, str]:
     return result
 
 
+def route_profile_names(raw: Mapping[str, Any]) -> dict[Route, str]:
+    profiles = raw.get("profiles")
+    available = set(profiles) if isinstance(profiles, Mapping) else set()
+    roles = _stage_roles(raw)
+    execution_fallback = roles.get(Stage.EXECUTION, "premium")
+    execution_profiles = {
+        Route.EXECUTION_SIMPLE: "lightweight",
+        Route.EXECUTION_COMPLEX: "premium",
+        Route.EXECUTION_HIGH_VOLUME: "orchestrator",
+    }
+    result = {
+        route: roles.get(stage, "")
+        for route, stage in ROUTE_STAGES.items()
+        if route not in execution_profiles
+    }
+    for route, preferred in execution_profiles.items():
+        result[route] = preferred if preferred in available else execution_fallback
+    return result
+
+
+def default_route_model_slots(raw: Mapping[str, Any]) -> dict[str, str]:
+    profile_slots = profile_model_slots(raw)
+    route_profiles = route_profile_names(raw)
+    result = {
+        route.value: profile_slots.get(profile, "pro")
+        for route, profile in route_profiles.items()
+    }
+    # Structure repair historically reuses the profile/model that produced the
+    # malformed output. Preserve that safe default while allowing an explicit
+    # Quick or Pro choice.
+    result[Route.STRUCTURE_REPAIR.value] = "inherit"
+    return result
+
+
+def _route(raw: Route | str) -> Route:
+    return raw if isinstance(raw, Route) else Route(str(raw).strip().lower())
+
+
+def _route_slot(route: Route, raw: Any) -> str:
+    slot = str(raw or "").strip().lower()
+    if slot == "quick":
+        slot = "fast"
+    allowed = {"fast", "pro"}
+    if route is Route.STRUCTURE_REPAIR:
+        allowed.add("inherit")
+    if slot not in allowed:
+        raise ValueError(f"invalid model slot {slot!r} for route {route.value!r}")
+    return slot
+
+
 @dataclass(frozen=True)
 class HERv2RuntimeConfiguration:
     provider: str
@@ -126,11 +176,8 @@ class HERv2RuntimeConfiguration:
     pro_model: str
     profile_reasoning: Mapping[str, str | None]
     stage_reasoning: Mapping[str, str]
-    _profile_slots: Mapping[str, str] = field(
-        default_factory=dict,
-        compare=False,
-        repr=False,
-    )
+    route_model_slots: Mapping[str, str]
+    route_reasoning: Mapping[str, str]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -139,28 +186,31 @@ class HERv2RuntimeConfiguration:
             "pro_model": self.pro_model,
             "profile_reasoning": dict(self.profile_reasoning),
             "stage_reasoning": dict(self.stage_reasoning),
+            "route_model_slots": dict(self.route_model_slots),
+            "route_reasoning": dict(self.route_reasoning),
         }
-
-    def slot_reasoning(self, slot: str) -> str:
-        values = [
-            (
-                "default"
-                if self.profile_reasoning.get(profile) is None
-                else str(self.profile_reasoning[profile])
-            )
-            for profile, assigned in self._profile_slots.items()
-            if assigned == slot
-        ]
-        return _common(values) or "default"
 
     def reasoning_for_stage(self, raw: Mapping[str, Any], stage: Stage | str) -> str:
         parsed = (
             stage if isinstance(stage, Stage) else Stage(str(stage).strip().lower())
         )
-        override = self.stage_reasoning.get(parsed.value)
+        return self.reasoning_for_route(raw, DEFAULT_ROUTES_BY_STAGE[parsed])
+
+    def model_slot_for_route(self, route: Route | str) -> str:
+        parsed = _route(route)
+        fallback = "inherit" if parsed is Route.STRUCTURE_REPAIR else "pro"
+        return self.route_model_slots.get(parsed.value, fallback)
+
+    def reasoning_for_route(self, raw: Mapping[str, Any], route: Route | str) -> str:
+        parsed = _route(route)
+        override = self.route_reasoning.get(parsed.value)
         if override is not None:
             return override
-        role = _stage_roles(raw).get(parsed, "")
+        stage = ROUTE_STAGES[parsed]
+        override = self.stage_reasoning.get(stage.value)
+        if override is not None:
+            return override
+        role = route_profile_names(raw).get(parsed, "")
         value = self.profile_reasoning.get(role)
         return str(value) if value is not None else "default"
 
@@ -213,6 +263,19 @@ def resolve_her_v2_configuration(
         )
         if value is not None and str(value).strip()
     }
+    route_model_slots = default_route_model_slots(raw)
+    configured_route_slots = raw.get("route_model_slots")
+    if isinstance(configured_route_slots, Mapping):
+        for name, value in configured_route_slots.items():
+            route = _route(str(name))
+            route_model_slots[route.value] = _route_slot(route, value)
+    configured_route_reasoning = raw.get("route_reasoning")
+    route_reasoning: dict[str, str] = {}
+    if isinstance(configured_route_reasoning, Mapping):
+        for name, value in configured_route_reasoning.items():
+            normalized = _reasoning_value(value, allow_inherit=True)
+            if normalized is not None:
+                route_reasoning[_route(str(name)).value] = normalized
 
     if isinstance(override, Mapping):
         selected_provider = str(override.get("provider") or "").strip()
@@ -241,16 +304,30 @@ def resolve_her_v2_configuration(
                 normalized = _reasoning_value(value, allow_inherit=True)
                 if normalized is not None:
                     stage_reasoning[stage.value] = normalized
+        selected_route_slots = override.get("route_model_slots")
+        if isinstance(selected_route_slots, Mapping):
+            for name, value in selected_route_slots.items():
+                route = _route(str(name))
+                route_model_slots[route.value] = _route_slot(route, value)
+        selected_route_reasoning = override.get("route_reasoning")
+        if isinstance(selected_route_reasoning, Mapping):
+            route_reasoning = {}
+            for name, value in selected_route_reasoning.items():
+                route = _route(str(name))
+                normalized = _reasoning_value(value, allow_inherit=True)
+                if normalized is not None:
+                    route_reasoning[route.value] = normalized
 
     if not provider or not fast_model or not pro_model:
-        raise ValueError("HER v2 Fast/Pro provider configuration is incomplete")
+        raise ValueError("HER v2 Quick/Pro provider configuration is incomplete")
     return HERv2RuntimeConfiguration(
         provider=provider,
         fast_model=fast_model,
         pro_model=pro_model,
         profile_reasoning=profile_reasoning,
         stage_reasoning=stage_reasoning,
-        _profile_slots=slots,
+        route_model_slots=route_model_slots,
+        route_reasoning=route_reasoning,
     )
 
 
@@ -402,30 +479,31 @@ def set_her_v2_slot_model(
     return replace(current, **{f"{normalized_slot}_model": requested})
 
 
-def set_her_v2_reasoning(
+def set_her_v2_route_model_slot(
     current: HERv2RuntimeConfiguration,
-    target: str,
+    route: Route | str,
+    slot: str,
+) -> HERv2RuntimeConfiguration:
+    parsed = _route(route)
+    normalized = _route_slot(parsed, slot)
+    updated = dict(current.route_model_slots)
+    updated[parsed.value] = normalized
+    return replace(current, route_model_slots=updated)
+
+
+def set_her_v2_route_reasoning(
+    current: HERv2RuntimeConfiguration,
+    route: Route | str,
     reasoning: str | None,
 ) -> HERv2RuntimeConfiguration:
-    normalized_target = str(target or "").strip().lower()
+    parsed = _route(route)
     normalized = _reasoning_value(reasoning, allow_inherit=True)
-    if normalized_target in HER_V2_MODEL_SLOTS:
-        updated = dict(current.profile_reasoning)
-        for profile, slot in current._profile_slots.items():
-            if slot == normalized_target:
-                updated[profile] = normalized
-        return replace(current, profile_reasoning=updated)
-
-    try:
-        stage = Stage(normalized_target)
-    except ValueError as exc:
-        raise ValueError(f"unknown HER v2 reasoning target: {target}") from exc
-    updated_stages = dict(current.stage_reasoning)
+    updated = dict(current.route_reasoning)
     if normalized is None:
-        updated_stages.pop(stage.value, None)
+        updated.pop(parsed.value, None)
     else:
-        updated_stages[stage.value] = normalized
-    return replace(current, stage_reasoning=updated_stages)
+        updated[parsed.value] = normalized
+    return replace(current, route_reasoning=updated)
 
 
 def apply_her_v2_runtime_configuration(
@@ -457,4 +535,13 @@ def apply_her_v2_runtime_configuration(
         result["stage_reasoning"] = dict(selected.stage_reasoning)
     else:
         result.pop("stage_reasoning", None)
+    result["slot_models"] = {
+        "fast": selected.fast_model,
+        "pro": selected.pro_model,
+    }
+    result["route_model_slots"] = dict(selected.route_model_slots)
+    if selected.route_reasoning:
+        result["route_reasoning"] = dict(selected.route_reasoning)
+    else:
+        result.pop("route_reasoning", None)
     return result

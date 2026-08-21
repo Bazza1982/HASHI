@@ -7,7 +7,7 @@ import pytest
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
-from orchestrator.her_v2.models import Stage
+from orchestrator.her_v2.models import Route, Stage, TriageClassification
 
 
 def _her_v2_config() -> dict:
@@ -119,15 +119,22 @@ def test_her_v2_provider_options_are_concrete_call_providers(tmp_path):
 
 def test_provider_switch_prepares_both_slots_and_preserves_reasoning(tmp_path):
     manager = _manager(tmp_path)
-    before = manager.get_her_v2_configuration()
+    before = manager.prepare_her_v2_route_model_slot("review", "fast")
+    before = manager.prepare_her_v2_route_reasoning(
+        "review",
+        "low",
+        current=before,
+    )
 
-    candidate = manager.prepare_her_v2_provider("OpenRouter")
+    candidate = manager.prepare_her_v2_provider("OpenRouter", current=before)
 
     assert candidate.provider == "openrouter-api"
     assert candidate.fast_model == "deepseek/deepseek-v4-flash"
     assert candidate.pro_model == "anthropic/claude-sonnet-4.6"
     assert candidate.profile_reasoning == before.profile_reasoning
     assert candidate.stage_reasoning == before.stage_reasoning
+    assert candidate.route_model_slots == before.route_model_slots
+    assert candidate.route_reasoning == before.route_reasoning
 
 
 def test_one_model_provider_assigns_the_same_model_to_both_slots(tmp_path):
@@ -169,22 +176,37 @@ def test_reselecting_active_provider_preserves_valid_slot_choices(tmp_path):
     assert reselected.pro_model == "anthropic/claude-sonnet-4.6"
 
 
-def test_slot_model_and_reasoning_updates_are_independent(tmp_path):
+def test_slot_model_and_route_controls_are_independent(tmp_path):
     manager = _manager(tmp_path)
     current = manager.get_her_v2_configuration()
 
     model_candidate = manager.prepare_her_v2_model(
         "fast", "deepseek-v4-pro", current=current
     )
-    reasoning_candidate = manager.prepare_her_v2_reasoning(
-        "review", "low", current=model_candidate
+    route_candidate = manager.prepare_her_v2_route_model_slot(
+        "review", "fast", current=model_candidate
+    )
+    reasoning_candidate = manager.prepare_her_v2_route_reasoning(
+        "review", "low", current=route_candidate
     )
 
     assert reasoning_candidate.fast_model == "deepseek-v4-pro"
     assert reasoning_candidate.pro_model == "deepseek-v4-pro"
-    assert reasoning_candidate.stage_reasoning == {"review": "low"}
+    assert reasoning_candidate.model_slot_for_route(Route.REVIEW) == "fast"
+    assert reasoning_candidate.route_reasoning == {"review": "low"}
+    assert reasoning_candidate.stage_reasoning == {}
     assert reasoning_candidate.profile_reasoning == current.profile_reasoning
     assert reasoning_candidate.provider == "deepseek-api"
+
+
+def test_default_routes_expose_actual_execution_classification_profiles(tmp_path):
+    manager = _manager(tmp_path)
+    selected = manager.get_her_v2_configuration()
+
+    assert selected.model_slot_for_route(Route.EXECUTION_SIMPLE) == "fast"
+    assert selected.model_slot_for_route(Route.EXECUTION_COMPLEX) == "pro"
+    assert selected.model_slot_for_route(Route.EXECUTION_HIGH_VOLUME) == "pro"
+    assert selected.model_slot_for_route(Route.STRUCTURE_REPAIR) == "inherit"
 
 
 def test_apply_configuration_persists_and_refreshes_live_adapter_atomically(tmp_path):
@@ -198,25 +220,34 @@ def test_apply_configuration_persists_and_refreshes_live_adapter_atomically(tmp_
         _v2_config=None,
         effort="high",
     )
-    candidate = manager.prepare_her_v2_reasoning("fast", "medium")
+    candidate = manager.prepare_her_v2_route_model_slot("planning", "fast")
+    candidate = manager.prepare_her_v2_route_reasoning(
+        "planning",
+        "medium",
+        current=candidate,
+    )
 
     manager.apply_her_v2_configuration(candidate)
 
     state = json.loads(manager.state_file.read_text(encoding="utf-8"))
-    assert state["her_v2_configuration"]["profile_reasoning"] == {
-        "lightweight": "medium",
-        "triage": "medium",
-        "premium": "high",
-        "reviewer": "max",
-        "orchestrator": "max",
+    assert state["her_v2_configuration"]["route_model_slots"]["planning"] == "fast"
+    assert state["her_v2_configuration"]["route_reasoning"] == {
+        "planning": "medium"
     }
     assert state["backend_efforts"] == {"her-v2": "high"}
     assert "provider_reasoning" not in state
     assert manager.current_backend.effort == "high"
-    assert (
-        manager.current_backend._v2_config.profile_for(Stage.TRIAGE).reasoning
-        == "medium"
+    planning = manager.current_backend._v2_config.profile_for(Stage.PLANNING)
+    assert planning.model == "deepseek-v4-flash"
+    assert planning.reasoning == "medium"
+    simple = manager.current_backend._v2_config.execution_profile_for(
+        TriageClassification.SIMPLE_TASK
     )
+    complex_task = manager.current_backend._v2_config.execution_profile_for(
+        TriageClassification.COMPLEX_TASK
+    )
+    assert simple.model == "deepseek-v4-flash"
+    assert complex_task.model == "deepseek-v4-pro"
 
 
 def test_legacy_single_route_state_migrates_without_exposing_role_configured(tmp_path):
@@ -253,7 +284,18 @@ def test_invalid_model_does_not_write_runtime_state(tmp_path):
 
 def test_persisted_selection_is_applied_when_adapter_config_is_rebuilt(tmp_path):
     manager = _manager(tmp_path)
-    manager.apply_her_v2_configuration(manager.prepare_her_v2_provider("openrouter"))
+    selected = manager.prepare_her_v2_provider("openrouter")
+    selected = manager.prepare_her_v2_route_model_slot(
+        "review",
+        "fast",
+        current=selected,
+    )
+    selected = manager.prepare_her_v2_route_reasoning(
+        "review",
+        "low",
+        current=selected,
+    )
+    manager.apply_her_v2_configuration(selected)
     reloaded = _manager(tmp_path)
     her_row = next(
         row for row in reloaded.config.allowed_backends if row["engine"] == "her-v2"
@@ -267,6 +309,8 @@ def test_persisted_selection_is_applied_when_adapter_config_is_rebuilt(tmp_path)
     assert {profile["engine"] for profile in profiles.values()} == {"openrouter-api"}
     assert profiles["lightweight"]["model"] == "deepseek/deepseek-v4-flash"
     assert profiles["premium"]["model"] == "anthropic/claude-sonnet-4.6"
+    assert adapter_config.extra["her_v2"]["route_model_slots"]["review"] == "fast"
+    assert adapter_config.extra["her_v2"]["route_reasoning"] == {"review": "low"}
 
 
 def test_persistence_failure_keeps_previous_live_configuration(tmp_path, monkeypatch):

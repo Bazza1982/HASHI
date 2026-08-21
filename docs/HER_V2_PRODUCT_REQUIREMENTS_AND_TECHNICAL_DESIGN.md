@@ -280,14 +280,20 @@ HER v2 termination condition. Effort never changes this rule.
 
 Effort determines the maximum orchestration path available. Triage classifications `DIRECT_RESPONSE` and `CONFIRMATION_REQUIRED` terminate through their dedicated paths without unnecessary planning, regardless of the selected effort.
 
-Provider model and reasoning settings for each stage are selected through configurable role profiles such as `lightweight`, `premium`, and `reviewer`. HER does not hard-code provider model names.
+Each effective task route derives its base capability from configurable role
+profiles such as `lightweight`, `premium`, and `reviewer`, then independently
+selects a model slot and provider reasoning. HER does not hard-code provider
+model names.
 
 ### 5.1 Runtime configuration command boundary
 
-HER v2 presents two model slots: Fast and Pro. `/provider` selects the concrete
-call-provider engine that carries both slots. `/model` configures the two models,
-their profile reasoning, and optional stage reasoning overrides. `/backend`
-selects `her-v2` without exposing the internal `role-configured` sentinel.
+HER v2 presents two reusable model slots: Quick and Pro. `/provider` selects the
+concrete call-provider engine that carries both slots. `/model` defines those
+two models, then independently assigns a model slot and provider reasoning to
+each effective task route. Execution is split into Simple, Complex, and
+High-volume routes because classification changes the actual profile. Structure
+repair may follow its source model. `/backend` selects `her-v2` without exposing
+the internal `role-configured` sentinel.
 
 `/effort` is a separate orchestration-policy command. Changing it must not read,
 infer, normalize, or persist a provider reasoning value. Conversely, changing a

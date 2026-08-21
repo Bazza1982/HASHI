@@ -1071,9 +1071,9 @@ Before HER v2 is accepted, the suite must contain logically complete coverage of
 18. retired-HER unreachability through aliases, startup, switching, and failure
     handling.
 19. runtime command separation: `/backend` never exposes `role-configured`,
-    `/provider` atomically resolves both slots, `/model` owns Fast/Pro and
-    provider reasoning, `/effort` cannot mutate reasoning, and non-HER
-    `/model` behaviour remains unchanged.
+    `/provider` atomically resolves both slots, `/model` defines Quick/Pro and
+    independently assigns model/reasoning per effective route, `/effort` cannot
+    mutate reasoning, and non-HER `/model` behaviour remains unchanged.
 
 This is a list of required coverage areas, not an instruction to multiply each area into hundreds of tests.
 

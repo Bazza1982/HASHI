@@ -46,9 +46,9 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   normal memory injection and Memory+ continuity independently.
 - `/notepad [today|carryover|history|find <query>|edit <text>|replace <text>|compact|clear]`:
   inspect or maintain the bounded Memory+ work card and archive index.
-- `/model`: on HER v2, inspect or configure Fast/Pro models and provider
-  reasoning by slot or stage; on other backends, retain the existing single-model
-  behaviour.
+- `/model`: on HER v2, define Quick/Pro models and independently choose the
+  model slot plus provider reasoning for each effective task route; on other
+  backends, retain the existing single-model behaviour.
 - `/habit [view|on|off|default|delete|reset]`: inspect or control the default-off,
   adapter-owned HER Habit/Meditation path. Non-HER backends do not read or
   modify its records.
@@ -91,9 +91,10 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   Memory+ are preserved.
 - backend `+`: same flow, but rebuild handoff context after the backend switch.
 - `/provider`: while HER v2 is active, select the call provider and atomically
-  resolve its Fast/Pro defaults.
-- `/model`: while HER v2 is active, configure Fast/Pro models and slot/stage
-  provider reasoning. Other active backends retain their existing behaviour.
+  resolve its Quick/Pro defaults.
+- `/model`: while HER v2 is active, define Quick/Pro models and configure each
+  effective task route's model slot and provider reasoning separately. Other
+  active backends retain their existing behaviour.
 - Backend and model changes continue to an optional effort picker when the
   selected model supports effort. Keeping the current value leaves it unchanged;
   models without selectable effort finish with `n/a`.

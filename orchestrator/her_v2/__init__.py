@@ -15,14 +15,18 @@ from .commentary import (
 )
 from .config import HERv2Config, ProviderProfile
 from .interfaces import DreamMaintainer, HabitAdvisor, MeditationRunner
-from .ledger import ExecutionLedger, LedgerInvariantError, LedgerStore
 from .learning import HERv2Learning, HERv2TurnLearning, LearningRecovery
+from .ledger import ExecutionLedger, LedgerInvariantError, LedgerStore
 from .lifecycle import LifecycleMachine, LifecycleViolation
 from .models import (
+    DEFAULT_ROUTES_BY_STAGE,
+    EXECUTION_ROUTES,
+    ROUTE_STAGES,
     Effort,
     ExecutionDisposition,
     LifecycleState,
     ReviewOutcome,
+    Route,
     Stage,
     TerminalState,
     TriageClassification,
@@ -36,24 +40,27 @@ from .presentation import (
 from .runtime import HERv2Runtime
 
 __all__ = [
+    "DEFAULT_ROUTES_BY_STAGE",
+    "EXECUTION_ROUTES",
+    "ROUTE_STAGES",
     "AuditPersistenceError",
     "CommentaryPort",
-    "DurableAuditLog",
     "DreamMaintainer",
+    "DurableAuditLog",
     "Effort",
     "ExecutionDisposition",
     "ExecutionLedger",
     "HERv2Config",
-    "HERv2Runtime",
     "HERv2Learning",
+    "HERv2Runtime",
     "HERv2TurnLearning",
     "HabitAdvisor",
+    "LearningRecovery",
     "LedgerInvariantError",
     "LedgerStore",
     "LifecycleMachine",
     "LifecycleState",
     "LifecycleViolation",
-    "LearningRecovery",
     "MeditationRunner",
     "NeutralCommentary",
     "PackagedCommentary",
@@ -63,6 +70,7 @@ __all__ = [
     "RequiredPersonaRenderer",
     "RequiredUserMessage",
     "ReviewOutcome",
+    "Route",
     "Stage",
     "TerminalState",
     "TriageClassification",

@@ -34,7 +34,8 @@ from orchestrator.her_v2.runtime_configuration import (
     build_her_v2_provider_options,
     resolve_her_v2_configuration,
     select_her_v2_provider,
-    set_her_v2_reasoning,
+    set_her_v2_route_model_slot,
+    set_her_v2_route_reasoning,
     set_her_v2_slot_model,
 )
 from orchestrator.privacy_levels import (
@@ -489,16 +490,29 @@ class FlexibleBackendManager:
             allowed_models=option["models"],
         )
 
-    def prepare_her_v2_reasoning(
+    def prepare_her_v2_route_model_slot(
         self,
-        target: str,
+        route: str,
+        slot: str,
+        *,
+        current: HERv2RuntimeConfiguration | None = None,
+    ) -> HERv2RuntimeConfiguration:
+        return set_her_v2_route_model_slot(
+            current or self.get_her_v2_configuration(),
+            route,
+            slot,
+        )
+
+    def prepare_her_v2_route_reasoning(
+        self,
+        route: str,
         reasoning: str | None,
         *,
         current: HERv2RuntimeConfiguration | None = None,
     ) -> HERv2RuntimeConfiguration:
-        return set_her_v2_reasoning(
+        return set_her_v2_route_reasoning(
             current or self.get_her_v2_configuration(),
-            target,
+            route,
             reasoning,
         )
 

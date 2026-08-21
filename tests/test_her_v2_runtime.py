@@ -1838,7 +1838,15 @@ async def test_side_effect_execution_bad_json_uses_tool_free_structure_repair_on
     runtime = _runtime(
         tmp_path,
         provider,
-        config=_config(structured_repair_attempts=2),
+        config=_config(
+            structured_repair_attempts=2,
+            slot_models={
+                "fast": "quick-route-model",
+                "pro": "pro-route-model",
+            },
+            route_model_slots={"structure_repair": "pro"},
+            route_reasoning={"structure_repair": "xhigh"},
+        ),
     )
 
     result = await runtime.run_turn(
@@ -1864,6 +1872,13 @@ async def test_side_effect_execution_bad_json_uses_tool_free_structure_repair_on
     assert repair_requests[0].allow_tools is False
     assert repair_requests[0].allow_side_effects is False
     assert repair_requests[0].context["original_execution_must_not_be_replayed"] is True
+    repair_profile = next(
+        profile
+        for profile, request in provider.requests
+        if request.stage is Stage.STRUCTURE_REPAIR
+    )
+    assert repair_profile.model == "pro-route-model"
+    assert repair_profile.reasoning == "xhigh"
 
     rows = [
         json.loads(line)

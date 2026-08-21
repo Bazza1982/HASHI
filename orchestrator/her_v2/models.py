@@ -6,9 +6,10 @@ is orchestration policy and is never reused as a provider reasoning value.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Mapping
+from typing import Any
 
 
 class StrEnum(str, Enum):
@@ -87,6 +88,65 @@ class Stage(StrEnum):
     FINALISATION = "finalisation"
     MEDITATION = "meditation"
     DREAM = "dream"
+
+
+class Route(StrEnum):
+    """User-configurable effective model/reasoning routes.
+
+    Execution is deliberately split by triage classification because those
+    paths may use different model slots even though they share one lifecycle
+    stage.
+    """
+
+    IMMEDIATE_RESPONSE = "immediate_response"
+    TRIAGE = "triage"
+    PLANNING = "planning"
+    EXECUTION_SIMPLE = "execution_simple"
+    EXECUTION_COMPLEX = "execution_complex"
+    EXECUTION_HIGH_VOLUME = "execution_high_volume"
+    STRUCTURE_REPAIR = "structure_repair"
+    REPLANNING = "replanning"
+    REVIEW = "review"
+    FINALISATION = "finalisation"
+    MEDITATION = "meditation"
+    DREAM = "dream"
+
+
+ROUTE_STAGES: Mapping[Route, Stage] = {
+    Route.IMMEDIATE_RESPONSE: Stage.IMMEDIATE_RESPONSE,
+    Route.TRIAGE: Stage.TRIAGE,
+    Route.PLANNING: Stage.PLANNING,
+    Route.EXECUTION_SIMPLE: Stage.EXECUTION,
+    Route.EXECUTION_COMPLEX: Stage.EXECUTION,
+    Route.EXECUTION_HIGH_VOLUME: Stage.EXECUTION,
+    Route.STRUCTURE_REPAIR: Stage.STRUCTURE_REPAIR,
+    Route.REPLANNING: Stage.REPLANNING,
+    Route.REVIEW: Stage.REVIEW,
+    Route.FINALISATION: Stage.FINALISATION,
+    Route.MEDITATION: Stage.MEDITATION,
+    Route.DREAM: Stage.DREAM,
+}
+
+
+DEFAULT_ROUTES_BY_STAGE: Mapping[Stage, Route] = {
+    Stage.IMMEDIATE_RESPONSE: Route.IMMEDIATE_RESPONSE,
+    Stage.TRIAGE: Route.TRIAGE,
+    Stage.PLANNING: Route.PLANNING,
+    Stage.EXECUTION: Route.EXECUTION_COMPLEX,
+    Stage.STRUCTURE_REPAIR: Route.STRUCTURE_REPAIR,
+    Stage.REPLANNING: Route.REPLANNING,
+    Stage.REVIEW: Route.REVIEW,
+    Stage.FINALISATION: Route.FINALISATION,
+    Stage.MEDITATION: Route.MEDITATION,
+    Stage.DREAM: Route.DREAM,
+}
+
+
+EXECUTION_ROUTES: Mapping[TriageClassification, Route] = {
+    TriageClassification.SIMPLE_TASK: Route.EXECUTION_SIMPLE,
+    TriageClassification.COMPLEX_TASK: Route.EXECUTION_COMPLEX,
+    TriageClassification.HIGH_VOLUME_TASK: Route.EXECUTION_HIGH_VOLUME,
+}
 
 
 class ReviewOutcome(StrEnum):

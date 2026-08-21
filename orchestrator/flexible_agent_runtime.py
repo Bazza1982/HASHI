@@ -4169,7 +4169,8 @@ class FlexibleAgentRuntime:
                 await self._reply_text(
                     update,
                     "HER v2 does not select a single backend model. "
-                    "Use /backend her-v2 [+], then configure Fast/Pro with /model.",
+                    "Use /backend her-v2 [+], then configure Quick/Pro and task "
+                    "routes with /model.",
                 )
                 return
             success, message = await self._switch_backend_mode(
@@ -4732,7 +4733,7 @@ class FlexibleAgentRuntime:
             selected = self.backend_manager.get_her_v2_configuration()
             facts.extend(
                 [
-                    f"<b>Fast</b> · <code>{html.escape(selected.fast_model)}</code>",
+                    f"<b>Quick</b> · <code>{html.escape(selected.fast_model)}</code>",
                     f"<b>Pro</b> · <code>{html.escape(selected.pro_model)}</code>",
                 ]
             )
@@ -4930,7 +4931,7 @@ class FlexibleAgentRuntime:
         if self.config.active_backend == HER_V2_ENGINE:
             selected = self.backend_manager.get_her_v2_configuration()
             effort_facts = [
-                f"<b>Fast</b> · <code>{html.escape(selected.fast_model)}</code>",
+                f"<b>Quick</b> · <code>{html.escape(selected.fast_model)}</code>",
                 f"<b>Pro</b> · <code>{html.escape(selected.pro_model)}</code>",
             ]
         else:

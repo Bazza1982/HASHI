@@ -6,7 +6,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .models import Effort, Stage, TerminalState, TriageClassification
+from .models import (
+    DEFAULT_ROUTES_BY_STAGE,
+    EXECUTION_ROUTES,
+    ROUTE_STAGES,
+    Effort,
+    Route,
+    Stage,
+    TerminalState,
+    TriageClassification,
+)
 
 
 class HERv2ConfigurationError(ValueError):
@@ -59,6 +68,9 @@ class HERv2Config:
     profiles: Mapping[str, ProviderProfile]
     stage_roles: Mapping[Stage, str]
     stage_reasoning: Mapping[Stage, str] = field(default_factory=dict)
+    slot_models: Mapping[str, str] = field(default_factory=dict)
+    route_model_slots: Mapping[Route, str] = field(default_factory=dict)
+    route_reasoning: Mapping[Route, str] = field(default_factory=dict)
     reporting_attempts: int = 3
     structured_repair_attempts: int = 3
     replan_limits: Mapping[Effort, int] = field(
@@ -180,6 +192,73 @@ class HERv2Config:
                 )
             stage_reasoning[stage] = reasoning
 
+        slot_models_raw = raw.get("slot_models") or {}
+        if not isinstance(slot_models_raw, Mapping):
+            raise HERv2ConfigurationError("her_v2.slot_models must be an object")
+        slot_models: dict[str, str] = {}
+        for raw_slot, value in slot_models_raw.items():
+            slot = str(raw_slot).strip().lower()
+            if slot == "quick":
+                slot = "fast"
+            if slot not in {"fast", "pro"}:
+                raise HERv2ConfigurationError(
+                    f"unknown HER v2 model slot: {raw_slot!r}"
+                )
+            model = str(value or "").strip()
+            if not model:
+                raise HERv2ConfigurationError(
+                    f"model for slot {slot!r} must be non-empty"
+                )
+            slot_models[slot] = model
+
+        route_model_slots_raw = raw.get("route_model_slots") or {}
+        if not isinstance(route_model_slots_raw, Mapping):
+            raise HERv2ConfigurationError(
+                "her_v2.route_model_slots must be an object"
+            )
+        route_model_slots: dict[Route, str] = {}
+        for route_name, value in route_model_slots_raw.items():
+            try:
+                route = Route(str(route_name).strip().lower())
+            except ValueError as exc:
+                raise HERv2ConfigurationError(
+                    f"unknown HER v2 route model slot: {route_name!r}"
+                ) from exc
+            slot = str(value or "").strip().lower()
+            if slot == "quick":
+                slot = "fast"
+            allowed_slots = {"fast", "pro"}
+            if route is Route.STRUCTURE_REPAIR:
+                allowed_slots.add("inherit")
+            if slot not in allowed_slots:
+                raise HERv2ConfigurationError(
+                    f"invalid model slot {slot!r} for route {route.value!r}"
+                )
+            route_model_slots[route] = slot
+        for route, slot in route_model_slots.items():
+            if slot != "inherit" and slot not in slot_models:
+                raise HERv2ConfigurationError(
+                    f"route {route.value!r} selects undefined model slot {slot!r}"
+                )
+
+        route_reasoning_raw = raw.get("route_reasoning") or {}
+        if not isinstance(route_reasoning_raw, Mapping):
+            raise HERv2ConfigurationError("her_v2.route_reasoning must be an object")
+        route_reasoning: dict[Route, str] = {}
+        for route_name, value in route_reasoning_raw.items():
+            try:
+                route = Route(str(route_name).strip().lower())
+            except ValueError as exc:
+                raise HERv2ConfigurationError(
+                    f"unknown HER v2 reasoning route: {route_name!r}"
+                ) from exc
+            reasoning = str(value or "").strip()
+            if not reasoning:
+                raise HERv2ConfigurationError(
+                    f"provider reasoning for route {route.value!r} must be non-empty"
+                )
+            route_reasoning[route] = reasoning
+
         replan_limits = _effort_int_map(
             raw.get("replan_limits"),
             {Effort.LOW: 0, Effort.MEDIUM: 0, Effort.HIGH: 50, Effort.XHIGH: 100, Effort.MAX: 200},
@@ -192,6 +271,9 @@ class HERv2Config:
             profiles=profiles,
             stage_roles=stage_roles,
             stage_reasoning=stage_reasoning,
+            slot_models=slot_models,
+            route_model_slots=route_model_slots,
+            route_reasoning=route_reasoning,
             reporting_attempts=int(raw.get("reporting_attempts", 3)),
             structured_repair_attempts=int(raw.get("structured_repair_attempts", 3)),
             replan_limits=replan_limits,
@@ -208,29 +290,76 @@ class HERv2Config:
             shadow_mode=_strict_bool(raw.get("shadow_mode", False), "shadow_mode"),
         )
 
+    def _configured_route_profile(
+        self,
+        profile: ProviderProfile,
+        route: Route,
+    ) -> ProviderProfile:
+        stage = ROUTE_STAGES[route]
+        model = profile.model
+        slot = self.route_model_slots.get(route)
+        if slot in {"fast", "pro"} and self.slot_models.get(slot):
+            model = self.slot_models[slot]
+        reasoning = self.route_reasoning.get(route)
+        if reasoning is None:
+            reasoning = self.stage_reasoning.get(stage, profile.reasoning)
+        return replace(profile, model=model, reasoning=reasoning)
+
+    def profile_for_route(
+        self,
+        route: Route | str,
+        *,
+        base_profile: ProviderProfile | None = None,
+    ) -> ProviderProfile:
+        parsed = (
+            route
+            if isinstance(route, Route)
+            else Route(str(route).strip().lower())
+        )
+        stage = ROUTE_STAGES[parsed]
+        profile = base_profile
+        if profile is None:
+            if parsed in {
+                Route.EXECUTION_SIMPLE,
+                Route.EXECUTION_COMPLEX,
+                Route.EXECUTION_HIGH_VOLUME,
+            }:
+                preferred_role = {
+                    Route.EXECUTION_SIMPLE: "lightweight",
+                    Route.EXECUTION_COMPLEX: "premium",
+                    Route.EXECUTION_HIGH_VOLUME: "orchestrator",
+                }[parsed]
+                role = (
+                    preferred_role
+                    if preferred_role in self.profiles
+                    else self.stage_roles.get(stage)
+                )
+            else:
+                role = self.stage_roles.get(stage)
+            if not role or role not in self.profiles:
+                raise HERv2ConfigurationError(
+                    f"no configured provider profile for route {parsed.value}"
+                )
+            profile = self.profiles[role]
+        return self._configured_route_profile(profile, parsed)
+
     def profile_for(self, stage: Stage) -> ProviderProfile:
         role = self.stage_roles.get(stage)
         if not role or role not in self.profiles:
             raise HERv2ConfigurationError(
                 f"no configured provider profile for stage {stage.value}"
             )
-        profile = self.profiles[role]
-        reasoning = self.stage_reasoning.get(stage)
-        return replace(profile, reasoning=reasoning) if reasoning is not None else profile
+        return self._configured_route_profile(
+            self.profiles[role],
+            DEFAULT_ROUTES_BY_STAGE[stage],
+        )
 
     def execution_profile_for(
         self, classification: TriageClassification
     ) -> ProviderProfile:
-        preferred_role = {
-            TriageClassification.SIMPLE_TASK: "lightweight",
-            TriageClassification.COMPLEX_TASK: "premium",
-            TriageClassification.HIGH_VOLUME_TASK: "orchestrator",
-        }.get(classification)
-        if preferred_role and preferred_role in self.profiles:
-            profile = self.profiles[preferred_role]
-            reasoning = self.stage_reasoning.get(Stage.EXECUTION)
-            return replace(profile, reasoning=reasoning) if reasoning is not None else profile
-        return self.profile_for(Stage.EXECUTION)
+        return self.profile_for_route(
+            EXECUTION_ROUTES.get(classification, Route.EXECUTION_COMPLEX)
+        )
 
 
 def _effort_int_map(

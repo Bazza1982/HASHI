@@ -21,6 +21,7 @@ from orchestrator.her_v2.models import (
     ExecutionDisposition,
     LifecycleState,
     ReviewOutcome,
+    Route,
     Stage,
     TerminalState,
     TriageClassification,
@@ -250,6 +251,75 @@ def test_stage_reasoning_override_is_provider_configuration_not_effort():
     )
     assert config.profile_for(Stage.REVIEW).reasoning == "max"
     assert Effort.HIGH.value == "high"
+
+
+def test_effective_routes_choose_model_slot_and_reasoning_independently():
+    config = HERv2Config.from_mapping(
+        {
+            "profiles": _profiles(),
+            "slot_models": {
+                "fast": "quick-model",
+                "pro": "pro-model",
+            },
+            "route_model_slots": {
+                "planning": "fast",
+                "execution_simple": "pro",
+                "execution_high_volume": "fast",
+                "structure_repair": "inherit",
+            },
+            "route_reasoning": {
+                "planning": "low",
+                "execution_simple": "max",
+            },
+        }
+    )
+
+    planning = config.profile_for(Stage.PLANNING)
+    simple = config.execution_profile_for(TriageClassification.SIMPLE_TASK)
+    complex_task = config.execution_profile_for(TriageClassification.COMPLEX_TASK)
+    high_volume = config.execution_profile_for(
+        TriageClassification.HIGH_VOLUME_TASK
+    )
+
+    assert planning.name == "premium"
+    assert planning.model == "quick-model"
+    assert planning.reasoning == "low"
+    assert simple.name == "lightweight"
+    assert simple.model == "pro-model"
+    assert simple.reasoning == "max"
+    assert complex_task.model == "model-premium"
+    assert high_volume.model == "quick-model"
+    assert config.profile_for_route(Route.STRUCTURE_REPAIR).model == "model-premium"
+
+    with pytest.raises(HERv2ConfigurationError, match="invalid model slot"):
+        HERv2Config.from_mapping(
+            {
+                "profiles": _profiles(),
+                "route_model_slots": {"review": "inherit"},
+            }
+        )
+    with pytest.raises(HERv2ConfigurationError, match="undefined model slot"):
+        HERv2Config.from_mapping(
+            {
+                "profiles": _profiles(),
+                "route_model_slots": {"review": "fast"},
+            }
+        )
+
+    profiles_without_orchestrator = _profiles()
+    profiles_without_orchestrator.pop("orchestrator")
+    fallback = HERv2Config.from_mapping(
+        {
+            "profiles": profiles_without_orchestrator,
+            "slot_models": {"fast": "quick-model", "pro": "pro-model"},
+            "route_model_slots": {"execution_high_volume": "fast"},
+        }
+    )
+    high_volume_fallback = fallback.execution_profile_for(
+        TriageClassification.HIGH_VOLUME_TASK
+    )
+    assert high_volume_fallback.name == "premium"
+    assert high_volume_fallback.model == "quick-model"
 
 
 def test_safety_configuration_rejects_ambiguous_or_unsafe_values():

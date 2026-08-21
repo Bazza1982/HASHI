@@ -1377,7 +1377,27 @@ async def test_stale_her_v2_model_button_cannot_bypass_managed_mode(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_her_v2_model_menu_shows_fast_pro_and_reasoning_without_role_sentinel(tmp_path):
+async def test_stale_her_v2_route_button_cannot_bypass_managed_mode(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    callback_data = runtime_model_selection.her_v2_route_keyboard(
+        runtime,
+        "planning",
+    ).inline_keyboard[0][0].callback_data
+    before = manager.get_her_v2_configuration().to_dict()
+    manager.agent_mode = "wrapper"
+    update, edits, answers = _callback_update(callback_data)
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert edits == []
+    assert answers[-1]["show_alert"] is True
+    assert "managed by the active mode" in answers[-1]["text"]
+    assert manager.get_her_v2_configuration().to_dict() == before
+
+
+@pytest.mark.asyncio
+async def test_her_v2_model_menu_shows_quick_pro_and_routes_without_derived_reasoning(tmp_path):
     manager = _make_claw_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
@@ -1388,12 +1408,14 @@ async def test_her_v2_model_menu_shows_fast_pro_and_reasoning_without_role_senti
     markup = str(runtime._reply_payloads[-1]["reply_markup"])
     assert "HER V2 MODELS" in text
     assert "<b>Provider</b> · <code>deepseek-api</code>" in text
-    assert "<b>Fast</b> · <code>deepseek-v4-flash</code>" in text
-    assert "<b>Pro</b> · <code>deepseek-v4-pro</code>" in text
+    assert "<b>Quick model</b> · <code>deepseek-v4-flash</code>" in text
+    assert "<b>Pro model</b> · <code>deepseek-v4-pro</code>" in text
     assert "role-configured" not in text
+    assert "mixed" not in text.lower()
     assert "her_model_slot:fast" in markup
     assert "her_model_slot:pro" in markup
-    assert "her_reasoning_stages" in markup
+    assert "her_routes" in markup
+    assert "her_reasoning" not in markup
 
 
 def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp_path):
@@ -1406,12 +1428,19 @@ def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp
     )
     deepseek["models"].append("provider/" + "m" * 90)
     manager.apply_her_v2_configuration(
-        manager.prepare_her_v2_reasoning("fast", "r" * 64)
+        manager.prepare_her_v2_route_reasoning(
+            "execution_high_volume",
+            "r" * 64,
+        )
     )
     keyboards = [
         runtime_model_selection.her_v2_provider_keyboard(runtime),
         runtime_model_selection.her_v2_slot_model_keyboard(runtime, "fast"),
-        runtime_model_selection.her_v2_reasoning_keyboard(runtime, "fast"),
+        runtime_model_selection.her_v2_routes_keyboard(runtime),
+        runtime_model_selection.her_v2_route_keyboard(
+            runtime,
+            "execution_high_volume",
+        ),
     ]
 
     callbacks = [
@@ -1492,17 +1521,57 @@ async def test_her_v2_model_and_reasoning_buttons_update_only_their_targets(tmp_
     assert selected.fast_model == "deepseek-v4-pro"
     assert selected.pro_model == "deepseek-v4-pro"
     reasoning_before = dict(selected.profile_reasoning)
+    routes_before = dict(selected.route_model_slots)
 
-    reasoning_callback = runtime_model_selection.her_v2_reasoning_keyboard(
+    route_callback = runtime_model_selection.her_v2_route_keyboard(
         runtime,
-        "review",
-    ).inline_keyboard[1][0].callback_data
+        "planning",
+    ).inline_keyboard[0][0].callback_data
+    update, edits, _answers = _callback_update(route_callback)
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+    selected = manager.get_her_v2_configuration()
+    assert selected.model_slot_for_route("planning") == "fast"
+    assert selected.route_reasoning == {}
+    assert selected.fast_model == "deepseek-v4-pro"
+    assert selected.pro_model == "deepseek-v4-pro"
+
+    route_keyboard = runtime_model_selection.her_v2_route_keyboard(runtime, "review")
+    reasoning_callback = next(
+        button.callback_data
+        for row in route_keyboard.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("her_route_reasoning:review:1:")
+    )
     update, edits, _answers = _callback_update(reasoning_callback)
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
     selected = manager.get_her_v2_configuration()
-    assert selected.stage_reasoning == {"review": "low"}
+    assert selected.route_reasoning == {"review": "low"}
+    assert selected.model_slot_for_route("planning") == "fast"
+    assert selected.model_slot_for_route("review") == routes_before["review"]
     assert selected.profile_reasoning == reasoning_before
-    assert "HER V2 MODELS" in edits[-1]["text"]
+    assert "HER V2 ROUTE" in edits[-1]["text"]
+
+
+def test_her_v2_route_menu_splits_execution_and_limits_follow_source(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+
+    route_markup = str(runtime_model_selection.her_v2_routes_keyboard(runtime))
+    repair_markup = str(
+        runtime_model_selection.her_v2_route_keyboard(runtime, "structure_repair")
+    )
+    review_markup = str(
+        runtime_model_selection.her_v2_route_keyboard(runtime, "review")
+    )
+
+    assert "Simple execution" in route_markup
+    assert "Complex execution" in route_markup
+    assert "High-volume execution" in route_markup
+    assert "Follow source" in repair_markup
+    assert "Follow source" not in review_markup
+    assert "Provider reasoning</b> · <code>Follow source</code>" in (
+        runtime_model_selection.her_v2_route_text(runtime, "structure_repair")
+    )
 
 
 @pytest.mark.asyncio
@@ -1551,20 +1620,43 @@ async def test_stale_her_v2_model_menu_rejects_reordered_model_grants(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_her_v2_model_typed_commands_update_slot_and_stage_reasoning(tmp_path):
+async def test_her_v2_model_typed_commands_update_slots_and_route_reasoning(tmp_path):
     manager = _make_claw_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
 
-    update, context = _update(["fast", "deepseek-v4-pro"])
+    update, context = _update(["quick", "deepseek-v4-pro"])
     await FlexibleAgentRuntime.cmd_model(runtime, update, context)
     assert manager.get_her_v2_configuration().fast_model == "deepseek-v4-pro"
     assert manager.get_her_v2_configuration().pro_model == "deepseek-v4-pro"
 
+    update, context = _update(["route", "simple", "pro"])
+    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
+    assert (
+        manager.get_her_v2_configuration().model_slot_for_route("execution_simple")
+        == "pro"
+    )
+
     update, context = _update(["reasoning", "review", "low"])
     await FlexibleAgentRuntime.cmd_model(runtime, update, context)
     selected = manager.get_her_v2_configuration()
-    assert selected.stage_reasoning["review"] == "low"
-    assert "HER V2 MODELS" in messages[-1]
+    assert selected.route_reasoning["review"] == "low"
+    assert selected.stage_reasoning == {}
+    assert "HER V2 ROUTE" in messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_retired_reasoning_button_fails_closed_without_mutation(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    before = manager.get_her_v2_configuration().to_dict()
+    update, edits, answers = _callback_update("her_reasoning:review:1:abcdef")
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert edits == []
+    assert answers[-1]["show_alert"] is True
+    assert "old reasoning menu was retired" in answers[-1]["text"]
+    assert manager.get_her_v2_configuration().to_dict() == before
 
 
 @pytest.mark.asyncio

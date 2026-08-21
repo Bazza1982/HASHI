@@ -424,7 +424,7 @@ def her_v2_provider_menu_text(
     facts = [
         "<b>Backend</b> · <code>her-v2</code>",
         f"<b>Available</b> · <code>{available_count}</code> call providers",
-        "<b>Fast/Pro</b> · validated and saved together with the provider",
+        "<b>Quick/Pro</b> · validated and saved together with the provider",
     ]
     if unavailable:
         facts.append(
@@ -441,7 +441,7 @@ def her_v2_provider_menu_text(
         facts=facts,
         consequence=(
             "A provider selection atomically assigns valid defaults to both model "
-            "slots. Provider reasoning is preserved and HER effort is untouched."
+            "slots. Task-route reasoning is preserved and HER effort is untouched."
         ),
         action=(
             "Choose a call provider below."
@@ -470,9 +470,6 @@ def her_v2_model_menu_text(
     provider: str,
     fast_model: str,
     pro_model: str,
-    fast_reasoning: str,
-    pro_reasoning: str,
-    stage_override_count: int,
 ) -> str:
     return setting_card(
         "🧠",
@@ -480,19 +477,17 @@ def her_v2_model_menu_text(
         current=f"<code>{html.escape(provider)}</code>",
         facts=[
             f"<b>Provider</b> · <code>{html.escape(provider)}</code>",
-            f"<b>Fast</b> · <code>{html.escape(fast_model)}</code>",
-            f"<b>Fast reasoning</b> · <code>{html.escape(fast_reasoning)}</code>",
-            f"<b>Pro</b> · <code>{html.escape(pro_model)}</code>",
-            f"<b>Pro reasoning</b> · <code>{html.escape(pro_reasoning)}</code>",
-            f"<b>Stage overrides</b> · <code>{stage_override_count}</code>",
+            f"<b>Quick model</b> · <code>{html.escape(fast_model)}</code>",
+            f"<b>Pro model</b> · <code>{html.escape(pro_model)}</code>",
         ],
         consequence=(
-            "Fast/Pro models and provider reasoning apply to HER role profiles. "
-            "The separate /effort setting continues to control orchestration only."
+            "Quick and Pro define reusable models only. Each effective task route "
+            "selects its model slot and provider reasoning independently. The "
+            "separate /effort setting controls orchestration only."
         ),
         action=(
-            "Choose a control below, or use <code>/model fast|pro &lt;model&gt;</code> "
-            "and <code>/model reasoning &lt;fast|pro|stage&gt; &lt;value|inherit&gt;</code>."
+            "Choose a model, or open task routes to configure model and reasoning "
+            "as separate settings."
         ),
     )
 
@@ -504,13 +499,14 @@ def her_v2_slot_model_text(
     current_model: str,
     model_count: int,
 ) -> str:
+    display_slot = "Quick" if slot == "fast" else "Pro"
     return setting_card(
         "🧠",
-        f"HER v2 {slot} model",
+        f"HER v2 {display_slot} model",
         current=f"<code>{html.escape(current_model)}</code>",
         facts=[
             f"<b>Provider</b> · <code>{html.escape(provider)}</code>",
-            f"<b>Slot</b> · <code>{html.escape(slot)}</code>",
+            f"<b>Slot</b> · <code>{display_slot}</code>",
             f"<b>Allowed models</b> · <code>{model_count}</code>",
         ],
         consequence="Only this model slot changes; the other slot and all reasoning settings are preserved.",
@@ -518,39 +514,51 @@ def her_v2_slot_model_text(
     )
 
 
-def her_v2_reasoning_text(
-    *,
-    target: str,
-    current: str,
-    inherited: bool,
-) -> str:
-    if target in {"fast", "pro"}:
-        inheritance = "SLOT PROFILES"
-    elif inherited:
-        inheritance = "STAGE → SLOT"
-    else:
-        inheritance = "EXPLICIT STAGE"
+def her_v2_routes_text(*, route_count: int, explicit_reasoning_count: int) -> str:
     return setting_card(
-        "💭",
-        "HER v2 provider reasoning",
-        current=f"<code>{html.escape(current)}</code>",
+        "🧭",
+        "HER v2 task routes",
+        current=f"<code>{route_count}</code> effective routes",
         facts=[
-            f"<b>Target</b> · <code>{html.escape(target)}</code>",
-            f"<b>Inheritance</b> · <code>{inheritance}</code>",
+            "<b>Model</b> · each route independently selects <code>Quick</code> or <code>Pro</code>",
+            "<b>Reasoning</b> · each route independently selects provider reasoning",
+            f"<b>Custom reasoning</b> · <code>{explicit_reasoning_count}</code> route overrides",
         ],
-        consequence="This changes provider reasoning only. HER orchestration effort is not read or modified.",
-        action="Choose a provider reasoning value below.",
+        consequence=(
+            "Changing one route never changes either model definition or another "
+            "route. HER orchestration effort remains separate."
+        ),
+        action="Choose a task route below.",
     )
 
 
-def her_v2_stage_reasoning_text(*, override_count: int) -> str:
+def her_v2_route_text(
+    *,
+    label: str,
+    model_slot: str,
+    effective_model: str,
+    reasoning: str,
+    reasoning_inherited: bool,
+) -> str:
+    reasoning_source = "inherited default" if reasoning_inherited else "explicit route"
     return setting_card(
-        "💭",
-        "HER v2 stage reasoning",
-        current=f"<code>{override_count}</code> explicit overrides",
-        facts=["<b>Fallback</b> · each stage inherits its Fast or Pro profile reasoning"],
-        consequence="A stage override affects only provider reasoning for that stage.",
-        action="Choose a stage, then select a value or inherit.",
+        "🧭",
+        f"HER v2 route · {label}",
+        current=(
+            f"<code>{html.escape(model_slot)}</code> + "
+            f"<code>{html.escape(reasoning)}</code>"
+        ),
+        facts=[
+            f"<b>Model slot</b> · <code>{html.escape(model_slot)}</code>",
+            f"<b>Effective model</b> · <code>{html.escape(effective_model)}</code>",
+            f"<b>Provider reasoning</b> · <code>{html.escape(reasoning)}</code>",
+            f"<b>Reasoning source</b> · <code>{reasoning_source}</code>",
+        ],
+        consequence=(
+            "Model slot and provider reasoning are independent. Changing either "
+            "setting affects only this route; /effort is not read or modified."
+        ),
+        action="Choose a model slot or reasoning value below.",
     )
 
 

@@ -75,8 +75,8 @@ Five execution modes:
 
 **Backend configuration:**
 - `/backend` — switch active backend in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the backend picker. Selecting `her-v2` switches only the backend; it never asks the user to select the internal `role-configured` sentinel.
-- `/provider [name]` — HER v2-only call-provider picker. Choosing a provider atomically assigns valid defaults to both Fast and Pro slots while preserving provider reasoning and HER effort.
-- `/model` — for HER v2, show the provider plus Fast/Pro models, slot reasoning, and stage reasoning overrides. Use `/model fast|pro <model>` or `/model reasoning <fast|pro|stage> <value|inherit>`. Other backends retain their existing single-model `/model [name]` behaviour.
+- `/provider [name]` — HER v2-only call-provider picker. Choosing a provider atomically assigns valid defaults to both Quick and Pro slots while preserving task-route reasoning and HER effort.
+- `/model` — for HER v2, define Quick/Pro models and independently configure each effective task route's model slot and provider reasoning. Use `/model quick|pro <model>`, `/model route <route> <quick|pro|inherit>`, or `/model reasoning <route> <value|inherit>`. `inherit` as a model slot is valid only for structure repair. Other backends retain their existing single-model `/model [name]` behaviour.
 - Non-HER backend/model selection continues to the existing optional effort step when supported. HER v2 keeps backend, provider, models/reasoning, and effort as independent controls.
 - `/effort [level]` — HER v2 effort controls orchestration depth, Planning, Replanning, Review, and sub-agent availability. It never reads or writes provider reasoning. Other backends retain their model-aware effort behaviour.
 
@@ -162,13 +162,15 @@ provider/model grants. API-key values stay in `secrets.json`.
 ```
 
 Each provider row is an exact allowlist. The first and last allowed models are
-the default Fast and Pro choices unless `her_v2_fast_model` and
-`her_v2_pro_model` explicitly select other granted models. A one-model provider
-uses that model for both slots. Disabled providers remain visible but locked.
+the default Quick and Pro choices unless `her_v2_fast_model` (the internal
+compatibility key for Quick) and `her_v2_pro_model` explicitly select other
+granted models. A one-model provider uses that model for both slots. Disabled
+providers remain visible but locked.
 
 Runtime selections persist in the agent workspace as a dedicated
-`her_v2_configuration` block. It contains the call-provider engine, Fast/Pro
-models, profile reasoning, and explicit stage reasoning. The internal
+`her_v2_configuration` block. It contains the call-provider engine, Quick/Pro
+models, per-route model slots, and per-route provider reasoning. Legacy
+profile/stage reasoning remains readable as a migration fallback. The internal
 `role-configured` model remains an adapter sentinel only and is never presented
 as a user choice. Provider/model grants are revalidated before every update.
 

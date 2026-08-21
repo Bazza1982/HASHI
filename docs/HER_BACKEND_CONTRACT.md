@@ -132,8 +132,8 @@ normal credential chain. The command surfaces have independent authority:
 | Command | HER v2 authority |
 | --- | --- |
 | `/backend` | select `her-v2` only; never request or expose `role-configured` |
-| `/provider` | select one concrete call-provider engine and atomically resolve granted Fast/Pro defaults |
-| `/model` | inspect or change Fast/Pro models plus slot/stage provider reasoning |
+| `/provider` | select one concrete call-provider engine and atomically resolve granted Quick/Pro defaults |
+| `/model` | define Quick/Pro models, then select a model slot and provider reasoning independently for each effective task route |
 | `/effort` | control orchestration depth, Replanning, Review, and sub-agents only |
 
 The non-HER `/model` contract is unchanged. HER v2 runtime selection is stored
@@ -142,11 +142,13 @@ exact Agent grants, reject stale callbacks and unavailable providers, and leave
 the previous complete selection intact on validation or persistence failure.
 The adapter-only `role-configured` value is never a selectable model.
 
-Fast reasoning applies to the lightweight and Triage profiles; Pro reasoning
-applies to premium, reviewer, orchestrator, and other Pro profiles. An explicit
-stage reasoning value overrides its profile for that stage only. Clearing a
-stage override restores profile inheritance. No provider reasoning value is
-derived from HER effort.
+Quick and Pro are reusable model definitions, not reasoning presets. Each
+effective task route independently chooses Quick or Pro and a provider reasoning
+value. Execution is exposed as Simple, Complex, and High-volume because those
+classifications route through different profiles. Structure repair may instead
+follow the model that produced the source output. Clearing a route reasoning
+override restores its underlying profile default. No provider reasoning
+value is derived from HER effort.
 
 Request-scoped reviewer tools use the same configured provider/model route as the
 primary run. Anthropic and the supported OpenAI-compatible families—including xAI,

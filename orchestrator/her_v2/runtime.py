@@ -45,6 +45,7 @@ from .models import (
     LifecycleState,
     ReviewFinding,
     ReviewOutcome,
+    Route,
     Stage,
     StageRequest,
     StageResponse,
@@ -1542,12 +1543,16 @@ class HERv2Runtime:
             "repair_authority": "structure_only",
             "original_execution_must_not_be_replayed": True,
         }
+        repair_profile = self.config.profile_for_route(
+            Route.STRUCTURE_REPAIR,
+            base_profile=profile,
+        )
         try:
             repaired_response, parsed = await self._invoke_stage(
                 state,
                 Stage.STRUCTURE_REPAIR,
                 validator,
-                profile=profile,
+                profile=repair_profile,
                 allow_tools=False,
                 allow_side_effects=False,
                 attempts=self.config.structured_repair_attempts,
@@ -1564,8 +1569,8 @@ class HERv2Runtime:
                 role=role,
                 event="structure_repair_failed",
                 event_id=f"{repair_key}:failed",
-                provider=profile.engine,
-                model=profile.model,
+                provider=repair_profile.engine,
+                model=repair_profile.model,
                 attempt=original_attempt,
                 payload={
                     "error_type": type(exc).__name__,
@@ -1580,8 +1585,8 @@ class HERv2Runtime:
             role=role,
             event="structure_repair_completed",
             event_id=f"{repair_key}:completed",
-            provider=repaired_response.provider or profile.engine,
-            model=repaired_response.model or profile.model,
+            provider=repaired_response.provider or repair_profile.engine,
+            model=repaired_response.model or repair_profile.model,
             attempt=original_attempt,
             payload={
                 "repair_target_stage": target_stage.value,
