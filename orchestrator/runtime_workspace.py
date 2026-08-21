@@ -10,6 +10,7 @@ from orchestrator import runtime_pending
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
 from orchestrator.command_ui import card_title, confirm_card
 from orchestrator.handoff_builder import HandoffBuilder
+from orchestrator.her_v2.runtime_configuration import HER_V2_CONFIGURATION_STATE_KEY
 from orchestrator.memory_index import MemoryIndex
 from orchestrator.memory_plus_mode import (
     ensure_memory_plus_notepad,
@@ -351,6 +352,7 @@ def _preserve_backend_state(runtime: Any) -> dict[str, Any]:
             "audit",
             "audit_criteria",
             "her_habit_meditation",
+            HER_V2_CONFIGURATION_STATE_KEY,
         ):
             if key in state_snapshot:
                 preserved_state[key] = state_snapshot[key]

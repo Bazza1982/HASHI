@@ -28,7 +28,11 @@ from orchestrator.memory_plus_mode import (
     set_memory_plus_enabled,
 )
 from orchestrator.runtime_common import QueuedRequest
-from orchestrator import runtime_cross_session, telegram_stream_policy
+from orchestrator import (
+    runtime_cross_session,
+    runtime_model_selection,
+    telegram_stream_policy,
+)
 from orchestrator.wrapper_mode import DEFAULT_WRAPPER_STYLE_SLOT_TEXT
 
 
@@ -66,24 +70,51 @@ def _make_claw_manager(workspace: Path) -> FlexibleBackendManager:
         telegram_token_key="test-claw",
         allowed_backends=[
             {
-                "engine": "her",
-                "provider": "openrouter",
+                "engine": "openrouter-api",
                 "models": ["deepseek/deepseek-v4-flash", "openai/gpt-4.1-mini"],
                 "default_model": "deepseek/deepseek-v4-flash",
             },
             {
-                "engine": "her",
-                "provider": "deepseek",
+                "engine": "deepseek-api",
                 "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
                 "default_model": "deepseek-v4-flash",
             },
             {
-                "engine": "her",
-                "provider": "ollama",
-                "model": "qwen2.5-coder:32b",
+                "engine": "her-v2",
+                "model": "role-configured",
+                "effort": "high",
+                "her_v2": {
+                    "profiles": {
+                        "lightweight": {
+                            "engine": "deepseek-api",
+                            "model": "deepseek-v4-flash",
+                            "reasoning": "high",
+                        },
+                        "triage": {
+                            "engine": "deepseek-api",
+                            "model": "deepseek-v4-flash",
+                            "reasoning": "high",
+                        },
+                        "premium": {
+                            "engine": "deepseek-api",
+                            "model": "deepseek-v4-pro",
+                            "reasoning": "high",
+                        },
+                        "reviewer": {
+                            "engine": "deepseek-api",
+                            "model": "deepseek-v4-pro",
+                            "reasoning": "max",
+                        },
+                        "orchestrator": {
+                            "engine": "deepseek-api",
+                            "model": "deepseek-v4-pro",
+                            "reasoning": "max",
+                        },
+                    }
+                },
             },
         ],
-        active_backend="her",
+        active_backend="her-v2",
         project_root=workspace,
     )
     global_cfg = GlobalConfig(
@@ -95,9 +126,16 @@ def _make_claw_manager(workspace: Path) -> FlexibleBackendManager:
         organization_id=None,
         her_providers={
             "providers": {
-                "openrouter": {"base_url": "https://openrouter.invalid/v1"},
-                "deepseek": {"base_url": "https://deepseek.invalid/v1"},
+                "deepseek": {
+                    "engine": "deepseek-api",
+                    "base_url": "https://deepseek.invalid/v1",
+                },
+                "openrouter": {
+                    "engine": "openrouter-api",
+                    "base_url": "https://openrouter.invalid/v1",
+                },
                 "ollama": {
+                    "engine": "ollama-api",
                     "base_url": "http://localhost:11434/v1",
                     "status": "disabled",
                 },
@@ -105,14 +143,14 @@ def _make_claw_manager(workspace: Path) -> FlexibleBackendManager:
         },
     )
     manager = FlexibleBackendManager(cfg, global_cfg, secrets={})
-    manager._active_provider_override = "openrouter"
-    manager._active_model_override = "deepseek/deepseek-v4-flash"
     manager.current_backend = SimpleNamespace(
         config=SimpleNamespace(
-            model="deepseek/deepseek-v4-flash",
-            extra={"provider": "openrouter"},
+            engine="her-v2",
+            model="role-configured",
+            extra={"her_v2": cfg.allowed_backends[-1]["her_v2"]},
         ),
-        effort=None,
+        effort="high",
+        _v2_config=None,
     )
     return manager
 
@@ -150,18 +188,25 @@ def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime
         with_context=False,
     ):
         manager.config.active_backend = target_engine
-        manager._active_provider_override = target_provider if target_engine == "her" else None
+        manager._active_provider_override = None
         manager._save_state(
             active_model=target_model,
             active_provider=target_provider,
         )
-        if target_engine == "her":
+        if target_engine == "her-v2":
+            her_row = next(
+                item
+                for item in manager.config.allowed_backends
+                if item["engine"] == "her-v2"
+            )
             manager.current_backend = SimpleNamespace(
                 config=SimpleNamespace(
-                    model=target_model,
-                    extra={"provider": target_provider},
+                    engine="her-v2",
+                    model="role-configured",
+                    extra={"her_v2": her_row["her_v2"]},
                 ),
-                effort=None,
+                effort=her_row["effort"],
+                _v2_config=None,
             )
         return True, f"Backend switched to: {target_engine}\nModel: {target_model}"
 
@@ -1192,14 +1237,14 @@ async def test_backend_non_flex_modes_offer_confirmation_without_mutating(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_provider_command_is_available_only_for_active_claw_backend(tmp_path):
+async def test_provider_command_is_available_only_for_active_her_v2_backend(tmp_path):
     manager = _make_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
 
     await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
 
-    assert "HER PROVIDER" in messages[-1]
+    assert "HER V2 PROVIDER" in messages[-1]
     assert "UNAVAILABLE" in messages[-1]
     assert "<code>codex-cli</code>" in messages[-1]
     assert not (manager.config.workspace_dir / "state.json").exists()
@@ -1216,43 +1261,46 @@ async def test_provider_menu_marks_current_and_reports_locked_choices(tmp_path):
     text = messages[-1]
     markup = runtime._reply_payloads[-1]["reply_markup"]
     labels = [button.text for row in markup.inline_keyboard for button in row]
-    assert "HER PROVIDER" in text
+    assert "HER V2 PROVIDER" in text
     assert text.index("<b>Current</b>") < text.index("<b>Backend</b>")
     assert "ollama (provider is disabled)" in text
-    assert labels == ["✓ openrouter", "deepseek", "🔒 ollama"]
+    assert labels == ["✓ deepseek", "openrouter", "🔒 ollama"]
     assert not (manager.config.workspace_dir / "state.json").exists()
 
 
 @pytest.mark.asyncio
-async def test_provider_choice_opens_only_that_provider_models_without_committing(tmp_path):
+async def test_provider_typed_choice_commits_both_model_slots_atomically(tmp_path):
     manager = _make_claw_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
-    update, context = _update(["deepseek"])
+    update, context = _update(["openrouter"])
 
     await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
 
     text = messages[-1]
-    markup = str(runtime._reply_payloads[-1]["reply_markup"])
-    assert "CHOOSE HER MODEL" in text
-    assert "<code>deepseek</code>" in text
-    assert "deepseek-v4-flash" in markup
-    assert "deepseek-v4-pro" in markup
-    assert "openai/gpt-4.1-mini" not in markup
-    assert manager.get_active_provider() == "openrouter"
-    assert not (manager.config.workspace_dir / "state.json").exists()
+    assert "HER V2 MODELS" in text
+    assert "<code>openrouter-api</code>" in text
+    assert "deepseek/deepseek-v4-flash" in text
+    assert "openai/gpt-4.1-mini" in text
+    state = _read_state(manager.config.workspace_dir)
+    assert state["active_backend"] == "her-v2"
+    assert "active_model" not in state
+    assert "active_provider" not in state
+    assert state["her_v2_configuration"]["provider"] == "openrouter-api"
+    assert state["her_v2_configuration"]["fast_model"] == "deepseek/deepseek-v4-flash"
+    assert state["her_v2_configuration"]["pro_model"] == "openai/gpt-4.1-mini"
 
 
 @pytest.mark.asyncio
 async def test_provider_typed_name_is_case_insensitive(tmp_path):
     manager = _make_claw_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
-    update, context = _update(["DeepSeek"])
+    update, context = _update(["OpenRouter"])
 
     await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
 
-    assert "CHOOSE HER MODEL" in messages[-1]
-    assert "<code>deepseek</code>" in messages[-1]
-    assert "pmodel:a:deepseek:0" in str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "HER V2 MODELS" in messages[-1]
+    assert "<code>openrouter-api</code>" in messages[-1]
+    assert manager.get_her_v2_configuration().provider == "openrouter-api"
 
 
 @pytest.mark.asyncio
@@ -1264,51 +1312,72 @@ async def test_provider_command_respects_managed_model_modes(tmp_path):
 
     await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
 
-    assert "HER PROVIDER" in messages[-1]
+    assert "HER V2 PROVIDER" in messages[-1]
     assert "MANAGED" in messages[-1]
     assert "<code>/core</code>" in messages[-1]
     assert not (manager.config.workspace_dir / "state.json").exists()
 
 
 @pytest.mark.asyncio
-async def test_provider_button_then_model_button_commits_route_atomically(tmp_path):
+async def test_provider_button_commits_provider_and_both_slots_without_model_step(tmp_path):
     manager = _make_claw_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
 
-    update, edits, _answers = _callback_update("provider:a:deepseek")
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-    assert "CHOOSE HER MODEL" in edits[-1]["text"]
-    assert manager.get_active_provider() == "openrouter"
-    assert not (manager.config.workspace_dir / "state.json").exists()
-
-    update, edits, _answers = _callback_update("pmodel:a:deepseek:1")
+    callback_data = runtime_model_selection.her_v2_provider_keyboard(
+        runtime
+    ).inline_keyboard[1][0].callback_data
+    update, edits, _answers = _callback_update(callback_data)
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
 
     state = _read_state(manager.config.workspace_dir)
-    assert state["active_backend"] == "her"
-    assert state["active_provider"] == "deepseek"
-    assert state["active_model"] == "deepseek-v4-pro"
-    assert "CHOOSE EFFORT" in edits[-1]["text"]
-    assert "<b>Provider</b> · <code>deepseek</code>" in edits[-1]["text"]
+    assert state["active_backend"] == "her-v2"
+    assert state["her_v2_configuration"]["provider"] == "openrouter-api"
+    assert "active_provider" not in state
+    assert "active_model" not in state
+    assert "HER V2 MODELS" in edits[-1]["text"]
+    assert "her_model_slot:fast" in str(edits[-1]["reply_markup"])
+    assert "pmodel:" not in str(edits[-1]["reply_markup"])
 
 
 @pytest.mark.asyncio
-async def test_stale_active_provider_button_cannot_switch_from_non_claw_backend(tmp_path):
+async def test_stale_active_provider_button_cannot_switch_from_non_her_v2_backend(tmp_path):
     manager = _make_claw_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
+    callback_data = runtime_model_selection.her_v2_provider_keyboard(
+        runtime
+    ).inline_keyboard[1][0].callback_data
     manager.config.active_backend = "codex-cli"
-    update, edits, answers = _callback_update("pmodel:a:deepseek:0")
+    update, edits, answers = _callback_update(callback_data)
 
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
 
     assert edits == []
     assert answers[-1]["show_alert"] is True
-    assert "only while HER is active" in answers[-1]["text"]
+    assert "only while HER v2 is active" in answers[-1]["text"]
     assert manager.config.active_backend == "codex-cli"
 
 
 @pytest.mark.asyncio
-async def test_claw_model_menu_is_scoped_to_active_provider(tmp_path):
+async def test_stale_her_v2_model_button_cannot_bypass_managed_mode(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    manager.agent_mode = "wrapper"
+    runtime, _messages = _make_runtime(manager)
+    callback_data = runtime_model_selection.her_v2_slot_model_keyboard(
+        runtime,
+        "fast",
+    ).inline_keyboard[1][0].callback_data
+    update, edits, answers = _callback_update(callback_data)
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert edits == []
+    assert answers[-1]["show_alert"] is True
+    assert "managed by the active mode" in answers[-1]["text"]
+    assert manager.get_her_v2_configuration().fast_model == "deepseek-v4-flash"
+
+
+@pytest.mark.asyncio
+async def test_her_v2_model_menu_shows_fast_pro_and_reasoning_without_role_sentinel(tmp_path):
     manager = _make_claw_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
@@ -1317,24 +1386,199 @@ async def test_claw_model_menu_is_scoped_to_active_provider(tmp_path):
 
     text = messages[-1]
     markup = str(runtime._reply_payloads[-1]["reply_markup"])
-    assert "<b>Provider</b> · <code>openrouter</code>" in text
-    assert "deepseek/deepseek-v4-flash" in markup
-    assert "openai/gpt-4.1-mini" in markup
-    assert "deepseek-v4-pro" not in markup
+    assert "HER V2 MODELS" in text
+    assert "<b>Provider</b> · <code>deepseek-api</code>" in text
+    assert "<b>Fast</b> · <code>deepseek-v4-flash</code>" in text
+    assert "<b>Pro</b> · <code>deepseek-v4-pro</code>" in text
+    assert "role-configured" not in text
+    assert "her_model_slot:fast" in markup
+    assert "her_model_slot:pro" in markup
+    assert "her_reasoning_stages" in markup
+
+
+def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    deepseek = next(
+        row
+        for row in manager.config.allowed_backends
+        if row["engine"] == "deepseek-api"
+    )
+    deepseek["models"].append("provider/" + "m" * 90)
+    manager.apply_her_v2_configuration(
+        manager.prepare_her_v2_reasoning("fast", "r" * 64)
+    )
+    keyboards = [
+        runtime_model_selection.her_v2_provider_keyboard(runtime),
+        runtime_model_selection.her_v2_slot_model_keyboard(runtime, "fast"),
+        runtime_model_selection.her_v2_reasoning_keyboard(runtime, "fast"),
+    ]
+
+    callbacks = [
+        button.callback_data
+        for keyboard in keyboards
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    ]
+
+    assert callbacks
+    assert max(len(value.encode("utf-8")) for value in callbacks) <= 64
 
 
 @pytest.mark.asyncio
-async def test_backend_claw_button_opens_provider_before_model(tmp_path):
+async def test_backend_her_v2_button_switches_backend_without_provider_or_model_step(tmp_path):
     manager = _make_claw_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
-    update, edits, _answers = _callback_update("backend:her:plain")
+    manager.config.active_backend = "codex-cli"
+    manager.config.allowed_backends.append(
+        {"engine": "codex-cli", "model": "gpt-5.4"}
+    )
+    update, edits, _answers = _callback_update("backend:her-v2:plain")
 
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
 
-    assert "HER PROVIDER" in edits[-1]["text"]
-    markup = str(edits[-1]["reply_markup"])
-    assert "provider:p:openrouter" in markup
-    assert "bmodel:her" not in markup
+    assert manager.config.active_backend == "her-v2"
+    assert "HER V2 SELECTED" in edits[-1]["text"]
+    assert "role-configured" not in edits[-1]["text"]
+    assert edits[-1].get("reply_markup") is None
+
+
+@pytest.mark.asyncio
+async def test_backend_her_v2_typed_command_switches_without_role_model(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    manager.config.active_backend = "codex-cli"
+    manager.config.allowed_backends.append(
+        {"engine": "codex-cli", "model": "gpt-5.4"}
+    )
+    update, context = _update(["her-v2"])
+
+    await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
+
+    assert manager.config.active_backend == "her-v2"
+    assert "HER V2 SELECTED" in messages[-1]
+    assert "role-configured" not in messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_backend_her_v2_rejects_single_model_argument(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    manager.config.active_backend = "codex-cli"
+    manager.config.allowed_backends.append(
+        {"engine": "codex-cli", "model": "gpt-5.4"}
+    )
+    update, context = _update(["her-v2", "role-configured"])
+
+    await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
+
+    assert manager.config.active_backend == "codex-cli"
+    assert "does not select a single backend model" in messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_her_v2_model_and_reasoning_buttons_update_only_their_targets(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+
+    model_callback = runtime_model_selection.her_v2_slot_model_keyboard(
+        runtime,
+        "fast",
+    ).inline_keyboard[1][0].callback_data
+    update, edits, _answers = _callback_update(model_callback)
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+    selected = manager.get_her_v2_configuration()
+    assert selected.fast_model == "deepseek-v4-pro"
+    assert selected.pro_model == "deepseek-v4-pro"
+    reasoning_before = dict(selected.profile_reasoning)
+
+    reasoning_callback = runtime_model_selection.her_v2_reasoning_keyboard(
+        runtime,
+        "review",
+    ).inline_keyboard[1][0].callback_data
+    update, edits, _answers = _callback_update(reasoning_callback)
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+    selected = manager.get_her_v2_configuration()
+    assert selected.stage_reasoning == {"review": "low"}
+    assert selected.profile_reasoning == reasoning_before
+    assert "HER V2 MODELS" in edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_stale_her_v2_model_menu_cannot_cross_provider_boundary(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    stale_callback = runtime_model_selection.her_v2_slot_model_keyboard(
+        runtime,
+        "fast",
+    ).inline_keyboard[1][0].callback_data
+    manager.apply_her_v2_configuration(
+        manager.prepare_her_v2_provider("openrouter")
+    )
+    update, edits, answers = _callback_update(stale_callback)
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert edits == []
+    assert answers[-1]["show_alert"] is True
+    assert "provider changed" in answers[-1]["text"]
+    assert manager.get_her_v2_configuration().provider == "openrouter-api"
+
+
+@pytest.mark.asyncio
+async def test_stale_her_v2_model_menu_rejects_reordered_model_grants(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    stale_callback = runtime_model_selection.her_v2_slot_model_keyboard(
+        runtime,
+        "fast",
+    ).inline_keyboard[1][0].callback_data
+    deepseek = next(
+        row
+        for row in manager.config.allowed_backends
+        if row["engine"] == "deepseek-api"
+    )
+    deepseek["models"].reverse()
+    update, edits, answers = _callback_update(stale_callback)
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert edits == []
+    assert answers[-1]["show_alert"] is True
+    assert "model menu is stale" in answers[-1]["text"]
+    assert manager.get_her_v2_configuration().fast_model == "deepseek-v4-flash"
+
+
+@pytest.mark.asyncio
+async def test_her_v2_model_typed_commands_update_slot_and_stage_reasoning(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+
+    update, context = _update(["fast", "deepseek-v4-pro"])
+    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
+    assert manager.get_her_v2_configuration().fast_model == "deepseek-v4-pro"
+    assert manager.get_her_v2_configuration().pro_model == "deepseek-v4-pro"
+
+    update, context = _update(["reasoning", "review", "low"])
+    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
+    selected = manager.get_her_v2_configuration()
+    assert selected.stage_reasoning["review"] == "low"
+    assert "HER V2 MODELS" in messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_her_v2_effort_change_does_not_mutate_provider_reasoning(tmp_path):
+    manager = _make_claw_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    before = manager.get_her_v2_configuration().to_dict()
+    update, context = _update(["max"])
+
+    await FlexibleAgentRuntime.cmd_effort(runtime, update, context)
+
+    after = manager.get_her_v2_configuration().to_dict()
+    assert after == before
+    assert manager.current_backend.effort == "max"
 
 
 @pytest.mark.asyncio
@@ -1997,6 +2241,15 @@ async def test_reset_preserves_wrapper_config_and_sys_prompts(tmp_path):
         wrapper={"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 3},
         wrapper_slots={"1": "Keep the Xishi persona."},
     )
+    state = manager.get_state_snapshot()
+    state["her_v2_configuration"] = {
+        "provider": "openrouter-api",
+        "fast_model": "fast-model",
+        "pro_model": "pro-model",
+        "profile_reasoning": {},
+        "stage_reasoning": {},
+    }
+    manager._write_state_dict(state)
     workspace = manager.config.workspace_dir
     (workspace / "agent.md").write_text("identity", encoding="utf-8")
     (workspace / "sys_prompts.json").write_text('{"slots":[]}', encoding="utf-8")
@@ -2025,6 +2278,13 @@ async def test_reset_preserves_wrapper_config_and_sys_prompts(tmp_path):
     assert state["core"] == {"backend": "codex-cli", "model": "gpt-5.5"}
     assert state["wrapper"] == {"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 3}
     assert state["wrapper_slots"] == {"1": "Keep the Xishi persona."}
+    assert state["her_v2_configuration"] == {
+        "provider": "openrouter-api",
+        "fast_model": "fast-model",
+        "pro_model": "pro-model",
+        "profile_reasoning": {},
+        "stage_reasoning": {},
+    }
     assert (workspace / "agent.md").exists()
     assert (workspace / "sys_prompts.json").exists()
     assert not (workspace / "transcript.jsonl").exists()

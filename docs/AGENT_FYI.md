@@ -46,8 +46,9 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   normal memory injection and Memory+ continuity independently.
 - `/notepad [today|carryover|history|find <query>|edit <text>|replace <text>|compact|clear]`:
   inspect or maintain the bounded Memory+ work card and archive index.
-- `/model`: inspect or switch model where supported, then optionally choose or
-  keep reasoning effort.
+- `/model`: on HER v2, inspect or configure Fast/Pro models and provider
+  reasoning by slot or stage; on other backends, retain the existing single-model
+  behaviour.
 - `/habit [view|on|off|default|delete|reset]`: inspect or control the default-off,
   adapter-owned HER Habit/Meditation path. Non-HER backends do not read or
   modify its records.
@@ -83,23 +84,29 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/terminate`: shut down this agent.
 
 ## Backend and Model Configuration
-- `/backend`: in Flex, open the backend picker, then model picker, then commit
-  the switch. In another execution mode, first ask for confirmation to move to
-  Flex; saved specialized-mode configuration and Memory+ are preserved.
-- backend `+`: same flow, but rebuild handoff context after model confirmation.
-- `/model`: inspect or switch the model for the current active backend only.
+- `/backend`: in Flex, open the backend picker. HER v2 commits the backend
+  directly without exposing `role-configured`; other backends retain their
+  existing model-selection flow. In another execution mode, first ask for
+  confirmation to move to Flex; saved specialized-mode configuration and
+  Memory+ are preserved.
+- backend `+`: same flow, but rebuild handoff context after the backend switch.
+- `/provider`: while HER v2 is active, select the call provider and atomically
+  resolve its Fast/Pro defaults.
+- `/model`: while HER v2 is active, configure Fast/Pro models and slot/stage
+  provider reasoning. Other active backends retain their existing behaviour.
 - Backend and model changes continue to an optional effort picker when the
   selected model supports effort. Keeping the current value leaves it unchanged;
   models without selectable effort finish with `n/a`.
-- `/effort [level]`: available when the active backend supports effort levels. Grok CLI offers `low`, `medium`, and `high` with a HASHI default of `medium`. Codex choices follow the active model: `gpt-5.6-sol` includes `max`; `gpt-5.6-terra` and `gpt-5.6-luna` expose `low`, `medium`, `high`, and `xhigh`. HER uses `low`, `medium`, `high`, `xhigh`, `max`, and `max+` as execution budgets of 12, 32, 96, 192, 384, and 512 iterations. MAX+ has plan-directed advisory assurance but no separate overall task time or token ceiling; independent reviewer provider calls have a fail-open 90-second hard deadline, and `/timeout` remains the outer control. HER effort controls agentic run length rather than provider reasoning depth.
+- `/effort [level]`: available when the active backend supports effort levels. Grok CLI offers `low`, `medium`, and `high` with a HASHI default of `medium`. Codex choices follow the active model. HER v2 effort controls orchestration depth, Replanning, Review, and sub-agent availability; it never changes provider reasoning configured through `/model`.
 - Grok CLI `0.2.93` offers `grok-4.5` as the default model and
   `grok-composer-2.5-fast` as an alternate. An agent explicitly configured for
   Composer keeps that choice until `/model grok-4.5` is selected. `/effort`
   changes Grok CLI reasoning effort and persists that backend choice.
 
 ## Flex Backend Behavior
-- Flex backend switching is atomic: backend choice is not committed until a valid model is selected.
-- `/backend` edits the same Telegram flow into a backend-specific model picker.
+- Non-HER backend/model switching retains its existing atomic flow.
+- HER v2 `/backend` switches only the backend; `/provider`, `/model`, and
+  `/effort` are independent persisted controls.
 - `/backend +` preserves the handoff intent through that picker and applies it only after the switch succeeds.
 - Backend rollback exists: if the new backend fails to initialize, bridge restores the previous backend.
 - Flex backend state persists in `workspaces/<agent>/state.json`.

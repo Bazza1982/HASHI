@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import types
 from types import SimpleNamespace
@@ -77,6 +78,31 @@ def test_skill_callback_binding_includes_nudge_buttons():
         if binding.method_name == "callback_skill"
     ]
     assert patterns == [r"^(skill|skilljob|nudgejob):"]
+
+
+@pytest.mark.parametrize(
+    ("callback_data", "method_name"),
+    [
+        ("her_provider:1:abcdef", "callback_claw_provider"),
+        ("her_provider_locked:2:abcdef", "callback_claw_provider"),
+        ("her_model_slot:fast", "callback_model"),
+        ("her_model:fast:0:abcdef:1:abcdef", "callback_model"),
+        ("her_reasoning_stages", "callback_model"),
+        ("her_reasoning_menu:review", "callback_model"),
+        ("her_reasoning:review:1:abcdef", "callback_model"),
+    ],
+)
+def test_her_v2_callbacks_are_bound_to_exactly_one_runtime_handler(
+    callback_data,
+    method_name,
+):
+    matches = [
+        binding.method_name
+        for binding in runtime_command_binding.CALLBACK_BINDINGS
+        if re.match(binding.pattern, callback_data)
+    ]
+
+    assert matches == [method_name]
 
 
 def test_bind_flexible_runtime_handlers_preserves_static_binding_count(monkeypatch):

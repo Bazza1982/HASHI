@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from typing import Any
 
 from .models import Effort, Stage, TerminalState, TriageClassification
 
@@ -57,6 +58,7 @@ DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
 class HERv2Config:
     profiles: Mapping[str, ProviderProfile]
     stage_roles: Mapping[Stage, str]
+    stage_reasoning: Mapping[Stage, str] = field(default_factory=dict)
     reporting_attempts: int = 3
     structured_repair_attempts: int = 3
     replan_limits: Mapping[Effort, int] = field(
@@ -118,7 +120,7 @@ class HERv2Config:
             )
 
     @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any]) -> "HERv2Config":
+    def from_mapping(cls, raw: Mapping[str, Any]) -> HERv2Config:
         profiles_raw = raw.get("profiles")
         if not isinstance(profiles_raw, Mapping) or not profiles_raw:
             raise HERv2ConfigurationError("her_v2.profiles must be a non-empty object")
@@ -160,6 +162,24 @@ class HERv2Config:
                 ) from exc
             stage_roles[stage] = str(role).strip()
 
+        stage_reasoning_raw = raw.get("stage_reasoning") or {}
+        if not isinstance(stage_reasoning_raw, Mapping):
+            raise HERv2ConfigurationError("her_v2.stage_reasoning must be an object")
+        stage_reasoning: dict[Stage, str] = {}
+        for stage_name, value in stage_reasoning_raw.items():
+            try:
+                stage = Stage(str(stage_name).strip().lower())
+            except ValueError as exc:
+                raise HERv2ConfigurationError(
+                    f"unknown HER v2 reasoning stage: {stage_name!r}"
+                ) from exc
+            reasoning = str(value or "").strip()
+            if not reasoning:
+                raise HERv2ConfigurationError(
+                    f"provider reasoning for stage {stage.value!r} must be non-empty"
+                )
+            stage_reasoning[stage] = reasoning
+
         replan_limits = _effort_int_map(
             raw.get("replan_limits"),
             {Effort.LOW: 0, Effort.MEDIUM: 0, Effort.HIGH: 50, Effort.XHIGH: 100, Effort.MAX: 200},
@@ -171,6 +191,7 @@ class HERv2Config:
         return cls(
             profiles=profiles,
             stage_roles=stage_roles,
+            stage_reasoning=stage_reasoning,
             reporting_attempts=int(raw.get("reporting_attempts", 3)),
             structured_repair_attempts=int(raw.get("structured_repair_attempts", 3)),
             replan_limits=replan_limits,
@@ -193,7 +214,9 @@ class HERv2Config:
             raise HERv2ConfigurationError(
                 f"no configured provider profile for stage {stage.value}"
             )
-        return self.profiles[role]
+        profile = self.profiles[role]
+        reasoning = self.stage_reasoning.get(stage)
+        return replace(profile, reasoning=reasoning) if reasoning is not None else profile
 
     def execution_profile_for(
         self, classification: TriageClassification
@@ -204,7 +227,9 @@ class HERv2Config:
             TriageClassification.HIGH_VOLUME_TASK: "orchestrator",
         }.get(classification)
         if preferred_role and preferred_role in self.profiles:
-            return self.profiles[preferred_role]
+            profile = self.profiles[preferred_role]
+            reasoning = self.stage_reasoning.get(Stage.EXECUTION)
+            return replace(profile, reasoning=reasoning) if reasoning is not None else profile
         return self.profile_for(Stage.EXECUTION)
 
 

@@ -60,6 +60,7 @@ FOUNDATION_PHASES = {
     "orchestrator.her_v2.audit": 0,
     "orchestrator.her_v2.progress": 0,
     "orchestrator.her_v2.config": 1,
+    "orchestrator.her_v2.runtime_configuration": 2,
     "orchestrator.her_v2.lifecycle": 1,
     "orchestrator.her_v2.policy": 1,
     "orchestrator.her_v2.prompts": 1,

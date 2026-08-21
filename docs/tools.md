@@ -74,18 +74,17 @@ Five execution modes:
 - Alias: `/usercomputer`
 
 **Backend configuration:**
-- `/backend` — switch active backend in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the backend picker.
-- `/provider [name]` — HER-only provider picker. Choosing a provider refreshes the menu to that provider's allowed models; provider and model are applied and saved together only after a model initializes successfully.
-- `/model [name]` — switch within the active backend. On `her`, the list is limited to the active provider and this command never changes provider.
-- Backend and model selection continue to an optional effort step when supported. Keeping the current effort does not change it; unsupported models finish with effort shown as `n/a`.
-- `/effort [level]` — effort for Claude, Codex, Grok CLI, and Claw. For Claw this is an agentic execution budget rather than provider reasoning depth: `low=12`, `medium=32`, `high=96` (default), `xhigh=192`, and `max=384` iterations. Other backends retain their model-aware reasoning-effort behavior.
+- `/backend` — switch active backend in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the backend picker. Selecting `her-v2` switches only the backend; it never asks the user to select the internal `role-configured` sentinel.
+- `/provider [name]` — HER v2-only call-provider picker. Choosing a provider atomically assigns valid defaults to both Fast and Pro slots while preserving provider reasoning and HER effort.
+- `/model` — for HER v2, show the provider plus Fast/Pro models, slot reasoning, and stage reasoning overrides. Use `/model fast|pro <model>` or `/model reasoning <fast|pro|stage> <value|inherit>`. Other backends retain their existing single-model `/model [name]` behaviour.
+- Non-HER backend/model selection continues to the existing optional effort step when supported. HER v2 keeps backend, provider, models/reasoning, and effort as independent controls.
+- `/effort [level]` — HER v2 effort controls orchestration depth, Planning, Replanning, Review, and sub-agent availability. It never reads or writes provider reasoning. Other backends retain their model-aware effort behaviour.
 
-### HER provider and model configuration
+### HER v2 provider and model configuration
 
-HER is not tied to OpenRouter. Provider connection details live once under
-`global.her_providers.providers`; each agent's `her` backend rows decide
-which providers and models that agent may select. API-key values stay in
-`secrets.json` and are referenced by name.
+HER v2 is provider-neutral. Provider connection metadata lives under
+`global.her_providers.providers`; concrete non-HER backend rows remain the exact
+provider/model grants. API-key values stay in `secrets.json`.
 
 ```json
 {
@@ -94,11 +93,13 @@ which providers and models that agent may select. API-key values stay in
       "max_permission_mode": "workspace-write",
       "providers": {
         "openrouter": {
+          "engine": "openrouter-api",
           "base_url": "https://openrouter.ai/api/v1",
           "secret": "openrouter-api_key",
           "status": "stable"
         },
         "deepseek": {
+          "engine": "deepseek-api",
           "base_url": "https://api.deepseek.com/v1",
           "secret": "deepseek-api_key",
           "status": "stable"
@@ -112,8 +113,7 @@ which providers and models that agent may select. API-key values stay in
       "type": "flex",
       "allowed_backends": [
         {
-          "engine": "her",
-          "provider": "openrouter",
+          "engine": "openrouter-api",
           "models": [
             "deepseek/deepseek-v4-flash",
             "deepseek/deepseek-v4-pro",
@@ -122,10 +122,38 @@ which providers and models that agent may select. API-key values stay in
           "default_model": "deepseek/deepseek-v4-flash"
         },
         {
-          "engine": "her",
-          "provider": "deepseek",
+          "engine": "deepseek-api",
           "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
           "default_model": "deepseek-v4-flash"
+        },
+        {
+          "engine": "her-v2",
+          "model": "role-configured",
+          "effort": "high",
+          "her_v2": {
+            "profiles": {
+              "lightweight": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-flash",
+                "reasoning": "high"
+              },
+              "triage": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-flash",
+                "reasoning": "high"
+              },
+              "premium": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-pro",
+                "reasoning": "high"
+              },
+              "reviewer": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-pro",
+                "reasoning": "max"
+              }
+            }
+          }
         }
       ]
     }
@@ -133,20 +161,16 @@ which providers and models that agent may select. API-key values stay in
 }
 ```
 
-Use one provider-specific backend row per provider when an agent needs a
-different model list for each service. The legacy singular `model` field still
-works as a one-model allowlist. A provider with `"status": "disabled"` stays
-visible as a locked menu choice with its reason. `/provider` is unavailable
-unless the active backend is `her`; `/model` never crosses the provider
-boundary.
+Each provider row is an exact allowlist. The first and last allowed models are
+the default Fast and Pro choices unless `her_v2_fast_model` and
+`her_v2_pro_model` explicitly select other granted models. A one-model provider
+uses that model for both slots. Disabled providers remain visible but locked.
 
-HASHI stores the upstream model IDs shown by each service. For direct DeepSeek,
-those remain `deepseek-v4-flash` and `deepseek-v4-pro`. When HER launches its
-packaged upstream Claw runtime, the adapter temporarily encodes a bare
-OpenAI-compatible model as `local/<model>` because the upstream protocol
-requires `provider/model` syntax; the runtime strips that routing prefix before
-sending the official bare ID to DeepSeek. OpenRouter model
-slugs already contain `/` and pass through unchanged.
+Runtime selections persist in the agent workspace as a dedicated
+`her_v2_configuration` block. It contains the call-provider engine, Fast/Pro
+models, profile reasoning, and explicit stage reasoning. The internal
+`role-configured` model remains an adapter sentinel only and is never presented
+as a user choice. Provider/model grants are revalidated before every update.
 
 **Wrapper-mode:**
 - `/mode wrapper` — switch a flex-capable agent into wrapper mode.

@@ -94,6 +94,7 @@ from orchestrator.ephemeral_invoker import make_backend_sidecar_invoker
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
+    HER_V2_ENGINE,
     canonical_backend_engine,
     get_available_efforts,
     get_available_models,
@@ -865,9 +866,11 @@ class FlexibleAgentRuntime:
         return "unknown"
 
     def get_current_provider(self) -> str | None:
-        if self.config.active_backend != "her":
-            return None
-        return self.backend_manager.get_active_provider()
+        if self.config.active_backend == HER_V2_ENGINE:
+            return self.backend_manager.get_her_v2_configuration().provider
+        if self.config.active_backend == "her":
+            return self.backend_manager.get_active_provider()
+        return None
 
     def reload_post_turn_observers(self) -> None:
         runtime_observers.reload_post_turn_observers(self)
@@ -4161,6 +4164,31 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, f"Backend not allowed: {target_engine}")
             return
 
+        if target_engine == HER_V2_ENGINE:
+            if requested_model:
+                await self._reply_text(
+                    update,
+                    "HER v2 does not select a single backend model. "
+                    "Use /backend her-v2 [+], then configure Fast/Pro with /model.",
+                )
+                return
+            success, message = await self._switch_backend_mode(
+                update.effective_chat.id,
+                HER_V2_ENGINE,
+                with_context=with_context,
+            )
+            if not success:
+                await self._reply_text(update, message)
+                return
+            await self._reply_text(
+                update,
+                runtime_menu_views.her_v2_backend_selected_text(
+                    with_context=with_context
+                ),
+                parse_mode="HTML",
+            )
+            return
+
         if requested_model:
             if target_engine == "claude-cli":
                 requested_model = CLAUDE_MODEL_ALIASES.get(requested_model.lower(), requested_model)
@@ -4488,6 +4516,10 @@ class FlexibleAgentRuntime:
 
 
     def _get_available_models(self) -> list[str]:
+        if self.config.active_backend == HER_V2_ENGINE:
+            selected = self.backend_manager.get_her_v2_configuration()
+            option = self.backend_manager._her_v2_provider_option(selected.provider)
+            return list(option["models"]) if option and option["available"] else []
         if self.config.active_backend == "her":
             return self.backend_manager.get_claw_models(self.get_current_provider())
         return get_available_models(self.config.active_backend)
@@ -4497,6 +4529,10 @@ class FlexibleAgentRuntime:
         engine: str,
         provider: str | None = None,
     ) -> list[str]:
+        if engine == HER_V2_ENGINE:
+            selected = self.backend_manager.get_her_v2_configuration()
+            option = self.backend_manager._her_v2_provider_option(selected.provider)
+            return list(option["models"]) if option and option["available"] else []
         if engine == "her":
             return self.backend_manager.get_claw_models(
                 provider or self.get_current_provider()
@@ -4671,19 +4707,37 @@ class FlexibleAgentRuntime:
     def _build_effort_followup_text(self) -> str:
         available = self._get_available_efforts()
         current = self._get_current_effort() or (available[0] if available else "n/a")
-        consequence = (
-            "For HER, low through max+ control one Agent's execution budget; ultra runs "
-            "HER-private coordinated multi-agent work with up to ten concurrent sub-agents. None changes provider reasoning depth."
-            if self.config.active_backend == "her"
-            else "This optional step controls reasoning depth. If no selection is made, the current value remains active."
-        )
+        if self.config.active_backend == HER_V2_ENGINE:
+            consequence = (
+                "HER v2 effort controls Planning, Replanning, Review, and sub-agent "
+                "availability. It never changes provider reasoning."
+            )
+        elif self.config.active_backend == "her":
+            consequence = (
+                "For legacy HER, low through max+ control one Agent's execution budget; "
+                "ultra coordinates bounded multi-agent work. None changes provider reasoning depth."
+            )
+        else:
+            consequence = (
+                "This optional step controls reasoning depth. If no selection is made, "
+                "the current value remains active."
+            )
         facts = [
             f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>",
         ]
         provider = self.get_current_provider()
         if provider:
             facts.append(f"<b>Provider</b> · <code>{html.escape(provider)}</code>")
-        facts.append(f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>")
+        if self.config.active_backend == HER_V2_ENGINE:
+            selected = self.backend_manager.get_her_v2_configuration()
+            facts.extend(
+                [
+                    f"<b>Fast</b> · <code>{html.escape(selected.fast_model)}</code>",
+                    f"<b>Pro</b> · <code>{html.escape(selected.pro_model)}</code>",
+                ]
+            )
+        else:
+            facts.append(f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>")
         return setting_card(
             "🎛️",
             "Choose effort",
@@ -4694,6 +4748,8 @@ class FlexibleAgentRuntime:
         )
 
     def _build_model_configuration_summary(self) -> str:
+        if self.config.active_backend == HER_V2_ENGINE:
+            return runtime_model_selection.her_v2_model_menu_text(self)
         effort = self._get_current_effort() if self._get_available_efforts() else None
         lines = [
             card_title("✅", "Model configuration"),
@@ -4857,18 +4913,37 @@ class FlexibleAgentRuntime:
             return
 
         current_effort = self._get_current_effort() or available[0]
-        consequence = (
-            "For HER, low through max+ increase one Agent's execution budget; ultra uses HER-private coordinated multi-agent execution with up to ten concurrent sub-agents. It does not change provider reasoning depth."
-            if self.config.active_backend == "her"
-            else "Higher effort may improve difficult work but takes longer and can use more tokens."
-        )
+        if self.config.active_backend == HER_V2_ENGINE:
+            consequence = (
+                "HER v2 effort controls Planning, Replanning, Review, and sub-agent "
+                "availability. It does not change provider reasoning."
+            )
+        elif self.config.active_backend == "her":
+            consequence = (
+                "Legacy HER effort controls its execution budget and does not change "
+                "provider reasoning depth."
+            )
+        else:
+            consequence = (
+                "Higher effort may improve difficult work but takes longer and can use more tokens."
+            )
+        if self.config.active_backend == HER_V2_ENGINE:
+            selected = self.backend_manager.get_her_v2_configuration()
+            effort_facts = [
+                f"<b>Fast</b> · <code>{html.escape(selected.fast_model)}</code>",
+                f"<b>Pro</b> · <code>{html.escape(selected.pro_model)}</code>",
+            ]
+        else:
+            effort_facts = [
+                f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>"
+            ]
         await self._reply_text(
             update,
             setting_card(
                 "🎛️",
                 "Model effort",
                 current=f"<code>{html.escape(current_effort)}</code>",
-                facts=[f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>"],
+                facts=effort_facts,
                 consequence=consequence,
                 action="The selection applies immediately and persists.",
             ),
@@ -6099,156 +6174,7 @@ class FlexibleAgentRuntime:
         await query.answer()
 
     async def callback_model(self, update: Update, context: Any):
-        query = update.callback_query
-        if not self._is_authorized_user(query.from_user.id):
-            return
-        data = query.data
-        if data.startswith(("provider", "pmodel:")):
-            await runtime_model_selection.callback_model(self, update, context)
-            return
-        try:
-            if data == "backend_mode_confirm":
-                if self.backend_manager.agent_mode == "memory+":
-                    set_memory_plus_enabled(self.workspace_dir, True)
-                runtime_mode.activate_flex_mode(self)
-                await query.edit_message_text(
-                    self._build_backend_menu_text(),
-                    parse_mode="HTML",
-                    reply_markup=self._backend_keyboard(),
-                )
-            elif data.startswith("backend_mode_cancel:"):
-                expected_mode = data.split(":", 1)[1]
-                current_mode = self.backend_manager.agent_mode
-                await query.edit_message_text(
-                    setting_card(
-                        "🧠",
-                        "Backend unchanged",
-                        current=f"<code>{html.escape(current_mode)}</code>",
-                        facts=[f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>"],
-                        consequence="No mode, backend, model, or saved configuration was changed.",
-                        action=(
-                            "The mode changed elsewhere before this button was used."
-                            if current_mode != expected_mode
-                            else "The current mode remains active."
-                        ),
-                    ),
-                    parse_mode="HTML",
-                )
-            elif data == "model_menu":
-                current_model = self.get_current_model()
-                provider = self.get_current_provider()
-                available = self._get_available_models()
-                if self.config.active_backend == "her" and provider and not available:
-                    mode_flag = self._claw_provider_mode(active=True)
-                    await query.edit_message_text(
-                        self._build_claw_provider_model_text(provider, mode_flag),
-                        parse_mode="HTML",
-                        reply_markup=self._claw_provider_model_keyboard(provider, mode_flag),
-                    )
-                else:
-                    await query.edit_message_text(
-                        runtime_menu_views.model_menu_text(
-                            model=current_model,
-                            backend=self.config.active_backend,
-                            has_choices=bool(available),
-                            persists=True,
-                            provider=provider,
-                        ),
-                        parse_mode="HTML",
-                        reply_markup=self._model_keyboard(current_model),
-                    )
-            elif data.startswith("model:"):
-                model = data.split(":", 1)[1]
-                available = self._get_available_models()
-                if not available or model in available:
-                    self._set_backend_model(self.config.active_backend, model)
-                    text, reply_markup = self._configuration_followup("model")
-                    await query.edit_message_text(
-                        text,
-                        parse_mode="HTML",
-                        reply_markup=reply_markup,
-                    )
-                else:
-                    await query.answer("Model is not available for the active provider.", show_alert=True)
-                    return
-            elif data == "backend_menu":
-                await query.edit_message_text(
-                    self._build_backend_menu_text(),
-                    parse_mode="HTML",
-                    reply_markup=self._backend_keyboard(),
-                )
-            elif data.startswith("backend:"):
-                parts = data.split(":", 2)
-                if len(parts) != 3:
-                    await query.answer("Invalid callback data", show_alert=True)
-                    return
-                _, target_engine, mode = parts
-                with_context = mode == "context"
-                if target_engine == "her":
-                    mode_flag = self._claw_provider_mode(with_context=with_context)
-                    await query.edit_message_text(
-                        self._build_claw_provider_menu_text(mode_flag),
-                        parse_mode="HTML",
-                        reply_markup=self._claw_provider_keyboard(mode_flag),
-                    )
-                else:
-                    await query.edit_message_text(
-                        self._build_backend_model_prompt(target_engine, with_context),
-                        parse_mode="HTML",
-                        reply_markup=self._backend_model_keyboard(target_engine, with_context),
-                    )
-            elif data.startswith("bmodel:"):
-                parts = data.split(":", 3)
-                if len(parts) != 4:
-                    await query.answer("Invalid callback data", show_alert=True)
-                    return
-                _, target_engine, mode_flag, model = parts
-                with_context = mode_flag == "c"
-                success, message = await self._switch_backend_mode(
-                    query.message.chat_id,
-                    target_engine,
-                    target_model=model,
-                    with_context=with_context,
-                )
-                if not success and "busy" in message.lower():
-                    await query.answer(message, show_alert=True)
-                    return
-                if success:
-                    text, reply_markup = self._configuration_followup("backend")
-                    await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
-                else:
-                    await query.edit_message_text(
-                        message,
-                        reply_markup=self._backend_model_keyboard(target_engine, with_context, model),
-                    )
-            elif data.startswith("effort:"):
-                parts = data.split(":")
-                source = parts[1] if len(parts) == 3 else None
-                requested = parts[2] if len(parts) == 3 else parts[1]
-                if source in {"backend", "model"} and requested == "keep":
-                    await query.edit_message_text(
-                        self._build_model_configuration_summary(),
-                        parse_mode="HTML",
-                    )
-                    await query.answer("Current effort kept")
-                    return
-                if requested in self._get_available_efforts():
-                    self._set_active_effort(requested)
-                    if source in {"backend", "model"}:
-                        await query.edit_message_text(
-                            self._build_model_configuration_summary(),
-                            parse_mode="HTML",
-                        )
-                    else:
-                        await query.edit_message_text(
-                            f"Effort switched to: {requested}",
-                            reply_markup=self._effort_keyboard(requested),
-                        )
-        except Exception as e:
-            self.error_logger.error(f"callback_model error: {e}", exc_info=True)
-            await query.answer(f"Error: {e}", show_alert=True)
-            return
-        await query.answer()
+        await runtime_model_selection.callback_model(self, update, context)
 
     async def cmd_mode(self, update: Update, context: Any):
         await runtime_mode.cmd_mode(self, update, context)

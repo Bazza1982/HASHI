@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+from hashlib import blake2s
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -9,11 +10,25 @@ from orchestrator import runtime_menu_views, runtime_mode
 from orchestrator.command_ui import BACK_LABEL, selected_label, setting_card
 from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
+    HER_V2_ENGINE,
     get_backend_label,
     normalize_effort,
     normalize_model,
 )
+from orchestrator.her_v2.models import Stage
+from orchestrator.her_v2.runtime_configuration import HER_V2_STANDARD_REASONING
 from orchestrator.memory_plus_mode import set_memory_plus_enabled
+
+
+def _her_v2_callback_token(value: Any) -> str:
+    return blake2s(str(value).encode("utf-8"), digest_size=6).hexdigest()
+
+
+def _her_v2_indexed_choice(values, raw_index: str):
+    index = int(raw_index)
+    if index < 0:
+        raise IndexError("callback index must be non-negative")
+    return index, values[index]
 
 
 def backend_keyboard(runtime) -> InlineKeyboardMarkup:
@@ -39,6 +54,216 @@ def backend_keyboard(runtime) -> InlineKeyboardMarkup:
             ]
         )
     return InlineKeyboardMarkup(buttons)
+
+
+def her_v2_provider_keyboard(runtime) -> InlineKeyboardMarkup:
+    current = runtime.backend_manager.get_her_v2_configuration().provider
+    buttons: list[list[InlineKeyboardButton]] = []
+    for index, option in enumerate(runtime.backend_manager.get_her_v2_provider_options()):
+        label = str(option["label"])
+        token = _her_v2_callback_token(option["engine"])
+        if option["available"]:
+            callback = f"her_provider:{index}:{token}"
+            label = selected_label(label, option["engine"] == current)
+        else:
+            callback = f"her_provider_locked:{index}:{token}"
+            label = f"🔒 {label}"
+        buttons.append([InlineKeyboardButton(label, callback_data=callback)])
+    return InlineKeyboardMarkup(buttons)
+
+
+def her_v2_provider_menu_text(runtime) -> str:
+    options = runtime.backend_manager.get_her_v2_provider_options()
+    selected = runtime.backend_manager.get_her_v2_configuration()
+    return runtime_menu_views.her_v2_provider_menu_text(
+        current_provider=selected.provider,
+        available_count=sum(bool(option["available"]) for option in options),
+        unavailable=[
+            (str(option["label"]), str(option.get("reason") or "unavailable"))
+            for option in options
+            if not option["available"]
+        ],
+    )
+
+
+def her_v2_model_keyboard(runtime) -> InlineKeyboardMarkup:
+    selected = runtime.backend_manager.get_her_v2_configuration()
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"Fast · {selected.fast_model}",
+                    callback_data="her_model_slot:fast",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"Pro · {selected.pro_model}",
+                    callback_data="her_model_slot:pro",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"Fast reasoning · {selected.slot_reasoning('fast')}",
+                    callback_data="her_reasoning_menu:fast",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"Pro reasoning · {selected.slot_reasoning('pro')}",
+                    callback_data="her_reasoning_menu:pro",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "Stage reasoning",
+                    callback_data="her_reasoning_stages",
+                )
+            ],
+        ]
+    )
+
+
+def her_v2_model_menu_text(runtime) -> str:
+    selected = runtime.backend_manager.get_her_v2_configuration()
+    return runtime_menu_views.her_v2_model_menu_text(
+        provider=selected.provider,
+        fast_model=selected.fast_model,
+        pro_model=selected.pro_model,
+        fast_reasoning=selected.slot_reasoning("fast"),
+        pro_reasoning=selected.slot_reasoning("pro"),
+        stage_override_count=len(selected.stage_reasoning),
+    )
+
+
+def her_v2_slot_model_keyboard(runtime, slot: str) -> InlineKeyboardMarkup:
+    selected = runtime.backend_manager.get_her_v2_configuration()
+    options = runtime.backend_manager.get_her_v2_provider_options()
+    provider_index = next(
+        (
+            index
+            for index, candidate in enumerate(options)
+            if candidate.get("engine") == selected.provider
+        ),
+        -1,
+    )
+    option = options[provider_index] if provider_index >= 0 else None
+    models = list(option["models"]) if option and option["available"] else []
+    current = selected.fast_model if slot == "fast" else selected.pro_model
+    buttons = [
+        [
+            InlineKeyboardButton(
+                selected_label(model, model == current),
+                callback_data=(
+                    f"her_model:{slot}:{provider_index}:"
+                    f"{_her_v2_callback_token(selected.provider)}:{index}:"
+                    f"{_her_v2_callback_token(model)}"
+                ),
+            )
+        ]
+        for index, model in enumerate(models)
+    ]
+    buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="model_menu")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def her_v2_slot_model_text(runtime, slot: str) -> str:
+    selected = runtime.backend_manager.get_her_v2_configuration()
+    option = runtime.backend_manager._her_v2_provider_option(selected.provider)
+    models = list(option["models"]) if option and option["available"] else []
+    current = selected.fast_model if slot == "fast" else selected.pro_model
+    return runtime_menu_views.her_v2_slot_model_text(
+        provider=selected.provider,
+        slot=slot,
+        current_model=current,
+        model_count=len(models),
+    )
+
+
+def _her_v2_reasoning_choices(runtime, target: str) -> tuple[str, list[str]]:
+    selected = runtime.backend_manager.get_her_v2_configuration()
+    if target in {"fast", "pro"}:
+        current = selected.slot_reasoning(target)
+        choices = list(HER_V2_STANDARD_REASONING)
+        if current not in {"default", "mixed", *choices}:
+            choices.append(current)
+        choices.append("default")
+    else:
+        stage = Stage(target)
+        current = selected.reasoning_for_stage(
+            runtime.backend_manager._her_v2_base_config(),
+            stage,
+        )
+        choices = list(HER_V2_STANDARD_REASONING)
+        if current not in {"default", *choices}:
+            choices.append(current)
+        choices.append("inherit")
+    return current, choices
+
+
+def her_v2_reasoning_keyboard(runtime, target: str) -> InlineKeyboardMarkup:
+    current, choices = _her_v2_reasoning_choices(runtime, target)
+    buttons = [
+        [
+            InlineKeyboardButton(
+                selected_label(value, value == current),
+                callback_data=(
+                    f"her_reasoning:{target}:{index}:"
+                    f"{_her_v2_callback_token(value)}"
+                ),
+            )
+        ]
+        for index, value in enumerate(choices)
+    ]
+    back = "her_reasoning_stages" if target not in {"fast", "pro"} else "model_menu"
+    buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data=back)])
+    return InlineKeyboardMarkup(buttons)
+
+
+def her_v2_reasoning_text(runtime, target: str) -> str:
+    selected = runtime.backend_manager.get_her_v2_configuration()
+    if target in {"fast", "pro"}:
+        current = selected.slot_reasoning(target)
+        inherited = False
+    else:
+        current = selected.reasoning_for_stage(
+            runtime.backend_manager._her_v2_base_config(),
+            target,
+        )
+        inherited = target not in selected.stage_reasoning
+    return runtime_menu_views.her_v2_reasoning_text(
+        target=target,
+        current=current,
+        inherited=inherited,
+    )
+
+
+def her_v2_stage_reasoning_keyboard(runtime) -> InlineKeyboardMarkup:
+    selected = runtime.backend_manager.get_her_v2_configuration()
+    raw = runtime.backend_manager._her_v2_base_config()
+    buttons = [
+        [
+            InlineKeyboardButton(
+                f"{stage.value} · {selected.reasoning_for_stage(raw, stage)}",
+                callback_data=f"her_reasoning_menu:{stage.value}",
+            )
+        ]
+        for stage in Stage
+    ]
+    buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="model_menu")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def apply_her_v2_configuration(runtime, selected) -> str | None:
+    if runtime.config.active_backend != HER_V2_ENGINE:
+        return "HER v2 configuration is available only while HER v2 is active."
+    if runtime._backend_busy():
+        return "HER v2 configuration is blocked while a request is running or queued."
+    try:
+        runtime.backend_manager.apply_her_v2_configuration(selected)
+    except (OSError, TypeError, ValueError) as exc:
+        return str(exc)
+    return None
 
 
 def claw_provider_mode(runtime, *, with_context: bool = False, active: bool = False) -> str:
@@ -179,10 +404,10 @@ def set_backend_model(runtime, engine: str, requested: str) -> None:
 async def cmd_provider(runtime, update, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
-    if runtime.config.active_backend != "her":
+    if runtime.config.active_backend != HER_V2_ENGINE:
         await runtime._reply_text(
             update,
-            runtime_menu_views.claw_provider_unavailable_text(
+            runtime_menu_views.her_v2_provider_unavailable_text(
                 backend=runtime.config.active_backend,
             ),
             parse_mode="HTML",
@@ -200,50 +425,139 @@ async def cmd_provider(runtime, update, context: Any) -> None:
             update,
             setting_card(
                 "🔌",
-                "HER provider",
+                "HER v2 provider",
                 current="<b>MANAGED</b>",
                 facts=[
-                    "<b>Backend</b> · <code>her</code>",
+                    "<b>Backend</b> · <code>her-v2</code>",
                     f"<b>Mode</b> · <code>{html.escape(managed_mode)}</code>",
                 ],
-                consequence="Provider and model changes are controlled by this mode's model configuration.",
+                consequence="Provider and model-slot changes are controlled by this mode's model configuration.",
                 action=f"Use {managed_commands[managed_mode]}, or switch to <code>/mode flex</code>.",
             ),
             parse_mode="HTML",
         )
         return
 
-    mode_flag = runtime._claw_provider_mode(active=True)
     args = context.args or []
     if not args:
         await runtime._reply_text(
             update,
-            runtime._build_claw_provider_menu_text(mode_flag),
+            her_v2_provider_menu_text(runtime),
             parse_mode="HTML",
-            reply_markup=runtime._claw_provider_keyboard(mode_flag),
+            reply_markup=her_v2_provider_keyboard(runtime),
         )
         return
 
     provider = args[0].strip()
-    option = runtime._claw_provider_option(provider)
-    if option is None or not option["available"]:
-        reason = str((option or {}).get("reason") or "provider is not allowed")
-        text = runtime._build_claw_provider_menu_text(mode_flag)
+    try:
+        selected = runtime.backend_manager.prepare_her_v2_provider(provider)
+        error = apply_her_v2_configuration(runtime, selected)
+    except (TypeError, ValueError) as exc:
+        error = str(exc)
+    if error:
+        text = her_v2_provider_menu_text(runtime)
+        reason = error
         text += f"\n\n❌ {html.escape(provider)} is unavailable: {html.escape(reason)}."
         await runtime._reply_text(
             update,
             text,
             parse_mode="HTML",
-            reply_markup=runtime._claw_provider_keyboard(mode_flag),
+            reply_markup=her_v2_provider_keyboard(runtime),
         )
         return
 
-    provider = str(option["name"])
     await runtime._reply_text(
         update,
-        runtime._build_claw_provider_model_text(provider, mode_flag),
+        her_v2_model_menu_text(runtime),
         parse_mode="HTML",
-        reply_markup=runtime._claw_provider_model_keyboard(provider, mode_flag),
+        reply_markup=her_v2_model_keyboard(runtime),
+    )
+
+
+async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
+    if not args:
+        await runtime._reply_text(
+            update,
+            her_v2_model_menu_text(runtime),
+            parse_mode="HTML",
+            reply_markup=her_v2_model_keyboard(runtime),
+        )
+        return
+
+    action = args[0].strip().lower()
+    if action in {"fast", "pro"} and len(args) == 1:
+        await runtime._reply_text(
+            update,
+            her_v2_slot_model_text(runtime, action),
+            parse_mode="HTML",
+            reply_markup=her_v2_slot_model_keyboard(runtime, action),
+        )
+        return
+    if action in {"fast", "pro"} and len(args) == 2:
+        try:
+            selected = runtime.backend_manager.prepare_her_v2_model(action, args[1])
+            error = apply_her_v2_configuration(runtime, selected)
+        except (TypeError, ValueError) as exc:
+            error = str(exc)
+        if error:
+            await runtime._reply_text(update, f"HER v2 model was not changed: {error}")
+            return
+        await runtime._reply_text(
+            update,
+            her_v2_model_menu_text(runtime),
+            parse_mode="HTML",
+            reply_markup=her_v2_model_keyboard(runtime),
+        )
+        return
+
+    if action == "reasoning" and len(args) == 1:
+        selected = runtime.backend_manager.get_her_v2_configuration()
+        await runtime._reply_text(
+            update,
+            runtime_menu_views.her_v2_stage_reasoning_text(
+                override_count=len(selected.stage_reasoning)
+            ),
+            parse_mode="HTML",
+            reply_markup=her_v2_stage_reasoning_keyboard(runtime),
+        )
+        return
+    if action == "reasoning" and len(args) == 2:
+        target = args[1].strip().lower()
+        if target not in {"fast", "pro", *(stage.value for stage in Stage)}:
+            await runtime._reply_text(update, f"Unknown HER v2 reasoning target: {target}")
+            return
+        await runtime._reply_text(
+            update,
+            her_v2_reasoning_text(runtime, target),
+            parse_mode="HTML",
+            reply_markup=her_v2_reasoning_keyboard(runtime, target),
+        )
+        return
+    if action == "reasoning" and len(args) == 3:
+        target = args[1].strip().lower()
+        try:
+            selected = runtime.backend_manager.prepare_her_v2_reasoning(
+                target,
+                args[2],
+            )
+            error = apply_her_v2_configuration(runtime, selected)
+        except (TypeError, ValueError) as exc:
+            error = str(exc)
+        if error:
+            await runtime._reply_text(update, f"HER v2 reasoning was not changed: {error}")
+            return
+        await runtime._reply_text(
+            update,
+            her_v2_model_menu_text(runtime),
+            parse_mode="HTML",
+            reply_markup=her_v2_model_keyboard(runtime),
+        )
+        return
+
+    await runtime._reply_text(
+        update,
+        "Usage: /model | /model fast|pro [model] | "
+        "/model reasoning [fast|pro|stage] [value|inherit]",
     )
 
 
@@ -272,6 +586,10 @@ async def cmd_model(runtime, update, context: Any) -> None:
             "Model switching is managed by `/brain` in **dual-brain** mode.\nUse `/mode flex` for normal `/model` switching.",
             parse_mode="Markdown",
         )
+        return
+
+    if runtime.config.active_backend == HER_V2_ENGINE:
+        await _cmd_her_v2_model(runtime, update, list(context.args or []))
         return
 
     current_model = runtime.backend_manager.current_backend.config.model
@@ -364,6 +682,19 @@ async def callback_model(runtime, update, context: Any) -> None:
     if not runtime._is_authorized_user(query.from_user.id):
         return
     data = query.data
+    her_v2_control = data.startswith(
+        ("her_provider", "her_model", "her_reasoning")
+    ) or data == "model_menu"
+    if (
+        her_v2_control
+        and runtime.config.active_backend == HER_V2_ENGINE
+        and runtime.backend_manager.agent_mode in {"wrapper", "audit", "dual-brain"}
+    ):
+        await query.answer(
+            "HER v2 provider and model controls are managed by the active mode.",
+            show_alert=True,
+        )
+        return
     try:
         if data == "backend_mode_confirm":
             if runtime.backend_manager.agent_mode == "memory+":
@@ -394,7 +725,189 @@ async def callback_model(runtime, update, context: Any) -> None:
                 ),
                 parse_mode="HTML",
             )
+        elif data.startswith("her_provider_locked:"):
+            if runtime.config.active_backend != HER_V2_ENGINE:
+                await query.answer(
+                    "Provider control is available only while HER v2 is active.",
+                    show_alert=True,
+                )
+                return
+            try:
+                _, raw_index, token = data.split(":", 2)
+                _index, option = _her_v2_indexed_choice(
+                    runtime.backend_manager.get_her_v2_provider_options(),
+                    raw_index,
+                )
+                if token != _her_v2_callback_token(option["engine"]):
+                    raise ValueError("stale provider option")
+            except (IndexError, TypeError, ValueError):
+                await query.answer("This provider option is no longer available.", show_alert=True)
+                return
+            await query.answer(
+                f"{option['label']}: {option.get('reason') or 'unavailable'}",
+                show_alert=True,
+            )
+            return
+        elif data.startswith("her_provider:"):
+            if runtime.config.active_backend != HER_V2_ENGINE:
+                await query.answer(
+                    "Provider control is available only while HER v2 is active.",
+                    show_alert=True,
+                )
+                return
+            try:
+                _, raw_index, token = data.split(":", 2)
+                _index, option = _her_v2_indexed_choice(
+                    runtime.backend_manager.get_her_v2_provider_options(),
+                    raw_index,
+                )
+                if token != _her_v2_callback_token(option["engine"]):
+                    raise ValueError("This provider menu is stale.")
+                selected = runtime.backend_manager.prepare_her_v2_provider(
+                    str(option["engine"])
+                )
+                error = apply_her_v2_configuration(runtime, selected)
+            except (IndexError, TypeError, ValueError) as exc:
+                error = str(exc)
+            if error:
+                await query.answer(error, show_alert=True)
+                return
+            await query.edit_message_text(
+                her_v2_model_menu_text(runtime),
+                parse_mode="HTML",
+                reply_markup=her_v2_model_keyboard(runtime),
+            )
+        elif data.startswith("her_model_slot:"):
+            if runtime.config.active_backend != HER_V2_ENGINE:
+                await query.answer(
+                    "Model-slot control is available only while HER v2 is active.",
+                    show_alert=True,
+                )
+                return
+            slot = data.split(":", 1)[1]
+            if slot not in {"fast", "pro"}:
+                await query.answer("Invalid HER v2 model slot.", show_alert=True)
+                return
+            await query.edit_message_text(
+                her_v2_slot_model_text(runtime, slot),
+                parse_mode="HTML",
+                reply_markup=her_v2_slot_model_keyboard(runtime, slot),
+            )
+        elif data.startswith("her_model:"):
+            if runtime.config.active_backend != HER_V2_ENGINE:
+                await query.answer(
+                    "Model-slot control is available only while HER v2 is active.",
+                    show_alert=True,
+                )
+                return
+            try:
+                (
+                    _,
+                    slot,
+                    raw_provider_index,
+                    provider_token,
+                    raw_model_index,
+                    model_token,
+                ) = data.split(":", 5)
+                selected = runtime.backend_manager.get_her_v2_configuration()
+                options = runtime.backend_manager.get_her_v2_provider_options()
+                _provider_index, option = _her_v2_indexed_choice(
+                    options,
+                    raw_provider_index,
+                )
+                if (
+                    option.get("engine") != selected.provider
+                    or provider_token != _her_v2_callback_token(option["engine"])
+                ):
+                    raise ValueError(
+                        "This model menu is stale because the HER v2 provider changed."
+                    )
+                _model_index, model = _her_v2_indexed_choice(
+                    list(option["models"]),
+                    raw_model_index,
+                )
+                if model_token != _her_v2_callback_token(model):
+                    raise ValueError("This HER v2 model menu is stale.")
+                candidate = runtime.backend_manager.prepare_her_v2_model(slot, model)
+                error = apply_her_v2_configuration(runtime, candidate)
+            except (IndexError, TypeError, ValueError) as exc:
+                error = str(exc)
+            if error:
+                await query.answer(error, show_alert=True)
+                return
+            await query.edit_message_text(
+                her_v2_model_menu_text(runtime),
+                parse_mode="HTML",
+                reply_markup=her_v2_model_keyboard(runtime),
+            )
+        elif data == "her_reasoning_stages":
+            if runtime.config.active_backend != HER_V2_ENGINE:
+                await query.answer(
+                    "Reasoning control is available only while HER v2 is active.",
+                    show_alert=True,
+                )
+                return
+            selected = runtime.backend_manager.get_her_v2_configuration()
+            await query.edit_message_text(
+                runtime_menu_views.her_v2_stage_reasoning_text(
+                    override_count=len(selected.stage_reasoning)
+                ),
+                parse_mode="HTML",
+                reply_markup=her_v2_stage_reasoning_keyboard(runtime),
+            )
+        elif data.startswith("her_reasoning_menu:"):
+            if runtime.config.active_backend != HER_V2_ENGINE:
+                await query.answer(
+                    "Reasoning control is available only while HER v2 is active.",
+                    show_alert=True,
+                )
+                return
+            target = data.split(":", 1)[1]
+            if target not in {"fast", "pro", *(stage.value for stage in Stage)}:
+                await query.answer("Invalid HER v2 reasoning target.", show_alert=True)
+                return
+            await query.edit_message_text(
+                her_v2_reasoning_text(runtime, target),
+                parse_mode="HTML",
+                reply_markup=her_v2_reasoning_keyboard(runtime, target),
+            )
+        elif data.startswith("her_reasoning:"):
+            if runtime.config.active_backend != HER_V2_ENGINE:
+                await query.answer(
+                    "Reasoning control is available only while HER v2 is active.",
+                    show_alert=True,
+                )
+                return
+            try:
+                _, target, raw_index, token = data.split(":", 3)
+                _current, choices = _her_v2_reasoning_choices(runtime, target)
+                _index, reasoning = _her_v2_indexed_choice(choices, raw_index)
+                if token != _her_v2_callback_token(reasoning):
+                    raise ValueError("This HER v2 reasoning menu is stale.")
+                selected = runtime.backend_manager.prepare_her_v2_reasoning(
+                    target,
+                    reasoning,
+                )
+                error = apply_her_v2_configuration(runtime, selected)
+            except (IndexError, TypeError, ValueError) as exc:
+                error = str(exc)
+            if error:
+                await query.answer(error, show_alert=True)
+                return
+            await query.edit_message_text(
+                her_v2_model_menu_text(runtime),
+                parse_mode="HTML",
+                reply_markup=her_v2_model_keyboard(runtime),
+            )
         elif data == "model_menu":
+            if runtime.config.active_backend == HER_V2_ENGINE:
+                await query.edit_message_text(
+                    her_v2_model_menu_text(runtime),
+                    parse_mode="HTML",
+                    reply_markup=her_v2_model_keyboard(runtime),
+                )
+                await query.answer()
+                return
             current_model = runtime.get_current_model()
             provider = runtime.get_current_provider()
             available = runtime._get_available_models()
@@ -418,6 +931,12 @@ async def callback_model(runtime, update, context: Any) -> None:
                     reply_markup=runtime._model_keyboard(current_model),
                 )
         elif data.startswith("model:"):
+            if runtime.config.active_backend == HER_V2_ENGINE:
+                await query.answer(
+                    "Use the HER v2 Fast/Pro model controls.",
+                    show_alert=True,
+                )
+                return
             model = data.split(":", 1)[1]
             available = runtime._get_available_models()
             if not available or model in available:
@@ -443,12 +962,21 @@ async def callback_model(runtime, update, context: Any) -> None:
                 return
             _, target_engine, mode = parts
             with_context = mode == "context"
-            if target_engine == "her":
-                mode_flag = runtime._claw_provider_mode(with_context=with_context)
+            if target_engine == HER_V2_ENGINE:
+                success, message = await runtime._switch_backend_mode(
+                    query.message.chat_id,
+                    HER_V2_ENGINE,
+                    with_context=with_context,
+                )
+                if not success:
+                    await query.answer(message, show_alert=True)
+                    return
                 await query.edit_message_text(
-                    runtime._build_claw_provider_menu_text(mode_flag),
+                    runtime_menu_views.her_v2_backend_selected_text(
+                        with_context=with_context
+                    ),
                     parse_mode="HTML",
-                    reply_markup=runtime._claw_provider_keyboard(mode_flag),
+                    reply_markup=None,
                 )
             else:
                 await query.edit_message_text(

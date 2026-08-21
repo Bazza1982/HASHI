@@ -211,6 +211,47 @@ def test_provider_profiles_route_by_configuration_and_cannot_recurse_into_her():
         ProviderProfile("bad", "her-v2", "recursive")
 
 
+def test_stage_reasoning_override_is_provider_configuration_not_effort():
+    config = HERv2Config.from_mapping(
+        {
+            "profiles": {
+                "lightweight": {
+                    "engine": "fake-api",
+                    "model": "fast-model",
+                    "reasoning": "medium",
+                },
+                "triage": {
+                    "engine": "fake-api",
+                    "model": "fast-model",
+                    "reasoning": "medium",
+                },
+                "premium": {
+                    "engine": "fake-api",
+                    "model": "pro-model",
+                    "reasoning": "high",
+                },
+                "reviewer": {
+                    "engine": "fake-api",
+                    "model": "pro-model",
+                    "reasoning": "max",
+                },
+            },
+            "stage_reasoning": {
+                "triage": "low",
+                "execution": "xhigh",
+            },
+        }
+    )
+
+    assert config.profile_for(Stage.TRIAGE).reasoning == "low"
+    assert (
+        config.execution_profile_for(TriageClassification.SIMPLE_TASK).reasoning
+        == "xhigh"
+    )
+    assert config.profile_for(Stage.REVIEW).reasoning == "max"
+    assert Effort.HIGH.value == "high"
+
+
 def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
     cases = [
         ("shadow_mode", "false"),

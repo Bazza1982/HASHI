@@ -126,10 +126,27 @@ even if a caller or process-wide default attempts to enable them.
 
 ## Provider, model, and effort contract
 
-HER provider profiles are instance configuration; secrets remain in HASHI's
-normal credential chain. The canonical command flow is backend → provider →
-model. `/provider` changes the provider and refreshes its allowlisted models;
-`/model` stays within the current provider.
+HER v2 provider profiles are instance configuration; secrets remain in HASHI's
+normal credential chain. The command surfaces have independent authority:
+
+| Command | HER v2 authority |
+| --- | --- |
+| `/backend` | select `her-v2` only; never request or expose `role-configured` |
+| `/provider` | select one concrete call-provider engine and atomically resolve granted Fast/Pro defaults |
+| `/model` | inspect or change Fast/Pro models plus slot/stage provider reasoning |
+| `/effort` | control orchestration depth, Replanning, Review, and sub-agents only |
+
+The non-HER `/model` contract is unchanged. HER v2 runtime selection is stored
+separately from generic single-model state. A provider/model update must retain
+exact Agent grants, reject stale callbacks and unavailable providers, and leave
+the previous complete selection intact on validation or persistence failure.
+The adapter-only `role-configured` value is never a selectable model.
+
+Fast reasoning applies to the lightweight and Triage profiles; Pro reasoning
+applies to premium, reviewer, orchestrator, and other Pro profiles. An explicit
+stage reasoning value overrides its profile for that stage only. Clearing a
+stage override restores profile inheritance. No provider reasoning value is
+derived from HER effort.
 
 Request-scoped reviewer tools use the same configured provider/model route as the
 primary run. Anthropic and the supported OpenAI-compatible families—including xAI,
@@ -137,30 +154,19 @@ DashScope, OpenRouter, and direct compatible endpoints—intersect the reviewer 
 allowlist with the process allowlist and preserve its additional virtual tool schemas.
 No provider route may silently fall back to the primary agent's broader tool set.
 
-HER effort controls agentic execution length, not provider reasoning depth:
+HER v2 effort controls orchestration policy, not provider reasoning depth:
 
-| Effort | Maximum iterations | Planning and review capability ceiling |
-| --- | ---: | --- |
-| `low` | 12 | no planning; direct execution |
-| `medium` | 32 | adaptive plan; no review loop |
-| `high` | 96 | adaptive plan; optional self-review |
-| `xhigh` | 192 | adaptive plan; deeper self-review and assurance checkpoints; no independent reviewer |
-| `max` | 384 | adaptive plan plus independent read-only planning/final review |
-| `max+` | 512 | same independent review plus optional isolated rerun of exact plan-declared tests |
-| `ultra` | coordinated | HASHI-owned primary/worker orchestration above the single-Agent native ceiling |
+| Effort | Planning | Replanning | Independent review |
+| --- | --- | --- | --- |
+| `low` | no formal Planning stage | none | none |
+| `medium` | required for work turns | none | none |
+| `high` | required | evidence-triggered and bounded | none |
+| `xhigh` | required | evidence-triggered and bounded | at most one remediation cycle |
+| `max` | required | evidence-triggered and bounded | at most three remediation cycles |
 
-`low` through `max+` are native single-Agent execution efforts. `ultra` is a
-HER adapter effort: it uses a bounded primary plan and up to ten concurrent
-isolated worker sessions, then assembles evidence through the primary. The
-adapter assigns ordinary single-Agent efforts to those sessions; it never
-passes `ultra` to the native executable as `CLAW_EXECUTION_EFFORT`.
-
-An explicit `max_tool_iterations` remains an operator override but is bounded to
-8–512. Effort is a capability ceiling, not a quota: the initial plan selects the
-smallest task-matched execution, verification, testing, and review scope available
-under that ceiling. A greeting at MAX+ therefore receives one planning decision and
-one normal reply, with no independent review, tool use, or test. MAX+ has no private
-token or wall-clock budget; `/timeout` remains the operator-owned outer control.
+The configured `max_subagents` and stage policy remain hard ceilings. Effort can
+make deeper orchestration available but cannot expand provider/model grants,
+tool authority, workzone authority, timeout authority, or provider reasoning.
 
 For a validated `direct_response` profile, the acknowledgement field is the complete
 final answer and `remaining_work` must be empty. HER returns that answer once without a
