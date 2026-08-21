@@ -27,7 +27,6 @@ HER_V2_ROUTE_LABELS = {
     Route.EXECUTION_SIMPLE: "Simple execution",
     Route.EXECUTION_COMPLEX: "Complex execution",
     Route.EXECUTION_HIGH_VOLUME: "High-volume execution",
-    Route.STRUCTURE_REPAIR: "Structure repair",
     Route.REPLANNING: "Replanning",
     Route.REVIEW: "Review",
     Route.FINALISATION: "Finalisation",
@@ -39,7 +38,6 @@ HER_V2_ROUTE_ALIASES = {
     "simple": Route.EXECUTION_SIMPLE,
     "complex": Route.EXECUTION_COMPLEX,
     "high_volume": Route.EXECUTION_HIGH_VOLUME,
-    "repair": Route.STRUCTURE_REPAIR,
     "finalization": Route.FINALISATION,
 }
 
@@ -217,12 +215,6 @@ def _her_v2_route_effective_model(runtime, route: Route) -> str:
 
 def _her_v2_route_effective_reasoning(runtime, route: Route) -> str:
     selected = runtime.backend_manager.get_her_v2_configuration()
-    if (
-        route is Route.STRUCTURE_REPAIR
-        and route.value not in selected.route_reasoning
-        and route.value not in selected.stage_reasoning
-    ):
-        return "Follow source"
     return selected.reasoning_for_route(
         runtime.backend_manager._her_v2_base_config(),
         route,
@@ -270,8 +262,6 @@ def her_v2_route_keyboard(runtime, route: Route | str) -> InlineKeyboardMarkup:
     selected = runtime.backend_manager.get_her_v2_configuration()
     current_slot = selected.model_slot_for_route(parsed)
     slots = ["fast", "pro"]
-    if parsed is Route.STRUCTURE_REPAIR:
-        slots.append("inherit")
     buttons = [
         [
             InlineKeyboardButton(

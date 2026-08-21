@@ -206,14 +206,23 @@ Decision rules:
 - Return only the required JSON object. Do not include commentary or additional fields."""
 
 
+_EXECUTION_SYSTEM_PROMPT = """You are the HER v2 Execution stage.
+
+Faithfully carry out the supplied user request using the appropriate tools available to this invocation. When HER v2 supplies an execution plan, follow that plan. Planning and Replanning are controlled by HER v2; do not request, create, or replace a plan.
+
+Use tools when they are appropriate to perform or verify the requested work. Report only actions and results that actually occurred. A tool error, unsuccessful check, limitation, or unmet requirement must be represented truthfully.
+
+After the work ends, return exactly one JSON object using the schema in the user message. The only allowed disposition values are:
+
+- COMPLETED: the requested outcome was achieved.
+- COMPLETED_WITH_LIMITATIONS: the requested outcome was achieved, but material limitations remain and are disclosed.
+- FAILED: the requested outcome was not achieved.
+- USER_INPUT_REQUIRED: work cannot continue without a concrete answer or authority from the user; include the clarification question.
+
+Do not return any disposition not listed above. Do not wrap the JSON in Markdown or add prose outside it."""
+
+
 def _internal_stage_system_prompt(request: StageRequest) -> str | None:
-    if request.stage is Stage.STRUCTURE_REPAIR:
-        return (
-            "You are the isolated HER v2 structure repair role. Convert only the "
-            "quoted provider response into the requested JSON shape. Tools and side "
-            "effects are forbidden. Preserve uncertainty and never invent execution "
-            "evidence or claim that work completed."
-        )
     if request.role.startswith("sub_agent:"):
         return (
             "You are a bounded HER v2 sub-agent. Follow the supplied assignment and "
@@ -226,6 +235,7 @@ def _internal_stage_system_prompt(request: StageRequest) -> str | None:
             "You are the HER v2 Planner. Produce a binding execution plan for the "
             "immutable goal and classification; do not execute or contact the user."
         ),
+        Stage.EXECUTION: _EXECUTION_SYSTEM_PROMPT,
         Stage.REPLANNING: (
             "You are the HER v2 Replanner. Replace only the active approach in response "
             "to current evidence; never change the goal or classification."
@@ -234,13 +244,6 @@ def _internal_stage_system_prompt(request: StageRequest) -> str | None:
             "You are the independent strict HER v2 Reviewer. Findings are advisory and "
             "addressed only to the Primary Agent. You cannot use tools, contact the user, "
             "change authority, authorise side effects, or finalise."
-        ),
-        Stage.FINALISATION: (
-            "You are the neutral HER v2 Final Reporter. Produce only the validated JSON "
-            "report requested by the stage envelope. Preserve established facts, "
-            "uncertainty, limitations, and original user-facing formatting; do not imitate "
-            "a Persona, call tools, add new work, or change the terminal assessment. A "
-            "separate presentation-only boundary renders the validated report later."
         ),
         Stage.MEDITATION: (
             "You are the optional HER v2 Meditation role. Produce only bounded, "
@@ -253,6 +256,35 @@ def _internal_stage_system_prompt(request: StageRequest) -> str | None:
             "the user, call tools, or enter the live turn lifecycle."
         ),
     }.get(request.stage)
+
+
+def _finalisation_system_prompt(
+    source: her_persona.HERPersonaPackagingSource,
+) -> str:
+    persona_guidance = (
+        source.guidance
+        if source.usable
+        else (
+            f"Agent display name: {source.display_name}. "
+            "Use a polite tone and address the user as 您."
+        )
+    )
+    return f"""You are the HER v2 Finalisation stage. This is one combined normalisation, ledger-payload, and user-message task. You have no tools and must not perform new work.
+
+Inputs contain the current user request, the complete raw Execution output, an optional already-validated Execution result, and optional Review findings.
+
+Rules:
+
+1. When parsed_execution_result is an object, preserve its disposition exactly. It is the authoritative Execution disposition. Do not promote or demote it.
+2. When parsed_execution_result is null because the Execution JSON was malformed, interpret the complete raw Execution output. If it has clear usable meaning, normalise that meaning into one of COMPLETED, COMPLETED_WITH_LIMITATIONS, FAILED, or USER_INPUT_REQUIRED.
+3. When the Execution stage had a technical failure, or its raw output has no usable meaning, return execution_result as null. ERROR is assigned only by HER v2 runtime and is never an Execution disposition.
+4. Do not invent actions, evidence, verification, limitations, or success. Preserve relevant Review findings without allowing Review to rewrite a valid Execution disposition.
+5. Render final_message for the user using only the Persona guidance below. Preserve requested formatting, concrete results, verification, uncertainty, limitations, and any clarification question.
+6. Return exactly one JSON object matching the user-message schema. Do not wrap it in Markdown or add prose outside it.
+
+{her_persona.PERSONA_BLOCK_BEGIN}
+{persona_guidance}
+{her_persona.PERSONA_BLOCK_END}"""
 
 
 def _immediate_response_system_prompt(
@@ -661,7 +693,10 @@ class HashiStageProvider(StageProvider):
                     f"failed to initialize {profile.engine}/{profile.model}"
                 )
             stage_prompt = render_stage_prompt(request)
-            if request.stage is Stage.IMMEDIATE_RESPONSE:
+            if request.stage in {
+                Stage.IMMEDIATE_RESPONSE,
+                Stage.FINALISATION,
+            }:
                 backend_config = backend.config
                 backend_extra = dict(getattr(backend_config, "extra", None) or {})
                 source = her_persona.load_persona_packaging_source(
@@ -671,15 +706,29 @@ class HashiStageProvider(StageProvider):
                         or getattr(backend_config, "name", None)
                     ),
                 )
-                system_prompt = _immediate_response_system_prompt(source)
+                system_prompt = (
+                    _immediate_response_system_prompt(source)
+                    if request.stage is Stage.IMMEDIATE_RESPONSE
+                    else _finalisation_system_prompt(source)
+                )
                 if not _install_system_prompt(backend, system_prompt):
+                    if request.stage is Stage.FINALISATION:
+                        raise StageInvocationError(
+                            "finalisation backend cannot isolate the HER v2 system prompt",
+                            retryable=False,
+                        )
                     stage_prompt = f"{system_prompt}\n\n{stage_prompt}"
             else:
                 internal_prompt = _internal_stage_system_prompt(request)
-                if internal_prompt is not None and not _install_system_prompt(
-                    backend, internal_prompt
-                ):
-                    stage_prompt = f"{internal_prompt}\n\n{stage_prompt}"
+                if internal_prompt is not None:
+                    installed = _install_system_prompt(backend, internal_prompt)
+                    if not installed and request.stage is Stage.EXECUTION:
+                        raise StageInvocationError(
+                            "execution backend cannot isolate the HER v2 system prompt",
+                            retryable=False,
+                        )
+                    if not installed:
+                        stage_prompt = f"{internal_prompt}\n\n{stage_prompt}"
             response = await backend.generate_response(
                 stage_prompt,
                 f"{request.turn_id}:{request.stage.value}:{request.attempt}",
@@ -1589,27 +1638,9 @@ class HERv2Adapter(BaseBackend):
                 oldest = next(iter(self._pending_delivery_receipts))
                 self._pending_delivery_receipts.pop(oldest, None)
         technical_error = result.terminal_state is TerminalState.ERROR
-        reconciliation_required = (
-            result.terminal_state is TerminalState.RECONCILIATION_REQUIRED
-        )
-        report_pending = (
-            result.terminal_state is TerminalState.COMPLETED_WITH_REPORT_PENDING
-        )
         stopped = result.terminal_state is TerminalState.STOPPED
         error = result.error
-        if report_pending:
-            error = (
-                "HER v2 completed execution but model-authored reporting ended on "
-                "a non-retryable failure or no-progress idle boundary; evidence is "
-                "preserved for reconciliation."
-            )
-        elif reconciliation_required:
-            error = (
-                "HER v2 cannot confirm the execution outcome after a malformed "
-                "provider result. The side-effecting execution was not replayed; "
-                "operator reconciliation is required before any retry."
-            )
-        elif stopped and not error:
+        if stopped and not error:
             error = "HER v2 turn was stopped by an authorised control path."
         return BackendResponse(
             text=result.text,
@@ -1617,8 +1648,6 @@ class HERv2Adapter(BaseBackend):
             error=error or None,
             is_success=not (
                 technical_error
-                or reconciliation_required
-                or report_pending
                 or stopped
             ),
             stop_reason=result.terminal_state.value.lower(),

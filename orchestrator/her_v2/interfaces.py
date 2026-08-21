@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
+from typing import Awaitable, Callable, Protocol, Sequence
 
 from .config import ProviderProfile
 from .models import DeliveryRecord, StageRequest, StageResponse, TerminalState
@@ -18,16 +18,6 @@ class StageInvocationError(RuntimeError):
 
 class StructuredOutputError(StageInvocationError):
     pass
-
-
-class ReconciliationRequired(StageInvocationError):
-    """Execution may have changed external state but lacks a trustworthy result."""
-
-    def __init__(self, message: str, *, evidence_refs: Sequence[str] = ()):
-        super().__init__(message, retryable=False)
-        self.evidence_refs = tuple(
-            str(item) for item in evidence_refs if str(item).strip()
-        )
 
 
 class TurnStopped(RuntimeError):

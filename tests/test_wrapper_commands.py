@@ -1550,14 +1550,11 @@ async def test_her_v2_model_and_reasoning_buttons_update_only_their_targets(tmp_
     assert "HER V2 ROUTE" in edits[-1]["text"]
 
 
-def test_her_v2_route_menu_splits_execution_and_limits_follow_source(tmp_path):
+def test_her_v2_route_menu_splits_execution_without_removed_repair_route(tmp_path):
     manager = _make_claw_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
 
     route_markup = str(runtime_model_selection.her_v2_routes_keyboard(runtime))
-    repair_markup = str(
-        runtime_model_selection.her_v2_route_keyboard(runtime, "structure_repair")
-    )
     review_markup = str(
         runtime_model_selection.her_v2_route_keyboard(runtime, "review")
     )
@@ -1565,11 +1562,8 @@ def test_her_v2_route_menu_splits_execution_and_limits_follow_source(tmp_path):
     assert "Simple execution" in route_markup
     assert "Complex execution" in route_markup
     assert "High-volume execution" in route_markup
-    assert "Follow source" in repair_markup
+    assert "Structure repair" not in route_markup
     assert "Follow source" not in review_markup
-    assert "Provider reasoning</b> · <code>Follow source</code>" in (
-        runtime_model_selection.her_v2_route_text(runtime, "structure_repair")
-    )
 
 
 @pytest.mark.asyncio

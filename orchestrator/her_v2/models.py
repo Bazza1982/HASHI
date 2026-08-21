@@ -53,11 +53,8 @@ class LifecycleState(StrEnum):
     FINALISING = "FINALISING"
     COMPLETED = "COMPLETED"
     COMPLETED_WITH_LIMITATIONS = "COMPLETED_WITH_LIMITATIONS"
-    COMPLETED_WITH_REPORT_PENDING = "COMPLETED_WITH_REPORT_PENDING"
-    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
     FAILED = "FAILED"
     ERROR = "ERROR"
-    ABANDONED = "ABANDONED"
     STOPPED = "STOPPED"
     PENDING_USER_INPUT = "PENDING_USER_INPUT"
 
@@ -65,11 +62,8 @@ class LifecycleState(StrEnum):
 class TerminalState(StrEnum):
     COMPLETED = "COMPLETED"
     COMPLETED_WITH_LIMITATIONS = "COMPLETED_WITH_LIMITATIONS"
-    COMPLETED_WITH_REPORT_PENDING = "COMPLETED_WITH_REPORT_PENDING"
-    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
     FAILED = "FAILED"
     ERROR = "ERROR"
-    ABANDONED = "ABANDONED"
     STOPPED = "STOPPED"
     PENDING_USER_INPUT = "PENDING_USER_INPUT"
 
@@ -82,7 +76,6 @@ class Stage(StrEnum):
     TRIAGE = "triage"
     PLANNING = "planning"
     EXECUTION = "execution"
-    STRUCTURE_REPAIR = "structure_repair"
     REPLANNING = "replanning"
     REVIEW = "review"
     FINALISATION = "finalisation"
@@ -104,7 +97,6 @@ class Route(StrEnum):
     EXECUTION_SIMPLE = "execution_simple"
     EXECUTION_COMPLEX = "execution_complex"
     EXECUTION_HIGH_VOLUME = "execution_high_volume"
-    STRUCTURE_REPAIR = "structure_repair"
     REPLANNING = "replanning"
     REVIEW = "review"
     FINALISATION = "finalisation"
@@ -119,7 +111,6 @@ ROUTE_STAGES: Mapping[Route, Stage] = {
     Route.EXECUTION_SIMPLE: Stage.EXECUTION,
     Route.EXECUTION_COMPLEX: Stage.EXECUTION,
     Route.EXECUTION_HIGH_VOLUME: Stage.EXECUTION,
-    Route.STRUCTURE_REPAIR: Stage.STRUCTURE_REPAIR,
     Route.REPLANNING: Stage.REPLANNING,
     Route.REVIEW: Stage.REVIEW,
     Route.FINALISATION: Stage.FINALISATION,
@@ -133,7 +124,6 @@ DEFAULT_ROUTES_BY_STAGE: Mapping[Stage, Route] = {
     Stage.TRIAGE: Route.TRIAGE,
     Stage.PLANNING: Route.PLANNING,
     Stage.EXECUTION: Route.EXECUTION_COMPLEX,
-    Stage.STRUCTURE_REPAIR: Route.STRUCTURE_REPAIR,
     Stage.REPLANNING: Route.REPLANNING,
     Stage.REVIEW: Route.REVIEW,
     Stage.FINALISATION: Route.FINALISATION,
@@ -159,8 +149,6 @@ class ExecutionDisposition(StrEnum):
     COMPLETED = "COMPLETED"
     COMPLETED_WITH_LIMITATIONS = "COMPLETED_WITH_LIMITATIONS"
     FAILED = "FAILED"
-    ABANDONED = "ABANDONED"
-    REPLAN_REQUIRED = "REPLAN_REQUIRED"
     USER_INPUT_REQUIRED = "USER_INPUT_REQUIRED"
 
 
@@ -207,8 +195,23 @@ class ExecutionOutcome:
     summary: str
     evidence_refs: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
-    replan_reason: str = ""
     clarification: str = ""
+    work_performed: tuple[str, ...] = ()
+    verification: tuple[str, ...] = ()
+    remaining_work: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FinalisationOutcome:
+    """Canonical ledger payload plus the Persona-rendered user message.
+
+    ``execution_result_present`` distinguishes the Plan B ``null`` result from
+    the legacy report-only envelope accepted during rolling upgrades.
+    """
+
+    execution_result: ExecutionOutcome | None
+    final_message: str
+    execution_result_present: bool = True
 
 
 @dataclass(frozen=True)

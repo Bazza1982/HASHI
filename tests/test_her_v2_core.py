@@ -20,8 +20,6 @@ from orchestrator.her_v2.models import (
     Effort,
     ExecutionDisposition,
     LifecycleState,
-    ReviewOutcome,
-    Route,
     Stage,
     TerminalState,
     TriageClassification,
@@ -56,6 +54,7 @@ def test_lifecycle_violation_is_not_silently_repaired():
         (LifecycleState.RECEIVED, LifecycleState.EXECUTING),
         (LifecycleState.TRIAGED, LifecycleState.REVIEWING),
         (LifecycleState.PLANNED, LifecycleState.FINALISING),
+        (LifecycleState.EXECUTING, LifecycleState.PENDING_USER_INPUT),
         (LifecycleState.EXECUTION_COMPLETED, LifecycleState.REPLANNING),
         (LifecycleState.COMPLETED, LifecycleState.ERROR),
     ]
@@ -125,6 +124,30 @@ def test_restart_reconciliation_marks_incomplete_turn_error_without_resuming(tmp
     assert store.load("done").status is LifecycleState.COMPLETED
 
 
+@pytest.mark.parametrize(
+    ("legacy", "current"),
+    [
+        ("COMPLETED_WITH_REPORT_PENDING", LifecycleState.ERROR),
+        ("RECONCILIATION_REQUIRED", LifecycleState.ERROR),
+        ("ABANDONED", LifecycleState.FAILED),
+    ],
+)
+def test_legacy_terminal_ledgers_load_into_current_plan_b_states(legacy, current):
+    ledger = ExecutionLedger.from_dict(
+        {
+            "turn_id": f"legacy-{legacy.lower()}",
+            "request_ref": "request:legacy",
+            "goal_ref": "goal:legacy",
+            "status": legacy,
+            "classification": "SIMPLE_TASK",
+            "terminal_reason": "legacy_terminal",
+        }
+    )
+
+    assert ledger.status is current
+    assert ledger.terminal_reason == "legacy_terminal"
+
+
 def test_effort_is_orchestration_policy_not_provider_reasoning():
     cases = [
         (Effort.LOW, False, False, False, 0, 0),
@@ -146,47 +169,19 @@ def test_effort_is_orchestration_policy_not_provider_reasoning():
 
 def test_terminal_truth_table():
     cases = [
-        (ExecutionDisposition.COMPLETED, None, False, TerminalState.COMPLETED),
+        (ExecutionDisposition.COMPLETED, TerminalState.COMPLETED),
         (
             ExecutionDisposition.COMPLETED_WITH_LIMITATIONS,
-            None,
-            False,
             TerminalState.COMPLETED_WITH_LIMITATIONS,
         ),
-        (ExecutionDisposition.FAILED, None, False, TerminalState.FAILED),
-        (ExecutionDisposition.ABANDONED, None, False, TerminalState.ABANDONED),
+        (ExecutionDisposition.FAILED, TerminalState.FAILED),
         (
             ExecutionDisposition.USER_INPUT_REQUIRED,
-            None,
-            False,
             TerminalState.PENDING_USER_INPUT,
         ),
-        (
-            ExecutionDisposition.COMPLETED,
-            ReviewOutcome.CONDITIONAL_PASS,
-            False,
-            TerminalState.COMPLETED_WITH_LIMITATIONS,
-        ),
-        (
-            ExecutionDisposition.COMPLETED,
-            ReviewOutcome.FAIL,
-            False,
-            TerminalState.COMPLETED_WITH_LIMITATIONS,
-        ),
-        (
-            ExecutionDisposition.COMPLETED,
-            ReviewOutcome.PASS,
-            True,
-            TerminalState.COMPLETED_WITH_LIMITATIONS,
-        ),
     ]
-    for disposition, review, limited, expected in cases:
-        assert (
-            terminal_for_execution(
-                disposition, review_outcome=review, material_limitations=limited
-            )
-            is expected
-        ), (disposition, review, limited)
+    for disposition, expected in cases:
+        assert terminal_for_execution(disposition) is expected
 
 
 def test_provider_profiles_route_by_configuration_and_cannot_recurse_into_her():
@@ -265,7 +260,6 @@ def test_effective_routes_choose_model_slot_and_reasoning_independently():
                 "planning": "fast",
                 "execution_simple": "pro",
                 "execution_high_volume": "fast",
-                "structure_repair": "inherit",
             },
             "route_reasoning": {
                 "planning": "low",
@@ -289,7 +283,6 @@ def test_effective_routes_choose_model_slot_and_reasoning_independently():
     assert simple.reasoning == "max"
     assert complex_task.model == "model-premium"
     assert high_volume.model == "quick-model"
-    assert config.profile_for_route(Route.STRUCTURE_REPAIR).model == "model-premium"
 
     with pytest.raises(HERv2ConfigurationError, match="invalid model slot"):
         HERv2Config.from_mapping(

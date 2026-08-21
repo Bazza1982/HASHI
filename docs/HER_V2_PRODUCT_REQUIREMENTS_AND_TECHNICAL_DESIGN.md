@@ -72,13 +72,13 @@ All execution parameters must be configurable, including:
 - review limits;
 - tool and permission policies.
 
-HER v2 has exactly two count-based orchestration ceilings: Replanning and
+Apart from the deliberate one-call Finalisation rule, HER v2 has exactly two
+count-based iterative orchestration ceilings: Replanning and
 Review/remediation, as defined by effort policy. It has no total execution
-clock, stage clock, retry-attempt ceiling, report-attempt ceiling, structure-
-repair-attempt ceiling, tool-round ceiling, sub-agent-count ceiling, turn
-ceiling, cumulative token budget, or per-request output-token ceiling. Legacy
-HER/Claw fields representing those ceilings are invalid HER v2 configuration
-and must be rejected rather than silently applied.
+clock, stage clock, generic retry-attempt ceiling, tool-round ceiling,
+sub-agent-count ceiling, turn ceiling, cumulative token budget, or per-request
+output-token ceiling. Legacy HER/Claw fields representing those ceilings are
+invalid HER v2 configuration and must be rejected rather than silently applied.
 
 Provider-specific request construction belongs in provider adapters, not in the HER orchestration core.
 
@@ -142,14 +142,15 @@ HER applies one deterministic compatibility membrane:
    goal, classification, evidence, permissions, or lifecycle authority.
 
 Reasoning recovery is therefore a bounded carrier fallback, not permission to
-infer a classification from prose. Plain text is accepted only for inherently
-user-facing Immediate Response and Finalisation outputs. JSON-string control
-character repair accepts only the otherwise unchanged object produced by a
-non-strict JSON decoder; it does not complete truncated structures or infer
-fields. If a user-facing envelope still cannot be repaired, its original text
-remains eligible for plain presentation so the message does not disappear. A
-retry receives the previous validation defect so it can correct the envelope
-instead of blindly repeating the same request.
+infer a classification from prose. Plain text is accepted directly only for
+Immediate Response. Finalisation must return its combined structured result.
+JSON-string control-character repair accepts only the otherwise unchanged
+object produced by a non-strict JSON decoder; it does not complete truncated
+structures or infer fields. A retryable, side-effect-free stage receives the
+previous validation defect so it can correct the envelope instead of blindly
+repeating the same request. Main Execution and Finalisation are the exceptions
+defined below: Execution is never replayed to repair its envelope, and
+Finalisation is invoked exactly once.
 
 ### 3.6 Work, commentary, Persona packaging, and delivery
 
@@ -169,34 +170,33 @@ HER v2 keeps five boundaries distinct:
    [persona_end]
    ```
 
-   Text outside that block is unavailable to the commentary packager, required
-   message renderer, and Immediate Response model.
+   Text outside that block is unavailable to commentary packaging, required
+   clarification rendering, Immediate Response, and Finalisation.
 4. Commentary delivery accepts only the typed output of Persona packaging.
    Generic workflow delivery is not a commentary transport.
-5. A validated Final Report or clarification enters a separate typed required
-   message lane. Its Persona renderer receives only that report or question and
-   the extracted Persona block. It cannot change the message kind, source event,
-   workflow authority, terminal assessment, or required-delivery semantics.
+5. Finalisation is one combined model call that normalises Execution when
+   necessary and renders the final message from the same result using the
+   extracted Persona block. A pre-execution Triage clarification retains its
+   separate typed required-message renderer because no Execution result exists.
 
 Commentary is optional presentation, never workflow authority. A missing,
 empty, malformed, oversized, packaging-failed, or delivery-failed commentary
 cannot invalidate, retry, reclassify, replan, stop, or complete a stage. Missing
-or invalid Persona markers and packaging failures use a deterministic minimal
-package based on the configured HASHI display name, the form of address `您`,
-and the unchanged validated source message. Required Final Reports and
-clarifications use the same fail-open presentation rule: rendering failure
-preserves the validated report or question and cannot change workflow state.
+or invalid Persona markers use deterministic minimal guidance based on the
+configured HASHI display name and the form of address `您`. A failed or invalid
+combined Finalisation is a technical `ERROR` with a deterministic local report;
+a failed Triage-clarification renderer preserves the validated question and
+cannot change workflow state.
 When the Persona block is unavailable to Immediate Response, its prompt uses
 the same configured display name and polite form of address `您` as its entire
 fallback Persona guidance; it never falls back to the rest of `system_md`.
 
-This boundary governs interim commentary packaging, required Final Report and
-clarification rendering, and the Persona input used by Immediate Response.
-Immediate Response is not rewritten by either packager; it receives the same
-extracted block directly and, for `DIRECT_RESPONSE`, becomes the sole final
-answer. Clarification and Final Report retain dedicated required-message paths;
-they do not become optional commentary merely because they share the isolated
-Persona rendering core.
+This boundary governs interim commentary packaging, Triage clarification
+rendering, and the Persona inputs used by Immediate Response and Finalisation.
+Immediate Response receives the extracted block directly and, for
+`DIRECT_RESPONSE`, becomes the sole final answer. Finalisation sends its
+validated `final_message` directly through the required delivery path; it is
+not sent through a second Persona model.
 An Immediate Response may be sent provisionally before Triage only when the
 transport explicitly advertises support for editing that exact message into a
 final answer, clarification, or commentary. Discard is a narrower transport
@@ -233,9 +233,11 @@ There is one active plan version at a time.
 - Only the Replanning stage may replace the active plan.
 - Sub-agents may not change or replace the plan.
 
-### 4.4 Primary Agent authority
+### 4.4 Execution and Review authority
 
-The Primary Agent owns execution and the user-facing outcome. Review findings are advisory evidence. A reviewer cannot:
+Execution owns the substantive work and its disposition. Finalisation renders
+the user-facing outcome without replacing a valid disposition. Review findings
+are advisory evidence. A reviewer cannot:
 
 - change the user's goal;
 - change the Triage classification;
@@ -460,6 +462,28 @@ Planning failures are technical failures. Valid examples include:
 
 Execution follows the active plan when a formal plan exists. Low-effort execution follows a minimal execution directive derived from the immutable Triage result.
 
+Execution uses a dedicated HER v2 system prompt, not the Agent's full
+`system_md` and not its Persona. Its user message contains the complete request
+context supplied by HASHI—the same recent turns, Memory+ content, cross-session
+receipts, and other context visible to Planning—plus the active plan when one
+exists and any completed delegated inputs. The system prompt directs Execution
+to carry out the request faithfully with the tools available to that invocation,
+follow the supplied plan, report only work that actually occurred, and return
+exactly one JSON object.
+
+The only Execution dispositions are:
+
+- `COMPLETED`;
+- `COMPLETED_WITH_LIMITATIONS`;
+- `FAILED`;
+- `USER_INPUT_REQUIRED`.
+
+The result also records a truthful summary, work performed, verification,
+evidence references, limitations, remaining work, and a clarification question
+when required. Technical `ERROR` belongs to HER v2 Runtime and is not available
+for Execution to select. Execution cannot request Replanning; HER v2 imposes
+Replanning only through the configured effort/review policy.
+
 ### 8.1 Simple tasks
 
 - Prefer a lightweight capable model.
@@ -483,10 +507,11 @@ Execution follows the active plan when a formal plan exists. Low-effort executio
 
 Execution may return `USER_INPUT_REQUIRED` only with a concrete clarification
 question and truthful evidence explaining why progress cannot safely continue.
-HER delivers that question, transitions directly from `EXECUTING` to
-`PENDING_USER_INPUT`, and does not Review or Finalise the incomplete work.
-Bounded sub-agents may not use this disposition to contact the user; they return
-the missing-information finding to the Primary Agent as evidence.
+HER skips Review, passes the result through the single combined Finalisation
+call, delivers its Persona-rendered clarification, and then reaches
+`PENDING_USER_INPUT`. Bounded sub-agents may not use this disposition to contact
+the user; they return the missing-information finding to the Primary Agent as
+evidence.
 
 ## 9. Stage 4: Replanning
 
@@ -615,7 +640,10 @@ The work is substantially complete but contains disclosed limitations, caveats, 
 
 The work is incomplete or below the required quality. If the remediation limit permits, perform Replanning and remediation before returning to Review.
 
-Review findings are advisory. The Primary Agent remains responsible for execution and final reporting.
+Review findings are advisory. They may trigger HER-controlled Replanning and
+remediation, but they cannot replace a valid Execution disposition. Execution
+remains responsible for its result and Finalisation remains responsible for the
+user-facing report.
 
 Review limits are strict:
 
@@ -630,16 +658,19 @@ Finalisation applies to every turn, although `DIRECT_RESPONSE` reuses the Immedi
 
 ### 12.1 Exit assessment
 
-The Primary Agent assesses:
+Execution assesses whether the requested outcome was achieved and records one
+of its four dispositions. Runtime deterministically maps that disposition to
+the corresponding terminal state. Finalisation does not make a second outcome
+decision when valid Execution JSON exists.
 
-- the authoritative request;
-- immutable Triage classification;
-- active plan and relevant historical plan references;
-- execution and tool evidence;
-- replanning history;
-- reviewer findings;
-- unresolved limitations;
-- the appropriate terminal state.
+Finalisation considers:
+
+- the current request and its complete supplied context;
+- the complete raw Execution output;
+- the parsed Execution result when valid;
+- execution and tool evidence references;
+- reviewer findings and unresolved limitations;
+- the marked Persona guidance used to render `final_message`.
 
 Reviewer findings must be considered critically rather than accepted blindly.
 
@@ -657,35 +688,31 @@ The report communicates, as applicable:
 
 Reporting must be honest and must not claim unverified work as complete.
 
-The Finalisation model returns a neutral structured report, normally
-`{"report": "..."}`. After the compatibility membrane and report schema have
-validated that result, HER extracts the report and creates a typed required
-final message. HASHI then renders that message through the isolated Persona
-boundary using only the report and the explicit `[persona]` block. Rendering
-must preserve Markdown, code, links, paths, identifiers, numbers, facts,
-uncertainty, limitations, and the terminal boundary. The rendered text remains
-the same required final delivery with the same stable delivery identity.
+Finalisation is one combined model call. It receives the current request, the
+complete raw Execution output, the parsed Execution result when that envelope
+was valid, optional Review findings, and only the explicit `[persona]` block
+from the configured Agent system file. It never receives the rest of that file
+and has no Tool Gateway.
 
-Persona rendering is presentation-only and fail-open. A missing Persona block,
-provider error, invalid rendered envelope, or empty rendered result uses a
-deterministic Persona fallback containing the unchanged validated report. It
-does not retry execution, reopen Finalisation, or alter the selected terminal
-state. Validated Triage and Execution clarification questions follow the same
-required-message rule. A Direct Response is already Persona-authored by
-Immediate Response and is never rendered a second time.
+Finalisation returns one JSON object containing `execution_result` and
+`final_message`. When parsed Execution JSON exists, its disposition is the
+source of truth and Runtime preserves it even if Finalisation attempts to
+change it. When Execution returned malformed but meaningful output,
+Finalisation may normalise the clear meaning into the Execution schema. When
+the output has no usable meaning, `execution_result` is `null` and Runtime
+selects technical `ERROR`. `final_message` is rendered with the supplied
+Persona in the same call and must preserve Markdown, code, links, paths,
+identifiers, numbers, facts, uncertainty, limitations, and clarification.
+
+There is no independent structure-repair call and no second final Persona
+renderer. A Direct Response remains Persona-authored by Immediate Response.
 
 ### 12.3 Reporting failure
 
-If execution completed but reporting fails, HER retries a retryable reporting
-failure without an attempt-count ceiling. Retries end only on success, explicit
-stop, a non-retryable failure, or the meaningful-progress idle boundary.
-
-If reporting cannot complete:
-
-- execution evidence remains valid;
-- completed work is not discarded;
-- the terminal state is `COMPLETED_WITH_REPORT_PENDING`;
-- HASHI logs the reporting failure and preserves the completed outcome for later user-visible reconciliation.
+Finalisation is invoked once. If the invocation fails or its JSON is unusable,
+Runtime does not call a repair model, repeat Finalisation, or replay Execution.
+It preserves Execution evidence, selects technical `ERROR`, and sends a
+deterministic local fallback report.
 
 ## 13. Lifecycle State Machine
 
@@ -729,12 +756,6 @@ EXECUTING
 EXECUTING
   -> EXECUTION_COMPLETED
 
-EXECUTING [new user information or authority is required]
-  -> PENDING_USER_INPUT
-
-EXECUTING [side-effect result cannot be validated after isolated repair]
-  -> RECONCILIATION_REQUIRED
-
 EXECUTION_COMPLETED [XHIGH/MAX]
   -> REVIEWING
 
@@ -747,6 +768,9 @@ REVIEWING [FAIL with remediation available]
 EXECUTION_COMPLETED or REVIEWING
   -> FINALISING
   -> TERMINAL
+
+FINALISING [Execution requires user input]
+  -> PENDING_USER_INPUT
 ```
 
 ### 13.3 Strict ordering
@@ -769,11 +793,8 @@ HER v2 uses the following unified terminal states:
 |---|---|
 | `COMPLETED` | Required work and reporting completed |
 | `COMPLETED_WITH_LIMITATIONS` | Work concluded with material disclosed limitations |
-| `COMPLETED_WITH_REPORT_PENDING` | Execution completed but user-facing reporting ended on a non-retryable failure or no-progress idle boundary |
-| `RECONCILIATION_REQUIRED` | Execution may have changed external state, but the result could not be validated; automatic replay is forbidden |
 | `FAILED` | Execution ran correctly but concluded that the user's goal could not be achieved |
 | `ERROR` | A technical failure prevented correct execution, including an unexpected process interruption or lifecycle violation |
-| `ABANDONED` | The Primary Agent deliberately concluded that continued execution was no longer justified and recorded the reason |
 | `STOPPED` | The user or authorised control path stopped the turn, including `/stop` and `/steer` |
 | `PENDING_USER_INPUT` | Triage or later Execution determined that clarification, confirmation, or missing authority is required |
 
@@ -874,9 +895,8 @@ HER permits retry within the active process and current stage for technical fail
 
 - transient provider or network errors;
 - invalid structured output;
-- schema repair;
 - retryable tool transport errors;
-- report-generation failure.
+- side-effect-free Planning, Replanning, or Review transport failure.
 
 Retry delays may back off, but attempt count and elapsed execution time are not
 ceilings. A retry does not change the Triage classification or user goal.
@@ -885,14 +905,11 @@ Before a non-side-effect retry, HER records and supplies the prior validation
 error to the next attempt. Compatible carrier recovery occurs before retry and
 is recorded as such; it is not described as a model repair.
 
-A stage invocation authorised to perform external side effects is never
-replayed merely to repair its output format. If its returned envelope is
-invalid, HER invokes a distinct `STRUCTURE_REPAIR` stage using the original
-response as quoted evidence. That repair stage has no Tool Gateway registry and
-no side-effect authority. If repair ends at a non-retryable failure or the
-no-progress idle boundary without establishing a valid result,
-the turn becomes `RECONCILIATION_REQUIRED`; it does not enter Finalisation,
-claim completion, or automatically retry Execution.
+A side-effect-authorised Execution invocation is never replayed merely to
+repair its output format. Its complete raw output is passed directly to the
+single Finalisation call. Finalisation normalises clear meaning, while an
+unusable result becomes technical `ERROR`. Finalisation itself is never retried
+or followed by another model call.
 
 ### 17.2 No process-restart resumption
 
@@ -995,13 +1012,15 @@ HER v2 owns:
 - plan version selection;
 - Replanning triggers;
 - review/remediation limits;
-- final task-state selection.
+- deterministic mapping from the canonical Execution disposition to terminal
+  state, plus technical runtime terminal states.
 
 HER v2 may validate and publish optional neutral commentary returned by a
-successful reasoning stage. It may also submit a typed validated Final Report
-or clarification to an injected required-message presentation interface. It
-never reads Persona guidance or authors Persona prose inside the orchestration
-state machine; HASHI owns source extraction, isolated rendering, and fallback.
+successful reasoning stage. HASHI extracts Persona guidance and supplies only
+the explicit marker block to isolated presentation invocations. Combined
+Finalisation consumes that block while producing the canonical Execution
+payload and final message in one call; only a pre-execution Triage clarification
+uses the older required-message presentation interface.
 
 ### 20.3 Optional supporting systems
 
@@ -1063,12 +1082,11 @@ HER v2 is ready for production rollout only when:
 - the retired HER implementation is unreachable through `her`, `claw-cli`,
   backend switching, startup preflight, and initialization failure;
 - lifecycle and workflow events cannot generate Persona commentary;
-- Persona packaging receives no raw request, plan, reasoning trace, lifecycle
-  snapshot, or unmarked `system_md` content. It receives exactly one eligible
-  source message: neutral commentary, a validated Final Report, or a validated
-  clarification;
-- required Final Report and clarification rendering preserves delivery kind,
-  source identity, validated content, terminal state, and fallback delivery;
+- commentary and Triage-clarification packaging receive no raw request, plan,
+  reasoning trace, lifecycle snapshot, or unmarked `system_md` content;
+- combined Finalisation receives the current request and complete Execution
+  inputs but only the marked Persona block from `system_md`; it preserves a
+  valid Execution disposition and required-delivery identity;
 - commentary packaging and delivery failures cannot alter workflow outcome;
 - failed HER v2 initialization fails closed or uses an explicitly selected
   non-HER backend; it never rolls back to retired HER.
@@ -1094,11 +1112,11 @@ The following decisions are authoritative for HER v2:
 14. Missing optional commentary does not fail execution.
 15. Only successful reasoning-stage output may originate neutral commentary;
     workflow events never originate Persona speech.
-16. Persona packaging is presentation-only and receives only one eligible
-    message plus the explicit configured Persona block: neutral commentary, a
-    validated Final Report, or a validated clarification.
-17. Commentary remains optional; Final Report and clarification remain typed
-    required messages. Rendering cannot change their workflow authority.
+16. Commentary and Triage-clarification packaging are presentation-only and
+    receive one eligible message plus the explicit configured Persona block.
+17. Combined Finalisation receives complete Execution inputs and that Persona
+    block, preserves a valid Execution disposition, and produces the final
+    required message without a second Persona call.
 18. Reporting failure does not discard completed work.
 19. Recovery is conversational, not transactional.
 20. HER core is provider-neutral and modular.

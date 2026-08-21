@@ -334,12 +334,6 @@ EXECUTING
 EXECUTING
   -> EXECUTION_COMPLETED
 
-EXECUTING [new user information or authority is required]
-  -> PENDING_USER_INPUT
-
-EXECUTING [side-effect result remains unvalidated after isolated repair]
-  -> RECONCILIATION_REQUIRED
-
 EXECUTION_COMPLETED [XHIGH/MAX]
   -> REVIEWING
 
@@ -352,6 +346,9 @@ REVIEWING [FAIL and remediation available]
 EXECUTION_COMPLETED or REVIEWING
   -> FINALISING
   -> TERMINAL
+
+FINALISING [Execution requires user input]
+  -> PENDING_USER_INPUT
 ```
 
 A table-driven transition test must cover every allowed edge and a representative set of forbidden edges. It is unnecessary to create a separate handwritten test for every pair of unrelated states.
@@ -366,6 +363,24 @@ Tests must prove that HER never:
 - changes the active plan outside `REPLANNING`.
 
 An invalid authoritative transition produces terminal `ERROR`.
+
+#### 7.6.1 Execution prompt and result authority
+
+Tests must prove that:
+
+- Execution receives a dedicated HER v2 system prompt rather than the Agent's
+  full `system_md` or Persona;
+- its user message retains the same complete HASHI-supplied request context as
+  Planning, including recent turns, Memory+, and cross-session receipts, plus
+  the active plan when one exists;
+- the system prompt requires faithful tool-backed execution and exact JSON;
+- the only accepted dispositions are `COMPLETED`,
+  `COMPLETED_WITH_LIMITATIONS`, `FAILED`, and `USER_INPUT_REQUIRED`;
+- `ERROR`, `REPLAN_REQUIRED`, `ABANDONED`, and any other value are rejected;
+- Execution cannot request Replanning, while HER may impose Replanning through
+  its effort/review policy;
+- a valid Execution disposition is the source of terminal truth and cannot be
+  changed by Review or Finalisation.
 
 ### 7.7 Plan authority and versioning
 
@@ -413,7 +428,7 @@ Tests must prove:
 - the reviewer communicates only with the Primary Agent;
 - the reviewer cannot contact the user, reopen Triage, change goal or classification, activate a plan, authorise side effects, or finalise;
 - Review outcomes are `PASS`, `CONDITIONAL_PASS`, or `FAIL`;
-- Primary Agent remains responsible for the outcome.
+- Review cannot change the valid Execution disposition.
 
 Limit tests must prove:
 
@@ -471,15 +486,12 @@ The terminal-state decision table is:
 |---|---|
 | Goal achieved without material limitations | `COMPLETED` |
 | Goal substantially achieved with material limitations | `COMPLETED_WITH_LIMITATIONS` |
-| Work completed but reporting cannot continue before a non-retryable or idle-progress boundary | `COMPLETED_WITH_REPORT_PENDING` |
-| Side-effecting Execution returned, but its result remains unvalidated after tool-free repair | `RECONCILIATION_REQUIRED` |
-| Primary Agent correctly concludes the goal was not achieved | `FAILED` |
+| Execution correctly concludes the goal was not achieved | `FAILED` |
 | Technical failure prevents correct execution | `ERROR` |
-| Primary Agent deliberately ends work because continuation is no longer justified | `ABANDONED` |
 | User or authorised control stops the turn | `STOPPED` |
 | Triage or Execution requires clarification, confirmation, or missing authority | `PENDING_USER_INPUT` |
 
-One parameterised decision suite must cover all terminal states. Representative end-to-end scenarios must separately cover the states whose correctness depends on multi-stage evidence, including `COMPLETED_WITH_REPORT_PENDING`, `RECONCILIATION_REQUIRED`, `ABANDONED`, `STOPPED`, and `PENDING_USER_INPUT`.
+One parameterised decision suite must cover all terminal states. Representative end-to-end scenarios must separately cover the states whose correctness depends on multi-stage evidence, including `FAILED`, `ERROR`, `STOPPED`, and `PENDING_USER_INPUT`.
 
 Tests must prove:
 
@@ -489,9 +501,9 @@ Tests must prove:
 - intentional stop is `STOPPED`, not `ERROR`;
 - unexpected interruption is `ERROR`, not a separate `INTERRUPTED` state;
 - rejection of a request after correct execution judgement is `FAILED` unless a higher policy defines a different terminal category.
-- execution-discovered user input transitions directly from `EXECUTING`,
-  preserves evidence and classification, and does not enter Review or
-  Finalisation.
+- execution-discovered user input skips Review, enters the combined
+  Finalisation call, preserves evidence and classification, and terminates as
+  `PENDING_USER_INPUT` with a Persona-rendered clarification.
 
 ### 7.14 Ledger minimality
 
@@ -633,16 +645,16 @@ Cover:
 - unavailable reviewer after a non-retryable failure or no-progress idle
   boundary, with completed work preserved.
 
-### Journey G: Completed work with reporting failure
+### Journey G: Finalisation failure after completed Execution
 
 Required:
 
 - execution is not repeated;
 - evidence remains available;
-- reporting succeeds after more attempts than any retired fixed retry ceiling;
-- a non-retryable failure or no-progress idle boundary preserves the completed
-  execution without replaying it;
-- terminal `COMPLETED_WITH_REPORT_PENDING`.
+- Finalisation is invoked exactly once;
+- no structure-repair or separate Persona model is invoked;
+- invalid or failed Finalisation produces a deterministic local report and
+  technical `ERROR`.
 
 ### Journey H: Stop and Steer
 
@@ -662,7 +674,7 @@ Attempt an unregistered tool, permission escalation, out-of-workzone access, and
 
 ### Journey L: Terminal truth
 
-Use a compact parameterised harness plus representative E2E evidence to distinguish all terminal states, including `ABANDONED`.
+Use a compact parameterised harness plus representative E2E evidence to distinguish all current terminal states.
 
 ## 9. Structured Output and Tolerance
 
@@ -676,10 +688,10 @@ The permitted handling sequence is:
 4. when no formal candidate validates, inspect provider-exposed reasoning only
    for a valid target-stage JSON control envelope;
 5. reject conflicting valid candidates rather than choosing by field order;
-6. retry with the previous validation defect included;
-7. log the original defect, selected carrier, rejected candidates, and any repair;
-8. produce `ERROR` when required information remains unavailable and no side-effect result is in doubt;
-9. produce `RECONCILIATION_REQUIRED` when a side-effecting Execution result remains unvalidated, without replaying Execution.
+6. retry side-effect-free stages with the previous validation defect included;
+7. log the original defect, selected carrier, and rejected candidates;
+8. pass malformed main Execution output directly to Finalisation without replay;
+9. produce `ERROR` when Finalisation returns `execution_result: null` or fails.
 
 Candidate imperfections include:
 
@@ -696,9 +708,9 @@ Candidate imperfections include:
 - provider-native parsed objects and common text-content block shapes;
 - a single target-stage JSON control envelope returned only in exposed
   reasoning when formal output is empty or invalid;
-- plain text for inherently user-facing Immediate Response and Finalisation;
-- unrepaired user-facing text remains visible rather than becoming a silent
-  optional-stage failure;
+- plain text for inherently user-facing Immediate Response;
+- malformed but meaningful Execution prose preserved in full for the single
+  combined Finalisation call;
 - string-or-list fields normalised without splitting a string into characters.
 
 The suite must not create a case for every permutation. Each accepted repair rule requires a named compatibility reason or production regression.
@@ -726,12 +738,13 @@ For a side-effect-authorised Execution response, tests must additionally prove:
 
 - `provider_response_received` and the available reasoning trace are durable before validation;
 - the original Execution provider is invoked exactly once;
-- repair uses the explicit `STRUCTURE_REPAIR` stage with tools and side effects disabled;
-- repaired output retains the original evidence references;
-- repair exhaustion skips Finalisation and records `RECONCILIATION_REQUIRED`;
-- neither repair nor later recovery automatically replays the side effect.
+- Finalisation receives the complete raw Execution output and original evidence references;
+- malformed but meaningful output can be normalised by one Finalisation call;
+- unusable output reaches Finalisation and then records technical `ERROR`;
+- a valid Execution disposition cannot be changed by Finalisation;
+- neither normalisation nor later recovery automatically replays the side effect.
 
-Stage failure after repair exhaustion should be tested through a parameterised fault harness, with a small number of E2E representatives for Planning and Reporting where downstream behaviour materially differs.
+Stage failure after side-effect-free validation retries should be tested through a parameterised fault harness, with a small number of E2E representatives where downstream behaviour materially differs. Finalisation has a separate one-call failure test.
 
 ## 10. Timeout, Retry, and Progress
 
@@ -754,15 +767,14 @@ False progress includes:
 - timestamp-only Ledger writes;
 - rewriting the same state;
 - unchanged Replans;
-- unsuccessful repeated structure repair;
 - tool calls that produce no new evidence.
 
 Tests must prove that false progress cannot keep a stalled turn alive indefinitely.
 
 ### 10.2 No fixed execution ceilings
 
-Tests must prove that Planning, Review, provider invocation, structure repair,
-reporting, tool loops, and sub-agent execution are not ended by elapsed runtime
+Tests must prove that Planning, Replanning, Review, retryable side-effect-free
+provider stages, tool loops, and sub-agent execution are not ended by elapsed runtime
 or a fixed attempt/count budget. They must prove:
 
 - retries remain within the current stage;
@@ -772,13 +784,15 @@ or a fixed attempt/count budget. They must prove:
 - retry does not change goal or classification;
 - non-retryable failure and no-progress idle expiry choose the correct stage
   and terminal outcome;
+- Finalisation remains the explicit one-call exception;
 - stage-local retry is not process-restart recovery.
 
 Required regressions include:
 
 - meaningful progress continuing beyond every former stage or whole-turn
   duration succeeds;
-- reporting succeeds on attempt four or later without repeating Execution;
+- Finalisation failure is reported after exactly one call without repeating
+  Execution;
 - more than the former sub-agent ceiling is accepted when authority permits;
 - tool use continues beyond the former tool-round ceiling;
 - removed limit fields are rejected by HER v2 configuration rather than
@@ -794,17 +808,17 @@ Tests must prove:
   and finalisation do not synthesise commentary;
 - missing, empty, malformed, or oversized optional commentary does not affect
   stage validation or workflow outcome;
-- runtime passes neutral commentary through a commentary port and typed
-  validated Final Reports and clarifications through a required-message
-  presentation interface; it has no Persona source, packaging prompt, or
-  Telegram dependency;
-- each Persona invocation receives the exact contents of the configured
-  `[persona]` marker block and exactly one eligible source message: neutral
-  commentary, a validated Final Report, or a validated clarification;
+- runtime passes neutral commentary through a commentary port, sends combined
+  Finalisation output through required delivery, and retains the separate
+  required-message presentation interface only for pre-execution Triage
+  clarifications;
+- commentary and Triage-clarification Persona invocations receive the exact
+  configured `[persona]` marker block and exactly one eligible source message;
+- Finalisation receives that same marker block, the current request, and the
+  complete Execution/review inputs, but no unmarked Agent instructions;
 - content outside that marker block cannot reach the packaging model;
 - missing or invalid markers use the deterministic display-name + `您`
-  fallback in commentary, Immediate Response, Final Report, and clarification;
-  packaging failure uses the same unchanged-source fallback;
+  fallback in commentary, Immediate Response, Finalisation, and clarification;
 - packaging occurs before delivery and concurrent/replayed event IDs are
   delivered at most once;
 - the Telegram commentary boundary accepts packaged commentary and rejects a
@@ -812,16 +826,15 @@ Tests must prove:
 - optional commentary failure is logged but does not fail execution;
 - `/verbose` changes presentation, not workflow authority;
 - a final answer is not delivered before Finalisation;
-- Finalisation first returns and validates the structured neutral `report`; the
-  extracted report is Persona-rendered only afterward;
-- Final Report and clarification remain typed required-message lanes rather
-  than optional commentary, and Persona rendering cannot change their kind,
-  source event, delivery requirement, terminal state, or stable delivery ID;
-- required-message rendering preserves Markdown, code blocks, inline code,
-  links, paths, identifiers, numbers, facts, uncertainty, and limitations;
-- required-message renderer failure, missing Persona, invalid typed output, or
-  empty output falls back deterministically without losing the validated report
-  or clarification or changing the workflow result;
+- Finalisation returns one validated object containing `execution_result` and
+  Persona-rendered `final_message`; no second model renders that message;
+- valid Execution disposition is preserved even if Finalisation attempts to
+  change it, while malformed meaningful Execution output is normalised once;
+- combined Finalisation preserves Markdown, code blocks, inline code, links,
+  paths, identifiers, numbers, facts, uncertainty, and limitations;
+- invalid or failed Finalisation is not retried and produces technical `ERROR`
+  plus a deterministic local fallback; Triage-clarification renderer failure
+  still preserves its validated question;
 - Immediate Response receives the same `[persona]` block, never the rest of
   `system_md` or Bridge `/sys` packaging, and its model prompt contains no
   execution, planning, feasibility, or capability assessment task;
@@ -842,12 +855,12 @@ Tests must prove:
 - every ordinary final send writes its real outcome back to the HER v2 audit
   under the same stable `delivery_id` used by the deferred delivery intent;
 - a deferred-lane acceptance is never asserted as an actual transport delivery;
-- reporting failure follows the dedicated retry and terminal policy.
+- reporting failure follows the one-call Finalisation terminal policy.
 
 Exact wording should not be asserted unless a safety, authority, preservation,
-or protocol requirement depends on it. Commentary, required-message rendering,
-and Immediate Response share one Persona source contract but retain separate
-typed delivery tests.
+or protocol requirement depends on it. Commentary, Triage clarification,
+Immediate Response, and combined Finalisation share one Persona source contract
+but retain separate typed delivery tests.
 
 ### 11.1 Retired backend isolation
 
@@ -881,7 +894,7 @@ Use contract tests for:
 - capability-based provider eligibility and Tool Gateway authority;
 - Tool Registry read-only capability metadata;
 - transport receipt normalisation;
-- required Final Report and clarification Persona-renderer contracts;
+- combined Finalisation and Triage-clarification Persona contracts;
 - Ledger/log separation;
 - reasoning-trace correlation;
 - fallback-spool durability and deduplication;
@@ -999,17 +1012,16 @@ Release must not proceed if any of the following is possible:
 - completed work is discarded because Review, commentary, or Reporting failed;
 - a workflow or lifecycle event synthesises Persona content without a validated
   eligible source message, or authors Persona commentary directly;
-- Persona packaging can observe unmarked Agent instructions, the raw user
-  request, plans, reasoning traces, or lifecycle state, or receives anything
-  beyond one eligible source message and the explicit Persona block;
-- required Final Report or clarification rendering changes validated facts,
-  message kind, source identity, required-delivery semantics, terminal state, or
-  stable delivery identity;
+- commentary or Triage-clarification packaging can observe unmarked Agent
+  instructions or anything beyond one eligible source message and the explicit
+  Persona block, or Finalisation can observe unmarked Agent instructions;
+- combined Finalisation changes a valid Execution disposition, loses validated
+  facts, or changes required-delivery semantics or stable delivery identity;
 - raw provider or runtime commentary can bypass Persona packaging into the
   Telegram commentary lane;
 - duplicate commentary event IDs can produce duplicate user delivery;
 - false progress keeps stalled execution alive indefinitely;
-- `ERROR`, `FAILED`, `ABANDONED`, `STOPPED`, or another terminal state is materially confused;
+- `ERROR`, `FAILED`, `STOPPED`, or another terminal state is materially confused;
 - Provider or model names are hard-coded into HER orchestration policy;
 - Habits, Meditation, or Dream acquire user-goal or live-workflow authority.
 

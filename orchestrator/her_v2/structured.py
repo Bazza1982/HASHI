@@ -11,6 +11,7 @@ from .interfaces import StructuredOutputError
 from .models import (
     ExecutionDisposition,
     ExecutionOutcome,
+    FinalisationOutcome,
     ReviewFinding,
     ReviewOutcome,
     StageResponse,
@@ -408,8 +409,7 @@ def parse_plan(data: Mapping[str, Any]) -> Mapping[str, Any]:
     return normalized
 
 
-@_stage_parser()
-def parse_execution(data: Mapping[str, Any]) -> ExecutionOutcome:
+def _parse_execution_data(data: Mapping[str, Any]) -> ExecutionOutcome:
     disposition = _enum_value(
         ExecutionDisposition,
         data.get("disposition") or data.get("status"),
@@ -421,7 +421,6 @@ def parse_execution(data: Mapping[str, Any]) -> ExecutionOutcome:
             "PARTIAL": "COMPLETED_WITH_LIMITATIONS",
             "PARTIAL_SUCCESS": "COMPLETED_WITH_LIMITATIONS",
             "UNSUCCESSFUL": "FAILED",
-            "NEEDS_REPLAN": "REPLAN_REQUIRED",
             "BLOCKED_ON_USER": "USER_INPUT_REQUIRED",
             "INPUT_REQUIRED": "USER_INPUT_REQUIRED",
             "NEEDS_USER_INPUT": "USER_INPUT_REQUIRED",
@@ -433,9 +432,13 @@ def parse_execution(data: Mapping[str, Any]) -> ExecutionOutcome:
         raise StructuredOutputError("Execution requires a truthful result summary")
     evidence = _string_items(data.get("evidence_refs"), field="evidence_refs")
     limitations = _string_items(data.get("limitations"), field="limitations")
-    reason = _text_value(data.get("replan_reason"), data.get("reason"))
-    if disposition is ExecutionDisposition.REPLAN_REQUIRED and not reason:
-        raise StructuredOutputError("REPLAN_REQUIRED requires a concrete reason")
+    work_performed = _string_items(
+        data.get("work_performed"), field="work_performed"
+    )
+    verification = _string_items(data.get("verification"), field="verification")
+    remaining_work = _string_items(
+        data.get("remaining_work"), field="remaining_work"
+    )
     clarification = _text_value(data.get("clarification"), data.get("question"))
     if (
         disposition is ExecutionDisposition.USER_INPUT_REQUIRED
@@ -449,9 +452,16 @@ def parse_execution(data: Mapping[str, Any]) -> ExecutionOutcome:
         summary,
         evidence,
         limitations,
-        reason,
         clarification,
+        work_performed,
+        verification,
+        remaining_work,
     )
+
+
+@_stage_parser()
+def parse_execution(data: Mapping[str, Any]) -> ExecutionOutcome:
+    return _parse_execution_data(data)
 
 
 @_stage_parser()
@@ -468,11 +478,43 @@ def parse_review(data: Mapping[str, Any]) -> ReviewFinding:
     return ReviewFinding(outcome, summary, findings)
 
 
-@_stage_parser(plain_text_field="report")
-def parse_report(data: Mapping[str, Any]) -> str:
-    report = _text_value(
-        data.get("report"), data.get("message"), data.get("response")
+@_stage_parser()
+def parse_finalisation(data: Mapping[str, Any]) -> FinalisationOutcome:
+    """Parse the one-call Plan B ledger result and Persona-rendered message.
+
+    A report-only object remains readable during a rolling upgrade, but it has
+    no authority to synthesize an Execution result when the original Execution
+    JSON was invalid.
+    """
+
+    execution_result_present = "execution_result" in data
+    raw_execution = data.get("execution_result")
+    execution: ExecutionOutcome | None
+    if raw_execution is None:
+        execution = None
+    elif isinstance(raw_execution, Mapping):
+        execution = _parse_execution_data(raw_execution)
+    else:
+        raise StructuredOutputError(
+            "Finalisation execution_result must be an object or null"
+        )
+
+    final_message = _text_value(
+        data.get("final_message"),
+        data.get("report"),
+        data.get("message"),
+        data.get("response"),
     )
-    if not report:
-        raise StructuredOutputError("Finalisation requires a user-facing report")
-    return report
+    if not final_message:
+        raise StructuredOutputError(
+            "Finalisation requires a Persona-rendered final_message"
+        )
+    if not execution_result_present and "report" not in data:
+        raise StructuredOutputError(
+            "Finalisation requires execution_result (object or null)"
+        )
+    return FinalisationOutcome(
+        execution_result=execution,
+        final_message=final_message,
+        execution_result_present=execution_result_present,
+    )

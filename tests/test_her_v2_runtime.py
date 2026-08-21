@@ -659,7 +659,7 @@ async def test_medium_turn_preserves_goal_and_routes_tools_only_to_execution(tmp
 
 
 @pytest.mark.asyncio
-async def test_validated_final_report_is_persona_rendered_before_required_delivery(
+async def test_combined_finalisation_delivers_persona_message_without_second_renderer(
     tmp_path,
 ):
     raw_report = (
@@ -677,7 +677,15 @@ async def test_validated_final_report_is_persona_rendered_before_required_delive
                     "summary": "Completed with receipt job-42.",
                 }
             ],
-            Stage.FINALISATION: [{"report": raw_report}],
+            Stage.FINALISATION: [
+                {
+                    "execution_result": {
+                        "disposition": "COMPLETED",
+                        "summary": "Completed with receipt job-42.",
+                    },
+                    "final_message": raw_report,
+                }
+            ],
         }
     )
     renderer = RecordingRequiredPersonaRenderer()
@@ -688,14 +696,11 @@ async def test_validated_final_report_is_persona_rendered_before_required_delive
         required_persona=renderer,
     ).run_turn("Complete it", "request-render-final", effort="low")
 
-    expected = f"Persona final:\n\n{raw_report}"
     assert result.terminal_state is TerminalState.COMPLETED
-    assert result.text == expected
-    assert [(message.kind, message.text) for message in renderer.messages] == [
-        ("final", raw_report)
-    ]
+    assert result.text == raw_report
+    assert renderer.messages == []
     final = next(item for item in result.delivery_records if item.kind == "final")
-    assert final.text == expected
+    assert final.text == raw_report
     assert result.ledger["status"] == "COMPLETED"
     rows = [
         json.loads(line)
@@ -707,11 +712,11 @@ async def test_validated_final_report_is_persona_rendered_before_required_delive
         if row["event"] == "delivery_result"
         and row["payload"]["kind"] == "final"
     )
-    assert delivery["payload"]["provenance"] == "test_persona_renderer"
+    assert delivery["payload"]["provenance"] == "her_v2_combined_finalisation"
 
 
 @pytest.mark.asyncio
-async def test_required_persona_failure_preserves_validated_report_and_terminal_state(
+async def test_removed_final_persona_renderer_cannot_change_finalisation_result(
     tmp_path,
 ):
     scripts = _initial("SIMPLE_TASK")
@@ -734,18 +739,14 @@ async def test_required_persona_failure_preserves_validated_report_and_terminal_
     assert result.terminal_state is TerminalState.COMPLETED
     assert result.text == "Completed with receipt 42."
     assert result.delivery_records[-1].text == result.text
+    assert renderer.messages == []
     rows = [
         json.loads(line)
         for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
     ]
-    rendered = next(
-        row for row in rows if row["event"] == "required_persona_render_completed"
+    assert not any(
+        row["event"].startswith("required_persona_render") for row in rows
     )
-    assert rendered["payload"]["fallback"] is True
-    assert rendered["payload"]["provenance"] == (
-        "required_message_identity_fallback"
-    )
-    assert rendered["payload"]["error_type"] == "RuntimeError"
 
 
 @pytest.mark.asyncio
@@ -813,6 +814,71 @@ async def test_representative_routing_matrix_edges(
 
 
 @pytest.mark.asyncio
+async def test_execution_receives_the_same_complete_request_context_as_planning(
+    tmp_path,
+):
+    complete_context = (
+        "RECENT TURN MESSAGES\n"
+        "Memory+ recent facts\n"
+        "Cross-session receipt evidence\n"
+        "CURRENT USER REQUEST"
+    )
+    scripts = _initial("COMPLEX_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {"plan": ["inspect", "change", "verify"]}
+            ],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Completed from the supplied context.",
+                }
+            ],
+            Stage.FINALISATION: [
+                {
+                    "execution_result": {
+                        "disposition": "COMPLETED",
+                        "summary": "Completed from the supplied context.",
+                    },
+                    "final_message": "Completed from the supplied context.",
+                }
+            ],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        complete_context, "request-complete-execution-context", effort="medium"
+    )
+
+    planning_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.PLANNING
+    )
+    execution_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.EXECUTION
+    )
+    finalisation_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.FINALISATION
+    )
+    assert planning_request.goal == complete_context
+    assert execution_request.goal == complete_context
+    assert finalisation_request.goal == complete_context
+    assert execution_request.context["active_plan"]["plan"] == [
+        "inspect",
+        "change",
+        "verify",
+    ]
+    assert result.terminal_state is TerminalState.COMPLETED
+
+
+@pytest.mark.asyncio
 async def test_normal_mode_enables_external_side_effect_authority(tmp_path):
     scripts = _initial("SIMPLE_TASK")
     scripts.update(
@@ -832,23 +898,22 @@ async def test_normal_mode_enables_external_side_effect_authority(tmp_path):
         for _profile, request in provider.requests
         if request.stage is Stage.EXECUTION
     )
-    assert execution.context["shadow_mode"] is False
+    assert set(execution.context) == {"active_plan", "sub_agent_results"}
     assert execution.allow_tools is True
     assert execution.allow_side_effects is True
     assert result.terminal_state is TerminalState.COMPLETED
 
 
 @pytest.mark.asyncio
-async def test_high_replanning_creates_new_plan_without_reconsulting_habits(tmp_path):
+async def test_review_imposed_replanning_does_not_reconsult_habits(tmp_path):
     scripts = _initial("COMPLEX_TASK")
     scripts.update(
         {
             Stage.PLANNING: [{"plan": ["old approach"]}],
             Stage.EXECUTION: [
                 {
-                    "disposition": "REPLAN_REQUIRED",
-                    "summary": "Constraint discovered.",
-                    "replan_reason": "The old API is unavailable.",
+                    "disposition": "COMPLETED",
+                    "summary": "Candidate used the old API.",
                     "evidence_refs": ["evidence:constraint"],
                 },
                 {
@@ -856,6 +921,13 @@ async def test_high_replanning_creates_new_plan_without_reconsulting_habits(tmp_
                     "summary": "Used the supported API.",
                     "evidence_refs": ["test:green"],
                 },
+            ],
+            Stage.REVIEW: [
+                {
+                    "outcome": "FAIL",
+                    "summary": "The old API is unavailable.",
+                    "findings": ["Use the supported API."],
+                }
             ],
             Stage.REPLANNING: [{"plan": ["supported approach"]}],
             Stage.FINALISATION: [{"report": "Completed with the supported API."}],
@@ -870,7 +942,7 @@ async def test_high_replanning_creates_new_plan_without_reconsulting_habits(tmp_
         config=_config(meditation_enabled=True),
         habits=habits,
     ).run_turn(
-        "Implement safely", "request-replan", effort=Effort.HIGH
+        "Implement safely", "request-replan", effort=Effort.XHIGH
     )
 
     assert result.terminal_state is TerminalState.COMPLETED
@@ -930,31 +1002,38 @@ async def test_review_never_receives_habits_or_retrieves_them_again(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_replan_limit_cannot_turn_incomplete_work_into_success(tmp_path):
+async def test_review_failure_cannot_change_valid_execution_disposition(tmp_path):
     scripts = _initial("COMPLEX_TASK")
     scripts.update(
         {
             Stage.PLANNING: [{"plan": ["attempt the constrained approach"]}],
             Stage.EXECUTION: [
                 {
-                    "disposition": "REPLAN_REQUIRED",
-                    "summary": "The active approach cannot complete the goal.",
-                    "replan_reason": "A required route is unavailable.",
+                    "disposition": "COMPLETED",
+                    "summary": "The constrained candidate was produced.",
+                }
+            ],
+            Stage.REVIEW: [
+                {
+                    "outcome": "FAIL",
+                    "summary": "A required route is unavailable.",
+                    "findings": ["The required verification route is unavailable."],
                 }
             ],
             Stage.FINALISATION: [
-                {"report": "Work was abandoned because no Replan was authorised."}
+                {"report": "Work completed with an unresolved verification limitation."}
             ],
         }
     )
-    config = _config(replan_limits={"high": 0})
+    config = _config(replan_limits={"xhigh": 0})
 
     result = await _runtime(
         tmp_path, ScriptedProvider(scripts), config=config
-    ).run_turn("Complete the constrained task", "request-no-replan", effort="high")
+    ).run_turn("Complete the constrained task", "request-no-replan", effort="xhigh")
 
-    assert result.terminal_state is TerminalState.ABANDONED
-    assert "Replanning limit" in result.limitations[0]
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.replan_count == 0
+    assert "verification route" in result.limitations[0]
 
 
 @pytest.mark.asyncio
@@ -1021,7 +1100,7 @@ async def test_max_review_and_remediation_are_bounded_at_three(tmp_path):
     assert result.review_count == 3
     assert result.replan_count == 3
     assert sum(call.stage is Stage.REVIEW for _profile, call in provider.requests) == 3
-    assert result.terminal_state is TerminalState.COMPLETED_WITH_LIMITATIONS
+    assert result.terminal_state is TerminalState.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -1055,9 +1134,9 @@ async def test_high_volume_subagents_are_bounded_and_cannot_replan_or_finalise(t
                     "evidence_refs": ["sub:a"],
                 },
                 {
-                    "disposition": "REPLAN_REQUIRED",
-                    "summary": "Sub-agent wants a different approach.",
-                    "replan_reason": "Source B moved.",
+                    "disposition": "FAILED",
+                    "summary": "Source B could not be inspected because it moved.",
+                    "limitations": ["Source B was unavailable."],
                 },
                 lambda request: {
                     "disposition": "COMPLETED",
@@ -1107,7 +1186,7 @@ async def test_high_volume_subagents_are_bounded_and_cannot_replan_or_finalise(t
         if item["assignment_id"] == "research-b"
     )
     assert prohibited["disposition"] == "FAILED"
-    assert "prohibited orchestration authority" in prohibited["summary"]
+    assert "could not be inspected" in prohibited["summary"]
     assert result.terminal_state is TerminalState.COMPLETED
     assert result.evidence_refs == ("sub:a", "primary:synthesis")
 
@@ -1227,7 +1306,7 @@ async def test_subagent_side_effect_flag_must_be_a_real_boolean(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_reporting_exhaustion_preserves_completed_execution(tmp_path):
+async def test_finalisation_failure_is_one_call_and_runtime_error(tmp_path):
     scripts = _initial("SIMPLE_TASK")
     scripts.update(
         {
@@ -1253,23 +1332,17 @@ async def test_reporting_exhaustion_preserves_completed_execution(tmp_path):
         "Perform once", "request-report", effort=Effort.LOW
     )
 
-    assert result.terminal_state is TerminalState.COMPLETED_WITH_REPORT_PENDING
+    assert result.terminal_state is TerminalState.ERROR
     assert result.evidence_refs == ("receipt:123",)
     assert sum(call.stage is Stage.EXECUTION for _profile, call in provider.requests) == 1
-    assert sum(call.stage is Stage.FINALISATION for _profile, call in provider.requests) == 3
+    assert sum(call.stage is Stage.FINALISATION for _profile, call in provider.requests) == 1
+    assert "report provider unavailable" in result.error
+    assert "marked ERROR" in result.text
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "disposition,terminal",
-    [
-        ("FAILED", TerminalState.FAILED),
-        ("ABANDONED", TerminalState.ABANDONED),
-    ],
-)
-async def test_unsuccessful_and_abandoned_execution_keep_truthful_terminal_states(
-    tmp_path, disposition, terminal
-):
+async def test_failed_execution_keeps_truthful_terminal_state(tmp_path):
+    disposition = "FAILED"
     scripts = _initial("SIMPLE_TASK")
     scripts.update(
         {
@@ -1285,7 +1358,7 @@ async def test_unsuccessful_and_abandoned_execution_keep_truthful_terminal_state
     result = await _runtime(tmp_path, ScriptedProvider(scripts)).run_turn(
         "Find the missing result", f"request-{disposition.lower()}", effort="low"
     )
-    assert result.terminal_state is terminal
+    assert result.terminal_state is TerminalState.FAILED
 
 
 @pytest.mark.asyncio
@@ -1324,11 +1397,10 @@ async def test_only_successful_stage_results_publish_neutral_commentary(
             ],
             Stage.EXECUTION: [
                 {
-                    "disposition": "REPLAN_REQUIRED",
-                    "summary": "The original route is unavailable.",
-                    "replan_reason": "The API returned a permanent removal response.",
+                    "disposition": "COMPLETED",
+                    "summary": "The original route produced an unverified candidate.",
                     "evidence_refs": ["receipt:gone"],
-                    "commentary": "The original route is unavailable.",
+                    "commentary": "The original route produced a candidate.",
                 },
                 {
                     "disposition": "COMPLETED",
@@ -1347,10 +1419,10 @@ async def test_only_successful_stage_results_publish_neutral_commentary(
             ],
             Stage.REVIEW: [
                 {
-                    "outcome": "PASS",
-                    "summary": "The replacement receipt proves completion.",
-                    "findings": [],
-                    "commentary": "Independent review passed.",
+                    "outcome": "FAIL",
+                    "summary": "The original route is no longer supported.",
+                    "findings": ["Use the supported replacement route."],
+                    "commentary": "Independent review required a replacement route.",
                 }
             ],
             Stage.FINALISATION: [
@@ -1373,13 +1445,13 @@ async def test_only_successful_stage_results_publish_neutral_commentary(
     assert result.terminal_state is TerminalState.COMPLETED
     assert [(item.stage, item.text) for item in commentary.records] == [
         (Stage.PLANNING, "The plan is ready for execution."),
-        (Stage.EXECUTION, "The original route is unavailable."),
+        (Stage.EXECUTION, "The original route produced a candidate."),
+        (Stage.REVIEW, "Independent review required a replacement route."),
         (Stage.REPLANNING, "A supported replacement route is now planned."),
         (
             Stage.EXECUTION,
             "The replacement route completed successfully.",
         ),
-        (Stage.REVIEW, "Independent review passed."),
     ]
     assert len({item.event_id for item in commentary.records}) == 5
     assert all(item.kind != "commentary" for item in result.delivery_records)
@@ -1395,7 +1467,7 @@ async def test_only_successful_stage_results_publish_neutral_commentary(
 
 
 @pytest.mark.asyncio
-async def test_commentary_port_failure_does_not_block_replanning_or_completion(
+async def test_commentary_port_failure_does_not_block_execution_or_completion(
     tmp_path,
 ):
     scripts = _initial("COMPLEX_TASK")
@@ -1409,23 +1481,10 @@ async def test_commentary_port_failure_does_not_block_replanning_or_completion(
             ],
             Stage.EXECUTION: [
                 {
-                    "disposition": "REPLAN_REQUIRED",
-                    "summary": "The primary route is blocked.",
-                    "replan_reason": "The required endpoint no longer exists.",
-                    "commentary": "The primary route is blocked.",
-                },
-                {
                     "disposition": "COMPLETED",
                     "summary": "The alternate route worked.",
                     "commentary": "The alternate route worked.",
                 },
-            ],
-            Stage.REPLANNING: [
-                {
-                    "plan": ["Use the alternate route"],
-                    "changed_because": "The endpoint no longer exists.",
-                    "commentary": "The plan now uses the alternate route.",
-                }
             ],
             Stage.FINALISATION: [{"report": "Completed with the alternate route."}],
         }
@@ -1439,7 +1498,7 @@ async def test_commentary_port_failure_does_not_block_replanning_or_completion(
     ).run_turn("Complete the task", "request-renderer-fallback", effort="high")
 
     assert result.terminal_state is TerminalState.COMPLETED
-    assert result.replan_count == 1
+    assert result.replan_count == 0
     assert commentary.records == []
     assert all(item.kind != "commentary" for item in result.delivery_records)
 
@@ -1553,7 +1612,7 @@ async def test_reviewer_technical_failure_does_not_discard_execution(tmp_path):
     result = await _runtime(tmp_path, ScriptedProvider(scripts)).run_turn(
         "Complete robustly", "request-review-error", effort=Effort.XHIGH
     )
-    assert result.terminal_state is TerminalState.COMPLETED_WITH_LIMITATIONS
+    assert result.terminal_state is TerminalState.COMPLETED
     assert any("Review unavailable" in item for item in result.limitations)
 
 
@@ -1611,7 +1670,7 @@ async def test_slow_review_has_no_stage_wall_clock_ceiling(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_reporting_retries_beyond_removed_attempt_cap_without_repeating_execution(
+async def test_finalisation_does_not_retry_or_repeat_execution(
     tmp_path,
 ):
     scripts = _initial("SIMPLE_TASK")
@@ -1638,8 +1697,8 @@ async def test_reporting_retries_beyond_removed_attempt_cap_without_repeating_ex
         "Perform once", "request-report-retries", effort="low"
     )
 
-    assert result.terminal_state is TerminalState.COMPLETED
-    assert result.text == "Completed after recovery."
+    assert result.terminal_state is TerminalState.ERROR
+    assert "marked ERROR" in result.text
     assert result.evidence_refs == ("receipt:timeout-case",)
     assert sum(
         request.stage is Stage.EXECUTION for _profile, request in provider.requests
@@ -1647,7 +1706,7 @@ async def test_reporting_retries_beyond_removed_attempt_cap_without_repeating_ex
     assert sum(
         request.stage is Stage.FINALISATION
         for _profile, request in provider.requests
-    ) == 4
+    ) == 1
 
 
 @pytest.mark.asyncio
@@ -1736,6 +1795,17 @@ async def test_execution_can_pause_for_newly_discovered_user_authority(tmp_path)
             "evidence_refs": ["lookup:accounts"],
         }
     ]
+    scripts[Stage.FINALISATION] = [
+        {
+            "execution_result": {
+                "disposition": "USER_INPUT_REQUIRED",
+                "summary": "Two accounts match the supplied name.",
+                "evidence_refs": ["lookup:accounts"],
+                "clarification": "Which account should be changed?",
+            },
+            "final_message": "Which account should be changed?",
+        }
+    ]
     provider = ScriptedProvider(scripts)
 
     result = await _runtime(tmp_path, provider).run_turn(
@@ -1745,21 +1815,37 @@ async def test_execution_can_pause_for_newly_discovered_user_authority(tmp_path)
     assert result.terminal_state is TerminalState.PENDING_USER_INPUT
     assert result.text == "Which account should be changed?"
     assert result.evidence_refs == ("lookup:accounts",)
-    assert result.ledger["terminal_reason"] == "execution_user_input_required"
+    assert result.ledger["terminal_reason"] == "user_input_required"
     assert not any(
-        request.stage in {Stage.REVIEW, Stage.FINALISATION}
+        request.stage is Stage.REVIEW
         for _profile, request in provider.requests
     )
+    assert sum(
+        request.stage is Stage.FINALISATION
+        for _profile, request in provider.requests
+    ) == 1
 
 
 @pytest.mark.asyncio
-async def test_execution_discovered_clarification_uses_required_persona_lane(tmp_path):
+async def test_execution_discovered_clarification_uses_combined_finalisation(tmp_path):
     scripts = _initial("SIMPLE_TASK")
     scripts[Stage.EXECUTION] = [
         {
             "disposition": "NEEDS_USER_INPUT",
             "summary": "Two accounts match.",
             "clarification": "Which account should be changed?",
+        }
+    ]
+    scripts[Stage.FINALISATION] = [
+        {
+            "execution_result": {
+                "disposition": "USER_INPUT_REQUIRED",
+                "summary": "Two accounts match.",
+                "clarification": "Which account should be changed?",
+            },
+            "final_message": (
+                "Persona clarification:\n\nWhich account should be changed?"
+            ),
         }
     ]
     renderer = RecordingRequiredPersonaRenderer()
@@ -1774,12 +1860,10 @@ async def test_execution_discovered_clarification_uses_required_persona_lane(tmp
     assert result.text == (
         "Persona clarification:\n\nWhich account should be changed?"
     )
-    assert [(message.kind, message.text) for message in renderer.messages] == [
-        ("clarification", "Which account should be changed?")
-    ]
+    assert renderer.messages == []
     assert result.delivery_records[-1].kind == "clarification"
     assert result.delivery_records[-1].text == result.text
-    assert result.ledger["terminal_reason"] == "execution_user_input_required"
+    assert result.ledger["terminal_reason"] == "user_input_required"
 
 
 @pytest.mark.asyncio
@@ -1792,11 +1876,17 @@ async def test_simple_classification_can_escalate_execution_capability_without_m
             Stage.PLANNING: [{"plan": ["attempt safely"]}],
             Stage.EXECUTION: [
                 {
-                    "disposition": "REPLAN_REQUIRED",
-                    "summary": "The lightweight route cannot verify the dependency.",
-                    "replan_reason": "premium capability required",
+                    "disposition": "COMPLETED",
+                    "summary": "The lightweight route produced an unverified candidate.",
                 },
                 {"disposition": "COMPLETED", "summary": "Verified and completed."},
+            ],
+            Stage.REVIEW: [
+                {
+                    "outcome": "FAIL",
+                    "summary": "Premium capability is required for verification.",
+                    "findings": ["Verify with the capable route."],
+                }
             ],
             Stage.REPLANNING: [{"plan": ["use the capable verification route"]}],
             Stage.FINALISATION: [{"report": "Verified and completed."}],
@@ -1805,7 +1895,7 @@ async def test_simple_classification_can_escalate_execution_capability_without_m
     provider = ScriptedProvider(scripts)
 
     result = await _runtime(tmp_path, provider).run_turn(
-        "Complete the simple request", "request-simple-escalation", effort="high"
+        "Complete the simple request", "request-simple-escalation", effort="xhigh"
     )
 
     assert result.terminal_state is TerminalState.COMPLETED
@@ -1822,11 +1912,11 @@ async def test_simple_classification_can_escalate_execution_capability_without_m
         if request.stage is Stage.EXECUTION
     ][1]
     assert second_execution.classification is TriageClassification.SIMPLE_TASK
-    assert second_execution.context["execution_capability_escalated"] is True
+    assert set(second_execution.context) == {"active_plan", "sub_agent_results"}
 
 
 @pytest.mark.asyncio
-async def test_side_effect_execution_bad_json_uses_tool_free_structure_repair_once(
+async def test_malformed_execution_is_normalised_by_single_finalisation_call(
     tmp_path,
 ):
     scripts = _initial("SIMPLE_TASK")
@@ -1841,33 +1931,24 @@ async def test_side_effect_execution_bad_json_uses_tool_free_structure_repair_on
                     evidence_refs=("hashi-tools:receipt-1",),
                 )
             ],
-            Stage.STRUCTURE_REPAIR: [
+            Stage.FINALISATION: [
                 {
-                    "disposition": "COMPLETED",
-                    "summary": "The requested change completed.",
-                    "evidence_refs": ["hashi-tools:receipt-1"],
+                    "execution_result": {
+                        "disposition": "COMPLETED",
+                        "summary": "The requested change completed.",
+                        "evidence_refs": ["hashi-tools:receipt-1"],
+                    },
+                    "final_message": "The requested change completed.",
                 }
             ],
-            Stage.FINALISATION: [{"report": "The requested change completed."}],
         }
     )
     provider = ScriptedProvider(scripts)
-    runtime = _runtime(
-        tmp_path,
-        provider,
-        config=_config(
-            slot_models={
-                "fast": "quick-route-model",
-                "pro": "pro-route-model",
-            },
-            route_model_slots={"structure_repair": "pro"},
-            route_reasoning={"structure_repair": "xhigh"},
-        ),
-    )
+    runtime = _runtime(tmp_path, provider)
 
     result = await runtime.run_turn(
         "Make the requested change once",
-        "request-execution-structure-repair",
+        "request-execution-plan-b-normalisation",
         effort="low",
     )
 
@@ -1877,24 +1958,23 @@ async def test_side_effect_execution_bad_json_uses_tool_free_structure_repair_on
         for _profile, request in provider.requests
         if request.stage is Stage.EXECUTION
     ]
-    repair_requests = [
+    finalisation_requests = [
         request
         for _profile, request in provider.requests
-        if request.stage is Stage.STRUCTURE_REPAIR
+        if request.stage is Stage.FINALISATION
     ]
     assert len(execution_requests) == 1
-    assert len(repair_requests) == 1
+    assert len(finalisation_requests) == 1
     assert execution_requests[0].allow_side_effects is True
-    assert repair_requests[0].allow_tools is False
-    assert repair_requests[0].allow_side_effects is False
-    assert repair_requests[0].context["original_execution_must_not_be_replayed"] is True
-    repair_profile = next(
-        profile
-        for profile, request in provider.requests
-        if request.stage is Stage.STRUCTURE_REPAIR
+    finalisation_context = finalisation_requests[0].context
+    assert finalisation_context["execution_json_valid"] is False
+    assert finalisation_context["parsed_execution_result"] is None
+    assert finalisation_context["raw_execution_output"]["text"].startswith(
+        "The requested change completed"
     )
-    assert repair_profile.model == "pro-route-model"
-    assert repair_profile.reasoning == "xhigh"
+    assert finalisation_context["raw_execution_output"]["evidence_refs"] == [
+        "hashi-tools:receipt-1"
+    ]
 
     rows = [
         json.loads(line)
@@ -1921,12 +2001,15 @@ async def test_side_effect_execution_bad_json_uses_tool_free_structure_repair_on
         for row in rows
         if row["event"] == "stage_completed" and row["stage"] == "execution"
     )
-    assert completed["payload"]["validation_source"] == "tool_free_structure_repair"
-    assert any(row["event"] == "structure_repair_completed" for row in rows)
+    assert completed["payload"]["validation_source"] == "deferred_to_finalisation"
+    assert any(
+        row["event"] == "execution_structure_deferred_to_finalisation"
+        for row in rows
+    )
 
 
 @pytest.mark.asyncio
-async def test_failed_execution_structure_repair_requires_reconciliation_without_replay(
+async def test_unusable_execution_reaches_finalisation_then_runtime_error(
     tmp_path,
 ):
     scripts = _initial("SIMPLE_TASK")
@@ -1941,11 +2024,13 @@ async def test_failed_execution_structure_repair_requires_reconciliation_without
                     evidence_refs=("hashi-tools:uncertain-1",),
                 )
             ],
-            Stage.STRUCTURE_REPAIR: [
-                StageResponse(text="still malformed"),
-                StageInvocationError(
-                    "repair provider rejected request", retryable=False
-                ),
+            Stage.FINALISATION: [
+                {
+                    "execution_result": None,
+                    "final_message": (
+                        "The Execution output could not be interpreted reliably."
+                    ),
+                }
             ],
         }
     )
@@ -1953,38 +2038,78 @@ async def test_failed_execution_structure_repair_requires_reconciliation_without
 
     result = await _runtime(tmp_path, provider).run_turn(
         "Perform the external action once",
-        "request-reconciliation-required",
+        "request-execution-result-unusable",
         effort="low",
     )
 
-    assert result.terminal_state is TerminalState.RECONCILIATION_REQUIRED
-    assert result.ledger["status"] == "RECONCILIATION_REQUIRED"
-    assert result.ledger["terminal_reason"] == "execution_outcome_unconfirmed"
+    assert result.terminal_state is TerminalState.ERROR
+    assert result.ledger["status"] == "ERROR"
+    assert result.ledger["terminal_reason"] == "technical_failure"
     assert result.evidence_refs == ("hashi-tools:uncertain-1",)
-    assert "was not replayed" in result.error
+    assert result.error == "execution_result_unusable"
+    assert result.text == "The Execution output could not be interpreted reliably."
     assert sum(
         request.stage is Stage.EXECUTION
         for _profile, request in provider.requests
     ) == 1
     assert sum(
-        request.stage is Stage.STRUCTURE_REPAIR
-        for _profile, request in provider.requests
-    ) == 2
-    assert not any(
         request.stage is Stage.FINALISATION
         for _profile, request in provider.requests
-    )
+    ) == 1
 
     rows = [
         json.loads(line)
         for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
     ]
-    assert any(row["event"] == "structure_repair_failed" for row in rows)
-    reconciliation = next(
-        row for row in rows if row["event"] == "execution_reconciliation_required"
+    assert any(
+        row["event"] == "execution_structure_deferred_to_finalisation"
+        for row in rows
     )
-    assert reconciliation["payload"]["execution_replayed"] is False
-    assert reconciliation["payload"]["automatic_retry_permitted"] is False
+
+
+@pytest.mark.asyncio
+async def test_finalisation_cannot_change_valid_execution_disposition(tmp_path):
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "The requested work completed and was verified.",
+                    "evidence_refs": ["receipt:complete"],
+                }
+            ],
+            Stage.FINALISATION: [
+                {
+                    "execution_result": {
+                        "disposition": "FAILED",
+                        "summary": "Incorrect attempted override.",
+                    },
+                    "final_message": "The requested work completed and was verified.",
+                }
+            ],
+        }
+    )
+
+    result = await _runtime(tmp_path, ScriptedProvider(scripts)).run_turn(
+        "Complete the requested work", "request-finalisation-cannot-fail", effort="low"
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.ledger["status"] == "COMPLETED"
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    ignored = next(
+        row
+        for row in rows
+        if row["event"] == "finalisation_disposition_override_ignored"
+    )
+    assert ignored["payload"] == {
+        "execution_disposition": "COMPLETED",
+        "finalisation_disposition": "FAILED",
+    }
 
 
 @pytest.mark.asyncio

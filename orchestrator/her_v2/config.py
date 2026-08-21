@@ -132,7 +132,6 @@ DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
     Stage.TRIAGE: "triage",
     Stage.PLANNING: "premium",
     Stage.EXECUTION: "premium",
-    Stage.STRUCTURE_REPAIR: "premium",
     Stage.REPLANNING: "premium",
     Stage.REVIEW: "reviewer",
     Stage.FINALISATION: "premium",
@@ -299,10 +298,7 @@ class HERv2Config:
             slot = str(value or "").strip().lower()
             if slot == "quick":
                 slot = "fast"
-            allowed_slots = {"fast", "pro"}
-            if route is Route.STRUCTURE_REPAIR:
-                allowed_slots.add("inherit")
-            if slot not in allowed_slots:
+            if slot not in {"fast", "pro"}:
                 raise HERv2ConfigurationError(
                     f"invalid model slot {slot!r} for route {route.value!r}"
                 )

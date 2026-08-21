@@ -142,15 +142,10 @@ def route_profile_names(raw: Mapping[str, Any]) -> dict[Route, str]:
 def default_route_model_slots(raw: Mapping[str, Any]) -> dict[str, str]:
     profile_slots = profile_model_slots(raw)
     route_profiles = route_profile_names(raw)
-    result = {
+    return {
         route.value: profile_slots.get(profile, "pro")
         for route, profile in route_profiles.items()
     }
-    # Structure repair historically reuses the profile/model that produced the
-    # malformed output. Preserve that safe default while allowing an explicit
-    # Quick or Pro choice.
-    result[Route.STRUCTURE_REPAIR.value] = "inherit"
-    return result
 
 
 def _route(raw: Route | str) -> Route:
@@ -161,10 +156,7 @@ def _route_slot(route: Route, raw: Any) -> str:
     slot = str(raw or "").strip().lower()
     if slot == "quick":
         slot = "fast"
-    allowed = {"fast", "pro"}
-    if route is Route.STRUCTURE_REPAIR:
-        allowed.add("inherit")
-    if slot not in allowed:
+    if slot not in {"fast", "pro"}:
         raise ValueError(f"invalid model slot {slot!r} for route {route.value!r}")
     return slot
 
@@ -198,8 +190,7 @@ class HERv2RuntimeConfiguration:
 
     def model_slot_for_route(self, route: Route | str) -> str:
         parsed = _route(route)
-        fallback = "inherit" if parsed is Route.STRUCTURE_REPAIR else "pro"
-        return self.route_model_slots.get(parsed.value, fallback)
+        return self.route_model_slots.get(parsed.value, "pro")
 
     def reasoning_for_route(self, raw: Mapping[str, Any], route: Route | str) -> str:
         parsed = _route(route)

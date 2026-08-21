@@ -7,7 +7,7 @@ import hashlib
 import logging
 import uuid
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Sequence
 
 from .audit import AuditPersistenceError, DurableAuditLog
@@ -27,7 +27,6 @@ from .interfaces import (
     NullDreamMaintainer,
     NullHabitAdvisor,
     NullMeditationRunner,
-    ReconciliationRequired,
     RecordingDelivery,
     StageInvocationError,
     StageProvider,
@@ -42,10 +41,10 @@ from .models import (
     Effort,
     ExecutionDisposition,
     ExecutionOutcome,
+    FinalisationOutcome,
     LifecycleState,
     ReviewFinding,
     ReviewOutcome,
-    Route,
     Stage,
     StageRequest,
     StageResponse,
@@ -58,7 +57,7 @@ from .models import (
     WORK_CLASSIFICATIONS,
     terminal_lifecycle,
 )
-from .policy import replan_eligible, resolve_policy, terminal_for_execution
+from .policy import resolve_policy, terminal_for_execution
 from .presentation import (
     RenderedRequiredMessage,
     RequiredMessageValidationError,
@@ -68,9 +67,9 @@ from .presentation import (
 from .progress import ProgressTracker
 from .structured import (
     parse_execution,
+    parse_finalisation,
     parse_immediate,
     parse_plan,
-    parse_report,
     parse_review,
     parse_triage,
     resolve_stage_response,
@@ -102,6 +101,9 @@ class _TurnState:
     delivery_kind: str = ""
     delivery_event_id: str = ""
     execution_capability_escalated: bool = False
+    last_execution_response: StageResponse | None = None
+    last_execution_structure_valid: bool = False
+    last_execution_error: str = ""
     late_immediate_source_task: asyncio.Task | None = None
     late_immediate_delivery_task: asyncio.Task | None = None
 
@@ -182,12 +184,6 @@ class HERv2Runtime:
                     state, f"AUDIT_PERSISTENCE_FAILURE: {exc}"
                 )
             return await self._error_result(state, str(exc))
-        except ReconciliationRequired as exc:
-            return await self._reconciliation_result(
-                state,
-                str(exc),
-                evidence_refs=exc.evidence_refs,
-            )
         except (LedgerInvariantError, LifecycleViolation) as exc:
             self.ledger_store.save(state.ledger)
             return self._result(
@@ -642,67 +638,49 @@ class HERv2Runtime:
 
         await self._transition(state, LifecycleState.EXECUTING)
         execution = await self._execute_once(state, classification)
-        self._merge_execution_evidence(state, execution)
-        while execution.disposition is ExecutionDisposition.REPLAN_REQUIRED:
-            if not replan_eligible(classification, policy):
-                state.limitations.append(
-                    "Execution requested Replanning outside the selected HER policy."
-                )
-                execution = ExecutionOutcome(
-                    ExecutionDisposition.ABANDONED,
-                    execution.summary,
-                    execution.evidence_refs,
-                    tuple(state.limitations),
-                )
-                break
-            if state.replan_count >= policy.max_replans:
-                state.limitations.append("Configured Replanning limit was reached.")
-                execution = ExecutionOutcome(
-                    ExecutionDisposition.ABANDONED,
-                    execution.summary,
-                    execution.evidence_refs,
-                    tuple(state.limitations),
-                )
-                break
-            await self._perform_replan(
-                state,
-                classification,
-                reason=execution.replan_reason,
-                reviewer_findings=(),
-            )
-            await self._transition(state, LifecycleState.EXECUTING)
-            execution = await self._execute_once(state, classification)
+        if execution is not None:
             self._merge_execution_evidence(state, execution)
-
-        self._merge_execution_evidence(state, execution)
-        if execution.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
-            return await self._execution_input_result(state, execution)
         await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
 
-        review_outcome: ReviewOutcome | None = None
-        if policy.review:
-            execution, review_outcome = await self._review_and_remediate(
+        if (
+            policy.review
+            and execution is not None
+            and execution.disposition is not ExecutionDisposition.USER_INPUT_REQUIRED
+        ):
+            execution, _review_outcome = await self._review_and_remediate(
                 state, classification, execution, policy.max_reviews, policy.max_replans
             )
-            if execution.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
-                return await self._execution_input_result(state, execution)
 
         await self._transition(state, LifecycleState.FINALISING)
-        desired_terminal = terminal_for_execution(
-            execution.disposition,
-            review_outcome=review_outcome,
-            material_limitations=bool(state.limitations),
-        )
-        report = ""
+        raw_execution = state.last_execution_response
+        finalisation: FinalisationOutcome | None = None
+        finalisation_error = ""
         try:
-            _response, report = await self._invoke_stage(
+            _response, finalisation = await self._invoke_stage(
                 state,
                 Stage.FINALISATION,
-                parse_report,
+                parse_finalisation,
                 allow_tools=False,
                 context={
-                    "required_terminal_state": desired_terminal.value,
-                    "execution_summary": execution.summary,
+                    "raw_execution_output": (
+                        {
+                            "text": raw_execution.text,
+                            "data": dict(raw_execution.data),
+                            "provider": raw_execution.provider,
+                            "model": raw_execution.model,
+                            "evidence_refs": list(raw_execution.evidence_refs),
+                        }
+                        if raw_execution is not None
+                        else None
+                    ),
+                    "parsed_execution_result": (
+                        _execution_payload(execution)
+                        if execution is not None
+                        and state.last_execution_structure_valid
+                        else None
+                    ),
+                    "execution_json_valid": state.last_execution_structure_valid,
+                    "execution_stage_error": state.last_execution_error or None,
                     "evidence_refs": list(state.evidence_refs),
                     "limitations": list(state.limitations),
                     "review": (
@@ -715,44 +693,106 @@ class HERv2Runtime:
                         else None
                     ),
                 },
+                retry_on_failure=False,
             )
-            assert isinstance(report, str)
+            assert isinstance(finalisation, FinalisationOutcome)
         except StageInvocationError as exc:
-            if desired_terminal in {
-                TerminalState.COMPLETED,
-                TerminalState.COMPLETED_WITH_LIMITATIONS,
-            }:
-                desired_terminal = TerminalState.COMPLETED_WITH_REPORT_PENDING
-                state.limitations.append(str(exc))
-            else:
-                desired_terminal = TerminalState.ERROR
-                state.limitations.append(f"Final reporting failed: {exc}")
+            finalisation_error = str(exc)
 
-        report_provenance = ""
-        report_detail = ""
-        if report:
-            await self._settle_late_immediate(
-                state,
-                reason="final_report_ready_before_immediate_response",
-                deliver_if_source_ready=True,
-            )
-            report, report_provenance, report_detail = (
-                await self._render_required_message(
+        canonical_execution = execution
+        if state.last_execution_error:
+            canonical_execution = None
+            desired_terminal = TerminalState.ERROR
+            error = state.last_execution_error
+        elif canonical_execution is not None:
+            # A valid Execution envelope is the source of truth. Finalisation
+            # can render it, but cannot alter its disposition.
+            if (
+                finalisation is not None
+                and finalisation.execution_result is not None
+                and finalisation.execution_result.disposition
+                is not canonical_execution.disposition
+            ):
+                self._audit(
                     state,
-                    kind="final",
-                    text=report,
-                    event_id=f"{state.ledger.turn_id}:final",
+                    stage=Stage.FINALISATION.value,
+                    role="runtime",
+                    event="finalisation_disposition_override_ignored",
+                    event_id=(
+                        f"{state.ledger.turn_id}:finalisation:"
+                        "disposition-override-ignored"
+                    ),
+                    payload={
+                        "execution_disposition": canonical_execution.disposition.value,
+                        "finalisation_disposition": (
+                            finalisation.execution_result.disposition.value
+                        ),
+                    },
                 )
+            desired_terminal = terminal_for_execution(
+                canonical_execution.disposition,
             )
-            await self._deliver(
-                state,
-                kind="final",
-                text=report,
-                event_id=f"{state.ledger.turn_id}:final",
-                required=True,
-                provenance=report_provenance,
-                detail=report_detail,
+            error = ""
+        else:
+            canonical_execution = (
+                finalisation.execution_result
+                if finalisation is not None
+                and finalisation.execution_result_present
+                else None
             )
+            if canonical_execution is None:
+                desired_terminal = TerminalState.ERROR
+                error = "execution_result_unusable"
+            else:
+                desired_terminal = terminal_for_execution(
+                    canonical_execution.disposition,
+                )
+                error = ""
+
+        if canonical_execution is not None:
+            self._merge_execution_evidence(state, canonical_execution)
+
+        if finalisation is None:
+            desired_terminal = TerminalState.ERROR
+            error = (
+                state.last_execution_error
+                or finalisation_error
+                or "finalisation_result_unusable"
+            )
+            limitation = f"Finalisation failed: {error}"
+            if limitation not in state.limitations:
+                state.limitations.append(limitation)
+            report = (
+                "HER v2 could not produce a trustworthy final report. The turn has "
+                "been marked ERROR; the Execution record remains available for inspection."
+            )
+            provenance = "runtime_finalisation_error_fallback"
+            detail = "persona_rendering_unavailable=true"
+        else:
+            report = finalisation.final_message
+            provenance = "her_v2_combined_finalisation"
+            detail = "persona_rendered_in_finalisation=true"
+
+        await self._settle_late_immediate(
+            state,
+            reason="final_report_ready_before_immediate_response",
+            deliver_if_source_ready=True,
+        )
+        delivery_kind = (
+            "clarification"
+            if desired_terminal is TerminalState.PENDING_USER_INPUT
+            else "final"
+        )
+        final_event_id = f"{state.ledger.turn_id}:{delivery_kind}"
+        await self._deliver(
+            state,
+            kind=delivery_kind,
+            text=report,
+            event_id=final_event_id,
+            required=True,
+            provenance=provenance,
+            detail=detail,
+        )
         await self._transition(
             state,
             terminal_lifecycle(desired_terminal),
@@ -761,60 +801,20 @@ class HERv2Runtime:
         self._schedule_meditation(
             state,
             terminal=desired_terminal,
-            execution_summary=execution.summary,
+            execution_summary=(
+                canonical_execution.summary if canonical_execution is not None else ""
+            ),
         )
         return self._result(
             state,
             terminal=desired_terminal,
             text=report,
-            error=(
-                "report_generation_failed"
-                if desired_terminal is TerminalState.COMPLETED_WITH_REPORT_PENDING
-                else ""
-            ),
-        )
-
-    async def _execution_input_result(
-        self,
-        state: _TurnState,
-        execution: ExecutionOutcome,
-    ) -> TurnResult:
-        """Pause truthfully when execution discovers missing user authority."""
-
-        await self._settle_late_immediate(
-            state,
-            reason="authoritative_clarification_ready",
-            deliver_if_source_ready=True,
-        )
-        clarification, provenance, detail = await self._render_required_message(
-            state,
-            kind="clarification",
-            text=execution.clarification,
-            event_id=f"{state.ledger.turn_id}:execution:clarification",
-        )
-        await self._deliver(
-            state,
-            kind="clarification",
-            text=clarification,
-            event_id=f"{state.ledger.turn_id}:execution:clarification",
-            required=True,
-            provenance=provenance,
-            detail=detail,
-        )
-        await self._transition(
-            state,
-            LifecycleState.PENDING_USER_INPUT,
-            terminal_reason="execution_user_input_required",
-        )
-        return self._result(
-            state,
-            terminal=TerminalState.PENDING_USER_INPUT,
-            text=clarification,
+            error=error,
         )
 
     async def _execute_once(
         self, state: _TurnState, classification: TriageClassification
-    ) -> ExecutionOutcome:
+    ) -> ExecutionOutcome | None:
         sub_agent_results: tuple[SubAgentResult, ...] = ()
         if classification is TriageClassification.HIGH_VOLUME_TASK:
             sub_agent_results = await self._run_subagents(state)
@@ -827,41 +827,56 @@ class HERv2Runtime:
             if state.execution_capability_escalated
             else self.config.execution_profile_for(classification)
         )
-        _response, execution = await self._invoke_stage(
-            state,
-            Stage.EXECUTION,
-            parse_execution,
-            profile=profile,
-            allow_tools=True,
-            allow_side_effects=not self.config.shadow_mode,
-            context={
-                "classification": classification.value,
-                "active_plan": state.active_plan,
-                "plan_id": state.ledger.plan_id,
-                "authority": "primary_agent",
-                "execution_capability_escalated": state.execution_capability_escalated,
-                "shadow_mode": self.config.shadow_mode,
-                "sub_agent_results": [
-                    {
-                        "assignment_id": result.assignment_id,
-                        "disposition": result.disposition.value,
-                        "summary": result.summary,
-                        "evidence_refs": list(result.evidence_refs),
-                        "limitations": list(result.limitations),
-                    }
-                    for result in sub_agent_results
-                ],
-            },
+        state.last_execution_response = None
+        state.last_execution_structure_valid = False
+        state.last_execution_error = ""
+        try:
+            _response, execution = await self._invoke_stage(
+                state,
+                Stage.EXECUTION,
+                parse_execution,
+                profile=profile,
+                allow_tools=True,
+                allow_side_effects=not self.config.shadow_mode,
+                context={
+                    "active_plan": state.active_plan,
+                    "sub_agent_results": [
+                        {
+                            "assignment_id": result.assignment_id,
+                            "disposition": result.disposition.value,
+                            "summary": result.summary,
+                            "evidence_refs": list(result.evidence_refs),
+                            "limitations": list(result.limitations),
+                        }
+                        for result in sub_agent_results
+                    ],
+                },
+                defer_structured_error=True,
+            )
+        except (TurnStopped, AuditPersistenceError):
+            raise
+        except StageInvocationError as exc:
+            state.last_execution_error = str(exc)
+            return None
+
+        state.last_execution_response = _response
+        state.last_execution_structure_valid = isinstance(
+            execution, ExecutionOutcome
         )
+        for ref in _response.evidence_refs:
+            if ref not in state.evidence_refs:
+                state.evidence_refs.append(ref)
+        if execution is None:
+            return None
         assert isinstance(execution, ExecutionOutcome)
         if _response.evidence_refs:
-            execution = ExecutionOutcome(
-                execution.disposition,
-                execution.summary,
-                tuple(dict.fromkeys((*execution.evidence_refs, *_response.evidence_refs))),
-                execution.limitations,
-                execution.replan_reason,
-                execution.clarification,
+            execution = replace(
+                execution,
+                evidence_refs=tuple(
+                    dict.fromkeys(
+                        (*execution.evidence_refs, *_response.evidence_refs)
+                    )
+                ),
             )
         return execution
 
@@ -988,19 +1003,17 @@ class HERv2Runtime:
                 context=request_context,
                 role_override=role,
                 publish_commentary=False,
+                retry_on_failure=False,
             )
             assert isinstance(outcome, ExecutionOutcome)
-            if outcome.disposition in {
-                ExecutionDisposition.REPLAN_REQUIRED,
-                ExecutionDisposition.USER_INPUT_REQUIRED,
-            }:
+            if outcome.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
                 outcome = ExecutionOutcome(
                     ExecutionDisposition.FAILED,
-                    "Sub-agent requested prohibited orchestration authority; request returned as evidence.",
+                    "Sub-agent requested user-facing authority; request returned as evidence.",
                     outcome.evidence_refs,
                     tuple(
                         item
-                        for item in (outcome.replan_reason, outcome.clarification)
+                        for item in (outcome.clarification,)
                         if item
                     ),
                 )
@@ -1030,7 +1043,7 @@ class HERv2Runtime:
                 },
             )
             return result
-        except (TurnStopped, AuditPersistenceError, ReconciliationRequired):
+        except (TurnStopped, AuditPersistenceError):
             raise
         except Exception as exc:
             self._audit(
@@ -1109,7 +1122,7 @@ class HERv2Runtime:
         execution: ExecutionOutcome,
         max_reviews: int,
         max_replans: int,
-    ) -> tuple[ExecutionOutcome, ReviewOutcome | None]:
+    ) -> tuple[ExecutionOutcome | None, ReviewOutcome | None]:
         last_outcome: ReviewOutcome | None = None
         remediation_count = 0
         while state.review_count < max_reviews:
@@ -1160,6 +1173,9 @@ class HERv2Runtime:
             remediation_count += 1
             await self._transition(state, LifecycleState.EXECUTING)
             execution = await self._execute_once(state, classification)
+            if execution is None:
+                await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
+                return None, last_outcome
             self._merge_execution_evidence(state, execution)
             if execution.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
                 return execution, last_outcome
@@ -1181,6 +1197,8 @@ class HERv2Runtime:
         context: Mapping[str, Any] | None = None,
         role_override: str | None = None,
         publish_commentary: bool = True,
+        defer_structured_error: bool = False,
+        retry_on_failure: bool = True,
     ) -> tuple[StageResponse, Any]:
         selected = profile or self.config.profile_for(stage)
         role = role_override or (
@@ -1327,58 +1345,27 @@ class HERv2Runtime:
                             },
                         )
                 except StructuredOutputError as exc:
-                    if not allow_side_effects:
+                    if not defer_structured_error:
                         raise
-                    try:
-                        repaired_response, parsed = await self._repair_structure(
-                            state,
-                            target_stage=stage,
-                            validator=validator,
-                            profile=selected,
-                            role=role,
-                            original_attempt=attempt,
-                            original_invocation=invocation_serial,
-                            original_response=response,
-                            validation_error=exc,
-                        )
-                    except (TurnStopped, AuditPersistenceError):
+                    if stage is not Stage.EXECUTION or role.startswith("sub_agent:"):
                         raise
-                    except StageInvocationError as repair_error:
-                        self._audit(
-                            state,
-                            stage=stage.value,
-                            role=role,
-                            event="stage_attempt_failed",
-                            event_id=f"{attempt_prefix}:failed",
-                            provider=response.provider or selected.engine,
-                            model=response.model or selected.model,
-                            attempt=attempt,
-                            payload={
-                                "error_type": type(exc).__name__,
-                                "error": str(exc),
-                                "will_retry": False,
-                                "provider_response_received": True,
-                                "structure_repair_attempted": True,
-                                "structure_repair_error": str(repair_error),
-                                "reconciliation_required": True,
-                            },
-                        )
-                        raise ReconciliationRequired(
-                            f"{stage.value} returned an invalid result after possible "
-                            "side effects, and tool-free structure repair could not continue; "
-                            "execution outcome requires reconciliation and was not replayed",
-                            evidence_refs=response.evidence_refs,
-                        ) from repair_error
-                    effective_response = StageResponse(
-                        text=repaired_response.text,
-                        data=repaired_response.data,
-                        reasoning_trace=response.reasoning_trace,
+                    parsed = None
+                    validation_source = "deferred_to_finalisation"
+                    self._audit(
+                        state,
+                        stage=stage.value,
+                        role=role,
+                        event="execution_structure_deferred_to_finalisation",
+                        event_id=f"{attempt_prefix}:deferred-to-finalisation",
                         provider=response.provider or selected.engine,
                         model=response.model or selected.model,
-                        usage=response.usage,
-                        evidence_refs=response.evidence_refs,
+                        attempt=attempt,
+                        payload={
+                            "validation_error": str(exc),
+                            "execution_replayed": False,
+                            "raw_output_preserved": True,
+                        },
                     )
-                    validation_source = "tool_free_structure_repair"
 
                 complete_ref = self._audit(
                     state,
@@ -1406,7 +1393,7 @@ class HERv2Runtime:
                 self.ledger_store.save(state.ledger)
                 if publish_commentary and validation_source not in {
                     "reasoning_recovery",
-                    "tool_free_structure_repair",
+                    "deferred_to_finalisation",
                 }:
                     await self._publish_stage_commentary(
                         state,
@@ -1423,8 +1410,6 @@ class HERv2Runtime:
             except TurnStopped:
                 raise
             except AuditPersistenceError:
-                raise
-            except ReconciliationRequired:
                 raise
             except (StructuredOutputError, StageInvocationError) as exc:
                 last_error = exc
@@ -1443,7 +1428,8 @@ class HERv2Runtime:
             # stop, or the meaningful-progress idle boundary. Side-effecting
             # execution is never replayed here.
             will_retry = bool(
-                not allow_side_effects
+                retry_on_failure
+                and not allow_side_effects
                 and isinstance(last_error, StageInvocationError)
                 and last_error.retryable
             )
@@ -1476,111 +1462,6 @@ class HERv2Runtime:
                 stage=stage,
                 attempt=attempt,
             )
-
-    async def _repair_structure(
-        self,
-        state: _TurnState,
-        *,
-        target_stage: Stage,
-        validator: Validator,
-        profile: ProviderProfile,
-        role: str,
-        original_attempt: int,
-        original_invocation: int,
-        original_response: StageResponse,
-        validation_error: StructuredOutputError,
-    ) -> tuple[StageResponse, Any]:
-        """Repair only the response envelope; never re-enter side-effect execution."""
-
-        repair_key = (
-            f"{state.ledger.turn_id}:{target_stage.value}:invocation:"
-            f"{original_invocation}:attempt:{original_attempt}:structure-repair"
-        )
-        self._audit(
-            state,
-            stage=target_stage.value,
-            role=role,
-            event="structure_repair_requested",
-            event_id=f"{repair_key}:requested",
-            provider=original_response.provider or profile.engine,
-            model=original_response.model or profile.model,
-            attempt=original_attempt,
-            payload={
-                "repair_target_stage": target_stage.value,
-                "validation_error": str(validation_error),
-                "tools_authorised": False,
-                "side_effects_authorised": False,
-                "original_execution_replayed": False,
-                "original_evidence_refs": list(original_response.evidence_refs),
-            },
-        )
-        repair_context = {
-            "repair_target_stage": target_stage.value,
-            "repair_of_role": role,
-            "repair_of_attempt": original_attempt,
-            "repair_of_invocation": original_invocation,
-            "validation_error": str(validation_error),
-            "original_provider_response": {
-                "text": original_response.text,
-                "data": dict(original_response.data),
-                "provider": original_response.provider or profile.engine,
-                "model": original_response.model or profile.model,
-                "evidence_refs": list(original_response.evidence_refs),
-            },
-            "repair_authority": "structure_only",
-            "original_execution_must_not_be_replayed": True,
-        }
-        repair_profile = self.config.profile_for_route(
-            Route.STRUCTURE_REPAIR,
-            base_profile=profile,
-        )
-        try:
-            repaired_response, parsed = await self._invoke_stage(
-                state,
-                Stage.STRUCTURE_REPAIR,
-                validator,
-                profile=repair_profile,
-                allow_tools=False,
-                allow_side_effects=False,
-                context=repair_context,
-                role_override=f"{role}:structure_repair",
-                publish_commentary=False,
-            )
-        except (TurnStopped, AuditPersistenceError):
-            raise
-        except StageInvocationError as exc:
-            self._audit(
-                state,
-                stage=target_stage.value,
-                role=role,
-                event="structure_repair_failed",
-                event_id=f"{repair_key}:failed",
-                provider=repair_profile.engine,
-                model=repair_profile.model,
-                attempt=original_attempt,
-                payload={
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "original_execution_replayed": False,
-                },
-            )
-            raise
-        self._audit(
-            state,
-            stage=target_stage.value,
-            role=role,
-            event="structure_repair_completed",
-            event_id=f"{repair_key}:completed",
-            provider=repaired_response.provider or repair_profile.engine,
-            model=repaired_response.model or repair_profile.model,
-            attempt=original_attempt,
-            payload={
-                "repair_target_stage": target_stage.value,
-                "original_execution_replayed": False,
-                "evidence_refs_preserved": list(original_response.evidence_refs),
-            },
-        )
-        return repaired_response, parsed
 
     async def _publish_stage_commentary(
         self,
@@ -2188,58 +2069,6 @@ class HERv2Runtime:
             error=error,
         )
 
-    async def _reconciliation_result(
-        self,
-        state: _TurnState,
-        error: str,
-        *,
-        evidence_refs: Sequence[str] = (),
-    ) -> TurnResult:
-        for ref in evidence_refs:
-            value = str(ref or "").strip()
-            if value and value not in state.evidence_refs:
-                state.evidence_refs.append(value)
-        limitation = (
-            "Execution may have changed external state, but its result could not be "
-            "validated. HASHI did not replay the execution; operator reconciliation "
-            "is required before retrying or claiming completion."
-        )
-        if limitation not in state.limitations:
-            state.limitations.append(limitation)
-        if not state.ledger.is_terminal:
-            try:
-                ref = self._audit(
-                    state,
-                    stage=Stage.EXECUTION.value,
-                    role="runtime",
-                    event="execution_reconciliation_required",
-                    event_id=f"{state.ledger.turn_id}:execution:reconciliation-required",
-                    payload={
-                        "reason": error,
-                        "evidence_refs": list(state.evidence_refs),
-                        "execution_replayed": False,
-                        "automatic_retry_permitted": False,
-                    },
-                )
-                state.ledger.add_log_ref(ref)
-                await self._transition(
-                    state,
-                    LifecycleState.RECONCILIATION_REQUIRED,
-                    terminal_reason="execution_outcome_unconfirmed",
-                )
-            except AuditPersistenceError:
-                state.ledger.transition(
-                    LifecycleState.RECONCILIATION_REQUIRED,
-                    terminal_reason="execution_outcome_unconfirmed",
-                )
-                self.ledger_store.save(state.ledger)
-        return self._result(
-            state,
-            terminal=TerminalState.RECONCILIATION_REQUIRED,
-            text="",
-            error=error,
-        )
-
     def _schedule_meditation(
         self,
         state: _TurnState,
@@ -2253,7 +2082,6 @@ class HERv2Runtime:
             or terminal not in {
                 TerminalState.COMPLETED,
                 TerminalState.COMPLETED_WITH_LIMITATIONS,
-                TerminalState.COMPLETED_WITH_REPORT_PENDING,
             }
         ):
             return
@@ -2305,6 +2133,19 @@ class HERv2Runtime:
         )
 
 
+def _execution_payload(outcome: ExecutionOutcome) -> dict[str, Any]:
+    return {
+        "disposition": outcome.disposition.value,
+        "summary": outcome.summary,
+        "work_performed": list(outcome.work_performed),
+        "verification": list(outcome.verification),
+        "evidence_refs": list(outcome.evidence_refs),
+        "limitations": list(outcome.limitations),
+        "remaining_work": list(outcome.remaining_work),
+        "clarification": outcome.clarification or None,
+    }
+
+
 def _normalise_text(value: str) -> str:
     return " ".join(str(value or "").casefold().split()).rstrip(".?!。？！")
 
@@ -2313,11 +2154,8 @@ def _terminal_reason(state: TerminalState) -> str:
     return {
         TerminalState.COMPLETED: "goal_achieved",
         TerminalState.COMPLETED_WITH_LIMITATIONS: "completed_with_disclosed_limitations",
-        TerminalState.COMPLETED_WITH_REPORT_PENDING: "report_generation_pending",
-        TerminalState.RECONCILIATION_REQUIRED: "execution_outcome_unconfirmed",
         TerminalState.FAILED: "goal_not_achieved",
         TerminalState.ERROR: "technical_failure",
-        TerminalState.ABANDONED: "continuation_not_justified",
         TerminalState.STOPPED: "authorised_stop",
         TerminalState.PENDING_USER_INPUT: "user_input_required",
     }[state]

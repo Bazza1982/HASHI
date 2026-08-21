@@ -10,9 +10,9 @@ from orchestrator.her_v2.models import (
 )
 from orchestrator.her_v2.structured import (
     parse_execution,
+    parse_finalisation,
     parse_immediate,
     parse_plan,
-    parse_report,
     parse_triage,
     resolve_stage_response,
 )
@@ -89,10 +89,57 @@ def test_compatible_field_shapes_normalise_without_silent_data_damage():
     assert execution.limitations == ("Remote verification was unavailable.",)
 
 
-def test_plain_user_facing_report_does_not_require_an_internal_json_wrapper():
-    assert parse_report(StageResponse(text="The requested work is complete.")) == (
-        "The requested work is complete."
+def test_plan_b_finalisation_parses_canonical_result_and_message():
+    result = parse_finalisation(
+        StageResponse(
+            data={
+                "execution_result": {
+                    "disposition": "COMPLETED",
+                    "summary": "Completed and verified.",
+                    "work_performed": ["Updated the target."],
+                    "verification": ["The focused test passed."],
+                    "evidence_refs": ["receipt:42"],
+                    "remaining_work": [],
+                },
+                "final_message": "Captain, the work is complete.",
+            }
+        )
     )
+
+    assert result.execution_result is not None
+    assert result.execution_result.disposition is ExecutionDisposition.COMPLETED
+    assert result.execution_result.work_performed == ("Updated the target.",)
+    assert result.execution_result.verification == ("The focused test passed.",)
+    assert result.execution_result.evidence_refs == ("receipt:42",)
+    assert result.final_message == "Captain, the work is complete."
+    assert result.execution_result_present is True
+
+
+def test_plan_b_finalisation_accepts_null_only_as_runtime_error_input():
+    result = parse_finalisation(
+        StageResponse(
+            data={
+                "execution_result": None,
+                "final_message": "The Execution output was unusable.",
+            }
+        )
+    )
+
+    assert result.execution_result is None
+    assert result.execution_result_present is True
+
+
+@pytest.mark.parametrize("disposition", ["ERROR", "REPLAN_REQUIRED", "ABANDONED"])
+def test_execution_rejects_non_execution_dispositions(disposition):
+    with pytest.raises(StructuredOutputError):
+        parse_execution(
+            StageResponse(
+                data={
+                    "disposition": disposition,
+                    "summary": "This disposition is not available to Execution.",
+                }
+            )
+        )
 
 
 @pytest.mark.parametrize(

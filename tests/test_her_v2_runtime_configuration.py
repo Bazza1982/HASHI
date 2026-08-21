@@ -206,7 +206,6 @@ def test_default_routes_expose_actual_execution_classification_profiles(tmp_path
     assert selected.model_slot_for_route(Route.EXECUTION_SIMPLE) == "fast"
     assert selected.model_slot_for_route(Route.EXECUTION_COMPLEX) == "pro"
     assert selected.model_slot_for_route(Route.EXECUTION_HIGH_VOLUME) == "pro"
-    assert selected.model_slot_for_route(Route.STRUCTURE_REPAIR) == "inherit"
 
 
 def test_apply_configuration_persists_and_refreshes_live_adapter_atomically(tmp_path):

@@ -139,7 +139,14 @@ class _WorkAndMeditationProvider(_DirectProvider):
                 "evidence_refs": ["receipt:v2"],
                 "commentary": "The requested work is verified and complete.",
             },
-            Stage.FINALISATION: {"report": "Completed and verified."},
+            Stage.FINALISATION: {
+                "execution_result": {
+                    "disposition": "COMPLETED",
+                    "summary": "Verified and completed the requested work.",
+                    "evidence_refs": ["receipt:v2"],
+                },
+                "final_message": "Completed and verified.",
+            },
         }.get(request.stage)
         if request.stage is Stage.MEDITATION:
             return StageResponse(
@@ -203,7 +210,14 @@ class _EffortPolicyProvider:
                 "evidence_refs": ["receipt:effort-policy"],
             },
             Stage.REVIEW: {"outcome": "PASS", "summary": "Verified."},
-            Stage.FINALISATION: {"report": "Completed and verified."},
+            Stage.FINALISATION: {
+                "execution_result": {
+                    "disposition": "COMPLETED",
+                    "summary": "Completed.",
+                    "evidence_refs": ["receipt:effort-policy"],
+                },
+                "final_message": "Completed and verified.",
+            },
         }.get(request.stage)
         if payload is None:
             raise AssertionError(f"unexpected stage: {request.stage}")
@@ -504,12 +518,8 @@ async def test_adapter_correlates_ordinary_transport_receipt_with_stable_deliver
 
 
 @pytest.mark.asyncio
-async def test_adapter_surfaces_reconciliation_required_as_non_success(tmp_path):
+async def test_adapter_finalises_unusable_execution_as_runtime_error(tmp_path):
     class _MalformedExecutionProvider(_DirectProvider):
-        def __init__(self):
-            super().__init__()
-            self.repair_calls = 0
-
         async def invoke(self, profile, request):
             self.requests.append((profile, request))
             if request.stage is Stage.IMMEDIATE_RESPONSE:
@@ -524,17 +534,11 @@ async def test_adapter_surfaces_reconciliation_required_as_non_success(tmp_path)
                     model=profile.model,
                     evidence_refs=("hashi-tools:uncertain",),
                 )
-            elif request.stage is Stage.STRUCTURE_REPAIR:
-                self.repair_calls += 1
-                if self.repair_calls > 1:
-                    raise StageInvocationError(
-                        "repair provider rejected request", retryable=False
-                    )
-                return StageResponse(
-                    text="repair reply without valid JSON",
-                    provider=profile.engine,
-                    model=profile.model,
-                )
+            elif request.stage is Stage.FINALISATION:
+                payload = {
+                    "execution_result": None,
+                    "final_message": "The execution result could not be interpreted.",
+                }
             else:
                 raise AssertionError(f"unexpected stage: {request.stage}")
             return StageResponse(
@@ -554,23 +558,22 @@ async def test_adapter_surfaces_reconciliation_required_as_non_success(tmp_path)
 
     assert await adapter.initialize() is True
     response = await adapter.generate_response(
-        "Perform the action once", "request-adapter-reconciliation"
+        "Perform the action once", "request-adapter-plan-b-error"
     )
 
     assert response.is_success is False
-    assert response.stop_reason == "reconciliation_required"
-    assert "was not replayed" in response.error
-    assert response.stream_metadata["her_v2"]["terminal_state"] == (
-        "RECONCILIATION_REQUIRED"
-    )
+    assert response.stop_reason == "error"
+    assert response.error == "execution_result_unusable"
+    assert response.stream_metadata["her_v2"]["terminal_state"] == "ERROR"
+    assert response.text == "The execution result could not be interpreted."
     assert sum(
         request.stage is Stage.EXECUTION
         for _profile, request in provider.requests
     ) == 1
     assert sum(
-        request.stage is Stage.STRUCTURE_REPAIR
+        request.stage is Stage.FINALISATION
         for _profile, request in provider.requests
-    ) == 2
+    ) == 1
 
 
 @pytest.mark.asyncio
@@ -605,7 +608,7 @@ async def test_adapter_packages_only_structured_stage_commentary_before_delivery
 
 
 @pytest.mark.asyncio
-async def test_adapter_routes_validated_final_through_required_persona_renderer(
+async def test_adapter_uses_combined_finalisation_without_required_persona_renderer(
     tmp_path,
 ):
     provider = _WorkAndMeditationProvider()
@@ -627,15 +630,13 @@ async def test_adapter_routes_validated_final_through_required_persona_renderer(
     )
 
     assert response.is_success is True
-    assert response.text == "Persona final: Completed and verified."
-    assert [(message.kind, message.text) for message in renderer.messages] == [
-        ("final", "Completed and verified.")
-    ]
+    assert response.text == "Completed and verified."
+    assert renderer.messages == []
     final_events = [event for event in events if event.delivery_class == DELIVERY_FINAL]
     assert len(final_events) == 1
     assert final_events[0].summary == response.text
-    assert final_events[0].provenance == "test_required_persona"
-    assert final_events[0].detail == "persona_rendering_fallback=false"
+    assert final_events[0].provenance == "her_v2_combined_finalisation"
+    assert final_events[0].detail == "persona_rendered_in_finalisation=true"
     assert response.stream_metadata["her_v2"]["delivery"]["delivery_id"]
 
 
@@ -1240,9 +1241,25 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
         reasoning="provider-high",
     )
 
+    execution_request = _stage_request(
+        Stage.EXECUTION, allow_tools=True, allow_side_effects=True
+    )
+    execution_request = StageRequest(
+        **{
+            **execution_request.__dict__,
+            "goal": (
+                "RECENT TURN MESSAGES\nMemory+ recent facts\n"
+                "Cross-session receipt evidence\nCURRENT REQUEST"
+            ),
+            "context": {
+                "active_plan": {"plan": ["inspect", "change", "verify"]},
+                "sub_agent_results": [],
+            },
+        }
+    )
     result = await provider.invoke(
         profile,
-        _stage_request(Stage.EXECUTION, allow_tools=True, allow_side_effects=True),
+        execution_request,
     )
 
     backend = manager.backends[-1]
@@ -1250,7 +1267,18 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     assert backend.tool_registry.max_loops is None
     assert backend.reasoning_enabled is True
     assert backend.config.extra["reasoning_effort"] == "provider-high"
-    assert '"her_effort": "xhigh"' in backend.prompt
+    assert backend.sys_prompt.startswith("You are the HER v2 Execution stage.")
+    assert "RECENT TURN MESSAGES" in backend.prompt
+    assert "Memory+ recent facts" in backend.prompt
+    assert "Cross-session receipt evidence" in backend.prompt
+    assert '"inspect"' in backend.prompt
+    assert "COMPLETED_WITH_LIMITATIONS" in backend.sys_prompt
+    assert "USER_INPUT_REQUIRED" in backend.sys_prompt
+    assert "REPLAN_REQUIRED" not in backend.sys_prompt
+    assert "ABANDONED" not in backend.sys_prompt
+    assert "ERROR" not in backend.sys_prompt
+    assert "configured agent persona" not in backend.sys_prompt
+    assert "her_effort" not in backend.prompt
     assert "provider-high" not in backend.prompt
     assert result.reasoning_trace == "provider trace"
     assert result.evidence_refs == ("hashi-tools:turn-1:1",)
@@ -1294,39 +1322,15 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     finalisation_backend = manager.backends[-1]
     assert finalisation_backend.tool_registry is None
     assert finalisation_backend.sys_prompt.startswith(
-        "You are the neutral HER v2 Final Reporter"
+        "You are the HER v2 Finalisation stage"
     )
-    assert "do not imitate a Persona" in finalisation_backend.sys_prompt
-    assert "separate presentation-only boundary" in finalisation_backend.sys_prompt
+    assert "normalisation, ledger-payload, and user-message" in (
+        finalisation_backend.sys_prompt
+    )
+    assert "Agent display name: agent" in finalisation_backend.sys_prompt
     assert "configured agent persona" not in finalisation_backend.sys_prompt
-    assert '"report"' in finalisation_backend.prompt
-    assert "neutral Persona-free final response" in finalisation_backend.prompt
-
-    repair_request = _stage_request(
-        Stage.STRUCTURE_REPAIR,
-        allow_tools=False,
-        allow_side_effects=False,
-    )
-    repair_request = StageRequest(
-        **{
-            **repair_request.__dict__,
-            "context": {
-                "repair_target_stage": Stage.EXECUTION.value,
-                "original_provider_response": {"text": "not json"},
-                "original_execution_must_not_be_replayed": True,
-            },
-        }
-    )
-    await provider.invoke(profile, repair_request)
-    repair_backend = manager.backends[-1]
-    assert repair_backend.tool_registry is None
-    assert repair_backend.sys_prompt.startswith(
-        "You are the isolated HER v2 structure repair role"
-    )
-    assert '"tools_authorised_for_this_stage": false' in repair_backend.prompt
-    assert '"external_side_effects_authorised_for_this_stage": false' in (
-        repair_backend.prompt
-    )
+    assert '"execution_result"' in finalisation_backend.prompt
+    assert '"final_message"' in finalisation_backend.prompt
 
 
 @pytest.mark.asyncio
@@ -1460,6 +1464,48 @@ Please scan Outlook.""",
     assert "Please scan Outlook" in immediate_backend.prompt
     assert "tools_authorised_for_this_stage" not in immediate_backend.prompt
     assert "invocation_role" not in immediate_backend.prompt
+
+    finalisation_request = _stage_request(
+        Stage.FINALISATION,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    finalisation_request = StageRequest(
+        **{
+            **finalisation_request.__dict__,
+            "context": {
+                "raw_execution_output": {
+                    "text": "The requested work completed.",
+                    "data": {},
+                    "evidence_refs": ["receipt:42"],
+                },
+                "parsed_execution_result": {
+                    "disposition": "COMPLETED",
+                    "summary": "The requested work completed.",
+                    "evidence_refs": ["receipt:42"],
+                    "limitations": [],
+                    "clarification": None,
+                },
+                "execution_json_valid": True,
+            },
+        }
+    )
+
+    await provider.invoke(profile, finalisation_request)
+
+    finalisation_backend = manager.backends[-1]
+    assert "Use a warm voice and address the user as Captain." in (
+        finalisation_backend.sys_prompt
+    )
+    assert "FULL AGENT OPERATIONAL CONTENT" not in (
+        finalisation_backend.sys_prompt
+    )
+    assert "PRIVATE WORKFLOW INSTRUCTIONS" not in (
+        finalisation_backend.sys_prompt
+    )
+    assert "The requested work completed." in finalisation_backend.prompt
+    assert '"execution_result"' in finalisation_backend.prompt
+    assert '"final_message"' in finalisation_backend.prompt
 
     rendered = await provider.package_persona_commentary(
         profile,

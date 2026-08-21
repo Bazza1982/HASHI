@@ -19,6 +19,13 @@ class LedgerInvariantError(RuntimeError):
     pass
 
 
+_LEGACY_TERMINAL_STATUS_MAP = {
+    "COMPLETED_WITH_REPORT_PENDING": LifecycleState.ERROR,
+    "RECONCILIATION_REQUIRED": LifecycleState.ERROR,
+    "ABANDONED": LifecycleState.FAILED,
+}
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -122,7 +129,10 @@ class ExecutionLedger:
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "ExecutionLedger":
         try:
-            status = LifecycleState(str(raw["status"]))
+            raw_status = str(raw["status"])
+            status = _LEGACY_TERMINAL_STATUS_MAP.get(raw_status)
+            if status is None:
+                status = LifecycleState(raw_status)
             classification_raw = raw.get("classification")
             classification = (
                 TriageClassification(str(classification_raw))
