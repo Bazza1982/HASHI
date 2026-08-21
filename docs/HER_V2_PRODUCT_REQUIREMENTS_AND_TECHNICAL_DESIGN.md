@@ -124,8 +124,8 @@ HER applies one deterministic compatibility membrane:
 
 1. collect provider-native parsed data and JSON objects from formal assistant
    text;
-2. apply only registered wrapper, alias, list, and plain-presentation
-   normalisations;
+2. apply only registered wrapper, alias, list, bounded JSON-string control
+   character repair, and plain-presentation normalisations;
 3. validate every candidate against the same target-stage semantic schema;
 4. if no formal candidate validates, inspect provider-exposed reasoning only
    for a JSON control envelope and never expose that reasoning as user text;
@@ -136,9 +136,13 @@ HER applies one deterministic compatibility membrane:
 
 Reasoning recovery is therefore a bounded carrier fallback, not permission to
 infer a classification from prose. Plain text is accepted only for inherently
-user-facing Immediate Response and Finalisation outputs. A retry receives the
-previous validation defect so it can correct the envelope instead of blindly
-repeating the same request.
+user-facing Immediate Response and Finalisation outputs. JSON-string control
+character repair accepts only the otherwise unchanged object produced by a
+non-strict JSON decoder; it does not complete truncated structures or infer
+fields. If a user-facing envelope still cannot be repaired, its original text
+remains eligible for plain presentation so the message does not disappear. A
+retry receives the previous validation defect so it can correct the envelope
+instead of blindly repeating the same request.
 
 ### 3.6 Work, commentary, Persona packaging, and delivery
 
@@ -294,10 +298,15 @@ Immediate-specific behaviour below. The rest of `system_md` and the Bridge
 - for work that must continue, provide only a short receipt acknowledgement;
 - tool access and tool authority are absent and this is private behavioural
   information that must not be repeated to the user;
+- absence of tools in this stage is not evidence that Execution tools are
+  unavailable; only a later Execution stage may determine actual availability
+  from real invocation results, including when the user supplied an
+  "if tools are unavailable" reporting branch;
 - never call a tool or emit tool syntax, a tool-control envelope, or an
   executable command;
-- do not execute, plan, assess feasibility, or discuss capability, because the
-  actual work belongs to a later stage.
+- do not execute, plan, assess feasibility, discuss capability, claim an
+  execution result, or narrate a concrete execution attempt, because the actual
+  work belongs to a later stage.
 
 Its purposes are to:
 

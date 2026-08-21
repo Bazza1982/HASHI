@@ -95,6 +95,42 @@ def test_plain_user_facing_report_does_not_require_an_internal_json_wrapper():
     )
 
 
+@pytest.mark.parametrize(
+    ("text", "expected", "source"),
+    [
+        (
+            "A plain acknowledgement.",
+            "A plain acknowledgement.",
+            "provider_plain_text",
+        ),
+        (
+            '{"message":"First line\\n\\nSecond line."}',
+            "First line\n\nSecond line.",
+            "provider_text",
+        ),
+        (
+            '{"message":"First line\n\nSecond line."}',
+            "First line\n\nSecond line.",
+            "provider_json_control_char_repair",
+        ),
+        (
+            '{"message":"Visible even though the envelope was truncated."',
+            '{"message":"Visible even though the envelope was truncated."',
+            "provider_plain_text",
+        ),
+    ],
+)
+def test_immediate_presentation_compatibility_preserves_visible_content(
+    text,
+    expected,
+    source,
+):
+    resolution = resolve_stage_response(StageResponse(text=text), parse_immediate)
+
+    assert resolution.parsed == expected
+    assert resolution.source == source
+
+
 def test_registered_wrapper_does_not_turn_a_nested_object_into_display_text():
     assert parse_immediate(
         StageResponse(text='{"response":{"message":"Hello."}}')

@@ -44,6 +44,7 @@ class StructuredResolution:
     @property
     def recovered(self) -> bool:
         return self.source in {
+            "provider_json_control_char_repair",
             "provider_plain_text",
             "reasoning_recovery",
         } or bool(self.rejected_candidates)
@@ -108,9 +109,11 @@ def _append_mapping(
         _append_mapping(items, seen, value.get(wrapper))
 
 
-def extract_json_objects(text: str) -> tuple[Mapping[str, Any], ...]:
-    """Extract a bounded set of JSON-object candidates without guessing meaning."""
-
+def _extract_json_objects(
+    text: str,
+    *,
+    strict: bool,
+) -> tuple[Mapping[str, Any], ...]:
     value = str(text or "").strip()
     if not value:
         return ()
@@ -123,14 +126,14 @@ def extract_json_objects(text: str) -> tuple[Mapping[str, Any], ...]:
     # First accept a complete object, including one deterministic layer of
     # JSON-string encoding used by several OpenAI-compatible gateways.
     try:
-        parsed: Any = json.loads(value)
+        parsed: Any = json.loads(value, strict=strict)
         if isinstance(parsed, str):
-            parsed = json.loads(parsed)
+            parsed = json.loads(parsed, strict=strict)
         _append_mapping(items, seen, parsed)
     except (json.JSONDecodeError, TypeError):
         pass
 
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(strict=strict)
     for index, character in enumerate(value):
         if len(items) >= _MAX_JSON_CANDIDATES:
             break
@@ -142,6 +145,12 @@ def extract_json_objects(text: str) -> tuple[Mapping[str, Any], ...]:
             continue
         _append_mapping(items, seen, parsed)
     return tuple(items)
+
+
+def extract_json_objects(text: str) -> tuple[Mapping[str, Any], ...]:
+    """Extract bounded strict-JSON object candidates without guessing meaning."""
+
+    return _extract_json_objects(text, strict=True)
 
 
 def extract_json_object(text: str) -> Mapping[str, Any]:
@@ -194,7 +203,20 @@ def _candidate_group(
     for index, data in enumerate(text_candidates):
         add(f"provider_text:{index + 1}", data)
     text = str(response.text or "").strip()
-    if plain_text_field and text and not text_candidates:
+    strict_keys = {_mapping_key(data) for data in text_candidates}
+    repaired_text_candidates = tuple(
+        data
+        for data in _extract_json_objects(response.text, strict=False)
+        if _mapping_key(data) not in strict_keys
+    )
+    for index, data in enumerate(repaired_text_candidates):
+        add(f"provider_json_control_char_repair:{index + 1}", data)
+    if (
+        plain_text_field
+        and text
+        and not text_candidates
+        and not repaired_text_candidates
+    ):
         add("provider_plain_text", {plain_text_field: text})
     return tuple(candidates)
 

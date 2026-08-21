@@ -242,6 +242,54 @@ async def test_direct_response_race_delivers_exactly_one_answer(tmp_path, delays
 
 
 @pytest.mark.asyncio
+async def test_direct_response_promotes_repaired_immediate_content_without_fallback(
+    tmp_path,
+):
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [
+            StageResponse(
+                text='{"message":"First answer line.\n\nSecond answer line."}',
+                provider="fake-api",
+                model="model-lightweight",
+            )
+        ],
+        Stage.TRIAGE: [{"classification": "DIRECT_RESPONSE"}],
+    }
+    provider = ScriptedProvider(
+        scripts,
+        delays={Stage.IMMEDIATE_RESPONSE: 0.01},
+    )
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Answer directly",
+        "request-direct-control-char-repair",
+        effort="low",
+    )
+
+    expected = "First answer line.\n\nSecond answer line."
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.final_was_immediate is True
+    assert result.text == expected
+    assert [(item.kind, item.text) for item in result.delivery_records] == [
+        ("final", expected)
+    ]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    compatibility = next(
+        row
+        for row in rows
+        if row["event"] == "structured_response_compatibility_applied"
+        and row["stage"] == Stage.IMMEDIATE_RESPONSE.value
+    )
+    assert (
+        compatibility["payload"]["validation_source"]
+        == "provider_json_control_char_repair"
+    )
+
+
+@pytest.mark.asyncio
 async def test_direct_response_is_not_repackaged_by_required_persona_renderer(tmp_path):
     renderer = RecordingRequiredPersonaRenderer()
     result = await _runtime(
@@ -256,7 +304,7 @@ async def test_direct_response_is_not_repackaged_by_required_persona_renderer(tm
 
 
 @pytest.mark.asyncio
-async def test_triage_first_work_starts_without_waiting_and_delivers_late_immediate(
+async def test_triage_first_work_starts_without_waiting_and_repairs_late_immediate(
     tmp_path,
 ):
     release_immediate = asyncio.Event()
@@ -266,7 +314,11 @@ async def test_triage_first_work_starts_without_waiting_and_delivers_late_immedi
 
     async def delayed_immediate(_request):
         await release_immediate.wait()
-        return {"message": "I have it and will check now."}
+        return StageResponse(
+            text='{"message":"I have it.\n\nI will check now."}',
+            provider="fake-api",
+            model="model-lightweight",
+        )
 
     async def blocked_execution(_request):
         execution_started.set()
@@ -303,7 +355,7 @@ async def test_triage_first_work_starts_without_waiting_and_delivers_late_immedi
 
     assert result.terminal_state is TerminalState.COMPLETED
     assert [(item.kind, item.text) for item in delivery.records] == [
-        ("acknowledgement", "I have it and will check now."),
+        ("acknowledgement", "I have it.\n\nI will check now."),
         ("final", "Checked and complete."),
     ]
     assert provider.cancelled[Stage.IMMEDIATE_RESPONSE] == 0
@@ -318,7 +370,57 @@ async def test_triage_first_work_starts_without_waiting_and_delivers_late_immedi
         "authoritative_path_waited": False,
         "delivery_when_ready": "acknowledgement",
     }
+    compatibility = next(
+        row
+        for row in rows
+        if row["event"] == "structured_response_compatibility_applied"
+        and row["stage"] == Stage.IMMEDIATE_RESPONSE.value
+    )
+    assert (
+        compatibility["payload"]["validation_source"]
+        == "provider_json_control_char_repair"
+    )
     assert not any(row["event"] == "optional_stage_degraded" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_unrepairable_immediate_text_remains_visible_for_work(tmp_path):
+    raw_immediate = '{"message":"Visible acknowledgement despite truncation."'
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [
+            StageResponse(
+                text=raw_immediate,
+                provider="fake-api",
+                model="model-lightweight",
+            )
+        ],
+        Stage.TRIAGE: [{"classification": "SIMPLE_TASK"}],
+        Stage.EXECUTION: [{"disposition": "COMPLETED", "summary": "Done."}],
+        Stage.FINALISATION: [{"report": "Done."}],
+    }
+
+    result = await _runtime(tmp_path, ScriptedProvider(scripts)).run_turn(
+        "Complete the work",
+        "request-visible-unrepairable-immediate",
+        effort="low",
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert [(item.kind, item.text) for item in result.delivery_records] == [
+        ("acknowledgement", raw_immediate),
+        ("final", "Done."),
+    ]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    compatibility = next(
+        row
+        for row in rows
+        if row["event"] == "structured_response_compatibility_applied"
+        and row["stage"] == Stage.IMMEDIATE_RESPONSE.value
+    )
+    assert compatibility["payload"]["validation_source"] == "provider_plain_text"
 
 
 @pytest.mark.asyncio

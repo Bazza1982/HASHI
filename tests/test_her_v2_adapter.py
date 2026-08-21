@@ -720,6 +720,10 @@ async def test_habit_command_uses_her_v2_persistent_store(tmp_path):
 async def test_dream_command_path_runs_outside_live_turn_with_v2_audit(tmp_path):
     provider = _DreamProvider()
     config = _agent_config(tmp_path)
+    config.system_md.write_text(
+        "[persona]\nUse a concise, friendly reporting voice.\n[persona_end]\n",
+        encoding="utf-8",
+    )
     setattr(config, "_her_v2_stage_provider", provider)
     global_config = _global_config(tmp_path)
     adapter = HERv2Adapter(config, global_config)
@@ -748,9 +752,11 @@ async def test_dream_command_path_runs_outside_live_turn_with_v2_audit(tmp_path)
     dream_requests = [
         request for _profile, request in provider.requests if request.stage is Stage.DREAM
     ]
-    assert len(dream_requests) == 1
-    assert dream_requests[0].allow_tools is False
-    assert dream_requests[0].allow_side_effects is False
+    assert len(dream_requests) == 2
+    assert any(":analysis:" in request.turn_id for request in dream_requests)
+    assert any(":persona" in request.turn_id for request in dream_requests)
+    assert all(request.allow_tools is False for request in dream_requests)
+    assert all(request.allow_side_effects is False for request in dream_requests)
     audit_rows = [
         json.loads(line)
         for line in (tmp_path / "logs" / "agent" / "her_v2_audit.jsonl")
@@ -1295,6 +1301,11 @@ Please scan Outlook.""",
         immediate_backend.sys_prompt
     )
     assert "has no tool access or tool authority" in immediate_backend.sys_prompt
+    assert "it does not need tools" in immediate_backend.sys_prompt
+    assert "only that stage may determine actual tool availability" in (
+        immediate_backend.sys_prompt
+    )
+    assert "from real invocation results" in immediate_backend.sys_prompt
     assert "private control information for your behaviour only" in (
         immediate_backend.sys_prompt
     )
@@ -1307,12 +1318,20 @@ Please scan Outlook.""",
     assert "requires checking, execution, or new evidence" in (
         immediate_backend.sys_prompt
     )
+    assert "Even if the user's request says what to report" in (
+        immediate_backend.sys_prompt
+    )
+    assert "do not make, infer, or repeat that judgement" in (
+        immediate_backend.sys_prompt
+    )
     assert "return only a short receipt acknowledgement" in (
         immediate_backend.sys_prompt
     )
-    assert "Do not execute, plan, assess feasibility, or discuss capability" in (
+    assert "Do not execute, plan, assess feasibility, discuss capability" in (
         immediate_backend.sys_prompt
     )
+    assert "claim an execution result" in immediate_backend.sys_prompt
+    assert "narrate a concrete execution attempt" in immediate_backend.sys_prompt
     assert "FULL AGENT OPERATIONAL CONTENT" not in immediate_backend.sys_prompt
     assert "PRIVATE WORKFLOW INSTRUCTIONS" not in immediate_backend.sys_prompt
     assert "GLOBAL SYS CONTENT" not in immediate_backend.prompt

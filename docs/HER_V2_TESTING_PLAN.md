@@ -660,11 +660,15 @@ Candidate imperfections include:
 - explicitly approved casing or enum aliases;
 - duplicated non-authoritative fields;
 - correct substantive content in an invalid wrapper.
+- an otherwise valid user-facing JSON envelope containing literal control
+  characters inside a string;
 - non-empty but invalid provider data beside valid formal assistant text;
 - provider-native parsed objects and common text-content block shapes;
 - a single target-stage JSON control envelope returned only in exposed
   reasoning when formal output is empty or invalid;
 - plain text for inherently user-facing Immediate Response and Finalisation;
+- unrepaired user-facing text remains visible rather than becoming a silent
+  optional-stage failure;
 - string-or-list fields normalised without splitting a string into characters.
 
 The suite must not create a case for every permutation. Each accepted repair rule requires a named compatibility reason or production regression.
@@ -785,6 +789,9 @@ Tests must prove:
 - Immediate Response has no tool authority, does not repeat that private control
   fact to the user, and never emits a tool call, tool-control envelope, tool
   syntax, or executable command;
+- Immediate Response does not treat its own lack of tool authority as evidence
+  that later Execution tools are unavailable, even when the user supplied a
+  conditional tool-unavailable reporting instruction;
 - `DIRECT_RESPONSE` is the sole exception because its Immediate Response is the final answer;
 - the `DIRECT_RESPONSE` Immediate answer is not Persona-rendered a second time;
 - a transport without explicit initial-resolution capability never receives a
