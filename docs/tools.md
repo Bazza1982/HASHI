@@ -46,7 +46,7 @@ Five execution modes:
 - `/fyi [prompt]` — refresh bridge environment awareness; optionally append a follow-up prompt
 - `/usecomputer [on|off|status|examples|task]` — load managed GUI-aware computer-use guidance; unified shortcut for desktop/browser/Windows interaction when needed
 - `/browser [status|examples|1-4 task]` — route an internet task through HASHI headless browser, CLI-native browsing, Brave search, or the logged-in browser extension
-- `/exp <task>` — run a task after consulting context-specific EXP guidebooks under `exp/`
+- `/exp <task>` — run a task after consulting text-first EXP guidebooks under `exp/`; large training/evidence assets restore from checksum-pinned packs only when needed
 - `/status` — agent state, workspace, last activity
 - `/debug` — detailed debug info (backend, PID, process state)
 - `/start` — inline keyboard to start a stopped agent

@@ -54,11 +54,14 @@ def build_exp_task_prompt(task: str, exp_root: str | Path | None = None) -> str:
         "say so and proceed normally.\n"
         "3. Read the selected EXP files as a guidebook, especially manifest.json, "
         "EXP.md, playbooks, failure memory, validators, templates, and evidence.\n"
-        "4. Apply only the parts that match this user's current context. Do not "
+        "4. If a selected guidebook references a missing binary training or "
+        "evidence asset, check exp/asset-packs.json and restore only the required "
+        "pack with scripts/exp_assets.py before using that asset.\n"
+        "5. Apply only the parts that match this user's current context. Do not "
         "treat EXP as universal knowledge.\n"
-        "5. Execute the task using the chosen EXP, and leave evidence when the "
+        "6. Execute the task using the chosen EXP, and leave evidence when the "
         "task produces files or uses desktop software.\n"
-        "6. If the task reveals a reusable context-specific lesson, propose or "
+        "7. If the task reveals a reusable context-specific lesson, propose or "
         "make an update to the relevant EXP after the work is done.\n"
         "--- END EXP GUIDEBOOK REQUEST ---"
     )
@@ -91,6 +94,7 @@ def get_exp_usage_text(exp_root: str | Path | None = None) -> str:
             "",
             "<b>Current</b> · <b>READY</b>",
             "<b>Scope</b> · context-specific expertise and playbooks",
+            "<b>Assets</b> · large training/evidence files install on demand",
             "",
             "The agent selects the most relevant EXP material for the task; command behavior is unchanged.",
             "",

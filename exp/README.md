@@ -58,6 +58,24 @@ playbook = store.get_playbook("barry/office_desktop", "powerpoint")
 The loader is read-only. It does not register commands, mutate HASHI runtime
 state, or alter core orchestration behavior.
 
+## Optional asset packs
+
+Text guidebooks, manifests, playbooks, validators, and failure memory remain in
+Git. Large Office documents, PDFs, and rendered evidence images are distributed
+as independent, checksum-pinned asset packs and restored only when a selected
+EXP needs them.
+
+```text
+python scripts/exp_assets.py status
+python scripts/exp_assets.py install exp-assets-v1 --source <local-path-or-https-url>
+```
+
+The installer verifies size, SHA-256, file count, archive paths, and file types.
+It restores the original `exp/...` paths and does not overwrite an existing
+asset unless `--force` is supplied. `HASHI_EXP_ASSET_DIR` may point to a local
+pack directory; `HASHI_EXP_ASSET_SOURCE` may provide one local path or HTTPS
+URL. A publisher may also add a stable URL to `asset-packs.json`.
+
 ## Training
 
 EXP should be trained, not merely written. See `training.md` for the standard

@@ -1,0 +1,6 @@
+.asset-packs/
+**/*.png
+**/*.docx
+**/*.pptx
+**/*.pdf
+**/*.xlsx

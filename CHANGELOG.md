@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runtime, and the standalone OpenClaw importer. `her` now resolves only to the
   clean-room HER v2 backend; `claw-cli` is rejected. Flex retains Fixed mode for
   session-based CLI backends.
+- **Repository-bundled EXP binaries** — moved large Office documents, PDFs,
+  spreadsheets, presentations, and rendered evidence images into a separately
+  checksummed, on-demand asset pack. Text guidebooks and runtime behavior remain
+  in the repository, and the safe installer restores the original paths when a
+  selected EXP actually needs those assets.
 
 ### Fixed
 

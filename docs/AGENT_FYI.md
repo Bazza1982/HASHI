@@ -37,7 +37,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/debug <prompt>`: strict debug mode with verification-first behavior.
 - `/usecomputer [on|off|status|examples|task]`: load managed GUI-aware operating guidance. This is a unified shortcut for desktop/browser/Windows computer use, but it does not force GUI when a better non-GUI path exists.
 - `/browser [status|examples|1-4 task]`: run an internet task with a selected route: HASHI headless browser, CLI-native browsing, Brave search, or the logged-in HASHI browser extension.
-- `/exp <task>`: consult the context-specific EXP guidebooks under `exp/` before running a task.
+- `/exp <task>`: consult the context-specific EXP guidebooks under `exp/` before running a task. Large binary training/evidence assets are optional packs; check `python scripts/exp_assets.py status` and restore only when the selected guidebook needs them.
 - `/skill`: browse, apply, validate, enable/disable, install/link, and safely uninstall standard instruction Skills.
 - `/mode [fixed|flex|wrapper|audit|dual-brain]`: inspect or switch execution
   mode. `/mode memory+` is a compatibility alias that enables continuity

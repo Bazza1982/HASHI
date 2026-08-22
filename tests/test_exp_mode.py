@@ -10,6 +10,8 @@ def test_exp_prompt_lists_dictionary_and_task():
     assert "barry/office_desktop" in prompt
     assert "powerpoint" in prompt
     assert "context-specific" in prompt
+    assert "asset-packs.json" in prompt
+    assert "restore only the required" in prompt
 
 
 def test_exp_usage_mentions_command_and_available_exp():
@@ -17,6 +19,7 @@ def test_exp_usage_mentions_command_and_available_exp():
 
     assert "<code>/exp &lt;task&gt;</code>" in text
     assert "barry/office_desktop" in text
+    assert "install on demand" in text
 
 
 def test_exp_is_supported_admin_command_when_runtime_has_handler():

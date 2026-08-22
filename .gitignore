@@ -101,7 +101,6 @@ node_modules/
 *.bak_*
 *.pre-flex-migration.bak
 voice_models/
-hashi_assets/her/bin/
 
 # Additional workspace runtime state
 workspaces/*/.env

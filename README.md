@@ -647,7 +647,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/privacy [0-5]` | Show privacy details or quickly select a privacy level; Level 1 is the default |
 | `/handoff` | Restore continuity from recent transcript |
 | `/skill` | Browse and apply standard instruction Skills (inline keyboard) |
-| `/exp <task>` | Run a task after consulting context-specific EXP guidebooks |
+| `/exp <task>` | Run a task after consulting text-first EXP guidebooks; large assets install on demand |
 | `/help` | Show available commands |
 
 For detailed task-control behavior and examples, including the difference

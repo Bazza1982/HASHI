@@ -28,12 +28,9 @@ recursive-include doc *.md
 recursive-include scripts *.py
 recursive-include scripts *.sh
 
-# Include the built-in HASHI Engine Runtime (HER), its Claw MIT notice, and binaries.
-recursive-include hashi_assets/her manifest.json certification_baseline.json CLAW_LICENSE
-recursive-include hashi_assets/her/releases *
-recursive-include packaging/her *.md
-recursive-include packaging/her *.json
-recursive-include packaging/her *.py
+# Include text-only EXP guidebooks and asset-pack metadata. Large binary assets
+# are distributed independently and restored on demand.
+recursive-include exp *.md *.json *.jsonl *.py *.ps1 .gitignore .gitkeep
 
 # Exclude runtime and build artifacts
 global-exclude __pycache__

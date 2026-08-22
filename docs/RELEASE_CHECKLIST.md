@@ -72,15 +72,17 @@
   - branch, visibility, and upstream tracking are intentional
   - a LAN/debug remote is not treated as a GitHub publication target
 - License and IP boundary:
-  - `LICENSE`, packaged `CLAW_LICENSE`, and third-party notices agree with the
-    files being published
-  - packaged HER retains `CLAW_LICENSE` and its reviewed provenance
+  - `LICENSE` and third-party notices agree with the files being published
+  - retired HER v1 source, binaries, and Claw notices are absent from the
+    application package and remain only in the external retirement archive
 - Repository hygiene:
   - `git status --short` contains only intended changes
   - staged diff and commit range contain no credentials, workspace state, logs,
     private media/cache content, local operator notes, or unrelated user edits
   - generated binaries are included only when their provenance, platform,
     checksum, license, and release purpose are reviewed
+  - optional EXP binary assets are absent from Git/source distributions; the
+    independent pack checksum and safe restore test pass
   - scan the exact outbound range for private-key blocks, access-token formats,
     credentials in assignments/URLs, personal filesystem roots, live chat or
     account identifiers, private IP/host records, and tracked local runtime

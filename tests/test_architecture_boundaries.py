@@ -154,6 +154,8 @@ def test_retired_her_v1_and_openclaw_surfaces_cannot_reenter_runtime():
         ROOT / "orchestrator" / "her_rebuild.py",
         ROOT / "orchestrator" / "her_rebuild_manager.py",
         ROOT / "scripts" / "her_rebuild_dev.py",
+        ROOT / "native" / "her",
+        ROOT / "hashi_assets" / "her",
         ROOT / "tools" / "her_debug",
         ROOT / "superloops" / "templates" / "her_debug",
     ]

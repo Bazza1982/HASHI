@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "packs": {
+    "exp-assets-v1": {
+      "filename": "hashi-exp-assets-v1.tar.gz",
+      "sha256": "4bacaa314507ef3bae0b5cfe68d1b75cc0c7d67c9ab1321ca6409270e3bd2e17",
+      "size_bytes": 152115839,
+      "content_size_bytes": 163039964,
+      "file_count": 619,
+      "url": null,
+      "extensions": [".png", ".docx", ".pptx", ".pdf", ".xlsx"]
+    }
+  }
+}
