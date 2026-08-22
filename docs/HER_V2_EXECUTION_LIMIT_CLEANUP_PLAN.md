@@ -8,6 +8,13 @@
 | Regression source | `839b10a5` (`Add tiered provider retry recovery to HER v2`) |
 | Runtime activation | Requires a separately authorised `/reboot`; no restart is part of this plan |
 
+> Scope note (2026-08-22): the later approved
+> [Auto Compact design](HER_V2_AUTO_COMPACTION_DESIGN.md) authorises one narrow
+> Tier 2/Tier 3 watchdog for an isolated, tool-free `CompactionRequest`. That future
+> capacity-maintenance exception does not restore the generic provider retry
+> tiers removed by this remediation and may not appear on `StageRequest`,
+> Persona, learning, target providers, tools, or complete provider tool loops.
+
 ## 1. Objective
 
 Remove the unauthorised HER v2 execution limits and their secondary failure

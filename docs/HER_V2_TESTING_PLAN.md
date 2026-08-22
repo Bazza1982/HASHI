@@ -5,12 +5,12 @@
 | Field | Value |
 |---|---|
 | Status | Approved testing baseline |
-| Version | 1.0 |
-| Date | 2026-08-20 |
+| Version | 1.1 |
+| Date | 2026-08-22 |
 | System | Hashi Engine Runtime (HER) v2 |
 | Testing approach | Intent-based, risk-focused, and scenario-driven |
 | Governing design | [HER v2 Product Requirements and Technical Design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) |
-| Implementation baseline | HASHI `origin/main` at `604b826ed0dbb8cb748a617cbcf4c7d0dd7406f4` |
+| Implementation baseline | HASHI `her-v2` at `e5989608cffe4d6e8f4e6cd759c42aca8ed0a736` |
 
 ## 1. Purpose
 
@@ -87,6 +87,8 @@ This plan covers:
 - Habits, Meditation, and Dream boundaries;
 - provider-neutral configuration;
 - capability-negotiated provider and read-only tool routing;
+- Auto Compact capacity detection, independent `/model` routing, protected
+  context, raw retention, atomic commit, and Tier 2/Tier 3 isolation;
 - structured-output carrier compatibility, ambiguity rejection, and repair.
 
 This plan does not attempt to test:
@@ -236,6 +238,15 @@ Provider boundary tests must select by declared capability: tool use plus HASHI
 tool isolation for tool-enabled stages, proven tool isolation for tool-capable
 no-tool stages, and safe acceptance of a previously unknown engine that has no
 tool capability. Engine-name allowlists are not an acceptance invariant.
+
+Auto Compact routing tests must treat Compact as independent from the Quick/Pro
+task slots. Quick/Fast may have a smaller context window than the selected
+source and must never be invoked merely because of its slot name. `/model` must
+persist Compact provider/model/reasoning/Tier 2-or-3 policy independently, with
+visible `inherit_pro` migration semantics and exact cross-provider grant
+validation. A declared local/slow capability may select Tier 3 without a
+hard-coded engine name. Changing Compact must not change task routes, HER
+effort, or provider reasoning elsewhere.
 
 Representative policy combinations must cover:
 
@@ -796,7 +807,9 @@ request ID/Retry-After metadata when supplied.
 Tests must prove:
 
 - no Runtime, adapter, Persona, learning, or sub-agent path wraps a complete
-  provider operation or tool-enabled provider loop in an attempt deadline;
+  ordinary provider operation or tool-enabled provider loop in an attempt
+  deadline; the separate tool-free Compact call is tested only under section
+  10.4;
 - connection/read-inactivity guards are tested at their narrow transport
   boundary, reset on qualifying activity, and never include foreground tool
   execution;
@@ -810,8 +823,8 @@ Tests must prove:
 - read-only sub-agents recover once;
 - main Execution recovers only before tool activity or after completed proven
   read-only tools, and never after unknown or side-effecting activity;
-- Persona packaging, Meditation, Dream, and local providers use the same
-  failure-class recovery contract without adding elapsed-time tiers;
+- Persona packaging, Meditation, Dream, and ordinary local providers use the
+  same failure-class recovery contract without adding elapsed-time tiers;
 - stage-local retry is not process-restart recovery.
 
 ### 10.3 No unauthorised execution ceilings
@@ -829,6 +842,93 @@ deadline, while an explicitly supplied per-invocation timeout remains scoped to
 that tool only. Removed legacy generic limit fields remain rejected rather than
 silently restored. No test may encode, bless, or preserve an unauthorised limit
 merely because the current implementation exposes one.
+
+### 10.4 Auto Compact capacity and timeout isolation
+
+The complete oracle is the
+[Auto Compact design](HER_V2_AUTO_COMPACTION_DESIGN.md). Release-blocking tests
+must prove the following boundaries.
+
+**Configuration and provider neutrality**
+
+- `/model` exposes Compact mode, provider, model, reasoning, effective context
+  capacity/provenance, and `tier_2`/`tier_3`/`auto` independently from Quick,
+  Pro, task routes, and HER effort;
+- `inherit_pro` follows Pro, while an explicit granted Compact route survives a
+  main `/provider` change and is revalidated rather than silently rewritten;
+- inherited Compact follows Pro's provider-specific reasoning, while explicit
+  Compact reasoning is independently configurable and never inferred from HER
+  effort or a hard-coded generic reasoning name;
+- Quick/Fast is never selected by slot-name convention, including when its
+  context window cannot read the source;
+- cross-provider Compact requires the exact provider/model grant, tool
+  disablement, dedicated-system-prompt isolation, privacy eligibility, and
+  explicit confirmation;
+- an unknown engine with declared capabilities works without a name allowlist,
+  while missing or fabricated capacity metadata fails safely; unknown target
+  capacity disables proactive ratios, and unknown Compact capacity cannot plan
+  compaction chunks.
+
+**Context authority and atomicity**
+
+- typed segments, rather than flat-prompt text heuristics, select one exact
+  eligible source prefix;
+- system/developer policy, current request, classification, goal, active plan,
+  recent-dialogue guard, open tool transaction, permissions, unresolved
+  side-effect truth, and required evidence remain byte-identical;
+- the Compact call receives only eligible quoted source, stable identifiers,
+  schema, and the permitted minimal relevance header—not Persona, unrelated
+  system/developer rules, secrets, tool schemas, or open tool data;
+- oversized eligible material is compacted hierarchically at semantic record
+  boundaries, with exact source-ID coverage and no fixed chunk/merge ceiling;
+- no-shrink output, malformed schema, missing evidence, injection text, archive
+  failure, cancellation, and compare-and-swap races all leave the active
+  context pointer unchanged;
+- successful commit retains hash-valid raw source, injects the capsule exactly
+  once, and cannot lose concurrently appended turns.
+
+**Capacity and failure truth**
+
+- synthetic model capacities cover below-watermark, exact boundary,
+  soft-pressure, post-compaction target, protected-set overflow, and typed
+  provider-capacity rejection;
+- response headroom is capacity accounting, not a main-model output-token
+  ceiling;
+- soft failure continues unchanged when the original still fits;
+  `CONTEXT_PROTECTED_SET_TOO_LARGE` and `CONTEXT_CAPACITY_EXHAUSTED` are stable,
+  truthful hard-pressure outcomes without silent truncation or route switching;
+- a target request is replayed after a capacity rejection only when that failed
+  request produced no tool call or side effect.
+
+**Tier 2/Tier 3 watchdog isolation**
+
+- Tier 1 is invalid; remote reasoning Compact resolves Tier 2 and a declared
+  local/slow Compact may resolve Tier 3, with explicit configuration winning
+  over `auto`;
+- the dedicated defaults are tested at `190/300` seconds for Tier 2 and
+  `300/600` seconds for Tier 3 using controlled time plus representative slow
+  cleanup tests;
+- exactly one eligible fresh-connection recovery receives the same frozen
+  source, provider, model, reasoning, schema, and tool-free permissions;
+- only `CompactionRequest` carries the tier/deadline; generic `StageRequest`,
+  target providers, Persona, learning, sub-agents, tools, and complete
+  compaction jobs remain free of that watchdog;
+- timeout or `/stop` reaps the exact ephemeral local process tree, commits no
+  partial output, and does not affect unrelated foreground or managed
+  background work;
+- newly validated, strictly reduced source coverage may reset meaningful
+  progress, while Compact telemetry, retries, repeated coverage, and no-shrink
+  maintenance never do.
+
+**Provider behaviour**
+
+- Gemini remains stateless and receives no persisted/resumed provider session
+  through either ordinary or Compact calls;
+- the initial OpenRouter and DeepSeek implementation retains current unbounded
+  request-local tool loops and performs no mid-loop split or compaction;
+- any later capability-gated safe-boundary hook has a separate regression suite
+  proving current-turn preservation, complete tool-call/result pairing, no tool
+  replay, and unchanged loop authority.
 
 ## 11. Commentary and User Delivery
 
@@ -1059,6 +1159,12 @@ Release must not proceed if any of the following is possible:
 - false progress keeps stalled execution alive indefinitely;
 - `ERROR`, `FAILED`, `STOPPED`, or another terminal state is materially confused;
 - Provider or model names are hard-coded into HER orchestration policy;
+- Auto Compact hard-codes Quick/Fast, mutates protected context or raw history,
+  commits partial/unvalidated output, loses a concurrent append, or applies its
+  Tier 2/Tier 3 deadline outside the isolated tool-free compactor call;
+- Auto Compact introduces Gemini session state, silently switches the target
+  route, or changes the initial OpenRouter/DeepSeek unbounded tool-loop
+  contract;
 - Habits, Meditation, or Dream acquire user-goal or live-workflow authority.
 
 ### 15.2 Non-blocking production observations
@@ -1159,12 +1265,18 @@ Before HER v2 is accepted, the suite must contain logically complete coverage of
 18. retired-HER unreachability through aliases, startup, switching, and failure
     handling.
 19. runtime command separation: `/backend` never exposes `role-configured`,
-    `/provider` atomically resolves both slots, `/model` defines Quick/Pro and
-    independently assigns model/reasoning per effective route, `/effort` cannot
-    mutate reasoning, and non-HER `/model` behaviour remains unchanged.
+    `/provider` atomically resolves Quick/Pro, `/model` defines Quick/Pro,
+    independently assigns model/reasoning per effective route, and exposes an
+    independent Compact provider/model/reasoning/Tier 2-or-3 policy; `/effort`
+    cannot mutate reasoning or Compact, and non-HER `/model` behaviour remains
+    unchanged.
 20. scheduled-job policy separation: cron/heartbeat prompt work uses a
     request-local low default or explicit override across scheduled, manual,
     and recovery entry points without affecting nudges or later user turns.
+21. Auto Compact: typed capacity detection, protected authority, hierarchical
+    source coverage, immutable raw retention, atomic commit/concurrency,
+    truthful failure, compactor-only deadline isolation, Gemini statelessness,
+    and unchanged initial OpenRouter/DeepSeek tool loops.
 
 This is a list of required coverage areas, not an instruction to multiply each area into hundreds of tests.
 

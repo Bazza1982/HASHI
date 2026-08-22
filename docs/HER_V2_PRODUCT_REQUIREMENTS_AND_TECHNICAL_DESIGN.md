@@ -5,10 +5,10 @@
 | Field | Value |
 |---|---|
 | Status | Approved design baseline |
-| Version | 1.1 |
+| Version | 1.2 |
 | Date | 2026-08-22 |
 | Product | Hashi Engine Runtime (HER) |
-| Implementation baseline | HASHI `origin/main` at `604b826ed0dbb8cb748a617cbcf4c7d0dd7406f4` |
+| Implementation baseline | HASHI `her-v2` at `e5989608cffe4d6e8f4e6cd759c42aca8ed0a736` |
 
 ## 1. Purpose
 
@@ -68,6 +68,7 @@ including:
 - provider and model names;
 - model role profiles;
 - provider reasoning settings;
+- target-model context capacity and the independent Auto Compact route;
 - the meaningful-progress idle window;
 - replanning triggers and limits;
 - review limits;
@@ -94,6 +95,11 @@ The only already-authorised controls that may stop or bound work are:
   never encloses a complete HER stage or tool loop;
 - a timeout explicitly supplied for one tool invocation by its authorised
   caller, where omitting the timeout means no default tool deadline;
+- the isolated, tool-free Auto Compact model-call watchdog explicitly defined
+  in section 18.4 and the
+  [Auto Compact design](HER_V2_AUTO_COMPACTION_DESIGN.md); this exception cannot
+  enclose a HER stage, target provider call, tool execution, or provider tool
+  loop;
 - the Replanning and Review/remediation iteration ceilings explicitly defined
   by HER effort policy; and
 - exactly one safe fresh-connection recovery after an eligible provider
@@ -328,18 +334,25 @@ model names.
 
 ### 5.1 Runtime configuration command boundary
 
-HER v2 presents two reusable model slots: Quick and Pro. `/provider` selects the
-concrete call-provider engine that carries both slots. `/model` defines those
-two models, then independently assigns a model slot and provider reasoning to
-each effective task route. Execution is split into Simple, Complex, and
-High-volume routes because classification changes the actual profile. Structure
-repair may follow its source model. `/backend` selects `her-v2` without exposing
-the internal `role-configured` sentinel.
+HER v2 presents two reusable task model slots, Quick and Pro, plus an independent
+Compact route. `/provider` selects the concrete call-provider engine that
+carries Quick and Pro. `/model` defines those two models, independently assigns
+a model slot and provider reasoning to each effective task route, and exposes
+the Compact provider, model, reasoning, and Tier 2/Tier 3 timeout policy.
+Compact may visibly inherit Pro for migration or use an explicitly granted
+provider/model, including a future local route. It must never default to Quick
+or Fast merely because that route is expected to be cheap or fast. Execution is
+split into Simple, Complex, and High-volume routes because classification
+changes the actual profile. Structure repair may follow its source model.
+`/backend` selects `her-v2` without exposing the internal `role-configured`
+sentinel.
 
 `/effort` is a separate orchestration-policy command. Changing it must not read,
 infer, normalize, or persist a provider reasoning value. Conversely, changing a
-provider, model slot, or provider reasoning setting must not change HER effort.
-Non-HER backends retain their established `/model` behaviour.
+provider, model slot, Compact route, or provider reasoning setting must not
+change HER effort. An explicit Compact route is preserved when `/provider`
+changes Quick and Pro; an inherited Compact route follows Pro. Non-HER backends
+retain their established `/model` behaviour.
 
 ### 5.2 Scheduled-job execution policy
 
@@ -1035,6 +1048,32 @@ for arbitrarily long elapsed time and across arbitrarily many tool/model rounds.
 Only the expressly authorised controls listed in section 3.2.1 may stop or
 bound it.
 
+### 18.4 Auto Compact maintenance-call exception
+
+Auto Compact is HASHI-owned context capacity maintenance, not a principal HER
+lifecycle stage. It may invoke only an explicitly configured, tool-free Compact
+route exposed through `/model`. Quick/Fast is never hard-coded as the compactor;
+the route may inherit Pro or use a separately granted provider/model. Gemini
+remains stateless, and the initial implementation does not split, cap, or
+replace the existing OpenRouter or DeepSeek request-local tool loops.
+
+Each individual semantic compactor model call may use the expressly authorised
+absolute watchdog defined by a dedicated Tier 2 or Tier 3 Compact policy. Tier
+1 is invalid because semantic compaction requires reasoning. Tier 3 is
+available for a provider/model that declares local or slow execution. The
+deadline travels only on a separate compaction request and may not be copied to
+`StageRequest`, provider profiles, Persona, learning, sub-agents, target model
+calls, or tools. It does not become `/timeout`, a complete compaction-job
+deadline, or a clock around a provider tool loop.
+
+Compaction is atomic and fail-safe: current authority, active task state, open
+tool transactions, and required side-effect evidence remain verbatim; raw
+source history remains immutable; and any timeout, cancellation, provider
+failure, schema defect, or commit race leaves the active context unchanged.
+The complete configuration, hierarchy, validation, persistence, provider
+boundary, failure, and test contract is authoritative in the
+[Auto Compact design](HER_V2_AUTO_COMPACTION_DESIGN.md).
+
 ## 19. Sub-Agent Governance
 
 Authority is ordered as:
@@ -1077,6 +1116,8 @@ HASHI remains responsible for:
 - permission and workzone enforcement;
 - queues, cancellation, `/stop`, and `/steer`;
 - meaningful-progress idle enforcement;
+- typed context assembly, provider/model capacity metadata, Auto Compact
+  configuration, raw-context retention, and atomic continuity-capsule commits;
 - audit logging and redaction;
 - Workbench and operational status;
 - hot restart and process lifecycle.
@@ -1157,11 +1198,19 @@ HER v2 is ready for production rollout only when:
   process-restart non-resumption are enforced without an attempt deadline;
 - every HER stage, adapter, presentation path, maintenance path, sub-agent, and
   tool-enabled provider loop is free of unauthorised turn-, time-, token-,
-  call-, step-, tool-round-, and sub-agent-count ceilings;
+  call-, step-, tool-round-, and sub-agent-count ceilings; the isolated
+  tool-free Compact call is the only provider-attempt watchdog exception and
+  remains scoped exactly as sections 3.2.1 and 18.4 require;
 - Ledger records remain minimal and auditable through log references;
 - all available reasoning traces are logged and correlated to the turn;
 - tools and permissions remain HASHI-owned;
 - provider model names are configurable rather than hard-coded in HER core;
+- `/model` exposes an independent Compact route, never assumes Quick/Fast can
+  read the source, supports capability-selected Tier 2/Tier 3, keeps Gemini
+  stateless, and leaves initial OpenRouter/DeepSeek long tool loops unchanged;
+- Auto Compact preserves protected authority and open tool truth verbatim,
+  retains raw source, atomically commits only validated capsules, and otherwise
+  continues unchanged or returns a stable truthful capacity failure;
 - reporting failure preserves completed execution evidence;
 - stop terminates primary and sub-agent activity;
 - the retired HER implementation is unreachable through backend switching,
@@ -1186,10 +1235,12 @@ The following decisions are authoritative for HER v2:
 3. Planning and Replanning may not change classification or goal.
 4. `/steer` stops the old turn and starts a newly triaged turn with new instructions.
 5. Lifecycle order is strict; stage content is flexible.
-6. Each eligible provider operation has exactly one safe fresh-connection
-   recovery, but neither attempt nor any HER stage has an elapsed-time,
-   turn-count, token, call, step, tool-round, or sub-agent-count ceiling beyond
-   the expressly authorised controls in section 3.2.1.
+6. Each eligible ordinary provider operation has exactly one safe
+   fresh-connection recovery, but neither attempt nor any HER stage has an
+   elapsed-time, turn-count, token, call, step, tool-round, or sub-agent-count
+   ceiling beyond the expressly authorised controls in section 3.2.1. The
+   separate tool-free Compact request follows the narrow Tier 2/Tier 3 exception
+   in section 18.4.
 7. Immediate Response becomes the sole final user-facing answer for `DIRECT_RESPONSE`.
 8. Review is advisory and never user-facing.
 9. The Primary Agent owns execution and reporting.
@@ -1208,6 +1259,9 @@ The following decisions are authoritative for HER v2:
 18. Reporting failure does not discard completed work.
 19. Recovery is conversational, not transactional.
 20. HER core is provider-neutral and modular.
+21. Auto Compact is HASHI-owned, tool-free, atomically reversible capacity
+    maintenance; its dedicated Tier 2/Tier 3 call watchdog never becomes an
+    ordinary HER stage, provider, tool-loop, or execution deadline.
 
 ## 24. Golden Rule
 
