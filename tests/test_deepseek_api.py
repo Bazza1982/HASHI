@@ -317,10 +317,20 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
                 tool_calls=tool_calls,
                 finish_reason="tool_calls",
                 reasoning_content="Need to inspect the directory.",
+                prompt_tokens=10,
+                completion_tokens=4,
+                thinking_tokens=3,
             )
         assistant_msg = payload["messages"][2]
         assert assistant_msg["reasoning_content"] == "Need to inspect the directory."
-        return _APIResult(text="done", tool_calls=None, finish_reason="stop")
+        return _APIResult(
+            text="done",
+            tool_calls=None,
+            finish_reason="stop",
+            prompt_tokens=20,
+            completion_tokens=5,
+            thinking_tokens=2,
+        )
 
     monkeypatch.setattr(adapter, "_call_api_once", fake_call)
 
@@ -330,6 +340,24 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
     assert response.text == "done"
     assert response.tool_call_count == 1
     assert response.tool_loop_count == 1
+    assert response.stream_metadata["meter"]["provider_calls"] == [
+        {
+            "input": 10,
+            "output": 4,
+            "thinking": 3,
+            "token_source": "provider",
+            "thinking_in_output": True,
+            "cost_usd": None,
+        },
+        {
+            "input": 20,
+            "output": 5,
+            "thinking": 2,
+            "token_source": "provider",
+            "thinking_in_output": True,
+            "cost_usd": None,
+        },
+    ]
 
 
 @pytest.mark.asyncio

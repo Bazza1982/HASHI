@@ -251,6 +251,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
         total_thinking = 0
         total_tool_calls = 0
         tool_loop_count = 0
+        provider_calls: list[dict] = []
 
         try:
             self._touch_activity()
@@ -264,6 +265,18 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 total_prompt += result.prompt_tokens
                 total_completion += result.completion_tokens
                 total_thinking += result.thinking_tokens
+                provider_calls.append(
+                    {
+                        "input": int(result.prompt_tokens or 0),
+                        "output": int(result.completion_tokens or 0),
+                        "thinking": int(result.thinking_tokens or 0),
+                        "token_source": "provider",
+                        # DeepSeek's completion_tokens already includes its
+                        # reported reasoning_tokens subset.
+                        "thinking_in_output": True,
+                        "cost_usd": result.cost_usd,
+                    }
+                )
 
                 last_text = result.text
                 last_structured_data = result.structured_data
@@ -298,6 +311,9 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 usage=usage,
                 tool_call_count=total_tool_calls,
                 tool_loop_count=tool_loop_count,
+                stream_metadata={
+                    "meter": {"provider_calls": provider_calls},
+                },
             )
 
         except Exception as e:

@@ -956,6 +956,7 @@ def test_adapter_notification_context_is_captured_from_matching_task_start(tmp_p
     assert captured == {
         "chat_id": 99,
         "verbose_at_start": True,
+        "meter_at_start": False,
         "silent": False,
         "deliver_to_telegram": True,
         "request_source": "telegram",
@@ -964,6 +965,7 @@ def test_adapter_notification_context_is_captured_from_matching_task_start(tmp_p
     assert adapter._habit_notification_context("req-other", silent=False) == {
         "chat_id": None,
         "verbose_at_start": False,
+        "meter_at_start": False,
         "silent": False,
         "deliver_to_telegram": False,
         "request_source": None,

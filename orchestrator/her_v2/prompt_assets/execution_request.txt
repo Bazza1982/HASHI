@@ -1,0 +1,6 @@
+User request and complete supplied context:
+
+$goal$active_plan_section$sub_agent_results_section$assignment_section
+
+Return exactly one JSON object matching this shape:
+$schema

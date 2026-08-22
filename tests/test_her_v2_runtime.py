@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 
 import pytest
 
-from orchestrator.her_v2 import runtime as runtime_module
+from orchestrator.her_v2 import runtime_invocation as runtime_invocation_module
 from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.commentary import RecordingCommentaryPort
 from orchestrator.her_v2.config import HERv2Config
@@ -1711,7 +1711,7 @@ async def test_provider_operations_have_no_elapsed_attempt_deadline(
 
     clock = ControlledClock()
     monkeypatch.setattr(
-        runtime_module,
+        runtime_invocation_module,
         "ProviderActivityTracker",
         lambda: ProviderActivityTracker(clock=clock),
     )

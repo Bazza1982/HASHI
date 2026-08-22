@@ -257,6 +257,13 @@ class FlexibleAgentRuntime:
             "commentary",
             default=True,
         )
+        # Per-turn cost tail. Eligibility is frozen in _request_meta_by_id and
+        # receipts are correlated by request ID; overlapping foreground and
+        # background turns must never share a mutable "current" receipt.
+        self._meter = telegram_stream_policy.get_display_preference(
+            self, "meter", default=False
+        )
+        self._meter_receipt_by_id: dict[str, Any] = {}
         # Load persisted Telegram notification preference (.notify_on presence = audible, absence = silent)
         self._notify_enabled: bool = (self.workspace_dir / ".notify_on").exists()
         self._think_buffer: list[str] = []
@@ -2211,6 +2218,17 @@ class FlexibleAgentRuntime:
             )
             await query.answer(f"Typing {status_label(enabled)}")
 
+        elif target == "meter":
+            enabled = value == "on"
+            telegram_stream_policy.set_display_preference(self, "meter", enabled)
+            self._meter = enabled
+            await query.edit_message_text(
+                self._meter_menu_text(),
+                parse_mode="HTML",
+                reply_markup=self._meter_keyboard(),
+            )
+            await query.answer(f"Meter {status_label(enabled)}")
+
         elif target == "stream":
             await query.answer(
                 "Stream controls moved to /typing, /verbose and /think.",
@@ -3885,6 +3903,65 @@ class FlexibleAgentRuntime:
             self._typing_menu_text(),
             parse_mode="HTML",
             reply_markup=self._typing_keyboard(),
+        )
+
+    def _meter_enabled(self) -> bool:
+        return bool(
+            telegram_stream_policy.get_display_preference(self, "meter", default=False)
+        )
+
+    def _meter_keyboard(self) -> InlineKeyboardMarkup:
+        enabled = self._meter_enabled()
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(selected_label("On", enabled), callback_data="tgl:meter:on"),
+            InlineKeyboardButton(selected_label("Off", not enabled), callback_data="tgl:meter:off"),
+        ]])
+
+    def _meter_menu_text(self) -> str:
+        enabled = self._meter_enabled()
+        return setting_card(
+            "💰",
+            "Turn cost tail",
+            current=f"<b>{status_label(enabled)}</b>",
+            facts=[
+                "<b>Default</b> · <code>OFF</code>",
+                "<b>Scope</b> · foreground turn cost only",
+                "<b>Saved</b> · workspace setting",
+            ],
+            consequence=(
+                "A short cost tail is sent after each answer is delivered."
+                if enabled
+                else "No cost tail is sent after answers."
+            ),
+            action="Changes apply immediately and persist across reboot.",
+        )
+
+    async def cmd_meter(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        current = self._meter_enabled()
+        if len(args) > 1 or (args and args[0] not in {"on", "off", "status"}):
+            await self._reply_text(
+                update,
+                "Usage: <code>/meter [on|off|status]</code>",
+                parse_mode="HTML",
+            )
+            return
+        if args and args[0] == "on":
+            enabled = True
+        elif args and args[0] == "off":
+            enabled = False
+        else:
+            enabled = current
+        if args and args[0] in {"on", "off"}:
+            telegram_stream_policy.set_display_preference(self, "meter", enabled)
+            self._meter = enabled
+        await self._reply_text(
+            update,
+            self._meter_menu_text(),
+            parse_mode="HTML",
+            reply_markup=self._meter_keyboard(),
         )
 
     async def cmd_stream(self, update: Update, context: Any):
@@ -7512,6 +7589,132 @@ class FlexibleAgentRuntime:
     async def _send_wrapper_verbose_trace(self, item: QueuedRequest, core_raw: str, visible_text: str, wrapper_result) -> None:
         await runtime_wrapper.send_wrapper_verbose_trace(self, item, core_raw, visible_text, wrapper_result)
 
+    async def _send_meter_cost_tail(self, item: QueuedRequest) -> None:
+        """Send the per-turn cost tail after the answer is confirmed delivered.
+
+        Uses request-local ``meter_at_start`` so a mid-flight toggle never changes
+        an in-progress turn.  Never writes to memory/transcript/wrapper and is
+        skipped for silent, non-Telegram, transfer-buffered, or undelivered
+        turns.
+        """
+        request_meta = runtime_pipeline.request_meta_for(self, item.request_id)
+        if request_meta.get("meter_at_start") is not True:
+            return
+        if getattr(item, "silent", False) or not getattr(item, "deliver_to_telegram", True):
+            return
+        if self._should_buffer_during_transfer(item.request_id):
+            return
+        receipt_registry = getattr(self, "_meter_receipt_by_id", None)
+        receipt = (
+            receipt_registry.get(item.request_id)
+            if isinstance(receipt_registry, dict)
+            else None
+        )
+        if receipt is None:
+            return
+        try:
+            from tools.meter_cost import format_cost_tail
+
+            text = format_cost_tail(receipt)
+        except Exception:
+            self.logger.exception("meter cost tail formatting failed")
+            return
+        try:
+            await self.send_long_message(
+                chat_id=item.chat_id,
+                text=text,
+                request_id=item.request_id,
+                purpose="meter-cost",
+            )
+        except Exception:
+            # A failed cost tail must never break the turn.
+            self.logger.exception("meter cost tail delivery failed")
+
+    async def _send_meditation_cost_tail(
+        self, job: dict[str, Any]
+    ) -> bool | None:
+        """Send the async Meditation cost tail after the Habit meditation ends.
+
+        Gated on the frozen ``meter_at_start`` (not ``/verbose``), and kept as
+        its own short message so it never enters memory / transcript / wrapper /
+        voice / HChat content.  ``task_total_usd`` is the foreground receipt for
+        this turn plus the Meditation cost, when the foreground receipt is still
+        available.
+        """
+        meter = job.get("meter") if isinstance(job.get("meter"), dict) else {}
+        notification = (
+            meter.get("notification")
+            if isinstance(meter.get("notification"), dict)
+            else (
+                job.get("notification")
+                if isinstance(job.get("notification"), dict)
+                else {}
+            )
+        )
+        if notification.get("meter_at_start") is not True:
+            return True
+        raw_items = meter.get("line_items")
+        if not isinstance(raw_items, list) or not raw_items:
+            return True
+        try:
+            from tools.meter_cost import (
+                UsageReceipt,
+                format_meditation_cost_tail,
+                line_item_from_dict,
+            )
+
+            line_items = [
+                line_item_from_dict(item)
+                for item in raw_items
+                if isinstance(item, dict)
+            ]
+            if not line_items:
+                return True
+            receipt = UsageReceipt(
+                request_id=str(job.get("request_id") or ""),
+                parent_request_id="",
+                line_items=line_items,
+            )
+            foreground = self._meter_receipt_by_id.get(str(job.get("request_id") or ""))
+            task_total = None
+            if (
+                foreground is not None
+                and receipt.cost_usd is not None
+                and getattr(foreground, "cost_usd", None) is not None
+            ):
+                task_total = round(
+                    float(receipt.cost_usd)
+                    + float(foreground.cost_usd),
+                    6,
+                )
+            text = format_meditation_cost_tail(receipt, task_total_usd=task_total)
+        except Exception:
+            self.logger.exception("meditation cost tail formatting failed")
+            return False
+        chat_id = notification.get("chat_id")
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            return True
+        try:
+            result = await self.send_long_message(
+                chat_id=chat_id,
+                text=text,
+                request_id=job.get("request_id"),
+                purpose="meditation-cost",
+            )
+            delivered = bool(
+                isinstance(result, tuple) and len(result) >= 2 and int(result[1]) > 0
+            )
+            if delivered:
+                receipt_registry = getattr(self, "_meter_receipt_by_id", None)
+                if isinstance(receipt_registry, dict):
+                    receipt_registry.pop(str(job.get("request_id") or ""), None)
+            return True if delivered else None
+        except Exception:
+            self.logger.exception("meditation cost tail delivery failed")
+            return False
+
     def _audit_enabled(self) -> bool:
         return runtime_audit.audit_enabled(self)
 
@@ -7764,13 +7967,14 @@ class FlexibleAgentRuntime:
                 try:
                     from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
                     import hashlib as _hashlib
+                    _meter_line_items = runtime_pipeline._meter_line_items_from_response(response)
                     if response.usage:
                         # Real usage from API/CLI backend
                         _bg_input_tok = response.usage.input_tokens
                         _bg_output_tok = response.usage.output_tokens
                         _bg_thinking_tok = response.usage.thinking_tokens
                         _bg_tok_source = "api"
-                        record_usage(
+                        _meter_receipt = record_usage(
                             self.workspace_dir,
                             model=self.get_current_model(),
                             backend=self.config.active_backend,
@@ -7779,6 +7983,11 @@ class FlexibleAgentRuntime:
                             thinking_tokens=_bg_thinking_tok,
                             session_id=self.session_id_dt,
                             cost_usd=getattr(response, "cost_usd", None),
+                            request_id=item.request_id,
+                            phase="background",
+                            engine=self.config.active_backend,
+                            line_items=_meter_line_items,
+                            token_source="provider",
                         )
                     else:
                         # CLI backend: estimate from full assembled prompt (includes history)
@@ -7787,7 +7996,7 @@ class FlexibleAgentRuntime:
                         _bg_output_tok = estimate_tokens(visible_text)
                         _bg_thinking_tok = self._thinking_chars_this_req // 4
                         _bg_tok_source = "estimated"
-                        record_usage(
+                        _meter_receipt = record_usage(
                             self.workspace_dir,
                             model=self.get_current_model(),
                             backend=self.config.active_backend,
@@ -7795,7 +8004,14 @@ class FlexibleAgentRuntime:
                             output_tokens=_bg_output_tok,
                             thinking_tokens=_bg_thinking_tok,
                             session_id=self.session_id_dt,
+                            request_id=item.request_id,
+                            phase="background",
+                            engine=self.config.active_backend,
+                            line_items=_meter_line_items,
                         )
+                    runtime_pipeline.remember_meter_receipt(
+                        self, item.request_id, _meter_receipt
+                    )
                     _pa = self._last_prompt_audit
                     _sec_chars = {s["key"]: s["chars"] for s in _pa.get("sections", [])}
                     _sec_tokens = {s["key"]: s.get("tokens_est") or max(1, s["chars"] // 4) for s in _pa.get("sections", [])}
@@ -7914,6 +8130,8 @@ class FlexibleAgentRuntime:
                     )
                 receipt_chunk_count = chunk_count
                 await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
+                if receipt_delivered:
+                    await self._send_meter_cost_tail(item)
                 self._schedule_audit_followup(
                     item,
                     core_raw=safe_core_raw,

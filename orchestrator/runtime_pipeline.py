@@ -395,6 +395,7 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         # eligibility now so a later /verbose toggle cannot rewrite the
         # notification policy for this already-started task.
         "verbose_at_start": bool(getattr(runtime, "_verbose", False)),
+        "meter_at_start": bool(getattr(runtime, "_meter", False)),
         "silent": bool(item.silent),
         "deliver_to_telegram": bool(item.deliver_to_telegram),
         "habit_learning_eligible": bool(
@@ -1788,6 +1789,39 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
     )
 
 
+def _meter_line_items_from_response(response):
+    """Extract per-stage HER v2 line items from a response's stream metadata."""
+    metadata = getattr(response, "stream_metadata", None) or {}
+    meter = metadata.get("meter") if isinstance(metadata, dict) else None
+    if not isinstance(meter, dict):
+        return None
+    raw_items = meter.get("line_items")
+    if not isinstance(raw_items, list) or not raw_items:
+        return None
+    try:
+        from tools.meter_cost import line_item_from_dict
+
+        return [
+            line_item_from_dict(item)
+            for item in raw_items
+            if isinstance(item, dict)
+        ]
+    except Exception:
+        return None
+
+
+def remember_meter_receipt(runtime, request_id: str, receipt) -> None:
+    """Keep one bounded receipt per request for foreground and async tails."""
+
+    registry = getattr(runtime, "_meter_receipt_by_id", None)
+    if not isinstance(registry, dict):
+        registry = {}
+        runtime._meter_receipt_by_id = registry
+    registry[str(request_id or "")] = receipt
+    while len(registry) > 512:
+        registry.pop(next(iter(registry)), None)
+
+
 def record_foreground_usage_audit(
     runtime,
     item,
@@ -1802,12 +1836,13 @@ def record_foreground_usage_audit(
     try:
         from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
 
+        meter_line_items = _meter_line_items_from_response(response)
         if response.usage:
             input_tokens = response.usage.input_tokens
             output_tokens = response.usage.output_tokens
             thinking_tokens = response.usage.thinking_tokens
             token_source = "api"
-            record_usage(
+            receipt = record_usage(
                 runtime.workspace_dir,
                 model=runtime.get_current_model(),
                 backend=runtime.config.active_backend,
@@ -1816,13 +1851,18 @@ def record_foreground_usage_audit(
                 thinking_tokens=thinking_tokens,
                 session_id=runtime.session_id_dt,
                 cost_usd=getattr(response, "cost_usd", None),
+                request_id=item.request_id,
+                phase="foreground",
+                engine=runtime.config.active_backend,
+                line_items=meter_line_items,
+                token_source="provider",
             )
         else:
             input_tokens = estimate_tokens(final_prompt)
             output_tokens = estimate_tokens(visible_text)
             thinking_tokens = runtime._thinking_chars_this_req // 4
             token_source = "estimated"
-            record_usage(
+            receipt = record_usage(
                 runtime.workspace_dir,
                 model=runtime.get_current_model(),
                 backend=runtime.config.active_backend,
@@ -1830,7 +1870,12 @@ def record_foreground_usage_audit(
                 output_tokens=output_tokens,
                 thinking_tokens=thinking_tokens,
                 session_id=runtime.session_id_dt,
+                request_id=item.request_id,
+                phase="foreground",
+                engine=runtime.config.active_backend,
+                line_items=meter_line_items,
             )
+        remember_meter_receipt(runtime, item.request_id, receipt)
         prompt_audit = runtime._last_prompt_audit
         section_chars = {s["key"]: s["chars"] for s in prompt_audit.get("sections", [])}
         section_tokens = {
@@ -2412,6 +2457,8 @@ async def handle_success_delivery(
         completion_path="foreground",
     )
     await runtime._send_voice_reply(item.chat_id, response_text, item.request_id)
+    if final_delivered and callable(getattr(runtime, "_send_meter_cost_tail", None)):
+        await runtime._send_meter_cost_tail(item)
     runtime._schedule_audit_followup(
         item,
         core_raw=safe_core_raw,

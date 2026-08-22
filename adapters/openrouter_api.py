@@ -44,6 +44,11 @@ _STABLE_CONTEXT_CAPACITY_CODES = frozenset(
     }
 )
 
+_REASONING_DISABLED_VALUES = frozenset({"off", "none", "false", "0", "disabled"})
+_REASONING_EFFORT_VALUES = frozenset(
+    {"minimal", "low", "medium", "high", "xhigh", "max"}
+)
+
 
 def _stable_provider_error_code(response: httpx.Response | None) -> str:
     """Return only provider-owned stable codes; never infer capacity from HTTP 400."""
@@ -79,8 +84,28 @@ class _APIResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     thinking_tokens: int = 0
+    cost_usd: float | None = None
     reasoning_content: str = ""
     structured_data: dict[str, Any] | None = None
+
+
+def _usage_thinking_tokens(usage: Mapping[str, Any]) -> int:
+    details = usage.get("completion_tokens_details")
+    if isinstance(details, Mapping):
+        value = details.get("reasoning_tokens")
+        if value is not None:
+            return int(value or 0)
+    return int(usage.get("thinking_tokens") or 0)
+
+
+def _usage_cost_usd(usage: Mapping[str, Any]) -> float | None:
+    value = usage.get("cost")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _retry_after_seconds(response: httpx.Response | None) -> float | None:
@@ -270,11 +295,35 @@ class OpenRouterAdapter(BaseBackend):
         self.logger = logging.getLogger(f"Backend.OpenRouter.{self.config.name}")
         self.client = None
         self.sys_prompt = "You are a helpful AI assistant."
-        self.reasoning_enabled = False
+        # ``None`` preserves the provider/model default. Explicit False must be
+        # distinguishable because some OpenRouter models default reasoning on.
+        self.reasoning_enabled: bool | None = None
         self.tool_registry = None   # Injected by FlexibleBackendManager if tools configured
 
-    def set_reasoning_enabled(self, enabled: bool) -> None:
-        self.reasoning_enabled = bool(enabled)
+    def set_reasoning_enabled(self, enabled: bool | None) -> None:
+        self.reasoning_enabled = None if enabled is None else bool(enabled)
+
+    def _reasoning_payload(self) -> dict[str, Any] | None:
+        extra = dict(getattr(self.config, "extra", None) or {})
+        configured = extra.get("provider_reasoning")
+        if configured is None:
+            configured = extra.get("reasoning_effort")
+        normalized = (
+            str(configured).strip().casefold() if configured is not None else ""
+        )
+        if normalized in _REASONING_DISABLED_VALUES:
+            return {"enabled": False}
+        if normalized in _REASONING_EFFORT_VALUES:
+            return {
+                "enabled": True,
+                "effort": normalized,
+                "exclude": False,
+            }
+        if configured is not None or self.reasoning_enabled is True:
+            return {"enabled": True, "exclude": False}
+        if self.reasoning_enabled is False:
+            return {"enabled": False}
+        return None
 
     def _ensure_client(self):
         if self.client is None or getattr(self.client, "is_closed", False):
@@ -352,8 +401,9 @@ class OpenRouterAdapter(BaseBackend):
             "model": self.config.model,
             "messages": messages,
         }
-        if self.reasoning_enabled:
-            payload["reasoning"] = {"enabled": True, "exclude": False}
+        reasoning = self._reasoning_payload()
+        if reasoning is not None:
+            payload["reasoning"] = reasoning
         if use_streaming:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
@@ -557,12 +607,13 @@ class OpenRouterAdapter(BaseBackend):
         usage = data.get("usage") or {}
         prompt_tokens = usage.get("prompt_tokens", 0)
         completion_tokens = usage.get("completion_tokens", 0)
-        thinking_tokens = usage.get("thinking_tokens", 0)
+        thinking_tokens = _usage_thinking_tokens(usage)
 
         return _APIResult(
             text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             thinking_tokens=thinking_tokens,
+            cost_usd=_usage_cost_usd(usage),
             structured_data=_message_structured_data(message),
         )
 
@@ -689,7 +740,8 @@ class OpenRouterAdapter(BaseBackend):
             finish_reason=finish_reason or "stop",
             prompt_tokens=stream_usage.get("prompt_tokens", 0),
             completion_tokens=stream_usage.get("completion_tokens", 0),
-            thinking_tokens=stream_usage.get("thinking_tokens", 0),
+            thinking_tokens=_usage_thinking_tokens(stream_usage),
+            cost_usd=_usage_cost_usd(stream_usage),
         )
 
     # ------------------------------------------------------------------
@@ -725,6 +777,10 @@ class OpenRouterAdapter(BaseBackend):
         total_prompt = 0
         total_completion = 0
         total_thinking = 0
+        total_cost_usd = 0.0
+        provider_call_count = 0
+        provider_cost_complete = True
+        provider_calls: list[dict[str, Any]] = []
         total_tool_calls = 0
         tool_loop_count = 0
 
@@ -743,6 +799,23 @@ class OpenRouterAdapter(BaseBackend):
                 total_prompt += result.prompt_tokens
                 total_completion += result.completion_tokens
                 total_thinking += result.thinking_tokens
+                provider_call_count += 1
+                provider_calls.append(
+                    {
+                        "input": int(result.prompt_tokens or 0),
+                        "output": int(result.completion_tokens or 0),
+                        "thinking": int(result.thinking_tokens or 0),
+                        "token_source": "provider",
+                        # OpenRouter reasoning_tokens is a detail within
+                        # completion_tokens, not an additional token bucket.
+                        "thinking_in_output": True,
+                        "cost_usd": result.cost_usd,
+                    }
+                )
+                if result.cost_usd is None:
+                    provider_cost_complete = False
+                else:
+                    total_cost_usd += result.cost_usd
 
                 last_text = result.text
                 last_structured_data = result.structured_data
@@ -781,6 +854,14 @@ class OpenRouterAdapter(BaseBackend):
                 is_success=True,
                 stop_reason=result.finish_reason if "result" in dir() else "stop",
                 usage=usage,
+                cost_usd=(
+                    round(total_cost_usd, 12)
+                    if provider_call_count and provider_cost_complete
+                    else None
+                ),
+                stream_metadata={
+                    "meter": {"provider_calls": provider_calls},
+                },
                 tool_call_count=total_tool_calls,
                 tool_loop_count=tool_loop_count,
             )

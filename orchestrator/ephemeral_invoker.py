@@ -149,6 +149,10 @@ class BackendSidecarInvoker:
                 thinking_tokens=thinking_tokens,
                 session_id=self._session_id(),
                 cost_usd=getattr(response, "cost_usd", None),
+                token_source=token_source,
+                request_id=request_id,
+                phase="sidecar",
+                engine=engine,
             )
             record_audit_event(
                 workspace,

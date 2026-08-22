@@ -379,6 +379,11 @@ An invalid authoritative transition produces terminal `ERROR`.
 
 Tests must prove that:
 
+- every required external prompt asset exists, is non-empty, and declares
+  exactly its approved placeholders independent of the process working
+  directory;
+- malformed or placeholder-drifted prompt assets fail closed before provider
+  invocation;
 - Execution receives a dedicated HER v2 system prompt rather than the Agent's
   full `system_md` or Persona;
 - its user message retains the same complete HASHI-supplied request context as

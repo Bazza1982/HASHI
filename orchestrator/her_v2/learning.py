@@ -35,6 +35,7 @@ MaintenanceInvoker = Callable[
     [Stage, str, str, str, float], Awaitable[StageResponse]
 ]
 NotificationSender = Callable[[dict[str, Any]], Awaitable[bool | None]]
+MeditationCostSender = Callable[[dict[str, Any]], Awaitable[bool | None]]
 ConfigGetter = Callable[[], her_habits.HabitMeditationConfig]
 
 
@@ -44,6 +45,7 @@ class LearningRecovery:
     resumed_meditations: int = 0
     recovered_dreams: int = 0
     resumed_notifications: int = 0
+    resumed_meter_notifications: int = 0
 
 
 class HERv2Learning:
@@ -58,6 +60,7 @@ class HERv2Learning:
         invoke_model: MaintenanceInvoker,
         audit_log: DurableAuditLog,
         notification_sender: NotificationSender | None = None,
+        meditation_cost_sender: MeditationCostSender | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.workspace_dir = Path(workspace_dir)
@@ -66,6 +69,7 @@ class HERv2Learning:
         self.invoke_model = invoke_model
         self.audit_log = audit_log
         self.notification_sender = notification_sender
+        self.meditation_cost_sender = meditation_cost_sender
         self.logger = logger or logging.getLogger(
             f"HASHI.HERv2.Learning.{self.agent_name}"
         )
@@ -89,6 +93,8 @@ class HERv2Learning:
         self.meditation_job_ids: set[str] = set()
         self.notification_tasks: set[asyncio.Task] = set()
         self.notification_job_ids: set[str] = set()
+        self.meter_notification_tasks: set[asyncio.Task] = set()
+        self.meter_notification_job_ids: set[str] = set()
         # Dream command execution registers its current task in this set.
         self.dream_tasks: set[asyncio.Task] = set()
 
@@ -219,7 +225,14 @@ class HERv2Learning:
                 for job in self.meditation_journal.pending_jobs(limit=16)
             )
         notifications = self.resume_notifications()
-        if interrupted or resumed or recovered_dreams or notifications:
+        meter_notifications = self.resume_meter_notifications()
+        if (
+            interrupted
+            or resumed
+            or recovered_dreams
+            or notifications
+            or meter_notifications
+        ):
             self._audit(
                 event_id=f"her-v2-learning:startup-recovery:{uuid.uuid4().hex}",
                 turn_id="startup-recovery",
@@ -231,6 +244,7 @@ class HERv2Learning:
                     "resumed_meditations": resumed,
                     "recovered_dreams": recovered_dreams,
                     "resumed_notifications": notifications,
+                    "resumed_meter_notifications": meter_notifications,
                 },
             )
         return LearningRecovery(
@@ -238,6 +252,7 @@ class HERv2Learning:
             resumed_meditations=resumed,
             recovered_dreams=recovered_dreams,
             resumed_notifications=notifications,
+            resumed_meter_notifications=meter_notifications,
         )
 
     def spawn_meditation(
@@ -325,6 +340,17 @@ class HERv2Learning:
                             turn_id,
                             f"{job_id}:attempt:{validation_attempt}",
                             config.meditation_idle_timeout_seconds,
+                        )
+                        self.meditation_journal.append_meditation_cost(
+                            job_id,
+                            line_item=self._meditation_line_item(
+                                response,
+                                turn_id=turn_id,
+                                invocation_id=(
+                                    f"{turn_id}:meditation:{job_id}:"
+                                    f"run:{execution_attempt}:repair:{validation_attempt}"
+                                ),
+                            ),
                         )
                         self.audit_log.record_reasoning(
                             event_id=(
@@ -443,7 +469,9 @@ class HERv2Learning:
                         "changes": [change.to_payload() for change in changes],
                     },
                 )
+            self.meditation_journal.finalize_meditation_cost(job_id)
             self.spawn_notification(job_id)
+            self.spawn_meter_notification(job_id)
         except asyncio.CancelledError:
             try:
                 self.meditation_journal.mark_pending(
@@ -505,6 +533,56 @@ class HERv2Learning:
                 pass
             self._audit_failure(turn_id, job_id, exc, code="runtime_error")
 
+    def _meditation_line_item(
+        self,
+        response: StageResponse,
+        *,
+        turn_id: str,
+        invocation_id: str,
+    ) -> dict[str, Any]:
+        """Derive one Meditation cost line item from a maintenance response.
+
+        Maintenance responses do not carry the provider-reported ``cost_usd``,
+        so cost provenance is resolved from model/engine pricing like the
+        non-HER foreground fallback. ``0.0`` (local) is never conflated with
+        ``None`` (unknown).
+        """
+        from tools.token_tracker import calc_cost, resolve_cost_source
+
+        usage = dict(response.usage or {})
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        thinking_tokens = int(usage.get("thinking_tokens") or 0)
+        engine = str(response.provider or "")
+        model = str(response.model or "")
+        resolved_cost, cost_source = resolve_cost_source(
+            cost_usd=None,
+            model=model,
+            engine=engine,
+        )
+        if resolved_cost is None and cost_source == "pricing_table":
+            resolved_cost = calc_cost(
+                input_tokens,
+                output_tokens,
+                model,
+                thinking_tokens,
+                thinking_in_output=True,
+            )
+        return {
+            "request_id": str(invocation_id or turn_id or ""),
+            "parent_request_id": str(turn_id or ""),
+            "phase": Stage.MEDITATION.value,
+            "engine": engine,
+            "model": model,
+            "input": input_tokens,
+            "output": output_tokens,
+            "thinking": thinking_tokens,
+            "token_source": "provider",
+            "thinking_in_output": True,
+            "cost_usd": resolved_cost,
+            "cost_source": cost_source,
+        }
+
     def _audit_failure(
         self, turn_id: str, job_id: str, error: Exception, *, code: str
     ) -> None:
@@ -548,6 +626,150 @@ class HERv2Learning:
         return sum(
             self.spawn_notification(job["job_id"])
             for job in self.meditation_journal.pending_notifications(limit=32)
+        )
+
+    def spawn_meter_notification(self, job_id: str) -> bool:
+        if (
+            self.meditation_cost_sender is None
+            or job_id in self.meter_notification_job_ids
+        ):
+            return False
+        current = self.meditation_journal.get(job_id)
+        meter = current.get("meter") if isinstance(current, dict) else None
+        notification = meter.get("notification") if isinstance(meter, dict) else None
+        if not isinstance(notification, dict) or notification.get("status") not in {
+            "pending",
+            "sending",
+        }:
+            return False
+        task = asyncio.create_task(
+            self._run_meter_notification(job_id),
+            name=f"her-v2-meter-notification:{self.agent_name}:{job_id}",
+        )
+        self.meter_notification_job_ids.add(job_id)
+        self.meter_notification_tasks.add(task)
+
+        def _done(done_task: asyncio.Task) -> None:
+            self.meter_notification_tasks.discard(done_task)
+            self.meter_notification_job_ids.discard(job_id)
+
+        task.add_done_callback(_done)
+        return True
+
+    def resume_meter_notifications(self) -> int:
+        return sum(
+            self.spawn_meter_notification(job["job_id"])
+            for job in self.meditation_journal.pending_meter_notifications(limit=32)
+        )
+
+    async def _run_meter_notification(self, job_id: str) -> None:
+        assert self.meditation_cost_sender is not None
+        idle_started = time.monotonic()
+        while True:
+            job = self.meditation_journal.claim_meter_notification(job_id)
+            if job is None:
+                return
+            meter = job.get("meter") if isinstance(job.get("meter"), dict) else {}
+            notification = (
+                meter.get("notification")
+                if isinstance(meter.get("notification"), dict)
+                else {}
+            )
+            try:
+                delivered = await self.meditation_cost_sender(job)
+                if delivered is None:
+                    self.meditation_journal.mark_meter_notification_deferred(
+                        job_id,
+                        reason="delivery temporarily unavailable",
+                    )
+                    self._record_meter_notification_audit(
+                        job, "meditation_cost_delivery_deferred"
+                    )
+                    return
+                if delivered is not True:
+                    raise RuntimeError("Meditation cost notification was not accepted")
+                self.meditation_journal.mark_meter_notification_sent(job_id)
+                self._record_meter_notification_audit(
+                    job, "meditation_cost_delivery_sent"
+                )
+                return
+            except asyncio.CancelledError:
+                try:
+                    self.meditation_journal.mark_meter_notification_retry(
+                        job_id, reason="runtime_shutdown"
+                    )
+                except Exception:
+                    pass
+                raise
+            except Exception as exc:
+                self.meditation_journal.mark_meter_notification_retry(
+                    job_id,
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+                self._record_meter_notification_audit(
+                    job,
+                    "meditation_cost_delivery_failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                current = self.meditation_journal.get(job_id) or {}
+                current_meter = (
+                    current.get("meter")
+                    if isinstance(current.get("meter"), dict)
+                    else {}
+                )
+                current_notification = (
+                    current_meter.get("notification")
+                    if isinstance(current_meter.get("notification"), dict)
+                    else {}
+                )
+                if current_notification.get("status") != "pending":
+                    return
+                idle_window = float(
+                    self.config_getter().meditation_idle_timeout_seconds
+                )
+                if time.monotonic() - idle_started >= idle_window:
+                    return
+                await asyncio.sleep(
+                    min(
+                        10.0,
+                        2.0 ** int(notification.get("attempts") or 1),
+                        max(
+                            0.0,
+                            idle_window - (time.monotonic() - idle_started),
+                        ),
+                    )
+                )
+
+    def _record_meter_notification_audit(
+        self,
+        job: Mapping[str, Any],
+        event: str,
+        *,
+        error: str = "",
+    ) -> None:
+        job_id = str(job.get("job_id") or "unknown")
+        turn_id = str(job.get("request_id") or job_id)
+        current = self.meditation_journal.get(job_id) or dict(job)
+        meter = current.get("meter") if isinstance(current.get("meter"), dict) else {}
+        notification = (
+            meter.get("notification")
+            if isinstance(meter.get("notification"), dict)
+            else {}
+        )
+        self._audit(
+            event_id=(
+                f"{turn_id}:meditation-cost:{job_id}:"
+                f"attempt:{notification.get('attempts', 0)}:{event}"
+            ),
+            turn_id=turn_id,
+            request_ref=f"hashi-turn:{turn_id}",
+            stage="meditation_cost_notification",
+            event=event,
+            payload={
+                "job_id": job_id,
+                "notification": notification,
+                **({"error": error} if error else {}),
+            },
         )
 
     async def _run_notification(self, job_id: str) -> None:
@@ -677,6 +899,7 @@ class HERv2Learning:
             for task in (
                 *self.meditation_tasks,
                 *self.notification_tasks,
+                *self.meter_notification_tasks,
                 *self.dream_tasks,
             )
             if not task.done()

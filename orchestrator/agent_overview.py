@@ -22,8 +22,13 @@ def _usage_period(value: dict[str, Any] | None) -> dict[str, Any] | None:
         "input": input_tokens,
         "output": output_tokens,
         "thinking": thinking_tokens,
-        "total": input_tokens + output_tokens + thinking_tokens,
+        "total": int(
+            value.get("total_tokens")
+            if value.get("total_tokens") is not None
+            else input_tokens + output_tokens + thinking_tokens
+        ),
         "cost_usd": float(value.get("cost_usd", 0.0) or 0.0),
+        "unknown_cost_requests": int(value.get("unknown_cost_requests", 0) or 0),
         "requests": int(value.get("requests", 0) or 0),
     }
 

@@ -1144,6 +1144,13 @@ Finalisation consumes that block while producing the canonical Execution
 payload and final message in one call; only a pre-execution Triage clarification
 uses the older required-message presentation interface.
 
+HER v2 prompt prose is stored as versioned UTF-8 assets under
+`orchestrator/her_v2/prompt_assets/`. The loader resolves those assets relative
+to its module, never the process working directory, and validates the complete
+asset inventory plus each template's exact placeholder set before a prompt may
+be rendered. Missing, empty, unknown, or drifted templates fail closed during
+import or hot reload.
+
 ### 20.3 Optional supporting systems
 
 Habits, Meditation, Dream, and optional native executors connect through explicit interfaces. They cannot become mandatory hidden dependencies of the core state machine.
@@ -1155,6 +1162,13 @@ it behaves as an orchestration policy over provider and tool interfaces rather
 than reproducing the retired monolithic backend design. Compatibility is limited
 to forward ID aliases and approved Habit, Meditation, and Dream data formats;
 it is not execution fallback compatibility.
+
+The facade in `adapters/her_v2.py` owns HASHI lifecycle integration only.
+Provider invocation, delivery, and Persona bridges live in
+`adapters/her_v2_provider.py`; stage invocation/recovery and
+lifecycle/delivery/audit support live in the dedicated HER v2 runtime modules.
+`HERv2Adapter`, `HashiStageProvider`, and the established test-facing bridge
+exports remain available from the compatibility facade.
 
 ## 21. Migration Strategy
 

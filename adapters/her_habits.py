@@ -1167,6 +1167,25 @@ class HERMeditationJournal:
                 or notification_attempts < 0
             ):
                 raise ValueError("invalid HER Habit notification attempt count")
+        meter = payload.get("meter")
+        if meter is not None:
+            if not isinstance(meter, dict):
+                raise ValueError("invalid HER Meditation meter state")
+            meter_notification = meter.get("notification")
+            if meter_notification is not None:
+                if not isinstance(meter_notification, dict):
+                    raise ValueError("invalid HER Meditation cost notification state")
+                if meter_notification.get("status") not in _VALID_NOTIFICATION_STATUSES:
+                    raise ValueError("invalid HER Meditation cost notification status")
+                meter_attempts = meter_notification.get("attempts", 0)
+                if (
+                    isinstance(meter_attempts, bool)
+                    or not isinstance(meter_attempts, int)
+                    or meter_attempts < 0
+                ):
+                    raise ValueError(
+                        "invalid HER Meditation cost notification attempt count"
+                    )
         return payload
 
     def _write(self, payload: Mapping[str, Any]) -> None:
@@ -1211,6 +1230,14 @@ class HERMeditationJournal:
             "outcomes": [],
             "changes": [],
             "notification": notification,
+            "meter": {
+                "line_items": [],
+                "notification": self._new_meter_notification_state(
+                    notification,
+                    job_id=job_id,
+                    now=now,
+                ),
+            },
             "error_code": None,
             "error_summary": None,
             "created_at": now,
@@ -1231,6 +1258,7 @@ class HERMeditationJournal:
         except (TypeError, ValueError):
             chat_id = None
         verbose_at_start = raw.get("verbose_at_start") is True
+        meter_at_start = raw.get("meter_at_start") is True
         silent = raw.get("silent") is True
         deliver_to_telegram = raw.get("deliver_to_telegram") is True
         reason = None
@@ -1248,6 +1276,7 @@ class HERMeditationJournal:
             "attempts": 0,
             "chat_id": chat_id,
             "verbose_at_start": verbose_at_start,
+            "meter_at_start": meter_at_start,
             "silent": silent,
             "deliver_to_telegram": deliver_to_telegram,
             "request_source": redact_bounded_text(
@@ -1258,6 +1287,48 @@ class HERMeditationJournal:
                 raw.get("request_summary"),
                 limit=2_000,
             ),
+            "created_at": now,
+            "updated_at": now,
+            "sent_at": None,
+            "error_summary": None,
+        }
+
+    @staticmethod
+    def _new_meter_notification_state(
+        context: Mapping[str, Any] | None,
+        *,
+        job_id: str,
+        now: str,
+    ) -> dict[str, Any]:
+        """Build the independent durable outbox state for a cost tail.
+
+        Meter delivery is intentionally independent from ``/verbose`` and from
+        whether Meditation changed a Habit.
+        """
+
+        raw = dict(context or {})
+        try:
+            chat_id = int(raw.get("chat_id"))
+        except (TypeError, ValueError):
+            chat_id = None
+        reason = None
+        if raw.get("meter_at_start") is not True:
+            reason = "meter_off_at_task_start"
+        elif raw.get("silent") is True:
+            reason = "silent_request"
+        elif raw.get("deliver_to_telegram") is not True:
+            reason = "telegram_delivery_not_requested"
+        elif chat_id is None:
+            reason = "telegram_chat_unavailable"
+        return {
+            "status": "skipped" if reason else "waiting",
+            "reason": reason,
+            "attempts": 0,
+            "chat_id": chat_id,
+            "meter_at_start": raw.get("meter_at_start") is True,
+            "silent": raw.get("silent") is True,
+            "deliver_to_telegram": raw.get("deliver_to_telegram") is True,
+            "delivery_id": f"meditation-cost:{job_id}",
             "created_at": now,
             "updated_at": now,
             "sent_at": None,
@@ -1424,6 +1495,190 @@ class HERMeditationJournal:
                     job_id,
                     type(exc).__name__,
                 )
+
+    def store_meditation_cost(
+        self,
+        job_id: str,
+        *,
+        line_items: list[Mapping[str, Any]],
+    ) -> None:
+        """Persist per-invocation Meditation cost line items for the /meter tail.
+
+        Written after ``mark_complete`` so the async Meditation cost tail can be
+        rendered even when a Habit change notification is skipped.
+        """
+        payload = self._read(job_id)
+        meter = payload.get("meter") if isinstance(payload.get("meter"), dict) else {}
+        meter["line_items"] = [
+            _audit_safe(dict(item)) for item in (line_items or [])
+        ]
+        if not isinstance(meter.get("notification"), dict):
+            meter["notification"] = self._new_meter_notification_state(
+                payload.get("notification"),
+                job_id=job_id,
+                now=_utc_now(),
+            )
+        payload["meter"] = meter
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
+        self.finalize_meditation_cost(job_id)
+
+    def append_meditation_cost(
+        self,
+        job_id: str,
+        *,
+        line_item: Mapping[str, Any],
+    ) -> None:
+        """Durably append one provider invocation before parsing continues."""
+
+        payload = self._read(job_id)
+        meter = payload.get("meter") if isinstance(payload.get("meter"), dict) else {}
+        items = meter.get("line_items") if isinstance(meter.get("line_items"), list) else []
+        safe_item = _audit_safe(dict(line_item))
+        identity = str(safe_item.get("request_id") or "")
+        if not identity or not any(
+            str(item.get("request_id") or "") == identity
+            for item in items
+            if isinstance(item, Mapping)
+        ):
+            items.append(safe_item)
+        meter["line_items"] = items
+        if not isinstance(meter.get("notification"), dict):
+            meter["notification"] = self._new_meter_notification_state(
+                payload.get("notification"),
+                job_id=job_id,
+                now=_utc_now(),
+            )
+        payload["meter"] = meter
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
+
+    def finalize_meditation_cost(self, job_id: str) -> None:
+        """Make a completed Meditation cost record eligible for delivery."""
+
+        payload = self._read(job_id)
+        meter = payload.get("meter") if isinstance(payload.get("meter"), dict) else {}
+        notification = meter.get("notification")
+        if not isinstance(notification, dict):
+            notification = self._new_meter_notification_state(
+                payload.get("notification"),
+                job_id=job_id,
+                now=_utc_now(),
+            )
+        if notification.get("status") == "waiting":
+            if meter.get("line_items"):
+                notification["status"] = "pending"
+                notification["reason"] = None
+            else:
+                notification["status"] = "skipped"
+                notification["reason"] = "usage_unavailable"
+            notification["updated_at"] = _utc_now()
+        meter["notification"] = notification
+        payload["meter"] = meter
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
+
+    def pending_meter_notifications(self, *, limit: int = 32) -> list[dict[str, Any]]:
+        if not self.root.is_dir():
+            return []
+        jobs: list[dict[str, Any]] = []
+        for path in sorted(self.root.glob("*.json")):
+            try:
+                payload = self._read(path.stem)
+            except Exception as exc:  # noqa: BLE001 - one corrupt job must not block delivery
+                if self.logger is not None:
+                    self.logger.warning(
+                        "Ignoring invalid HER Meditation meter job %s: %s",
+                        path,
+                        exc,
+                    )
+                continue
+            meter = payload.get("meter")
+            notification = (
+                meter.get("notification") if isinstance(meter, dict) else None
+            )
+            if (
+                payload.get("status") in {"completed", "no_change"}
+                and isinstance(notification, dict)
+                and notification.get("status") in {"pending", "sending"}
+            ):
+                jobs.append(payload)
+        jobs.sort(key=lambda item: (str(item.get("created_at") or ""), item["job_id"]))
+        return jobs[: max(1, limit)]
+
+    def claim_meter_notification(self, job_id: str) -> dict[str, Any] | None:
+        payload = self._read(job_id)
+        meter = payload.get("meter")
+        notification = meter.get("notification") if isinstance(meter, dict) else None
+        if not isinstance(notification, dict) or notification.get("status") not in {
+            "pending",
+            "sending",
+        }:
+            return None
+        notification["status"] = "sending"
+        notification["attempts"] = int(notification.get("attempts") or 0) + 1
+        notification["reason"] = None
+        notification["error_summary"] = None
+        notification["updated_at"] = _utc_now()
+        meter["notification"] = notification
+        payload["meter"] = meter
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
+        return payload
+
+    def mark_meter_notification_sent(self, job_id: str) -> None:
+        payload = self._read(job_id)
+        meter = payload.get("meter")
+        notification = meter.get("notification") if isinstance(meter, dict) else None
+        if not isinstance(notification, dict) or notification.get("status") != "sending":
+            return
+        now = _utc_now()
+        notification.update(
+            {
+                "status": "sent",
+                "reason": None,
+                "error_summary": None,
+                "sent_at": now,
+                "updated_at": now,
+            }
+        )
+        meter["notification"] = notification
+        payload["meter"] = meter
+        payload["updated_at"] = now
+        self._write(payload)
+
+    def mark_meter_notification_retry(self, job_id: str, *, reason: str) -> None:
+        payload = self._read(job_id)
+        meter = payload.get("meter")
+        notification = meter.get("notification") if isinstance(meter, dict) else None
+        if not isinstance(notification, dict) or notification.get("status") != "sending":
+            return
+        notification["status"] = "pending"
+        notification["reason"] = "delivery_failed"
+        notification["error_summary"] = redact_bounded_text(reason, limit=500)
+        notification["updated_at"] = _utc_now()
+        meter["notification"] = notification
+        payload["meter"] = meter
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
+
+    def mark_meter_notification_deferred(self, job_id: str, *, reason: str) -> None:
+        payload = self._read(job_id)
+        meter = payload.get("meter")
+        notification = meter.get("notification") if isinstance(meter, dict) else None
+        if not isinstance(notification, dict) or notification.get("status") != "sending":
+            return
+        notification["status"] = "pending"
+        notification["attempts"] = max(
+            0, int(notification.get("attempts") or 0) - 1
+        )
+        notification["reason"] = "delivery_deferred"
+        notification["error_summary"] = redact_bounded_text(reason, limit=500)
+        notification["updated_at"] = _utc_now()
+        meter["notification"] = notification
+        payload["meter"] = meter
+        payload["updated_at"] = _utc_now()
+        self._write(payload)
 
     def pending_notifications(self, *, limit: int = 32) -> list[dict[str, Any]]:
         if not self.root.is_dir():

@@ -92,6 +92,15 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("think", "cmd_think", "Show commentary and provider reasoning", "session"),
     CommandSpec("commentary", "cmd_commentary", "Show HER Persona interim reports", "session"),
     CommandSpec("typing", "cmd_typing", "Control Telegram typing indicators", "session"),
+    CommandSpec("meter", "cmd_meter", "Toggle per-turn cost tail", "session"),
+    CommandSpec(
+        "metre",
+        "cmd_meter",
+        "Alias for /meter",
+        "session",
+        menu_visible=False,
+        alias_of="meter",
+    ),
     CommandSpec(
         "stream",
         "cmd_stream",

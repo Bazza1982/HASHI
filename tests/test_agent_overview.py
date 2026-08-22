@@ -67,8 +67,9 @@ def test_overview_uses_canonical_hashi_state_and_keeps_all_sys_slots(tmp_path):
     assert overview["workzone"] == {"active": True, "path": str(workzone)}
     assert overview["usage"]["all_time"]["input"] == canonical["all_time"]["input"]
     assert overview["usage"]["all_time"]["cost_usd"] == canonical["all_time"]["cost_usd"]
-    assert overview["usage"]["all_time"]["total"] == 200
-    assert overview["usage"]["session"]["total"] == 150
+    # Provider completion tokens already contain their reasoning-token subset.
+    assert overview["usage"]["all_time"]["total"] == 180
+    assert overview["usage"]["session"]["total"] == 130
     assert [item["model"] for item in overview["usage"]["by_model"]] == [
         "gpt-5.4",
         "claude-sonnet-4-6",

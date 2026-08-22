@@ -42,6 +42,10 @@ PRICING: dict[str, dict[str, float]] = {
     # Retain historical prices for already-recorded legacy model IDs.
     "deepseek-chat":            {"input": 0.32,  "cached": 0.032, "output": 0.89},
     "deepseek-r1":              {"input": 0.70,  "cached": 0.07,  "output": 2.50},
+    # OpenRouter /api/v1/models (2026-08-22). Qwen has prompt-length tiers
+    # below; these rows are the base rates for prompts shorter than 32K.
+    "qwen/qwen3.7-flash":       {"input": 0.03,  "cached": 0.006, "output": 0.13},
+    "z-ai/glm-5.3":             {"input": 1.40,  "cached": 0.26,  "output": 4.40},
     # OpenAI  (gpt-5.x cached = 10% of input)
     "gpt-4o":                   {"input": 2.50,  "cached": 1.25,  "output": 10.00},
     "gpt-4o-mini":              {"input": 0.15,  "cached": 0.075, "output": 0.60},
@@ -54,6 +58,16 @@ PRICING: dict[str, dict[str, float]] = {
     "gpt-5.4-mini":             {"input": 0.75,  "cached": 0.075, "output": 4.50},
     # CLI fallback (treated as claude-sonnet-4-6 equivalent)
     "default":                  {"input": 3.00,  "cached": 0.30,  "output": 15.00},
+}
+
+# Some OpenRouter models change price according to the prompt length of each
+# individual provider call. Entries are ordered by ascending inclusive
+# ``min_input_tokens``; the last matching tier wins.
+PRICING_TIERS: dict[str, tuple[tuple[int, dict[str, float]], ...]] = {
+    "qwen/qwen3.7-flash": (
+        (32_000, {"input": 0.10, "cached": 0.02, "output": 0.40}),
+        (256_000, {"input": 0.20, "cached": 0.04, "output": 0.80}),
+    ),
 }
 
 # Characters that are CJK (each ~0.67 tokens vs 0.25 for ASCII)
@@ -77,34 +91,118 @@ def estimate_tokens(text: str) -> int:
     return max(1, int(estimated))
 
 
-def get_price(model: str) -> dict[str, float]:
-    """Return pricing dict for a model, falling back to default."""
-    model_lower = model.lower().strip()
-    # Direct match
+def _pricing_key(model: str) -> str:
+    """Resolve only exact model identifiers or exact provider-qualified slugs.
+
+    The previous bidirectional substring match made partial names such as
+    ``gpt-5`` silently inherit the first ``gpt-5.x`` price in dictionary order.
+    A provider prefix (for example ``anthropic/claude-sonnet-4-6``) is safe to
+    strip only when the remaining basename is itself an exact pricing key.
+    """
+
+    model_lower = str(model or "").casefold().strip().strip("/")
     if model_lower in PRICING:
-        return PRICING[model_lower]
-    # Partial match (e.g. "claude-sonnet-4-6" in "anthropic/claude-sonnet-4-6")
-    for key, prices in PRICING.items():
-        if key in model_lower or model_lower in key:
-            return prices
-    return PRICING["default"]
+        return model_lower
+    if "/" in model_lower:
+        basename = model_lower.rsplit("/", 1)[-1]
+        if basename in PRICING:
+            return basename
+    return "default"
 
 
-def calc_cost(input_tokens: int, output_tokens: int, model: str,
-              thinking_tokens: int = 0, cached_tokens: int = 0) -> float:
+def get_price(model: str, *, input_tokens: int | None = None) -> dict[str, float]:
+    """Return the applicable per-million-token prices for one provider call."""
+    key = _pricing_key(model)
+    prices = PRICING[key]
+    if input_tokens is None:
+        return prices
+    for minimum, tier_prices in PRICING_TIERS.get(key, ()):
+        if input_tokens >= minimum:
+            prices = tier_prices
+    return prices
+
+
+def calc_cost(
+    input_tokens: int,
+    output_tokens: int,
+    model: str,
+    thinking_tokens: int = 0,
+    cached_tokens: int = 0,
+    *,
+    thinking_in_output: bool = False,
+) -> float:
     """Calculate cost in USD.  *cached_tokens* are the portion of
     *input_tokens* that hit prompt cache (charged at reduced rate)."""
-    prices = get_price(model)
+    prices = get_price(model, input_tokens=input_tokens)
     cached = min(cached_tokens, input_tokens)
     non_cached = input_tokens - cached
     cached_price = prices.get("cached", prices["input"] * 0.5)  # fallback 50%
+    separately_billed_thinking = 0 if thinking_in_output else thinking_tokens
     cost = (
         non_cached * prices["input"] / 1_000_000 +
         cached * cached_price / 1_000_000 +
         output_tokens * prices["output"] / 1_000_000 +
-        thinking_tokens * prices.get("thinking", prices["output"]) / 1_000_000
+        separately_billed_thinking
+        * prices.get("thinking", prices["output"])
+        / 1_000_000
     )
     return round(cost, 6)
+
+
+# ── Cost provenance helpers (used by tools.meter_cost) ───────────────────────
+
+LOCAL_ENGINE_MARKERS = (
+    "ollama",
+    "lmstudio",
+    "lm studio",
+    "llamacpp",
+    "llama.cpp",
+    "vllm",
+    "local",
+    "localai",
+    "text-generation-webui",
+    "koboldcpp",
+)
+
+
+def _is_local_engine(engine: str) -> bool:
+    normalized = " ".join(str(engine or "").split()).casefold()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in LOCAL_ENGINE_MARKERS)
+
+
+def model_has_pricing(model: str) -> bool:
+    """True when *model* resolves to an explicit pricing row (not ``default``)."""
+    return bool(str(model or "").strip()) and _pricing_key(model) != "default"
+
+
+def classify_token_source(usage_is_provider: bool) -> str:
+    """Map usage provenance to the display contract token source."""
+    return "provider" if usage_is_provider else "estimated"
+
+
+def resolve_cost_source(
+    *,
+    cost_usd,
+    model,
+    engine,
+):
+    """Resolve a per-call cost and its provenance without lying about precision.
+
+    Returns ``(resolved_cost, cost_source)`` where ``cost_source`` is one of
+    ``provider`` / ``pricing_table`` / ``local_zero`` / ``unknown``.  ``None``
+    cost means "unknown" and is never conflated with a genuine ``0.0``.
+    """
+    if cost_usd is not None:
+        if _is_local_engine(engine):
+            return float(cost_usd), "local_zero"
+        return float(cost_usd), "provider"
+    if _is_local_engine(engine):
+        return 0.0, "local_zero"
+    if model_has_pricing(model):
+        return None, "pricing_table"
+    return None, "unknown"
 
 
 # ── Storage ───────────────────────────────────────────────────────────────────
@@ -126,9 +224,70 @@ def record_usage(
     thinking_tokens: int = 0,
     session_id: str | None = None,
     cost_usd: float | None = None,
-) -> None:
-    """Append a usage record to the agent's token_usage.jsonl."""
-    cost = cost_usd if cost_usd is not None else calc_cost(input_tokens, output_tokens, model, thinking_tokens)
+    token_source: str | None = None,
+    request_id: str = "",
+    parent_request_id: str = "",
+    phase: str = "",
+    engine: str = "",
+    line_items: list | None = None,
+):
+    """Append a usage record and return a structured :class:`UsageReceipt`.
+
+    ``line_items`` may carry a per-stage HER v2 breakdown.  When omitted, a
+    single aggregate line item is derived from the positional token arguments.
+    The JSONL write remains a single aggregate record for backwards
+    compatibility with :func:`get_summary`.
+    """
+    from tools.meter_cost import PerCallUsageLineItem, UsageReceipt
+
+    resolved_cost, cost_source = resolve_cost_source(
+        cost_usd=cost_usd,
+        model=model,
+        engine=engine or backend,
+    )
+    normalized_token_source = str(token_source or "").strip().casefold()
+    if normalized_token_source in {"api", "provider"}:
+        normalized_token_source = "provider"
+    elif normalized_token_source != "estimated":
+        # Compatibility callers did not historically pass token provenance.
+        # Provider-reported cost is a useful hint, but new call sites pass the
+        # explicit source even when provider cost is unavailable.
+        normalized_token_source = classify_token_source(cost_usd is not None)
+    thinking_in_output = normalized_token_source == "provider"
+    if resolved_cost is None and cost_source == "pricing_table":
+        resolved_cost = calc_cost(
+            input_tokens,
+            output_tokens,
+            model,
+            thinking_tokens,
+            thinking_in_output=thinking_in_output,
+        )
+    if line_items is None:
+        line_items = [
+            PerCallUsageLineItem(
+                request_id=str(request_id or ""),
+                parent_request_id=str(parent_request_id or ""),
+                phase=str(phase or ""),
+                engine=str(engine or backend or ""),
+                model=str(model or ""),
+                input_tokens=int(input_tokens or 0),
+                output_tokens=int(output_tokens or 0),
+                thinking_tokens=int(thinking_tokens or 0),
+                token_source=normalized_token_source,
+                thinking_in_output=thinking_in_output,
+                cost_usd=resolved_cost,
+                cost_source=cost_source,
+            )
+        ]
+    receipt = UsageReceipt(
+        request_id=str(request_id or ""),
+        parent_request_id=str(parent_request_id or ""),
+        line_items=list(line_items),
+    )
+    # The structured receipt is authoritative for multi-stage/multi-model HER
+    # turns.  Repricing the role-configured aggregate can contradict /meter and
+    # previously wrote a known non-zero receipt as 0.0 in token_usage.jsonl.
+    cost = receipt.cost_usd
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "model": model,
@@ -137,6 +296,9 @@ def record_usage(
         "output": output_tokens,
         "thinking": thinking_tokens,
         "cost_usd": cost,
+        "cost_known": cost is not None,
+        "cost_source": receipt.dominant_cost_source(),
+        "total_tokens": receipt.total_tokens,
         "session_id": session_id or "",
     }
     path = _usage_path(workspace_dir)
@@ -145,6 +307,7 @@ def record_usage(
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
         pass  # Never break the agent over tracking
+    return receipt
 
 
 def record_audit_event(workspace_dir: Path, record: dict[str, Any]) -> None:
@@ -193,7 +356,15 @@ def get_summary(
     records = _load_records(workspace_dir)
 
     def empty():
-        return {"input": 0, "output": 0, "thinking": 0, "cost_usd": 0.0, "requests": 0}
+        return {
+            "input": 0,
+            "output": 0,
+            "thinking": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "unknown_cost_requests": 0,
+            "requests": 0,
+        }
 
     all_time = empty()
     session = empty()
@@ -219,7 +390,22 @@ def _add(acc: dict, record: dict) -> None:
     acc["input"] += record.get("input", 0)
     acc["output"] += record.get("output", 0)
     acc["thinking"] += record.get("thinking", 0)
-    acc["cost_usd"] += record.get("cost_usd", 0.0)
+    acc["total_tokens"] = int(acc.get("total_tokens") or 0) + int(
+        record.get("total_tokens")
+        if record.get("total_tokens") is not None
+        else (
+            int(record.get("input") or 0)
+            + int(record.get("output") or 0)
+            + int(record.get("thinking") or 0)
+        )
+    )
+    raw_cost = record.get("cost_usd")
+    if raw_cost is None:
+        acc["unknown_cost_requests"] = int(
+            acc.get("unknown_cost_requests") or 0
+        ) + 1
+    else:
+        acc["cost_usd"] += float(raw_cost)
     acc["requests"] += 1
 
 
@@ -228,7 +414,10 @@ def format_summary_text(summary: dict, agent_name: str = "") -> str:
     lines = [f"<b>📊 Token Usage{' — ' + agent_name if agent_name else ''}</b>"]
 
     def fmt_block(label: str, data: dict) -> str:
-        tokens = data["input"] + data["output"] + data["thinking"]
+        tokens = int(
+            data.get("total_tokens")
+            or (data["input"] + data["output"] + data["thinking"])
+        )
         cost = data["cost_usd"]
         req = data["requests"]
         thinking_note = f" + {_fmt_tokens(data['thinking'])} thinking" if data["thinking"] > 0 else ""
@@ -315,7 +504,15 @@ def get_summary_extended(
     records = _load_records(workspace_dir)
 
     def empty() -> dict:
-        return {"input": 0, "output": 0, "thinking": 0, "cost_usd": 0.0, "requests": 0}
+        return {
+            "input": 0,
+            "output": 0,
+            "thinking": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "unknown_cost_requests": 0,
+            "requests": 0,
+        }
 
     all_time = empty()
     session  = empty()

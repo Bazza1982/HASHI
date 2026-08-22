@@ -61,8 +61,19 @@ def _service(tmp_path, invoker, *, enabled=True):
 
 async def _wait_for_learning(service: HERv2Learning) -> None:
     for _ in range(200):
-        tasks = [task for task in service.meditation_tasks if not task.done()]
-        if not tasks and not service.meditation_job_ids:
+        tasks = [
+            task
+            for task in (
+                *service.meditation_tasks,
+                *getattr(service, "meter_notification_tasks", set()),
+            )
+            if not task.done()
+        ]
+        if (
+            not tasks
+            and not service.meditation_job_ids
+            and not getattr(service, "meter_notification_job_ids", set())
+        ):
             return
         await asyncio.sleep(0.005)
     raise AssertionError("HER v2 learning task did not become idle")
@@ -340,3 +351,189 @@ async def test_ineligible_turn_neither_reads_habits_nor_queues_meditation(
 
     assert invoker.calls == []
     assert not service.meditation_journal.root.exists()
+
+
+@pytest.mark.asyncio
+async def test_meditation_cost_sender_receives_meter_line_items(tmp_path):
+    """After Meditation completes, the injected cost sender receives the job
+    with per-invocation line items, gated on the request-bound context."""
+    invoker = ScriptedMaintenance(['{"actions":[]}'])
+    root = tmp_path / "workspace"
+    audit = DurableAuditLog(
+        root / "logs" / "her_v2_audit.jsonl",
+        root / "backend_state" / "her_v2" / "audit_fallback.jsonl",
+    )
+    config = HabitMeditationConfig(enabled=True, max_actions=3)
+    delivered: list[dict] = []
+
+    async def cost_sender(job: dict) -> bool:
+        delivered.append(dict(job))
+        return True
+
+    service = HERv2Learning(
+        workspace_dir=root,
+        agent_name="agent",
+        config_getter=lambda: config,
+        invoke_model=invoker,
+        audit_log=audit,
+        meditation_cost_sender=cost_sender,
+    )
+
+    await service.bind_turn(
+        notification_context={
+            "chat_id": 99,
+            "meter_at_start": True,
+            "verbose_at_start": False,
+            "silent": False,
+            "deliver_to_telegram": True,
+        }
+    ).meditate(
+        turn_id="turn-meditation-cost",
+        goal="Complete the current request.",
+        summary="Finished.",
+        evidence_refs=(),
+        limitations=(),
+        terminal_state=TerminalState.COMPLETED,
+    )
+    await _wait_for_learning(service)
+
+    assert len(delivered) == 1
+    job = delivered[0]
+    assert job["request_id"] == "turn-meditation-cost"
+    meter = job.get("meter") or {}
+    line_items = meter.get("line_items") or []
+    assert line_items, "meditation cost line items must be persisted"
+    assert line_items[0]["phase"] == "meditation"
+    assert line_items[0]["model"] == "configured-learning-model"
+    assert line_items[0]["token_source"] == "provider"
+    meter_notification = meter.get("notification") or {}
+    assert meter_notification["status"] == "sending"
+    stored = service.meditation_journal.get(job["job_id"])
+    assert stored["meter"]["notification"]["status"] == "sent"
+    assert stored["meter"]["notification"]["attempts"] == 1
+    assert stored["meter"]["notification"]["delivery_id"].startswith(
+        "meditation-cost:"
+    )
+    assert service.resume_meter_notifications() == 0
+
+
+@pytest.mark.asyncio
+async def test_meditation_cost_delivery_retries_and_then_marks_sent(tmp_path):
+    invoker = ScriptedMaintenance(['{"actions":[]}'])
+    root = tmp_path / "workspace"
+    audit = DurableAuditLog(
+        root / "logs" / "her_v2_audit.jsonl",
+        root / "backend_state" / "her_v2" / "audit_fallback.jsonl",
+    )
+    config = HabitMeditationConfig(
+        enabled=True,
+        max_actions=3,
+        meditation_idle_timeout_seconds=0.2,
+    )
+    calls: list[str] = []
+
+    async def flaky_sender(job: dict) -> bool:
+        calls.append(job["job_id"])
+        if len(calls) == 1:
+            raise RuntimeError("temporary Telegram failure")
+        return True
+
+    service = HERv2Learning(
+        workspace_dir=root,
+        agent_name="agent",
+        config_getter=lambda: config,
+        invoke_model=invoker,
+        audit_log=audit,
+        meditation_cost_sender=flaky_sender,
+    )
+
+    await service.bind_turn(
+        notification_context={
+            "chat_id": 99,
+            "meter_at_start": True,
+            "verbose_at_start": False,
+            "silent": False,
+            "deliver_to_telegram": True,
+        }
+    ).meditate(
+        turn_id="turn-meditation-retry",
+        goal="Complete the current request.",
+        summary="Finished.",
+        evidence_refs=(),
+        limitations=(),
+        terminal_state=TerminalState.COMPLETED,
+    )
+    await _wait_for_learning(service)
+
+    job_id = hashlib.sha256(
+        b"her-v2-meditation\0turn-meditation-retry"
+    ).hexdigest()[:32]
+    stored = service.meditation_journal.get(job_id)
+    assert calls == [job_id, job_id]
+    assert stored["meter"]["notification"]["status"] == "sent"
+    assert stored["meter"]["notification"]["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_meditation_cost_delivery_resumes_after_service_recovery(tmp_path):
+    root = tmp_path / "workspace"
+    audit = DurableAuditLog(
+        root / "logs" / "her_v2_audit.jsonl",
+        root / "backend_state" / "her_v2" / "audit_fallback.jsonl",
+    )
+    config = HabitMeditationConfig(enabled=True, max_actions=3)
+    first = HERv2Learning(
+        workspace_dir=root,
+        agent_name="agent",
+        config_getter=lambda: config,
+        invoke_model=ScriptedMaintenance(['{"actions":[]}']),
+        audit_log=audit,
+        meditation_cost_sender=None,
+    )
+
+    await first.bind_turn(
+        notification_context={
+            "chat_id": 99,
+            "meter_at_start": True,
+            "verbose_at_start": False,
+            "silent": False,
+            "deliver_to_telegram": True,
+        }
+    ).meditate(
+        turn_id="turn-meditation-recovery",
+        goal="Complete the current request.",
+        summary="Finished.",
+        evidence_refs=(),
+        limitations=(),
+        terminal_state=TerminalState.COMPLETED,
+    )
+    await _wait_for_learning(first)
+
+    job_id = hashlib.sha256(
+        b"her-v2-meditation\0turn-meditation-recovery"
+    ).hexdigest()[:32]
+    pending = first.meditation_journal.get(job_id)
+    assert pending["meter"]["notification"]["status"] == "pending"
+
+    deliveries: list[str] = []
+
+    async def recovered_sender(job: dict) -> bool:
+        deliveries.append(job["meter"]["notification"]["delivery_id"])
+        return True
+
+    recovered_service = HERv2Learning(
+        workspace_dir=root,
+        agent_name="agent",
+        config_getter=lambda: config,
+        invoke_model=ScriptedMaintenance([]),
+        audit_log=audit,
+        meditation_cost_sender=recovered_sender,
+    )
+    recovery = recovered_service.recover()
+    await _wait_for_learning(recovered_service)
+
+    assert recovery.resumed_meter_notifications == 1
+    assert deliveries == [f"meditation-cost:{job_id}"]
+    stored = recovered_service.meditation_journal.get(job_id)
+    assert stored["meter"]["notification"]["status"] == "sent"
+    assert recovered_service.recover().resumed_meter_notifications == 0
