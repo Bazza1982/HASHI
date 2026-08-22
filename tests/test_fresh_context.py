@@ -111,7 +111,6 @@ async def test_flex_runtime_fresh_clears_turns_without_session_reset_llm_prompt(
     runtime.config = SimpleNamespace(active_backend="ollama-api")
     runtime.backend_manager = SimpleNamespace(current_backend=object())
     runtime._pending_auto_recall_context = "old"
-    runtime._last_delivered_turn_by_chat = {"456": {"assistant_text": "old"}}
     runtime._clear_transfer_state = lambda: None
     store = FakeMemoryStore()
     runtime.context_assembler = BridgeContextAssembler(store, system_md=None)
@@ -133,7 +132,6 @@ async def test_flex_runtime_fresh_clears_turns_without_session_reset_llm_prompt(
     assert runtime.context_assembler.turns_injection_enabled is True
     assert runtime.context_assembler.saved_memory_injection_enabled is False
     assert runtime._pending_auto_recall_context is None
-    assert runtime._last_delivered_turn_by_chat == {}
     assert enqueued == []
 
 
