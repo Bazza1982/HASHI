@@ -10,7 +10,7 @@
 | System | Hashi Engine Runtime (HER) v2 |
 | Testing approach | Intent-based, risk-focused, and scenario-driven |
 | Governing design | [HER v2 Product Requirements and Technical Design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) |
-| Implementation baseline | HASHI `her-v2` at `e5989608cffe4d6e8f4e6cd759c42aca8ed0a736` |
+| Implementation baseline | HASHI `her-v2` at `6f5747503f478de912553d3e2a92926a5755c41c` |
 
 ## 1. Purpose
 

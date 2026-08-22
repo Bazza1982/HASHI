@@ -8,7 +8,7 @@
 | Version | 1.2 |
 | Date | 2026-08-22 |
 | Product | Hashi Engine Runtime (HER) |
-| Implementation baseline | HASHI `her-v2` at `e5989608cffe4d6e8f4e6cd759c42aca8ed0a736` |
+| Implementation baseline | HASHI `her-v2` at `6f5747503f478de912553d3e2a92926a5755c41c` |
 
 ## 1. Purpose
 

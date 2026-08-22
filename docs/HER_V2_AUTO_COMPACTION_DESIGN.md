@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Status | Implemented in source; deterministic verification passed; live activation pending |
+| Status | Implemented and live-loaded; configured Compact route verified end to end |
 | Date | 2026-08-22 |
 | Scope | HASHI-owned context capacity management for HER v2 |
 | Governing specification | [HER v2 product and technical design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) |
-| Runtime activation | User authorised Lily Agent `/reboot min` after implementation; no `/reboot max` or `/restart` is authorised |
+| Runtime activation | Lily Agent `/reboot min` completed successfully on 2026-08-22; no `/reboot max` or `/restart` was used |
 
 ## 1. Objective
 
@@ -649,7 +649,20 @@ route UI and text interface.
 
 Deterministic coverage lives in `tests/test_context_compaction.py`, with command,
 adapter, lifecycle, runtime-pipeline, and hot-reload regressions in their
-existing focused suites. Phase D remains pending until the authorised Lily
-Agent `/reboot min` transaction and live canaries complete. Phase E remains the
-separately designed optional capability described above; this implementation
-does not split or cap existing OpenRouter or DeepSeek request-local tool loops.
+existing focused suites. The authorised Lily Agent `/reboot min` transaction
+completed with only Lily targeted. Live checks proved `/compact`, `/model
+compact`, migration-default readiness, and a real DeepSeek V4 Pro Tier 2
+compaction from isolated synthetic source through strict shrink, hash-valid raw
+archive, validated capsule, audit, and generation-1 CAS commit. The isolated
+canary retained all 24 raw rows and did not touch Lily's production pointer.
+
+The Gemini launch contract was also inspected during a real isolated CLI
+attempt: it declared `supports_sessions=false`, emitted no resume/session/
+continue argument, and reaped its subprocess. The provider response itself was
+blocked by the installed Gemini CLI/account with `IneligibleTierError`, so this
+is recorded as an external availability limitation rather than a successful
+Gemini answer canary. Lily has no granted local/Ollama Compact model, so the
+conditional local Tier 3 production canary was not applicable. Phase E remains
+the separately designed optional capability described above; this
+implementation does not split or cap existing OpenRouter or DeepSeek
+request-local tool loops.
