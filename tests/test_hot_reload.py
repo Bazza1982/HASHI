@@ -226,6 +226,77 @@ def test_hot_reload_ignores_function_body_only_change(tmp_path):
     )
 
 
+def test_hot_reload_ignores_unchanged_property_accessors(tmp_path):
+    source = tmp_path / "context.py"
+    source.write_text(
+        "class Context:\n"
+        "    @property\n"
+        "    def memory_enabled(self):\n"
+        "        return True\n"
+        "\n"
+        "    @memory_enabled.setter\n"
+        "    def memory_enabled(self, enabled):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    module = types.ModuleType("orchestrator.context_example")
+    module.__file__ = str(source)
+
+    class Context:
+        @property
+        def memory_enabled(self):
+            return False
+
+        @memory_enabled.setter
+        def memory_enabled(self, enabled):
+            pass
+
+    Context.__module__ = module.__name__
+    module.Context = Context
+
+    assert (
+        detect_loaded_class_interface_changes(
+            [module.__name__], modules={module.__name__: module}
+        )
+        == []
+    )
+
+
+def test_hot_reload_detects_property_setter_signature_change(tmp_path):
+    source = tmp_path / "context.py"
+    source.write_text(
+        "class Context:\n"
+        "    @property\n"
+        "    def memory_enabled(self):\n"
+        "        return True\n"
+        "\n"
+        "    @memory_enabled.setter\n"
+        "    def memory_enabled(self, enabled, *, reason=None):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    module = types.ModuleType("orchestrator.context_example")
+    module.__file__ = str(source)
+
+    class Context:
+        @property
+        def memory_enabled(self):
+            return False
+
+        @memory_enabled.setter
+        def memory_enabled(self, enabled):
+            pass
+
+    Context.__module__ = module.__name__
+    module.Context = Context
+
+    assert detect_loaded_class_interface_changes(
+        [module.__name__], modules={module.__name__: module}
+    ) == [
+        "orchestrator.context_example.Context.memory_enabled.setter (signature changed)"
+    ]
+
+
 def test_hot_reload_detects_signature_and_dataclass_field_changes(tmp_path):
     source = tmp_path / "state.py"
     source.write_text(
