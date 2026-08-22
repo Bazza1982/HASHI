@@ -23,6 +23,11 @@
 - Live reboot smoke:
   - `/reboot min`
   - `/reboot max`
+  - while at least one other Agent remains online, adopt a disposable public
+    class/member change through `/reboot min`; verify only the requester stops
+    and returns, with no implicit `max` and no targeted-interface rejection
+  - verify malformed `min`/number requests are rejected before preflight and
+    never fall back to all running Agents
   - no function change or failed reload directs the operator to a cold process restart
   - verify agents return to `ONLINE`
   - verify Workbench API, enabled API Gateway, scheduler, delivery watcher, and

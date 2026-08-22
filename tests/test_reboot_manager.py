@@ -12,7 +12,7 @@ import pytest
 from adapters import registry as backend_registry
 from orchestrator import reboot_manager as reboot_manager_module
 from orchestrator.hot_reload import HotReloadError, module_reload_key
-from orchestrator.reboot_manager import RebootManager
+from orchestrator.reboot_manager import RebootManager, _resolve_restart_targets
 from orchestrator.service_manager import ServiceManager
 
 
@@ -365,6 +365,53 @@ def test_reload_project_modules_fails_fast_instead_of_continuing(monkeypatch):
     assert calls == ["orchestrator.first", "orchestrator.broken"]
 
 
+@pytest.mark.parametrize(
+    ("restart", "expected"),
+    [
+        ({"mode": "min", "agent_name": "zelda"}, ("zelda",)),
+        ({"mode": "number", "agent_number": 3}, ("offline",)),
+        ({"mode": "same"}, ("zelda", "sunny")),
+        ({"mode": "max"}, ("zelda", "sunny")),
+    ],
+)
+def test_restart_scope_requires_an_explicit_broad_mode(restart, expected):
+    kernel = SimpleNamespace(
+        runtimes=[SimpleNamespace(name="zelda"), SimpleNamespace(name="sunny")],
+        configured_agent_names=lambda: ["zelda", "sunny", "offline"],
+    )
+
+    targets = _resolve_restart_targets(kernel, restart)
+
+    assert targets == expected
+    if restart["mode"] in {"min", "number"}:
+        assert len(targets) == 1
+
+
+@pytest.mark.parametrize(
+    "restart",
+    [
+        {"mode": "min"},
+        {"mode": "number", "agent_number": 0},
+        {"mode": "number", "agent_number": 4},
+        {"mode": "number", "agent_number": "2"},
+        {"mode": "unexpected", "agent_name": "zelda"},
+    ],
+)
+def test_invalid_restart_scope_is_rejected_instead_of_falling_back_to_all(restart):
+    kernel = SimpleNamespace(
+        runtimes=[SimpleNamespace(name="zelda"), SimpleNamespace(name="sunny")],
+        configured_agent_names=lambda: ["zelda", "sunny", "offline"],
+    )
+
+    with pytest.raises(ValueError):
+        _resolve_restart_targets(kernel, restart)
+
+
+def test_restart_scope_guard_stays_outside_manager_class_for_legacy_min_adoption():
+    assert "_resolve_restart_targets" not in RebootManager.__dict__
+    assert callable(reboot_manager_module._resolve_restart_targets)
+
+
 @pytest.mark.asyncio
 async def test_hot_restart_fails_when_target_does_not_restart_even_if_others_run(
     monkeypatch,
@@ -426,16 +473,23 @@ async def test_hot_restart_fails_when_target_does_not_restart_even_if_others_run
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "restart",
+    ("restart", "expected_target"),
     [
-        {"mode": "min", "agent_name": "zelda", "agent_number": None},
-        {"mode": "number", "agent_name": "zelda", "agent_number": 3},
+        (
+            {"mode": "min", "agent_name": "zelda", "agent_number": None},
+            "zelda",
+        ),
+        (
+            {"mode": "number", "agent_name": "zelda", "agent_number": 2},
+            "sunny",
+        ),
     ],
 )
-async def test_targeted_hot_restart_rejects_class_abi_change_without_widening_scope(
+async def test_targeted_hot_restart_loads_public_api_change_without_widening_scope(
     monkeypatch,
-    capsys,
+    tmp_path,
     restart,
+    expected_target,
 ):
     class ConsoleHandler:
         def addFilter(self, _filter):
@@ -452,22 +506,14 @@ async def test_targeted_hot_restart_rejects_class_abi_change_without_widening_sc
             self.refreshed = True
 
     class Runtime:
-        def __init__(self, name, notifications):
+        def __init__(self, name):
             self.name = name
-            self.notifications = notifications
-
-        def _primary_chat_id(self):
-            return 42
-
-        async def _send_text(self, chat_id, text):
-            self.notifications.append((chat_id, text))
 
     class Kernel:
         def __init__(self):
-            self.notifications = []
             self.runtimes = [
-                Runtime("zelda", self.notifications),
-                Runtime("sunny", self.notifications),
+                Runtime("zelda"),
+                Runtime("sunny"),
             ]
             self.whatsapp = None
             self.global_cfg = SimpleNamespace(workbench_port=18800)
@@ -484,6 +530,7 @@ async def test_targeted_hot_restart_rejects_class_abi_change_without_widening_sc
             return True, "stopped"
 
         async def start_agent(self, name):
+            assert code_state["loaded"] is True
             self.start_calls.append(name)
             self.runtimes.append(SimpleNamespace(name=name))
             return True, "started"
@@ -499,23 +546,48 @@ async def test_targeted_hot_restart_rejects_class_abi_change_without_widening_sc
             return ["zelda", "sunny", "offline"]
 
     kernel = Kernel()
+    untouched_runtime = next(
+        runtime for runtime in kernel.runtimes if runtime.name != expected_target
+    )
     manager = RebootManager(kernel=kernel, console_handler=ConsoleHandler())
+
+    source = tmp_path / "reboot_scope_fixture.py"
+    source.write_text(
+        "class RuntimeGeneration:\n"
+        "    def execute(self, request):\n"
+        "        return request\n"
+        "\n"
+        "    def added_public_method(self, value, *, enabled=True):\n"
+        "        return value if enabled else None\n",
+        encoding="utf-8",
+    )
+    fixture_module = types.ModuleType("orchestrator.reboot_scope_fixture")
+    fixture_module.__file__ = str(source)
+
+    class RuntimeGeneration:
+        def execute(self, request):
+            return request
+
+    RuntimeGeneration.__module__ = fixture_module.__name__
+    fixture_module.RuntimeGeneration = RuntimeGeneration
+    monkeypatch.setitem(sys.modules, fixture_module.__name__, fixture_module)
+
     monkeypatch.setattr(
         manager,
         "preflight_project_modules",
-        lambda: ["orchestrator.her_v2.config"],
-    )
-    monkeypatch.setattr(
-        "orchestrator.reboot_manager.detect_loaded_class_interface_changes",
-        lambda _module_names: [
-            "orchestrator.her_v2.config.HERv2Config.profile_for_route (new method)"
-        ],
+        lambda: [fixture_module.__name__],
     )
     reload_calls = []
+    code_state = {"loaded": False}
+
+    def reload_modules(module_names):
+        reload_calls.append(tuple(module_names))
+        code_state["loaded"] = True
+
     monkeypatch.setattr(
         manager,
         "reload_project_modules",
-        lambda _names: reload_calls.append(True),
+        reload_modules,
     )
     monkeypatch.setattr(manager, "validate_agent_runtime_contract", lambda: None)
     monkeypatch.setattr(manager, "rebuild_hot_managers", lambda: None)
@@ -526,19 +598,57 @@ async def test_targeted_hot_restart_rejects_class_abi_change_without_widening_sc
 
     result = await manager.hot_restart(restart)
 
+    assert result is True
+    assert kernel.stop_calls == [
+        (expected_target, f"hot-restart:{restart['mode']}")
+    ]
+    assert kernel.start_calls == [expected_target]
+    assert reload_calls == [(fixture_module.__name__,)]
+    assert sorted(runtime.name for runtime in kernel.runtimes) == ["sunny", "zelda"]
+    assert untouched_runtime in kernel.runtimes
+    assert kernel.service_manager.refreshed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "restart",
+    [
+        {"mode": "min", "agent_name": None},
+        {"mode": "number", "agent_number": 99},
+        {"mode": "unexpected", "agent_name": "zelda"},
+    ],
+)
+async def test_invalid_hot_restart_scope_has_no_lifecycle_or_reload_side_effects(
+    monkeypatch,
+    restart,
+):
+    class Kernel:
+        def __init__(self):
+            self.runtimes = [
+                SimpleNamespace(name="zelda"),
+                SimpleNamespace(name="sunny"),
+            ]
+            self.stop_calls = []
+
+        def configured_agent_names(self):
+            return ["zelda", "sunny"]
+
+        async def stop_agent(self, name, reason):
+            self.stop_calls.append((name, reason))
+            return True, "stopped"
+
+    kernel = Kernel()
+    manager = RebootManager(kernel=kernel, console_handler=None)
+    monkeypatch.setattr(
+        manager,
+        "preflight_project_modules",
+        lambda: pytest.fail("invalid scope must be rejected before source preflight"),
+    )
+
+    result = await manager.hot_restart(restart)
+
     assert result is False
     assert kernel.stop_calls == []
-    assert kernel.start_calls == []
-    assert reload_calls == []
-    assert sorted(runtime.name for runtime in kernel.runtimes) == ["sunny", "zelda"]
-    assert kernel.service_manager.refreshed is False
-    assert len(kernel.notifications) == 1
-    assert kernel.notifications[0][0] == 42
-    assert "no agents were stopped" in kernel.notifications[0][1].casefold()
-    assert "/reboot max explicitly" in kernel.notifications[0][1].casefold()
-    output = capsys.readouterr().out.casefold()
-    assert "no agents were stopped" in output
-    assert "explicitly run /reboot max" in output
 
 
 @pytest.mark.asyncio

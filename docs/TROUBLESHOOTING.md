@@ -42,7 +42,10 @@
 - [ ] `/fresh` disables saved-memory auto-injection until `/memory saved on` or `/memory on`
 
 ### /reboot semantics
-- [ ] `/reboot min` restarts the requester and rebuilds hot managers
+- [ ] `/reboot min` reloads current code/config, restarts only the requester,
+  and rebuilds hot managers even when a valid public class interface changed
+- [ ] `/reboot min` and `/reboot N` are never widened to all Agents; malformed
+  target input is rejected without stopping anyone
 - [ ] `/reboot max` restarts all running agents and rebuilds hot managers
 - [ ] Workbench API stays healthy after reboot
 - [ ] Scheduler is recreated and started after reboot

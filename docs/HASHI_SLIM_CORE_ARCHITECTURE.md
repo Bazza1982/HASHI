@@ -98,24 +98,29 @@ The accepted flow is:
 The manager rebuild is transaction-style. If any replacement manager fails to initialize, the kernel keeps the old manager set alive and the failure is logged clearly.
 If source preflight fails, no agent is stopped. If a live reload fails after
 agents were stopped, HASHI restores those agents where possible, leaves warm
-services untouched, and reports the source/ABI mismatch. The operator repairs
-that mismatch and retries `/reboot`; cold process restart is not an adoption or
-recovery path for function changes.
+services untouched, and reports the reload or runtime-contract mismatch. The
+operator repairs that mismatch and retries `/reboot`; cold process restart is
+not an adoption or recovery path for function changes.
 
 ## Reboot Modes
 
-`/reboot min` normally restarts the requesting agent and reloads project code.
-Before stopping any agent, HASHI compares public class members and callable
-signatures declared by the source about to be loaded with the classes currently
-held in memory. If a loaded public class interface changed while another Agent
-would remain running, the targeted request is rejected before any Agent is
-stopped. HASHI never widens `/reboot min` or `/reboot N` into an implicit
-`/reboot max`; adopting an interface change process-wide requires an explicit
-`/reboot max`. Python module dictionaries are process-global, so leaving another
-Agent alive across that reload could combine a new consumer with an old class
-instance. Function-body-only changes and underscore-private implementation
-details keep the targeted behavior; Python data-model hooks such as `__init__`
-and `__call__` remain protected.
+`/reboot min` always restarts only the requesting Agent while reloading project
+code, configuration, managers, and warm services. `/reboot N` applies the same
+flow to exactly the numbered Agent. Public class additions, signature changes,
+and other valid Python edits are not grounds to widen or reject a targeted
+reboot. The rebuilt target receives fresh runtime objects; non-target Agents
+remain online and their active work is not interrupted.
+
+Target selection is locked before source preflight. Only an explicit
+`/reboot` (same) or `/reboot max` request may select multiple Agents. Missing,
+invalid, or unknown targeted input is rejected with no lifecycle or reload side
+effects; it never falls back to all Agents.
+
+Python module dictionaries and warm services are process-global, so the source
+reload itself is shared even when lifecycle interruption is local. This is not
+a reason to force all Agents through a restart. A function-layer change is
+complete only when it can be adopted through `/reboot min`; `/reboot max` is an
+operator-selected rollout action, not a compatibility prerequisite.
 
 `/reboot max` restarts all running agents and reloads project code.
 

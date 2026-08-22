@@ -2293,9 +2293,21 @@ class FlexibleAgentRuntime:
             elif value.isdigit():
                 all_names = orchestrator.configured_agent_names()
                 num = int(value)
-                mode, label = "number", f"Restarting agent #{num} (<b>{all_names[num - 1]}</b>)..."
-            else:
+                if num < 1 or num > len(all_names):
+                    await query.answer(
+                        "Invalid agent number.",
+                        show_alert=True,
+                    )
+                    return
+                mode, label = (
+                    "number",
+                    f"Restarting agent #{num} (<b>{all_names[num - 1]}</b>)...",
+                )
+            elif value == "same":
                 mode, label = "same", "Restarting all running agents..."
+            else:
+                await query.answer("Invalid reboot target.", show_alert=True)
+                return
             await query.edit_message_text(label, parse_mode="HTML")
             await query.answer()
             orchestrator.request_restart(mode=mode, agent_name=self.name,
@@ -2392,8 +2404,14 @@ class FlexibleAgentRuntime:
                 await self._reply_text(update, f"Invalid agent number. Use 1–{len(all_names)}. /reboot help to list.")
                 return
             mode, label = "number", f"Restarting agent #{num} (<b>{all_names[num - 1]}</b>)..."
-        else:
+        elif arg == "same":
             mode, label = "same", "Restarting all running agents..."
+        else:
+            await self._reply_text(
+                update,
+                "Invalid reboot target. Use /reboot help, min, max, same, or an agent number.",
+            )
+            return
         await self._reply_text(update, label, parse_mode="HTML")
         orchestrator.request_restart(mode=mode, agent_name=self.name, agent_number=int(arg) if arg.isdigit() else None)
 

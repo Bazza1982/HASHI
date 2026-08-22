@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Target-scoped hot reboot adoption** — removed the loaded-class interface
+  gate that promoted or rejected `/reboot min` and numbered reboots when valid
+  Python interfaces changed. Target scope is now resolved once before source
+  preflight, only explicit `same`/`max` modes may select multiple Agents, and
+  malformed command or callback targets fail closed without lifecycle or reload
+  side effects. Public API changes can be loaded while restarting only the
+  selected Agent, and the fix itself remains adoptable by legacy targeted
+  reboot code without presenting a new manager-class interface.
 - **HER Habit / TaskFrame authority pollution** — foreground Habit records now
   travel through a bounded request-scoped system advisory channel shared by the
   planner and primary executor, while the Bridge prompt and persisted user

@@ -163,9 +163,13 @@ Examples:
 Rules:
 
 - Feature work should land here by default.
-- Every function-layer change must be adopted by `/reboot min` or `/reboot max`.
-- A function change without a verified `/reboot` adoption path is incomplete
+- Every function-layer change must be adoptable through `/reboot min` for one
+  Agent. `/reboot max` may also adopt it, but must never be a prerequisite.
+- A function change without a verified targeted adoption path is incomplete
   and must not be promoted.
+- A targeted reboot must never be widened or rejected because class members,
+  signatures, fields, or other valid Python interfaces changed. Only an
+  explicit `same` or `max` request may select multiple Agents.
 - Managers may use kernel-owned handles but must not silently replace them.
 - New behavior should be modular and swappable rather than hard-coded into one
   large runtime object.
@@ -257,15 +261,17 @@ existence, is authoritative. This avoids the unlock/delete inode race.
 Tracked feature and adoption behavior should be usable after `/reboot` whenever
 the process bootstrap contract itself did not change:
 
-1. Compile all loaded project sources before stopping an agent.
-2. Reject the reboot without touching running agents if preflight fails.
-3. Reload dependencies before consumers and fail fast on the first reload
+1. Resolve the requested lifecycle scope once; targeted modes must contain
+   exactly one immutable target, and malformed input must not fall back to all.
+2. Compile all loaded project sources before stopping an agent.
+3. Reject the reboot without touching running agents if preflight fails.
+4. Reload dependencies before consumers and fail fast on the first reload
    error; never continue into a mixed manager rebuild silently.
-4. Build the complete manager bundle before installing any replacement.
-5. Restart selected agents.
-6. Recreate warm services—Workbench API, enabled API Gateway, scheduler,
+5. Build the complete manager bundle before installing any replacement.
+6. Restart only the previously selected agents.
+7. Recreate warm services—Workbench API, enabled API Gateway, scheduler,
    delivery watcher, and background jobs—only after a successful reload.
-7. Keep the process lock, kernel identity, and live WhatsApp transport outside
+8. Keep the process lock, kernel identity, and live WhatsApp transport outside
    the warm-service refresh.
 
 Cold process restart is not an allowed function-change adoption or recovery

@@ -77,9 +77,11 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/start`: start another stopped agent.
 - `/reboot`: hot restart agents with live Python code reload. Modes:
   - `/reboot` — restart all running agents (same selection), picks up code + config changes.
-  - `/reboot min` — restart only this bot.
+  - `/reboot min` — reload current code/config and restart only this bot; it is
+    never promoted to all bots or blocked merely because a class interface
+    changed.
   - `/reboot max` — restart all active agents.
-  - `/reboot [number]` — restart a specific agent by number.
+  - `/reboot [number]` — reload current code/config and restart exactly that agent.
   - `/reboot help` — list modes and show all agents with numbers.
 - `/rebuild`: one-version compatibility notice for the retired native HER build workflow. It performs no build, reload, restart, or status lookup. Use `/reboot` to adopt HASHI Python updates.
 - `/terminate`: shut down this agent.

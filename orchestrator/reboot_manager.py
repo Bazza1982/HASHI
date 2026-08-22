@@ -10,7 +10,6 @@ import sys
 from orchestrator.bootstrap_logging import AnimMute
 from orchestrator.hot_reload import (
     HotReloadError,
-    detect_loaded_class_interface_changes,
     discover_loaded_project_modules,
     preflight_module_sources,
 )
@@ -26,6 +25,8 @@ main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
 AGENT_STOP_TIMEOUT_SECONDS = 25.0
 AGENT_RESTORE_TIMEOUT_SECONDS = 60.0
+TARGETED_REBOOT_MODES = frozenset({"min", "number"})
+BROAD_REBOOT_MODES = frozenset({"same", "max"})
 
 
 def _consume_operation_task_result(task: asyncio.Future) -> None:
@@ -33,6 +34,45 @@ def _consume_operation_task_result(task: asyncio.Future) -> None:
         task.result()
     except (asyncio.CancelledError, Exception):
         pass
+
+
+def _resolve_restart_targets(kernel, restart: dict) -> tuple[str, ...]:
+    """Resolve lifecycle targets without ever widening an invalid request.
+
+    Only explicit broad modes may select more than one Agent. Targeted modes
+    resolve to exactly one immutable target before source preflight, so later
+    compatibility or reload work cannot promote or replace the requested
+    lifecycle scope. Keep this outside ``RebootManager``: the first targeted
+    reboot adopting this fix must not look like a class-interface change to a
+    previously loaded manager.
+    """
+
+    mode = restart.get("mode", "same")
+    requesting_agent = restart.get("agent_name")
+    agent_number = restart.get("agent_number")
+
+    if mode == "min":
+        if not isinstance(requesting_agent, str) or not requesting_agent.strip():
+            raise ValueError("min reboot requires a requesting agent")
+        targets = (requesting_agent,)
+    elif mode == "number":
+        if not isinstance(agent_number, int) or isinstance(agent_number, bool):
+            raise ValueError("number reboot requires an integer agent number")
+        all_names = kernel.configured_agent_names()
+        idx = agent_number - 1
+        if not 0 <= idx < len(all_names):
+            raise ValueError(
+                f"agent number {agent_number} is outside 1–{len(all_names)}"
+            )
+        targets = (all_names[idx],)
+    elif mode in BROAD_REBOOT_MODES:
+        targets = tuple(dict.fromkeys(runtime.name for runtime in kernel.runtimes))
+    else:
+        raise ValueError(f"unknown reboot mode: {mode!r}")
+
+    if mode in TARGETED_REBOOT_MODES and len(targets) != 1:
+        raise ValueError(f"targeted reboot resolved to {len(targets)} agents")
+    return targets
 
 
 class RebootManager:
@@ -100,50 +140,6 @@ class RebootManager:
                 names,
             )
             await asyncio.gather(*[_restore(name) for name in names])
-
-    async def _notify_targeted_reboot_rejection(
-        self,
-        requesting_agent: str | None,
-    ) -> None:
-        if not requesting_agent:
-            return
-        runtime = next(
-            (
-                candidate
-                for candidate in self.kernel.runtimes
-                if candidate.name == requesting_agent
-            ),
-            None,
-        )
-        sender = getattr(runtime, "_send_text", None)
-        primary_chat_id = getattr(runtime, "_primary_chat_id", None)
-        if not callable(sender) or not callable(primary_chat_id):
-            return
-        message = (
-            "⚠️ Targeted reboot not started.\n\n"
-            "The pending code changes include shared public interfaces, so "
-            "this targeted reboot cannot be applied safely while other agents remain "
-            "online. No agents were stopped. Run /reboot max explicitly to "
-            "adopt these changes across HASHI."
-        )
-        try:
-            await asyncio.wait_for(
-                sender(primary_chat_id(), message),
-                timeout=5.0,
-            )
-        except Exception as exc:  # noqa: BLE001 - notification must not bypass the safety gate
-            main_logger.warning(
-                "Hot restart: could not notify requester '%s' about targeted "
-                "reboot rejection: %s",
-                requesting_agent,
-                exc,
-            )
-            bridge_logger.warning(
-                "Hot restart: could not notify requester '%s' about targeted "
-                "reboot rejection: %s",
-                requesting_agent,
-                exc,
-            )
 
     def rebuild_hot_managers(self):
         """Transactionally rebuild hot-reloadable managers after module reload."""
@@ -280,29 +276,23 @@ class RebootManager:
         requesting_agent = restart.get("agent_name")
         agent_number = restart.get("agent_number")
 
-        if mode == "min" and requesting_agent:
-            targets = [requesting_agent]
-        elif mode == "number" and agent_number is not None:
-            all_names = self.kernel.configured_agent_names()
-            idx = agent_number - 1
-            if 0 <= idx < len(all_names):
-                targets = [all_names[idx]]
-            else:
-                main_logger.warning("Restart: invalid agent number %s, restarting all.", agent_number)
-                targets = [rt.name for rt in self.kernel.runtimes]
-        elif mode == "max":
-            targets = [rt.name for rt in self.kernel.runtimes]
-        else:
-            targets = [rt.name for rt in self.kernel.runtimes]
+        try:
+            selected_targets = _resolve_restart_targets(self.kernel, restart)
+        except ValueError as exc:
+            main_logger.error("Hot restart scope rejected: %s", exc)
+            bridge_logger.error("Hot restart scope rejected: %s", exc)
+            print(
+                "\033[38;5;203m  ✗ reboot rejected — invalid target scope; "
+                "no agents were stopped\033[0m\n",
+                flush=True,
+            )
+            return False
 
-        boot_state = {name: "pending" for name in targets}
+        boot_state = {name: "pending" for name in selected_targets}
         boot_reason = {}
 
         try:
             module_names = self.preflight_project_modules()
-            class_interface_changes = detect_loaded_class_interface_changes(
-                module_names
-            )
         except HotReloadError as exc:
             main_logger.error("%s", exc)
             bridge_logger.error("Hot restart preflight rejected: %s", exc)
@@ -313,54 +303,20 @@ class RebootManager:
             )
             return False
 
-        running_names = [runtime.name for runtime in self.kernel.runtimes]
-        targeted_mode = mode in {"min", "number"}
-        non_target_running_names = [
-            name for name in running_names if name not in targets
-        ]
-        if (
-            targeted_mode
-            and class_interface_changes
-            and non_target_running_names
-        ):
-            change_preview = ", ".join(class_interface_changes[:8])
-            if len(class_interface_changes) > 8:
-                change_preview += (
-                    f", +{len(class_interface_changes) - 8} more"
-                )
-            rejection_message = (
-                "Hot restart: rejected targeted %s reboot for %s before stopping "
-                "any agents because loaded class interfaces changed and %s "
-                "non-target agent(s) are running; explicitly request /reboot max "
-                "to adopt these changes process-wide: %s"
-            )
-            rejection_args = (
-                mode,
-                targets,
-                len(non_target_running_names),
-                change_preview,
-            )
-            main_logger.warning(rejection_message, *rejection_args)
-            bridge_logger.warning(rejection_message, *rejection_args)
-            await self._notify_targeted_reboot_rejection(requesting_agent)
-            print(
-                "\033[38;5;203m  ✗ targeted reboot rejected — loaded public "
-                "class interfaces changed; no agents were stopped. "
-                "Explicitly run /reboot max to adopt the changes.\033[0m\n",
-                flush=True,
-            )
-            return False
-
-        main_logger.info("Hot restart: stopping %s agent(s): %s", len(targets), targets)
+        main_logger.info(
+            "Hot restart: stopping %s agent(s): %s",
+            len(selected_targets),
+            selected_targets,
+        )
         bridge_logger.warning(
             "Hot restart begin (mode=%s, requester=%s, number=%s, targets=%s)",
             mode,
             requesting_agent or "-",
             agent_number if agent_number is not None else "-",
-            targets,
+            selected_targets,
         )
         stopped_targets = []
-        for name in targets:
+        for name in selected_targets:
             _completed, result, error = await self._bounded_operation(
                 self.kernel.stop_agent(name, reason=f"hot-restart:{mode}"),
                 timeout_s=AGENT_STOP_TIMEOUT_SECONDS,
@@ -398,17 +354,24 @@ class RebootManager:
             main_logger.critical("%s", reload_error)
             bridge_logger.critical("Hot manager rebuild failed: %s", reload_error)
 
-        main_logger.info("Hot restart: starting agents: %s", targets)
+        main_logger.info("Hot restart: starting agents: %s", selected_targets)
         try:
             _, agent_configs, _ = self.kernel._load_config_bundle()
             active_config_names = {cfg.name for cfg in agent_configs}
-            newly_inactive = [name for name in targets if name not in active_config_names]
-            targets = [name for name in targets if name in active_config_names]
+            newly_inactive = [
+                name for name in selected_targets if name not in active_config_names
+            ]
+            start_targets = [
+                name for name in selected_targets if name in active_config_names
+            ]
             for name in newly_inactive:
                 boot_state.pop(name, None)
-            inactive_agent_names = [cfg.name for cfg in agent_configs if cfg.name not in targets] + newly_inactive
+            inactive_agent_names = [
+                cfg.name for cfg in agent_configs if cfg.name not in start_targets
+            ] + newly_inactive
         except Exception as e:
             main_logger.error("Hot restart: config reload failed: %s", e)
+            start_targets = list(selected_targets)
             inactive_agent_names = []
 
         from orchestrator.banner import show_startup_banner
@@ -448,7 +411,7 @@ class RebootManager:
 
         def _run_banner():
             show_startup_banner(
-                agent_names=targets,
+                agent_names=start_targets,
                 boot_state=boot_state,
                 workbench_port=workbench_port,
                 wa_enabled=wa_enabled,
@@ -462,7 +425,7 @@ class RebootManager:
         try:
             await asyncio.gather(
                 loop.run_in_executor(None, _run_banner),
-                *[_start_agent_with_state(name) for name in targets],
+                *[_start_agent_with_state(name) for name in start_targets],
                 return_exceptions=True,
             )
         finally:
@@ -485,7 +448,7 @@ class RebootManager:
 
         failed_targets = [
             name
-            for name in targets
+            for name in start_targets
             if boot_state.get(name) not in {"online", "local"}
         ]
         if failed_targets:

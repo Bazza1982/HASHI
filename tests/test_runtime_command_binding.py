@@ -71,6 +71,79 @@ def test_command_binding_method_names_exist_on_flexible_runtime():
     assert missing == []
 
 
+@pytest.mark.asyncio
+async def test_reboot_command_rejects_unknown_target_without_requesting_restart():
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    replies = []
+    restart_requests = []
+
+    async def reply_text(_update, text, **_kwargs):
+        replies.append(text)
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        orchestrator=SimpleNamespace(
+            request_restart=lambda **kwargs: restart_requests.append(kwargs),
+        ),
+        _is_authorized_user=lambda _user_id: True,
+        _reply_text=reply_text,
+    )
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=42))
+
+    await FlexibleAgentRuntime.cmd_reboot(
+        runtime,
+        update,
+        SimpleNamespace(args=["unexpected"]),
+    )
+
+    assert restart_requests == []
+    assert replies == [
+        "Invalid reboot target. Use /reboot help, min, max, same, or an agent number."
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["0", "3", "unexpected"])
+async def test_reboot_callback_rejects_invalid_target_without_requesting_restart(
+    value,
+):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    answers = []
+    edits = []
+    restart_requests = []
+
+    class Query:
+        data = f"tgl:reboot:{value}"
+        from_user = SimpleNamespace(id=42)
+
+        async def answer(self, text=None, **kwargs):
+            answers.append((text, kwargs))
+
+        async def edit_message_text(self, text, **kwargs):
+            edits.append((text, kwargs))
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        orchestrator=SimpleNamespace(
+            configured_agent_names=lambda: ["zelda", "sunny"],
+            request_restart=lambda **kwargs: restart_requests.append(kwargs),
+        ),
+        _is_authorized_user=lambda _user_id: True,
+    )
+
+    await FlexibleAgentRuntime.callback_toggle(
+        runtime,
+        SimpleNamespace(callback_query=Query()),
+        SimpleNamespace(),
+    )
+
+    assert restart_requests == []
+    assert edits == []
+    assert answers[-1][1] == {"show_alert": True}
+
+
 def test_skill_callback_binding_includes_nudge_buttons():
     patterns = [
         binding.pattern

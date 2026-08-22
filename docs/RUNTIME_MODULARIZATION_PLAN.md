@@ -364,17 +364,17 @@ Actions:
    inline command registrations.
 4. Specify the reload contract for command modules:
    - static Telegram handler binding may remain startup-only;
-   - command metadata and implementation modules should be reloadable where
-     safe;
-   - if `/reboot min` is expected to pick up a command change,
-     `bind_runtime_commands()` or its replacement must run during the reboot
-     path, not only during cold initialization.
+   - command metadata and implementation modules must be reloadable through a
+     targeted restart;
+   - `bind_runtime_commands()` or its replacement must run during the
+     `/reboot min` path, not only during cold initialization.
 
 Exit criteria:
 
 - Adding a built-in command does not require editing the main runtime class.
 - Private and built-in command loading share compatible abstractions.
-- `/reboot min` can pick up command module changes where safe.
+- `/reboot min` picks up command module changes without restarting other
+  Agents.
 
 ## Phase 6: Slim the Turn Pipeline
 

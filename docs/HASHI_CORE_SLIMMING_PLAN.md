@@ -515,8 +515,10 @@ curl http://127.0.0.1:18801/health
 
 - `main.py` is slim enough to act as a stable process bootstrap/kernel wrapper. Original target was less than or equal to 200 lines; accepted `v3.2.0` outcome is 337 lines.
 - Full test suite passes.
-- `/reboot min` picks up agent lifecycle changes.
-- `/reboot max` picks up scheduler/runtime/backend changes.
+- `/reboot min` picks up agent lifecycle, scheduler, runtime, and backend
+  changes while interrupting only its target.
+- `/reboot max` picks up the same changes when the operator explicitly chooses
+  a whole-instance rollout.
 - Workbench API remains healthy after reboot.
 - API Gateway remains healthy after reboot when enabled.
 - HASHI can still cold-start normally.
