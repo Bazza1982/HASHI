@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import importlib
 import inspect
 import logging
@@ -476,31 +477,55 @@ def _handoff_reloaded_runtime_contract(
     previous_manager_class,
     *,
     current_manager_class=RebootManager,
-) -> bool:
+) -> int:
     """Move the post-reload validator onto an already-running manager class.
 
     The first reboot across a contract change is still executing
     ``hot_restart`` from the previous class generation.  Its subsequent
     ``self.validate_agent_runtime_contract()`` lookup must resolve to the
-    validator from the source that was just reloaded.  Patch only that seam;
-    backend aliases and ordinary runtime resolution remain unchanged.
+    validator from the source that was just reloaded.
+
+    A failed reload can leave the module bound to a newer class generation
+    while the kernel still owns an instance from an older generation.  In
+    that state, handing the validator only to the module's previous class is
+    insufficient.  Discover every live instance with the same class identity
+    and patch that narrow seam on each generation; backend aliases and
+    ordinary runtime resolution remain unchanged.
     """
 
-    if (
-        not inspect.isclass(previous_manager_class)
-        or previous_manager_class is current_manager_class
-    ):
-        return False
-    previous_manager_class.validate_agent_runtime_contract = (
-        current_manager_class.validate_agent_runtime_contract
-    )
-    return True
+    if not inspect.isclass(previous_manager_class):
+        return 0
+
+    expected_module = previous_manager_class.__module__
+    expected_name = previous_manager_class.__name__
+    manager_classes = {previous_manager_class}
+    for candidate in gc.get_objects():
+        candidate_class = type(candidate)
+        if (
+            candidate_class.__module__ == expected_module
+            and candidate_class.__name__ == expected_name
+        ):
+            manager_classes.add(candidate_class)
+
+    patched = 0
+    for manager_class in manager_classes:
+        if manager_class is current_manager_class:
+            continue
+        manager_class.validate_agent_runtime_contract = (
+            current_manager_class.validate_agent_runtime_contract
+        )
+        patched += 1
+    return patched
 
 
-if _handoff_reloaded_runtime_contract(_PRE_RELOAD_REBOOT_MANAGER_CLASS):
+_HANDED_OFF_REBOOT_MANAGER_GENERATIONS = _handoff_reloaded_runtime_contract(
+    _PRE_RELOAD_REBOOT_MANAGER_CLASS
+)
+if _HANDED_OFF_REBOOT_MANAGER_GENERATIONS:
     handoff_message = (
-        "Hot reload: handed the current runtime contract validator to the "
-        "live RebootManager generation."
+        "Hot reload: handed the current runtime contract validator to "
+        f"{_HANDED_OFF_REBOOT_MANAGER_GENERATIONS} live RebootManager "
+        "generation(s)."
     )
     main_logger.info(handoff_message)
     bridge_logger.info(handoff_message)

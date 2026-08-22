@@ -250,6 +250,41 @@ def test_reload_hands_current_contract_to_live_legacy_manager():
         backend_registry.get_backend_class("claw-cli")
 
 
+def test_handoff_repairs_kernel_manager_stranded_before_module_generation():
+    class OldestRebootManager:
+        def validate_agent_runtime_contract(self):
+            backend_registry.get_backend_class("claw-cli")
+
+    class IntermediateRebootManager(OldestRebootManager):
+        pass
+
+    for manager_class in (OldestRebootManager, IntermediateRebootManager):
+        manager_class.__name__ = "RebootManager"
+        manager_class.__module__ = "orchestrator.reboot_manager_stranded_test"
+
+    oldest_manager = OldestRebootManager()
+    intermediate_manager = IntermediateRebootManager()
+    reloaded_namespace = runpy.run_path(
+        reboot_manager_module.__file__,
+        init_globals={"RebootManager": IntermediateRebootManager},
+    )
+    reloaded_manager_class = reloaded_namespace["RebootManager"]
+
+    assert reloaded_namespace["_HANDED_OFF_REBOOT_MANAGER_GENERATIONS"] == 2
+    oldest_manager.validate_agent_runtime_contract()
+    intermediate_manager.validate_agent_runtime_contract()
+    assert (
+        OldestRebootManager.validate_agent_runtime_contract
+        is reloaded_manager_class.validate_agent_runtime_contract
+    )
+    assert (
+        IntermediateRebootManager.validate_agent_runtime_contract
+        is reloaded_manager_class.validate_agent_runtime_contract
+    )
+    with pytest.raises(ValueError, match="Unknown engine: claw-cli"):
+        backend_registry.get_backend_class("claw-cli")
+
+
 def test_validate_agent_runtime_contract_rejects_stale_tool_registry(monkeypatch):
     manager = RebootManager(kernel=object(), console_handler=None)
 
