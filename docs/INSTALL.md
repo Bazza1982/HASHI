@@ -141,6 +141,12 @@ bin/hashi-remote-ctl.sh start
 bin/hashi-remote-ctl.sh status
 ```
 
+The helper derives a distinct unit name from each checkout's configured
+`global.instance_id` (for example, `hashi-remote-hashi1.service`). This lets
+multiple HASHI instances on the same Linux/WSL user session keep independent
+Remote supervisors. Use `bin/hashi-remote-ctl.sh service-name` to print the
+resolved unit name.
+
 For manual development fallback:
 
 ```bash
@@ -155,6 +161,10 @@ python -m remote --hashi-root "$(pwd)" --no-tls --discovery lan
 .\bin\hashi_remote_ctl.ps1 status
 .\bin\hashi_remote_ctl.ps1 doctor
 ```
+
+The default scheduled-task name is also per instance (for example,
+`HashiRemote-hashi1`). Pass `-TaskName` only when an explicit override is
+required.
 
 Keep the default `security.max_terminal_level: "L2_WRITE"` unless you
 intentionally want remote HASHI rescue start. To enable rescue start before a

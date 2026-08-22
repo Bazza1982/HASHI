@@ -97,6 +97,64 @@ def test_load_settings_prefers_instance_registry_port(tmp_path):
     assert settings.port == 8766
 
 
+def test_remote_supervisor_info_is_per_instance_and_root_bound(tmp_path, monkeypatch):
+    root = tmp_path / "hashi one"
+    root.mkdir()
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "HASHI1"}}),
+        encoding="utf-8",
+    )
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    unit = config_home / "systemd" / "user" / "hashi-remote-hashi1.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text(
+        "\n".join(
+            [
+                "[Service]",
+                f'WorkingDirectory="{root}"',
+                'ExecStart="python3" -m remote',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    info = remote_lifecycle.remote_supervisor_info(root)
+
+    assert info.instance_id == "HASHI1"
+    assert info.service_name == "hashi-remote-hashi1.service"
+    assert info.service_path == unit
+    assert info.installed is True
+    assert info.declared_root == root.resolve()
+    assert info.owns_root is True
+
+
+@pytest.mark.asyncio
+async def test_control_remote_supervisor_refuses_unit_owned_by_other_root(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "hashi1"
+    other = tmp_path / "hashi2"
+    root.mkdir()
+    other.mkdir()
+    (root / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "HASHI1"}}),
+        encoding="utf-8",
+    )
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    unit = config_home / "systemd" / "user" / "hashi-remote-hashi1.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text(f"[Service]\nWorkingDirectory={other}\n", encoding="utf-8")
+
+    result = await remote_lifecycle.control_remote_supervisor(root, action="start")
+
+    assert result["ok"] is False
+    assert result["action"] == "supervisor_root_mismatch"
+    assert str(other) in result["reason"]
+
+
 def test_validate_launch_context_refuses_different_working_hashi_root(tmp_path, monkeypatch):
     code_root = tmp_path / "hashi"
     working_root = tmp_path / "hashi2"
@@ -277,6 +335,60 @@ async def test_ensure_remote_started_skips_when_explicitly_disabled(tmp_path):
     assert result["ok"] is False
     assert result["action"] == "skipped"
     assert result["reason"] == "remote explicitly disabled"
+
+
+@pytest.mark.asyncio
+async def test_ensure_remote_started_uses_per_instance_supervisor(monkeypatch, tmp_path):
+    (tmp_path / "remote").mkdir()
+    (tmp_path / "remote" / "config.yaml").write_text(
+        "\n".join(
+            [
+                "server:",
+                "  port: 8766",
+                "  use_tls: false",
+                "lifecycle:",
+                "  remote_enabled: true",
+                "  remote_supervised: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    async def fake_control(root, *, action):
+        calls.append((root, action))
+        return {
+            "ok": True,
+            "action": "supervisor_started",
+            "service_name": "hashi-remote-hashi1.service",
+        }
+
+    health_results = iter(
+        [
+            None,
+            None,
+            {
+                "port": 8766,
+                "health": {"ok": True},
+                "health_host": "127.0.0.1",
+            },
+        ]
+    )
+
+    async def fake_owned(_settings):
+        return next(health_results)
+
+    monkeypatch.setattr(remote_lifecycle, "control_remote_supervisor", fake_control)
+    monkeypatch.setattr(remote_lifecycle, "_find_owned_remote", fake_owned)
+    monkeypatch.setattr(remote_lifecycle, "_SUPERVISOR_HEALTH_INTERVAL_SECONDS", 0)
+
+    result = await remote_lifecycle.ensure_remote_started(tmp_path)
+
+    assert calls == [(tmp_path, "start")]
+    assert result["ok"] is True
+    assert result["action"] == "started_supervisor"
+    assert result["service_name"] == "hashi-remote-hashi1.service"
+    assert result["port"] == 8766
 
 
 @pytest.mark.asyncio

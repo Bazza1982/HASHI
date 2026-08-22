@@ -104,6 +104,12 @@ bin/hashi-remote-ctl.sh start
 bin/hashi-remote-ctl.sh status
 ```
 
+The Linux/WSL helper installs one unit per configured instance, such as
+`hashi-remote-hashi1.service` and `hashi-remote-hashi2.service`. It does not
+replace another instance's legacy `hashi-remote.service`. Confirm the resolved
+name with `bin/hashi-remote-ctl.sh service-name`, then retire a legacy unit only
+after proving which checkout it owns.
+
 Windows:
 
 ```powershell
@@ -112,6 +118,9 @@ Windows:
 .\bin\hashi_remote_ctl.ps1 status
 .\bin\hashi_remote_ctl.ps1 doctor
 ```
+
+Windows uses the same isolation rule with scheduled-task names such as
+`HashiRemote-hashi1`. An explicit `-TaskName` still overrides the derived name.
 
 Keep `security.max_terminal_level: "L2_WRITE"` unless you intentionally want
 remote HASHI start. To enable rescue start:

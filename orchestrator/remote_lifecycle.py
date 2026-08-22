@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import shlex
 import sys
 import urllib.request
 from dataclasses import dataclass
@@ -23,6 +25,12 @@ from remote.runtime_identity import (
     read_runtime_claim,
     remove_runtime_claim,
 )
+from remote.supervisor_identity import resolve_supervisor_identity
+
+
+_SYSTEMD_SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
+_SUPERVISOR_HEALTH_ATTEMPTS = 12
+_SUPERVISOR_HEALTH_INTERVAL_SECONDS = 0.25
 
 
 @dataclass(frozen=True)
@@ -36,6 +44,17 @@ class RemoteLifecycleSettings:
     backend: str
 
 
+@dataclass(frozen=True)
+class RemoteSupervisorInfo:
+    instance_id: str
+    service_name: str
+    service_path: Path
+    installed: bool
+    declared_root: Path | None
+    owns_root: bool
+    valid_name: bool
+
+
 def resolve_hashi_root(root: Path | str | None = None) -> Path:
     if root is not None:
         return Path(root).expanduser().resolve()
@@ -47,6 +66,131 @@ def resolve_hashi_root(root: Path | str | None = None) -> Path:
 
 def disabled_state_path(root: Path | str | None = None) -> Path:
     return resolve_hashi_root(root) / "state" / "remote_disabled.json"
+
+
+def _systemd_user_dir() -> Path:
+    config_home = os.getenv("XDG_CONFIG_HOME")
+    if config_home:
+        return Path(config_home).expanduser() / "systemd" / "user"
+    return Path.home() / ".config" / "systemd" / "user"
+
+
+def _read_unit_working_directory(path: Path) -> Path | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line.startswith("WorkingDirectory="):
+            continue
+        value = line.split("=", 1)[1].strip()
+        try:
+            parts = shlex.split(value)
+        except ValueError:
+            return None
+        if len(parts) != 1:
+            return None
+        # systemd escapes a literal percent as %% in unit directives.
+        return Path(parts[0].replace("%%", "%")).expanduser().resolve()
+    return None
+
+
+def remote_supervisor_info(root: Path | str | None = None) -> RemoteSupervisorInfo:
+    resolved_root = resolve_hashi_root(root)
+    identity = resolve_supervisor_identity(
+        resolved_root,
+        instance_id=os.getenv("HASHI_INSTANCE_ID"),
+    )
+    service_name = str(
+        os.getenv("HASHI_REMOTE_SERVICE_NAME") or identity.systemd_service_name
+    ).strip()
+    valid_name = bool(_SYSTEMD_SERVICE_NAME_RE.fullmatch(service_name))
+    service_path = _systemd_user_dir() / service_name if valid_name else _systemd_user_dir()
+    installed = valid_name and service_path.is_file()
+    declared_root = _read_unit_working_directory(service_path) if installed else None
+    return RemoteSupervisorInfo(
+        instance_id=identity.instance_id,
+        service_name=service_name,
+        service_path=service_path,
+        installed=installed,
+        declared_root=declared_root,
+        owns_root=bool(installed and declared_root == resolved_root),
+        valid_name=valid_name,
+    )
+
+
+async def control_remote_supervisor(
+    root: Path | str | None,
+    *,
+    action: str,
+) -> dict[str, Any]:
+    if action not in {"start", "stop", "restart"}:
+        raise ValueError(f"unsupported Remote supervisor action: {action}")
+    info = remote_supervisor_info(root)
+    common = {"supervisor": info, "service_name": info.service_name}
+    if not info.valid_name:
+        return {
+            "ok": False,
+            "action": "invalid_supervisor_name",
+            "reason": f"invalid systemd service name: {info.service_name}",
+            **common,
+        }
+    if not info.installed:
+        return {
+            "ok": False,
+            "action": "supervisor_unavailable",
+            "reason": f"per-instance supervisor is not installed at {info.service_path}",
+            **common,
+        }
+    if not info.owns_root:
+        declared = str(info.declared_root) if info.declared_root else "unknown"
+        return {
+            "ok": False,
+            "action": "supervisor_root_mismatch",
+            "reason": (
+                f"refusing to control {info.service_name}: unit root {declared} "
+                f"does not match {resolve_hashi_root(root)}"
+            ),
+            **common,
+        }
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "systemctl",
+            "--user",
+            action,
+            info.service_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+    except (FileNotFoundError, OSError) as exc:
+        return {
+            "ok": False,
+            "action": "supervisor_control_unavailable",
+            "reason": f"systemctl --user is unavailable: {type(exc).__name__}: {exc}",
+            **common,
+        }
+    output = stdout.decode("utf-8", errors="replace").strip()
+    error = stderr.decode("utf-8", errors="replace").strip()
+    if process.returncode != 0:
+        return {
+            "ok": False,
+            "action": f"supervisor_{action}_failed",
+            "reason": error or output or f"systemctl exited {process.returncode}",
+            "exit_code": process.returncode,
+            "stdout": output,
+            "stderr": error,
+            **common,
+        }
+    return {
+        "ok": True,
+        "action": f"supervisor_{action}ed" if action != "stop" else "supervisor_stopped",
+        "exit_code": process.returncode,
+        "stdout": output,
+        "stderr": error,
+        **common,
+    }
 
 
 def _load_remote_config(root: Path) -> dict[str, Any]:
@@ -213,10 +357,28 @@ async def ensure_remote_started(root: Path | str | None = None) -> dict[str, Any
     if owned:
         return {"ok": True, "action": "already_running", "settings": settings, **owned}
     if settings.supervised:
+        control = await control_remote_supervisor(settings.root, action="start")
+        if not control.get("ok"):
+            return {**control, "settings": settings}
+        for _attempt in range(_SUPERVISOR_HEALTH_ATTEMPTS):
+            owned = await _find_owned_remote(settings)
+            if owned:
+                return {
+                    **control,
+                    "ok": True,
+                    "action": "started_supervisor",
+                    "settings": settings,
+                    **owned,
+                }
+            await asyncio.sleep(_SUPERVISOR_HEALTH_INTERVAL_SECONDS)
         return {
+            **control,
             "ok": False,
-            "action": "supervisor_unavailable",
-            "reason": "OS supervisor integration is not installed in this build",
+            "action": "supervisor_started_unhealthy",
+            "reason": (
+                f"{control.get('service_name')} started but Remote did not become "
+                f"healthy on configured port {settings.port}"
+            ),
             "settings": settings,
         }
     cmd = build_child_command(settings)

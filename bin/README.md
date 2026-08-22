@@ -90,7 +90,12 @@ bin\restart_bridge_u_f.bat           # Windows
 ```
 
 These helpers start Remote with `--supervised` so it can outlive the HASHI core
-process and support remote rescue workflows.
+process and support remote rescue workflows. The default supervisor identity is
+derived from `global.instance_id`: for example, HASHI1 and HASHI2 use
+`hashi-remote-hashi1.service` and `hashi-remote-hashi2.service` on Linux/WSL,
+or `HashiRemote-hashi1` and `HashiRemote-hashi2` in Windows Task Scheduler.
+`HASHI_REMOTE_SERVICE_NAME` (Linux/WSL) and `-TaskName` (Windows) remain explicit
+operator overrides.
 
 ### Kill All Sessions
 ```bash

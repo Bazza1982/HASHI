@@ -5,7 +5,8 @@ param(
 
     [string]$HashiRoot,
     [string]$Python,
-    [string]$TaskName = "HashiRemote",
+    [string]$TaskName,
+    [string]$InstanceId = $env:HASHI_INSTANCE_ID,
     [string]$MaxTerminalLevel = $env:HASHI_REMOTE_MAX_TERMINAL_LEVEL,
     [string]$Discovery = $env:HASHI_REMOTE_DISCOVERY,
     [string]$Port = $env:HASHI_REMOTE_PORT,
@@ -25,6 +26,26 @@ if (-not $Python) {
     } else {
         $Python = "python"
     }
+}
+
+$IdentityScript = Join-Path $HashiRoot "remote\supervisor_identity.py"
+if (-not (Test-Path $IdentityScript)) {
+    throw "Missing supervisor identity helper: $IdentityScript"
+}
+$IdentityArgs = @($IdentityScript, "--hashi-root", $HashiRoot, "--format", "json")
+if ($InstanceId) {
+    $IdentityArgs += @("--instance-id", $InstanceId)
+}
+$IdentityJson = & $Python @IdentityArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not resolve the Hashi Remote supervisor identity."
+}
+$SupervisorIdentity = $IdentityJson | ConvertFrom-Json
+if (-not $TaskName) {
+    $TaskName = $SupervisorIdentity.windows_task_name
+}
+if ($TaskName -match '[\\/]') {
+    throw "Invalid scheduled task name: $TaskName"
 }
 
 $LogDir = Join-Path $HashiRoot "logs"
@@ -137,6 +158,7 @@ switch ($Action) {
         }
         $Info = Get-ScheduledTaskInfo -TaskName $TaskName
         [PSCustomObject]@{
+            InstanceId = $SupervisorIdentity.instance_id
             TaskName = $Task.TaskName
             State = $Task.State
             LastRunTime = $Info.LastRunTime
@@ -153,7 +175,11 @@ switch ($Action) {
         }
     }
     "command" {
-        Write-Host $CommandPreview
+        [PSCustomObject]@{
+            InstanceId = $SupervisorIdentity.instance_id
+            TaskName = $TaskName
+            Command = $CommandPreview
+        } | Format-List
     }
     "doctor" {
         Show-RemoteDoctor

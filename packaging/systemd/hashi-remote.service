@@ -1,11 +1,12 @@
 [Unit]
-Description=Hashi Remote side program
+Description=Hashi Remote side program (%HASHI_INSTANCE_SLUG%)
 After=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=%HASHI_ROOT%
 Environment=HASHI_REMOTE_SUPERVISED=1
+Environment=HASHI_INSTANCE_ID=%HASHI_INSTANCE_ID%
 Environment=PYTHONUTF8=1
 Environment=PYTHONIOENCODING=utf-8
 ExecStart=%PYTHON% -m remote --hashi-root %HASHI_ROOT% --supervised

@@ -11,9 +11,12 @@ set -euo pipefail
 ACTION="${1:-status}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HASHI_ROOT="${HASHI_ROOT:-$SCRIPT_DIR}"
-SERVICE_NAME="${HASHI_REMOTE_SERVICE_NAME:-hashi-remote.service}"
+if [[ ! -d "$HASHI_ROOT" ]]; then
+    echo "HASHI root does not exist: $HASHI_ROOT" >&2
+    exit 66
+fi
+HASHI_ROOT="$(cd "$HASHI_ROOT" && pwd -P)"
 SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-SERVICE_PATH="$SYSTEMD_USER_DIR/$SERVICE_NAME"
 LOG_DIR="$HASHI_ROOT/logs"
 LOG_PATH="$LOG_DIR/hashi-remote-supervisor.log"
 
@@ -22,6 +25,31 @@ if [[ -x "$HASHI_ROOT/.venv/bin/python3" ]]; then
 else
     PYTHON_BIN="${HASHI_REMOTE_PYTHON:-python3}"
 fi
+
+IDENTITY_SCRIPT="$HASHI_ROOT/remote/supervisor_identity.py"
+if [[ ! -f "$IDENTITY_SCRIPT" ]]; then
+    echo "Missing supervisor identity helper: $IDENTITY_SCRIPT" >&2
+    exit 66
+fi
+IDENTITY_ARGS=(--hashi-root "$HASHI_ROOT" --format lines)
+if [[ -n "${HASHI_INSTANCE_ID:-}" ]]; then
+    IDENTITY_ARGS+=(--instance-id "$HASHI_INSTANCE_ID")
+fi
+mapfile -t SUPERVISOR_IDENTITY < <("$PYTHON_BIN" "$IDENTITY_SCRIPT" "${IDENTITY_ARGS[@]}")
+if [[ "${#SUPERVISOR_IDENTITY[@]}" -lt 5 ]]; then
+    echo "Could not resolve the Hashi Remote supervisor identity." >&2
+    exit 70
+fi
+INSTANCE_ID="${SUPERVISOR_IDENTITY[0]}"
+INSTANCE_SLUG="${SUPERVISOR_IDENTITY[1]}"
+DEFAULT_SERVICE_NAME="${SUPERVISOR_IDENTITY[2]}"
+IDENTITY_SOURCE="${SUPERVISOR_IDENTITY[4]}"
+SERVICE_NAME="${HASHI_REMOTE_SERVICE_NAME:-$DEFAULT_SERVICE_NAME}"
+if [[ ! "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@:-]+\.service$ ]]; then
+    echo "Invalid systemd service name: $SERVICE_NAME" >&2
+    exit 64
+fi
+SERVICE_PATH="$SYSTEMD_USER_DIR/$SERVICE_NAME"
 
 REMOTE_ARGS=(--hashi-root "$HASHI_ROOT" --supervised)
 
@@ -45,28 +73,49 @@ have_systemd_user() {
     command -v systemctl >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1
 }
 
+unit_quote() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//%/%%}"
+    printf '"%s"' "$value"
+}
+
 write_service() {
     mkdir -p "$SYSTEMD_USER_DIR" "$LOG_DIR"
-    cat > "$SERVICE_PATH" <<EOF
+    local temp_path working_directory instance_environment exec_start log_target arg
+    temp_path="$(mktemp "$SYSTEMD_USER_DIR/.${SERVICE_NAME}.XXXXXX")"
+    working_directory="$(unit_quote "$HASHI_ROOT")"
+    instance_environment="$(unit_quote "HASHI_INSTANCE_ID=$INSTANCE_ID")"
+    exec_start=""
+    for arg in "$PYTHON_BIN" -m remote "${REMOTE_ARGS[@]}"; do
+        [[ -z "$exec_start" ]] || exec_start+=" "
+        exec_start+="$(unit_quote "$arg")"
+    done
+    log_target="$(unit_quote "append:$LOG_PATH")"
+    cat > "$temp_path" <<EOF
 [Unit]
-Description=Hashi Remote side program
+Description=Hashi Remote side program ($INSTANCE_SLUG)
 After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=$HASHI_ROOT
+WorkingDirectory=$working_directory
 Environment=HASHI_REMOTE_SUPERVISED=1
+Environment=$instance_environment
 Environment=PYTHONUTF8=1
 Environment=PYTHONIOENCODING=utf-8
-ExecStart=$PYTHON_BIN -m remote ${REMOTE_ARGS[*]}
+ExecStart=$exec_start
 Restart=always
 RestartSec=5
-StandardOutput=append:$LOG_PATH
-StandardError=append:$LOG_PATH
+StandardOutput=$log_target
+StandardError=$log_target
 
 [Install]
 WantedBy=default.target
 EOF
+    chmod 0644 "$temp_path"
+    mv "$temp_path" "$SERVICE_PATH"
 }
 
 require_systemd_user() {
@@ -84,6 +133,7 @@ case "$ACTION" in
         systemctl --user daemon-reload
         systemctl --user enable "$SERVICE_NAME"
         echo "Installed $SERVICE_PATH"
+        echo "Instance $INSTANCE_ID ($IDENTITY_SOURCE)"
         ;;
     uninstall)
         require_systemd_user
@@ -109,6 +159,9 @@ case "$ACTION" in
         systemctl --user restart "$SERVICE_NAME"
         ;;
     status)
+        echo "Instance: $INSTANCE_ID ($IDENTITY_SOURCE)"
+        echo "Service: $SERVICE_NAME"
+        echo "Root: $HASHI_ROOT"
         if have_systemd_user; then
             systemctl --user status "$SERVICE_NAME" --no-pager || true
         else
@@ -126,8 +179,11 @@ case "$ACTION" in
     command)
         echo "$PYTHON_BIN -m remote ${REMOTE_ARGS[*]}"
         ;;
+    service-name)
+        echo "$SERVICE_NAME"
+        ;;
     *)
-        echo "Usage: $0 {install|uninstall|start|stop|restart|status|logs|command}"
+        echo "Usage: $0 {install|uninstall|start|stop|restart|status|logs|command|service-name}"
         exit 64
         ;;
 esac
