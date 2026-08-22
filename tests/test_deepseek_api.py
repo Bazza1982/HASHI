@@ -7,6 +7,7 @@ import pytest
 from adapters import deepseek_api
 from adapters.deepseek_api import DeepSeekAdapter
 from adapters.openrouter_api import _APIResult, _backend_failure_response
+from adapters.stream_events import KIND_TOOL_END
 from orchestrator.enterprise import IdentityService, PolicyEvaluator
 from tools.registry import ToolResult
 
@@ -149,6 +150,97 @@ def test_openai_compatible_connection_and_stream_failures_are_typed():
     assert invalid_url.error_retryable is False
     assert tls.error_code == "PROVIDER_TLS_ERROR"
     assert tls.error_retryable is False
+
+
+@pytest.mark.asyncio
+async def test_tool_cleanup_details_are_forwarded_in_the_tool_end_event(tmp_path):
+    adapter = _adapter(tmp_path)
+
+    async def execute_with_cleanup(tool_name, arguments, tool_call_id=""):
+        del tool_name, arguments
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output="tool output",
+            details={
+                "foreground_cleanup": {
+                    "status": "normal_completion",
+                    "process_reaped": True,
+                }
+            },
+        )
+
+    adapter.tool_registry.execute = execute_with_cleanup
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    await adapter._run_tool_calls(
+        [
+            {
+                "id": "call_cleanup",
+                "type": "function",
+                "function": {
+                    "name": "file_list",
+                    "arguments": '{"path":"/tmp"}',
+                },
+            }
+        ],
+        [],
+        capture,
+    )
+
+    completed = next(event for event in events if event.kind == KIND_TOOL_END)
+    assert completed.metadata["tool_result_details"]["foreground_cleanup"] == {
+        "status": "normal_completion",
+        "process_reaped": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tool_forwards_cleanup_before_propagating_cancellation(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+
+    async def cancel_after_cleanup(tool_name, arguments, tool_call_id=""):
+        del tool_name, arguments, tool_call_id
+        cancellation = asyncio.CancelledError()
+        cancellation.hashi_tool_details = {
+            "foreground_cleanup": {
+                "status": "terminated",
+                "process_reaped": True,
+            }
+        }
+        raise cancellation
+
+    adapter.tool_registry.execute = cancel_after_cleanup
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter._run_tool_calls(
+            [
+                {
+                    "id": "call_cancelled_cleanup",
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": '{"command":"sleep 30"}',
+                    },
+                }
+            ],
+            [],
+            capture,
+        )
+
+    completed = next(event for event in events if event.kind == KIND_TOOL_END)
+    assert completed.metadata["tool_result_details"]["foreground_cleanup"] == {
+        "status": "terminated",
+        "process_reaped": True,
+    }
 
 
 @pytest.mark.asyncio

@@ -109,6 +109,8 @@ class _TurnState:
     last_execution_structure_valid: bool = False
     last_execution_error: str = ""
     last_execution_failure: StageInvocationError | None = None
+    terminal_failure: StageInvocationError | None = None
+    last_foreground_cleanup: Mapping[str, Any] = field(default_factory=dict)
     last_execution_invocation_id: str = ""
     late_immediate_source_task: asyncio.Task | None = None
     late_immediate_delivery_task: asyncio.Task | None = None
@@ -216,11 +218,14 @@ class HERv2Runtime:
                 error=str(exc),
             )
         except StageInvocationError as exc:
+            state.terminal_failure = exc
             return await self._error_result(
                 state,
                 f"[{exc.error_code}] {exc.human_description}",
                 text=_technical_error_message_from_failure(
-                    state.ledger.turn_id, exc
+                    state.ledger.turn_id,
+                    exc,
+                    foreground_cleanup=state.last_foreground_cleanup,
                 ),
             )
         finally:
@@ -843,11 +848,13 @@ class HERv2Runtime:
 
         terminal_failure = state.last_execution_failure or finalisation_failure
         if desired_terminal is TerminalState.ERROR and terminal_failure is not None:
+            state.terminal_failure = terminal_failure
             diagnostic = _technical_error_message_from_failure(
                 state.ledger.turn_id,
                 terminal_failure,
+                foreground_cleanup=state.last_foreground_cleanup,
             )
-            if terminal_failure.error_code not in report:
+            if diagnostic not in report:
                 report = f"{report.rstrip()}\n\n{diagnostic}"
 
         await self._settle_late_immediate(
@@ -935,6 +942,7 @@ class HERv2Runtime:
             raise
         except StageInvocationError as exc:
             state.last_execution_failure = exc
+            state.terminal_failure = exc
             state.last_execution_error = (
                 f"[{exc.error_code}] {exc.human_description}"
             )
@@ -1352,7 +1360,9 @@ class HERv2Runtime:
                 invocation_id=invocation_id,
                 retry_invariant_hash=retry_invariant_hash,
                 progress_callback=self._progress_callback(state),
-                provider_activity_callback=provider_activity.record,
+                provider_activity_callback=self._provider_activity_callback(
+                    state, provider_activity
+                ),
             )
             attempt_prefix = (
                 f"{state.ledger.turn_id}:{stage.value}:invocation:"
@@ -1577,6 +1587,30 @@ class HERv2Runtime:
             ):
                 retry_reason = "provider_recovery_already_used"
             will_retry = retry_reason == "eligible"
+            possible_side_effects = bool(
+                provider_activity.side_effects_possible
+                or unobserved_side_effects
+            )
+            recovery_decision: dict[str, Any] | None = None
+            if not will_retry and not replay_safe and last_error.retryable:
+                blocked_code = (
+                    ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED
+                    if possible_side_effects
+                    else ProviderFailureCode.REPLAY_SAFETY_UNPROVEN
+                )
+                blocked_description = (
+                    "The provider failed after a tool with possible side effects "
+                    "started, so HASHI did not replay the execution."
+                    if possible_side_effects
+                    else "The provider failed while a proven read-only tool call "
+                    "remained incomplete, so HASHI could not prove replay safety."
+                )
+                recovery_decision = {
+                    "code": blocked_code.value,
+                    "description": blocked_description,
+                    "reason": retry_reason,
+                    "automatic_replay_attempted": False,
+                }
             retry_delay = 0.0
             if will_retry:
                 retry_delay = (
@@ -1608,43 +1642,26 @@ class HERv2Runtime:
                         "provider_response_received": response is not None,
                         "provider_activity": provider_activity.snapshot(),
                         "replay_safe": replay_safe,
-                        "side_effects_possible": bool(
-                            provider_activity.side_effects_possible
-                            or unobserved_side_effects
-                        ),
+                        "side_effects_possible": possible_side_effects,
+                        "recovery_decision": recovery_decision,
                     },
                 )
             except AuditPersistenceError:
                 raise
             if not will_retry:
-                if not replay_safe and last_error.retryable:
-                    possible_side_effects = bool(
-                        provider_activity.side_effects_possible
-                        or unobserved_side_effects
-                    )
-                    blocked_code = (
-                        ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED
-                        if possible_side_effects
-                        else ProviderFailureCode.REPLAY_SAFETY_UNPROVEN
-                    )
-                    blocked_description = (
-                        "The provider failed after a tool with possible side effects "
-                        "started, so HASHI did not replay the execution."
-                        if possible_side_effects
-                        else "The provider failed while a proven read-only tool call "
-                        "remained incomplete, so HASHI could not prove replay safety."
-                    )
+                if recovery_decision is not None:
+                    cleanup = provider_activity.snapshot().get(
+                        "foreground_cleanup"
+                    ) or dict(state.last_foreground_cleanup)
                     raise last_error.terminal_copy(
                         f"{stage.value} failed after tool activity; automatic replay "
-                        "was blocked: "
-                        f"{last_error}",
+                        f"was blocked by {recovery_decision['code']}: {last_error}",
                         attempts=attempt,
-                        code=blocked_code,
-                        human_description=blocked_description,
                         side_effects_possible=possible_side_effects,
                         details={
-                            "original_error_code": last_error.error_code,
                             "retry_reason": retry_reason,
+                            "recovery_decision": recovery_decision,
+                            "foreground_cleanup": cleanup or None,
                         },
                     ) from last_error
                 raise last_error.terminal_copy(
@@ -1768,6 +1785,24 @@ class HERv2Runtime:
     def _progress_callback(self, state: _TurnState):
         def _record(kind: str, content: str, meaningful: bool = True) -> None:
             state.progress.record(kind, content, meaningful=meaningful)
+
+        return _record
+
+    def _provider_activity_callback(
+        self,
+        state: _TurnState,
+        tracker: ProviderActivityTracker,
+    ):
+        def _record(event: Mapping[str, Any]) -> None:
+            tracker.record(event)
+            tool_details = event.get("tool_details")
+            cleanup = (
+                tool_details.get("foreground_cleanup")
+                if isinstance(tool_details, Mapping)
+                else None
+            )
+            if isinstance(cleanup, Mapping):
+                state.last_foreground_cleanup = dict(cleanup)
 
         return _record
 
@@ -2343,6 +2378,38 @@ class HERv2Runtime:
         final_was_immediate: bool = False,
         final_already_delivered: bool = False,
     ) -> TurnResult:
+        failure = state.terminal_failure or state.last_execution_failure
+        primary_failure = (
+            {
+                "code": failure.error_code,
+                "description": failure.human_description,
+                "attempts": failure.attempts,
+                "side_effects_possible": failure.side_effects_possible,
+            }
+            if failure is not None
+            else {}
+        )
+        recovery_value = (
+            failure.details.get("recovery_decision")
+            if failure is not None
+            else None
+        )
+        recovery_decision = (
+            dict(recovery_value)
+            if isinstance(recovery_value, Mapping)
+            else {}
+        )
+        failure_cleanup = (
+            failure.details.get("foreground_cleanup")
+            if failure is not None
+            else None
+        )
+        cleanup_value = failure_cleanup or state.last_foreground_cleanup
+        foreground_cleanup = (
+            dict(cleanup_value)
+            if isinstance(cleanup_value, Mapping)
+            else {}
+        )
         return TurnResult(
             turn_id=state.ledger.turn_id,
             terminal_state=terminal,
@@ -2353,6 +2420,9 @@ class HERv2Runtime:
             evidence_refs=tuple(state.evidence_refs),
             limitations=tuple(state.limitations),
             error=error,
+            primary_failure=primary_failure,
+            recovery_decision=recovery_decision,
+            foreground_cleanup=foreground_cleanup,
             final_was_immediate=final_was_immediate,
             final_already_delivered=final_already_delivered,
             delivery_id=state.delivery_id,
@@ -2394,32 +2464,87 @@ def _technical_error_message(
     description: str,
     attempts: int,
     side_effects_possible: bool,
+    recovery_decision: Mapping[str, Any] | None = None,
+    foreground_cleanup: Mapping[str, Any] | None = None,
 ) -> str:
     side_effect_text = (
         "possible; automatic replay was blocked"
         if side_effects_possible
         else "none observed"
     )
-    return (
-        "⚠️ A technical provider failure prevented completion.\n\n"
-        f"Error code: `{code}`\n"
-        f"Description: {description}\n"
-        f"Provider attempts: {max(1, int(attempts))}\n"
-        f"Possible side effects: {side_effect_text}\n"
-        f"Reference: `{turn_id}`"
+    lines = [
+        "⚠️ A technical provider failure prevented completion.",
+        "",
+        "Primary failure:",
+        f"Error code: `{code}`",
+        f"Description: {description}",
+        f"Provider attempts: {max(1, int(attempts))}",
+        f"Possible side effects: {side_effect_text}",
+    ]
+    recovery = (
+        dict(recovery_decision)
+        if isinstance(recovery_decision, Mapping)
+        else {}
     )
+    if recovery:
+        lines.extend(
+            [
+                "",
+                "Recovery decision:",
+                f"Code: `{recovery.get('code') or 'UNKNOWN'}`",
+                f"Description: {recovery.get('description') or 'No description recorded.'}",
+                "Automatic replay attempted: "
+                + (
+                    "yes"
+                    if recovery.get("automatic_replay_attempted") is True
+                    else "no"
+                ),
+            ]
+        )
+    cleanup = (
+        dict(foreground_cleanup)
+        if isinstance(foreground_cleanup, Mapping)
+        else {}
+    )
+    if cleanup:
+        lines.extend(
+            [
+                "",
+                "Foreground cleanup:",
+                f"Status: `{cleanup.get('status') or 'unknown'}`",
+                "Process reaped: "
+                + ("yes" if cleanup.get("process_reaped") is True else "no"),
+            ]
+        )
+        if cleanup.get("errors"):
+            lines.append("Cleanup errors: " + "; ".join(map(str, cleanup["errors"])))
+    lines.extend(["", f"Reference: `{turn_id}`"])
+    return "\n".join(lines)
 
 
 def _technical_error_message_from_failure(
     turn_id: str,
     failure: StageInvocationError,
+    *,
+    foreground_cleanup: Mapping[str, Any] | None = None,
 ) -> str:
+    failure_cleanup = failure.details.get("foreground_cleanup")
     return _technical_error_message(
         turn_id,
         code=failure.error_code,
         description=failure.human_description,
         attempts=failure.attempts,
         side_effects_possible=failure.side_effects_possible,
+        recovery_decision=(
+            failure.details.get("recovery_decision")
+            if isinstance(failure.details.get("recovery_decision"), Mapping)
+            else None
+        ),
+        foreground_cleanup=(
+            failure_cleanup
+            if isinstance(failure_cleanup, Mapping)
+            else foreground_cleanup
+        ),
     )
 
 

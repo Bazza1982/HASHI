@@ -263,6 +263,9 @@ class TurnResult:
     evidence_refs: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     error: str = ""
+    primary_failure: Mapping[str, Any] = field(default_factory=dict)
+    recovery_decision: Mapping[str, Any] = field(default_factory=dict)
+    foreground_cleanup: Mapping[str, Any] = field(default_factory=dict)
     final_was_immediate: bool = False
     final_already_delivered: bool = False
     delivery_id: str = ""

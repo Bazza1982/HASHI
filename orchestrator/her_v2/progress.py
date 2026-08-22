@@ -54,6 +54,7 @@ class ProviderActivityTracker:
     tool_completion_counts: dict[str, int] = field(default_factory=dict, init=False)
     non_read_only_tools: set[str] = field(default_factory=set, init=False)
     unknown_tools: set[str] = field(default_factory=set, init=False)
+    foreground_cleanup: dict[str, Any] = field(default_factory=dict, init=False)
     last_event_kind: str = field(default="", init=False)
 
     def __post_init__(self) -> None:
@@ -113,6 +114,14 @@ class ProviderActivityTracker:
             self.tool_completion_counts[tool_name] = (
                 self.tool_completion_counts.get(tool_name, 0) + 1
             )
+        tool_details = event.get("tool_details")
+        cleanup = (
+            tool_details.get("foreground_cleanup")
+            if isinstance(tool_details, Mapping)
+            else None
+        )
+        if isinstance(cleanup, Mapping):
+            self.foreground_cleanup = dict(cleanup)
         return True
 
     @property
@@ -164,5 +173,6 @@ class ProviderActivityTracker:
             "non_read_only_tools": sorted(self.non_read_only_tools),
             "unknown_tools": sorted(self.unknown_tools),
             "side_effects_possible": self.side_effects_possible,
+            "foreground_cleanup": dict(self.foreground_cleanup) or None,
             "last_event_kind": self.last_event_kind or None,
         }

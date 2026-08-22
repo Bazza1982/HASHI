@@ -320,12 +320,19 @@ class OpenRouterAdapter(BaseBackend):
     # ------------------------------------------------------------------
 
     async def _emit(self, on_stream_event: StreamCallback, kind: str, summary: str,
-                    tool_name: str = "", file_path: str = "") -> None:
+                    tool_name: str = "", file_path: str = "",
+                    metadata: Mapping[str, Any] | None = None) -> None:
         if on_stream_event is None:
             return
         try:
             await on_stream_event(
-                StreamEvent(kind=kind, summary=summary, tool_name=tool_name, file_path=file_path)
+                StreamEvent(
+                    kind=kind,
+                    summary=summary,
+                    tool_name=tool_name,
+                    file_path=file_path,
+                    metadata=dict(metadata or {}),
+                )
             )
         except Exception:
             pass
@@ -389,11 +396,27 @@ class OpenRouterAdapter(BaseBackend):
                 continue
 
             # Execute
-            result = await self.tool_registry.execute(tool_name, arguments, tool_call_id=tc_id)
+            try:
+                result = await self.tool_registry.execute(
+                    tool_name, arguments, tool_call_id=tc_id
+                )
+            except asyncio.CancelledError as exc:
+                details = dict(getattr(exc, "hashi_tool_details", {}) or {})
+                await self._emit(
+                    on_stream_event,
+                    KIND_TOOL_END,
+                    f"{tool_name}: cancelled after cleanup",
+                    tool_name=tool_name,
+                    metadata={"tool_result_details": details},
+                )
+                raise
 
             output_preview = result.output[:100].replace("\n", " ")
             await self._emit(on_stream_event, KIND_TOOL_END,
-                             f"{tool_name}: {output_preview}", tool_name=tool_name)
+                             f"{tool_name}: {output_preview}", tool_name=tool_name,
+                             metadata={
+                                 "tool_result_details": dict(result.details or {})
+                             })
 
             messages.append({
                 "role": "tool",

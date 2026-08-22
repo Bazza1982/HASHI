@@ -1015,11 +1015,18 @@ class HashiStageProvider(StageProvider):
             owner = str(event.delivery_class or "") or legacy_delivery_class(event.kind)
             if request.provider_activity_callback is not None:
                 content = str(event.raw_delta or event.summary or "")
+                event_metadata = (
+                    event.metadata if isinstance(event.metadata, Mapping) else {}
+                )
+                tool_details = event_metadata.get("tool_result_details")
                 request.provider_activity_callback(
                     {
                         "kind": event.kind,
                         "content": content,
                         "tool_name": event.tool_name,
+                        "tool_details": dict(
+                            tool_details if isinstance(tool_details, Mapping) else {}
+                        ),
                         "tool_read_only": (
                             _registry_is_read_only(selected_registry, event.tool_name)
                             if event.tool_name and selected_registry is not None
@@ -2365,6 +2372,25 @@ class HERv2Adapter(BaseBackend):
                 "effort": effort_resolution.metadata(),
             }
         }
+        if result.foreground_cleanup:
+            metadata["her_v2"]["foreground_cleanup"] = dict(
+                result.foreground_cleanup
+            )
+        if result.primary_failure:
+            metadata["her_v2"]["failure_chain"] = {
+                "primary_failure": dict(result.primary_failure),
+                "recovery_decision": (
+                    dict(result.recovery_decision)
+                    if result.recovery_decision
+                    else None
+                ),
+                "foreground_cleanup": (
+                    dict(result.foreground_cleanup)
+                    if result.foreground_cleanup
+                    else None
+                ),
+                "turn_id": result.turn_id,
+            }
         if result.delivery_id:
             self._pending_delivery_receipts[result.delivery_id] = {
                 "request_id": str(request_id),
@@ -2381,13 +2407,23 @@ class HERv2Adapter(BaseBackend):
         technical_error = result.terminal_state is TerminalState.ERROR
         stopped = result.terminal_state is TerminalState.STOPPED
         error = result.error
-        terminal_error_code = ""
+        terminal_error_code = str(result.primary_failure.get("code") or "")
         if error.startswith("[") and "]" in error:
-            terminal_error_code = error[1 : error.index("]")].strip()
+            terminal_error_code = (
+                terminal_error_code
+                or error[1 : error.index("]")].strip()
+            )
         if terminal_error_code:
             metadata["her_v2"]["error"] = {
                 "code": terminal_error_code,
-                "description": error[error.index("]") + 1 :].strip(),
+                "description": str(
+                    result.primary_failure.get("description")
+                    or (
+                        error[error.index("]") + 1 :].strip()
+                        if "]" in error
+                        else error
+                    )
+                ),
             }
         if stopped and not error:
             error = "HER v2 turn was stopped by an authorised control path."

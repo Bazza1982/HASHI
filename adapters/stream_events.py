@@ -12,7 +12,7 @@ reconstruct provider reasoning that was not returned for display.
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Awaitable, Optional
+from typing import Any, Callable, Awaitable, Mapping, Optional
 
 # Canonical event kinds.  Backends should use these constants.
 KIND_THINKING = "thinking"
@@ -88,6 +88,7 @@ class StreamEvent:
     resolution: str = ""  # final, commentary, clarification, or discard
     target_event_id: str = ""  # provisional event changed by a control event
     delivery_id: str = ""  # stable transport correlation for final-boundary receipts
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 # Callback signature accepted by generate_response().

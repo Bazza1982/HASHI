@@ -257,6 +257,61 @@ class _WorkAndMeditationProvider(_DirectProvider):
         )
 
 
+class _SideEffectFailureProvider(_DirectProvider):
+    async def invoke(self, profile, request):
+        self.requests.append((profile, request))
+        if request.stage is Stage.IMMEDIATE_RESPONSE:
+            payload = {"message": "I have it."}
+        elif request.stage is Stage.TRIAGE:
+            payload = {"classification": "SIMPLE_TASK", "goal": request.goal}
+        elif request.stage is Stage.EXECUTION:
+            request.provider_activity_callback(
+                {
+                    "kind": "shell_exec",
+                    "content": "bash started",
+                    "tool_name": "bash",
+                    "tool_read_only": False,
+                }
+            )
+            request.provider_activity_callback(
+                {
+                    "kind": "tool_end",
+                    "content": "bash cleanup completed",
+                    "tool_name": "bash",
+                    "tool_read_only": False,
+                    "tool_details": {
+                        "foreground_cleanup": {
+                            "status": "terminated",
+                            "scope": "process_group",
+                            "process_reaped": True,
+                            "group_alive": False,
+                            "errors": [],
+                        }
+                    },
+                }
+            )
+            raise StageInvocationError(
+                "provider stream ended before completion",
+                code=ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT,
+                human_description=(
+                    "The provider response began but did not complete."
+                ),
+            )
+        elif request.stage is Stage.FINALISATION:
+            payload = {
+                "execution_result": None,
+                "final_message": "The execution could not be completed safely.",
+            }
+        else:
+            raise AssertionError(f"unexpected stage: {request.stage}")
+        return StageResponse(
+            text="",
+            data=payload,
+            provider=profile.engine,
+            model=profile.model,
+        )
+
+
 class _PlannedWorkAndMeditationProvider(_WorkAndMeditationProvider):
     async def invoke(self, profile, request):
         if request.stage is Stage.PLANNING:
@@ -655,6 +710,51 @@ async def test_adapter_finalises_unusable_execution_as_runtime_error(tmp_path):
         request.stage is Stage.FINALISATION
         for _profile, request in provider.requests
     ) == 1
+
+
+@pytest.mark.asyncio
+async def test_adapter_exposes_primary_failure_recovery_decision_and_cleanup(tmp_path):
+    provider = _SideEffectFailureProvider()
+    config = _agent_config(tmp_path)
+    setattr(config, "_her_v2_stage_provider", provider)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response(
+        "Run the shell operation once",
+        "request-complete-failure-chain",
+    )
+
+    primary_code = ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT.value
+    recovery_code = ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value
+    assert response.is_success is False
+    assert response.error_code == primary_code
+    assert primary_code in response.error
+    assert primary_code in response.text
+    assert recovery_code in response.text
+    assert "Foreground cleanup:" in response.text
+    chain = response.stream_metadata["her_v2"]["failure_chain"]
+    assert chain["primary_failure"]["code"] == primary_code
+    assert chain["recovery_decision"]["code"] == recovery_code
+    assert chain["recovery_decision"]["automatic_replay_attempted"] is False
+    assert chain["foreground_cleanup"]["status"] == "terminated"
+    assert chain["foreground_cleanup"]["process_reaped"] is True
+    assert response.stream_metadata["her_v2"]["error"]["code"] == primary_code
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "agent" / "her_v2_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    failed = next(
+        row
+        for row in rows
+        if row["event"] == "stage_attempt_failed"
+        and row["stage"] == Stage.EXECUTION.value
+    )
+    assert failed["payload"]["error_code"] == primary_code
+    assert failed["payload"]["recovery_decision"]["code"] == recovery_code
 
 
 @pytest.mark.asyncio

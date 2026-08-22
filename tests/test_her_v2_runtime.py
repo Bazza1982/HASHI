@@ -1952,6 +1952,22 @@ async def test_execution_never_replays_after_side_effect_tool_starts(tmp_path):
                 "tool_read_only": False,
             }
         )
+        request.provider_activity_callback(
+            {
+                "kind": "tool_end",
+                "content": "write completed",
+                "tool_name": "file_write",
+                "tool_read_only": False,
+                "tool_details": {
+                    "foreground_cleanup": {
+                        "status": "normal_completion",
+                        "process_reaped": True,
+                        "group_alive": False,
+                        "errors": [],
+                    }
+                },
+            }
+        )
         raise StageInvocationError(
             "connection reset after write began",
             code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
@@ -1974,12 +1990,97 @@ async def test_execution_never_replays_after_side_effect_tool_starts(tmp_path):
     )
 
     assert result.terminal_state is TerminalState.ERROR
-    assert ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value in result.error
+    assert ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value in result.error
+    assert ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value in result.text
     assert ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value in result.text
+    assert result.primary_failure["code"] == (
+        ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value
+    )
+    assert result.recovery_decision["code"] == (
+        ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value
+    )
+    assert result.recovery_decision["automatic_replay_attempted"] is False
+    assert result.foreground_cleanup["status"] == "normal_completion"
+    assert "Foreground cleanup:" in result.text
+    assert "Process reaped: yes" in result.text
     assert sum(
         request.stage is Stage.EXECUTION
         for _profile, request in provider.requests
     ) == 1
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    failure = next(
+        row
+        for row in rows
+        if row["event"] == "stage_attempt_failed"
+        and row["stage"] == Stage.EXECUTION.value
+    )
+    assert failure["payload"]["error_code"] == (
+        ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value
+    )
+    assert failure["payload"]["recovery_decision"]["code"] == (
+        ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value
+    )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_is_disclosed_without_hiding_primary_failure(tmp_path):
+    async def shell_cleanup_failed_then_disconnect(request):
+        request.provider_activity_callback(
+            {
+                "kind": "shell_exec",
+                "content": "bash started",
+                "tool_name": "bash",
+                "tool_read_only": False,
+            }
+        )
+        request.provider_activity_callback(
+            {
+                "kind": "tool_end",
+                "content": "bash cleanup failed",
+                "tool_name": "bash",
+                "tool_read_only": False,
+                "tool_details": {
+                    "foreground_cleanup": {
+                        "status": "cleanup_failed",
+                        "process_reaped": False,
+                        "group_alive": True,
+                        "errors": ["injected cleanup failure"],
+                    }
+                },
+            }
+        )
+        raise StageInvocationError(
+            "provider connection reset",
+            code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+            human_description="The provider connection was interrupted.",
+        )
+
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [shell_cleanup_failed_then_disconnect],
+            Stage.FINALISATION: [{"report": "Execution failed."}],
+        }
+    )
+
+    result = await _runtime(tmp_path, ScriptedProvider(scripts)).run_turn(
+        "Run once", "request-cleanup-failure-truth", effort="low"
+    )
+
+    assert result.terminal_state is TerminalState.ERROR
+    assert result.primary_failure["code"] == (
+        ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value
+    )
+    assert result.recovery_decision["code"] == (
+        ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value
+    )
+    assert result.foreground_cleanup["status"] == "cleanup_failed"
+    assert "Status: `cleanup_failed`" in result.text
+    assert "Process reaped: no" in result.text
+    assert "injected cleanup failure" in result.text
 
 
 @pytest.mark.asyncio
@@ -2016,8 +2117,15 @@ async def test_execution_does_not_retry_with_incomplete_read_only_tool(tmp_path)
     )
 
     assert result.terminal_state is TerminalState.ERROR
-    assert ProviderFailureCode.REPLAY_SAFETY_UNPROVEN.value in result.error
+    assert ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value in result.error
+    assert ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value in result.text
     assert ProviderFailureCode.REPLAY_SAFETY_UNPROVEN.value in result.text
+    assert result.primary_failure["code"] == (
+        ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value
+    )
+    assert result.recovery_decision["code"] == (
+        ProviderFailureCode.REPLAY_SAFETY_UNPROVEN.value
+    )
     assert "Possible side effects: none observed" in result.text
     assert sum(
         request.stage is Stage.EXECUTION
@@ -2498,9 +2606,29 @@ async def test_structured_output_repair_has_no_attempt_cap_and_preserves_classif
 async def test_stop_cancels_active_execution_and_records_stopped(tmp_path):
     execution_started = asyncio.Event()
 
-    async def blocking_execution(_request):
+    async def blocking_execution(request):
         execution_started.set()
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            request.provider_activity_callback(
+                {
+                    "kind": "tool_end",
+                    "content": "bash cancelled after cleanup",
+                    "tool_name": "bash",
+                    "tool_read_only": False,
+                    "tool_details": {
+                        "foreground_cleanup": {
+                            "status": "terminated",
+                            "scope": "process_group",
+                            "process_reaped": True,
+                            "group_alive": False,
+                            "errors": [],
+                        }
+                    },
+                }
+            )
+            raise
 
     scripts = _initial("COMPLEX_TASK")
     scripts[Stage.EXECUTION] = [blocking_execution]
@@ -2519,6 +2647,8 @@ async def test_stop_cancels_active_execution_and_records_stopped(tmp_path):
     assert result.terminal_state is TerminalState.STOPPED
     assert result.ledger["terminal_reason"] == "USER_STOP"
     assert provider.cancelled[Stage.EXECUTION] == 1
+    assert result.foreground_cleanup["status"] == "terminated"
+    assert result.foreground_cleanup["process_reaped"] is True
 
 
 @pytest.mark.asyncio
