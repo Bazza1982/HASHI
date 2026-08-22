@@ -4,7 +4,6 @@
 
 HASHI already has mature agent movement primitives:
 
-- `scripts/import_openclaw.py` imports OpenClaw agents into HASHI.
 - `scripts/move_agent.py` moves or packages HASHI agents between HASHI
   instances.
 - HASHI Remote and HChat provide authenticated cross-instance communication.
@@ -29,10 +28,6 @@ agent state during transfer.
 
 Relevant files:
 
-- `scripts/import_openclaw.py`
-  - One-way OpenClaw to HASHI importer.
-  - Imports identity, memory files, Telegram tokens, cron jobs, API credentials,
-    scripts, and skills.
 - `scripts/move_agent.py`
   - HASHI to HASHI migration tool.
   - Supports direct instance moves, USB/package export, encrypted secrets, and

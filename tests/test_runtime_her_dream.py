@@ -21,7 +21,7 @@ from orchestrator.skill_manager import SkillManager
 
 class FakeDreamAdapter:
     def __init__(self, workspace: Path):
-        self.config = SimpleNamespace(engine="her", workspace_dir=workspace)
+        self.config = SimpleNamespace(engine="her-v2", workspace_dir=workspace)
         self._store = HERHabitStore(workspace)
         self._journal = HERDreamJournal(workspace)
         self._habit_execution_lock = asyncio.Lock()

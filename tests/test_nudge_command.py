@@ -122,7 +122,7 @@ class FakeRuntime:
         self.listeners = {}
         self.is_generating = False
         self.queue = SimpleNamespace(empty=lambda: not self.busy)
-        self.config = SimpleNamespace(active_backend="her", access_scope="drive")
+        self.config = SimpleNamespace(active_backend="her-v2", access_scope="drive")
 
     def _backend_busy(self) -> bool:
         return self.busy
@@ -313,7 +313,7 @@ async def test_scheduler_cron_uses_owning_runtime_current_backend_and_access(tmp
 
     await _run_one_scheduler_pass(scheduler)
 
-    assert runtime.config.active_backend == "her"
+    assert runtime.config.active_backend == "her-v2"
     assert runtime.config.access_scope == "drive"
     assert len(runtime.enqueued) == 1
     _request_id, payload = runtime.enqueued[0]

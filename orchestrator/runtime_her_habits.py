@@ -95,7 +95,6 @@ def _control_status(runtime: Any, adapter: Any) -> HabitControlStatus:
     override = override_getter() if callable(override_getter) else None
     global_her = (
         getattr(runtime.global_config, "her_providers", None)
-        or getattr(runtime.global_config, "claw_providers", None)
         or {}
     )
     global_raw = (

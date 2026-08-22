@@ -85,7 +85,7 @@ def plan_hermes_import(
         warnings.append("package does not contain schedules/tasks.json")
     contains_skill_archive = any(name.startswith("skills/") for name in package.names)
     if contains_skill_archive:
-        warnings.append("package Skill files remain inert; native HER/Claw Skill loading is disabled")
+        warnings.append("package Skill files remain inert; transfer does not activate them")
 
     planned = [
         PlannedWrite(path=str(profile / "AGENT.md"), action="write", description="write imported Hermes instructions"),

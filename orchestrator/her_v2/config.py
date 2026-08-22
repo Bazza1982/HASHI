@@ -113,7 +113,7 @@ class ProviderProfile:
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise HERv2ConfigurationError("provider profile name is required")
-        if not self.engine.strip() or self.engine in {"her", "claw-cli", "her-v2"}:
+        if not self.engine.strip() or self.engine in {"her", "her-v2"}:
             raise HERv2ConfigurationError(
                 f"profile {self.name!r} must select a non-HER provider engine"
             )

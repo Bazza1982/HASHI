@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from orchestrator import runtime_turn_context
 from orchestrator.flexible_backend_registry import is_cli_backend
 from orchestrator.memory_plus_mode import is_memory_plus_enabled
 
@@ -42,8 +41,6 @@ def _prepare_clean_context(
         memory_store = getattr(runtime, "memory_store", None)
     if memory_store is not None and hasattr(memory_store, "clear_turns"):
         memory_store.clear_turns()
-    runtime_turn_context.clear_delivered_turn_context(runtime)
-
     if assembler is not None and disable_saved_memory:
         assembler.turns_injection_enabled = True
         assembler.saved_memory_injection_enabled = False

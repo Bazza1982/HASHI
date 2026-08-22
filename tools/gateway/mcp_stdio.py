@@ -161,8 +161,7 @@ class ToolGateway:
             description = function.get("description", "")
             if internal_name in _GATEWAY_EXPOSED_TOOL_NAMES:
                 description = (
-                    f"HASHI filesystem authority (access_root scoped; distinct from Claw-local "
-                    f"workspace tools). {description}"
+                    f"HASHI filesystem authority (access_root scoped). {description}"
                 )
             definitions.append(
                 {

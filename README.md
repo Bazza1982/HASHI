@@ -122,11 +122,11 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
    can wake the responsible agent after completion to report or decide the next
    step
 19. **Vibe-Coded** — Every line written by AI, reviewed by AI, directed by human vision
-20. **HASHI Engine Runtime (HER)** — certified cross-platform runtime packages, seven effort levels from direct execution through coordinated multi-agent work, persistent conversation continuity, governed tools/media, and safe source-integrated Rust rebuilding
+20. **HASHI Engine Runtime (HER v2)** — provider-neutral orchestration with explicit lifecycle stages, unbounded tool execution, governed tools/media, persistent conversation continuity, and agent-local Habit/Meditation learning
 21. **Superloop Operational Foundation** — Long-running controller loops use explicit taskboards, waits, issue registers, HChat reply classification, and inbox-drain closeout barriers
 
-HASHI Engine Runtime (HER) is derived from the MIT-licensed Claw runtime. HASHI
-retains and distributes the original Claw copyright and MIT license notice.
+HER v2 is a HASHI-native Python runtime. The retired Claw-derived HER v1 source
+and binary packages are no longer part of the active program.
 
 ---
 
@@ -137,11 +137,10 @@ retains and distributes the original Claw copyright and MIT license notice.
   connector MVPs, Workbench enterprise surfaces, and deployment artifacts for
   alpha operator review. Production enterprise-server validation remains
   pending.
-- **v4.0.0-alpha.2** *(current v4 release candidate)* — certified HER `.22`
-  packages, seven task-matched effort levels (`low` through `ultra`), stronger
-  session and delivery continuity, Habit/Media/Tool Gateway integration, and
-  transactional `/rebuild` development adoption. This is the broader platform
-  line, not the enterprise package version line.
+- **v4.0.0-alpha.2** *(current v4 release candidate)* — HER v2 orchestration,
+  stronger session and delivery continuity, Habit/Media/Tool Gateway
+  integration, and a Flex-only runtime architecture. This is the broader
+  platform line, not the enterprise package version line.
 - **v3.2.1** — Workbench API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
 - **v3.2.0** — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
@@ -168,45 +167,26 @@ Both lines share one repository and one codebase. Personal/local mode remains
 the default smooth path; enterprise features are activated through explicit
 profiles and bootstrap state.
 
-### HER Runtime Upgrade in v4.0.0-alpha.2
+### HER v2 Runtime in v4.0.0-alpha.2
 
-HER began as HASHI's integration of the MIT-licensed Claw runtime. It is now a
-substantially extended HASHI backend with a reviewed Rust source component and
-HASHI-owned Python orchestration around it:
+HER v2 is the sole supported HER execution backend:
 
-- **Seven effort levels** — `low`, `medium`, `high`, `xhigh`, `max`, and
-  `max+` progressively expand one Agent's execution, planning, testing, and
-  review ceiling; `ultra` adds bounded HER-private primary/worker coordination.
-  Effort is a capability ceiling, not a requirement to consume the full budget.
-- **Certified `.22` runtime** — Linux and Windows x86-64 packages are pinned to
-  the same reviewed source identity, checksum metadata, and retained upstream
-  MIT license.
-- **Conversation and delivery correctness** — persistent direct turns,
-  isolated scheduler execution, stable event IDs, explicit commentary
-  ownership, and request-scoped idempotency prevent stale or repeated internal
-  events from becoming duplicate user messages.
-- **Canonical TaskFrame context (next development candidate)** — HASHI freezes
-  the immediate delivered dialogue and model/effort transition at enqueue time;
-  TaskFrame planning and primary execution consume the same bounded referent,
-  so `A`, `continue`, and similar replies cannot split into two internal goals.
-  This post-`.22` source hardening requires `/rebuild` or the next certified
-  package before a running Agent can use it.
-- **Integrated operating capabilities** — Tool Gateway/MCP, secure multimedia,
-  provider/model routing, persistent sessions, and optional agent-local
-  Habit/Meditation learning are part of one HER contract.
-- **Fast Rust development adoption** — `/rebuild` fingerprints integrated HER
-  source, runs an incremental Cargo build and offline verification, stores an
-  immutable development candidate, selects it atomically, and reboots only the
-  affected idle HER Agent. Process-lifetime manager ownership prevents a second
-  coordinator from corrupting an active job, and every status path is
-  side-effect-free. `/reboot` upgrades this stable coordinator in place without
-  losing active jobs or tasks. It never overwrites or re-labels a certified
-  package.
+- **Provider-neutral orchestration** — Triage, Planning, Execution, Review, and
+  Finalisation are explicit, independently testable stages.
+- **Execution effort** — effort controls orchestration depth without changing
+  provider reasoning settings or limiting tool-call count. Scheduled cron and
+  heartbeat work defaults to low execution effort unless the job overrides it.
+- **Conversation and delivery correctness** — stable event and delivery IDs,
+  isolated scheduled turns, audited terminal states, and final safety checks
+  prevent internal control payloads from becoming user-visible completion.
+- **Integrated capabilities** — HASHI-owned tools, permissions, secure media,
+  provider/model routing, optional Habit/Meditation learning, and scheduler
+  receipts remain available without a native Claw runtime.
+- **Migration compatibility** — public engine ID `her` resolves forward to
+  `her-v2`. The unrelated historical ID `claw-cli` is rejected.
 
-See [the v4.0.0-alpha.2 release notes](docs/RELEASE_NOTES_v4.0.0-alpha.2.md),
-[the HER backend contract](docs/HER_BACKEND_CONTRACT.md), and
-[the `/rebuild` contract](docs/HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md), and
-[the TaskFrame canonical-context contract](docs/HER_TASKFRAME_CANONICAL_TURN_CONTEXT.md).
+See [the HER v2 design](docs/HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md)
+and [HER v2 testing plan](docs/HER_V2_TESTING_PLAN.md).
 
 HASHI 2.x proved that local agents could execute tools, browse, switch backends, run from a TUI, and orchestrate Nagare workflows. HASHI 3.2 turns that foundation into a much broader local agent platform:
 
@@ -863,7 +843,7 @@ HASHI's **adapter system** provides a unified interface to multiple AI backends:
 | Codex CLI | `codex-cli` | `codex` CLI installed | Local auth |
 | Grok CLI | `grok-cli` | `grok` CLI installed and logged in | Local auth, streaming JSON |
 | xAI API | `xai-api` | Hermes xAI OAuth profile or `xai_api_key` | Grok chat, responses, Imagine image/video |
-| HER + direct Grok OAuth | `her` + `provider=xai` | **Coming soon** — HASHI OAuth `client_id` from xAI | No `grok-cli`/Hermes; see [docs/HASHI_XAI_HER_OAUTH.md](docs/HASHI_XAI_HER_OAUTH.md) |
+| HER v2 | `her-v2` (`her` migration alias) | At least one configured HER v2 provider profile | Provider-neutral staged orchestration; `claw-cli` is retired |
 | OpenRouter API | `openrouter-api` | API key in `secrets.json` | Multi-model access |
 | DeepSeek API | `deepseek-api` | API key in `secrets.json` | Direct API, cost-effective |
 | Ollama | `ollama-api` | Ollama installed locally | Free, no API key needed |

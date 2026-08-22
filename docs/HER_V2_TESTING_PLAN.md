@@ -888,12 +888,12 @@ but retain separate typed delivery tests.
 
 ### 11.1 Retired backend isolation
 
-Tests must prove that `her`, `claw-cli`, and `her-v2` all resolve to the HER v2
-adapter and that no registry, normalization, startup, switch, or recovery path
-imports or initializes the retired HER adapter. HER v2 configuration failure
-must fail closed; it must not activate the retired backend. Compatible Habit,
-Meditation, and Dream files may be reused without importing the old execution
-backend.
+Tests must prove that `her` and `her-v2` resolve to the HER v2 adapter, that
+`claw-cli` is rejected, and that no registry, normalization, startup, switch,
+or recovery path imports or initializes the retired HER adapter. HER v2
+configuration failure must fail closed; it must not activate the retired
+backend. Compatible Habit, Meditation, and Dream files may be reused without
+importing the old execution backend.
 
 ## 12. Test Levels and Consolidation Rules
 

@@ -79,7 +79,6 @@ class FlexibleBackendManager:
 
     def _load_state(self):
         self._active_model_override = None
-        self._active_provider_override = None
         self._her_v2_configuration_override: dict[str, Any] | None = None
         self.agent_mode = self.config.default_mode
         self.privacy_level = PrivacyLevel.PROVIDER_TRUST
@@ -123,12 +122,6 @@ class FlexibleBackendManager:
                     and "active_model" in state
                 ):
                     self._active_model_override = state["active_model"]
-                if (
-                    restore_backend_overrides
-                    and self.config.active_backend != HER_V2_ENGINE
-                    and "active_provider" in state
-                ):
-                    self._active_provider_override = state["active_provider"]
                 if restore_backend_overrides and self.config.active_backend == HER_V2_ENGINE:
                     legacy_provider = str(state.get("active_provider") or "").strip()
                     legacy_model = str(state.get("active_model") or "").strip()
@@ -207,10 +200,7 @@ class FlexibleBackendManager:
             state["active_model"] = self._active_model_override
         else:
             state.pop("active_model", None)
-        if self.config.active_backend == "her" and getattr(self, "_active_provider_override", None):
-            state["active_provider"] = self._active_provider_override
-        else:
-            state.pop("active_provider", None)
+        state.pop("active_provider", None)
         backend_efforts = {
             backend_cfg["engine"]: backend_cfg["effort"]
             for backend_cfg in self.config.allowed_backends
@@ -231,12 +221,9 @@ class FlexibleBackendManager:
     def _save_state(
         self,
         active_model: str | None = None,
-        active_provider: str | None = None,
     ):
         if active_model is not None:
             self._active_model_override = active_model
-        if active_provider is not None:
-            self._active_provider_override = active_provider
         # Preserve state blocks owned by newer/optional features. This method is
         # called from the runtime event loop and is expected to stay serialized.
         self._write_state_dict(self._read_state_dict())
@@ -244,9 +231,8 @@ class FlexibleBackendManager:
     def persist_state(
         self,
         active_model: str | None = None,
-        active_provider: str | None = None,
     ):
-        self._save_state(active_model=active_model, active_provider=active_provider)
+        self._save_state(active_model=active_model)
 
     def set_privacy_level(self, level: int | str | PrivacyLevel) -> PrivacyLevel:
         parsed = require_level_available(level)
@@ -391,7 +377,7 @@ class FlexibleBackendManager:
     def get_her_v2_provider_options(self) -> list[dict[str, Any]]:
         return build_her_v2_provider_options(
             self.config.allowed_backends,
-            self._claw_provider_profiles(),
+            self._her_provider_profiles(),
             self._her_v2_base_config(),
         )
 
@@ -548,7 +534,6 @@ class FlexibleBackendManager:
         except Exception as exc:
             raise OSError(f"failed to persist HER v2 configuration: {exc}") from exc
         self._active_model_override = None
-        self._active_provider_override = None
         self._her_v2_configuration_override = serialized
 
         backend = self.current_backend
@@ -562,8 +547,8 @@ class FlexibleBackendManager:
             if hasattr(backend, "_v2_config"):
                 backend._v2_config = parsed
 
-    def _claw_provider_profiles(self) -> dict[str, dict[str, Any]]:
-        raw = getattr(self.global_config, "her_providers", None) or getattr(self.global_config, "claw_providers", None) or {}
+    def _her_provider_profiles(self) -> dict[str, dict[str, Any]]:
+        raw = getattr(self.global_config, "her_providers", None) or {}
         providers = raw.get("providers") if isinstance(raw, dict) else {}
         if not isinstance(providers, dict):
             return {}
@@ -572,170 +557,6 @@ class FlexibleBackendManager:
             for name, profile in providers.items()
             if str(name).strip() and isinstance(profile, dict)
         }
-
-    @staticmethod
-    def _strip_claw_provider_prefix(model: str, provider: str | None) -> str:
-        value = str(model or "").strip()
-        prefix = f"{provider}:" if provider else ""
-        if prefix and value.startswith(prefix) and len(value) > len(prefix):
-            return value[len(prefix):]
-        return value
-
-    @staticmethod
-    def _claw_entry_model_values(entry: dict[str, Any]) -> list[Any]:
-        raw_models = entry.get("models")
-        values = raw_models if isinstance(raw_models, list) else []
-        if entry.get("model"):
-            values = [*values, entry.get("model")]
-        if entry.get("default_model"):
-            values = [*values, entry.get("default_model")]
-        return values
-
-    def _claw_entry_models(self, entry: dict[str, Any], provider: str | None) -> list[str]:
-        models: list[str] = []
-        for value in self._claw_entry_model_values(entry):
-            route_provider, route_model = self._normalize_claw_route(str(value), None)
-            if route_provider and provider and route_provider != provider:
-                continue
-            models.append(
-                str(
-                    route_model
-                    if route_provider
-                    else self._strip_claw_provider_prefix(str(value), provider)
-                )
-            )
-        return self._unique_strings(models)
-
-    def get_claw_provider_options(self) -> list[dict[str, Any]]:
-        """Return provider/model choices allowed for this agent.
-
-        Global provider profiles own connection details. Agent backend rows own
-        authorization and may narrow each provider to one model (legacy
-        ``model``) or a provider-specific ``models`` list.
-        """
-        profiles = self._claw_provider_profiles()
-        entries = [
-            entry
-            for entry in self.config.allowed_backends
-            if entry.get("engine") == "her"
-        ]
-        explicit_names = self._unique_strings(entry.get("provider") for entry in entries)
-        generic_entries = [entry for entry in entries if not str(entry.get("provider") or "").strip()]
-        names = list(explicit_names)
-        if generic_entries:
-            for name in profiles:
-                if name not in names:
-                    names.append(name)
-
-        options: list[dict[str, Any]] = []
-        for name in names:
-            profile = profiles.get(name)
-            matching = [entry for entry in entries if str(entry.get("provider") or "").strip() == name]
-            models: list[str] = []
-            for entry in matching:
-                models.extend(self._claw_entry_models(entry, name))
-            models = self._unique_strings(models)
-
-            if not models and profile:
-                profile_models = profile.get("models") if isinstance(profile.get("models"), list) else []
-                profile_values = [*profile_models, profile.get("default_model")]
-                models = []
-                for value in profile_values:
-                    route_provider, route_model = self._normalize_claw_route(str(value or ""), None)
-                    if route_provider and route_provider != name:
-                        continue
-                    models.append(str(route_model or value or ""))
-                models = self._unique_strings(models)
-            if not models and generic_entries:
-                for entry in generic_entries:
-                    for value in self._claw_entry_model_values(entry):
-                        route_provider, route_model = self._normalize_claw_route(str(value), None)
-                        if route_provider:
-                            if route_provider == name:
-                                models.append(str(route_model or ""))
-                            continue
-                        # Legacy provider-less Claw rows historically meant
-                        # OpenRouter. If only one profile exists, that sole
-                        # provider is unambiguous and receives the bare model.
-                        if name == "openrouter" or len(profiles) == 1:
-                            models.append(str(value or ""))
-                models = self._unique_strings(models)
-            if not models and generic_entries and name == "openrouter":
-                models = get_available_models("her")
-
-            status = str((profile or {}).get("status") or "stable").strip().lower()
-            reason = None
-            if profile is None:
-                reason = "provider profile is not configured"
-            elif status == "disabled":
-                reason = "provider is disabled"
-            elif not models:
-                reason = "no models are allowed for this agent"
-            options.append(
-                {
-                    "name": name,
-                    "status": status,
-                    "models": models,
-                    "available": reason is None,
-                    "reason": reason,
-                }
-            )
-        return options
-
-    def get_claw_models(self, provider: str | None) -> list[str]:
-        name = str(provider or "").strip()
-        for option in self.get_claw_provider_options():
-            if option["name"] == name and option["available"]:
-                return list(option["models"])
-        return []
-
-    def get_active_provider(self) -> str | None:
-        if self.config.active_backend != "her":
-            return None
-        backend = self.current_backend
-        if backend is not None:
-            extra = getattr(getattr(backend, "config", None), "extra", None) or {}
-            provider = str(extra.get("provider") or "").strip()
-            if provider:
-                return provider
-        provider = str(getattr(self, "_active_provider_override", None) or "").strip()
-        if provider:
-            return provider
-        model = str(getattr(self, "_active_model_override", None) or "").strip()
-        selected = self._select_backend_cfg("her", target_model=model)
-        if selected:
-            provider = str(selected.get("provider") or "").strip()
-            if provider:
-                return provider
-        for option in self.get_claw_provider_options():
-            if option["available"]:
-                return str(option["name"])
-        return None
-
-    def _normalize_claw_route(
-        self,
-        target_model: str | None,
-        target_provider: str | None,
-    ) -> tuple[str | None, str | None]:
-        provider = str(target_provider or "").strip() or None
-        model = str(target_model or "").strip() or None
-        if not model or ":" not in model:
-            return provider, model
-
-        prefix, bare_model = model.split(":", 1)
-        known_providers = set(self._claw_provider_profiles())
-        known_providers.update(
-            str(entry.get("provider") or "").strip()
-            for entry in self.config.allowed_backends
-            if entry.get("engine") == "her" and entry.get("provider")
-        )
-        if prefix not in known_providers or not bare_model:
-            return provider, model
-        if provider and provider != prefix:
-            raise ValueError(
-                f"HER provider mismatch: requested {provider!r} but model prefix selects {prefix!r}."
-            )
-        return prefix, bare_model
 
     def _build_adapter_config(
         self,
@@ -786,20 +607,6 @@ class FlexibleBackendManager:
         resolved_model = target_model or backend_cfg_raw.get("default_model") or backend_cfg_raw.get("model")
         if not resolved_model and isinstance(backend_cfg_raw.get("models"), list):
             resolved_model = next(iter(backend_cfg_raw["models"]), None)
-        if engine == "her":
-            provider, resolved_model = self._normalize_claw_route(resolved_model, target_provider)
-            provider = provider or str(backend_cfg_raw.get("provider") or "").strip() or None
-            if not resolved_model and provider:
-                profile = self._claw_provider_profiles().get(provider) or {}
-                resolved_model = profile.get("default_model")
-                if not resolved_model and isinstance(profile.get("models"), list):
-                    resolved_model = next(iter(profile["models"]), None)
-                provider, resolved_model = self._normalize_claw_route(
-                    resolved_model,
-                    provider,
-                )
-            if provider:
-                extra["provider"] = provider
         return AgentConfig(
             name=self.config.name,
             engine=engine,
@@ -817,11 +624,7 @@ class FlexibleBackendManager:
         if backend is None or getattr(getattr(backend, "config", None), "engine", None) != engine:
             return
         current_extra = getattr(backend.config, "extra", None) or {}
-        current_provider = (
-            str(current_extra.get("provider") or "").strip() or None
-            if engine == "her"
-            else None
-        )
+        current_provider = None
         backend_cfg_raw = self._select_backend_cfg(
             engine,
             target_model=getattr(backend.config, "model", None),
@@ -883,8 +686,8 @@ class FlexibleBackendManager:
     ) -> dict | None:
         """Pick allowed backend entry for engine, preferring model/provider match.
 
-        Multiple HER rows (e.g. OpenRouter vs xAI) share the same engine name;
-        first-match alone would always bind the wrong provider.
+        Provider-specific HER v2 routing is resolved by its dedicated runtime
+        configuration before this generic backend selector is called.
         """
         engine = canonical_backend_engine(engine)
         candidates = [
@@ -895,49 +698,13 @@ class FlexibleBackendManager:
         if not candidates:
             return None
         model = str(target_model or "").strip()
-        provider = str(target_provider or "").strip() or None
-        if engine == "her":
-            provider, normalized_model = self._normalize_claw_route(model, provider)
-            model = str(normalized_model or "").strip()
-            if provider:
-                provider_candidates = [
-                    backend
-                    for backend in candidates
-                    if str(backend.get("provider") or "").strip() == provider
-                ]
-                generic_candidates = [backend for backend in candidates if not backend.get("provider")]
-                candidates = provider_candidates or generic_candidates
-                if not candidates:
-                    return None
         if not model:
             return candidates[0]
 
         for backend in candidates:
-            backend_provider = provider or str(backend.get("provider") or "").strip() or None
-            if engine == "her":
-                matches = model in self._claw_entry_models(backend, backend_provider)
-            else:
-                matches = str(backend.get("model") or "").strip() == model
+            matches = str(backend.get("model") or "").strip() == model
             if matches:
                 return backend
-
-        if engine == "her" and ":" in model:
-            provider_name, bare_model = model.split(":", 1)
-            provider_name = provider_name.strip()
-            bare_model = bare_model.strip()
-            for backend in candidates:
-                if str(backend.get("provider") or "").strip() != provider_name:
-                    continue
-                if not bare_model or str(backend.get("model") or "").strip() == bare_model:
-                    return backend
-                return backend
-
-        # Grok models on HER should prefer the HASHI xAI OAuth provider when present.
-        lowered = model.lower()
-        if lowered.startswith("grok") or lowered.startswith("xai/"):
-            for backend in candidates:
-                if str(backend.get("provider") or "").strip() == "xai":
-                    return backend
 
         return candidates[0]
 
@@ -1083,13 +850,6 @@ class FlexibleBackendManager:
 
         resolved_model = target_model or getattr(self, "_active_model_override", None)
         resolved_provider = target_provider
-        if engine == "her" and resolved_provider is None:
-            resolved_provider = getattr(self, "_active_provider_override", None)
-        if engine == "her":
-            resolved_provider, resolved_model = self._normalize_claw_route(
-                resolved_model,
-                resolved_provider,
-            )
         backend_cfg_raw = self._select_backend_cfg(
             engine,
             target_model=resolved_model,
@@ -1262,15 +1022,6 @@ class FlexibleBackendManager:
         target_engine = canonical_backend_engine(target_engine)
         resolved_provider = target_provider
         resolved_model = target_model
-        if target_engine == "her":
-            try:
-                resolved_provider, resolved_model = self._normalize_claw_route(
-                    target_model,
-                    target_provider,
-                )
-            except ValueError as exc:
-                self.logger.error("Invalid HER route: %s", exc)
-                return False
         self.logger.info(
             f"Switching backend to {target_engine}"
             + (f" provider={resolved_provider}" if resolved_provider else "")
@@ -1284,18 +1035,6 @@ class FlexibleBackendManager:
         if not backend_cfg_raw:
             self.logger.error(f"Target backend {target_engine} not allowed.")
             return False
-        if target_engine == "her":
-            resolved_provider = (
-                resolved_provider
-                or str(backend_cfg_raw.get("provider") or "").strip()
-                or None
-            )
-            if not resolved_model:
-                models = self.get_claw_models(resolved_provider)
-                resolved_model = next(iter(models), None)
-            if not resolved_provider or not resolved_model:
-                self.logger.error("HER backend requires an explicit provider and model.")
-                return False
         try:
             require_backend_compatibility(target_engine, self.privacy_level)
         except PrivacyPolicyError as exc:
@@ -1308,16 +1047,6 @@ class FlexibleBackendManager:
             getattr(self, "_active_model_override", None)
             or getattr(previous_backend_config, "model", None)
         )
-        previous_extra = getattr(previous_backend_config, "extra", None) or {}
-        previous_provider = (
-            getattr(self, "_active_provider_override", None)
-            or (
-                str(previous_extra.get("provider") or "").strip()
-                if isinstance(previous_extra, dict)
-                else None
-            )
-        ) or None
-
         # Cleanly shut down current backend
         if self.current_backend:
             await self.shutdown()
@@ -1325,7 +1054,6 @@ class FlexibleBackendManager:
         # Update config and state
         self.config.active_backend = target_engine
         self._active_model_override = resolved_model
-        self._active_provider_override = resolved_provider if target_engine == "her" else None
         self._save_state()
 
         # Initialize target backend — rollback on failure
@@ -1338,11 +1066,9 @@ class FlexibleBackendManager:
             )
             self.config.active_backend = previous_engine
             self._active_model_override = previous_model
-            self._active_provider_override = previous_provider
             self._save_state()
             if not await self.initialize_active_backend(
                 target_model=previous_model,
-                target_provider=previous_provider,
             ):
                 self.logger.critical(
                     f"Rollback to {previous_engine} also failed. Agent has no active backend."

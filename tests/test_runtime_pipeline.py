@@ -12,10 +12,6 @@ from types import SimpleNamespace
 import pytest
 from telegram.error import RetryAfter
 
-from adapters.her import (
-    _claw_jsonl_to_stream_events,
-    _HERStreamCadenceController,
-)
 from adapters.stream_events import (
     DELIVERY_CONTROL,
     DELIVERY_FINAL,
@@ -464,39 +460,9 @@ async def test_build_turn_prompt_collects_context_sections_and_updates_audit_sta
 
 
 @pytest.mark.asyncio
-async def test_scheduler_her_turn_uses_isolated_full_context_session():
+async def test_fixed_session_backend_uses_incremental_prompt():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
-    runtime.backend_manager.agent_mode = "fixed"
-    runtime.backend_manager.current_backend = SimpleNamespace(
-        _session_id="persistent-session",
-        persistent_session_busy=False,
-        capabilities=SimpleNamespace(
-            supports_sessions=True,
-            supports_thinking_stream=True,
-        ),
-    )
-    item = _item(source="scheduler")
-
-    runtime_pipeline.begin_queue_item(runtime, item)
-    prompt = await runtime_pipeline.build_turn_prompt(
-        runtime,
-        item,
-        is_bridge_request=False,
-    )
-
-    assert runtime.current_request_meta["session_scope"] == "isolated_per_run"
-    assert (
-        runtime._request_meta_by_id[item.request_id]["session_scope"]
-        == "isolated_per_run"
-    )
-    assert prompt.incremental is False
-
-
-@pytest.mark.asyncio
-async def test_new_direct_her_turn_waits_for_busy_persistent_session():
-    runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "codex-cli"
     runtime.backend_manager.agent_mode = "fixed"
     runtime.backend_manager.current_backend = SimpleNamespace(
         _session_id="persistent-session",
@@ -531,7 +497,7 @@ async def test_build_turn_prompt_binds_bare_continue_to_persisted_stopped_task()
     runtime_retry.remember_interrupted_task(
         runtime,
         runtime.current_request_meta,
-        backend="her",
+        backend="codex-cli",
     )
 
     continuation = _item(
@@ -562,11 +528,10 @@ async def test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_ta
     mode,
 ):
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "codex-cli"
     runtime.backend_manager.agent_mode = mode
     runtime.backend_manager.current_backend = SimpleNamespace(
         _session_id="primary-session",
-        _claw_model=lambda: "local/deepseek-v4-pro",
         persistent_session_busy=False,
         capabilities=SimpleNamespace(
             supports_sessions=True,
@@ -582,7 +547,7 @@ async def test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_ta
             "source": "text",
             "summary": "Older task",
         },
-        backend="her",
+        backend="codex-cli",
     )
     scheduler_item = _item(
         request_id="req-scheduler",
@@ -594,16 +559,13 @@ async def test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_ta
         is_success=True,
         stop_reason="max_iterations",
         stream_metadata={
-            "claw_completion_status": "incomplete",
-            "claw_stop_reason": "max_iterations",
+            "completion_status": "incomplete",
+            "completion_stop_reason": "max_iterations",
             "recommended_action": "continue",
             "pending_interaction": {
                 "kind": "continuation",
                 "token": "CONTINUE",
             },
-            "her_session_scope": "isolated_per_run",
-            "her_session_id": "scheduler-session",
-            "her_model": "local/deepseek-v4-pro",
         },
     )
     runtime_cross_session.record_turn_result(
@@ -630,9 +592,9 @@ async def test_build_turn_prompt_prefers_newer_scheduler_receipt_over_stopped_ta
     assert "HASHI cross-session reply binding" in prompt.effective_prompt
     assert "Newer scheduler task is incomplete" in prompt.effective_prompt
     assert "HASHI /stop continuation" not in prompt.effective_prompt
-    assert runtime.current_request_meta["session_scope"] == "isolated_resume"
-    assert runtime.current_request_meta["resume_session_id"] == "scheduler-session"
-    assert prompt.incremental is True
+    assert runtime.current_request_meta["session_scope"] == "persistent"
+    assert "resume_session_id" not in runtime.current_request_meta
+    assert prompt.incremental is (mode == "fixed")
 
 
 @pytest.mark.asyncio
@@ -647,7 +609,7 @@ async def test_build_turn_prompt_leaves_unrelated_request_unchanged_with_stopped
             "source": "text",
             "summary": "Original",
         },
-        backend="her",
+        backend="codex-cli",
     )
     item = _item(prompt="Write a new report")
     runtime_pipeline.begin_queue_item(runtime, item)
@@ -977,9 +939,9 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
 
 
 @pytest.mark.asyncio
-async def test_medium_claw_sends_each_task_acknowledgement_event_once():
+async def test_medium_her_v2_sends_each_task_acknowledgement_event_once():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "her-v2"
     runtime.backend_manager.current_backend.effort = "medium"
     sent = []
 
@@ -1001,7 +963,7 @@ async def test_medium_claw_sends_each_task_acknowledgement_event_once():
         summary="I will inspect the requested logs and report only the findings.",
         event_id="req-1:ack:initial",
         delivery_class=DELIVERY_USER_COMMENTARY,
-        origin="her_planner",
+        origin="her_v2",
         phase="initial",
     )
     await feedback.on_stream_event(event)
@@ -1023,8 +985,8 @@ async def test_medium_claw_sends_each_task_acknowledgement_event_once():
 @pytest.mark.asyncio
 async def test_her_message_audit_preserves_exact_commentary_and_transport_status():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
-    runtime.backend_manager.current_backend.effort = "ultra"
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "max"
     exact_text = "了解しました。計画の作成を開始しますね。\n次の確認段階で報告します。"
 
     async def _send_text(_chat_id, _text, **_kwargs):
@@ -1041,9 +1003,9 @@ async def test_her_message_audit_preserves_exact_commentary_and_transport_status
         StreamEvent(
             kind=KIND_COMMENTARY,
             summary=exact_text,
-            event_id="ultra-run:persona:planning:started",
+            event_id="req-1:persona:planning:started",
             delivery_class=DELIVERY_USER_COMMENTARY,
-            origin="her_ultra",
+            origin="her_v2",
             phase="planning",
             provenance="persona_renderer",
             detail="persona_renderer_fallback=false",
@@ -1068,7 +1030,7 @@ async def test_her_message_audit_preserves_exact_commentary_and_transport_status
 @pytest.mark.asyncio
 async def test_her_short_commentary_renders_markdown_before_telegram_delivery():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "her-v2"
     runtime.backend_manager.current_backend.effort = "high"
     exact_text = (
         "记录 A/B 核对结果：**两份记录都只有 Finance 侧确认，没有 HR 审批人**。\n\n"
@@ -1129,7 +1091,7 @@ async def test_her_short_commentary_renders_markdown_before_telegram_delivery():
 @pytest.mark.asyncio
 async def test_her_commentary_uses_long_sender_when_rendered_html_exceeds_limit():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "her-v2"
     runtime.backend_manager.current_backend.effort = "high"
     raw_text = "&" * 900
     short_sender_calls = []
@@ -1174,7 +1136,7 @@ async def test_her_commentary_uses_long_sender_when_rendered_html_exceeds_limit(
 @pytest.mark.asyncio
 async def test_her_message_audit_does_not_report_missing_transport_receipt_as_sent():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "her-v2"
     runtime.backend_manager.current_backend.effort = "high"
 
     async def _send_text(_chat_id, _text, **_kwargs):
@@ -1193,7 +1155,7 @@ async def test_her_message_audit_does_not_report_missing_transport_receipt_as_se
             summary="Still working.",
             event_id="req-1:commentary:1",
             delivery_class=DELIVERY_USER_COMMENTARY,
-            origin="her_planner",
+            origin="her_v2",
             phase="execution",
         )
     )
@@ -1214,9 +1176,9 @@ async def test_her_message_audit_does_not_report_missing_transport_receipt_as_se
 
 
 @pytest.mark.asyncio
-async def test_medium_claw_acknowledgement_composes_with_request_activity():
+async def test_medium_her_v2_acknowledgement_composes_with_request_activity():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "her-v2"
     runtime.backend_manager.current_backend.effort = "medium"
     sent = []
     published = []
@@ -1253,7 +1215,7 @@ async def test_medium_claw_acknowledgement_composes_with_request_activity():
             summary="I will inspect the requested logs.",
             event_id="req-1:ack:initial",
             delivery_class=DELIVERY_USER_COMMENTARY,
-            origin="her_planner",
+            origin="her_v2",
             phase="initial",
         )
     )
@@ -1269,7 +1231,7 @@ async def test_medium_claw_acknowledgement_composes_with_request_activity():
 @pytest.mark.asyncio
 async def test_high_her_commentary_delivers_independently_of_think_and_verbose():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "her-v2"
     runtime.backend_manager.current_backend.effort = "high"
     runtime._commentary = True
     runtime._think = False
@@ -1295,7 +1257,7 @@ async def test_high_her_commentary_delivers_independently_of_think_and_verbose()
             summary="Sunny is still checking the verified results. ☀️",
             event_id="req-1:commentary:replan:1",
             delivery_class=DELIVERY_USER_COMMENTARY,
-            origin="her_planner",
+            origin="her_v2",
             phase="replan",
             revision=1,
         )
@@ -1309,8 +1271,8 @@ async def test_high_her_commentary_delivers_independently_of_think_and_verbose()
 @pytest.mark.asyncio
 async def test_pending_her_commentary_superseded_by_final_is_audited_not_sent():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
-    runtime.backend_manager.current_backend.effort = "max+"
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "max"
     runtime._commentary = True
     sent = []
 
@@ -1332,7 +1294,7 @@ async def test_pending_her_commentary_superseded_by_final_is_audited_not_sent():
             detail="suppressed_reason=superseded_by_final",
             event_id="req-1:commentary:final-pending",
             delivery_class="internal",
-            origin="her_planner",
+            origin="her_v2",
             phase="finalization",
             revision=3,
         )
@@ -1355,111 +1317,9 @@ async def test_pending_her_commentary_superseded_by_final_is_audited_not_sent():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("effort", "expected_purposes"),
-    [
-        ("low", ["task_commentary"]),
-        ("medium", ["task_acknowledgement", "task_commentary"]),
-        ("high", ["task_acknowledgement", "task_commentary"]),
-        ("xhigh", ["task_acknowledgement", "task_commentary"]),
-        ("max", ["task_acknowledgement", "task_commentary"]),
-        ("max+", ["task_acknowledgement", "task_commentary"]),
-        ("ultra", ["task_commentary"]),
-    ],
-)
-async def test_her_effort_commentary_matrix_reaches_transport_receipt(
-    effort, expected_purposes
-):
-    runtime = _runtime()
-    runtime.config.active_backend = "her"
-    runtime.backend_manager.current_backend.effort = effort
-    runtime._commentary = True
-    runtime._think = False
-    runtime._verbose = False
-    telegram_stream_policy.set_typing_enabled(runtime, False)
-    sent = []
-
-    async def _send_text(chat_id, text, **kwargs):
-        sent.append((chat_id, text, kwargs))
-        return SimpleNamespace(message_id=len(sent))
-
-    runtime._send_text = _send_text
-    feedback = await runtime_pipeline.setup_interactive_feedback(
-        runtime,
-        _item(),
-        audit_active=False,
-        audit_collector=None,
-    )
-
-    if effort == "ultra":
-        await feedback.on_stream_event(
-            StreamEvent(
-                kind=KIND_COMMENTARY,
-                summary="Sunny has accepted the Ultra plan. ☀️",
-                event_id="ultra:persona:plan_accepted",
-                delivery_class=DELIVERY_USER_COMMENTARY,
-                origin="her_ultra",
-                phase="plan_accepted",
-                provenance="persona_renderer",
-            )
-        )
-    else:
-        controller = _HERStreamCadenceController(
-            feedback.on_stream_event,
-            request_id="req-1",
-            prompt="Inspect and report.",
-            progress_enabled=True,
-            first_update_s=0.001,
-            target_interval_s=0.002,
-            hard_interval_s=0.003,
-            activity_grace_s=0,
-        )
-        cadence_task = (
-            asyncio.create_task(controller.run())
-            if controller.progress_enabled
-            else None
-        )
-        raw_events = []
-        if effort != "low":
-            raw_events.append(
-                {
-                    "kind": "task_acknowledgement",
-                    "event_id": "task-acknowledgement:1",
-                    "text": "Sunny will inspect the requested evidence. ☀️",
-                }
-            )
-        raw_events.append(
-            {
-                "kind": "assistant_commentary",
-                "event_id": "assistant-commentary:1",
-                "phase": "execution",
-                "iteration": 1,
-                "text": "Sunny completed the inspection and is validating it. ☀️",
-            }
-        )
-        for raw_event in raw_events:
-            for event in _claw_jsonl_to_stream_events(
-                raw_event,
-                request_id="req-1",
-            ):
-                await controller.forward(event)
-        if cadence_task is not None:
-            deadline = asyncio.get_running_loop().time() + 0.2
-            while len(sent) < len(expected_purposes):
-                assert asyncio.get_running_loop().time() < deadline
-                await asyncio.sleep(0.001)
-            await controller.finish()
-            await cadence_task
-        else:
-            await controller.finish()
-
-    assert [entry[2]["_purpose"] for entry in sent] == expected_purposes
-
-
-@pytest.mark.asyncio
 async def test_her_commentary_off_suppresses_acknowledgement_and_progress_live():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "her-v2"
     runtime.backend_manager.current_backend.effort = "high"
     runtime._commentary = False
     telegram_stream_policy.set_typing_enabled(runtime, False)
@@ -1482,7 +1342,7 @@ async def test_her_commentary_off_suppresses_acknowledgement_and_progress_live()
             summary="Sunny will inspect the request. ☀️",
             event_id="req-1:ack:initial",
             delivery_class=DELIVERY_USER_COMMENTARY,
-            origin="her_planner",
+            origin="her_v2",
             phase="initial",
         )
     )
@@ -1492,7 +1352,7 @@ async def test_her_commentary_off_suppresses_acknowledgement_and_progress_live()
             summary="Sunny has a verified update. ☀️",
             event_id="req-1:commentary:replan:1",
             delivery_class=DELIVERY_USER_COMMENTARY,
-            origin="her_planner",
+            origin="her_v2",
             phase="replan",
             revision=1,
         )
@@ -1521,7 +1381,7 @@ async def test_her_commentary_off_suppresses_acknowledgement_and_progress_live()
 @pytest.mark.asyncio
 async def test_her_router_trusts_emitted_commentary_without_rechecking_effort():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "her-v2"
     runtime.backend_manager.current_backend.effort = "medium"
     runtime._commentary = True
     telegram_stream_policy.set_typing_enabled(runtime, False)
@@ -1544,7 +1404,7 @@ async def test_her_router_trusts_emitted_commentary_without_rechecking_effort():
             summary="Sunny has a progress update. ☀️",
             event_id="req-1:commentary:replan:1",
             delivery_class=DELIVERY_USER_COMMENTARY,
-            origin="her_planner",
+            origin="her_v2",
             phase="replan",
             revision=1,
         )
@@ -1555,7 +1415,7 @@ async def test_her_router_trusts_emitted_commentary_without_rechecking_effort():
             summary="Sunny will inspect the request. ☀️",
             event_id="req-1:ack:initial",
             delivery_class=DELIVERY_USER_COMMENTARY,
-            origin="her_planner",
+            origin="her_v2",
             phase="initial",
         )
     )
@@ -1569,7 +1429,7 @@ async def test_her_router_trusts_emitted_commentary_without_rechecking_effort():
 @pytest.mark.asyncio
 async def test_non_deliverable_her_activity_persists_without_presentation():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "her-v2"
     runtime.backend_manager.current_backend.effort = "high"
     runtime._commentary = True
     published = []
@@ -1594,7 +1454,7 @@ async def test_non_deliverable_her_activity_persists_without_presentation():
             summary="This stays local and is not delivered.",
             event_id="req-1:commentary:replan:1",
             delivery_class=DELIVERY_USER_COMMENTARY,
-            origin="her_planner",
+            origin="her_v2",
             phase="replan",
             revision=1,
         )
@@ -1605,7 +1465,7 @@ async def test_non_deliverable_her_activity_persists_without_presentation():
 @pytest.mark.asyncio
 async def test_required_her_control_is_visible_with_all_optional_channels_off():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "her-v2"
     runtime.backend_manager.current_backend.effort = "high"
     runtime._commentary = False
     runtime._verbose = False
@@ -2403,7 +2263,7 @@ async def test_prepare_successful_response_blocks_dangling_tool_markup_globally(
     response = SimpleNamespace(
         text='<｜DSML｜tool_calls><｜DSML｜invoke name="bash">',
         stop_reason="end_turn",
-        stream_metadata={"claw_completion_status": "completed"},
+        stream_metadata={"completion_status": "completed"},
     )
 
     result = await runtime_pipeline.prepare_successful_response(
@@ -2416,7 +2276,7 @@ async def test_prepare_successful_response_blocks_dangling_tool_markup_globally(
     assert "DSML" not in result.visible_text
     assert "不视为已执行或已完成" in result.visible_text
     assert response.stop_reason == "no_final_text"
-    assert response.stream_metadata["claw_completion_status"] == "incomplete"
+    assert response.stream_metadata["completion_status"] == "incomplete"
     assert response.stream_metadata["dangling_tool_markup_blocked"] is True
     assert "DSML" not in runtime.transcripts[0]["core_raw"]
     assert "DSML" not in runtime.listener_payloads[0]["text"]
@@ -2443,7 +2303,7 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
         tool_call_count=2,
         tool_loop_count=1,
         stream_metadata={
-            "claw_thinking": {
+            "thinking": {
                 "thinking_chars": 44,
                 "thinking_event_count": 2,
                 "thinking_redacted_count": 1,
@@ -2765,7 +2625,7 @@ async def test_handle_success_delivery_does_not_duplicate_resolved_direct_respon
 @pytest.mark.asyncio
 async def test_scheduler_delivery_persists_cross_session_receipt_after_send():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "her-v2"
     item = _item(
         request_id="req-scheduler",
         source="scheduler",
@@ -2777,16 +2637,13 @@ async def test_scheduler_delivery_persists_cross_session_receipt_after_send():
         is_success=True,
         stop_reason="max_iterations",
         stream_metadata={
-            "claw_completion_status": "incomplete",
-            "claw_stop_reason": "max_iterations",
+            "completion_status": "incomplete",
+            "completion_stop_reason": "max_iterations",
             "recommended_action": "continue",
             "pending_interaction": {
                 "kind": "continuation",
                 "token": "CONTINUE",
             },
-            "her_session_scope": "isolated_per_run",
-            "her_session_id": "scheduler-session",
-            "her_model": "local/deepseek-v4-pro",
         },
     )
 
@@ -2807,14 +2664,13 @@ async def test_scheduler_delivery_persists_cross_session_receipt_after_send():
     receipt = runtime_cross_session.load_receipts(runtime)[0]
     assert receipt["delivered"] is True
     assert receipt["status"] == "incomplete"
-    assert receipt["session_id"] == "scheduler-session"
     assert receipt["active"] is True
 
 
 @pytest.mark.asyncio
 async def test_her_direct_response_stream_event_is_not_sent_before_final_delivery():
     runtime = _runtime()
-    runtime.config.active_backend = "her"
+    runtime.config.active_backend = "her-v2"
     runtime.backend_manager.current_backend.effort = "medium"
     runtime._commentary = True
     runtime._verbose = False
@@ -2833,7 +2689,7 @@ async def test_her_direct_response_stream_event_is_not_sent_before_final_deliver
             summary="complete direct answer",
             event_id="req-1:final",
             delivery_class=DELIVERY_FINAL,
-            origin="her_planner",
+            origin="her_v2",
             phase="finalization",
             required=True,
         )

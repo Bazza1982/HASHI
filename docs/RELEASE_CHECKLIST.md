@@ -34,35 +34,19 @@
   - `docs/HASHI_SLIM_CORE_ARCHITECTURE.md` reflects current manager boundaries
   - `docs/HASHI_CORE_SLIMMING_PLAN.md` reflects latest implementation and validation status
   - `CHANGELOG.md` records structural changes and residual notes
-- HER mode gates:
+- HER v2 mode gates:
   - release scope names HASHI `v4.0.0-alpha.2` separately from Enterprise AAI
     `v0.1.0-alpha.1` / package `0.1.0a1`
-  - Manifest review confirms runtime version, source commit, platform target,
-    executable path, SHA-256, upstream license, and certification baseline all
-    describe the same artifact
-  - the selected Linux and Windows x86-64 entries are both
-    `0.1.0-hashi.22`, share the reviewed source identity, and the rejected
-    `.21` forensic artifact is not selectable
-  - `python scripts/her_runtime_probe.py --check version` resolves the packaged
-    HER binary and returns a successful version diagnostic
-  - `python scripts/verify_her_certification.py --source-root <pinned-her-source>`
-    passes full Rust workspace tests plus workspace/all-target Clippy with
-    warnings denied
   - HER v2 changes run the touched v2 module plus its direct adapter/runtime
-    consumer; legacy HER compatibility is added only when legacy ownership or
-    a shared boundary changed
+    consumers; no active path imports the retired HER v1 implementation
+  - `her` resolves forward to `her-v2`, while `claw-cli` is rejected
   - the release candidate passes the explicit offline product suite once;
     repeated overlapping HER bundles are not separate gates
-  - `python -m py_compile adapters/her.py adapters/her_habits.py orchestrator/runtime_her_habits.py tools/media_read.py tools/gateway/mcp_stdio.py`
-  - Fixed mode proves incremental resume only after a HER session ID exists;
-    Flex, Wrapper, Audit, and Dual Brain prove full-context turns do not also
-    pass `--resume`
-  - The HER adapter is the one active Habit/Meditation owner and request-scoped
+  - `python -m py_compile adapters/her_v2.py adapters/her_habits.py orchestrator/runtime_her_habits.py tools/media_read.py tools/gateway/mcp_stdio.py`
+  - Fixed mode proves incremental resume for session-based CLI backends; Flex,
+    Wrapper, Audit, and Dual Brain preserve their full-context contracts
+  - HER v2 remains the active Habit/Meditation owner and request-scoped
     eligibility prevents internal or ephemeral work from entering `/habit`
-  - all seven HER effort choices are exposed only where supported; `ultra`
-    remains adapter-owned and is never passed to the native executable as a
-    single-process effort
-  - `/rebuild` proves source-scoped fingerprints, unchanged-source candidate
     reuse, incremental changed-source builds, offline verification, atomic
     selection, targeted adoption, failure preservation, and rollback
   - `/rebuild` candidates remain explicitly development-only and do not alter

@@ -162,7 +162,7 @@ async def test_stop_preserves_and_reports_delayed_messages(tmp_path):
     runtime = SimpleNamespace(
         name="zelda",
         orchestrator=SimpleNamespace(scheduler=scheduler),
-        config=SimpleNamespace(active_backend="her", engine="her"),
+        config=SimpleNamespace(active_backend="her-v2", engine="her-v2"),
         logger=SimpleNamespace(warning=lambda *args, **kwargs: None),
         queue=asyncio.Queue(),
         backend_manager=SimpleNamespace(current_backend=None),

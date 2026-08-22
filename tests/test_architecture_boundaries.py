@@ -140,3 +140,38 @@ def test_legacy_fixed_runtime_cannot_reenter_active_architecture():
                     violations.append(f"{path.relative_to(ROOT)}: {marker}")
 
     assert violations == []
+
+
+def test_retired_her_v1_and_openclaw_surfaces_cannot_reenter_runtime():
+    retired_paths = [
+        ROOT / "adapters" / "her.py",
+        ROOT / "adapters" / "her_ultra.py",
+        ROOT / "adapters" / "claw_cli.py",
+        ROOT / "orchestrator" / "runtime_turn_context.py",
+        ROOT / "scripts" / "import_openclaw.py",
+        ROOT / "scripts" / "her_runtime_probe.py",
+        ROOT / "scripts" / "verify_her_certification.py",
+        ROOT / "tools" / "her_debug",
+        ROOT / "superloops" / "templates" / "her_debug",
+    ]
+    assert [path for path in retired_paths if path.exists()] == []
+
+    forbidden_imports = (
+        "adapters.her import",
+        "adapters.her_ultra import",
+        "adapters.claw_cli import",
+        "orchestrator.runtime_turn_context import",
+        "ClawCLIAdapter",
+        "HERUltraAdapter",
+        "discover_claw_binary",
+        "build_claw_env",
+    )
+    violations = []
+    for package in ("orchestrator", "adapters", "onboarding", "tui", "scripts", "tools"):
+        for path in (ROOT / package).rglob("*.py"):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for marker in forbidden_imports:
+                if marker in text:
+                    violations.append(f"{path.relative_to(ROOT)}: {marker}")
+
+    assert violations == []

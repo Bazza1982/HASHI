@@ -169,7 +169,6 @@ class HabitMeditationConfig:
     ) -> HabitMeditationConfig:
         global_her = (
             getattr(global_config, "her_providers", None)
-            or getattr(global_config, "claw_providers", None)
             or {}
         )
         global_raw = (

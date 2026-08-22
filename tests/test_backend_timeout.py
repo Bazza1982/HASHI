@@ -9,7 +9,6 @@ import pytest
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
 from adapters.claude_cli import ClaudeCLIAdapter
-from adapters.claw_cli import ClawCLIAdapter
 from adapters.codex_cli import CodexCLIAdapter
 from adapters.gemini_cli import GeminiCLIAdapter
 from adapters.grok_cli import GrokCLIAdapter
@@ -73,9 +72,6 @@ def test_active_cli_defaults_use_one_hour_idle_liveness_only():
         assert adapter_class.DEFAULT_IDLE_TIMEOUT_SEC == 60 * 60
         assert adapter_class.USES_LEGACY_HARD_TIMEOUT is False
 
-    # The retired class may still be imported for old integrations, but the
-    # backend registry aliases ``her``/``claw-cli`` to HER v2 before selection.
-    assert ClawCLIAdapter.USES_LEGACY_HARD_TIMEOUT is True
 
 
 @pytest.mark.asyncio

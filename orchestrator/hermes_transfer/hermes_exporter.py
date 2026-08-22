@@ -105,7 +105,7 @@ def plan_hermes_export(
 
     if opts.include_skills:
         _collect_skills(files, profile, opts, warnings)
-        warnings.append("Hermes skill files included as inert transfer archive only; HER/Claw skill loading is disabled")
+        warnings.append("Hermes skill files are included as an inert transfer archive only")
 
     _warn_blocked_profile_state(profile, warnings)
     files["source/secrets_summary.json"] = _json_text({"included": False, "policy": "excluded_by_default"})

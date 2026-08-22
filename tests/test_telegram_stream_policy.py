@@ -248,7 +248,7 @@ async def test_her_commentary_command_persists_without_changing_think_or_verbose
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.workspace_dir = tmp_path / "workspaces" / "sunny"
     runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
-    runtime.config = SimpleNamespace(active_backend="her", extra={})
+    runtime.config = SimpleNamespace(active_backend="her-v2", extra={})
     runtime.backend_manager = SimpleNamespace(current_backend=SimpleNamespace(effort="high"))
     runtime._commentary = True
     runtime._verbose = False
@@ -445,7 +445,7 @@ async def test_her_compaction_start_and_failure_are_both_visible_with_verbose(tm
         name="sunny",
         workspace_dir=tmp_path / "workspaces" / "sunny",
         config=SimpleNamespace(
-            active_backend="her",
+            active_backend="her-v2",
             extra={
                 "telegram_stream_enabled": True,
                 "answer_stream_edit_interval_s": 0.01,
@@ -535,7 +535,7 @@ async def test_verbose_and_think_receive_disjoint_event_classes():
 @pytest.mark.asyncio
 async def test_her_commentary_never_enters_think_buffer():
     runtime = object.__new__(FlexibleAgentRuntime)
-    runtime.config = SimpleNamespace(active_backend="her")
+    runtime.config = SimpleNamespace(active_backend="her-v2")
     runtime.logger = SimpleNamespace(debug=lambda _message: None)
     runtime._thinking_chars_this_req = 0
     runtime._openrouter_think_chunk = ""
@@ -561,7 +561,7 @@ async def test_her_commentary_never_enters_think_buffer():
 @pytest.mark.asyncio
 async def test_thinking_deltas_preserve_exact_provider_spacing():
     runtime = object.__new__(FlexibleAgentRuntime)
-    runtime.config = SimpleNamespace(active_backend="her")
+    runtime.config = SimpleNamespace(active_backend="her-v2")
     runtime.logger = SimpleNamespace(debug=lambda _message: None)
     runtime._thinking_chars_this_req = 0
     runtime._openrouter_think_chunk = ""

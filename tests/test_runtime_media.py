@@ -371,7 +371,7 @@ async def test_safevoice_confirmation_adds_transcript_to_long_batch(tmp_path, mo
 async def test_failed_direct_voice_transcription_routes_her_to_media_read(tmp_path, monkeypatch):
     runtime = _runtime(tmp_path)
     runtime._safevoice_enabled = False
-    runtime.config = SimpleNamespace(active_backend="her")
+    runtime.config = SimpleNamespace(active_backend="her-v2")
 
     class _Transcriber:
         async def transcribe(self, _local_path):

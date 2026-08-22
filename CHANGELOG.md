@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gates for global-impact mutations, refresh-on-request visibility, and a
   prompt-free global mutation audit accompany the new layer.
 
+### Removed
+
+- **HER v1 and legacy fixed runtime** — retired the Claw-derived native HER
+  adapter, binaries/source integration, debug/certification tooling, old fixed
+  runtime, and the standalone OpenClaw importer. `her` now resolves only to the
+  clean-room HER v2 backend; `claw-cli` is rejected. Flex retains Fixed mode for
+  session-based CLI backends.
+
 ### Fixed
 
 - **HER Habit / TaskFrame authority pollution** — foreground Habit records now
@@ -190,7 +198,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Bridge-only outputs. See
   [docs/RETRY_RESEND_COMMANDS.md](docs/RETRY_RESEND_COMMANDS.md).
 - **Telegram `/privacy [0-5]` foundation** — added a persisted per-agent privacy setting, backend compatibility declarations, a details menu, quick setting, downgrade confirmation, and the six-level framework. Level 0 fully disables privacy controls; Level 1 remains the default provider-trust mode. Levels 2–5 are reserved until their enforcement is installed and verified.
-- **Direct Grok OAuth → HER (coming soon)** — landed HASHI-native xAI device-code OAuth scaffolding that stores tokens under the bridge home and injects `XAI_API_KEY` into HER's upstream Claw process without Hermes or `grok-cli`. Live login remains blocked until HASHI receives its own xAI OAuth `client_id`. See [docs/HASHI_XAI_HER_OAUTH.md](docs/HASHI_XAI_HER_OAUTH.md).
+- **Direct Grok OAuth → HER (historical)** — landed HASHI-native xAI device-code OAuth scaffolding and a token store. The later HER v1 retirement removed native process injection; the backend-neutral credential utility remains documented in [docs/HASHI_XAI_OAUTH.md](docs/HASHI_XAI_OAUTH.md).
 - **Grok CLI reasoning effort control** — added `low`, `medium`, and `high` support to Telegram `/effort` for `grok-cli`, with HASHI defaulting Grok sessions to `medium`, passing the selection through `--reasoning-effort`, and persisting per-backend choices across agent reloads.
 - **Grok 4.5 API Gateway support** — added smoke-tested `grok-4.5` to the `xai-api` and `/v1/models` catalogs, routing it through xAI's Responses API. The existing tested Codex GPT-5.6 variants remain available through the API Gateway.
 - **Default-off Telegram streaming controls** — added independent `/stream` master and placeholder, typing, progress, preview, and final-promotion switches. All current and future agents default to final-only Telegram delivery until streaming is explicitly enabled.

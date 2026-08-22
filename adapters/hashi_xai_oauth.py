@@ -1,7 +1,6 @@
 """HASHI-native xAI OAuth (no Hermes, no xai-api engine).
 
 Owns device-code login, refresh, and on-disk token storage under bridge_home.
-Claw receives a fresh access_token via XAI_API_KEY at task start.
 """
 
 from __future__ import annotations
@@ -107,8 +106,6 @@ def resolve_client_id(
     candidates.append(str(xai_oauth.get("client_id") or "").strip())
 
     her = _as_mapping(getattr(global_config, "her_providers", None) if global_config is not None else None)
-    if not her:
-        her = _as_mapping(getattr(global_config, "claw_providers", None) if global_config is not None else None)
     providers = _as_mapping(her.get("providers"))
     xai_provider = _as_mapping(providers.get("xai"))
     candidates.append(str(xai_provider.get("client_id") or "").strip())

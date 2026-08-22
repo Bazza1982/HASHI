@@ -378,12 +378,13 @@ def _command_update():
     )
 
 
-def test_retired_her_ids_resolve_forward_to_the_only_her_backend():
+def test_public_her_alias_resolves_forward_and_claw_id_is_removed():
     assert get_backend_class("her-v2") is HERv2Adapter
     assert get_backend_class("her") is HERv2Adapter
-    assert get_backend_class("claw-cli") is HERv2Adapter
+    with pytest.raises(ValueError, match="Unknown engine: claw-cli"):
+        get_backend_class("claw-cli")
     assert canonical_backend_engine("her") == "her-v2"
-    assert canonical_backend_engine("claw-cli") == "her-v2"
+    assert canonical_backend_engine("claw-cli") == "claw-cli"
     assert "her" not in BACKEND_REGISTRY
     assert "claw-cli" not in BACKEND_REGISTRY
     assert BACKEND_REGISTRY["her-v2"]["efforts"] == [

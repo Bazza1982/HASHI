@@ -72,7 +72,6 @@ class GlobalConfig:
     xai_use_responses_api: bool = False
     xai_oauth: Dict[str, Any] = field(default_factory=dict)
     openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
-    claw_providers: Dict[str, Any] = field(default_factory=dict)
     her_providers: Dict[str, Any] = field(default_factory=dict)
     enterprise_auth_providers: List[Dict[str, Any]] = field(default_factory=list)
     enterprise_database_url: str | None = None
@@ -148,6 +147,11 @@ class ConfigManager:
             if not engine:
                 raise ValueError(
                     f"Agent '{name}' uses legacy type='fixed' but has no engine to migrate."
+                )
+            if engine == "claw-cli":
+                raise ValueError(
+                    f"Agent '{name}' uses removed backend 'claw-cli'; "
+                    "configure 'her-v2' explicitly before migrating the agent."
                 )
             model = row.pop("model", "default")
             row.pop("resume_policy", None)
@@ -306,6 +310,12 @@ class ConfigManager:
             ),
         )
 
+        if "claw_providers" in g_raw:
+            raise ValueError(
+                "global.claw_providers has been removed; rename the active provider "
+                "configuration to global.her_providers."
+            )
+
         global_cfg = GlobalConfig(
             authorized_id=_auth_id,
             deployment_profile=profile_ctx.profile.value,
@@ -360,9 +370,7 @@ class ConfigManager:
             xai_use_responses_api=_truthy(g_raw.get("xai_use_responses_api", False)),
             xai_oauth=dict(g_raw.get("xai_oauth") or {}),
             openrouter_url=g_raw.get("openrouter_url", "https://openrouter.ai/api/v1/chat/completions"),
-            her_providers=dict(g_raw.get("her_providers") or g_raw.get("claw_providers") or {}),
-            # Deprecated compatibility alias for pre-HER deployments.
-            claw_providers=dict(g_raw.get("her_providers") or g_raw.get("claw_providers") or {}),
+            her_providers=dict(g_raw.get("her_providers") or {}),
             enterprise_auth_providers=list(g_raw.get("enterprise_auth_providers") or []),
             enterprise_database_url=enterprise_database_url,
             enterprise_scheduler_lease_enabled=enterprise_scheduler_lease_enabled,
@@ -410,6 +418,11 @@ class ConfigManager:
             telegram_token_key = a_raw.pop("telegram_token_key", name)
             allowed_backends = normalize_allowed_backends(a_raw.pop("allowed_backends"))
             active_backend = canonical_backend_engine(a_raw.pop("active_backend"))
+            if active_backend == "claw-cli":
+                raise ValueError(
+                    f"Agent '{name}' uses removed active backend 'claw-cli'; "
+                    "configure 'her-v2' instead."
+                )
             is_active = a_raw.pop("is_active", True)
             default_mode = str(a_raw.pop("default_mode", "flex") or "flex").strip().lower()
             if default_mode not in {"flex", "fixed"}:

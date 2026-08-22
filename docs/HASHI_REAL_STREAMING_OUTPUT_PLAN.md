@@ -97,7 +97,7 @@ Existing pieces:
 | `claude_cli.py` | Emits `KIND_TEXT_DELTA` from `text_delta` in stream-json | Good candidate if CLI emits partial text in live runs |
 | `codex_cli.py` | Parses Codex CLI JSON lines | Does not emit real answer deltas from current `codex exec --json` path |
 | `gemini_cli.py` | Best-effort CLI parsing | Needs verification; likely weak or non-delta depending on CLI behavior |
-| `claw_cli.py` | Emits `assistant_delta` as `KIND_TEXT_DELTA` through stream-json | Conditional answer-stream candidate if stream-json is supported |
+| `her_v2.py` | Owns staged progress/commentary and one validated final message | Test event ownership and final-delivery promotion rather than native deltas |
 | `deepseek_api.py` | Already has streaming delta path | Needs full-delta preservation; do not treat as greenfield |
 | `ollama_api.py` | Already has streaming line/delta path | Needs full-delta preservation; do not treat as greenfield |
 | `runtime_pipeline.answer_preview_loop()` | Edits placeholder with deltas or heartbeat | Still preview-only; final delivery sends full answer separately |
@@ -305,24 +305,13 @@ Risk:
 
 - Heuristic parsing can create false deltas or leak non-answer status text into the answer.
 
-### 7.5 HASHI Engine Runtime (HER)
+### 7.5 HASHI Engine Runtime v2 (HER v2)
 
-Current state:
-
-- `adapters/her.py` already maps `assistant_delta` to `KIND_TEXT_DELTA`.
-- Stream behavior depends on Claw stream-json support and runtime configuration.
-
-Required changes:
-
-- Add HASHI Engine Runtime (HER) to the capability matrix.
-- Preserve full assistant deltas for answer streaming.
-- Add fixtures for `assistant_delta`, completion, and fallback events.
-- Mark as `supports_answer_stream=True` only when stream-json is available and verified.
-
-Risk:
-
-- Claw event shapes may differ by version.
-- Tool/action deltas must not be appended to visible answer text.
+HER v2 owns staged commentary, progress, tool activity, and final delivery
+events. Its final answer is delivered as one validated message rather than
+reconstructed from a retired native runtime's deltas. Capability tests should
+therefore cover event ownership and duplicate-delivery prevention instead of
+Claw-specific stream shapes.
 
 ### 7.6 DeepSeek API
 

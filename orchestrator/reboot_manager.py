@@ -165,7 +165,7 @@ class RebootManager:
             )
         if any(
             resolver(engine) is not supported_adapter
-            for engine in ("her-v2", "her", "claw-cli")
+            for engine in ("her-v2", "her")
         ):
             raise HotReloadError(
                 "Hot reload contract failed: a HER ID can reach a stale or retired adapter"

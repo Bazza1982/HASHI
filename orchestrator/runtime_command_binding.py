@@ -50,8 +50,8 @@ CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
         "callback_model",
     ),
     CallbackBinding(
-        r"^(provider|provider_menu|provider_locked|pmodel|her_provider)",
-        "callback_claw_provider",
+        r"^her_provider",
+        "callback_model",
     ),
     CallbackBinding(r"^wcfg:", "callback_wrapper_config"),
     CallbackBinding(r"^acfg:", "callback_audit_config"),

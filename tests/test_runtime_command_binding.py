@@ -83,8 +83,8 @@ def test_skill_callback_binding_includes_nudge_buttons():
 @pytest.mark.parametrize(
     ("callback_data", "method_name"),
     [
-        ("her_provider:1:abcdef", "callback_claw_provider"),
-        ("her_provider_locked:2:abcdef", "callback_claw_provider"),
+        ("her_provider:1:abcdef", "callback_model"),
+        ("her_provider_locked:2:abcdef", "callback_model"),
         ("her_model_slot:fast", "callback_model"),
         ("her_model:fast:0:abcdef:1:abcdef", "callback_model"),
         ("her_routes", "callback_model"),

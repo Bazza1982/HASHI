@@ -17,10 +17,6 @@ HOT_RELOAD_PREFIXES = ("adapters.", "tools.", "orchestrator.")
 # reloading the module replaced an already-held lock or path identity.
 PROCESS_IDENTITY_MODULES = frozenset(
     {
-        # Retired execution modules may remain imported by historical tests or
-        # a pre-upgrade process, but hot reload must never reactivate them.
-        "adapters.her",
-        "adapters.claw_cli",
         "orchestrator.instance_lock",
         "orchestrator.pathing",
     }

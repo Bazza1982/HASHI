@@ -157,12 +157,10 @@ async def test_completed_scheduler_turn_is_injected_for_fixed_and_flex_modes(
     runtime = _runtime()
     runtime.name = "momo"
     runtime.workspace_dir = tmp_path
-    runtime.config = SimpleNamespace(active_backend="her", workspace_dir=tmp_path)
+    runtime.config = SimpleNamespace(active_backend="her-v2", workspace_dir=tmp_path)
     runtime.backend_manager = SimpleNamespace(
         agent_mode=mode,
-        current_backend=SimpleNamespace(
-            _claw_model=lambda: "local/deepseek-v4-pro",
-        ),
+        current_backend=SimpleNamespace(),
     )
     scheduler_item = _item("scheduler")
     scheduler_item.summary = "Cron Task [engagement]"
@@ -170,12 +168,9 @@ async def test_completed_scheduler_turn_is_injected_for_fixed_and_flex_modes(
         is_success=True,
         stop_reason="max_iterations",
         stream_metadata={
-            "claw_completion_status": "incomplete",
-            "claw_stop_reason": "max_iterations",
+            "completion_status": "incomplete",
+            "completion_stop_reason": "max_iterations",
             "recommended_action": "continue",
-            "her_session_scope": "isolated_per_run",
-            "her_session_id": "scheduler-session",
-            "her_model": "local/deepseek-v4-pro",
         },
     )
     runtime_cross_session.record_turn_result(

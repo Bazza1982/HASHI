@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 from adapters import hashi_xai_oauth as oauth
-from adapters.claw_cli import build_claw_env
 
 
 def test_hashi_xai_oauth_module_has_no_hermes_imports():
@@ -103,88 +102,6 @@ def test_clear_tokens(tmp_path: Path):
     path = oauth.clear_tokens(global_config=cfg)
     assert path == store.resolve()
     assert not store.exists()
-
-
-def test_build_claw_env_passes_xai_keys():
-    env = build_claw_env(
-        {
-            "XAI_API_KEY": "token-abc",
-            "XAI_BASE_URL": "https://api.x.ai/v1",
-            "OPENAI_API_KEY": "should-also-pass",
-            "HOME": "/tmp",
-            "SECRET_SHOULD_DROP": "nope",
-        }
-    )
-    assert env["XAI_API_KEY"] == "token-abc"
-    assert env["XAI_BASE_URL"] == "https://api.x.ai/v1"
-    assert env["OPENAI_API_KEY"] == "should-also-pass"
-    assert "SECRET_SHOULD_DROP" not in env
-
-
-def test_claw_provider_hashi_oauth_injection(tmp_path: Path, monkeypatch):
-    from adapters.claw_cli import ClawCLIAdapter
-
-    store = tmp_path / "auth" / "xai_oauth.json"
-    oauth._persist_tokens(
-        store,
-        access_token="fresh-access",
-        refresh_token="refresh-keep",
-        expires_at=9_999_999_999.0,
-        client_id="hashi-client",
-        scopes="openid offline_access api:access",
-        token_endpoint="https://auth.x.ai/oauth2/token",
-    )
-
-    agent = SimpleNamespace(
-        name="xishi",
-        model="grok-4.5",
-        workspace_dir=tmp_path / "ws",
-        system_md=tmp_path / "system.md",
-        extra={"provider": "xai", "model": "grok-4.5"},
-        project_root=tmp_path,
-    )
-    agent.workspace_dir.mkdir(parents=True, exist_ok=True)
-    (tmp_path / "system.md").write_text("sys", encoding="utf-8")
-
-    global_cfg = SimpleNamespace(
-        bridge_home=tmp_path,
-        project_root=tmp_path,
-        xai_oauth={"client_id": "hashi-client", "auth_store": "auth/xai_oauth.json"},
-        her_providers={
-            "providers": {
-                "xai": {
-                    "auth_mode": "hashi_oauth",
-                    "base_url": "https://api.x.ai/v1",
-                    "status": "provisional",
-                    "env_api_key": "XAI_API_KEY",
-                    "env_base_url": "XAI_BASE_URL",
-                }
-            }
-        },
-        xai_api_base_url="https://api.x.ai/v1",
-    )
-
-    adapter = ClawCLIAdapter(agent, global_cfg, api_key=None)
-    env = adapter._env_from_provider("xai")
-    assert env["XAI_API_KEY"] == "fresh-access"
-    assert env["XAI_BASE_URL"] == "https://api.x.ai/v1"
-    assert "OPENAI_API_KEY" not in env or env.get("OPENAI_API_KEY") != "fresh-access"
-
-
-def test_select_backend_prefers_xai_for_grok_model():
-    from orchestrator.flexible_backend_manager import FlexibleBackendManager
-
-    mgr = FlexibleBackendManager.__new__(FlexibleBackendManager)
-    mgr.global_config = SimpleNamespace(her_providers={})
-    mgr.config = SimpleNamespace(
-        allowed_backends=[
-            {"engine": "her", "provider": "openrouter", "model": "deepseek/deepseek-v4-flash"},
-            {"engine": "her", "provider": "xai", "model": "grok-4.5"},
-        ]
-    )
-    selected = FlexibleBackendManager._select_backend_cfg(mgr, "her", target_model="grok-4.5")
-    assert selected["provider"] == "xai"
-    assert selected["model"] == "grok-4.5"
 
 
 def test_device_login_poll_success(tmp_path: Path, monkeypatch):

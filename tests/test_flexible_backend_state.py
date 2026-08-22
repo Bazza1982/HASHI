@@ -74,7 +74,6 @@ def test_stale_persisted_backend_falls_back_to_configured_allowed_backend(
 
     assert manager.config.active_backend == "codex-cli"
     assert manager._active_model_override is None
-    assert manager._active_provider_override is None
     assert manager.agent_mode == "fixed"
     assert "not present in allowed_backends" in caplog.text
     state = _read_state(workspace)
@@ -330,186 +329,6 @@ async def test_timeout_override_survives_recreation_and_is_scoped_per_backend(tm
     assert state["backend_timeouts"]["claude-cli"] == {IDLE_TIMEOUT_KEY: 7200}
 
 
-def test_provider_prefixed_model_is_normalized_for_adapter_resolution(tmp_path):
-    workspace = tmp_path / "agent"
-    workspace.mkdir()
-    cfg = FlexibleAgentConfig(
-        name="test-flex",
-        workspace_dir=workspace,
-        system_md=workspace / "AGENT.md",
-        telegram_token_key="test-flex",
-        allowed_backends=[
-            {"engine": "her", "model": "deepseek/default"},
-        ],
-        active_backend="her",
-        project_root=workspace,
-    )
-    global_cfg = GlobalConfig(
-        authorized_id=1,
-        base_logs_dir=workspace / "logs",
-        base_media_dir=workspace / "media",
-        project_root=workspace,
-        her_providers={"providers": {"openrouter": {"base_url": "https://example.invalid/v1"}}},
-    )
-    manager = FlexibleBackendManager(cfg, global_cfg, secrets={"openrouter_key": "secret"})
-
-    adapter_cfg = manager._build_adapter_config(
-        "her",
-        cfg.allowed_backends[0],
-        target_model="openrouter:deepseek/deepseek-v4-flash",
-    )
-
-    assert adapter_cfg.model == "deepseek/deepseek-v4-flash"
-    assert adapter_cfg.extra["provider"] == "openrouter"
-
-
-def test_claw_provider_models_are_scoped_by_agent_backend_rows(tmp_path):
-    workspace = tmp_path / "agent"
-    workspace.mkdir()
-    cfg = FlexibleAgentConfig(
-        name="test-flex",
-        workspace_dir=workspace,
-        system_md=workspace / "AGENT.md",
-        telegram_token_key="test-flex",
-        allowed_backends=[
-            {
-                "engine": "her",
-                "provider": "openrouter",
-                "models": ["deepseek/deepseek-v4-flash", "openai/gpt-4.1-mini"],
-            },
-            {
-                "engine": "her",
-                "provider": "deepseek",
-                "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
-            },
-            {
-                "engine": "her",
-                "provider": "ollama",
-                "model": "qwen2.5-coder:32b",
-            },
-        ],
-        active_backend="her",
-        project_root=workspace,
-    )
-    global_cfg = GlobalConfig(
-        authorized_id=1,
-        base_logs_dir=workspace / "logs",
-        base_media_dir=workspace / "media",
-        project_root=workspace,
-        her_providers={
-            "providers": {
-                "openrouter": {"base_url": "https://openrouter.invalid/v1"},
-                "deepseek": {"base_url": "https://deepseek.invalid/v1"},
-                "ollama": {"base_url": "http://localhost:11434/v1", "status": "disabled"},
-            }
-        },
-    )
-    manager = FlexibleBackendManager(cfg, global_cfg, secrets={})
-
-    options = {option["name"]: option for option in manager.get_claw_provider_options()}
-
-    assert options["openrouter"]["models"] == [
-        "deepseek/deepseek-v4-flash",
-        "openai/gpt-4.1-mini",
-    ]
-    assert options["deepseek"]["models"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
-    assert options["ollama"]["available"] is False
-    assert options["ollama"]["reason"] == "provider is disabled"
-
-
-def test_generic_claw_model_routes_do_not_leak_between_providers(tmp_path):
-    workspace = tmp_path / "agent"
-    workspace.mkdir()
-    cfg = FlexibleAgentConfig(
-        name="test-flex",
-        workspace_dir=workspace,
-        system_md=workspace / "AGENT.md",
-        telegram_token_key="test-flex",
-        allowed_backends=[
-            {
-                "engine": "her",
-                "models": [
-                    "openrouter:deepseek/deepseek-v4-flash",
-                    "deepseek:deepseek-v4-pro",
-                ],
-            }
-        ],
-        active_backend="her",
-        project_root=workspace,
-    )
-    global_cfg = GlobalConfig(
-        authorized_id=1,
-        base_logs_dir=workspace / "logs",
-        base_media_dir=workspace / "media",
-        project_root=workspace,
-        her_providers={
-            "providers": {
-                "openrouter": {"base_url": "https://openrouter.invalid/v1"},
-                "deepseek": {"base_url": "https://deepseek.invalid/v1"},
-            }
-        },
-    )
-    manager = FlexibleBackendManager(cfg, global_cfg, secrets={})
-
-    options = {option["name"]: option for option in manager.get_claw_provider_options()}
-
-    assert options["openrouter"]["models"] == ["deepseek/deepseek-v4-flash"]
-    assert options["deepseek"]["models"] == ["deepseek-v4-pro"]
-
-
-def test_claw_adapter_config_uses_provider_default_model_when_row_only_authorizes_provider(
-    tmp_path,
-):
-    workspace = tmp_path / "agent"
-    workspace.mkdir()
-    cfg = FlexibleAgentConfig(
-        name="test-flex",
-        workspace_dir=workspace,
-        system_md=workspace / "AGENT.md",
-        telegram_token_key="test-flex",
-        allowed_backends=[{"engine": "her", "provider": "deepseek"}],
-        active_backend="her",
-        project_root=workspace,
-    )
-    global_cfg = GlobalConfig(
-        authorized_id=1,
-        base_logs_dir=workspace / "logs",
-        base_media_dir=workspace / "media",
-        project_root=workspace,
-        her_providers={
-            "providers": {
-                "deepseek": {
-                    "base_url": "https://deepseek.invalid/v1",
-                    "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
-                    "default_model": "deepseek-v4-pro",
-                }
-            }
-        },
-    )
-    manager = FlexibleBackendManager(cfg, global_cfg, secrets={})
-
-    adapter_cfg = manager._build_adapter_config("her", cfg.allowed_backends[0])
-
-    assert adapter_cfg.extra["provider"] == "deepseek"
-    assert adapter_cfg.model == "deepseek-v4-pro"
-
-
-def test_claw_provider_and_model_persist_as_separate_state(tmp_path):
-    workspace = tmp_path / "agent"
-    manager = _make_manager(workspace)
-    manager.config.active_backend = "her"
-    manager.persist_state(
-        active_provider="deepseek",
-        active_model="deepseek-v4-flash",
-    )
-
-    state = _read_state(workspace)
-
-    assert state["active_backend"] == "her"
-    assert state["active_provider"] == "deepseek"
-    assert state["active_model"] == "deepseek-v4-flash"
-
-
 @pytest.mark.asyncio
 async def test_failed_her_alias_switch_never_rolls_back_to_retired_her(tmp_path):
     workspace = tmp_path / "agent"
@@ -571,7 +390,6 @@ async def test_failed_her_alias_switch_never_rolls_back_to_retired_her(tmp_path)
         ("codex-cli", "gpt-test", None),
     ]
     assert manager.config.active_backend == "codex-cli"
-    assert manager._active_provider_override is None
     assert manager._active_model_override == "gpt-test"
     state = _read_state(workspace)
     assert state["active_backend"] == "codex-cli"

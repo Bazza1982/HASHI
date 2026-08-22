@@ -129,7 +129,7 @@ def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):
     assert "has no explicit type" not in caplog.text
 
 
-def test_retired_her_configuration_ids_resolve_forward_to_v2(tmp_path):
+def test_public_her_configuration_id_resolves_forward_to_v2(tmp_path):
     config_path = tmp_path / "agents.json"
     secrets_path = tmp_path / "secrets.json"
     config_path.write_text(
@@ -139,9 +139,7 @@ def test_retired_her_configuration_ids_resolve_forward_to_v2(tmp_path):
                     "authorized_id": 0,
                     "base_logs_dir": "logs",
                     "base_media_dir": "media",
-                    "claw_providers": {
-                        "binary_path": "/opt/hashi/bin/claw",
-                        "max_permission_mode": "workspace-write",
+                    "her_providers": {
                         "providers": {
                             "openrouter": {
                                 "base_url": "https://openrouter.ai/api/v1",
@@ -156,8 +154,8 @@ def test_retired_her_configuration_ids_resolve_forward_to_v2(tmp_path):
                         "type": "flex",
                         "workspace_dir": "workspaces/flexy",
                         "system_md": "workspaces/flexy/agent.md",
-                        "allowed_backends": [{"engine": "claw-cli", "model": "deepseek/test"}],
-                        "active_backend": "claw-cli",
+                        "allowed_backends": [{"engine": "her", "model": "role-configured"}],
+                        "active_backend": "her",
                     }
                 ],
             }
@@ -168,11 +166,40 @@ def test_retired_her_configuration_ids_resolve_forward_to_v2(tmp_path):
 
     global_cfg, agents, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
-    assert global_cfg.her_providers["binary_path"] == "/opt/hashi/bin/claw"
-    assert global_cfg.claw_providers["binary_path"] == "/opt/hashi/bin/claw"
-    assert global_cfg.claw_providers["providers"]["openrouter"]["secret"] == "openrouter_key"
+    assert global_cfg.her_providers["providers"]["openrouter"]["secret"] == "openrouter_key"
     assert agents[0].active_backend == "her-v2"
     assert agents[0].allowed_backends[0]["engine"] == "her-v2"
+
+
+@pytest.mark.parametrize(
+    "legacy_fragment",
+    [
+        {"global": {"claw_providers": {"providers": {}}}},
+        {
+            "agent": {
+                "allowed_backends": [{"engine": "claw-cli"}],
+                "active_backend": "claw-cli",
+            }
+        },
+    ],
+)
+def test_removed_claw_configuration_is_rejected(tmp_path, legacy_fragment):
+    agent = {
+        "name": "legacy",
+        "type": "flex",
+        "workspace_dir": "workspaces/legacy",
+        "system_md": "workspaces/legacy/agent.md",
+        "allowed_backends": [{"engine": "codex-cli", "model": "gpt-5.4"}],
+        "active_backend": "codex-cli",
+    }
+    config_path, secrets_path = _write_base_files(tmp_path, agent)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["global"].update(legacy_fragment.get("global", {}))
+    payload["agents"][0].update(legacy_fragment.get("agent", {}))
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="claw"):
+        ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
 
 def test_flex_agent_does_not_receive_an_implicit_her_backend(tmp_path):

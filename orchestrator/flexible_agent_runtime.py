@@ -63,7 +63,7 @@ from remote.runtime_identity import read_runtime_claim
 from orchestrator import runtime_session
 from orchestrator import runtime_status
 from orchestrator import runtime_timeout
-from orchestrator import runtime_transfer, runtime_turn_context
+from orchestrator import runtime_transfer
 from orchestrator import runtime_workspace
 from orchestrator import runtime_wrapper
 from orchestrator import runtime_workzone
@@ -716,7 +716,6 @@ class FlexibleAgentRuntime:
             )
         runtime_delivery_order.register_turn(self, item)
         runtime_cross_session.capture_reply_target(self, item)
-        runtime_turn_context.capture_at_enqueue(self, item)
         self.request_activity.start(
             item.request_id,
             source=item.source,
@@ -888,8 +887,6 @@ class FlexibleAgentRuntime:
     def get_current_provider(self) -> str | None:
         if self.config.active_backend == HER_V2_ENGINE:
             return self.backend_manager.get_her_v2_configuration().provider
-        if self.config.active_backend == "her":
-            return self.backend_manager.get_active_provider()
         return None
 
     def reload_post_turn_observers(self) -> None:
@@ -4290,16 +4287,6 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, text, parse_mode="HTML", reply_markup=reply_markup)
             return
 
-        if target_engine == "her":
-            mode_flag = self._claw_provider_mode(with_context=with_context)
-            await self._reply_text(
-                update,
-                self._build_claw_provider_menu_text(mode_flag),
-                parse_mode="HTML",
-                reply_markup=self._claw_provider_keyboard(mode_flag),
-            )
-            return
-
         await self._reply_text(
             update,
             self._build_backend_model_prompt(target_engine, with_context),
@@ -4308,7 +4295,6 @@ class FlexibleAgentRuntime:
         )
 
     cmd_provider = runtime_model_selection.cmd_provider
-    callback_claw_provider = runtime_model_selection.callback_model
 
     async def cmd_handoff(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -4597,25 +4583,18 @@ class FlexibleAgentRuntime:
             selected = self.backend_manager.get_her_v2_configuration()
             option = self.backend_manager._her_v2_provider_option(selected.provider)
             return list(option["models"]) if option and option["available"] else []
-        if self.config.active_backend == "her":
-            return self.backend_manager.get_claw_models(self.get_current_provider())
         return get_available_models(self.config.active_backend)
 
     def _get_available_models_for(
         self,
         engine: str,
-        provider: str | None = None,
     ) -> list[str]:
         if engine == HER_V2_ENGINE:
             selected = self.backend_manager.get_her_v2_configuration()
             option = self.backend_manager._her_v2_provider_option(selected.provider)
             return list(option["models"]) if option and option["available"] else []
-        if engine == "her":
-            return self.backend_manager.get_claw_models(
-                provider or self.get_current_provider()
-            )
         models = get_available_models(engine)
-        backend_cfg = self._get_backend_cfg(engine, provider)
+        backend_cfg = self._get_backend_cfg(engine)
         if not backend_cfg:
             return models
 
@@ -4652,18 +4631,8 @@ class FlexibleAgentRuntime:
     def _get_backend_cfg(
         self,
         engine: str,
-        provider: str | None = None,
     ) -> dict | None:
         candidates = [b for b in self.config.allowed_backends if b["engine"] == engine]
-        if engine == "her" and provider:
-            return next(
-                (
-                    backend
-                    for backend in candidates
-                    if str(backend.get("provider") or "").strip() == provider
-                ),
-                next((backend for backend in candidates if not backend.get("provider")), None),
-            )
         return next(iter(candidates), None)
 
     def _get_current_effort(self) -> Optional[str]:
@@ -4671,10 +4640,7 @@ class FlexibleAgentRuntime:
             effort = getattr(self.backend_manager.current_backend, "effort", None)
             if effort:
                 return effort
-        backend_cfg = self._get_backend_cfg(
-            self.config.active_backend,
-            self.get_current_provider(),
-        )
+        backend_cfg = self._get_backend_cfg(self.config.active_backend)
         if backend_cfg:
             return backend_cfg.get("effort")
         return None
@@ -4691,10 +4657,7 @@ class FlexibleAgentRuntime:
             return
         if self.backend_manager.current_backend and hasattr(self.backend_manager.current_backend, "effort"):
             self.backend_manager.current_backend.effort = normalized
-        backend_cfg = self._get_backend_cfg(
-            self.config.active_backend,
-            self.get_current_provider(),
-        )
+        backend_cfg = self._get_backend_cfg(self.config.active_backend)
         if backend_cfg is not None:
             backend_cfg["effort"] = normalized
         self.backend_manager.persist_state()
@@ -4738,14 +4701,6 @@ class FlexibleAgentRuntime:
         )
 
     _backend_keyboard = runtime_model_selection.backend_keyboard
-    _claw_provider_mode = runtime_model_selection.claw_provider_mode
-    _claw_provider_options = runtime_model_selection.claw_provider_options
-    _claw_provider_option = runtime_model_selection.claw_provider_option
-    _claw_provider_callback_error = runtime_model_selection.claw_provider_callback_error
-    _claw_provider_keyboard = runtime_model_selection.claw_provider_keyboard
-    _claw_provider_model_keyboard = runtime_model_selection.claw_provider_model_keyboard
-    _build_claw_provider_menu_text = runtime_model_selection.claw_provider_menu_text
-    _build_claw_provider_model_text = runtime_model_selection.claw_provider_model_text
 
     def _model_keyboard(self, current_model: Optional[str] = None, engine: Optional[str] = None) -> InlineKeyboardMarkup:
         active_engine = engine or self.config.active_backend
@@ -4788,11 +4743,6 @@ class FlexibleAgentRuntime:
             consequence = (
                 "HER v2 effort controls Planning, Replanning, Review, and sub-agent "
                 "availability. It never changes provider reasoning."
-            )
-        elif self.config.active_backend == "her":
-            consequence = (
-                "For legacy HER, low through max+ control one Agent's execution budget; "
-                "ultra coordinates bounded multi-agent work. None changes provider reasoning depth."
             )
         else:
             consequence = (
@@ -4994,11 +4944,6 @@ class FlexibleAgentRuntime:
             consequence = (
                 "HER v2 effort controls Planning, Replanning, Review, and sub-agent "
                 "availability. It does not change provider reasoning."
-            )
-        elif self.config.active_backend == "her":
-            consequence = (
-                "Legacy HER effort controls its execution budget and does not change "
-                "provider reasoning depth."
             )
         else:
             consequence = (

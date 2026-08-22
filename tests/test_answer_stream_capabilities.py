@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.claude_cli import ClaudeCLIAdapter
-from adapters.claw_cli import ClawCLIAdapter
 from adapters.codex_cli import CodexCLIAdapter
 from adapters.deepseek_api import DeepSeekAdapter
 from adapters.gemini_cli import GeminiCLIAdapter
@@ -57,10 +56,8 @@ def test_cli_backends_do_not_advertise_answer_stream_by_default(tmp_path):
     codex_capabilities = CodexCLIAdapter._define_capabilities(
         CodexCLIAdapter.__new__(CodexCLIAdapter)
     )
-    claw = ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key")
 
     assert getattr(codex_capabilities, "supports_answer_stream", False) is False
-    assert getattr(claw.capabilities, "supports_answer_stream", False) is False
 
 
 def test_backend_presentation_capabilities_have_explicit_meaning(tmp_path):
@@ -74,7 +71,6 @@ def test_backend_presentation_capabilities_have_explicit_meaning(tmp_path):
         "deepseek": DeepSeekAdapter(cfg, SimpleNamespace(), api_key="test-key"),
         "xai": XaiApiAdapter(cfg, SimpleNamespace(), api_key="test-key"),
         "ollama": OllamaAdapter(cfg, SimpleNamespace(), api_key=None),
-        "claw": ClawCLIAdapter(cfg, SimpleNamespace(), api_key="test-key"),
     }
 
     for backend in backends.values():
@@ -84,10 +80,9 @@ def test_backend_presentation_capabilities_have_explicit_meaning(tmp_path):
     assert backends["codex"].capabilities.supports_thinking_stream is False
     assert backends["codex"].capabilities.supports_commentary_stream is True
     assert backends["gemini"].capabilities.supports_thinking_stream is False
-    assert backends["claw"].capabilities.supports_thinking_stream is False
     for name in ("claude", "grok", "openrouter", "deepseek", "xai", "ollama"):
         assert backends[name].capabilities.supports_thinking_stream is True
-    for name in ("claude", "gemini", "grok", "openrouter", "deepseek", "xai", "ollama", "claw"):
+    for name in ("claude", "gemini", "grok", "openrouter", "deepseek", "xai", "ollama"):
         assert backends[name].capabilities.supports_commentary_stream is False
 
 

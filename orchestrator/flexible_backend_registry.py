@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 HER_V2_ENGINE = "her-v2"
-RETIRED_HER_ENGINE_ALIASES = frozenset({"her", "claw-cli"})
+RETIRED_HER_ENGINE_ALIASES = frozenset({"her"})
+REMOVED_ENGINE_IDS = frozenset({"claw-cli"})
 CLI_ENGINES = frozenset(
     {
         "gemini-cli",
@@ -199,10 +200,11 @@ def get_backend_entry(engine: str) -> dict:
 
 
 def canonical_backend_engine(engine: str | None) -> str:
-    """Resolve retired HER IDs forward to the sole supported HER runtime.
+    """Resolve the public HER compatibility ID to the supported runtime.
 
-    ``her`` and ``claw-cli`` remain accepted only as configuration migration
-    aliases.  They never select or fall back to the retired HER implementation.
+    ``her`` remains a public migration alias. ``claw-cli`` is deliberately not
+    an alias: it named the removed upstream-derived runtime and must not imply
+    that the clean-room HER v2 implementation is Claw-compatible.
     """
 
     value = str(engine or "").strip()
@@ -229,6 +231,10 @@ def normalize_allowed_backends(backends: list) -> list[dict]:
     for raw in backends or []:
         item = {"engine": raw} if isinstance(raw, str) else dict(raw)
         source_engine = str(item.get("engine") or "").strip()
+        if source_engine in REMOVED_ENGINE_IDS:
+            raise ValueError(
+                "Backend 'claw-cli' has been removed; configure 'her-v2' instead."
+            )
         if explicit_v2 and source_engine in RETIRED_HER_ENGINE_ALIASES:
             continue
         engine = canonical_backend_engine(source_engine)

@@ -22,13 +22,12 @@ class _Logger:
 def _runtime(tmp_path: Path, *, mode: str = "fixed") -> SimpleNamespace:
     backend = SimpleNamespace(
         _session_id="primary-session",
-        _claw_model=lambda: "local/deepseek-v4-pro",
         capabilities=SimpleNamespace(supports_sessions=True),
     )
     return SimpleNamespace(
         name="momo",
         workspace_dir=tmp_path,
-        config=SimpleNamespace(active_backend="her", workspace_dir=tmp_path),
+        config=SimpleNamespace(active_backend="her-v2", workspace_dir=tmp_path),
         backend_manager=SimpleNamespace(agent_mode=mode, current_backend=backend),
         current_request_meta=None,
         _request_meta_by_id={},
@@ -53,23 +52,18 @@ def _item(**overrides) -> SimpleNamespace:
 def _response(
     text: str,
     *,
-    session_id: str,
     completion: str = "completed",
     stop_reason: str = "end_turn",
     recommendation: str = "",
     pending_interaction: dict[str, str] | None = None,
-    session_scope: str = "isolated_per_run",
 ) -> BackendResponse:
     response = BackendResponse(
         text=text,
         duration_ms=1,
         stop_reason=stop_reason,
         stream_metadata={
-            "claw_completion_status": completion,
-            "claw_stop_reason": stop_reason,
-            "her_session_scope": session_scope,
-            "her_session_id": session_id,
-            "her_model": "local/deepseek-v4-pro",
+            "completion_status": completion,
+            "completion_stop_reason": stop_reason,
             "recommended_action": recommendation,
         },
     )
@@ -100,7 +94,7 @@ def test_scheduler_choice_receipt_is_persisted_and_injected(tmp_path):
         runtime,
         item,
         assistant_text=visible,
-        response=_response(visible, session_id="scheduler-session"),
+        response=_response(visible),
         delivered=True,
         completion_path="foreground",
     )
@@ -124,52 +118,6 @@ def test_scheduler_choice_receipt_is_persisted_and_injected(tmp_path):
     assert "read-only context" in sections[0][1]
 
 
-def test_ultra_structured_choice_receipt_does_not_depend_on_rendered_text(tmp_path):
-    runtime = _runtime(tmp_path)
-    item = _item(request_id="req-ultra-choice")
-    response = _response(
-        "哥哥，您想先做哪一项？",
-        session_id="ultra-primary-session",
-        completion="incomplete",
-        stop_reason="requires_user_input",
-    )
-    response.stream_metadata["her_ultra"] = {
-        "run_id": "run-choice",
-        "status": "incomplete",
-        "pending_interaction": {
-            "interaction_id": "run-choice:interaction:1",
-            "kind": "choice",
-            "labels": ["A", "B", "C"],
-        },
-    }
-
-    receipt = runtime_cross_session.record_turn_result(
-        runtime,
-        item,
-        assistant_text=response.text,
-        response=response,
-        delivered=True,
-        completion_path="foreground",
-    )
-
-    assert receipt is not None
-    assert receipt["pending_interaction"] == {
-        "kind": "choice",
-        "labels": ["A", "B", "C"],
-        "interaction_id": "run-choice:interaction:1",
-    }
-    reply = _item(request_id="req-ultra-reply", source="text", prompt="B")
-    _begin(runtime, reply)
-    bound_prompt = runtime_cross_session.prepare_reply_binding(
-        runtime, reply, reply.prompt
-    )
-    assert "authoritative referent resolution" in bound_prompt
-    assert reply._cross_session_receipt["reply_kind"] == "choice"
-    assert runtime.current_request_meta["resume_session_id"] == (
-        "ultra-primary-session"
-    )
-
-
 def test_primary_pending_turn_persists_checkpoint_and_binds_a_full_flex_reply(tmp_path):
     runtime = _runtime(tmp_path, mode="flex")
     item = _item(
@@ -180,10 +128,8 @@ def test_primary_pending_turn_persists_checkpoint_and_binds_a_full_flex_reply(tm
     )
     response = _response(
         "I inspected the workbook. Which mapping should I use?",
-        session_id="primary-pending-session",
         completion="incomplete",
         stop_reason="requires_user_input",
-        session_scope="persistent",
     )
     response.stream_metadata.update(
         {
@@ -252,7 +198,6 @@ def test_primary_pending_turn_persists_checkpoint_and_binds_a_full_flex_reply(tm
     assert "read-1" in bound_prompt
     assert "preserve all current workbook formatting" in bound_prompt
     assert reply._cross_session_receipt["reply_kind"] == "answer"
-    assert runtime.current_request_meta["resume_session_id"] == "primary-pending-session"
 
 
 def test_active_receipt_is_not_trimmed_out_by_recent_completed_receipts(tmp_path):
@@ -264,7 +209,7 @@ def test_active_receipt_is_not_trimmed_out_by_recent_completed_receipts(tmp_path
             runtime,
             item,
             assistant_text=text,
-            response=_response(text, session_id=f"completed-session-{index}"),
+            response=_response(text),
             delivered=True,
             completion_path="foreground",
         )
@@ -274,7 +219,7 @@ def test_active_receipt_is_not_trimmed_out_by_recent_completed_receipts(tmp_path
         runtime,
         active_item,
         assistant_text=active_text,
-        response=_response(active_text, session_id="active-session"),
+        response=_response(active_text),
         delivered=True,
         completion_path="foreground",
     )
@@ -299,7 +244,6 @@ def test_incomplete_status_and_legacy_recommendation_do_not_invent_a_pending_rep
         assistant_text=visible,
         response=_response(
             visible,
-            session_id="scheduler-session",
             completion="incomplete",
             stop_reason="max_iterations",
             recommendation="continue",
@@ -314,7 +258,7 @@ def test_incomplete_status_and_legacy_recommendation_do_not_invent_a_pending_rep
     assert receipt["active"] is False
 
 
-def test_continue_binds_exact_isolated_session(tmp_path):
+def test_continue_binds_cross_session_receipt_without_backend_resume(tmp_path):
     runtime = _runtime(tmp_path)
     scheduler_item = _item()
     visible = "Task incomplete. CONTINUE from the saved session."
@@ -324,7 +268,6 @@ def test_continue_binds_exact_isolated_session(tmp_path):
         assistant_text=visible,
         response=_response(
             visible,
-            session_id="scheduler-session",
             completion="incomplete",
             stop_reason="max_iterations",
             recommendation="continue",
@@ -348,49 +291,8 @@ def test_continue_binds_exact_isolated_session(tmp_path):
     metadata = runtime._request_meta_by_id[continuation.request_id]
     assert "cross-session reply binding" in prompt
     assert "Task incomplete" in prompt
-    assert metadata["session_scope"] == "isolated_resume"
-    assert metadata["resume_session_id"] == "scheduler-session"
-    assert continuation._cross_session_receipt["reply_kind"] == "continuation"
-
-
-def test_model_mismatch_keeps_bound_reply_out_of_primary_session(tmp_path):
-    runtime = _runtime(tmp_path)
-    scheduler_item = _item()
-    visible = "Task incomplete. CONTINUE from the saved session."
-    runtime_cross_session.record_turn_result(
-        runtime,
-        scheduler_item,
-        assistant_text=visible,
-        response=_response(
-            visible,
-            session_id="scheduler-session",
-            completion="incomplete",
-            stop_reason="max_iterations",
-            recommendation="continue",
-            pending_interaction={"kind": "continuation", "token": "CONTINUE"},
-        ),
-        delivered=True,
-        completion_path="foreground",
-    )
-    runtime.backend_manager.current_backend._claw_model = lambda: "other/model"
-    runtime.get_current_model = lambda: "other/model"
-    continuation = _item(
-        request_id="req-continue",
-        source="text",
-        prompt="continue",
-        summary="Continue",
-    )
-    _begin(runtime, continuation)
-
-    runtime_cross_session.prepare_reply_binding(
-        runtime,
-        continuation,
-        continuation.prompt,
-    )
-
-    metadata = runtime.current_request_meta
-    assert metadata["session_scope"] == "isolated_per_run"
     assert "resume_session_id" not in metadata
+    assert continuation._cross_session_receipt["reply_kind"] == "continuation"
 
 
 def test_choice_reply_uses_newest_delivered_choice_set(tmp_path):
@@ -408,7 +310,7 @@ def test_choice_reply_uses_newest_delivered_choice_set(tmp_path):
         runtime,
         old_item,
         assistant_text=old_text,
-        response=_response(old_text, session_id="old-session"),
+        response=_response(old_text),
         delivered=True,
         completion_path="foreground",
     )
@@ -416,7 +318,7 @@ def test_choice_reply_uses_newest_delivered_choice_set(tmp_path):
         runtime,
         new_item,
         assistant_text=new_text,
-        response=_response(new_text, session_id="new-session"),
+        response=_response(new_text),
         delivered=True,
         completion_path="foreground",
     )
@@ -432,7 +334,6 @@ def test_choice_reply_uses_newest_delivered_choice_set(tmp_path):
 
     assert "New action" in prompt
     assert "Old action" not in prompt
-    assert runtime.current_request_meta["resume_session_id"] == "new-session"
     assert reply._cross_session_receipt["reply_kind"] == "choice"
     receipts = runtime_cross_session.load_receipts(runtime)
     assert [receipt["active"] for receipt in receipts] == [False, True]
@@ -457,7 +358,6 @@ def test_reply_target_is_frozen_at_enqueue_before_later_scheduler_delivery(tmp_p
         assistant_text=visible,
         response=_response(
             visible,
-            session_id="later-session",
             completion="incomplete",
             stop_reason="max_iterations",
             recommendation="continue",
@@ -482,7 +382,7 @@ def test_reply_target_captured_at_enqueue_survives_later_scheduler_delivery(tmp_
         runtime,
         first_item,
         assistant_text=first_text,
-        response=_response(first_text, session_id="first-session"),
+        response=_response(first_text),
         delivered=True,
         completion_path="background",
     )
@@ -501,7 +401,7 @@ def test_reply_target_captured_at_enqueue_survives_later_scheduler_delivery(tmp_
         runtime,
         second_item,
         assistant_text=second_text,
-        response=_response(second_text, session_id="second-session"),
+        response=_response(second_text),
         delivered=True,
         completion_path="background",
     )
@@ -512,7 +412,6 @@ def test_reply_target_captured_at_enqueue_survives_later_scheduler_delivery(tmp_
     assert binding["request_id"] == "req-first-scheduler"
     assert "First visible action" in prompt
     assert "Later action" not in prompt
-    assert runtime.current_request_meta["resume_session_id"] == "first-session"
 
 
 def test_newer_primary_choice_prevents_stale_scheduler_choice_binding(tmp_path):
@@ -525,7 +424,7 @@ def test_newer_primary_choice_prevents_stale_scheduler_choice_binding(tmp_path):
         runtime,
         scheduler_item,
         assistant_text=scheduler_text,
-        response=_response(scheduler_text, session_id="scheduler-session"),
+        response=_response(scheduler_text),
         delivered=True,
         completion_path="foreground",
     )
@@ -542,8 +441,6 @@ def test_newer_primary_choice_prevents_stale_scheduler_choice_binding(tmp_path):
         assistant_text=primary_text,
         response=_response(
             primary_text,
-            session_id="primary-session",
-            session_scope="persistent",
         ),
         delivered=True,
         completion_path="foreground",
@@ -577,7 +474,6 @@ def test_newer_primary_question_with_trailing_emoji_closes_scheduler_prompt(tmp_
         assistant_text=scheduler_text,
         response=_response(
             scheduler_text,
-            session_id="scheduler-session",
             completion="incomplete",
             stop_reason="max_iterations",
             recommendation="continue",
@@ -600,8 +496,6 @@ def test_newer_primary_question_with_trailing_emoji_closes_scheduler_prompt(tmp_
         assistant_text=primary_text,
         response=_response(
             primary_text,
-            session_id="primary-session",
-            session_scope="persistent",
         ),
         delivered=True,
         completion_path="foreground",
@@ -622,7 +516,7 @@ def test_newer_scheduler_completion_closes_older_scheduler_choice(tmp_path):
         runtime,
         old_item,
         assistant_text=old_text,
-        response=_response(old_text, session_id="old-session"),
+        response=_response(old_text),
         delivered=True,
         completion_path="foreground",
     )
@@ -633,7 +527,6 @@ def test_newer_scheduler_completion_closes_older_scheduler_choice(tmp_path):
         assistant_text="The newer scheduled task completed.",
         response=_response(
             "The newer scheduled task completed.",
-            session_id="new-session",
         ),
         delivered=True,
         completion_path="foreground",
@@ -653,7 +546,7 @@ def test_successful_bound_reply_resolves_receipt(tmp_path):
         runtime,
         scheduler_item,
         assistant_text=visible,
-        response=_response(visible, session_id="scheduler-session"),
+        response=_response(visible),
         delivered=True,
         completion_path="foreground",
     )
@@ -670,7 +563,7 @@ def test_successful_bound_reply_resolves_receipt(tmp_path):
         runtime,
         reply,
         assistant_text="Action completed.",
-        response=_response("Action completed.", session_id="scheduler-session"),
+        response=_response("Action completed."),
         delivered=True,
         completion_path="foreground",
     )
@@ -691,7 +584,6 @@ def test_failed_bound_reply_keeps_original_checkpoint_retryable(tmp_path):
         assistant_text=visible,
         response=_response(
             visible,
-            session_id="scheduler-session",
             completion="incomplete",
             stop_reason="max_iterations",
             recommendation="continue",
@@ -719,7 +611,6 @@ def test_failed_bound_reply_keeps_original_checkpoint_retryable(tmp_path):
 
     receipt = runtime_cross_session.load_receipts(runtime)[0]
     assert receipt["active"] is True
-    assert receipt["session_id"] == "scheduler-session"
     assert receipt["assistant_text"] == visible
     assert receipt["last_attempt"]["status"] == "failed"
     assert receipt["last_attempt"]["delivered"] is True

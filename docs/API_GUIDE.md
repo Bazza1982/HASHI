@@ -115,14 +115,13 @@ available. Existing agents with an explicit Composer selection keep it until a
 user changes their model.
 
 `grok-4.5` is also available through the API Gateway's `xai-api` backend. It
-uses xAI's Responses API route and was smoke-tested through HASHI's xAI OAuth
-adapter. The three Codex API Gateway variants `gpt-5.6-sol`,
+uses xAI's Responses API route with the credential source configured for that
+backend. The three Codex API Gateway variants `gpt-5.6-sol`,
 `gpt-5.6-terra`, and `gpt-5.6-luna` remain the tested GPT-5.6 choices.
 
-**Coming soon:** direct Grok OAuth for agent runtimes via Claw (`her` +
-HASHI-owned device login, no Hermes and no `grok-cli`). Code is in tree;
-production login waits on HASHI's own xAI OAuth `client_id`. See
-[HASHI_XAI_HER_OAUTH.md](HASHI_XAI_HER_OAUTH.md).
+The separate HASHI-native device-login utility is documented in
+[HASHI_XAI_OAUTH.md](HASHI_XAI_OAUTH.md). Its token store is not implicitly
+injected into an active backend.
 
 ### GPT-5.6 through Codex CLI
 

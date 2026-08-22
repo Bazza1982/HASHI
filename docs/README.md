@@ -73,7 +73,7 @@ deployment validation continues.
 - [WRAPPER_AGENT_MODE_PLAN.md](WRAPPER_AGENT_MODE_PLAN.md) — implemented v3.2 wrapper agent mode design, command model, state contract, and acceptance record
 - [API_GUIDE.md](API_GUIDE.md) — OpenAI-compatible API Gateway guide, including per-instance gateway port rules
 - [HASHI_XAI_API_BACKEND_PLAN.md](HASHI_XAI_API_BACKEND_PLAN.md) — xAI/Grok API backend design using Hermes-managed OAuth refresh and OpenAI-compatible gateway routes
-- [HASHI_XAI_HER_OAUTH.md](HASHI_XAI_HER_OAUTH.md) — **Coming soon:** direct Grok OAuth (HASHI device login → HER; no Hermes, no grok-cli). Code landed; live use needs HASHI's own xAI `client_id`
+- [HASHI_XAI_OAUTH.md](HASHI_XAI_OAUTH.md) — HASHI-native xAI device-login and token-store commands; backend consumption remains separately configured
 - [OPTION_D_BROWSER_BRIDGE.md](OPTION_D_BROWSER_BRIDGE.md) — Option D Chrome extension browser bridge (actions, native host, logging)
 - [BROWSER_BRIDGE_HOVER_NOTE.md](BROWSER_BRIDGE_HOVER_NOTE.md) — Extension `hover` (CDP mouseMoved) for flyouts such as LinkedIn reactions
 - [ANATTA_MIGRATION_PLAN.md](ANATTA_MIGRATION_PLAN.md) — Anatta live self-assembly architecture and validation plan
@@ -89,17 +89,12 @@ deployment validation continues.
 - [AUDIT_VIBE_CODING_SUPERLOOP.md](AUDIT_VIBE_CODING_SUPERLOOP.md) — end-to-end vibe-coded product superloop with mandatory independent reviews and live runtime exit gates
 - [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md) — local-first voice runtime plan for the WhatsApp Desktop call bridge and future provider transports
 - [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) — current unreleased integration identity, verification evidence, open rollout gates, and GitHub publication boundary
-- [HER_BACKEND_CONTRACT.md](HER_BACKEND_CONTRACT.md) — active HER ownership, sessions, Tool Gateway, streaming, multimodal, packaging, and certification contract
 - [HER_HABIT_MEDITATION.md](HER_HABIT_MEDITATION.md) — default-off adapter-direct HER Habit controls, JSON persistence, recovery, audit, and change notifications
 - [her_multimedia_multimodal_plan.md](her_multimedia_multimodal_plan.md) — implemented HER media bridge, security limits, compatibility paths, and remaining live rollout matrix
-- [HER_TOOL_GATEWAY_TELEMETRY_PLAN.md](HER_TOOL_GATEWAY_TELEMETRY_PLAN.md) — long-term HER packaging, Tool Gateway/MCP, and structured thinking/token telemetry plan
-- [HER_CODE_MODULE_PLAN.md](HER_CODE_MODULE_PLAN.md) — HER module packaging notes, upstream Claw runtime expectations, and local release-binary evidence
 - [HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md](HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md) — transactional local Rust rebuild, verification, development selection, targeted reboot, and rollback plan
 - [HER_REBUILD_PARALLEL_DEVELOPMENT_CHECKPOINT.md](HER_REBUILD_PARALLEL_DEVELOPMENT_CHECKPOINT.md) — safe takeover, integration, live adoption, cache verification, and preserved Zelda release provenance
-- [HER_ULTRA_EFFORT_LEVEL_PLAN.md](HER_ULTRA_EFFORT_LEVEL_PLAN.md) — implemented HER-private coordinated multi-agent effort above the single-Agent `max+` ceiling
-- [HER_COMPREHENSIVE_TEST_PLAN.md](HER_COMPREHENSIVE_TEST_PLAN.md) — full HER × DeepSeek certification matrix across providers, models, modes, efforts, streaming, continuity, and exit paths
-- [HER_bug_journal.md](HER_bug_journal.md) — permanent HER defect and regression record, seeded with the known 2026-08-11 failures
-- [HER Debug Superloop template](../superloops/templates/her_debug/README.md) — two-stage Flash-before-Pro test/fix/retest controller with Lin Yueru-owned `/nudge` liveness and strict no-fallback gates
+- [HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) — authoritative HER v2 lifecycle, provider, delivery, and compatibility contract
+- [HER_V2_TESTING_PLAN.md](HER_V2_TESTING_PLAN.md) — consolidated HER v2 behavioral and integration test contract
 
 ### Nagare Flow System (v2.1)
 - [NAGARE_FLOW_SYSTEM.md](NAGARE_FLOW_SYSTEM.md) — Complete technical reference for the multi-agent workflow orchestration engine

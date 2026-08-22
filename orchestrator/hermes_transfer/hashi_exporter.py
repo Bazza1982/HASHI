@@ -389,7 +389,7 @@ def _post_migration_self_check(agent_id: str, display_name: str) -> str:
             f"Target Hermes profile for HASHI agent `{agent_id}` (`{display_name}`) must confirm:",
             "",
             "1. Imported identity is readable.",
-            "2. Skill files are absent or retained only as an inert archive; HER/Claw Skill loading remains disabled.",
+            "2. Skill files are absent or retained only as an inert archive; transfer does not activate them.",
             "3. Memory import counts match `memory/import_notes.json`.",
             "4. Schedules are paused and require manual resume.",
             "5. No secrets were imported unless explicitly approved.",

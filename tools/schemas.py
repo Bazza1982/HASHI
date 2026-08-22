@@ -1567,8 +1567,7 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
         "function": {
             "name": "hashi_scheduler_list",
             "description": (
-                "List jobs from the authoritative HASHI Scheduler for this agent. "
-                "This is not the Claw-local cron store."
+                "List jobs from the authoritative HASHI Scheduler for this agent."
             ),
             "parameters": {
                 "type": "object",

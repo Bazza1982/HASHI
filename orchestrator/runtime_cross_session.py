@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
-from orchestrator import runtime_retry, runtime_turn_context
+from orchestrator import runtime_retry
 
 
 STATE_VERSION = 2
@@ -18,9 +18,6 @@ MAX_STORED_PROMPT_CHARS = 20_000
 MAX_STORED_RESPONSE_CHARS = 24_000
 MAX_CONTEXT_PROMPT_CHARS = 5_000
 MAX_CONTEXT_RESPONSE_CHARS = 8_000
-
-HER_SESSION_SCOPE_ISOLATED = "isolated_per_run"
-HER_SESSION_SCOPE_ISOLATED_RESUME = "isolated_resume"
 
 _DIRECT_REPLY_SOURCES = frozenset(
     {"telegram", "text", "voice", "voice_transcript"}
@@ -183,10 +180,16 @@ def _stream_metadata(response: Any) -> dict[str, Any]:
 
 def _completion_status(response: Any, error: str) -> tuple[str, str, str]:
     metadata = _stream_metadata(response)
-    completion = str(metadata.get("claw_completion_status") or "").strip().lower()
+    her_v2 = metadata.get("her_v2")
+    her_v2 = her_v2 if isinstance(her_v2, Mapping) else {}
+    completion = str(
+        metadata.get("completion_status")
+        or her_v2.get("terminal_state")
+        or ""
+    ).strip().lower()
     stop_reason = (
         str(
-            metadata.get("claw_stop_reason")
+            metadata.get("completion_stop_reason")
             or _value(response, "stop_reason", "")
             or ""
         )
@@ -218,11 +221,6 @@ def _pending_interaction(
     metadata: Mapping[str, Any],
 ) -> dict[str, Any] | None:
     structured = metadata.get("pending_interaction")
-    if not isinstance(structured, Mapping):
-        ultra = metadata.get("her_ultra")
-        structured = (
-            ultra.get("pending_interaction") if isinstance(ultra, Mapping) else None
-        )
     if isinstance(structured, Mapping):
         kind = str(structured.get("kind") or "").strip().lower()
         interaction_id = str(structured.get("interaction_id") or "").strip()
@@ -278,15 +276,6 @@ def _pending_interaction(
 
 
 def _current_model(runtime: Any) -> str:
-    backend = getattr(
-        getattr(runtime, "backend_manager", None), "current_backend", None
-    )
-    claw_model = getattr(backend, "_claw_model", None)
-    if callable(claw_model):
-        try:
-            return str(claw_model() or "").strip()
-        except Exception:
-            pass
     getter = getattr(runtime, "get_current_model", None)
     if callable(getter):
         try:
@@ -318,11 +307,7 @@ def _bound_receipt_id(runtime: Any, item: Any) -> str:
 
 def _should_record(runtime: Any, item: Any, response: Any) -> bool:
     source = str(_value(item, "source", "") or "").strip().lower()
-    if source.startswith("scheduler") or _bound_receipt_id(runtime, item):
-        return True
-    metadata = _stream_metadata(response)
-    scope = str(metadata.get("her_session_scope") or "").strip().lower()
-    return scope in {HER_SESSION_SCOPE_ISOLATED, HER_SESSION_SCOPE_ISOLATED_RESUME}
+    return source.startswith("scheduler") or bool(_bound_receipt_id(runtime, item))
 
 
 def _supersede_active_receipts(
@@ -356,12 +341,6 @@ def record_turn_result(
     completion_path: str,
 ) -> dict[str, Any] | None:
     """Persist a no-op receipt for a turn outside the primary backend session."""
-    if delivered:
-        runtime_turn_context.record_delivered_turn(
-            runtime,
-            item,
-            assistant_text or error,
-        )
     metadata = _stream_metadata(response)
     status, completion_status, stop_reason = _completion_status(response, error)
     pending = _pending_interaction(
@@ -397,9 +376,7 @@ def record_turn_result(
     )
     now = time.time()
     sequence = _next_sequence(state)
-    session_id = str(metadata.get("her_session_id") or "").strip()
-    session_scope = str(metadata.get("her_session_scope") or "").strip()
-    model = str(metadata.get("her_model") or _current_model(runtime) or "").strip()
+    model = _current_model(runtime)
     backend = str(getattr(getattr(runtime, "config", None), "active_backend", "") or "")
 
     if receipt is None:
@@ -444,8 +421,6 @@ def record_turn_result(
             "completion_path": str(completion_path or "foreground"),
             "backend": backend,
             "model": model,
-            "session_id": session_id or str(receipt.get("session_id") or ""),
-            "session_scope": session_scope or str(receipt.get("session_scope") or ""),
             "status": status,
             "completion_status": completion_status,
             "stop_reason": stop_reason,
@@ -559,7 +534,7 @@ def _matching_receipt(runtime: Any, item: Any) -> tuple[dict[str, Any] | None, s
 
 
 def capture_reply_target(runtime: Any, item: Any) -> dict[str, str] | None:
-    """Freeze the eligible isolated reply target at user-message enqueue time."""
+    """Freeze the eligible cross-session reply target at enqueue time."""
     if bool(_value(item, "_cross_session_target_captured", False)):
         attached = _value(item, "_cross_session_receipt", None)
         return dict(attached) if isinstance(attached, Mapping) else None
@@ -576,7 +551,6 @@ def capture_reply_target(runtime: Any, item: Any) -> dict[str, str] | None:
         "receipt_id": str(receipt.get("receipt_id") or ""),
         "request_id": str(receipt.get("request_id") or ""),
         "reply_kind": reply_kind,
-        "session_id": str(receipt.get("session_id") or ""),
     }
     try:
         setattr(item, "_cross_session_receipt", binding)
@@ -586,27 +560,8 @@ def capture_reply_target(runtime: Any, item: Any) -> dict[str, str] | None:
     return binding
 
 
-def _can_resume_exact_session(runtime: Any, receipt: Mapping[str, Any]) -> bool:
-    if not _uses_her_backend(runtime):
-        return False
-    if not str(receipt.get("session_id") or "").strip():
-        return False
-    receipt_model = str(receipt.get("model") or "").strip()
-    current_model = _current_model(runtime)
-    return not receipt_model or not current_model or receipt_model == current_model
-
-
-def _uses_her_backend(runtime: Any) -> bool:
-    return (
-        str(getattr(getattr(runtime, "config", None), "active_backend", "") or "")
-        .strip()
-        .lower()
-        == "her"
-    )
-
-
 def prepare_reply_binding(runtime: Any, item: Any, effective_prompt: str) -> str:
-    """Apply only the isolated reply target captured when the message arrived."""
+    """Apply only the cross-session target captured when the message arrived."""
     if not bool(_value(item, "_cross_session_target_captured", False)):
         capture_reply_target(runtime, item)
     binding = _value(item, "_cross_session_receipt", None)
@@ -618,17 +573,11 @@ def prepare_reply_binding(runtime: Any, item: Any, effective_prompt: str) -> str
     meta = _request_meta(runtime, str(_value(item, "request_id", "") or ""))
     if meta:
         meta["cross_session_receipt"] = binding
-        if _uses_her_backend(runtime):
-            meta["session_scope"] = HER_SESSION_SCOPE_ISOLATED
-            if _can_resume_exact_session(runtime, receipt):
-                meta["session_scope"] = HER_SESSION_SCOPE_ISOLATED_RESUME
-                meta["resume_session_id"] = binding["session_id"]
     logger = getattr(runtime, "logger", None)
     if logger is not None:
         logger.info(
             f"Bound request {_value(item, 'request_id', '')} to cross-session "
-            f"receipt {binding['receipt_id']} ({reply_kind}, "
-            f"exact_resume={bool(meta.get('resume_session_id')) if meta else False})"
+            f"receipt {binding['receipt_id']} ({reply_kind})"
         )
 
     task_prompt = _bounded_text(receipt.get("task_prompt"), MAX_CONTEXT_PROMPT_CHARS)
@@ -663,7 +612,7 @@ def prepare_reply_binding(runtime: Any, item: Any, effective_prompt: str) -> str
 
 
 def context_section(runtime: Any, item: Any) -> list[tuple[str, str]]:
-    """Inject recent isolated-turn receipts into fixed and flex user turns."""
+    """Inject recent scheduled-turn receipts into fixed and flex user turns."""
     source = str(_value(item, "source", "") or "").strip().lower()
     if source.startswith("scheduler") or source in _SKIP_CONTEXT_SOURCES:
         return []

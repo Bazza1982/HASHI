@@ -34,7 +34,7 @@ def test_build_steer_prompt_keeps_original_and_forbids_reset():
     prompt = runtime_control.build_steer_prompt(
         direction="also include xxx in your tasks",
         original_prompt="Build the OAuth login flow",
-        backend="her",
+        backend="her-v2",
     )
     assert "[HASHI /steer" in prompt
     assert "also include xxx in your tasks" in prompt
@@ -235,7 +235,7 @@ async def test_cmd_steer_treats_detached_her_generation_as_busy():
     runtime = SimpleNamespace(
         name="sunny",
         logger=SimpleNamespace(warning=lambda *a, **k: None),
-        config=SimpleNamespace(active_backend="her", engine="her"),
+        config=SimpleNamespace(active_backend="her-v2", engine="her-v2"),
         queue=asyncio.Queue(),
         backend_manager=SimpleNamespace(
             current_backend=SimpleNamespace(
@@ -317,7 +317,7 @@ async def test_cmd_stop_persists_active_task_before_killing_backend(tmp_path):
         name="ajiao",
         workspace_dir=tmp_path,
         logger=SimpleNamespace(warning=lambda *a, **k: None),
-        config=SimpleNamespace(active_backend="her", engine="her"),
+        config=SimpleNamespace(active_backend="her-v2", engine="her-v2"),
         queue=asyncio.Queue(),
         backend_manager=SimpleNamespace(current_backend=SimpleNamespace(shutdown=shutdown)),
         current_request_meta={

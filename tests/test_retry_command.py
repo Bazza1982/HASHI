@@ -233,7 +233,7 @@ def test_interrupted_task_survives_restart_and_last_prompt_overwrite(tmp_path):
     saved = runtime_retry.remember_interrupted_task(
         runtime,
         original,
-        backend="her",
+        backend="her-v2",
     )
     runtime_retry.remember_retryable_prompt(
         runtime,
@@ -254,7 +254,7 @@ def test_interrupted_task_survives_restart_and_last_prompt_overwrite(tmp_path):
     assert recovered is not None
     assert recovered.prompt == original["prompt"]
     assert recovered.request_id == "req-research"
-    assert recovered.backend == "her"
+    assert recovered.backend == "her-v2"
     state = json.loads(runtime_retry.retry_state_path(runtime).read_text(encoding="utf-8"))
     assert state["last_prompt"]["prompt"] == "You can continue now"
     assert state["unfinished_task"]["prompt"] == original["prompt"]
@@ -299,7 +299,7 @@ def test_repeated_stop_of_continuation_keeps_original_task_and_success_clears_it
             "source": "text",
             "summary": "Implementation",
         },
-        backend="her",
+        backend="her-v2",
     )
     item = SimpleNamespace(
         request_id="req-continue",
@@ -313,7 +313,7 @@ def test_repeated_stop_of_continuation_keeps_original_task_and_success_clears_it
         runtime,
         item,
         item.prompt,
-        backend="her",
+        backend="her-v2",
     )
     runtime.current_request_meta = {
         "request_id": item.request_id,
@@ -326,7 +326,7 @@ def test_repeated_stop_of_continuation_keeps_original_task_and_success_clears_it
     saved_again = runtime_retry.remember_interrupted_task(
         runtime,
         runtime.current_request_meta,
-        backend="her",
+        backend="her-v2",
     )
 
     assert original is not None

@@ -61,13 +61,13 @@ def _make_manager(workspace: Path) -> FlexibleBackendManager:
     return FlexibleBackendManager(cfg, global_cfg, secrets={})
 
 
-def _make_claw_manager(workspace: Path) -> FlexibleBackendManager:
+def _make_her_v2_manager(workspace: Path) -> FlexibleBackendManager:
     workspace.mkdir(parents=True, exist_ok=True)
     cfg = FlexibleAgentConfig(
-        name="test-claw",
+        name="test-her-v2",
         workspace_dir=workspace,
         system_md=workspace / "AGENT.md",
-        telegram_token_key="test-claw",
+        telegram_token_key="test-her-v2",
         allowed_backends=[
             {
                 "engine": "openrouter-api",
@@ -188,10 +188,8 @@ def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime
         with_context=False,
     ):
         manager.config.active_backend = target_engine
-        manager._active_provider_override = None
         manager._save_state(
             active_model=target_model,
-            active_provider=target_provider,
         )
         if target_engine == "her-v2":
             her_row = next(
@@ -1250,7 +1248,7 @@ async def test_provider_command_is_available_only_for_active_her_v2_backend(tmp_
 
 @pytest.mark.asyncio
 async def test_provider_menu_marks_current_and_reports_locked_choices(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
 
@@ -1268,7 +1266,7 @@ async def test_provider_menu_marks_current_and_reports_locked_choices(tmp_path):
 
 @pytest.mark.asyncio
 async def test_provider_typed_choice_commits_both_model_slots_atomically(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update(["openrouter"])
 
@@ -1290,7 +1288,7 @@ async def test_provider_typed_choice_commits_both_model_slots_atomically(tmp_pat
 
 @pytest.mark.asyncio
 async def test_provider_typed_name_is_case_insensitive(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update(["OpenRouter"])
 
@@ -1303,7 +1301,7 @@ async def test_provider_typed_name_is_case_insensitive(tmp_path):
 
 @pytest.mark.asyncio
 async def test_provider_command_respects_managed_model_modes(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     manager.agent_mode = "wrapper"
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
@@ -1318,7 +1316,7 @@ async def test_provider_command_respects_managed_model_modes(tmp_path):
 
 @pytest.mark.asyncio
 async def test_provider_button_commits_provider_and_both_slots_without_model_step(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
 
     callback_data = runtime_model_selection.her_v2_provider_keyboard(
@@ -1339,7 +1337,7 @@ async def test_provider_button_commits_provider_and_both_slots_without_model_ste
 
 @pytest.mark.asyncio
 async def test_stale_active_provider_button_cannot_switch_from_non_her_v2_backend(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
     callback_data = runtime_model_selection.her_v2_provider_keyboard(
         runtime
@@ -1357,7 +1355,7 @@ async def test_stale_active_provider_button_cannot_switch_from_non_her_v2_backen
 
 @pytest.mark.asyncio
 async def test_stale_her_v2_model_button_cannot_bypass_managed_mode(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     manager.agent_mode = "wrapper"
     runtime, _messages = _make_runtime(manager)
     callback_data = runtime_model_selection.her_v2_slot_model_keyboard(
@@ -1376,7 +1374,7 @@ async def test_stale_her_v2_model_button_cannot_bypass_managed_mode(tmp_path):
 
 @pytest.mark.asyncio
 async def test_stale_her_v2_route_button_cannot_bypass_managed_mode(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
     callback_data = runtime_model_selection.her_v2_route_keyboard(
         runtime,
@@ -1396,7 +1394,7 @@ async def test_stale_her_v2_route_button_cannot_bypass_managed_mode(tmp_path):
 
 @pytest.mark.asyncio
 async def test_her_v2_model_menu_shows_quick_pro_and_routes_without_derived_reasoning(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
 
@@ -1417,7 +1415,7 @@ async def test_her_v2_model_menu_shows_quick_pro_and_routes_without_derived_reas
 
 
 def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
     deepseek = next(
         row
@@ -1455,7 +1453,7 @@ def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp
 
 @pytest.mark.asyncio
 async def test_backend_her_v2_button_switches_backend_without_provider_or_model_step(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
     manager.config.active_backend = "codex-cli"
     manager.config.allowed_backends.append(
@@ -1473,7 +1471,7 @@ async def test_backend_her_v2_button_switches_backend_without_provider_or_model_
 
 @pytest.mark.asyncio
 async def test_backend_her_v2_typed_command_switches_without_role_model(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     manager.config.active_backend = "codex-cli"
     manager.config.allowed_backends.append(
@@ -1490,7 +1488,7 @@ async def test_backend_her_v2_typed_command_switches_without_role_model(tmp_path
 
 @pytest.mark.asyncio
 async def test_backend_her_v2_rejects_single_model_argument(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     manager.config.active_backend = "codex-cli"
     manager.config.allowed_backends.append(
@@ -1506,7 +1504,7 @@ async def test_backend_her_v2_rejects_single_model_argument(tmp_path):
 
 @pytest.mark.asyncio
 async def test_her_v2_model_and_reasoning_buttons_update_only_their_targets(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
 
     model_callback = runtime_model_selection.her_v2_slot_model_keyboard(
@@ -1551,7 +1549,7 @@ async def test_her_v2_model_and_reasoning_buttons_update_only_their_targets(tmp_
 
 
 def test_her_v2_route_menu_splits_execution_without_removed_repair_route(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
 
     route_markup = str(runtime_model_selection.her_v2_routes_keyboard(runtime))
@@ -1568,7 +1566,7 @@ def test_her_v2_route_menu_splits_execution_without_removed_repair_route(tmp_pat
 
 @pytest.mark.asyncio
 async def test_stale_her_v2_model_menu_cannot_cross_provider_boundary(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
     stale_callback = runtime_model_selection.her_v2_slot_model_keyboard(
         runtime,
@@ -1589,7 +1587,7 @@ async def test_stale_her_v2_model_menu_cannot_cross_provider_boundary(tmp_path):
 
 @pytest.mark.asyncio
 async def test_stale_her_v2_model_menu_rejects_reordered_model_grants(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
     stale_callback = runtime_model_selection.her_v2_slot_model_keyboard(
         runtime,
@@ -1613,7 +1611,7 @@ async def test_stale_her_v2_model_menu_rejects_reordered_model_grants(tmp_path):
 
 @pytest.mark.asyncio
 async def test_her_v2_model_typed_commands_update_slots_and_route_reasoning(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
 
     update, context = _update(["quick", "deepseek-v4-pro"])
@@ -1638,7 +1636,7 @@ async def test_her_v2_model_typed_commands_update_slots_and_route_reasoning(tmp_
 
 @pytest.mark.asyncio
 async def test_retired_reasoning_button_fails_closed_without_mutation(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
     before = manager.get_her_v2_configuration().to_dict()
     update, edits, answers = _callback_update("her_reasoning:review:1:abcdef")
@@ -1653,7 +1651,7 @@ async def test_retired_reasoning_button_fails_closed_without_mutation(tmp_path):
 
 @pytest.mark.asyncio
 async def test_her_v2_effort_change_does_not_mutate_provider_reasoning(tmp_path):
-    manager = _make_claw_manager(tmp_path / "agent")
+    manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
     before = manager.get_her_v2_configuration().to_dict()
     update, context = _update(["max"])

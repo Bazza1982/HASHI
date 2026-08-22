@@ -48,9 +48,9 @@ HER v2 replaces the current tightly coupled HER workflow with a smaller, modular
 
 HER v2 is the sole supported HER execution backend. The former monolithic HER
 implementation is retired and must never be selected as an initialization,
-switching, preflight, recovery, or runtime fallback. The historical public IDs
-`her` and `claw-cli` may resolve forward to `her-v2` only; they cannot revive the
-retired implementation.
+switching, preflight, recovery, or runtime fallback. The historical public ID
+`her` resolves forward to `her-v2`; the unrelated `claw-cli` ID is removed and
+rejected rather than retained as an alias.
 
 ## 3. Core Principles
 
@@ -1140,8 +1140,9 @@ HER v2 is ready for production rollout only when:
 - provider model names are configurable rather than hard-coded in HER core;
 - reporting failure preserves completed execution evidence;
 - stop terminates primary and sub-agent activity;
-- the retired HER implementation is unreachable through `her`, `claw-cli`,
-  backend switching, startup preflight, and initialization failure;
+- the retired HER implementation is unreachable through backend switching,
+  startup preflight, and initialization failure; `her` resolves to HER v2 and
+  `claw-cli` is rejected;
 - lifecycle and workflow events cannot generate Persona commentary;
 - commentary and Triage-clarification packaging receive no raw request, plan,
   reasoning trace, lifecycle snapshot, or unmarked `system_md` content;

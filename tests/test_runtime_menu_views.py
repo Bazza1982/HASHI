@@ -135,31 +135,6 @@ def test_backend_and_model_cards_share_standard_order_and_escape_values() -> Non
     assert "<code>/model &lt;name&gt;</code>" in model
 
 
-def test_claw_provider_cards_follow_standard_order_and_escape_values() -> None:
-    provider = runtime_menu_views.claw_provider_menu_text(
-        current_provider="open<router>",
-        available_count=2,
-        unavailable=[("local&host", "provider is disabled")],
-        backend_flow=True,
-    )
-    model = runtime_menu_views.claw_provider_model_text(
-        provider="deep<seek>",
-        current_model="model&one",
-        model_count=3,
-        with_context=True,
-    )
-    unavailable = runtime_menu_views.claw_provider_unavailable_text(backend="codex<cli>")
-
-    _assert_standard_card(provider, "HER PROVIDER")
-    _assert_standard_card(model, "CHOOSE HER MODEL")
-    _assert_standard_card(unavailable, "HER PROVIDER")
-    assert "open&lt;router&gt;" in provider
-    assert "local&amp;host" in provider
-    assert "deep&lt;seek&gt;" in model
-    assert "model&amp;one" in model
-    assert "codex&lt;cli&gt;" in unavailable
-
-
 def test_skill_detail_escapes_reference_and_reports_standard_package() -> None:
     skill = SimpleNamespace(
         id="debug<strict>",

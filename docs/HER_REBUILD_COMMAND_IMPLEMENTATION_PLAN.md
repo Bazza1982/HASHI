@@ -18,13 +18,11 @@ Owner: HASHI
 Scope: HASHI-integrated HER Rust source, local development builds, safe binary
 activation, Agent hot restart, rollback, audit and operator reporting
 
-Related contracts:
+Related release gate: [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
 
-- [HER_BACKEND_CONTRACT.md](HER_BACKEND_CONTRACT.md)
-- [HER_TOOL_GATEWAY_TELEMETRY_PLAN.md](HER_TOOL_GATEWAY_TELEMETRY_PLAN.md)
-- [HER_CODE_MODULE_PLAN.md](HER_CODE_MODULE_PLAN.md)
-- [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)
-- [HER_CRON_CONVERSATION_CONTINUITY_FIX_PLAN.md](HER_CRON_CONVERSATION_CONTINUITY_FIX_PLAN.md)
+The native runtime contracts referenced by earlier revisions were archived
+when HER v1 retired. This document remains only until `/rebuild` completes its
+one-version retirement window.
 
 ## 1. Executive decision
 

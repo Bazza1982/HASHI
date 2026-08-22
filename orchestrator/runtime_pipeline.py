@@ -16,7 +16,6 @@ from orchestrator import (
     runtime_cross_session,
     runtime_delivery_order,
     runtime_retry,
-    runtime_turn_context,
     telegram_delivery_failover,
     telegram_stream_policy,
 )
@@ -34,9 +33,9 @@ EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
 )
 INTERACTIVE_FEEDBACK_CLEANUP_TIMEOUT_SECONDS = 5.0
 
-HER_SESSION_SCOPE_PERSISTENT = "persistent"
-HER_SESSION_SCOPE_ISOLATED = "isolated_per_run"
-HER_SESSION_SCOPE_ISOLATED_RESUME = "isolated_resume"
+SESSION_SCOPE_PERSISTENT = "persistent"
+SESSION_SCOPE_ISOLATED = "isolated_per_run"
+SESSION_SCOPE_ISOLATED_RESUME = "isolated_resume"
 
 _DANGLING_TOOL_MARKERS = (
     "<｜dsml｜tool_calls",
@@ -265,19 +264,15 @@ async def record_her_v2_transport_receipt(
         return False
 
 
-def _resolve_her_session_scope(runtime, item) -> str:
+def _resolve_session_scope(item) -> str:
     explicit = str(getattr(item, "session_scope", None) or "").strip().lower()
     if explicit in {
-        HER_SESSION_SCOPE_PERSISTENT,
-        HER_SESSION_SCOPE_ISOLATED,
-        HER_SESSION_SCOPE_ISOLATED_RESUME,
+        SESSION_SCOPE_PERSISTENT,
+        SESSION_SCOPE_ISOLATED,
+        SESSION_SCOPE_ISOLATED_RESUME,
     }:
         return explicit
-    if str(getattr(runtime.config, "active_backend", "") or "") != "her":
-        return HER_SESSION_SCOPE_PERSISTENT
-    if str(item.source or "").strip().lower().startswith("scheduler"):
-        return HER_SESSION_SCOPE_ISOLATED
-    return HER_SESSION_SCOPE_PERSISTENT
+    return SESSION_SCOPE_PERSISTENT
 
 
 @dataclass(frozen=True)
@@ -388,7 +383,7 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
             getattr(item, "habit_learning_eligible", True)
         ),
         **skill_usage_audit_fields(item),
-        "session_scope": _resolve_her_session_scope(runtime, item),
+        "session_scope": _resolve_session_scope(item),
     }
     scheduler_context = getattr(item, "scheduler_context", None)
     if isinstance(scheduler_context, dict) and scheduler_context:
@@ -441,23 +436,16 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     supports_sessions = bool(
         getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
     )
-    resume_session_id = str(request_meta.get("resume_session_id") or "").strip()
-    session_id = resume_session_id or getattr(backend, "_session_id", None)
-    session_scope = str(request_meta.get("session_scope") or HER_SESSION_SCOPE_PERSISTENT)
+    session_id = getattr(backend, "_session_id", None)
+    session_scope = str(request_meta.get("session_scope") or SESSION_SCOPE_PERSISTENT)
     incremental = (
         supports_sessions
         and session_id is not None
-        and (
-            bool(resume_session_id)
-            or (
-                runtime.backend_manager.agent_mode == "fixed"
-                and session_scope == HER_SESSION_SCOPE_PERSISTENT
-            )
-        )
+        and runtime.backend_manager.agent_mode == "fixed"
+        and session_scope == SESSION_SCOPE_PERSISTENT
     )
     continuity_enabled = is_memory_plus_enabled(runtime.workspace_dir)
     extra_sections = runtime._workzone_prompt_section()
-    extra_sections += runtime_turn_context.context_section(runtime, item)
     pre_turn_builder = runtime._build_pre_turn_context_sections
     pre_turn_kwargs = {"is_bridge_request": is_bridge_request}
     if "metadata" in inspect.signature(pre_turn_builder).parameters:
@@ -1515,8 +1503,8 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
         metadata = dict(metadata) if isinstance(metadata, dict) else {}
         metadata.update(
             {
-                "claw_completion_status": "incomplete",
-                "claw_stop_reason": "no_final_text",
+                "completion_status": "incomplete",
+                "completion_stop_reason": "no_final_text",
                 "dangling_tool_markup_blocked": True,
             }
         )
@@ -1608,7 +1596,7 @@ def record_foreground_usage_audit(
         }
         section_counts = {s["key"]: s.get("item_count", 0) for s in prompt_audit.get("sections", [])}
         stream_metadata = getattr(response, "stream_metadata", None) or {}
-        claw_thinking = stream_metadata.get("claw_thinking") or {}
+        thinking_metadata = stream_metadata.get("thinking") or {}
         record_audit_event(
             runtime.workspace_dir,
             {
@@ -1634,10 +1622,10 @@ def record_foreground_usage_audit(
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "thinking_tokens": thinking_tokens,
-                "thinking_chars": int(claw_thinking.get("thinking_chars") or 0),
-                "thinking_event_count": int(claw_thinking.get("thinking_event_count") or 0),
-                "thinking_redacted_count": int(claw_thinking.get("thinking_redacted_count") or 0),
-                "thinking_sources": list(claw_thinking.get("thinking_sources") or []),
+                "thinking_chars": int(thinking_metadata.get("thinking_chars") or 0),
+                "thinking_event_count": int(thinking_metadata.get("thinking_event_count") or 0),
+                "thinking_redacted_count": int(thinking_metadata.get("thinking_redacted_count") or 0),
+                "thinking_sources": list(thinking_metadata.get("thinking_sources") or []),
                 "tool_call_count": int(getattr(response, "tool_call_count", 0) or 0),
                 "tool_loop_count": int(getattr(response, "tool_loop_count", 0) or 0),
                 "tool_catalog_count": 0,

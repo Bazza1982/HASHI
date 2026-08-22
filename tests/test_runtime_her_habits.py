@@ -9,12 +9,14 @@ from typing import Any
 
 import pytest
 
-from adapters.her import HERAdapter
 from adapters.her_habits import HERHabitStore, HERMeditationJournal
+from adapters.her_v2 import HERv2Adapter
 from orchestrator import runtime_her_habits
 from orchestrator.command_specs import COMMAND_SPEC_BY_NAME, SENSITIVE_COMMAND_NAMES
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.her_v2.audit import DurableAuditLog
+from orchestrator.her_v2.learning import HERv2Learning
 from orchestrator.slash_command_audit import redact_args
 
 
@@ -36,7 +38,7 @@ class FakeBackendManager:
 
 
 class FakeRuntime:
-    def __init__(self, workspace: Path, *, engine: str = "her"):
+    def __init__(self, workspace: Path, *, engine: str = "her-v2"):
         self.name = "zelda"
         self.workspace_dir = workspace
         self.logger = logging.getLogger(f"test.habit.{engine}")
@@ -44,16 +46,40 @@ class FakeRuntime:
         self.global_config = SimpleNamespace(
             her_providers={"habit_meditation": {"enabled": True}},
         )
-        if engine == "her":
+        if engine == "her-v2":
             adapter_config = SimpleNamespace(
                 name=self.name,
                 workspace_dir=workspace,
                 model="test-model",
-                engine="her",
-                extra={},
+                engine="her-v2",
+                extra={"her_v2": {}},
                 resolve_access_root=lambda: workspace,
             )
-            adapter = HERAdapter(adapter_config, self.global_config, api_key="test")
+            adapter = HERv2Adapter(adapter_config, self.global_config, api_key="test")
+            audit = DurableAuditLog(
+                workspace / "backend_state" / "her_v2" / "audit.jsonl",
+                workspace / "backend_state" / "her_v2" / "audit_fallback.jsonl",
+            )
+            learning = HERv2Learning(
+                workspace_dir=workspace,
+                agent_name=self.name,
+                config_getter=adapter._habit_meditation_config,
+                invoke_model=adapter._invoke_maintenance_model,
+                audit_log=audit,
+                notification_sender=adapter._deliver_habit_notification,
+                logger=adapter.logger,
+            )
+            adapter._audit_log = audit
+            adapter._learning = learning
+            adapter._habit_execution_lock = learning.habit_execution_lock
+            adapter._habit_meditation_execution_lock = (
+                learning.meditation_execution_lock
+            )
+            adapter._habit_dream_execution_lock = learning.dream_execution_lock
+            adapter._habit_dream_run_lock = learning.dream_run_lock
+            adapter._habit_meditation_tasks = learning.meditation_tasks
+            adapter._habit_notification_tasks = learning.notification_tasks
+            adapter._habit_dream_tasks = learning.dream_tasks
         else:
             adapter = SimpleNamespace(config=SimpleNamespace(engine=engine))
         self.backend_manager = FakeBackendManager(adapter)
@@ -793,7 +819,7 @@ async def test_notification_delivery_retries_are_bounded_and_audited(
     tmp_path,
     monkeypatch,
 ):
-    import adapters.her as her_module
+    from orchestrator.her_v2 import learning as learning_module
 
     runtime = FakeRuntime(tmp_path)
     adapter = runtime.backend_manager.current_backend
@@ -843,7 +869,7 @@ async def test_notification_delivery_retries_are_bounded_and_audited(
         return None
 
     runtime._deliver_her_habit_notification = flaky_sender
-    monkeypatch.setattr(her_module.asyncio, "sleep", no_delay)
+    monkeypatch.setattr(learning_module.asyncio, "sleep", no_delay)
 
     await adapter._run_habit_notification(job_id)
 

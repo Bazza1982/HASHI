@@ -49,7 +49,7 @@ def _runtime(persona_path: Path, renderer: AsyncMock):
     logger = _Logger()
     runtime = SimpleNamespace(
         config=SimpleNamespace(
-            active_backend="her",
+            active_backend="her-v2",
             system_md=str(persona_path),
             extra={
                 "background_mode": True,

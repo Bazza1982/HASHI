@@ -45,7 +45,7 @@ async def test_scheduled_prompt_skill_retains_backend_and_job_context(tmp_path):
     )
     runtime = SimpleNamespace(
         skill_manager=manager,
-        config=SimpleNamespace(active_backend="her", access_scope="drive"),
+        config=SimpleNamespace(active_backend="her-v2", access_scope="drive"),
         logger=SimpleNamespace(info=Mock()),
         error_logger=SimpleNamespace(error=Mock()),
         enqueue_request=AsyncMock(return_value="req-1"),
@@ -66,7 +66,7 @@ async def test_scheduled_prompt_skill_retains_backend_and_job_context(tmp_path):
     )
     assert ok is True
     assert message == "Scheduled prompt skill queued: legacy-pinned-skill"
-    assert runtime.config.active_backend == "her"
+    assert runtime.config.active_backend == "her-v2"
     runtime.enqueue_request.assert_awaited_once_with(
         chat_id=123,
         prompt="skill prompt: now",

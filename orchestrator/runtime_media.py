@@ -93,7 +93,7 @@ def _is_her_backend(runtime: Any, backend: Any) -> bool:
         backend_engine = str(
             getattr(getattr(runtime, "config", None), "active_backend", "") or ""
         ).strip().casefold()
-    return backend_engine in {"her", "claw-cli"}
+    return backend_engine in {"her", "her-v2"}
 
 
 def _backend_accepts_media_bridge(backend: Any, media_kind: str, filename: str) -> bool:
