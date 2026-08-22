@@ -34,6 +34,15 @@ from adapters.stream_events import (
 
 _DEFAULT_OLLAMA_URL = "http://localhost:11434/v1/chat/completions"
 
+HASHI_COMPACTION_CAPABILITIES = {
+    "prompt_isolation": True,
+    "tool_disablement": True,
+    # Ollama model capabilities vary; require an exact model-grant override.
+    "semantic_reasoning": False,
+    "local_or_slow": True,
+}
+HASHI_MODEL_CAPACITY_PROFILES = {}
+
 
 class OllamaAdapter(OpenRouterAdapter):
 

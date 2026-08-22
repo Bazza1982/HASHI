@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Status | Approved design; implementation not started |
+| Status | Implemented in source; deterministic verification passed; live activation pending |
 | Date | 2026-08-22 |
 | Scope | HASHI-owned context capacity management for HER v2 |
 | Governing specification | [HER v2 product and technical design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) |
-| Runtime activation | Any later functional implementation requires separately authorised `/reboot`; this design performs no reload |
+| Runtime activation | User authorised Lily Agent `/reboot min` after implementation; no `/reboot max` or `/restart` is authorised |
 
 ## 1. Objective
 
@@ -170,7 +170,8 @@ The persisted conceptual state is:
       "provider": null,
       "model": null,
       "reasoning": "inherit_pro",
-      "timeout_tier": "auto"
+      "timeout_tier": "auto",
+      "cross_provider_confirmed": false
     }
   }
 }
@@ -209,7 +210,10 @@ Provider selection rules are:
    grant; it never silently rewrites it.
 4. Removing a grant locks Auto Compact and preserves the last configuration for
    inspection; it does not fall back to Quick.
-5. `auto` timeout selection resolves Tier 3 only from a declared local/slow
+5. If a later main-provider change makes a previously same-provider explicit
+   Compact route cross-provider, the route locks until that export is explicitly
+   confirmed; changing a timeout or reasoning value cannot silently grant it.
+6. `auto` timeout selection resolves Tier 3 only from a declared local/slow
    capability. Otherwise it resolves Tier 2. No provider/model name table lives
    in HER core.
 
@@ -631,3 +635,21 @@ Auto Compact is ready only when:
   stable truthful capacity error; and
 - focused, integration, concurrency, cancellation, and live-canary gates pass
   before any rollout claim.
+
+## 16. Implementation record
+
+Phases A-C are implemented in the 2026-08-22 source tree. The implementation
+adds HASHI-owned typed history selection and capacity profiles, an independent
+persisted Compact route, hierarchical semantic compaction, immutable raw
+archives, validated capsules, atomic compare-and-swap activation, cancellation,
+auditing, proactive stage-boundary triggering, post-turn scheduling, and one
+side-effect-free typed capacity-rejection recovery. `/compact` provides manual,
+status, and cancellation controls; `/model compact` provides the independent
+route UI and text interface.
+
+Deterministic coverage lives in `tests/test_context_compaction.py`, with command,
+adapter, lifecycle, runtime-pipeline, and hot-reload regressions in their
+existing focused suites. Phase D remains pending until the authorised Lily
+Agent `/reboot min` transaction and live canaries complete. Phase E remains the
+separately designed optional capability described above; this implementation
+does not split or cap existing OpenRouter or DeepSeek request-local tool loops.

@@ -457,6 +457,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             "engine": runtime.config.active_backend,
         }
     extra_sections += await pre_turn_builder(item, effective_prompt, **pre_turn_kwargs)
+    base_extra_sections = list(extra_sections)
     context_profile = None
     if continuity_enabled:
         context_profile = "memory_plus_session" if supports_sessions and runtime.backend_manager.agent_mode == "fixed" else "memory_plus_stateless"
@@ -468,16 +469,191 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     }
     if "context_profile" in inspect.signature(prompt_builder).parameters:
         prompt_kwargs["context_profile"] = context_profile
-    prompt_payload = prompt_builder(
-        effective_prompt,
-        runtime.config.active_backend,
-        **prompt_kwargs,
-    )
+    compaction_snapshot = None
+    history_compaction_enabled = False
+    if (
+        runtime.config.active_backend == "her-v2"
+        and not incremental
+        and not item.skip_memory_injection
+        and not is_bridge_request
+        and bool(
+            getattr(
+                getattr(runtime, "context_assembler", None),
+                "turns_injection_enabled",
+                True,
+            )
+        )
+    ):
+        from orchestrator.context_compaction import install_history_section
+
+        extra_sections, compaction_snapshot = install_history_section(
+            runtime,
+            base_extra_sections,
+        )
+        history_compaction_enabled = compaction_snapshot is not None
+        prompt_kwargs["extra_sections"] = extra_sections
+
+    def assemble(sections: list[tuple[str, str]]) -> dict[str, Any]:
+        current_kwargs = dict(prompt_kwargs)
+        current_kwargs["extra_sections"] = sections
+        return prompt_builder(
+            effective_prompt,
+            runtime.config.active_backend,
+            **current_kwargs,
+        )
+
+    prompt_payload = assemble(extra_sections)
+    if runtime.config.active_backend == "her-v2" and not incremental:
+        from orchestrator.context_compaction import (
+            CONTEXT_CAPACITY_EXHAUSTED,
+            CONTEXT_PROTECTED_SET_TOO_LARGE,
+            ContextCapacityError,
+            coordinator_for,
+            estimate_target_overhead_tokens,
+            estimate_tokens,
+            install_history_section,
+            resolve_target_capacity,
+        )
+
+        target = resolve_target_capacity(runtime)
+        target_overhead_tokens = estimate_target_overhead_tokens(runtime)
+        if target is not None:
+            if compaction_snapshot is not None:
+                protected_sections, _protected_snapshot = install_history_section(
+                    runtime,
+                    base_extra_sections,
+                    protected_only=True,
+                )
+                protected_prompt = assemble(protected_sections)["final_prompt"]
+            else:
+                protected_prompt = prompt_payload["final_prompt"]
+            protected_tokens = estimate_tokens(protected_prompt)
+            if (
+                protected_tokens
+                + target_overhead_tokens
+                + target.response_headroom_tokens
+                > target.context_window_tokens
+            ):
+                raise ContextCapacityError(
+                    CONTEXT_PROTECTED_SET_TOO_LARGE,
+                    "Protected context and response headroom exceed the selected target model capacity.",
+                    facts={
+                        "provider": target.provider,
+                        "model": target.model,
+                        "context_window_tokens": target.context_window_tokens,
+                        "protected_tokens": protected_tokens,
+                        "response_headroom_tokens": target.response_headroom_tokens,
+                        "target_overhead_tokens": target_overhead_tokens,
+                        "estimator": target.estimator,
+                    },
+                )
+
+        if compaction_snapshot is not None:
+            coordinator = coordinator_for(runtime)
+            previous_tokens = estimate_tokens(prompt_payload["final_prompt"])
+            last_outcome = None
+            while True:
+                last_outcome = await coordinator.maybe_compact_prompt(
+                    prompt=prompt_payload["final_prompt"],
+                    request_ref=item.request_id,
+                    trigger="pre_her_stage_boundary",
+                    additional_tokens=target_overhead_tokens,
+                )
+                if not last_outcome.changed:
+                    # Another coordinator can win the CAS while this request is
+                    # compacting. Rebuild from the committed pointer even when
+                    # our own outcome reports COMPACTION_CAS_LOST/failed.
+                    fresh_snapshot = coordinator.snapshot()
+                    if fresh_snapshot.generation != compaction_snapshot.generation:
+                        extra_sections, compaction_snapshot = install_history_section(
+                            runtime,
+                            base_extra_sections,
+                        )
+                        prompt_payload = assemble(extra_sections)
+                        previous_tokens = estimate_tokens(
+                            prompt_payload["final_prompt"]
+                        )
+                        continue
+                    break
+                extra_sections, compaction_snapshot = install_history_section(
+                    runtime,
+                    base_extra_sections,
+                )
+                candidate_payload = assemble(extra_sections)
+                candidate_tokens = estimate_tokens(candidate_payload["final_prompt"])
+                if candidate_tokens >= previous_tokens:
+                    raise ContextCapacityError(
+                        CONTEXT_CAPACITY_EXHAUSTED,
+                        "A committed capsule did not reduce the effective target prompt.",
+                        facts={
+                            "before_tokens": previous_tokens,
+                            "after_tokens": candidate_tokens,
+                            "compaction_id": last_outcome.compaction_id,
+                        },
+                    )
+                prompt_payload = candidate_payload
+                previous_tokens = candidate_tokens
+
+            if (
+                target is not None
+                and previous_tokens + target.response_headroom_tokens
+                + target_overhead_tokens
+                > target.context_window_tokens
+            ):
+                raise ContextCapacityError(
+                    CONTEXT_CAPACITY_EXHAUSTED,
+                    "Effective context still exceeds the selected target model after safe compaction.",
+                    facts={
+                        "provider": target.provider,
+                        "model": target.model,
+                        "context_window_tokens": target.context_window_tokens,
+                        "effective_tokens": previous_tokens,
+                        "response_headroom_tokens": target.response_headroom_tokens,
+                        "target_overhead_tokens": target_overhead_tokens,
+                        "compaction_status": getattr(last_outcome, "status", "not_run"),
+                        "compaction_code": getattr(last_outcome, "code", ""),
+                        "estimator": target.estimator,
+                    },
+                )
+
+        prompt_tokens = estimate_tokens(prompt_payload["final_prompt"])
+        request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", None)
+        if not isinstance(request_tokens, dict):
+            request_tokens = {}
+            runtime._context_compaction_prompt_tokens = request_tokens
+        request_tokens[item.request_id] = prompt_tokens
     final_prompt = prompt_payload["final_prompt"]
     prompt_audit = prompt_payload.get("audit", {})
     runtime._last_prompt_audit = prompt_audit
     runtime._thinking_chars_this_req = 0
     runtime._last_full_prompt_tokens = len(final_prompt) // 4
+    if runtime.config.active_backend == "her-v2" and not incremental:
+        states = getattr(runtime, "_context_compaction_prompt_states", None)
+        if not isinstance(states, dict):
+            states = {}
+            runtime._context_compaction_prompt_states = states
+        request_token_map = getattr(
+            runtime,
+            "_context_compaction_prompt_tokens",
+            None,
+        )
+        if not isinstance(request_token_map, dict):
+            request_token_map = {}
+        states[item.request_id] = {
+            "effective_prompt": effective_prompt,
+            "base_extra_sections": list(base_extra_sections),
+            "context_profile": context_profile,
+            "inject_memory": history_compaction_enabled,
+            "is_bridge_request": bool(is_bridge_request),
+            "final_prompt": final_prompt,
+            "prompt_tokens": int(
+                request_token_map.get(
+                    item.request_id,
+                    max(1, len(final_prompt) // 4),
+                )
+            ),
+            "capacity_recovery_attempted": False,
+        }
     return TurnPrompt(
         effective_prompt=effective_prompt,
         final_prompt=final_prompt,
@@ -1678,11 +1854,186 @@ def persist_success_memory(
             memory_assistant_text,
             is_bridge_request=is_bridge_request,
         )
+        try:
+            from orchestrator.context_compaction import estimate_tokens, schedule_post_turn
+
+            request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", {})
+            prompt_tokens = int(request_tokens.get(item.request_id) or 0)
+            if prompt_tokens > 0:
+                schedule_post_turn(
+                    runtime,
+                    request_ref=item.request_id,
+                    prompt_tokens=(
+                        prompt_tokens + estimate_tokens(memory_assistant_text)
+                    ),
+                )
+        except Exception as exc:
+            runtime.logger.warning(
+                "Post-turn context compaction scheduling failed safely for %s: %s: %s",
+                item.request_id,
+                type(exc).__name__,
+                exc,
+            )
+        finally:
+            request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", None)
+            if isinstance(request_tokens, dict):
+                request_tokens.pop(item.request_id, None)
     if not is_bridge_request:
         runtime.handoff_builder.append_transcript("user", item.prompt, item.source)
         runtime.handoff_builder.append_transcript("assistant", visible_text, item.source)
         runtime.handoff_builder.refresh_recent_context()
         runtime.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
+
+
+def clear_context_compaction_request_state(runtime, request_id: str) -> None:
+    request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", None)
+    if isinstance(request_tokens, dict):
+        request_tokens.pop(str(request_id), None)
+    prompt_states = getattr(runtime, "_context_compaction_prompt_states", None)
+    if isinstance(prompt_states, dict):
+        prompt_states.pop(str(request_id), None)
+
+
+def _typed_capacity_recovery_is_safe(response: Any) -> bool:
+    if str(getattr(response, "error_code", "") or "") != "CONTEXT_CAPACITY_REJECTED":
+        return False
+    if bool(getattr(response, "side_effects_possible", False)):
+        return False
+    if int(getattr(response, "tool_call_count", 0) or 0) > 0:
+        return False
+    if int(getattr(response, "tool_loop_count", 0) or 0) > 0:
+        return False
+    metadata = getattr(response, "stream_metadata", None)
+    her = metadata.get("her_v2") if isinstance(metadata, dict) else None
+    if not isinstance(her, dict):
+        return True
+    failure_chain = her.get("failure_chain")
+    primary = (
+        failure_chain.get("primary_failure")
+        if isinstance(failure_chain, dict)
+        else None
+    )
+    if isinstance(primary, dict) and bool(primary.get("side_effects_possible")):
+        return False
+    delivery = her.get("delivery")
+    if isinstance(delivery, dict) and str(delivery.get("delivery_id") or "").strip():
+        return False
+    return True
+
+
+async def recover_typed_context_capacity_rejection(
+    runtime,
+    item,
+    response,
+    *,
+    on_stream_event=None,
+) -> tuple[Any, str] | None:
+    """Compact and retry once only when a typed rejection proved side-effect free."""
+
+    if not _typed_capacity_recovery_is_safe(response):
+        return None
+    states = getattr(runtime, "_context_compaction_prompt_states", None)
+    state = states.get(item.request_id) if isinstance(states, dict) else None
+    if not isinstance(state, dict) or state.get("capacity_recovery_attempted"):
+        return None
+    state["capacity_recovery_attempted"] = True
+    if not state.get("inject_memory") or state.get("is_bridge_request"):
+        return None
+
+    from orchestrator.context_compaction import (
+        coordinator_for,
+        estimate_target_overhead_tokens,
+        estimate_tokens,
+        install_history_section,
+        resolve_target_capacity,
+    )
+
+    coordinator = coordinator_for(runtime)
+    outcome = await coordinator.compact(
+        trigger="typed_provider_capacity_rejection",
+        request_ref=item.request_id,
+        force=True,
+    )
+    if not outcome.changed:
+        runtime.logger.warning(
+            "Typed context-capacity recovery could not compact request=%s status=%s code=%s",
+            item.request_id,
+            outcome.status,
+            outcome.code,
+        )
+        return None
+
+    base_sections = list(state.get("base_extra_sections") or [])
+    sections, _snapshot = install_history_section(runtime, base_sections)
+    builder = runtime.context_assembler.build_prompt_payload
+    kwargs = {
+        "extra_sections": sections,
+        "inject_memory": True,
+        "incremental": False,
+    }
+    if "context_profile" in inspect.signature(builder).parameters:
+        kwargs["context_profile"] = state.get("context_profile")
+    payload = builder(
+        str(state.get("effective_prompt") or item.prompt),
+        runtime.config.active_backend,
+        **kwargs,
+    )
+    retry_prompt = str(payload["final_prompt"])
+    runtime._last_prompt_audit = dict(payload.get("audit") or {})
+    retry_tokens = estimate_tokens(retry_prompt)
+    previous_tokens = int(state.get("prompt_tokens") or estimate_tokens(state.get("final_prompt") or ""))
+    if retry_tokens >= previous_tokens:
+        runtime.logger.warning(
+            "Typed context-capacity recovery aborted because effective prompt did not shrink: "
+            "request=%s before=%s after=%s",
+            item.request_id,
+            previous_tokens,
+            retry_tokens,
+        )
+        return None
+    target = resolve_target_capacity(runtime)
+    target_overhead_tokens = estimate_target_overhead_tokens(runtime)
+    if (
+        target is not None
+        and retry_tokens
+        + target_overhead_tokens
+        + target.response_headroom_tokens
+        > target.context_window_tokens
+    ):
+        runtime.logger.warning(
+            "Typed context-capacity recovery remains above declared capacity: "
+            "request=%s tokens=%s capacity=%s",
+            item.request_id,
+            retry_tokens,
+            target.context_window_tokens,
+        )
+        return None
+
+    runtime.logger.warning(
+        "Retrying one side-effect-free HER v2 request after typed capacity recovery: "
+        "request=%s compaction=%s before=%s after=%s",
+        item.request_id,
+        outcome.compaction_id,
+        previous_tokens,
+        retry_tokens,
+    )
+    runtime.is_generating = True
+    try:
+        retry_response = await runtime.backend_manager.generate_response(
+            retry_prompt,
+            item.request_id,
+            is_retry=True,
+            silent=item.silent,
+            on_stream_event=on_stream_event,
+        )
+    finally:
+        runtime.is_generating = False
+    state["final_prompt"] = retry_prompt
+    state["prompt_tokens"] = retry_tokens
+    request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", None)
+    if isinstance(request_tokens, dict):
+        request_tokens[item.request_id] = retry_tokens
+    return retry_response, retry_prompt
 
 
 async def handle_backend_error(

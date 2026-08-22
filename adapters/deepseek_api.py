@@ -24,6 +24,23 @@ from adapters.stream_events import KIND_THINKING, StreamEvent
 
 _DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 
+HASHI_COMPACTION_CAPABILITIES = {
+    "prompt_isolation": True,
+    "tool_disablement": True,
+    "semantic_reasoning": True,
+    "local_or_slow": False,
+}
+HASHI_MODEL_CAPACITY_PROFILES = {
+    "deepseek-v4-flash": {
+        "context_window_tokens": 1_000_000,
+        "capacity_provenance": "official_deepseek_api_docs_2026-08-22",
+    },
+    "deepseek-v4-pro": {
+        "context_window_tokens": 1_000_000,
+        "capacity_provenance": "official_deepseek_api_docs_2026-08-22",
+    },
+}
+
 
 def _with_reasoning_content(result: _APIResult, reasoning_content: str) -> _APIResult:
     # /reboot min can reload this adapter while retaining the already-imported
@@ -41,6 +58,19 @@ class DeepSeekAdapter(OpenRouterAdapter):
             "model": self.config.model,
             "messages": messages,
         }
+        extra = getattr(self.config, "extra", None) or {}
+        raw_reasoning = str(
+            extra.get("provider_reasoning")
+            or extra.get("reasoning_effort")
+            or ""
+        ).strip().lower()
+        if raw_reasoning in {"off", "none", "false", "0", "disabled"}:
+            payload["thinking"] = {"type": "disabled"}
+        elif raw_reasoning:
+            payload["thinking"] = {"type": "enabled"}
+            payload["reasoning_effort"] = (
+                "max" if raw_reasoning in {"max", "xhigh"} else "high"
+            )
         if use_streaming:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}

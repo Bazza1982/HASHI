@@ -320,6 +320,16 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
             reason="user_stop",
         )
         mark_user_interrupt(runtime, "user_stop", request_meta=active_meta)
+    try:
+        from orchestrator.context_compaction import cancel_runtime_compaction
+
+        await cancel_runtime_compaction(runtime)
+    except Exception as exc:
+        runtime.logger.warning(
+            "Context compaction cancellation warning during /stop: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
     await _shutdown_active_backend(runtime)
     await _notify_interrupted(
         runtime,

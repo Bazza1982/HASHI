@@ -25,6 +25,51 @@ from adapters.stream_events import (
 from orchestrator.enterprise.policy import evaluate_governance_policy
 
 
+HASHI_COMPACTION_CAPABILITIES = {
+    "prompt_isolation": True,
+    "tool_disablement": True,
+    # OpenRouter aggregates heterogeneous models; an exact Agent grant must
+    # opt the selected model into semantic compaction.
+    "semantic_reasoning": False,
+    "local_or_slow": False,
+}
+HASHI_MODEL_CAPACITY_PROFILES: dict[str, dict[str, Any]] = {}
+
+_STABLE_CONTEXT_CAPACITY_CODES = frozenset(
+    {
+        "context_length_exceeded",
+        "context_window_exceeded",
+        "maximum_context_length_exceeded",
+        "prompt_too_long",
+    }
+)
+
+
+def _stable_provider_error_code(response: httpx.Response | None) -> str:
+    """Return only provider-owned stable codes; never infer capacity from HTTP 400."""
+
+    if response is None:
+        return ""
+    try:
+        payload = response.json()
+    except Exception:
+        return ""
+    candidates: list[Any] = []
+    if isinstance(payload, Mapping):
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            candidates.extend((error.get("code"), error.get("type")))
+            metadata = error.get("metadata")
+            if isinstance(metadata, Mapping):
+                candidates.extend((metadata.get("code"), metadata.get("type")))
+        candidates.extend((payload.get("code"), payload.get("type")))
+    for candidate in candidates:
+        normalized = str(candidate or "").strip().lower()
+        if normalized in _STABLE_CONTEXT_CAPACITY_CODES:
+            return "CONTEXT_CAPACITY_REJECTED"
+    return ""
+
+
 @dataclass
 class _APIResult:
     """Internal intermediate result from a single API call."""
@@ -80,7 +125,11 @@ def _backend_failure_response(
     description = "The provider request failed for an unknown technical reason."
 
     if status is not None:
-        if status == 400:
+        stable_code = _stable_provider_error_code(response)
+        if stable_code:
+            code = stable_code
+            description = "The provider rejected the serialized request because it exceeds the model context capacity."
+        elif status == 400:
             code = "PROVIDER_BAD_REQUEST"
             description = "The provider rejected the request as invalid."
         elif status == 401:

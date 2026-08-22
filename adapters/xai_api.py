@@ -34,6 +34,16 @@ _EXTERNAL_CHAT_OPTION_FIELDS = (
     "user",
 )
 
+HASHI_COMPACTION_CAPABILITIES = {
+    "prompt_isolation": True,
+    "tool_disablement": True,
+    # xAI model families expose different reasoning contracts. Require the
+    # exact Agent grant to opt a specific model into semantic compaction.
+    "semantic_reasoning": False,
+    "local_or_slow": False,
+}
+HASHI_MODEL_CAPACITY_PROFILES = {}
+
 
 class XaiApiAdapter(OpenRouterAdapter):
     """xAI HTTP backend with Hermes OAuth auto-refresh or static API key."""

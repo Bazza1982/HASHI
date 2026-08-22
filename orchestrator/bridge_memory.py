@@ -846,6 +846,11 @@ class BridgeContextAssembler:
         return t[: limit - len(marker) - 2].rstrip() + "\n\n" + marker
 
     def _apply_budget(self, prompt: str, engine: str) -> str:
+        # HER v2 capacity is governed in tokens by the HASHI context-capacity
+        # controller.  Character-tail clipping here could silently remove the
+        # current request or protected authority before that controller sees it.
+        if engine == "her-v2":
+            return prompt
         limit = self.PROMPT_BUDGETS.get(engine, 30000)
         if len(prompt) <= limit:
             return prompt
@@ -941,7 +946,19 @@ class BridgeContextAssembler:
 
         system_text = "" if incremental else self._load_system_prompt()
         inject_base = not incremental and inject_memory
-        inject_turns = inject_base and self.turns_injection_enabled
+        managed_history = False
+        if extra_sections:
+            try:
+                from orchestrator.context_compaction import managed_history_present
+
+                managed_history = managed_history_present(extra_sections)
+            except Exception:
+                managed_history = False
+        inject_turns = (
+            inject_base
+            and self.turns_injection_enabled
+            and not managed_history
+        )
         inject_saved_memory = inject_base and self.saved_memory_injection_enabled
         recent_turns = (
             self.memory_store.get_recent_turns(limit=limits["recent_turns"])

@@ -152,6 +152,60 @@ def test_openai_compatible_connection_and_stream_failures_are_typed():
     assert tls.error_retryable is False
 
 
+def test_stable_provider_capacity_code_is_typed_but_generic_400_is_not():
+    request = httpx.Request("POST", "https://provider.invalid/v1/chat")
+    capacity_response = httpx.Response(
+        400,
+        request=request,
+        json={"error": {"code": "context_length_exceeded", "message": "large"}},
+    )
+    capacity_error = httpx.HTTPStatusError(
+        "HTTP 400",
+        request=request,
+        response=capacity_response,
+    )
+    generic_response = httpx.Response(
+        400,
+        request=request,
+        json={"error": {"message": "maximum context length was exceeded"}},
+    )
+    generic_error = httpx.HTTPStatusError(
+        "HTTP 400",
+        request=request,
+        response=generic_response,
+    )
+
+    assert _backend_failure_response(
+        capacity_error,
+        duration_ms=1,
+    ).error_code == "CONTEXT_CAPACITY_REJECTED"
+    assert _backend_failure_response(
+        generic_error,
+        duration_ms=1,
+    ).error_code == "PROVIDER_BAD_REQUEST"
+
+
+@pytest.mark.parametrize(
+    ("configured", "thinking", "effort"),
+    [
+        ("high", "enabled", "high"),
+        ("medium", "enabled", "high"),
+        ("xhigh", "enabled", "max"),
+        ("max", "enabled", "max"),
+        ("off", "disabled", None),
+    ],
+)
+def test_deepseek_v4_payload_maps_provider_reasoning(configured, thinking, effort, tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = None
+    adapter.config.extra = {"provider_reasoning": configured}
+
+    payload = adapter._build_payload([{"role": "user", "content": "hello"}])
+
+    assert payload["thinking"] == {"type": thinking}
+    assert payload.get("reasoning_effort") == effort
+
+
 @pytest.mark.asyncio
 async def test_tool_cleanup_details_are_forwarded_in_the_tool_end_event(tmp_path):
     adapter = _adapter(tmp_path)

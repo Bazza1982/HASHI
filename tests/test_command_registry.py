@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 from orchestrator.admin_local_testing import execute_local_command, supported_commands
 from orchestrator.command_registry import load_runtime_callbacks, load_runtime_commands, runtime_bot_commands
+from orchestrator import command_registry
 
 
 class _FakeRuntime:
@@ -87,8 +89,44 @@ def test_runtime_command_registry_loads_external_private_commands(monkeypatch, t
     commands = {command.name: command for command in load_runtime_commands()}
 
     assert commands["rebuild"].description == "Retired HER rebuild notice"
+    assert commands["compact"].description.startswith("Compact eligible HER v2 history")
     assert "private_sample" in commands
     assert any(command.command == "private_sample" for command in runtime_bot_commands())
+
+
+def test_private_command_override_is_debug_not_warning(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    private_dir = tmp_path / "private_commands"
+    private_dir.mkdir()
+    (private_dir / "queue_override.py").write_text(
+        "from orchestrator.command_registry import RuntimeCommand\n"
+        "async def callback(runtime, update, context):\n"
+        "    return None\n"
+        "COMMANDS = [RuntimeCommand(name='queue', description='Private queue', callback=callback)]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        command_registry,
+        "DEFAULT_PRIVATE_COMMAND_DIR",
+        tmp_path / "missing-private-commands",
+    )
+    monkeypatch.setenv("HASHI_PRIVATE_COMMAND_DIRS", str(private_dir))
+
+    with caplog.at_level(logging.DEBUG, logger="BridgeU.CommandRegistry"):
+        commands = {command.name: command for command in load_runtime_commands()}
+
+    assert commands["queue"].description == "Private queue"
+    matching = [
+        record
+        for record in caplog.records
+        if record.name == "BridgeU.CommandRegistry" and "command queue" in record.message
+    ]
+    assert matching
+    assert all(record.levelno == logging.DEBUG for record in matching)
+    assert "intentionally overridden" in matching[-1].message
 
 
 def test_runtime_command_registry_loads_external_private_callbacks(monkeypatch, tmp_path):

@@ -45,6 +45,9 @@ FOUNDATION_PHASES = {
     "orchestrator.runtime_common": 0,
     "orchestrator.runtime_defaults": 0,
     "orchestrator.workspace_state": 0,
+    # Context compaction owns new value types and must refresh before runtime
+    # pipeline/command consumers bind its coordinator and exception classes.
+    "orchestrator.context_compaction": 3,
     "adapters.base": 1,
     "adapters.her_persona": 1,
     "adapters.xai_oauth_credentials": 1,

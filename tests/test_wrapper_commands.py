@@ -1411,6 +1411,7 @@ async def test_her_v2_model_menu_shows_quick_pro_and_routes_without_derived_reas
     assert "her_model_slot:fast" in markup
     assert "her_model_slot:pro" in markup
     assert "her_routes" in markup
+    assert "her_model_compact" in markup
     assert "her_reasoning" not in markup
 
 
@@ -1437,7 +1438,26 @@ def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp
             runtime,
             "execution_high_volume",
         ),
+        runtime_model_selection.her_v2_compact_keyboard(runtime),
+        runtime_model_selection.her_v2_compact_provider_keyboard(runtime),
     ]
+    for provider_index, option in enumerate(manager.get_her_v2_provider_options()):
+        if not option.get("available") or not option.get("models"):
+            continue
+        keyboards.append(
+            runtime_model_selection.her_v2_compact_model_keyboard(
+                runtime,
+                provider_index,
+            )
+        )
+        for model_index, _model in enumerate(option["models"]):
+            keyboards.append(
+                runtime_model_selection.her_v2_compact_reasoning_keyboard(
+                    runtime,
+                    provider_index,
+                    model_index,
+                )
+            )
 
     callbacks = [
         button.callback_data
@@ -1449,6 +1469,58 @@ def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp
 
     assert callbacks
     assert max(len(value.encode("utf-8")) for value in callbacks) <= 64
+
+
+@pytest.mark.asyncio
+async def test_her_v2_compact_typed_and_button_controls_are_independent(tmp_path):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    before = manager.get_her_v2_configuration().to_dict()
+
+    update, context = _update(["compact", "status"])
+    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
+    assert "HASHI Context Compact" in messages[-1]
+    assert "inherit_pro" in messages[-1]
+    assert "deepseek-api / deepseek-v4-pro" in messages[-1]
+
+    update, edits, answers = _callback_update("her_model_compact_mode:off")
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert not any(answer.get("show_alert") for answer in answers)
+    assert "<code>off</code>" in edits[-1]["text"]
+    assert "LOCKED" in edits[-1]["text"]
+    assert manager.get_her_v2_configuration().to_dict() == before
+
+
+def test_explicit_compact_route_survives_main_provider_change_and_revalidates(tmp_path):
+    from orchestrator.context_compaction import (
+        configure_route,
+        load_route_config,
+        resolve_compact_route,
+    )
+
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    configure_route(
+        runtime,
+        mode="explicit",
+        provider="deepseek-api",
+        model="deepseek-v4-pro",
+        reasoning="high",
+    )
+
+    manager.apply_her_v2_configuration(
+        manager.prepare_her_v2_provider("openrouter")
+    )
+
+    persisted = load_route_config(runtime)
+    resolved = resolve_compact_route(runtime)
+    assert persisted.provider == "deepseek-api"
+    assert persisted.model == "deepseek-v4-pro"
+    assert persisted.cross_provider_confirmed is False
+    assert resolved.crosses_provider is True
+    assert resolved.eligible is False
+    assert "confirmation is absent" in resolved.lock_reason
 
 
 @pytest.mark.asyncio

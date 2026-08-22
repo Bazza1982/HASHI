@@ -7712,6 +7712,14 @@ class FlexibleAgentRuntime:
                 return
 
             response = task.result()
+            recovered = await runtime_pipeline.recover_typed_context_capacity_rejection(
+                self,
+                item,
+                response,
+                on_stream_event=None,
+            )
+            if recovered is not None:
+                response, _recovered_prompt = recovered
             receipt_response = response
 
             if response.is_success and response.text:
@@ -7847,6 +7855,38 @@ class FlexibleAgentRuntime:
                         memory_assistant_text,
                         is_bridge_request=is_bridge_request,
                     )
+                    if not is_bridge_request:
+                        try:
+                            from orchestrator.context_compaction import (
+                                estimate_tokens,
+                                schedule_post_turn,
+                            )
+
+                            request_tokens = getattr(
+                                self,
+                                "_context_compaction_prompt_tokens",
+                                {},
+                            )
+                            prompt_tokens = int(
+                                request_tokens.get(item.request_id) or 0
+                            )
+                            if prompt_tokens > 0:
+                                schedule_post_turn(
+                                    self,
+                                    request_ref=item.request_id,
+                                    prompt_tokens=(
+                                        prompt_tokens
+                                        + estimate_tokens(memory_assistant_text)
+                                    ),
+                                )
+                        except Exception as exc:
+                            self.logger.warning(
+                                "Post-turn context compaction scheduling failed safely "
+                                "for %s: %s: %s",
+                                item.request_id,
+                                type(exc).__name__,
+                                exc,
+                            )
                 self.handoff_builder.append_transcript("user", item.prompt, item.source)
                 self.handoff_builder.append_transcript("assistant", visible_text, item.source)
                 self.handoff_builder.refresh_recent_context()
@@ -7951,6 +7991,10 @@ class FlexibleAgentRuntime:
             registry = getattr(self, "_request_meta_by_id", None)
             if isinstance(registry, dict):
                 registry.pop(item.request_id, None)
+            runtime_pipeline.clear_context_compaction_request_state(
+                self,
+                item.request_id,
+            )
             await runtime_delivery_order.complete_turn(self, item.request_id)
 
     async def process_queue(self):

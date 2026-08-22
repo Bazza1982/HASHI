@@ -75,7 +75,15 @@ class StageInvocationError(RuntimeError):
                 else ProviderFailureCode(str(code))
             )
         except ValueError:
-            self.code = ProviderFailureCode.PROVIDER_UNKNOWN
+            # HASHI-owned boundary codes (for example typed context-capacity
+            # rejection) intentionally survive without expanding this enum or
+            # coupling generic StageRequest to a compaction concern.
+            raw_code = str(code or "")
+            self.code = (
+                raw_code
+                if raw_code.startswith("CONTEXT_")
+                else ProviderFailureCode.PROVIDER_UNKNOWN
+            )
         self.human_description = sanitise_provider_error(
             human_description or safe_message,
             limit=600,
@@ -93,7 +101,7 @@ class StageInvocationError(RuntimeError):
 
     @property
     def error_code(self) -> str:
-        return self.code.value
+        return self.code.value if isinstance(self.code, ProviderFailureCode) else str(self.code)
 
     def audit_payload(self) -> dict[str, Any]:
         return {

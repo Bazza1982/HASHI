@@ -88,6 +88,13 @@ async def initialize(runtime: Any) -> bool:
     runtime.logger.info(f"Initializing flex agent '{runtime.name}'...")
     result = await runtime.backend_manager.initialize_active_backend()
     if result:
+        if str(getattr(runtime.config, "active_backend", "")) == "her-v2":
+            from orchestrator.context_compaction import ensure_route_state
+
+            if ensure_route_state(runtime):
+                runtime.logger.info(
+                    "Persisted HER v2 Compact migration default: inherit_pro"
+                )
         migrated = migrate_legacy_memory_plus_runtime(runtime)
         if is_memory_plus_enabled(runtime.workspace_dir):
             ensure_memory_plus_observer(runtime.workspace_dir)
@@ -116,10 +123,28 @@ async def initialize(runtime: Any) -> bool:
 async def shutdown(runtime: Any) -> None:
     runtime.logger.info(f"Shutting down flex agent '{runtime.name}'...")
     runtime.is_shutting_down = True
+    try:
+        from orchestrator.context_compaction import cancel_runtime_compaction
+
+        await cancel_runtime_compaction(runtime)
+    except Exception as exc:
+        runtime.error_logger.warning(
+            "Context compaction cancellation warning during shutdown: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
     clean = await _cancel_tasks(
         runtime,
         runtime._scheduled_retry_tasks,
         label="retry-tasks",
+    )
+    clean = (
+        await _cancel_tasks(
+            runtime,
+            getattr(runtime, "_context_compaction_tasks", set()),
+            label="context-compaction-tasks",
+        )
+        and clean
     )
     long_batch_tasks = {
         task
@@ -302,6 +327,15 @@ async def process_queue(runtime: Any) -> None:
                 runtime._log_maintenance(item, "bg_detached", detach_after_s=generation.detach_after_s)
                 continue
 
+            recovered = await runtime_pipeline.recover_typed_context_capacity_rejection(
+                runtime,
+                item,
+                response,
+                on_stream_event=feedback.on_stream_event,
+            )
+            if recovered is not None:
+                response, final_prompt = recovered
+
             backend_elapsed = max(
                 0.0, time.monotonic() - backend_started_monotonic
             )
@@ -421,6 +455,52 @@ async def process_queue(runtime: Any) -> None:
         except asyncio.CancelledError:
             break
         except Exception as exc:
+            from orchestrator.context_compaction import (
+                ContextCapacityError,
+                capacity_error_text,
+                record_capacity_blocked,
+            )
+
+            if isinstance(exc, ContextCapacityError):
+                runtime._mark_error(f"{exc.code}: {exc}")
+                try:
+                    record_capacity_blocked(
+                        runtime,
+                        request_ref=(item.request_id if item is not None else "unknown"),
+                        error=exc,
+                    )
+                except Exception as audit_exc:
+                    runtime.error_logger.error(
+                        "Context capacity-blocked audit failed: %s: %s",
+                        type(audit_exc).__name__,
+                        audit_exc,
+                    )
+                if item is not None:
+                    try:
+                        is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
+                        runtime._notify_right_brain_interrupted(
+                            item,
+                            item.prompt,
+                            is_bridge_request=is_bridge_request,
+                            reason="context_capacity_blocked",
+                            error=f"{exc.code}: {exc}",
+                        )
+                    except Exception:
+                        pass
+                    if item.deliver_to_telegram:
+                        await runtime.send_long_message(
+                            item.chat_id,
+                            capacity_error_text(exc),
+                            request_id=item.request_id,
+                            purpose="context-capacity-blocked",
+                        )
+                runtime.error_logger.warning(
+                    "HER v2 context capacity blocked: code=%s facts=%s",
+                    exc.code,
+                    exc.facts,
+                )
+                runtime.is_generating = False
+                continue
             runtime._mark_error(str(exc))
             if item is not None:
                 try:
@@ -448,6 +528,10 @@ async def process_queue(runtime: Any) -> None:
                     runtime.current_request_meta = None
                 if item.request_id not in background_ids:
                     await runtime_delivery_order.complete_turn(runtime, item.request_id)
+                    runtime_pipeline.clear_context_compaction_request_state(
+                        runtime,
+                        item.request_id,
+                    )
                 runtime.queue.task_done()
             else:
                 runtime.current_request_meta = None

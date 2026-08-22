@@ -115,7 +115,18 @@ def load_runtime_commands() -> list[RuntimeCommand]:
     for module in _iter_runtime_modules():
         for command in _commands_from_module(module):
             if command.name in commands:
-                logger.warning("Runtime command %s overwritten by %s", command.name, module.__name__)
+                if module.__name__.startswith("_hashi_private_command_"):
+                    logger.debug(
+                        "Runtime command %s intentionally overridden by private command module %s",
+                        command.name,
+                        module.__name__,
+                    )
+                else:
+                    logger.warning(
+                        "Runtime command %s overwritten by %s",
+                        command.name,
+                        module.__name__,
+                    )
             commands[command.name] = command
     return [commands[name] for name in sorted(commands)]
 
