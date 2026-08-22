@@ -158,6 +158,139 @@ def test_one_model_provider_assigns_the_same_model_to_both_slots(tmp_path):
     assert selected.pro_model == "grok-4.5"
 
 
+def test_instance_configured_provider_does_not_need_agent_backend_row(tmp_path):
+    manager = _manager(tmp_path)
+    manager.global_config.her_providers["providers"]["xai"] = {
+        "engine": "xai-api",
+        "status": "stable",
+    }
+
+    option = manager._her_v2_provider_option("xai")
+    selected = manager.prepare_her_v2_provider("xai")
+
+    assert option is not None
+    assert option["available"] is True
+    assert "grok-4.5" in option["models"]
+    assert selected.fast_provider == "xai-api"
+    assert selected.pro_provider == "xai-api"
+
+
+def test_instance_configured_provider_can_create_her_ephemeral_backend(tmp_path):
+    manager = _manager(tmp_path)
+    manager.global_config.her_providers["providers"]["hashi"] = {
+        "base_url": "http://127.0.0.1:18801/v1",
+        "status": "stable",
+    }
+
+    backend = manager.create_ephemeral_backend(
+        "hashi-api",
+        target_model="gpt-5.6-luna",
+    )
+
+    assert backend.config.engine == "hashi-api"
+    assert backend.config.model == "gpt-5.6-luna"
+    assert backend.hashi_url == "http://127.0.0.1:18801/v1/chat/completions"
+
+
+def test_hybrid_draft_applies_full_targets_and_custom_route_atomically(tmp_path):
+    manager = _manager(tmp_path)
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(
+            engine="her-v2",
+            model="role-configured",
+            extra={"her_v2": _her_v2_config()},
+        ),
+        _v2_config=None,
+        effort="high",
+    )
+    active_before = manager.get_her_v2_configuration()
+    draft = manager.begin_her_v2_hybrid_draft()
+    draft = manager.prepare_her_v2_model(
+        "fast",
+        "deepseek/deepseek-v4-flash",
+        provider="openrouter-api",
+        current=draft,
+    )
+    draft = manager.prepare_her_v2_route_target(
+        "review",
+        "openrouter-api",
+        "anthropic/claude-sonnet-4.6",
+        current=draft,
+    )
+    manager.stage_her_v2_configuration(draft)
+
+    assert manager.get_her_v2_configuration() == active_before
+    assert manager.current_backend._v2_config is None
+    staged_state = json.loads(manager.state_file.read_text(encoding="utf-8"))
+    assert staged_state["her_v2_configuration_draft"]["routing_mode"] == "hybrid"
+
+    applied = manager.apply_her_v2_configuration_draft()
+
+    assert applied.routing_mode == "hybrid"
+    assert applied.fast_provider == "openrouter-api"
+    assert applied.pro_provider == "deepseek-api"
+    assert applied.provider == "mixed"
+    assert applied.target_for_route("review").provider == "openrouter-api"
+    assert applied.target_for_route("review").model == "anthropic/claude-sonnet-4.6"
+    state = json.loads(manager.state_file.read_text(encoding="utf-8"))
+    assert "her_v2_configuration_draft" not in state
+    assert set(state["her_v2_configuration_presets"]) == {"single", "hybrid"}
+    configured = manager.current_backend._v2_config
+    assert configured.profile_for(Stage.TRIAGE).engine == "openrouter-api"
+    assert configured.profile_for(Stage.PLANNING).engine == "deepseek-api"
+    assert configured.profile_for(Stage.REVIEW).engine == "openrouter-api"
+    assert configured.profile_for_name("orchestrator").engine == "deepseek-api"
+
+
+def test_last_hybrid_configuration_is_restored_after_single_mode(tmp_path):
+    manager = _manager(tmp_path)
+    hybrid = manager.begin_her_v2_hybrid_draft()
+    hybrid = manager.prepare_her_v2_model(
+        "fast",
+        "deepseek/deepseek-v4-flash",
+        provider="openrouter-api",
+        current=hybrid,
+    )
+    manager.stage_her_v2_configuration(hybrid)
+    manager.apply_her_v2_configuration_draft()
+    manager.apply_her_v2_configuration(
+        manager.prepare_her_v2_provider("openrouter-api")
+    )
+
+    restored = manager.begin_her_v2_hybrid_draft()
+
+    assert restored.routing_mode == "hybrid"
+    assert restored.fast_provider == "openrouter-api"
+    assert restored.pro_provider == "deepseek-api"
+
+
+def test_apply_replaces_live_config_without_mutating_turn_snapshot(tmp_path):
+    manager = _manager(tmp_path)
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(
+            engine="her-v2",
+            model="role-configured",
+            extra={"her_v2": _her_v2_config()},
+        ),
+        _v2_config=None,
+        effort="high",
+    )
+    manager.apply_her_v2_configuration(
+        manager.prepare_her_v2_provider("openrouter-api")
+    )
+    frozen_turn_config = manager.current_backend._v2_config
+
+    manager.apply_her_v2_configuration(
+        manager.prepare_her_v2_provider("deepseek-api")
+    )
+
+    assert frozen_turn_config.profile_for(Stage.PLANNING).engine == "openrouter-api"
+    assert manager.current_backend._v2_config is not frozen_turn_config
+    assert manager.current_backend._v2_config.profile_for(Stage.PLANNING).engine == (
+        "deepseek-api"
+    )
+
+
 def test_reselecting_active_provider_preserves_valid_slot_choices(tmp_path):
     manager = _manager(tmp_path)
     selected = manager.prepare_her_v2_provider("openrouter")
@@ -270,6 +403,33 @@ def test_legacy_single_route_state_migrates_without_exposing_role_configured(tmp
     assert selected.provider == "deepseek-api"
     assert selected.fast_model == "deepseek-v4-flash"
     assert selected.pro_model == "deepseek-v4-flash"
+
+
+def test_persisted_hybrid_provider_names_normalize_to_engine_ids(tmp_path):
+    manager = _manager(
+        tmp_path,
+        state={
+            "active_backend": "her-v2",
+            "her_v2_configuration": {
+                "routing_mode": "hybrid",
+                "targets": {
+                    "fast": {
+                        "provider": "openrouter",
+                        "model": "deepseek/deepseek-v4-flash",
+                    },
+                    "pro": {
+                        "provider": "deepseek",
+                        "model": "deepseek-v4-pro",
+                    },
+                },
+            },
+        },
+    )
+
+    selected = manager.get_her_v2_configuration()
+
+    assert selected.fast_provider == "openrouter-api"
+    assert selected.pro_provider == "deepseek-api"
 
 
 def test_invalid_model_does_not_write_runtime_state(tmp_path):

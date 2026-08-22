@@ -53,7 +53,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("transfer", "cmd_transfer", "Transfer this session to another agent", "everyday"),
     CommandSpec("fork", "cmd_fork", "Fork this session to another agent", "everyday"),
     CommandSpec("cos", "cmd_cos", "Control Chief of Staff routing", "models"),
-    CommandSpec("provider", "cmd_provider", "Choose HER v2 call provider", "models"),
+    CommandSpec("provider", "cmd_provider", "Choose HER v2 provider or Hybrid", "models"),
     CommandSpec("model", "cmd_model", "View or change model configuration", "models"),
     CommandSpec("effort", "cmd_effort", "View or change effort", "models"),
     CommandSpec("agents", "cmd_agents", "View and manage agents", "everyday"),

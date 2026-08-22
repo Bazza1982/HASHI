@@ -76,16 +76,18 @@ Five execution modes:
 
 **Backend configuration:**
 - `/backend` — switch active backend in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the backend picker. Selecting `her-v2` switches only the backend; it never asks the user to select the internal `role-configured` sentinel.
-- `/provider [name]` — HER v2-only call-provider picker. Choosing a provider atomically assigns valid defaults to both Quick and Pro slots while preserving task-route reasoning and HER effort.
-- `/model` — for HER v2, define Quick/Pro models and independently configure each effective task route's model slot and provider reasoning. Use `/model quick|pro <model>`, `/model route <route> <quick|pro|inherit>`, or `/model reasoning <route> <value|inherit>`. `inherit` as a model slot is valid only for structure repair. Other backends retain their existing single-model `/model [name]` behaviour.
+- `/provider [name|hybrid]` — HER v2-only routing-mode picker. A named provider keeps the immediate Single-provider flow; `hybrid` opens a draft with independent Quick and Pro provider/model targets.
+- `/model` — for HER v2, edit complete Quick/Pro targets and let each effective task route follow Quick, follow Pro, or use a Custom provider/model target. Use `/model quick|pro [provider] <model>`, `/model route <route> <quick|pro>`, `/model route <route> custom <provider> <model>`, `/model reasoning <route> <value|inherit>`, and `/model apply|discard`. Other backends retain their existing single-model `/model [name]` behaviour.
 - Non-HER backend/model selection continues to the existing optional effort step when supported. HER v2 keeps backend, provider, models/reasoning, and effort as independent controls.
 - `/effort [level]` — HER v2 effort controls orchestration depth, Planning, Replanning, Review, and sub-agent availability. It never reads or writes provider reasoning. Other backends retain their model-aware effort behaviour.
 
 ### HER v2 provider and model configuration
 
 HER v2 is provider-neutral. Provider connection metadata lives under
-`global.her_providers.providers`; concrete non-HER backend rows remain the exact
-provider/model grants. API-key values stay in `secrets.json`.
+`global.her_providers.providers`; an enabled instance provider is sufficient for
+HER routing and does not need to be repeated in each Agent's
+`allowed_backends`. Concrete non-HER rows still control ordinary direct backend
+selection. API-key values stay in `secrets.json`.
 
 ```json
 {
@@ -162,18 +164,30 @@ provider/model grants. API-key values stay in `secrets.json`.
 }
 ```
 
-Each provider row is an exact allowlist. The first and last allowed models are
-the default Quick and Pro choices unless `her_v2_fast_model` (the internal
-compatibility key for Quick) and `her_v2_pro_model` explicitly select other
-granted models. A one-model provider uses that model for both slots. Disabled
-providers remain visible but locked.
+Provider choices are built from enabled instance provider profiles and the
+installed adapter model catalogue, with Agent backend rows retained as optional
+model/default hints. A one-model provider uses that model for both slots.
+Disabled providers remain visible but locked.
+
+Single mode keeps one provider for Quick and Pro. Hybrid mode stores full
+`provider + model` targets for Quick and Pro. Immediate response, Triage,
+Meditation, Dream, and Simple execution follow Quick by default; Planning,
+Complex execution, High-volume execution (including its sub-agents),
+Replanning, Review, and Finalisation follow Pro. Any task route may instead use
+a Custom target. This phase adds no automatic cross-provider failover and no
+picture/media-specific routing.
 
 Runtime selections persist in the agent workspace as a dedicated
-`her_v2_configuration` block. It contains the call-provider engine, Quick/Pro
-models, per-route model slots, and per-route provider reasoning. Legacy
-profile/stage reasoning remains readable as a migration fallback. The internal
-`role-configured` model remains an adapter sentinel only and is never presented
-as a user choice. Provider/model grants are revalidated before every update.
+`her_v2_configuration` block. It contains `routing_mode`, full Quick/Pro
+`targets`, per-route target selection, optional Custom `route_targets`, and
+per-route provider reasoning. Hybrid edits first persist in
+`her_v2_configuration_draft`; `/model apply` validates and activates the whole
+draft in one state update. The last Single and Hybrid configurations are kept
+under `her_v2_configuration_presets`. In-flight turns keep their starting
+routing snapshot, and queued Meditation jobs durably keep the turn's target.
+Legacy provider/model and profile/stage reasoning fields remain readable as a
+migration fallback. The internal `role-configured` model remains an adapter
+sentinel only and is never presented as a user choice.
 
 **Wrapper-mode:**
 - `/mode wrapper` — switch a flex-capable agent into wrapper mode.

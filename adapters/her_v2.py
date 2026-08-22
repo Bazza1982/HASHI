@@ -28,7 +28,11 @@ from adapters.her_v2_provider import (
 from adapters.stream_events import StreamCallback
 from orchestrator.her_v2.audit import AuditPersistenceError, DurableAuditLog
 from orchestrator.her_v2.commentary import PersonaCommentaryPipeline
-from orchestrator.her_v2.config import HERv2Config, HERv2ConfigurationError
+from orchestrator.her_v2.config import (
+    HERv2Config,
+    HERv2ConfigurationError,
+    ProviderProfile,
+)
 from orchestrator.her_v2.interfaces import (
     ProviderFailureCode,
     StageInvocationError,
@@ -222,10 +226,10 @@ class HERv2Adapter(BaseBackend):
                 )
             if injected is None:
                 manager = self._backend_manager()
-                for profile in self._v2_config.profiles.values():
+                for profile in self._v2_config.all_provider_profiles():
                     if not _manager_authorises_profile(manager, profile):
                         raise HERv2ConfigurationError(
-                            f"profile {profile.name!r} provider/model does not have an exact grant in this Agent's allowed_backends"
+                            f"profile {profile.name!r} provider/model is not configured on this HASHI instance"
                         )
 
             state_root = Path(self.config.workspace_dir) / "backend_state" / "her_v2"
@@ -344,6 +348,27 @@ class HERv2Adapter(BaseBackend):
                 human_description="HER v2 learning services are not initialized.",
             )
         profile = self._v2_config.profile_for(stage)
+        if stage is Stage.MEDITATION and self._learning is not None:
+            job_id = str(request_id).split(":attempt:", 1)[0]
+            job = (
+                self._learning.meditation_journal.get(job_id)
+                if len(job_id) == 32
+                and all(char in "0123456789abcdef" for char in job_id)
+                else None
+            )
+            frozen = job.get("routing_target") if isinstance(job, Mapping) else None
+            if isinstance(frozen, Mapping):
+                profile = ProviderProfile(
+                    name=profile.name,
+                    engine=str(frozen.get("provider") or "").strip(),
+                    model=str(frozen.get("model") or "").strip(),
+                    reasoning=(
+                        str(frozen.get("reasoning")).strip()
+                        if frozen.get("reasoning") is not None
+                        else None
+                    ),
+                    options=profile.options,
+                )
         policy = self._provider_retry_policy()
         context = {
             "maintenance_prompt": prompt,
@@ -675,12 +700,21 @@ class HERv2Adapter(BaseBackend):
                 and not self._v2_config.shadow_mode
             ),
         )
+        meditation_routing_target: dict[str, str | None] = {}
+        if runtime_config.meditation_enabled:
+            meditation_profile = runtime_config.profile_for(Stage.MEDITATION)
+            meditation_routing_target = {
+                "provider": meditation_profile.engine,
+                "model": meditation_profile.model,
+                "reasoning": meditation_profile.reasoning,
+            }
         turn_learning = (
             self._learning.bind_turn(
                 learning_eligible=habit_request_eligible,
                 notification_context=self._habit_notification_context(
                     request_id, silent=silent
                 ),
+                routing_target=meditation_routing_target or None,
             )
             if self._learning is not None
             else None

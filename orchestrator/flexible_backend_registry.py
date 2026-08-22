@@ -188,6 +188,8 @@ BACKEND_REGISTRY: dict[str, dict] = {
             "gpt-5.6-sol",
         ],
         "default_model": "gpt-5.6-luna",
+        "fast_model": "gpt-5.6-luna",
+        "pro_model": "gpt-5.6-sol",
         "efforts": [],
         "default_effort": None,
         "secret_keys": [],

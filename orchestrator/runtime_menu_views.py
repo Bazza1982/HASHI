@@ -342,8 +342,8 @@ def her_v2_provider_menu_text(
 ) -> str:
     facts = [
         "<b>Backend</b> · <code>her-v2</code>",
-        f"<b>Available</b> · <code>{available_count}</code> call providers",
-        "<b>Quick/Pro</b> · validated and saved together with the provider",
+        f"<b>Instance configured</b> · <code>{available_count}</code> call providers",
+        "<b>Modes</b> · one provider, or Hybrid Quick/Pro targets",
     ]
     if unavailable:
         facts.append(
@@ -360,12 +360,13 @@ def her_v2_provider_menu_text(
         facts=facts,
         consequence=(
             "A provider selection atomically assigns valid defaults to both model "
-            "slots. Task-route reasoning is preserved and HER effort is untouched."
+            "slots. Hybrid opens a draft where each target can use a different "
+            "provider/model. Task-route reasoning and HER effort stay untouched."
         ),
         action=(
             "Choose a call provider below."
             if available_count
-            else "No usable HER v2 call provider is configured for this agent."
+            else "No usable HER v2 call provider is configured on this instance."
         ),
     )
 
@@ -387,26 +388,36 @@ def her_v2_provider_unavailable_text(*, backend: str) -> str:
 def her_v2_model_menu_text(
     *,
     provider: str,
+    routing_mode: str = "single",
+    fast_provider: str = "",
     fast_model: str,
+    pro_provider: str = "",
     pro_model: str,
+    draft: bool = False,
 ) -> str:
+    fast_provider = fast_provider or provider
+    pro_provider = pro_provider or provider
     return setting_card(
         "🧠",
         "HER v2 models",
-        current=f"<code>{html.escape(provider)}</code>",
+        current=(
+            f"<code>{html.escape(routing_mode.upper())}</code>"
+            + (" · <b>DRAFT</b>" if draft else "")
+        ),
         facts=[
             f"<b>Provider</b> · <code>{html.escape(provider)}</code>",
-            f"<b>Quick model</b> · <code>{html.escape(fast_model)}</code>",
-            f"<b>Pro model</b> · <code>{html.escape(pro_model)}</code>",
+            f"<b>Quick target</b> · <code>{html.escape(fast_provider)} / {html.escape(fast_model)}</code>",
+            f"<b>Pro target</b> · <code>{html.escape(pro_provider)} / {html.escape(pro_model)}</code>",
         ],
         consequence=(
-            "Quick and Pro define reusable models only. Each effective task route "
-            "selects its model slot and provider reasoning independently. The "
-            "separate /effort setting controls orchestration only."
+            "Quick and Pro are complete provider/model targets. Each task route "
+            "follows one target or uses a Custom target; reasoning stays independent. "
+            "No automatic cross-provider failover is added."
         ),
         action=(
-            "Choose a model, or open task routes to configure model and reasoning "
-            "as separate settings."
+            "Review the draft and press Apply once."
+            if draft
+            else "Choose a target, or open task routes."
         ),
     )
 
@@ -433,13 +444,23 @@ def her_v2_slot_model_text(
     )
 
 
-def her_v2_routes_text(*, route_count: int, explicit_reasoning_count: int) -> str:
+def her_v2_routes_text(
+    *,
+    route_count: int,
+    explicit_reasoning_count: int,
+    custom_target_count: int = 0,
+    draft: bool = False,
+) -> str:
     return setting_card(
         "🧭",
         "HER v2 task routes",
-        current=f"<code>{route_count}</code> effective routes",
+        current=(
+            f"<code>{route_count}</code> effective routes"
+            + (" · <b>DRAFT</b>" if draft else "")
+        ),
         facts=[
-            "<b>Model</b> · each route independently selects <code>Quick</code> or <code>Pro</code>",
+            "<b>Target</b> · each route selects <code>Quick</code>, <code>Pro</code>, or <code>Custom</code>",
+            f"<b>Custom targets</b> · <code>{custom_target_count}</code>",
             "<b>Reasoning</b> · each route independently selects provider reasoning",
             f"<b>Custom reasoning</b> · <code>{explicit_reasoning_count}</code> route overrides",
         ],
@@ -468,13 +489,13 @@ def her_v2_route_text(
             f"<code>{html.escape(reasoning)}</code>"
         ),
         facts=[
-            f"<b>Model slot</b> · <code>{html.escape(model_slot)}</code>",
-            f"<b>Effective model</b> · <code>{html.escape(effective_model)}</code>",
+            f"<b>Target mode</b> · <code>{html.escape(model_slot)}</code>",
+            f"<b>Effective target</b> · <code>{html.escape(effective_model)}</code>",
             f"<b>Provider reasoning</b> · <code>{html.escape(reasoning)}</code>",
             f"<b>Reasoning source</b> · <code>{reasoning_source}</code>",
         ],
         consequence=(
-            "Model slot and provider reasoning are independent. Changing either "
+            "Provider/model target and provider reasoning are independent. Changing either "
             "setting affects only this route; /effort is not read or modified."
         ),
         action="Choose a model slot or reasoning value below.",

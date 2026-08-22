@@ -128,6 +128,20 @@ class ProviderProfile:
         )
 
 
+@dataclass(frozen=True)
+class ProviderTarget:
+    engine: str
+    model: str
+
+    def __post_init__(self) -> None:
+        if not self.engine.strip() or self.engine in {"her", "her-v2"}:
+            raise HERv2ConfigurationError(
+                "HER v2 target must select a non-HER provider engine"
+            )
+        if not self.model.strip():
+            raise HERv2ConfigurationError("HER v2 target must select a model")
+
+
 DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
     Stage.IMMEDIATE_RESPONSE: "lightweight",
     Stage.TRIAGE: "triage",
@@ -145,9 +159,13 @@ DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
 class HERv2Config:
     profiles: Mapping[str, ProviderProfile]
     stage_roles: Mapping[Stage, str]
+    routing_mode: str = "single"
     stage_reasoning: Mapping[Stage, str] = field(default_factory=dict)
     slot_models: Mapping[str, str] = field(default_factory=dict)
+    targets: Mapping[str, ProviderTarget] = field(default_factory=dict)
+    profile_model_slots: Mapping[str, str] = field(default_factory=dict)
     route_model_slots: Mapping[Route, str] = field(default_factory=dict)
+    route_targets: Mapping[Route, ProviderTarget] = field(default_factory=dict)
     route_reasoning: Mapping[Route, str] = field(default_factory=dict)
     replan_limits: Mapping[Effort, int] = field(
         default_factory=lambda: {
@@ -176,6 +194,19 @@ class HERv2Config:
         if self.shadow_mode:
             raise HERv2ConfigurationError(
                 "HER v2 shadow mode has been permanently retired; use normal mode"
+            )
+        if self.routing_mode not in {"single", "hybrid"}:
+            raise HERv2ConfigurationError(
+                f"unknown HER v2 routing mode: {self.routing_mode!r}"
+            )
+        target_providers = {target.engine for target in self.targets.values()}
+        if self.routing_mode == "single" and len(target_providers) > 1:
+            raise HERv2ConfigurationError(
+                "single-provider mode requires one provider for Quick and Pro"
+            )
+        if self.routing_mode != "hybrid" and self.route_targets:
+            raise HERv2ConfigurationError(
+                "custom task-route targets require Hybrid mode"
             )
         if self.user_idle_timeout_s <= 0:
             raise HERv2ConfigurationError("idle-progress timeout must be positive")
@@ -283,6 +314,79 @@ class HERv2Config:
                 )
             slot_models[slot] = model
 
+        targets_raw = raw.get("targets") or {}
+        if not isinstance(targets_raw, Mapping):
+            raise HERv2ConfigurationError("her_v2.targets must be an object")
+        targets: dict[str, ProviderTarget] = {}
+        for raw_slot, value in targets_raw.items():
+            slot = str(raw_slot).strip().lower()
+            if slot == "quick":
+                slot = "fast"
+            if slot not in {"fast", "pro"}:
+                raise HERv2ConfigurationError(
+                    f"unknown HER v2 target slot: {raw_slot!r}"
+                )
+            if not isinstance(value, Mapping):
+                raise HERv2ConfigurationError(
+                    f"HER v2 target {slot!r} must be an object"
+                )
+            targets[slot] = ProviderTarget(
+                engine=str(value.get("provider") or value.get("engine") or "").strip(),
+                model=str(value.get("model") or "").strip(),
+            )
+
+        explicit_profile_slots: dict[str, str] = {}
+        model_slots_raw = raw.get("model_slots") or {}
+        if not isinstance(model_slots_raw, Mapping):
+            raise HERv2ConfigurationError("her_v2.model_slots must be an object")
+        for raw_slot, value in model_slots_raw.items():
+            slot = str(raw_slot).strip().lower()
+            if slot == "quick":
+                slot = "fast"
+            if slot not in {"fast", "pro"}:
+                continue
+            names = value.get("profiles") if isinstance(value, Mapping) else value
+            if isinstance(names, list):
+                for name in names:
+                    profile_name = str(name or "").strip()
+                    if profile_name:
+                        explicit_profile_slots[profile_name] = slot
+        fast_roles = {
+            stage_roles[stage]
+            for stage in {
+                Stage.IMMEDIATE_RESPONSE,
+                Stage.TRIAGE,
+                Stage.MEDITATION,
+                Stage.DREAM,
+            }
+            if stage in stage_roles
+        }
+        pro_roles = {
+            role
+            for stage, role in stage_roles.items()
+            if stage
+            not in {
+                Stage.IMMEDIATE_RESPONSE,
+                Stage.TRIAGE,
+                Stage.MEDITATION,
+                Stage.DREAM,
+            }
+        }
+        if "orchestrator" in profiles:
+            pro_roles.add("orchestrator")
+        profile_model_slots = {
+            name: explicit_profile_slots.get(
+                name,
+                (
+                    "fast"
+                    if name not in pro_roles
+                    and (name in fast_roles or name in {"lightweight", "triage"})
+                    else "pro"
+                ),
+            )
+            for name in profiles
+        }
+
         route_model_slots_raw = raw.get("route_model_slots") or {}
         if not isinstance(route_model_slots_raw, Mapping):
             raise HERv2ConfigurationError(
@@ -305,10 +409,30 @@ class HERv2Config:
                 )
             route_model_slots[route] = slot
         for route, slot in route_model_slots.items():
-            if slot != "inherit" and slot not in slot_models:
+            if slot not in slot_models and slot not in targets:
                 raise HERv2ConfigurationError(
                     f"route {route.value!r} selects undefined model slot {slot!r}"
                 )
+
+        route_targets_raw = raw.get("route_targets") or {}
+        if not isinstance(route_targets_raw, Mapping):
+            raise HERv2ConfigurationError("her_v2.route_targets must be an object")
+        route_targets: dict[Route, ProviderTarget] = {}
+        for route_name, value in route_targets_raw.items():
+            try:
+                route = Route(str(route_name).strip().lower())
+            except ValueError as exc:
+                raise HERv2ConfigurationError(
+                    f"unknown HER v2 custom route target: {route_name!r}"
+                ) from exc
+            if not isinstance(value, Mapping):
+                raise HERv2ConfigurationError(
+                    f"HER v2 custom route target {route.value!r} must be an object"
+                )
+            route_targets[route] = ProviderTarget(
+                engine=str(value.get("provider") or value.get("engine") or "").strip(),
+                model=str(value.get("model") or "").strip(),
+            )
 
         route_reasoning_raw = raw.get("route_reasoning") or {}
         if not isinstance(route_reasoning_raw, Mapping):
@@ -328,6 +452,13 @@ class HERv2Config:
                 )
             route_reasoning[route] = reasoning
 
+        routing_mode = str(raw.get("routing_mode") or "").strip().lower()
+        if not routing_mode:
+            configured_engines = {target.engine for target in targets.values()}
+            if not configured_engines:
+                configured_engines = {profile.engine for profile in profiles.values()}
+            routing_mode = "hybrid" if len(configured_engines) > 1 else "single"
+
         replan_limits = _effort_int_map(
             raw.get("replan_limits"),
             {Effort.LOW: 0, Effort.MEDIUM: 0, Effort.HIGH: 50, Effort.XHIGH: 100, Effort.MAX: 200},
@@ -339,9 +470,13 @@ class HERv2Config:
         return cls(
             profiles=profiles,
             stage_roles=stage_roles,
+            routing_mode=routing_mode,
             stage_reasoning=stage_reasoning,
             slot_models=slot_models,
+            targets=targets,
+            profile_model_slots=profile_model_slots,
             route_model_slots=route_model_slots,
+            route_targets=route_targets,
             route_reasoning=route_reasoning,
             replan_limits=replan_limits,
             review_limits=review_limits,
@@ -361,14 +496,56 @@ class HERv2Config:
         route: Route,
     ) -> ProviderProfile:
         stage = ROUTE_STAGES[route]
+        engine = profile.engine
         model = profile.model
+        custom_target = self.route_targets.get(route)
         slot = self.route_model_slots.get(route)
-        if slot in {"fast", "pro"} and self.slot_models.get(slot):
+        slot_target = self.targets.get(slot) if slot in {"fast", "pro"} else None
+        if custom_target is not None:
+            engine = custom_target.engine
+            model = custom_target.model
+        elif slot_target is not None:
+            engine = slot_target.engine
+            model = slot_target.model
+        elif slot in {"fast", "pro"} and self.slot_models.get(slot):
             model = self.slot_models[slot]
         reasoning = self.route_reasoning.get(route)
         if reasoning is None:
             reasoning = self.stage_reasoning.get(stage, profile.reasoning)
-        return replace(profile, model=model, reasoning=reasoning)
+        return replace(profile, engine=engine, model=model, reasoning=reasoning)
+
+    def profile_for_name(self, name: str) -> ProviderProfile:
+        profile_name = str(name or "").strip()
+        if profile_name not in self.profiles:
+            raise HERv2ConfigurationError(
+                f"no configured provider profile named {profile_name!r}"
+            )
+        profile = self.profiles[profile_name]
+        slot = self.profile_model_slots.get(profile_name, "pro")
+        target = self.targets.get(slot)
+        if target is None:
+            model = self.slot_models.get(slot, profile.model)
+            return replace(profile, model=model)
+        return replace(profile, engine=target.engine, model=target.model)
+
+    def all_provider_profiles(self) -> tuple[ProviderProfile, ...]:
+        """Return every provider/model pair that active routing can invoke."""
+
+        candidates = [self.profile_for_name(name) for name in self.profiles]
+        for route in Route:
+            try:
+                candidates.append(self.profile_for_route(route))
+            except HERv2ConfigurationError:
+                continue
+        result: list[ProviderProfile] = []
+        seen: set[tuple[str, str]] = set()
+        for profile in candidates:
+            identity = (profile.engine, profile.model)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            result.append(profile)
+        return tuple(result)
 
     def profile_for_route(
         self,

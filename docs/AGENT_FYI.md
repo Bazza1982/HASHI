@@ -46,8 +46,9 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   normal memory injection and Memory+ continuity independently.
 - `/notepad [today|carryover|history|find <query>|edit <text>|replace <text>|compact|clear]`:
   inspect or maintain the bounded Memory+ work card and archive index.
-- `/model`: on HER v2, define Quick/Pro models and independently choose the
-  model slot plus provider reasoning for each effective task route; on other
+- `/model`: on HER v2, define complete Quick/Pro provider/model targets and
+  independently choose Follow Quick, Follow Pro, or Custom plus provider
+  reasoning for each effective task route; on other
   backends, retain the existing single-model behaviour.
 - `/habit [view|on|off|default|delete|reset]`: inspect or control the default-off,
   adapter-owned HER Habit/Meditation path. Non-HER backends do not read or
@@ -90,10 +91,12 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   confirmation to move to Flex; saved specialized-mode configuration and
   Memory+ are preserved.
 - backend `+`: same flow, but rebuild handoff context after the backend switch.
-- `/provider`: while HER v2 is active, select the call provider and atomically
-  resolve its Quick/Pro defaults.
-- `/model`: while HER v2 is active, define Quick/Pro models and configure each
-  effective task route's model slot and provider reasoning separately. Other
+- `/provider`: while HER v2 is active, select a Single call provider or open a
+  Hybrid routing draft. Instance configuration is sufficient; a provider need
+  not be repeated in the Agent's backend list.
+- `/model`: while HER v2 is active, define Quick/Pro provider/model targets and
+  configure each effective task route's target and provider reasoning
+  separately. Hybrid edits take effect together through Apply. Other
   active backends retain their existing behaviour.
 - Backend and model changes continue to an optional effort picker when the
   selected model supports effort. Keeping the current value leaves it unchanged;

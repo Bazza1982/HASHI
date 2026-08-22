@@ -1,5 +1,6 @@
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -21,20 +22,23 @@ from orchestrator.config import AgentConfig, FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
     canonical_backend_engine,
-    get_available_models,
     get_secret_lookup_order,
 )
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.runtime_configuration import (
+    HER_V2_CONFIGURATION_DRAFT_STATE_KEY,
+    HER_V2_CONFIGURATION_PRESETS_STATE_KEY,
     HER_V2_CONFIGURATION_STATE_KEY,
-    HER_V2_MIXED_VALUE,
     HERv2RuntimeConfiguration,
+    ProviderModelTarget,
     apply_her_v2_runtime_configuration,
     build_her_v2_provider_options,
     resolve_her_v2_configuration,
+    select_her_v2_hybrid,
     select_her_v2_provider,
     set_her_v2_route_model_slot,
     set_her_v2_route_reasoning,
+    set_her_v2_route_target,
     set_her_v2_slot_model,
 )
 from orchestrator.privacy_levels import (
@@ -80,6 +84,7 @@ class FlexibleBackendManager:
     def _load_state(self):
         self._active_model_override = None
         self._her_v2_configuration_override: dict[str, Any] | None = None
+        self._her_v2_configuration_draft: dict[str, Any] | None = None
         self.agent_mode = self.config.default_mode
         self.privacy_level = PrivacyLevel.PROVIDER_TRUST
         configured_backend = self.config.active_backend
@@ -116,6 +121,13 @@ class FlexibleBackendManager:
                 persisted_her_v2 = state.get(HER_V2_CONFIGURATION_STATE_KEY)
                 if isinstance(persisted_her_v2, dict):
                     self._her_v2_configuration_override = dict(persisted_her_v2)
+                persisted_her_v2_draft = state.get(
+                    HER_V2_CONFIGURATION_DRAFT_STATE_KEY
+                )
+                if isinstance(persisted_her_v2_draft, dict):
+                    self._her_v2_configuration_draft = dict(
+                        persisted_her_v2_draft
+                    )
                 if (
                     restore_backend_overrides
                     and self.config.active_backend != HER_V2_ENGINE
@@ -375,11 +387,24 @@ class FlexibleBackendManager:
         return raw
 
     def get_her_v2_provider_options(self) -> list[dict[str, Any]]:
-        return build_her_v2_provider_options(
+        options = build_her_v2_provider_options(
             self.config.allowed_backends,
             self._her_provider_profiles(),
             self._her_v2_base_config(),
         )
+        for option in options:
+            if not option.get("available"):
+                continue
+            try:
+                require_level_available(self.privacy_level)
+                require_backend_compatibility(
+                    str(option.get("engine") or ""),
+                    self.privacy_level,
+                )
+            except PrivacyPolicyError as exc:
+                option["available"] = False
+                option["reason"] = str(exc)
+        return options
 
     def _her_v2_provider_option(self, requested: str) -> dict[str, Any] | None:
         value = str(requested or "").strip().casefold()
@@ -403,6 +428,7 @@ class FlexibleBackendManager:
                 self._her_v2_base_config(),
                 self._her_v2_configuration_override,
             )
+            selected = self._normalise_her_v2_target_providers(selected)
             self._validate_her_v2_selection(selected)
             return selected
         except (TypeError, ValueError) as exc:
@@ -414,25 +440,78 @@ class FlexibleBackendManager:
             )
             self._her_v2_configuration_override = None
             fallback = resolve_her_v2_configuration(self._her_v2_base_config())
+            fallback = self._normalise_her_v2_target_providers(fallback)
             self._validate_her_v2_selection(fallback)
             return fallback
+
+    def get_her_v2_draft_configuration(
+        self,
+    ) -> HERv2RuntimeConfiguration | None:
+        raw = self._her_v2_configuration_draft
+        if not isinstance(raw, dict):
+            return None
+        try:
+            selected = resolve_her_v2_configuration(
+                self._her_v2_base_config(),
+                raw,
+            )
+            selected = self._normalise_her_v2_target_providers(selected)
+            self._validate_her_v2_selection(selected)
+            return selected
+        except (TypeError, ValueError) as exc:
+            self.logger.warning(
+                "Ignoring invalid persisted HER v2 configuration draft: %s",
+                exc,
+            )
+            self._her_v2_configuration_draft = None
+            return None
+
+    def get_her_v2_edit_configuration(self) -> HERv2RuntimeConfiguration:
+        return self.get_her_v2_draft_configuration() or self.get_her_v2_configuration()
+
+    def has_her_v2_configuration_draft(self) -> bool:
+        return self.get_her_v2_draft_configuration() is not None
+
+    def _normalise_her_v2_target_providers(
+        self,
+        selected: HERv2RuntimeConfiguration,
+    ) -> HERv2RuntimeConfiguration:
+        def normalize(target: ProviderModelTarget) -> ProviderModelTarget:
+            option = self._her_v2_provider_option(target.provider)
+            if option is None:
+                return target
+            return ProviderModelTarget(str(option["engine"]), target.model)
+
+        fast = normalize(selected.target_for_slot("fast"))
+        pro = normalize(selected.target_for_slot("pro"))
+        routes = {
+            route: normalize(target)
+            for route, target in selected.route_targets.items()
+        }
+        return replace(
+            selected,
+            fast_provider=fast.provider,
+            fast_model=fast.model,
+            pro_provider=pro.provider,
+            pro_model=pro.model,
+            route_targets=routes,
+        )
 
     def _validate_her_v2_selection(
         self,
         selected: HERv2RuntimeConfiguration,
     ) -> None:
-        if selected.provider == HER_V2_MIXED_VALUE:
-            return
-        option = self._her_v2_provider_option(selected.provider)
-        if option is None or not option.get("available"):
-            raise ValueError("the selected HER v2 provider is unavailable")
-        for slot, model in (
-            ("fast", selected.fast_model),
-            ("pro", selected.pro_model),
-        ):
-            if model != HER_V2_MIXED_VALUE and model not in option["models"]:
+        require_level_available(self.privacy_level)
+        for target in selected.all_targets():
+            require_backend_compatibility(target.provider, self.privacy_level)
+            option = self._her_v2_provider_option(target.provider)
+            if option is None or not option.get("available"):
                 raise ValueError(
-                    f"{slot} model {model!r} is not allowed for provider {selected.provider!r}"
+                    f"HER v2 provider {target.provider!r} is not configured on this instance"
+                )
+            if target.model not in option["models"]:
+                raise ValueError(
+                    f"model {target.model!r} is not allowed by configured provider {target.provider!r}"
                 )
 
     def prepare_her_v2_provider(
@@ -445,7 +524,10 @@ class FlexibleBackendManager:
         if option is None:
             raise ValueError(f"unknown HER v2 provider: {provider}")
         selected = current or self.get_her_v2_configuration()
-        if option.get("engine") == selected.provider:
+        if (
+            selected.routing_mode == "single"
+            and option.get("engine") == selected.provider
+        ):
             option = dict(option)
             models = option.get("models") or []
             if selected.fast_model in models:
@@ -457,21 +539,36 @@ class FlexibleBackendManager:
             option,
         )
 
+    def prepare_her_v2_hybrid(
+        self,
+        *,
+        current: HERv2RuntimeConfiguration | None = None,
+    ) -> HERv2RuntimeConfiguration:
+        return select_her_v2_hybrid(current or self.get_her_v2_configuration())
+
     def prepare_her_v2_model(
         self,
         slot: str,
         model: str,
         *,
+        provider: str | None = None,
         current: HERv2RuntimeConfiguration | None = None,
     ) -> HERv2RuntimeConfiguration:
         selected = current or self.get_her_v2_configuration()
-        option = self._her_v2_provider_option(selected.provider)
+        requested_provider = (
+            provider if provider else selected.target_for_slot(slot).provider
+        )
+        option = self._her_v2_provider_option(requested_provider)
         if option is None or not option.get("available"):
-            raise ValueError("the active HER v2 provider is unavailable")
+            raise ValueError(
+                f"HER v2 provider {requested_provider!r} is not configured on this instance"
+            )
+        selected_provider = str(option["engine"])
         return set_her_v2_slot_model(
             selected,
             slot,
             model,
+            provider=selected_provider,
             allowed_models=option["models"],
         )
 
@@ -501,6 +598,28 @@ class FlexibleBackendManager:
             reasoning,
         )
 
+    def prepare_her_v2_route_target(
+        self,
+        route: str,
+        provider: str,
+        model: str,
+        *,
+        current: HERv2RuntimeConfiguration | None = None,
+    ) -> HERv2RuntimeConfiguration:
+        option = self._her_v2_provider_option(provider)
+        if option is None or not option.get("available"):
+            raise ValueError(
+                f"HER v2 provider {provider!r} is not configured on this instance"
+            )
+        selected_provider = str(option["engine"])
+        return set_her_v2_route_target(
+            current or self.get_her_v2_configuration(),
+            route,
+            provider=selected_provider,
+            model=model,
+            allowed_models=option["models"],
+        )
+
     def _effective_her_v2_config(
         self,
         selected: HERv2RuntimeConfiguration | None = None,
@@ -516,14 +635,25 @@ class FlexibleBackendManager:
     ) -> None:
         if self.config.active_backend != HER_V2_ENGINE:
             raise ValueError("HER v2 configuration is available only while HER v2 is active")
+        selected = self._normalise_her_v2_target_providers(selected)
         self._validate_her_v2_selection(selected)
 
         effective = self._effective_her_v2_config(selected)
         parsed = HERv2Config.from_mapping(effective)
         serialized = selected.to_dict()
+        current = self.get_her_v2_configuration()
+        draft = self.get_her_v2_draft_configuration()
 
         def update_state(state: dict[str, Any]) -> dict[str, Any]:
             state[HER_V2_CONFIGURATION_STATE_KEY] = serialized
+            presets = state.get(HER_V2_CONFIGURATION_PRESETS_STATE_KEY)
+            presets = dict(presets) if isinstance(presets, dict) else {}
+            presets[current.routing_mode] = current.to_dict()
+            if draft is not None:
+                presets[draft.routing_mode] = draft.to_dict()
+            presets[selected.routing_mode] = serialized
+            state[HER_V2_CONFIGURATION_PRESETS_STATE_KEY] = presets
+            state.pop(HER_V2_CONFIGURATION_DRAFT_STATE_KEY, None)
             self._apply_managed_state_fields(state)
             state.pop("active_model", None)
             state.pop("active_provider", None)
@@ -535,6 +665,16 @@ class FlexibleBackendManager:
             raise OSError(f"failed to persist HER v2 configuration: {exc}") from exc
         self._active_model_override = None
         self._her_v2_configuration_override = serialized
+        self._her_v2_configuration_draft = None
+
+        self._refresh_live_her_v2_configuration(effective, parsed)
+
+    def _refresh_live_her_v2_configuration(
+        self,
+        effective: dict[str, Any],
+        parsed: HERv2Config,
+    ) -> None:
+        """Refresh only future turns; each in-flight runtime owns its snapshot."""
 
         backend = self.current_backend
         backend_engine = str(
@@ -546,6 +686,98 @@ class FlexibleBackendManager:
             backend.config.extra = extra
             if hasattr(backend, "_v2_config"):
                 backend._v2_config = parsed
+
+    def stage_her_v2_configuration(
+        self,
+        selected: HERv2RuntimeConfiguration,
+    ) -> HERv2RuntimeConfiguration:
+        if self.config.active_backend != HER_V2_ENGINE:
+            raise ValueError(
+                "HER v2 configuration is available only while HER v2 is active"
+            )
+        selected = self._normalise_her_v2_target_providers(selected)
+        self._validate_her_v2_selection(selected)
+        HERv2Config.from_mapping(self._effective_her_v2_config(selected))
+        serialized = selected.to_dict()
+
+        def update_state(state: dict[str, Any]) -> dict[str, Any]:
+            state[HER_V2_CONFIGURATION_DRAFT_STATE_KEY] = serialized
+            self._apply_managed_state_fields(state)
+            return state
+
+        try:
+            self.state_store.update(update_state)
+        except Exception as exc:
+            raise OSError(f"failed to persist HER v2 configuration draft: {exc}") from exc
+        self._her_v2_configuration_draft = serialized
+        return selected
+
+    def begin_her_v2_hybrid_draft(self) -> HERv2RuntimeConfiguration:
+        if self.config.active_backend != HER_V2_ENGINE:
+            raise ValueError(
+                "HER v2 configuration is available only while HER v2 is active"
+            )
+        existing = self.get_her_v2_draft_configuration()
+        if existing is not None and existing.routing_mode == "hybrid":
+            return existing
+        current = self.get_her_v2_configuration()
+        state = self._read_state_dict()
+        presets = state.get(HER_V2_CONFIGURATION_PRESETS_STATE_KEY)
+        preset = presets.get("hybrid") if isinstance(presets, dict) else None
+        candidate: HERv2RuntimeConfiguration | None = None
+        if isinstance(preset, dict):
+            try:
+                candidate = resolve_her_v2_configuration(
+                    self._her_v2_base_config(),
+                    preset,
+                )
+                candidate = self._normalise_her_v2_target_providers(candidate)
+                candidate = select_her_v2_hybrid(candidate)
+                self._validate_her_v2_selection(candidate)
+            except (TypeError, ValueError) as exc:
+                self.logger.warning(
+                    "Ignoring invalid saved HER v2 Hybrid preset: %s",
+                    exc,
+                )
+        if candidate is None:
+            candidate = select_her_v2_hybrid(current)
+
+        serialized = candidate.to_dict()
+
+        def update_state(state: dict[str, Any]) -> dict[str, Any]:
+            saved = state.get(HER_V2_CONFIGURATION_PRESETS_STATE_KEY)
+            saved = dict(saved) if isinstance(saved, dict) else {}
+            saved[current.routing_mode] = current.to_dict()
+            state[HER_V2_CONFIGURATION_PRESETS_STATE_KEY] = saved
+            state[HER_V2_CONFIGURATION_DRAFT_STATE_KEY] = serialized
+            self._apply_managed_state_fields(state)
+            return state
+
+        try:
+            self.state_store.update(update_state)
+        except Exception as exc:
+            raise OSError(f"failed to start HER v2 Hybrid draft: {exc}") from exc
+        self._her_v2_configuration_draft = serialized
+        return candidate
+
+    def discard_her_v2_configuration_draft(self) -> None:
+        def update_state(state: dict[str, Any]) -> dict[str, Any]:
+            state.pop(HER_V2_CONFIGURATION_DRAFT_STATE_KEY, None)
+            self._apply_managed_state_fields(state)
+            return state
+
+        try:
+            self.state_store.update(update_state)
+        except Exception as exc:
+            raise OSError(f"failed to discard HER v2 configuration draft: {exc}") from exc
+        self._her_v2_configuration_draft = None
+
+    def apply_her_v2_configuration_draft(self) -> HERv2RuntimeConfiguration:
+        selected = self.get_her_v2_draft_configuration()
+        if selected is None:
+            raise ValueError("there is no HER v2 configuration draft to apply")
+        self.apply_her_v2_configuration(selected)
+        return selected
 
     def _her_provider_profiles(self) -> dict[str, dict[str, Any]]:
         raw = getattr(self.global_config, "her_providers", None) or {}
@@ -623,7 +855,6 @@ class FlexibleBackendManager:
         backend = self.current_backend
         if backend is None or getattr(getattr(backend, "config", None), "engine", None) != engine:
             return
-        current_extra = getattr(backend.config, "extra", None) or {}
         current_provider = None
         backend_cfg_raw = self._select_backend_cfg(
             engine,
@@ -708,11 +939,57 @@ class FlexibleBackendManager:
 
         return candidates[0]
 
+    def _instance_provider_backend_cfg(
+        self,
+        engine: str,
+        *,
+        target_model: str | None,
+    ) -> dict[str, Any] | None:
+        """Build an internal call config from an instance-level HER provider."""
+
+        option = self._her_v2_provider_option(engine)
+        if option is None or not option.get("available"):
+            return None
+        models = list(option.get("models") or [])
+        if target_model and target_model not in models:
+            return None
+        profile = next(
+            (
+                raw
+                for name, raw in self._her_provider_profiles().items()
+                if canonical_backend_engine(raw.get("engine") or f"{name}-api")
+                == canonical_backend_engine(engine)
+            ),
+            {},
+        )
+        result = dict(profile)
+        result.update(
+            {
+                "engine": canonical_backend_engine(engine),
+                "models": models,
+                "default_model": (
+                    target_model
+                    or option.get("fast_model")
+                    or option.get("pro_model")
+                ),
+            }
+        )
+        return result
+
     def create_ephemeral_backend(self, engine: str, target_model: str | None = None):
         engine = canonical_backend_engine(engine)
+        require_level_available(self.privacy_level)
+        require_backend_compatibility(engine, self.privacy_level)
         backend_cfg_raw = self._select_backend_cfg(engine, target_model=target_model)
         if not backend_cfg_raw:
-            raise ValueError(f"Backend {engine} not allowed for {self.config.name}.")
+            backend_cfg_raw = self._instance_provider_backend_cfg(
+                engine,
+                target_model=target_model,
+            )
+        if not backend_cfg_raw:
+            raise ValueError(
+                f"Backend {engine} is not configured for {self.config.name}."
+            )
 
         adapter_cfg = self._build_adapter_config(
             engine,

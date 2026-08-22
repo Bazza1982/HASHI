@@ -944,6 +944,43 @@ async def test_background_learning_provider_retries_once_with_same_invariants(
 
 
 @pytest.mark.asyncio
+async def test_meditation_uses_turn_frozen_provider_target(tmp_path):
+    provider = _RetryingMaintenanceProvider()
+    config = _agent_config(tmp_path, her_v2={"profiles": _profiles()})
+    config._her_v2_stage_provider = provider
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize() is True
+    job_id = "a" * 32
+    adapter._her_meditation_journal().enqueue(
+        job_id=job_id,
+        request_id="turn-frozen-routing",
+        prompt="Maintain the local catalogue.",
+        max_actions=3,
+        routing_target={
+            "provider": "openrouter-api",
+            "model": "anthropic/claude-sonnet-4.6",
+            "reasoning": "low",
+        },
+    )
+
+    await adapter._invoke_maintenance_model(
+        Stage.MEDITATION,
+        "Maintain the local catalogue.",
+        "turn-frozen-routing",
+        f"{job_id}:attempt:1",
+        None,
+    )
+
+    profiles = [profile for profile, _request in provider.requests]
+    assert {profile.engine for profile in profiles} == {"openrouter-api"}
+    assert {profile.model for profile in profiles} == {
+        "anthropic/claude-sonnet-4.6"
+    }
+    assert {profile.reasoning for profile in profiles} == {"low"}
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_adapter_runs_durable_meditation_after_completed_turn(tmp_path):
     provider = _WorkAndMeditationProvider()
     raw = {
@@ -971,6 +1008,11 @@ async def test_adapter_runs_durable_meditation_after_completed_turn(tmp_path):
         raise AssertionError("Meditation did not reach a durable terminal state")
 
     assert payload["status"] == "completed"
+    assert payload["routing_target"] == {
+        "provider": "openrouter-api",
+        "model": "configured/lightweight",
+        "reasoning": "provider-lightweight",
+    }
     assert [habit.title for habit in adapter._her_habit_store().load()] == [
         "Verify before completion"
     ]

@@ -1260,7 +1260,7 @@ async def test_provider_menu_marks_current_and_reports_locked_choices(tmp_path):
     assert "HER V2 PROVIDER" in text
     assert text.index("<b>Current</b>") < text.index("<b>Backend</b>")
     assert "ollama (provider is disabled)" in text
-    assert labels == ["✓ deepseek", "openrouter", "🔒 ollama"]
+    assert labels == ["Hybrid routing", "✓ deepseek", "openrouter", "🔒 ollama"]
     assert not (manager.config.workspace_dir / "state.json").exists()
 
 
@@ -1300,6 +1300,48 @@ async def test_provider_typed_name_is_case_insensitive(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_typed_hybrid_configuration_stays_draft_until_apply(tmp_path):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+
+    update, context = _update(["hybrid"])
+    await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
+    assert "DRAFT" in messages[-1]
+    assert manager.get_her_v2_configuration().routing_mode == "single"
+
+    update, context = _update(
+        ["quick", "openrouter", "deepseek/deepseek-v4-flash"]
+    )
+    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
+    update, context = _update(
+        [
+            "route",
+            "review",
+            "custom",
+            "openrouter",
+            "openai/gpt-4.1-mini",
+        ]
+    )
+    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
+
+    assert manager.get_her_v2_configuration().routing_mode == "single"
+    draft = manager.get_her_v2_draft_configuration()
+    assert draft is not None
+    assert draft.fast_provider == "openrouter-api"
+    assert draft.target_for_route("review").model == "openai/gpt-4.1-mini"
+
+    update, context = _update(["apply"])
+    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
+
+    active = manager.get_her_v2_configuration()
+    assert active.routing_mode == "hybrid"
+    assert active.fast_provider == "openrouter-api"
+    assert active.pro_provider == "deepseek-api"
+    assert active.target_for_route("review").model == "openai/gpt-4.1-mini"
+    assert manager.get_her_v2_draft_configuration() is None
+
+
+@pytest.mark.asyncio
 async def test_provider_command_respects_managed_model_modes(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     manager.agent_mode = "wrapper"
@@ -1321,7 +1363,7 @@ async def test_provider_button_commits_provider_and_both_slots_without_model_ste
 
     callback_data = runtime_model_selection.her_v2_provider_keyboard(
         runtime
-    ).inline_keyboard[1][0].callback_data
+    ).inline_keyboard[2][0].callback_data
     update, edits, _answers = _callback_update(callback_data)
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
 
@@ -1404,8 +1446,8 @@ async def test_her_v2_model_menu_shows_quick_pro_and_routes_without_derived_reas
     markup = str(runtime._reply_payloads[-1]["reply_markup"])
     assert "HER V2 MODELS" in text
     assert "<b>Provider</b> · <code>deepseek-api</code>" in text
-    assert "<b>Quick model</b> · <code>deepseek-v4-flash</code>" in text
-    assert "<b>Pro model</b> · <code>deepseek-v4-pro</code>" in text
+    assert "<b>Quick target</b> · <code>deepseek-api / deepseek-v4-flash</code>" in text
+    assert "<b>Pro target</b> · <code>deepseek-api / deepseek-v4-pro</code>" in text
     assert "role-configured" not in text
     assert "mixed" not in text.lower()
     assert "her_model_slot:fast" in markup
@@ -1430,6 +1472,7 @@ def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp
             "r" * 64,
         )
     )
+    manager.begin_her_v2_hybrid_draft()
     keyboards = [
         runtime_model_selection.her_v2_provider_keyboard(runtime),
         runtime_model_selection.her_v2_slot_model_keyboard(runtime, "fast"),
@@ -1440,6 +1483,11 @@ def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp
         ),
         runtime_model_selection.her_v2_compact_keyboard(runtime),
         runtime_model_selection.her_v2_compact_provider_keyboard(runtime),
+        runtime_model_selection.her_v2_target_provider_keyboard(runtime, "fast"),
+        runtime_model_selection.her_v2_route_provider_keyboard(
+            runtime,
+            "execution_high_volume",
+        ),
     ]
     for provider_index, option in enumerate(manager.get_her_v2_provider_options()):
         if not option.get("available") or not option.get("models"):
@@ -1447,6 +1495,20 @@ def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp
         keyboards.append(
             runtime_model_selection.her_v2_compact_model_keyboard(
                 runtime,
+                provider_index,
+            )
+        )
+        keyboards.append(
+            runtime_model_selection.her_v2_target_model_keyboard(
+                runtime,
+                "fast",
+                provider_index,
+            )
+        )
+        keyboards.append(
+            runtime_model_selection.her_v2_route_model_keyboard(
+                runtime,
+                "execution_high_volume",
                 provider_index,
             )
         )

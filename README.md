@@ -668,8 +668,8 @@ examples, timing semantics, persistence, and cancellation, see
 |---------|-------------|
 | `/mode [fixed\|flex\|wrapper\|audit\|dual-brain]` | Switch execution mode; `/mode memory+` is a compatibility alias that only enables continuity |
 | `/backend [engine]` | Switch backend in Flex; other modes first offer an explicit switch-to-Flex confirmation |
-| `/provider [name]` | Choose a provider for the active HER backend, then choose one of that provider's models |
-| `/model [name]` | View/change a model within the active provider, followed by optional effort selection when supported |
+| `/provider [name\|hybrid]` | Choose a Single provider or open a HER v2 Hybrid routing draft |
+| `/model [name]` | Configure HER v2 Quick/Pro and task-route targets, or change the active model on other backends |
 | `/core` | View/change the functional core backend/model used by wrapper or audit mode |
 | `/wrap` | View/change wrapper-mode persona wrapper backend/model/context |
 | `/wrapper` | View/edit wrapper-mode persona/style slots |
@@ -702,11 +702,11 @@ For Grok CLI, `/effort` offers `low`, `medium`, and `high`. HASHI defaults
 Grok sessions to `medium`, passes the selection to the CLI explicitly, and
 persists the chosen level for that backend across agent reloads.
 
-The `/backend` and `/model` menus finish as one configuration flow. For
-`her`, that flow is backend → provider → model: `/provider` refreshes the
-available model list, while `/model` remains inside the active provider and
-never changes it. Provider and model are committed together only after the new
-route initializes successfully. Models with selectable effort levels show an
+The `/backend` and `/model` menus finish as one configuration flow. For HER v2,
+`/provider` selects either a Single provider or Hybrid routing. Hybrid Quick,
+Pro, and Custom task routes each carry a full provider/model target and remain
+drafted until one Apply; Single-provider selection retains its immediate atomic
+flow. Models with selectable effort levels show an
 optional effort step; keeping the current value leaves it unchanged. Models
 without selectable effort skip that step and show `n/a` in the saved
 configuration summary.
@@ -1386,9 +1386,10 @@ Every agent must set `type` explicitly. New agents should normally use
 back to the retired legacy fixed runtime. Explicit `"type": "fixed"` is reserved
 for emergency rollback only and requires `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`.
 
-HER provider profiles hold connection details, not secrets. Provider-specific
-`her` rows are the per-agent model allowlists shown by `/provider` and
-`/model`; the legacy singular `model` field remains a one-model allowlist.
+HER provider profiles hold instance-level connection details, not secrets. An
+enabled instance provider is enough for HER v2 routing; per-Agent backend rows
+remain optional default/model hints and still govern ordinary direct backend
+selection. The legacy singular `model` field remains a one-model hint.
 
 ### secrets.json
 ```json

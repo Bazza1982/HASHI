@@ -742,8 +742,11 @@ def resolve_compact_route(runtime: Any) -> ResolvedCompactRoute:
     except Exception as exc:
         return ResolvedCompactRoute(config=config, lock_reason=f"HER v2 configuration unavailable: {type(exc).__name__}")
 
+    pro_provider = canonical_backend_engine(
+        str(getattr(selected, "pro_provider", selected.provider))
+    )
     if config.mode == "inherit_pro":
-        provider = canonical_backend_engine(str(selected.provider))
+        provider = pro_provider
         model = str(selected.pro_model)
         reasoning = "default"
         raw = _effective_her_config(runtime)
@@ -771,7 +774,7 @@ def resolve_compact_route(runtime: Any) -> ResolvedCompactRoute:
             model=model,
             reasoning=reasoning,
             lock_reason="exact provider/model grant is absent",
-            crosses_provider=provider != canonical_backend_engine(str(selected.provider)),
+            crosses_provider=provider != pro_provider,
         )
     capabilities, _capacities = _adapter_declarations(provider)
     capabilities = dict(capabilities)
@@ -798,7 +801,7 @@ def resolve_compact_route(runtime: Any) -> ResolvedCompactRoute:
         timeout_tier = requested_tier
     if timeout_tier not in {"tier_2", "tier_3"}:
         missing.append("semantic Compact cannot use Tier 1")
-    crosses = provider != canonical_backend_engine(str(selected.provider))
+    crosses = provider != pro_provider
     if crosses and not config.cross_provider_confirmed:
         missing.append("cross-provider Compact confirmation is absent")
     return ResolvedCompactRoute(
@@ -838,6 +841,9 @@ def configure_route(
     if timeout_tier not in {"auto", "tier_2", "tier_3"}:
         raise ValueError("Compact timeout tier must be auto, tier_2, or tier_3")
     selected = manager.get_her_v2_configuration()
+    pro_provider = canonical_backend_engine(
+        str(getattr(selected, "pro_provider", selected.provider))
+    )
     if mode == "explicit":
         provider = canonical_backend_engine(provider)
         model = str(model or "").strip()
@@ -846,7 +852,7 @@ def configure_route(
             raise ValueError("explicit Compact requires provider, model, and reasoning")
         if _exact_grant(runtime, provider, model) is None:
             raise ValueError("explicit Compact provider/model lacks an exact Agent grant")
-        if provider != canonical_backend_engine(str(selected.provider)) and not confirmed_cross_provider:
+        if provider != pro_provider and not confirmed_cross_provider:
             raise ValueError("cross-provider Compact requires explicit confirmation")
         candidate = CompactRouteConfig(
             mode,

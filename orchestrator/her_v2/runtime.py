@@ -1027,7 +1027,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
     async def _invoke_subagent(
         self, state: _TurnState, assignment: SubAgentAssignment
     ) -> SubAgentResult:
-        profile = self.config.profiles[assignment.profile]
+        profile = self.config.profile_for_name(assignment.profile)
         role = f"sub_agent:{assignment.assignment_id}"
         side_effects_authorised = (
             assignment.allow_side_effects and not self.config.shadow_mode

@@ -1186,6 +1186,14 @@ class HERMeditationJournal:
                     raise ValueError(
                         "invalid HER Meditation cost notification attempt count"
                     )
+        routing_target = payload.get("routing_target")
+        if routing_target is not None:
+            if not isinstance(routing_target, dict):
+                raise ValueError("invalid HER Meditation routing target")
+            if not str(routing_target.get("provider") or "").strip():
+                raise ValueError("HER Meditation routing target provider is required")
+            if not str(routing_target.get("model") or "").strip():
+                raise ValueError("HER Meditation routing target model is required")
         return payload
 
     def _write(self, payload: Mapping[str, Any]) -> None:
@@ -1199,6 +1207,7 @@ class HERMeditationJournal:
         prompt: str,
         max_actions: int,
         notification_context: Mapping[str, Any] | None = None,
+        routing_target: Mapping[str, Any] | None = None,
     ) -> tuple[str, bool]:
         job_id = str(job_id or "").strip().casefold()
         # Validate the execution-scoped identity before any filesystem access.
@@ -1217,6 +1226,20 @@ class HERMeditationJournal:
             notification_context,
             now=now,
         )
+        frozen_target = None
+        if routing_target is not None:
+            provider = _clean_text(routing_target.get("provider"), limit=160)
+            model = _clean_text(routing_target.get("model"), limit=320)
+            reasoning = _clean_text(routing_target.get("reasoning"), limit=64)
+            if not provider or not model:
+                raise ValueError(
+                    "HER Meditation routing target requires provider and model"
+                )
+            frozen_target = {
+                "provider": provider,
+                "model": model,
+                "reasoning": reasoning or None,
+            }
         payload = {
             "format": MEDITATION_JOB_FORMAT,
             "job_id": job_id,
@@ -1230,6 +1253,7 @@ class HERMeditationJournal:
             "outcomes": [],
             "changes": [],
             "notification": notification,
+            "routing_target": frozen_target,
             "meter": {
                 "line_items": [],
                 "notification": self._new_meter_notification_state(

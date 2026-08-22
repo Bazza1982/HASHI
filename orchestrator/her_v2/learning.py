@@ -103,11 +103,15 @@ class HERv2Learning:
         *,
         learning_eligible: bool = True,
         notification_context: Mapping[str, Any] | None = None,
+        routing_target: Mapping[str, Any] | None = None,
     ) -> "HERv2TurnLearning":
         return HERv2TurnLearning(
             owner=self,
             learning_eligible=bool(learning_eligible),
             notification_context=dict(notification_context or {}),
+            routing_target=(
+                dict(routing_target) if isinstance(routing_target, Mapping) else None
+            ),
         )
 
     async def retrieve(self, *, goal: str, turn_id: str) -> Sequence[str]:
@@ -150,6 +154,7 @@ class HERv2Learning:
         limitations: Sequence[str],
         terminal_state: TerminalState,
         notification_context: Mapping[str, Any] | None = None,
+        routing_target: Mapping[str, Any] | None = None,
     ) -> None:
         config = self.config_getter()
         if not config.enabled:
@@ -199,6 +204,7 @@ class HERv2Learning:
             prompt=prompt,
             max_actions=config.max_actions,
             notification_context=notification_context,
+            routing_target=routing_target,
         )
         self._audit(
             event_id=f"{turn_id}:meditation:enqueued",
@@ -943,6 +949,7 @@ class HERv2TurnLearning:
     owner: HERv2Learning
     learning_eligible: bool
     notification_context: Mapping[str, Any]
+    routing_target: Mapping[str, Any] | None
 
     async def retrieve(self, *, goal: str, turn_id: str) -> Sequence[str]:
         if not self.learning_eligible:
@@ -969,6 +976,7 @@ class HERv2TurnLearning:
             limitations=limitations,
             terminal_state=terminal_state,
             notification_context=self.notification_context,
+            routing_target=self.routing_target,
         )
 
 

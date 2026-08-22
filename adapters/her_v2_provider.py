@@ -441,8 +441,19 @@ def _registry_is_read_only(registry: Any, tool_name: str) -> bool:
 
 
 def _manager_authorises_profile(manager: Any, profile: ProviderProfile) -> bool:
-    """Require an exact provider/model grant from the Agent configuration."""
+    """Accept provider/model targets configured at the HASHI instance level."""
 
+    option_getter = getattr(manager, "_her_v2_provider_option", None)
+    if callable(option_getter):
+        option = option_getter(profile.engine)
+        return bool(
+            option
+            and option.get("available")
+            and profile.model in (option.get("models") or ())
+        )
+
+    # Compatibility for injected test/third-party managers that expose only
+    # the legacy Agent configuration surface.
     manager_config = getattr(manager, "config", None)
     for raw in getattr(manager_config, "allowed_backends", ()) or ():
         if not isinstance(raw, Mapping):

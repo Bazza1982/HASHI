@@ -46,7 +46,7 @@ BOT_COMMAND_BINDINGS: tuple[BotCommandBinding, ...] = tuple(
 
 CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
     CallbackBinding(
-        r"^(model|backend|bmodel|effort|backend_menu|her_model|her_route|her_routes|her_reasoning)",
+        r"^(model|backend|bmodel|effort|backend_menu|her_model|her_route|her_routes|her_reasoning|her_target)",
         "callback_model",
     ),
     CallbackBinding(
