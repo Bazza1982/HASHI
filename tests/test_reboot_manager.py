@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import runpy
 import sys
 import types
 from contextlib import suppress
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from adapters import registry as backend_registry
+from orchestrator import reboot_manager as reboot_manager_module
 from orchestrator.hot_reload import HotReloadError, module_reload_key
 from orchestrator.reboot_manager import RebootManager
 from orchestrator.service_manager import ServiceManager
@@ -218,6 +220,34 @@ def test_validate_agent_runtime_contract_accepts_current_modules():
     manager = RebootManager(kernel=object(), console_handler=None)
 
     manager.validate_agent_runtime_contract()
+
+
+def test_reload_hands_current_contract_to_live_legacy_manager():
+    class LegacyRebootManager:
+        def validate_agent_runtime_contract(self):
+            supported_adapter = backend_registry.get_backend_class("her-v2")
+            assert all(
+                backend_registry.get_backend_class(engine) is supported_adapter
+                for engine in ("her-v2", "her", "claw-cli")
+            )
+
+    legacy_manager = LegacyRebootManager()
+    with pytest.raises(ValueError, match="Unknown engine: claw-cli"):
+        legacy_manager.validate_agent_runtime_contract()
+
+    reloaded_namespace = runpy.run_path(
+        reboot_manager_module.__file__,
+        init_globals={"RebootManager": LegacyRebootManager},
+    )
+    reloaded_manager_class = reloaded_namespace["RebootManager"]
+
+    legacy_manager.validate_agent_runtime_contract()
+    assert (
+        LegacyRebootManager.validate_agent_runtime_contract
+        is reloaded_manager_class.validate_agent_runtime_contract
+    )
+    with pytest.raises(ValueError, match="Unknown engine: claw-cli"):
+        backend_registry.get_backend_class("claw-cli")
 
 
 def test_validate_agent_runtime_contract_rejects_stale_tool_registry(monkeypatch):

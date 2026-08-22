@@ -14,6 +14,13 @@ from orchestrator.hot_reload import (
     preflight_module_sources,
 )
 
+# ``importlib.reload`` reuses this module dictionary.  Capture the class owned
+# by the live kernel before the new class statement replaces the module name.
+# A hot-restart coroutine already executing on that class keeps its old
+# ``hot_restart`` code object, so the post-reload contract seam must be handed
+# forward explicitly below.
+_PRE_RELOAD_REBOOT_MANAGER_CLASS = globals().get("RebootManager")
+
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
 AGENT_STOP_TIMEOUT_SECONDS = 25.0
@@ -463,3 +470,37 @@ class RebootManager:
             bridge_logger.critical("Hot restart failed: no agents running after restart")
             print("\033[38;5;203m  ✗ reboot failed — no agents running\033[0m\n", flush=True)
             return False
+
+
+def _handoff_reloaded_runtime_contract(
+    previous_manager_class,
+    *,
+    current_manager_class=RebootManager,
+) -> bool:
+    """Move the post-reload validator onto an already-running manager class.
+
+    The first reboot across a contract change is still executing
+    ``hot_restart`` from the previous class generation.  Its subsequent
+    ``self.validate_agent_runtime_contract()`` lookup must resolve to the
+    validator from the source that was just reloaded.  Patch only that seam;
+    backend aliases and ordinary runtime resolution remain unchanged.
+    """
+
+    if (
+        not inspect.isclass(previous_manager_class)
+        or previous_manager_class is current_manager_class
+    ):
+        return False
+    previous_manager_class.validate_agent_runtime_contract = (
+        current_manager_class.validate_agent_runtime_contract
+    )
+    return True
+
+
+if _handoff_reloaded_runtime_contract(_PRE_RELOAD_REBOOT_MANAGER_CLASS):
+    handoff_message = (
+        "Hot reload: handed the current runtime contract validator to the "
+        "live RebootManager generation."
+    )
+    main_logger.info(handoff_message)
+    bridge_logger.info(handoff_message)
