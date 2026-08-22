@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import types
+from dataclasses import dataclass
 
 import pytest
 
@@ -97,11 +98,17 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
         "adapters.deepseek_api",
         "orchestrator.flexible_backend_manager",
         "orchestrator.her_v2.config",
+        "orchestrator.her_v2.prompt_catalog",
+        "orchestrator.her_v2.prompts",
         "orchestrator.her_v2.models",
         "orchestrator.her_v2.retry",
         "orchestrator.her_v2.runtime_configuration",
         "orchestrator.her_v2.interfaces",
+        "orchestrator.her_v2.presentation",
+        "orchestrator.her_v2.runtime_support",
+        "orchestrator.her_v2.runtime_invocation",
         "orchestrator.her_v2.runtime",
+        "adapters.her_v2_provider",
         "orchestrator.runtime_pipeline",
         "orchestrator.flexible_agent_runtime",
     ]
@@ -118,6 +125,18 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
     assert ordered.index("orchestrator.her_v2.interfaces") < ordered.index(
         "orchestrator.her_v2.runtime"
     )
+    assert ordered.index("orchestrator.her_v2.prompt_catalog") < ordered.index(
+        "orchestrator.her_v2.prompts"
+    )
+    assert ordered.index("orchestrator.her_v2.presentation") < ordered.index(
+        "orchestrator.her_v2.runtime_support"
+    )
+    assert ordered.index("orchestrator.her_v2.runtime_support") < ordered.index(
+        "orchestrator.her_v2.runtime_invocation"
+    )
+    assert ordered.index("orchestrator.her_v2.runtime_invocation") < ordered.index(
+        "orchestrator.her_v2.runtime"
+    )
     assert ordered.index("orchestrator.her_v2.retry") < ordered.index(
         "orchestrator.her_v2.runtime"
     )
@@ -128,6 +147,9 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
         "orchestrator.flexible_backend_manager"
     )
     assert ordered.index("orchestrator.her_v2.runtime") < ordered.index(
+        "adapters.her_v2_provider"
+    )
+    assert ordered.index("adapters.her_v2_provider") < ordered.index(
         "adapters.her_v2"
     )
     assert ordered.index("adapters.openrouter_api") < ordered.index(
@@ -198,6 +220,71 @@ def test_hot_reload_detects_new_method_on_loaded_config_class(tmp_path):
     ) == [
         "orchestrator.her_v2.config.HERv2Config.profile_for_route (new method)"
     ]
+
+
+def test_hot_reload_ignores_private_openrouter_implementation_additions(tmp_path):
+    source = tmp_path / "openrouter_api.py"
+    source.write_text(
+        "from dataclasses import dataclass\n"
+        "\n"
+        "@dataclass\n"
+        "class _APIResult:\n"
+        "    text: str\n"
+        "    cost_usd: float | None = None\n"
+        "\n"
+        "class OpenRouterAdapter:\n"
+        "    def chat(self, messages):\n"
+        "        return self._reasoning_payload(), messages\n"
+        "\n"
+        "    def _reasoning_payload(self):\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    module = types.ModuleType("adapters.openrouter_api")
+    module.__file__ = str(source)
+
+    @dataclass
+    class _APIResult:
+        text: str
+
+    class OpenRouterAdapter:
+        def chat(self, messages):
+            return messages
+
+    _APIResult.__module__ = module.__name__
+    OpenRouterAdapter.__module__ = module.__name__
+    module._APIResult = _APIResult
+    module.OpenRouterAdapter = OpenRouterAdapter
+
+    assert (
+        detect_loaded_class_interface_changes(
+            [module.__name__], modules={module.__name__: module}
+        )
+        == []
+    )
+
+
+def test_hot_reload_keeps_dunder_protocol_signatures_in_public_interface(tmp_path):
+    source = tmp_path / "adapter.py"
+    source.write_text(
+        "class Adapter:\n"
+        "    def __call__(self, request, *, timeout=None):\n"
+        "        return request\n",
+        encoding="utf-8",
+    )
+    module = types.ModuleType("adapters.protocol_example")
+    module.__file__ = str(source)
+
+    class Adapter:
+        def __call__(self, request):
+            return request
+
+    Adapter.__module__ = module.__name__
+    module.Adapter = Adapter
+
+    assert detect_loaded_class_interface_changes(
+        [module.__name__], modules={module.__name__: module}
+    ) == ["adapters.protocol_example.Adapter.__call__ (signature changed)"]
 
 
 def test_hot_reload_ignores_function_body_only_change(tmp_path):

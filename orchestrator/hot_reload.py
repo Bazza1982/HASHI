@@ -66,15 +66,20 @@ FOUNDATION_PHASES = {
     "orchestrator.her_v2.runtime_configuration": 2,
     "orchestrator.her_v2.lifecycle": 1,
     "orchestrator.her_v2.policy": 1,
-    "orchestrator.her_v2.prompts": 1,
+    "orchestrator.her_v2.prompt_catalog": 1,
+    "orchestrator.her_v2.prompts": 2,
     "orchestrator.her_v2.interfaces": 2,
     "orchestrator.her_v2.ledger": 3,
     "orchestrator.her_v2.learning": 3,
+    "orchestrator.her_v2.presentation": 3,
     "orchestrator.her_v2.structured": 3,
     "orchestrator.her_v2.commentary": 4,
-    "orchestrator.her_v2.runtime": 4,
-    "orchestrator.her_v2": 5,
-    "adapters.her_v2": 5,
+    "orchestrator.her_v2.runtime_support": 4,
+    "orchestrator.her_v2.runtime_invocation": 5,
+    "orchestrator.her_v2.runtime": 6,
+    "orchestrator.her_v2": 7,
+    "adapters.her_v2_provider": 7,
+    "adapters.her_v2": 8,
 }
 
 
@@ -156,6 +161,14 @@ def _assigned_names(node: ast.Assign | ast.AnnAssign) -> set[str]:
     return {target.id for target in targets if isinstance(target, ast.Name)}
 
 
+def _is_private_implementation_name(name: str) -> bool:
+    """Return whether *name* is private but not a Python data-model hook."""
+
+    return name.startswith("_") and not (
+        name.startswith("__") and name.endswith("__")
+    )
+
+
 def detect_loaded_class_interface_changes(
     module_names: list[str],
     *,
@@ -166,12 +179,15 @@ def detect_loaded_class_interface_changes(
     ``importlib.reload`` mutates a process-global module dictionary.  Methods on
     an old live instance keep their old function body but resolve globals from
     that newly populated dictionary.  A targeted reboot is therefore unsafe
-    when current source adds a class member, changes a callable signature, or
-    adds a dataclass field: a non-target Agent can combine old instances with
-    new consumers.  Detect that boundary before any Agent is stopped so the
-    caller can widen the restart transaction.
+    when current source adds a public class member, changes a public callable
+    signature, or adds a public dataclass field: a non-target Agent can combine
+    old instances with new consumers.  Detect that boundary before any Agent
+    is stopped so the caller can widen the restart transaction.
 
-    Function-body-only edits intentionally do not count as interface changes.
+    Function-body-only edits and underscore-private implementation details do
+    not count as cross-generation interfaces. Python data-model hooks such as
+    ``__init__`` and ``__call__`` remain protected even though they start with
+    underscores.
     """
 
     loaded = modules if modules is not None else sys.modules
@@ -195,6 +211,8 @@ def detect_loaded_class_interface_changes(
         for class_node in (
             node for node in tree.body if isinstance(node, ast.ClassDef)
         ):
+            if _is_private_implementation_name(class_node.name):
+                continue
             class_label = f"{module_name}.{class_node.name}"
             loaded_class = getattr(module, class_node.name, None)
             if not inspect.isclass(loaded_class):
@@ -224,6 +242,8 @@ def detect_loaded_class_interface_changes(
             dataclass_fields = getattr(loaded_class, "__dataclass_fields__", {})
             class_annotations = getattr(loaded_class, "__annotations__", {})
             for field_name in sorted(source_fields):
+                if _is_private_implementation_name(field_name):
+                    continue
                 if (
                     field_name in loaded_class.__dict__
                     or field_name in dataclass_fields
@@ -233,6 +253,8 @@ def detect_loaded_class_interface_changes(
                 changes.append(f"{class_label}.{field_name} (new field)")
 
             for method_name, source_shape in source_methods.items():
+                if _is_private_implementation_name(method_name):
+                    continue
                 try:
                     loaded_member = inspect.getattr_static(loaded_class, method_name)
                 except AttributeError:
@@ -255,6 +277,8 @@ def detect_loaded_class_interface_changes(
                 "fdel": "deleter",
             }
             for property_name, source_accessors in source_properties.items():
+                if _is_private_implementation_name(property_name):
+                    continue
                 try:
                     loaded_member = inspect.getattr_static(
                         loaded_class, property_name
