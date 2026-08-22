@@ -48,7 +48,6 @@ from orchestrator.her_v2.presentation import (
     RenderedRequiredMessage,
     RequiredUserMessage,
 )
-from orchestrator.her_v2.retry import ProviderRetryPolicy, RetryTier
 from orchestrator import runtime_her_dream, runtime_her_habits
 
 
@@ -800,16 +799,13 @@ async def test_adapter_supplies_concrete_meditation_service_when_enabled(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", [Stage.MEDITATION, Stage.DREAM])
-async def test_background_learning_provider_retries_once_at_tier_two(
+async def test_background_learning_provider_retries_once_with_same_invariants(
     tmp_path,
     stage,
 ):
     provider = _RetryingMaintenanceProvider()
     config = _agent_config(tmp_path, her_v2={"profiles": _profiles()})
     config._her_v2_stage_provider = provider
-    config._her_v2_retry_policy = ProviderRetryPolicy(
-        tier_timeouts={tier: (1.0, 1.0) for tier in RetryTier}
-    )
     adapter = HERv2Adapter(config, _global_config(tmp_path))
     assert await adapter.initialize() is True
 
@@ -824,8 +820,6 @@ async def test_background_learning_provider_retries_once_at_tier_two(
     assert response.provider_attempt == 2
     requests = [request for _profile, request in provider.requests]
     assert [request.attempt for request in requests] == [1, 2]
-    assert [request.retry_tier for request in requests] == ["tier_2", "tier_2"]
-    assert [request.attempt_timeout_s for request in requests] == [1.0, 1.0]
     assert len({request.retry_invariant_hash for request in requests}) == 1
     rows = [
         json.loads(line)

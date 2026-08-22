@@ -5,8 +5,8 @@
 | Field | Value |
 |---|---|
 | Status | Approved design baseline |
-| Version | 1.0 |
-| Date | 2026-08-20 |
+| Version | 1.1 |
+| Date | 2026-08-22 |
 | Product | Hashi Engine Runtime (HER) |
 | Implementation baseline | HASHI `origin/main` at `604b826ed0dbb8cb748a617cbcf4c7d0dd7406f4` |
 
@@ -73,19 +73,40 @@ including:
 - review limits;
 - tool and permission policies.
 
-The provider-recovery tiers below are a locked HER v2 safety policy rather than
-a provider/profile tuning field.
+#### 3.2.1 No unauthorised execution ceilings
 
-HER v2 has exactly two count-based iterative orchestration ceilings:
-Replanning and Review/remediation, as defined by effort policy. In addition, a
-provider operation has one fixed recovery allowance: after an eligible
-transient failure, Runtime may make exactly one fresh-connection retry. Each
-provider attempt has the tiered deadline defined in section 17. HER still has no
-whole-turn hard clock, tool-round ceiling, sub-agent-count ceiling, turn
-ceiling, cumulative token budget, or per-request output-token ceiling. Legacy
-HER/Claw generic timeout and retry fields remain invalid configuration and must
-be rejected rather than silently applied; they cannot override the deliberate
-tiered recovery policy.
+HER v2 has no turn-count, elapsed-time, wall-clock, stage, provider-attempt,
+tool-round, sub-agent-count, call-count, step-count, cumulative-token, or
+output-token execution ceiling at any stage. This rule applies equally to
+Immediate Response, Triage, Planning, Execution, Replanning, Review,
+Finalisation, Persona packaging, Meditation, Dream, delegated sub-agents,
+provider adapters, and tool-enabled provider loops. A provider operation must
+never be defined so broadly that a transport timeout silently becomes a clock
+around model generation, foreground tool execution, and subsequent model
+continuation.
+
+The only already-authorised controls that may stop or bound work are:
+
+- an explicit user `/stop`, `/steer`, cancellation, or process-lifecycle stop;
+- the configured meaningful-progress idle detector in section 18;
+- a connection, read-inactivity, or protocol-safety guard scoped inside the
+  relevant transport/parser operation, which resets on qualifying activity and
+  never encloses a complete HER stage or tool loop;
+- a timeout explicitly supplied for one tool invocation by its authorised
+  caller, where omitting the timeout means no default tool deadline;
+- the Replanning and Review/remediation iteration ceilings explicitly defined
+  by HER effort policy; and
+- exactly one safe fresh-connection recovery after an eligible provider
+  failure, as defined in section 17. This is a recovery allowance after a typed
+  failure, not permission to time-limit a healthy attempt.
+
+No implementation, adapter option, compatibility field, test fixture, or audit
+label may introduce an equivalent limit under another name such as `budget`,
+`lease`, `window`, `deadline`, `max_tokens`, `max_turns`, or `max_loops`.
+Legacy HER/Claw fields representing those ceilings remain invalid HER v2
+configuration and must be rejected rather than silently applied. Any new
+execution limit requires explicit user authorisation and an approved amendment
+to this section before implementation or supporting tests are added.
 
 Provider-specific request construction belongs in provider adapters, not in the HER orchestration core.
 
@@ -725,13 +746,12 @@ Persona-authored by Immediate Response.
 ### 12.3 Reporting failure
 
 For one transient provider-failure sequence, Finalisation may make at most two
-attempts: the initial Tier-1 attempt and one eligible recovery attempt.
+attempts: the initial attempt and one eligible fresh-connection recovery.
 Structured-envelope correction remains the separate semantic repair path from
 section 3.7 and may issue another Finalisation-stage call under the user
 idle-progress boundary; it does not replenish the one provider-recovery
-allowance. Malformed/high-volume or large-context Finalisation is promoted to
-Tier 2, and a local/CLI provider is promoted to Tier 3. Runtime freezes and
-hashes the Finalisation input before the first attempt; every recovery or
+allowance. Neither attempt has an HER elapsed-time deadline. Runtime freezes
+and hashes the Finalisation input before the first attempt; every recovery or
 structure-correction attempt must reuse the same Execution invocation identity,
 raw output, parsed result, evidence references, Review findings, goal,
 classification, permissions, provider, model, and workzone. Execution is never
@@ -915,38 +935,36 @@ Logs must apply existing HASHI secret-redaction, access-control, retention, and 
 
 ## 17. Failure, Retry, and Recovery
 
-### 17.1 Stage-local retry
+### 17.1 Stage-local provider recovery
 
 HER permits exactly one fresh-connection provider recovery within the active
-process and current logical stage. The recovery tiers are:
-
-| Tier | Initial attempt | Recovery attempt | Default stages |
-| --- | ---: | ---: | --- |
-| Tier 1 | 60 seconds | 180 seconds | Immediate Response, Triage, ordinary Finalisation, Persona packaging |
-| Tier 2 | 190 seconds | 300 seconds | Planning, Replanning, Review, remote Execution, Meditation, Dream |
-| Tier 3 | 300 seconds | 600 seconds | local/CLI provider calls |
-
-Malformed/high-volume or large-context Finalisation is promoted from Tier 1 to
-Tier 2. A sufficiently large context promotes any remote stage by one tier,
-capped at Tier 3. Any local/CLI route is Tier 3. The tier bounds individual
-provider attempts; they are not a whole-turn runtime budget.
+process and current logical stage. Recovery eligibility is selected by typed
+failure and replay safety, never by an elapsed-time tier. Initial and recovery
+attempts have no HER deadline. Runtime must not wrap a complete
+`provider.invoke()` operation in a timeout and must not synthesize an attempt
+timeout for an adapter, because a tool-capable provider invocation can include
+model generation, any number of foreground tool calls, and later model
+continuations.
 
 Typed failures eligible for the one recovery are HTTP 408, HTTP 429, HTTP 5xx,
-connection/DNS/reset failures, response timeouts, an incomplete provider stream,
-an empty response, and a stream that never produces a usable tool or final
-result. Configuration failures, HTTP 400, HTTP 401, HTTP 403, invalid URL or TLS
-configuration, audit persistence failure, and an authorised user stop are not
-retried. Every terminal technical failure enters `ERROR` with a stable error
-code, a redacted human-readable description, attempt count, side-effect status,
-and a correlation reference.
+connection/DNS/reset failures, a scoped transport read-inactivity timeout, an
+incomplete provider stream, an empty response, and a stream that never produces
+a usable tool or final result. Configuration failures, HTTP 400, HTTP 401, HTTP
+403, invalid URL or TLS configuration, audit persistence failure, and an
+authorised user stop are not retried. Every terminal technical failure enters
+`ERROR` with a stable error code, a redacted human-readable description,
+attempt count, side-effect status, and a correlation reference.
 
 Every provider failure and retry decision is audited, including provider/model,
-tier, deadline, typed code, HTTP status and provider request ID when available,
-activity summary, retryability, replay-safety decision, delay, and whether the
-next attempt uses a fresh connection. A retry must preserve provider, model,
-goal, immutable Triage classification, role, provider reasoning, tool and
-side-effect permissions, delegated tool allowlist, workzone, and active plan.
-Runtime hashes those invariants and records the same hash on both attempts.
+typed code, failure origin, HTTP status and provider request ID when available,
+activity/inactivity summary, retryability, replay-safety decision, delay, and
+whether the next attempt uses a fresh connection. A retry must preserve
+provider, model, goal, immutable Triage classification, role, provider
+reasoning, tool and side-effect permissions, delegated tool allowlist,
+workzone, and active plan. Runtime hashes those invariants and records the same
+hash on both attempts. Backoff and a provider-supplied `Retry-After` value are
+scheduling inputs, not attempt deadlines or permission to create a recovery
+window.
 
 Deterministic carrier recovery and structured-envelope correction occur before
 provider recovery. A side-effect-free structured correction receives the prior
@@ -992,27 +1010,30 @@ Measurable progress includes:
 
 No-op retries, heartbeat-only Ledger writes, idle waiting, and unlogged internal loops are not progress.
 
-### 18.2 Provider-attempt clock
+### 18.2 Scoped inactivity and explicit operation timeouts
 
-Each provider attempt owns an independent tier deadline and an attempt-local
-activity tracker. Provider reasoning, text deltas, tool starts, and tool results
-are recorded on that tracker for timeout classification and replay safety; they
-do not silently refresh the user meaningful-progress clock. The recovery
-attempt receives a fresh deadline, so a stalled first connection cannot consume
-the recovery window. Blank heartbeats are activity for neither clock.
+Transport operations may retain connection-inactivity, read-inactivity, and
+protocol-safety guards. Each guard must live inside the narrow transport or
+parser operation it protects, reset on qualifying provider activity, and never
+include foreground tool execution or a complete HER stage. A blank heartbeat
+does not qualify as activity. These guards classify an actual transport stall;
+they are not provider-attempt clocks.
 
-The user meaningful-progress clock governs turn-level liveness and
-structured-envelope repair. The provider-attempt clock governs only the current
-provider operation. Neither clock may be substituted for the other.
+A tool may have a timeout only when the authorised caller explicitly supplies
+one for that individual invocation. Omission means that no default tool timeout
+is applied. An explicit tool timeout does not create or imply a turn, stage,
+provider, or later-tool budget.
 
-### 18.3 Prohibited total execution budgets
+### 18.3 Prohibited execution limits at every stage
 
-There is no whole-turn hard timeout, time budget, turn budget, tool-round
-budget, sub-agent budget, cumulative token budget, or output-token budget in
-HER v2. A sequence of successful substantive units may continue for
-arbitrarily long elapsed time. The tiered attempt deadline, an authorised
-operator stop, and the no-progress idle detector are scoped liveness controls,
-not total-runtime ceilings.
+There is no stage timeout, provider-attempt timeout, whole-turn hard timeout,
+elapsed-time budget, turn-count budget, tool-round budget, call/step budget,
+sub-agent-count budget, cumulative token budget, or output-token budget in HER
+v2. This prohibition applies to normal execution, recovery, presentation,
+background learning, adapters, and delegated work. Meaningful work may continue
+for arbitrarily long elapsed time and across arbitrarily many tool/model rounds.
+Only the expressly authorised controls listed in section 3.2.1 may stop or
+bound it.
 
 ## 19. Sub-Agent Governance
 
@@ -1132,8 +1153,11 @@ HER v2 is ready for production rollout only when:
   changing provider reasoning or leaking into later ordinary turns;
 - Replanning and Review loops cannot violate lifecycle order;
 - eligible provider failures receive no more and no less than one safe
-  fresh-connection recovery; attempt tiers, typed exclusions, invariant hashes,
-  and process-restart non-resumption are enforced;
+  fresh-connection recovery; typed exclusions, invariant hashes, and
+  process-restart non-resumption are enforced without an attempt deadline;
+- every HER stage, adapter, presentation path, maintenance path, sub-agent, and
+  tool-enabled provider loop is free of unauthorised turn-, time-, token-,
+  call-, step-, tool-round-, and sub-agent-count ceilings;
 - Ledger records remain minimal and auditable through log references;
 - all available reasoning traces are logged and correlated to the turn;
 - tools and permissions remain HASHI-owned;
@@ -1162,9 +1186,10 @@ The following decisions are authoritative for HER v2:
 3. Planning and Replanning may not change classification or goal.
 4. `/steer` stops the old turn and starts a newly triaged turn with new instructions.
 5. Lifecycle order is strict; stage content is flexible.
-6. Each eligible provider operation has exactly one fresh-connection recovery;
-   each attempt uses its tier deadline, while the turn itself has no aggregate
-   runtime ceiling.
+6. Each eligible provider operation has exactly one safe fresh-connection
+   recovery, but neither attempt nor any HER stage has an elapsed-time,
+   turn-count, token, call, step, tool-round, or sub-agent-count ceiling beyond
+   the expressly authorised controls in section 3.2.1.
 7. Immediate Response becomes the sole final user-facing answer for `DIRECT_RESPONSE`.
 8. Review is advisory and never user-facing.
 9. The Primary Agent owns execution and reporting.

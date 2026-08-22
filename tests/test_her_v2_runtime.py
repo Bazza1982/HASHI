@@ -27,7 +27,6 @@ from orchestrator.her_v2.presentation import (
     RequiredUserMessage,
 )
 from orchestrator.her_v2.runtime import HERv2Runtime
-from orchestrator.her_v2.retry import ProviderRetryPolicy, RetryTier
 
 
 def _config(**overrides):
@@ -46,69 +45,6 @@ def _config(**overrides):
     }
     raw.update(overrides)
     return HERv2Config.from_mapping(raw)
-
-
-def _fast_retry_policy(
-    initial: float = 0.02,
-    recovery: float = 0.04,
-) -> ProviderRetryPolicy:
-    return ProviderRetryPolicy(
-        tier_timeouts={tier: (initial, recovery) for tier in RetryTier}
-    )
-
-
-def test_provider_retry_tiers_match_stage_complexity_and_local_promotion():
-    policy = ProviderRetryPolicy()
-
-    assert policy.tier_for(Stage.IMMEDIATE_RESPONSE, engine="deepseek-api") is RetryTier.TIER_1
-    assert policy.tier_for(Stage.TRIAGE, engine="deepseek-api") is RetryTier.TIER_1
-    assert policy.tier_for(Stage.FINALISATION, engine="deepseek-api") is RetryTier.TIER_1
-    assert policy.tier_for(Stage.PLANNING, engine="deepseek-api") is RetryTier.TIER_2
-    assert policy.tier_for(Stage.REPLANNING, engine="deepseek-api") is RetryTier.TIER_2
-    assert policy.tier_for(Stage.REVIEW, engine="deepseek-api") is RetryTier.TIER_2
-    assert policy.tier_for(Stage.MEDITATION, engine="deepseek-api") is RetryTier.TIER_2
-    assert policy.tier_for(Stage.DREAM, engine="deepseek-api") is RetryTier.TIER_2
-    assert (
-        policy.tier_for(
-            Stage.FINALISATION,
-            engine="deepseek-api",
-            context={"execution_json_valid": False},
-        )
-        is RetryTier.TIER_2
-    )
-    assert (
-        policy.tier_for(
-            Stage.FINALISATION,
-            engine="deepseek-api",
-            classification=TriageClassification.HIGH_VOLUME_TASK,
-        )
-        is RetryTier.TIER_2
-    )
-    small_threshold_policy = ProviderRetryPolicy(large_context_bytes=32)
-    large_context = {"payload": "x" * 64}
-    assert (
-        small_threshold_policy.tier_for(
-            Stage.TRIAGE,
-            engine="deepseek-api",
-            context=large_context,
-        )
-        is RetryTier.TIER_2
-    )
-    assert (
-        small_threshold_policy.tier_for(
-            Stage.PLANNING,
-            engine="deepseek-api",
-            context=large_context,
-        )
-        is RetryTier.TIER_3
-    )
-    assert policy.tier_for(Stage.TRIAGE, engine="codex-cli") is RetryTier.TIER_3
-    assert policy.timeout_for(RetryTier.TIER_1, recovery_attempt=False) == 60.0
-    assert policy.timeout_for(RetryTier.TIER_1, recovery_attempt=True) == 180.0
-    assert policy.timeout_for(RetryTier.TIER_2, recovery_attempt=False) == 190.0
-    assert policy.timeout_for(RetryTier.TIER_2, recovery_attempt=True) == 300.0
-    assert policy.timeout_for(RetryTier.TIER_3, recovery_attempt=False) == 300.0
-    assert policy.timeout_for(RetryTier.TIER_3, recovery_attempt=True) == 600.0
 
 
 class ScriptedProvider:
@@ -1411,7 +1347,6 @@ async def test_finalisation_exhausts_one_recovery_without_repeating_execution(
     ]
     assert len(finalisation_requests) == 2
     assert [call.attempt for call in finalisation_requests] == [1, 2]
-    assert [call.attempt_timeout_s for call in finalisation_requests] == [60.0, 180.0]
     assert len({call.retry_invariant_hash for call in finalisation_requests}) == 1
     assert len(
         {
@@ -1666,31 +1601,6 @@ async def test_meaningful_progress_keeps_long_execution_alive(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_repeated_user_progress_cannot_extend_provider_attempt_deadline(tmp_path):
-    async def false_progress(request):
-        while True:
-            request.progress_callback("commentary", "Still working", True)
-            await asyncio.sleep(0.015)
-
-    scripts = _initial("SIMPLE_TASK")
-    scripts[Stage.EXECUTION] = [false_progress, false_progress]
-    scripts[Stage.FINALISATION] = [
-        {"report": "The stalled provider request could not be completed."}
-    ]
-    provider = ScriptedProvider(scripts)
-    result = await _runtime(
-        tmp_path,
-        provider,
-        config=_config(user_idle_timeout_s=0.05),
-        retry_policy=_fast_retry_policy(0.04, 0.05),
-    ).run_turn("Stalled task", "request-false-progress", effort="low")
-
-    assert result.terminal_state is TerminalState.ERROR
-    assert ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT.value in result.error
-    assert provider.cancelled[Stage.EXECUTION] == 2
-
-
-@pytest.mark.asyncio
 async def test_reviewer_technical_failure_does_not_discard_execution(tmp_path):
     scripts = _initial("COMPLEX_TASK")
     scripts.update(
@@ -1708,59 +1618,6 @@ async def test_reviewer_technical_failure_does_not_discard_execution(tmp_path):
     )
     assert result.terminal_state is TerminalState.COMPLETED
     assert any("Review unavailable" in item for item in result.limitations)
-
-
-@pytest.mark.asyncio
-async def test_slow_planning_within_tier_deadline_completes_without_retry(tmp_path):
-    scripts = _initial("COMPLEX_TASK")
-    scripts.update(
-        {
-            Stage.PLANNING: [{"plan": ["slow but valid"]}],
-            Stage.EXECUTION: [
-                {"disposition": "COMPLETED", "summary": "Plan completed."}
-            ],
-            Stage.FINALISATION: [{"report": "Plan completed."}],
-        }
-    )
-    provider = ScriptedProvider(scripts, delays={Stage.PLANNING: 0.05})
-
-    result = await _runtime(
-        tmp_path,
-        provider,
-        config=_config(user_idle_timeout_s=0.2),
-    ).run_turn("Plan this", "request-slow-plan", effort="medium")
-
-    assert result.terminal_state is TerminalState.COMPLETED
-    assert sum(
-        request.stage is Stage.PLANNING for _profile, request in provider.requests
-    ) == 1
-    assert any(request.stage is Stage.EXECUTION for _profile, request in provider.requests)
-
-
-@pytest.mark.asyncio
-async def test_slow_review_within_tier_deadline_completes_without_retry(tmp_path):
-    scripts = _initial("COMPLEX_TASK")
-    scripts.update(
-        {
-            Stage.PLANNING: [{"plan": ["complete the work"]}],
-            Stage.EXECUTION: [
-                {"disposition": "COMPLETED", "summary": "Work completed."}
-            ],
-            Stage.REVIEW: [{"outcome": "PASS", "summary": "Reviewed."}],
-            Stage.FINALISATION: [{"report": "Completed and reviewed."}],
-        }
-    )
-    provider = ScriptedProvider(scripts, delays={Stage.REVIEW: 0.05})
-
-    result = await _runtime(
-        tmp_path,
-        provider,
-        config=_config(user_idle_timeout_s=0.2),
-    ).run_turn("Complete and review", "request-slow-review", effort="xhigh")
-
-    assert result.terminal_state is TerminalState.COMPLETED
-    assert result.text == "Completed and reviewed."
-    assert result.review_count == 1
 
 
 @pytest.mark.asyncio
@@ -1834,106 +1691,6 @@ async def test_finalisation_retries_same_evidence_without_repeating_execution(
 
 
 @pytest.mark.asyncio
-async def test_tiered_stall_recovery_uses_fresh_attempt_clock_and_typed_audit(
-    tmp_path,
-):
-    never_release = asyncio.Event()
-
-    async def stalled_triage(_request):
-        await never_release.wait()
-
-    scripts = {
-        Stage.IMMEDIATE_RESPONSE: [{"message": "Recovered."}],
-        Stage.TRIAGE: [
-            stalled_triage,
-            {"classification": "DIRECT_RESPONSE", "goal": "Reply"},
-        ],
-    }
-    provider = ScriptedProvider(scripts)
-    result = await _runtime(
-        tmp_path,
-        provider,
-        retry_policy=_fast_retry_policy(),
-    ).run_turn("Reply", "request-tiered-stall", effort="low")
-
-    assert result.terminal_state is TerminalState.COMPLETED
-    triage_requests = [
-        request
-        for _profile, request in provider.requests
-        if request.stage is Stage.TRIAGE
-    ]
-    assert [request.attempt for request in triage_requests] == [1, 2]
-    assert [request.attempt_timeout_s for request in triage_requests] == [
-        0.02,
-        0.04,
-    ]
-    assert len({request.retry_invariant_hash for request in triage_requests}) == 1
-    assert provider.cancelled[Stage.TRIAGE] == 1
-
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
-    ]
-    failed = next(
-        row
-        for row in rows
-        if row["event"] == "stage_attempt_failed"
-        and row["stage"] == Stage.TRIAGE.value
-    )
-    assert (
-        failed["payload"]["error_code"]
-        == ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT.value
-    )
-    assert failed["payload"]["will_retry"] is True
-    assert failed["payload"]["provider_activity"]["event_count"] == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("event_kind", "expected_code"),
-    [
-        (
-            "thinking",
-            ProviderFailureCode.PROVIDER_REASONING_ONLY_TIMEOUT,
-        ),
-        (
-            "text_delta",
-            ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT,
-        ),
-    ],
-)
-async def test_stalled_partial_streams_end_with_specific_typed_error(
-    tmp_path,
-    event_kind,
-    expected_code,
-):
-    never_release = asyncio.Event()
-
-    async def partial_then_stall(request):
-        request.provider_activity_callback(
-            {"kind": event_kind, "content": "partial provider output"}
-        )
-        await never_release.wait()
-
-    provider = ScriptedProvider(
-        {
-            Stage.IMMEDIATE_RESPONSE: [{"message": "I have it."}],
-            Stage.TRIAGE: [partial_then_stall, partial_then_stall],
-        }
-    )
-    result = await _runtime(
-        tmp_path,
-        provider,
-        retry_policy=_fast_retry_policy(initial=0.01, recovery=0.02),
-    ).run_turn("Classify this", f"request-{event_kind}-stall", effort="low")
-
-    assert result.terminal_state is TerminalState.ERROR
-    assert expected_code.value in result.error
-    assert expected_code.value in result.text
-    assert provider.cancelled[Stage.TRIAGE] == 2
-
-
-@pytest.mark.asyncio
 async def test_nonretryable_auth_failure_keeps_typed_code_and_single_attempt(tmp_path):
     scripts = {
         Stage.IMMEDIATE_RESPONSE: [
@@ -1995,11 +1752,9 @@ async def test_rate_limit_retry_honours_retry_after_and_preserves_route(tmp_path
     }
     provider = ScriptedProvider(scripts)
 
-    result = await _runtime(
-        tmp_path,
-        provider,
-        retry_policy=_fast_retry_policy(),
-    ).run_turn("Reply", "request-rate-limit", effort="low")
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Reply", "request-rate-limit", effort="low"
+    )
 
     assert result.terminal_state is TerminalState.COMPLETED
     rows = [
@@ -2239,33 +1994,6 @@ async def test_read_only_subagent_retries_once_with_same_authority(tmp_path):
     assert [request.attempt for request in sub_requests] == [1, 2]
     assert all(request.allow_side_effects is False for request in sub_requests)
     assert len({request.retry_invariant_hash for request in sub_requests}) == 1
-
-
-@pytest.mark.asyncio
-async def test_meaningfully_progressing_execution_has_no_total_runtime_ceiling(tmp_path):
-    async def finishes_after_sustained_progress(request):
-        for index in range(40):
-            request.progress_callback("tool_result", f"evidence-{index}", True)
-            await asyncio.sleep(0.005)
-        return {"disposition": "COMPLETED", "summary": "Long work completed."}
-
-    scripts = _initial("SIMPLE_TASK")
-    scripts.update(
-        {
-            Stage.EXECUTION: [finishes_after_sustained_progress],
-            Stage.FINALISATION: [{"report": "Long work completed."}],
-        }
-    )
-    provider = ScriptedProvider(scripts)
-
-    result = await _runtime(
-        tmp_path,
-        provider,
-        config=_config(user_idle_timeout_s=0.03),
-    ).run_turn("Finish eventually", "request-no-total-timeout", effort="low")
-
-    assert result.terminal_state is TerminalState.COMPLETED
-    assert provider.cancelled[Stage.EXECUTION] == 0
 
 
 @pytest.mark.asyncio

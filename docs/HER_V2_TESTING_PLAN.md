@@ -778,12 +778,12 @@ False progress includes:
 
 Tests must prove that false progress cannot keep a stalled turn alive indefinitely.
 
-### 10.2 Tiered provider-attempt recovery
+### 10.2 Failure-class provider recovery
 
-Tests must prove the exact Tier-1 `60/180`, Tier-2 `190/300`, and Tier-3
-`300/600` second initial/recovery deadlines and the stage mapping. They must
-also prove malformed/high-volume and large-context promotion, local/CLI Tier-3
-promotion, and exactly one fresh-connection provider recovery.
+Tests must prove exactly one safe fresh-connection recovery after an eligible
+typed provider failure. Recovery eligibility is based on failure type and
+replay safety; it must not vary by an elapsed-time tier, stage deadline,
+provider deadline, context-size deadline, or local/remote deadline.
 
 The fault matrix must cover retryable HTTP 408/429/5xx, connection and timeout
 faults, empty responses, incomplete streams, no-response timeout,
@@ -795,8 +795,11 @@ request ID/Retry-After metadata when supplied.
 
 Tests must prove:
 
-- provider attempts use an independent activity/deadline tracker and a stalled
-  first attempt cannot consume the recovery attempt's deadline;
+- no Runtime, adapter, Persona, learning, or sub-agent path wraps a complete
+  provider operation or tool-enabled provider loop in an attempt deadline;
+- connection/read-inactivity guards are tested at their narrow transport
+  boundary, reset on qualifying activity, and never include foreground tool
+  execution;
 - provider reasoning or text cannot masquerade as user meaningful progress;
 - retry preserves provider, model, goal, classification, role, provider
   reasoning, permissions, delegated tools, workzone, and plan;
@@ -807,16 +810,25 @@ Tests must prove:
 - read-only sub-agents recover once;
 - main Execution recovers only before tool activity or after completed proven
   read-only tools, and never after unknown or side-effecting activity;
-- Persona packaging uses Tier 1, Meditation and Dream use Tier 2, and local
-  providers promote all three to Tier 3 while existing fallbacks remain intact;
+- Persona packaging, Meditation, Dream, and local providers use the same
+  failure-class recovery contract without adding elapsed-time tiers;
 - stage-local retry is not process-restart recovery.
 
-### 10.3 No fixed total execution ceilings
+### 10.3 No unauthorised execution ceilings
 
 Required regressions prove that successful substantive work can continue beyond
-former whole-turn, tool-round, sub-agent-count, and token ceilings. The tiered
-provider-attempt deadlines do not reintroduce a whole-turn budget. Removed
-legacy generic limit fields remain rejected rather than silently restored.
+every former `60/180`, `190/300`, and `300/600` second boundary as well as former
+whole-turn, stage, tool-round, call/step, sub-agent-count, and token ceilings.
+Fast tests must use a controlled clock that actually crosses those historical
+boundaries; a sub-second test must not claim to prove absence of a multi-minute
+ceiling. A slow integration canary must also cross the largest former real
+wall-clock boundary before release.
+
+Tests must additionally prove that omitting a tool timeout applies no default
+deadline, while an explicitly supplied per-invocation timeout remains scoped to
+that tool only. Removed legacy generic limit fields remain rejected rather than
+silently restored. No test may encode, bless, or preserve an unauthorised limit
+merely because the current implementation exposes one.
 
 ## 11. Commentary and User Delivery
 
