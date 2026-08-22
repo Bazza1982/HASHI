@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from telegram.error import RetryAfter
+from telegram.error import BadRequest, RetryAfter
 
 from adapters.stream_events import (
     DELIVERY_CONTROL,
@@ -134,6 +134,7 @@ class _Bot:
     def __init__(self, *, edit_error=None, send_error=None):
         self.sent = []
         self.edits = []
+        self.edit_attempts = []
         self.deleted = []
         self.edit_error = edit_error
         self.send_error = send_error
@@ -145,6 +146,7 @@ class _Bot:
         return SimpleNamespace(message_id=77)
 
     async def edit_message_text(self, **kwargs):
+        self.edit_attempts.append(kwargs)
         if self.edit_error is not None:
             raise self.edit_error
         self.edits.append(kwargs)
@@ -2822,6 +2824,166 @@ async def test_her_v2_initial_resolution_accepts_mapping_receipt_and_edit_only_t
     assert accepted is True
     assert resolved is True
     assert edits[0]["message_id"] == 88
+
+
+@pytest.mark.asyncio
+async def test_her_v2_identical_commentary_resolution_is_local_idempotent_success():
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "medium"
+    runtime._commentary = True
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+
+    async def _send_text(chat_id, text, **kwargs):
+        return await runtime.app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=kwargs.get("parse_mode"),
+        )
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(request_id="req-her-v2-commentary-noop"),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    accepted = await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT,
+            summary="Checking.",
+            event_id="turn-noop:immediate",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_v2",
+        )
+    )
+    resolved = await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_INITIAL_RESOLUTION,
+            summary="Checking.",
+            event_id="turn-noop:resolution",
+            delivery_class="internal",
+            origin="her_v2",
+            resolution="commentary",
+            target_event_id="turn-noop:immediate",
+        )
+    )
+
+    assert accepted is True
+    assert resolved is True
+    assert runtime.app.bot.edit_attempts == []
+    assert not any("initial resolution failed" in line for line in runtime.logger.messages)
+
+
+@pytest.mark.asyncio
+async def test_her_v2_message_not_modified_race_is_idempotent_success():
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "medium"
+    runtime._commentary = True
+    runtime.app.bot = _Bot(
+        edit_error=BadRequest(
+            "Message is not modified: specified new message content and reply "
+            "markup are exactly the same as a current content and reply markup "
+            "of the message"
+        )
+    )
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+
+    async def _send_text(chat_id, text, **kwargs):
+        return await runtime.app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=kwargs.get("parse_mode"),
+        )
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(request_id="req-her-v2-commentary-race"),
+        audit_active=False,
+        audit_collector=None,
+    )
+    await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT,
+            summary="Checking.",
+            event_id="turn-race:immediate",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_v2",
+        )
+    )
+
+    resolved = await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_INITIAL_RESOLUTION,
+            summary="Still checking.",
+            event_id="turn-race:resolution",
+            delivery_class="internal",
+            origin="her_v2",
+            resolution="commentary",
+            target_event_id="turn-race:immediate",
+        )
+    )
+
+    assert resolved is True
+    assert len(runtime.app.bot.edit_attempts) == 1
+    assert not any("initial resolution failed" in line for line in runtime.logger.messages)
+
+
+@pytest.mark.asyncio
+async def test_her_v2_unexpected_bad_request_remains_failure_with_reason():
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "medium"
+    runtime._commentary = True
+    runtime.app.bot = _Bot(
+        edit_error=BadRequest("Can't parse entities: unsupported start tag")
+    )
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+
+    async def _send_text(chat_id, text, **kwargs):
+        return await runtime.app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=kwargs.get("parse_mode"),
+        )
+
+    runtime._send_text = _send_text
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(request_id="req-her-v2-commentary-invalid"),
+        audit_active=False,
+        audit_collector=None,
+    )
+    await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT,
+            summary="Checking.",
+            event_id="turn-invalid:immediate",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_v2",
+        )
+    )
+
+    resolved = await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_INITIAL_RESOLUTION,
+            summary="Still checking.",
+            event_id="turn-invalid:resolution",
+            delivery_class="internal",
+            origin="her_v2",
+            resolution="commentary",
+            target_event_id="turn-invalid:immediate",
+        )
+    )
+
+    assert resolved is False
+    assert any(
+        "Can't parse entities: unsupported start tag" in line
+        for line in runtime.logger.messages
+    )
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from telegram.error import RetryAfter
+from telegram.error import BadRequest, RetryAfter
 
 from orchestrator import (
     runtime_cross_session,
@@ -48,6 +48,24 @@ _DANGLING_TOOL_MARKERS = (
     "<||dsml||invoke",
     "<tool_call>",
 )
+
+
+@dataclass
+class _ProvisionalTelegramMessage:
+    """Telegram state needed to resolve one provisional HER message."""
+
+    message_id: Any
+    rendered_text: str
+    parse_mode: str | None = "HTML"
+    reply_markup: Any | None = None
+
+
+def _is_message_not_modified_error(exc: Exception) -> bool:
+    """Recognise only Telegram's explicit idempotent no-change response."""
+
+    return isinstance(exc, BadRequest) and (
+        "message is not modified" in str(exc).casefold()
+    )
 
 
 def _her_event_suppression_reason(event) -> str:
@@ -1134,7 +1152,7 @@ def wrap_her_persona_stream(
         f"think={bool(getattr(runtime, '_think', False))} effort={effort} "
         f"delivery_requested={delivery_requested} blocked={delivery_blocked}"
     )
-    provisional_messages: dict[str, Any] = {}
+    provisional_messages: dict[str, _ProvisionalTelegramMessage] = {}
     bot = getattr(getattr(runtime, "app", None), "bot", None)
     initial_resolution_capable = bool(
         callable(getattr(runtime, "_send_text", None))
@@ -1198,7 +1216,12 @@ def wrap_her_persona_stream(
         event_id = str(getattr(event, "event_id", "") or "").strip()
         message_id = _transport_message_id(result)
         if event_id and message_id is not None:
-            provisional_messages[event_id] = message_id
+            provisional_messages[event_id] = _ProvisionalTelegramMessage(
+                message_id=message_id,
+                rendered_text=rendered_text,
+                parse_mode="HTML",
+                reply_markup=None,
+            )
         label = "acknowledgement" if purpose == "task_acknowledgement" else purpose
         _append_her_message_audit(
             runtime,
@@ -1227,10 +1250,13 @@ def wrap_her_persona_stream(
         target_event_id = str(
             getattr(event, "target_event_id", "") or ""
         ).strip()
-        message_id = provisional_messages.get(target_event_id)
-        if message_id is None:
+        provisional = provisional_messages.get(target_event_id)
+        if provisional is None:
             return False
         resolution = str(getattr(event, "resolution", "") or "").strip()
+        rendered_text = provisional.rendered_text
+        parse_mode = provisional.parse_mode
+        reply_markup = provisional.reply_markup
         try:
             if resolution == "discard":
                 delete_message = getattr(runtime.app.bot, "delete_message", None)
@@ -1238,7 +1264,7 @@ def wrap_her_persona_stream(
                     return False
                 await delete_message(
                     chat_id=item.chat_id,
-                    message_id=message_id,
+                    message_id=provisional.message_id,
                 )
                 provisional_messages.pop(target_event_id, None)
                 return True
@@ -1247,19 +1273,60 @@ def wrap_her_persona_stream(
                 return False
             if resolution == "commentary" and not raw_text.startswith("💬"):
                 raw_text = f"💬 {raw_text}"
+            rendered_text = _md_to_html(raw_text)
+            parse_mode = "HTML"
+            reply_markup = None
+            if (
+                provisional.rendered_text == rendered_text
+                and provisional.parse_mode == parse_mode
+                and provisional.reply_markup == reply_markup
+            ):
+                debug = getattr(runtime.logger, "debug", None)
+                if callable(debug):
+                    debug(
+                        f"HER initial resolution already current: "
+                        f"request={item.request_id} "
+                        f"target_event_id={target_event_id} "
+                        f"resolution={resolution}"
+                    )
+                if resolution in {"final", "clarification"}:
+                    provisional_messages.pop(target_event_id, None)
+                return True
             await runtime.app.bot.edit_message_text(
                 chat_id=item.chat_id,
-                message_id=message_id,
-                text=_md_to_html(raw_text),
-                parse_mode="HTML",
+                message_id=provisional.message_id,
+                text=rendered_text,
+                parse_mode=parse_mode,
             )
             if resolution in {"final", "clarification"}:
                 provisional_messages.pop(target_event_id, None)
+            else:
+                provisional.rendered_text = rendered_text
+                provisional.parse_mode = parse_mode
+                provisional.reply_markup = reply_markup
             return True
         except Exception as exc:
+            if resolution != "discard" and _is_message_not_modified_error(exc):
+                debug = getattr(runtime.logger, "debug", None)
+                if callable(debug):
+                    debug(
+                        f"HER initial resolution reached Telegram idempotently: "
+                        f"request={item.request_id} "
+                        f"target_event_id={target_event_id} "
+                        f"resolution={resolution}"
+                    )
+                if resolution in {"final", "clarification"}:
+                    provisional_messages.pop(target_event_id, None)
+                else:
+                    provisional.rendered_text = rendered_text
+                    provisional.parse_mode = parse_mode
+                    provisional.reply_markup = reply_markup
+                return True
             runtime.logger.warning(
                 f"HER initial resolution failed: request={item.request_id} "
-                f"target_event_id={target_event_id} error_type={type(exc).__name__}"
+                f"target_event_id={target_event_id} "
+                f"error_type={type(exc).__name__} "
+                f"error={_safe_excerpt(str(exc), 500)}"
             )
             return False
 
