@@ -6,6 +6,7 @@ when the backend config contains a `tools` key.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextvars import ContextVar
@@ -112,6 +113,7 @@ class ToolResult:
     output: str
     is_error: bool = False
     content: list[dict[str, Any]] | None = None
+    details: dict[str, Any] | None = None
 
 
 @dataclass
@@ -265,7 +267,8 @@ class ToolRegistry:
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = "") -> ToolResult:
         """
         Execute a tool call with permission checking.
-        Always returns a ToolResult — never raises.
+        Returns a ToolResult for normal and error outcomes. Task cancellation is
+        audited after local cleanup and then deliberately propagated.
         """
         started = time.monotonic()
         if not self.is_allowed(tool_name):
@@ -299,6 +302,26 @@ class ToolRegistry:
 
         try:
             dispatched = await self._dispatch(tool_name, arguments)
+        except asyncio.CancelledError as exc:
+            details = dict(getattr(exc, "hashi_tool_details", {}) or {})
+            cleanup = dict(details.get("foreground_cleanup") or {})
+            cleanup_status = str(cleanup.get("status") or "not_reported")
+            output = (
+                f"Error: tool '{tool_name}' cancelled"
+                + (
+                    f"; foreground cleanup: {cleanup_status}"
+                    if tool_name == "bash"
+                    else ""
+                )
+            )
+            result = ToolResult(
+                tool_call_id=tool_call_id,
+                output=output,
+                is_error=True,
+                details=details,
+            )
+            self._record_tool_audit(tool_name, arguments, result, started)
+            raise
         except Exception as e:
             self.logger.error(f"Tool '{tool_name}' raised unexpected error: {e}", exc_info=True)
             output = f"Error: unexpected failure in '{tool_name}': {e}"
@@ -306,9 +329,16 @@ class ToolRegistry:
             self._record_tool_audit(tool_name, arguments, result, started)
             return result
 
+        from tools.builtins import BuiltinExecutionResult
+
+        details = None
         if isinstance(dispatched, StructuredToolOutput):
             output = dispatched.output
             content = dispatched.content
+        elif isinstance(dispatched, BuiltinExecutionResult):
+            output = dispatched.output
+            content = None
+            details = dict(dispatched.details)
         else:
             output = dispatched
             content = None
@@ -318,6 +348,7 @@ class ToolRegistry:
             output=output,
             is_error=is_error,
             content=content,
+            details=details,
         )
         self._record_tool_audit(tool_name, arguments, result, started)
         return result
@@ -482,6 +513,7 @@ class ToolRegistry:
                 is_error=result.is_error,
                 duration_ms=int((time.monotonic() - started) * 1000),
                 audit_context=audit_context,
+                details=result.details,
             )
         except Exception:
             pass
@@ -554,10 +586,15 @@ class ToolRegistry:
 
         if tool_name == "bash":
             bash_opts = opts.get("bash", {})
+            configured_timeout_max = (
+                bash_opts.get("timeout_max")
+                if "timeout_max" in bash_opts
+                else None
+            )
             return await execute_bash(
                 arguments,
                 workspace_dir=self.workspace_dir,
-                timeout_max=int(bash_opts.get("timeout_max", 120)),
+                timeout_max=configured_timeout_max,
                 blocked_patterns=bash_opts.get("blocked_patterns"),
             )
 

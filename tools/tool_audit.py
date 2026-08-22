@@ -49,6 +49,7 @@ def build_tool_audit_record(
     is_error: bool,
     duration_ms: int,
     audit_context: dict | None = None,
+    details: dict | None = None,
     ts: float | None = None,
 ) -> dict[str, Any]:
     context = dict(audit_context or {})
@@ -70,6 +71,7 @@ def build_tool_audit_record(
         "duration_ms": max(0, int(duration_ms)),
         "args_redacted": sanitize_value(arguments or {}),
         "output_snippet": sanitize_value(str(output or "")[:_MAX_VALUE_CHARS]),
+        "details": sanitize_value(details or {}),
     }
 
 
@@ -93,6 +95,7 @@ def record_tool_action(
     is_error: bool,
     duration_ms: int,
     audit_context: dict | None = None,
+    details: dict | None = None,
 ) -> None:
     try:
         append_tool_audit_record(
@@ -105,6 +108,7 @@ def record_tool_action(
                 is_error=is_error,
                 duration_ms=duration_ms,
                 audit_context=audit_context,
+                details=details,
             ),
         )
     except Exception:

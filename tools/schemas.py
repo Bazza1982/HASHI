@@ -20,8 +20,12 @@ TOOL_SCHEMAS = [
                         "description": "The bash command to run.",
                     },
                     "timeout": {
-                        "type": "integer",
-                        "description": "Timeout in seconds (default 30, max 120).",
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description": (
+                            "Optional timeout in seconds for this command only. "
+                            "Omit it to run without a time limit."
+                        ),
                     },
                 },
                 "required": ["command"],

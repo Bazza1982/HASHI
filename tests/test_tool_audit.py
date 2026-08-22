@@ -5,7 +5,9 @@ import json
 import pytest
 
 from orchestrator.enterprise import ArtifactRegistry, IdentityService, TaskRegistry
+from tools.builtins import BuiltinExecutionResult
 from tools.registry import ToolRegistry
+from tools.schemas import TOOL_SCHEMA_MAP
 from tools.tool_audit import build_tool_audit_record
 
 
@@ -31,6 +33,16 @@ def test_build_tool_audit_record_redacts_and_truncates_sensitive_values():
     assert record["args_redacted"]["command"] == "echo token=[redacted]"
     assert record["args_redacted"]["content"].endswith("...[truncated]")
     assert record["status"] == "success"
+
+
+def test_bash_schema_exposes_only_an_optional_positive_timeout():
+    parameters = TOOL_SCHEMA_MAP["bash"]["function"]["parameters"]
+    timeout = parameters["properties"]["timeout"]
+
+    assert parameters["required"] == ["command"]
+    assert timeout["type"] == "number"
+    assert timeout["exclusiveMinimum"] == 0
+    assert "Omit it to run without a time limit" in timeout["description"]
 
 
 @pytest.mark.parametrize(
@@ -69,6 +81,41 @@ async def test_tool_registry_allows_bash_without_enterprise_context(tmp_path):
 
     assert result.is_error is False
     assert result.output == "ok"
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_does_not_supply_an_implicit_bash_timeout_cap(
+    tmp_path, monkeypatch
+):
+    captured = {}
+
+    async def fake_execute_bash(
+        args, workspace_dir, timeout_max=None, blocked_patterns=None
+    ):
+        captured.update(
+            {
+                "args": args,
+                "workspace_dir": workspace_dir,
+                "timeout_max": timeout_max,
+                "blocked_patterns": blocked_patterns,
+            }
+        )
+        return BuiltinExecutionResult("ok")
+
+    monkeypatch.setattr("tools.builtins.execute_bash", fake_execute_bash)
+    registry = ToolRegistry(
+        allowed_tools=["bash"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+    )
+
+    result = await registry.execute(
+        "bash", {"command": "long-running-command"}, tool_call_id="no-cap"
+    )
+
+    assert result.is_error is False
+    assert captured["timeout_max"] is None
 
 
 @pytest.mark.asyncio

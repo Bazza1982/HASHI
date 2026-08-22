@@ -8,8 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import os
 import re
+import signal
+import subprocess
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, urlencode
@@ -49,17 +54,215 @@ def _resolve_path(raw_path: str, access_root: Path, workspace_dir: Path) -> Path
 # bash
 # ---------------------------------------------------------------------------
 
+_BASH_CLEANUP_GRACE_SECONDS = 1.0
+
+
+@dataclass(frozen=True)
+class BuiltinExecutionResult:
+    """Builtin output plus deterministic, machine-readable execution facts."""
+
+    output: str
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+
+def _positive_seconds(value: object, *, label: str) -> tuple[float | None, str | None]:
+    if isinstance(value, bool):
+        return None, f"Error: {label} must be a positive number of seconds"
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None, f"Error: {label} must be a positive number of seconds"
+    if not math.isfinite(seconds) or seconds <= 0:
+        return None, f"Error: {label} must be a positive number of seconds"
+    return seconds, None
+
+
+def _bash_timeout(
+    args: Mapping[str, Any], timeout_max: float | None
+) -> tuple[float | None, dict[str, Any], str | None]:
+    """Resolve only an explicitly requested timeout and optional operator cap."""
+
+    if "timeout" not in args or args.get("timeout") is None:
+        return None, {"timeout_explicit": False}, None
+    requested, error = _positive_seconds(args.get("timeout"), label="timeout")
+    if error is not None:
+        return None, {"timeout_explicit": True}, error
+    assert requested is not None
+    effective = requested
+    capped = False
+    configured_max = None
+    if timeout_max is not None:
+        configured_max, error = _positive_seconds(
+            timeout_max, label="configured bash timeout_max"
+        )
+        if error is not None:
+            return None, {"timeout_explicit": True}, error
+        assert configured_max is not None
+        effective = min(requested, configured_max)
+        capped = effective < requested
+    return (
+        effective,
+        {
+            "timeout_explicit": True,
+            "timeout_requested_s": requested,
+            "timeout_effective_s": effective,
+            "timeout_capped": capped,
+            "timeout_max_s": configured_max,
+        },
+        None,
+    )
+
+
+def _bash_process_kwargs() -> dict[str, Any]:
+    if os.name == "posix":
+        return {"start_new_session": True}
+    creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    return {"creationflags": creation_flag} if creation_flag else {}
+
+
+def _bash_process_group_id(proc: asyncio.subprocess.Process) -> int | None:
+    if os.name != "posix" or not proc.pid:
+        return None
+    # start_new_session=True makes the spawned shell both session and process
+    # group leader.  Refuse any unexpected group identity rather than risk
+    # signalling HASHI's own group.
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (OSError, ProcessLookupError):
+        return None
+    if pgid != proc.pid or pgid == os.getpgrp():
+        return None
+    return pgid
+
+
+def _bash_group_alive(pgid: int | None) -> bool:
+    if os.name != "posix" or pgid is None:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _wait_for_bash_cleanup(
+    communicate_task: asyncio.Task,
+    *,
+    pgid: int | None,
+    timeout: float,
+) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, float(timeout))
+    while True:
+        communication_done = communicate_task.done()
+        group_gone = not _bash_group_alive(pgid)
+        if communication_done and group_gone:
+            return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(0.02, remaining))
+
+
+async def _cleanup_bash_process(
+    proc: asyncio.subprocess.Process,
+    communicate_task: asyncio.Task,
+    *,
+    pgid: int | None,
+    grace_seconds: float = _BASH_CLEANUP_GRACE_SECONDS,
+) -> dict[str, Any]:
+    """Terminate and reap only the exact foreground process group."""
+
+    scope = "process_group" if pgid is not None else "process_only_fallback"
+    forced = False
+    errors: list[str] = []
+
+    def signal_process(*, force: bool) -> None:
+        nonlocal forced
+        forced = forced or force
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
+            elif proc.returncode is None:
+                proc.kill() if force else proc.terminate()
+        except ProcessLookupError:
+            return
+        except Exception as exc:  # cleanup truth is reported, never hidden
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    signal_process(force=False)
+    complete = await _wait_for_bash_cleanup(
+        communicate_task,
+        pgid=pgid,
+        timeout=grace_seconds,
+    )
+    if not complete:
+        signal_process(force=True)
+        complete = await _wait_for_bash_cleanup(
+            communicate_task,
+            pgid=pgid,
+            timeout=grace_seconds,
+        )
+
+    if communicate_task.done():
+        await asyncio.gather(communicate_task, return_exceptions=True)
+    else:
+        communicate_task.cancel()
+        await asyncio.gather(communicate_task, return_exceptions=True)
+    if proc.returncode is None:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    group_alive = _bash_group_alive(pgid)
+    reaped = proc.returncode is not None
+    success = bool(reaped and not group_alive and not errors)
+    return {
+        "status": (
+            "force_killed" if success and forced else
+            "terminated" if success else
+            "cleanup_failed"
+        ),
+        "scope": scope,
+        "pgid": pgid,
+        "forced": forced,
+        "process_reaped": reaped,
+        "group_alive": group_alive,
+        "errors": errors,
+    }
+
+
+async def _shield_bash_cleanup(cleanup) -> dict[str, Any]:
+    """Finish the short cleanup barrier even if cancellation is repeated."""
+
+    task = asyncio.create_task(cleanup)
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return await task
+
+
+def _seconds_label(value: float) -> str:
+    return f"{value:g}"
+
 async def execute_bash(
     args: dict,
     workspace_dir: Path,
-    timeout_max: int = 120,
+    timeout_max: float | None = None,
     blocked_patterns: Optional[list[str]] = None,
-) -> str:
+) -> str | BuiltinExecutionResult:
     command = str(args.get("command", "")).strip()
     if not command:
         return "Error: no command provided"
 
-    timeout = min(int(args.get("timeout", 30)), timeout_max)
+    timeout, timeout_details, timeout_error = _bash_timeout(args, timeout_max)
+    if timeout_error is not None:
+        return BuiltinExecutionResult(timeout_error, timeout_details)
 
     # Check blocked patterns
     if blocked_patterns:
@@ -67,21 +270,41 @@ async def execute_bash(
             if re.search(pattern, command):
                 return f"Error: command blocked by policy (matched: {pattern!r})"
 
+    proc: asyncio.subprocess.Process | None = None
+    communicate_task: asyncio.Task | None = None
+    pgid: int | None = None
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace_dir),
+            **_bash_process_kwargs(),
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return f"Error: command timed out after {timeout}s"
+        pgid = _bash_process_group_id(proc)
+        communicate_task = asyncio.create_task(proc.communicate())
+        if timeout is None:
+            stdout, stderr = await asyncio.shield(communicate_task)
+        else:
+            done, _pending = await asyncio.wait(
+                {communicate_task}, timeout=timeout
+            )
+            if communicate_task not in done:
+                cleanup = await _shield_bash_cleanup(
+                    _cleanup_bash_process(
+                        proc,
+                        communicate_task,
+                        pgid=pgid,
+                    )
+                )
+                return BuiltinExecutionResult(
+                    f"Error: command timed out after {_seconds_label(timeout)}s",
+                    {
+                        **timeout_details,
+                        "foreground_cleanup": cleanup,
+                    },
+                )
+            stdout, stderr = await communicate_task
 
         output_parts = []
         if stdout:
@@ -97,10 +320,61 @@ async def execute_bash(
         if len(result) > 20000:
             result = result[:20000] + "\n...[output truncated]"
 
-        return result or "(no output)"
+        if _bash_group_alive(pgid):
+            completion_cleanup = await _shield_bash_cleanup(
+                _cleanup_bash_process(proc, communicate_task, pgid=pgid)
+            )
+        else:
+            completion_cleanup = {
+                "status": "normal_completion",
+                "scope": "process_group" if pgid is not None else "process_only_fallback",
+                "pgid": pgid,
+                "forced": False,
+                "process_reaped": proc.returncode is not None,
+                "group_alive": False,
+                "errors": [],
+            }
+        return BuiltinExecutionResult(
+            result or "(no output)",
+            {
+                **timeout_details,
+                "foreground_cleanup": completion_cleanup,
+            },
+        )
 
-    except Exception as e:
-        return f"Error executing command: {e}"
+    except asyncio.CancelledError as exc:
+        cleanup = None
+        if proc is not None and communicate_task is not None:
+            cleanup = await _shield_bash_cleanup(
+                _cleanup_bash_process(proc, communicate_task, pgid=pgid)
+            )
+        details = {
+            **timeout_details,
+            "foreground_cleanup": cleanup or {
+                "status": "not_started",
+                "process_reaped": True,
+                "errors": [],
+            },
+        }
+        setattr(exc, "hashi_tool_details", details)
+        raise
+    except Exception as exc:
+        cleanup = None
+        if proc is not None and communicate_task is not None:
+            cleanup = await _shield_bash_cleanup(
+                _cleanup_bash_process(proc, communicate_task, pgid=pgid)
+            )
+        return BuiltinExecutionResult(
+            f"Error executing command: {exc}",
+            {
+                **timeout_details,
+                "foreground_cleanup": cleanup or {
+                    "status": "not_started",
+                    "process_reaped": True,
+                    "errors": [],
+                },
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
