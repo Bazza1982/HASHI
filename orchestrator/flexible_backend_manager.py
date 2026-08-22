@@ -81,7 +81,7 @@ class FlexibleBackendManager:
         self._active_model_override = None
         self._active_provider_override = None
         self._her_v2_configuration_override: dict[str, Any] | None = None
-        self.agent_mode = "flex"  # default mode
+        self.agent_mode = self.config.default_mode
         self.privacy_level = PrivacyLevel.PROVIDER_TRUST
         configured_backend = self.config.active_backend
         allowed_engines = {

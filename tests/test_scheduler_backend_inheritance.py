@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
-from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime
 from orchestrator.skill_manager import SkillDefinition
 
 
@@ -65,7 +64,6 @@ async def test_scheduled_prompt_skill_retains_backend_and_job_context(tmp_path):
             "trigger": "scheduled",
         },
     )
-
     assert ok is True
     assert message == "Scheduled prompt skill queued: legacy-pinned-skill"
     assert runtime.config.active_backend == "her"
@@ -80,64 +78,5 @@ async def test_scheduled_prompt_skill_retains_backend_and_job_context(tmp_path):
             "kind": "cron",
             "task_id": "cron-1",
             "trigger": "scheduled",
-        },
-    )
-
-
-@pytest.mark.asyncio
-async def test_legacy_scheduled_prompt_skill_retains_backend_and_job_context(tmp_path):
-    skill = SkillDefinition(
-        id="legacy-pinned-skill",
-        name="Legacy pinned skill",
-        description="",
-        body="Use the owning Agent runtime.",
-        skill_dir=Path(tmp_path),
-    )
-    manager = SimpleNamespace(
-        get_skill=lambda _skill_id: skill,
-        build_prompt_for_skill=lambda _skill, args: f"skill prompt: {args}",
-    )
-    runtime = SimpleNamespace(
-        skill_manager=manager,
-        config=SimpleNamespace(
-            engine="her",
-            model="deepseek/deepseek-v4-flash",
-            workspace_dir=tmp_path,
-        ),
-        global_config=SimpleNamespace(authorized_id=123),
-        name="sunny",
-        logger=SimpleNamespace(info=Mock()),
-        error_logger=SimpleNamespace(error=Mock()),
-        enqueue_request=AsyncMock(return_value="req-1"),
-    )
-
-    ok, message = await BridgeAgentRuntime.invoke_scheduler_skill(
-        runtime,
-        skill_id=skill.id,
-        args="now",
-        task_id="cron-1",
-        scheduler_context={
-            "kind": "cron",
-            "task_id": "cron-1",
-            "trigger": "recovery",
-            "her_v2_effort_override": "high",
-        },
-    )
-
-    assert ok is True
-    assert message == "Scheduled prompt skill queued: legacy-pinned-skill"
-    assert runtime.config.engine == "her"
-    runtime.enqueue_request.assert_awaited_once_with(
-        chat_id=123,
-        prompt="skill prompt: now",
-        source="scheduler-skill",
-        summary="Skill Task [cron-1]",
-        silent=False,
-        skill_id="legacy-pinned-skill",
-        scheduler_context={
-            "kind": "cron",
-            "task_id": "cron-1",
-            "trigger": "recovery",
-            "her_v2_effort_override": "high",
         },
     )

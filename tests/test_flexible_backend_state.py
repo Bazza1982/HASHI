@@ -103,6 +103,35 @@ def test_allowed_persisted_backend_still_overrides_configured_backend(tmp_path):
     assert manager._active_model_override == "claude-haiku-4-5"
 
 
+def test_persisted_mode_overrides_migrated_fixed_default(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(
+        json.dumps({"agent_mode": "flex"}),
+        encoding="utf-8",
+    )
+    config = FlexibleAgentConfig(
+        name="migrated-fixed",
+        workspace_dir=workspace,
+        system_md=workspace / "AGENT.md",
+        telegram_token_key="migrated-fixed",
+        allowed_backends=[{"engine": "codex-cli", "model": "gpt-5.4"}],
+        active_backend="codex-cli",
+        default_mode="fixed",
+        project_root=workspace,
+    )
+    global_config = GlobalConfig(
+        authorized_id=1,
+        base_logs_dir=workspace / "logs",
+        base_media_dir=workspace / "media",
+        project_root=workspace,
+    )
+
+    manager = FlexibleBackendManager(config, global_config, secrets={})
+
+    assert manager.agent_mode == "flex"
+
+
 def test_save_state_preserves_unknown_keys(tmp_path):
     workspace = tmp_path / "agent"
     workspace.mkdir()

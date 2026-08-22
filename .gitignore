@@ -99,6 +99,7 @@ node_modules/
 
 # Local scratch, backups, and model assets
 *.bak_*
+*.pre-flex-migration.bak
 voice_models/
 hashi_assets/her/bin/
 

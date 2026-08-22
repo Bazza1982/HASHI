@@ -3538,6 +3538,15 @@ class FlexibleAgentRuntime:
         except URLError as e:
             return False, f"Connection failed ({host}:{wb_port}): {e}"
 
+    def export_daily_transcript(self, cutoff_dt: datetime) -> bool:
+        from orchestrator.transcript_export import export_daily_transcript
+
+        return export_daily_transcript(
+            self.transcript_log_path,
+            self.workspace_dir / "journals",
+            cutoff_dt,
+        )
+
     async def _run_job_now(
         self,
         job: dict[str, Any],
@@ -3562,13 +3571,15 @@ class FlexibleAgentRuntime:
             return False, message
         action = job.get("action", "enqueue_prompt")
         if action == "export_transcript":
+            exported = self.export_daily_transcript(datetime.now())
+            text = "Transcript exported." if exported else "No transcript entries to export."
             await self.send_long_message(
                 chat_id=self._primary_chat_id(),
-                text="Transcript export is only implemented for fixed agents.",
+                text=text,
                 request_id=f"job-{job.get('id')}",
                 purpose="skill-job-run",
             )
-            return False, "Transcript export is only implemented for fixed agents."
+            return True, text
         if action in {"her:dream", "skill:dream"}:
             return await self.invoke_her_dream(
                 task_id=str(job.get("id") or "manual"),

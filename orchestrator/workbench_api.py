@@ -669,8 +669,6 @@ class WorkbenchApiServer:
             config_dir=self.config_path.parent,
             bridge_home=self.global_config.bridge_home,
         ) or (self.config_path.parent / agent_row["workspace_dir"])
-        if agent_row.get("type") == "fixed":
-            return workspace_dir / "conversation_log.jsonl"
         return workspace_dir / "transcript.jsonl"
 
     def _metadata_for_agent(self, agent_row: dict, runtime) -> dict:
@@ -685,7 +683,7 @@ class WorkbenchApiServer:
             ) or (self.config_path.parent / agent_row["workspace_dir"])
             engine = agent_row.get("engine") or agent_row.get("active_backend", "unknown")
             model = agent_row.get("model", "unknown")
-            if agent_row.get("type") == "flex":
+            if agent_row.get("type") in {"flex", "limited"}:
                 for backend in agent_row.get("allowed_backends", []):
                     if backend.get("engine") == agent_row.get("active_backend"):
                         model = backend.get("model", model)

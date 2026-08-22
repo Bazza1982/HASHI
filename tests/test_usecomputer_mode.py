@@ -10,7 +10,7 @@ sys.modules.setdefault("edge_tts", SimpleNamespace())
 
 from orchestrator.admin_local_testing import supported_commands
 from orchestrator.bridge_memory import SysPromptManager
-from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime
+from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.usecomputer_mode import (
     USECOMPUTER_SLOT,
     USECOMPUTER_SYSTEM_PROMPT,
@@ -42,6 +42,12 @@ class _UsecomputerRuntime:
         self.global_config = SimpleNamespace(authorized_id=123)
         self.sys_prompt_manager = SysPromptManager(workspace_dir)
         self.enqueued: list[dict] = []
+
+    def _is_authorized_user(self, user_id: int) -> bool:
+        return user_id == self.global_config.authorized_id
+
+    async def _reply_text(self, update, text, **kwargs):
+        return await update.message.reply_text(text, **kwargs)
 
     async def enqueue_request(self, chat_id, prompt, source, summary):
         self.enqueued.append(
@@ -93,10 +99,10 @@ class UsecomputerModeTests(unittest.IsolatedAsyncioTestCase):
             runtime = _UsecomputerRuntime(Path(tmp))
             update = _FakeUpdate()
 
-            await BridgeAgentRuntime.cmd_usecomputer(runtime, update, SimpleNamespace(args=["status"]))
+            await FlexibleAgentRuntime.cmd_usecomputer(runtime, update, SimpleNamespace(args=["status"]))
             self.assertIn("<b>Current</b> · <b>OFF</b>", update.message.replies[-1])
 
-            await BridgeAgentRuntime.cmd_usecomputer(
+            await FlexibleAgentRuntime.cmd_usecomputer(
                 runtime,
                 update,
                 SimpleNamespace(args=["Please", "code", "this", "in", "NVivo"]),
@@ -111,7 +117,7 @@ class UsecomputerModeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             runtime = _UsecomputerRuntime(Path(tmp))
             update = _FakeUpdate()
-            await BridgeAgentRuntime.cmd_usecomputer(runtime, update, SimpleNamespace(args=["examples"]))
+            await FlexibleAgentRuntime.cmd_usecomputer(runtime, update, SimpleNamespace(args=["examples"]))
             self.assertIn("/usecomputer on", update.message.replies[-1])
 
     def test_supported_commands_include_aliases(self):

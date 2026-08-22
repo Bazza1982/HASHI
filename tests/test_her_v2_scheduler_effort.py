@@ -13,7 +13,6 @@ from orchestrator.her_v2.request_policy import (
     job_effort_policy,
     resolve_request_effort,
 )
-from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime
 
 
 @pytest.mark.parametrize("kind", ["cron", "heartbeat"])
@@ -192,39 +191,6 @@ async def test_manual_run_now_rejects_invalid_effort_before_queueing():
     assert "Invalid scheduler policy" in message
     assert "her_v2_effort must be one of" in message
     runtime.enqueue_request.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_legacy_manual_heartbeat_run_uses_same_request_policy():
-    runtime = SimpleNamespace(
-        global_config=SimpleNamespace(authorized_id=456),
-        enqueue_request=AsyncMock(return_value="req-legacy"),
-    )
-    job = {
-        "id": "pulse",
-        "agent": "momo",
-        "interval_seconds": 300,
-        "prompt": "Check status",
-    }
-
-    result = await BridgeAgentRuntime._run_job_now(
-        runtime,
-        job,
-        kind="heartbeat",
-    )
-
-    assert result == (True, "Queued heartbeat task [pulse]")
-    runtime.enqueue_request.assert_awaited_once_with(
-        chat_id=456,
-        prompt="Check status",
-        source="scheduler",
-        summary="Heartbeat Task [pulse]",
-        scheduler_context={
-            "kind": "heartbeat",
-            "task_id": "pulse",
-            "trigger": "manual",
-        },
-    )
 
 
 @pytest.mark.asyncio

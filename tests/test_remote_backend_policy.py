@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
-from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime
 from orchestrator.source_policy import (
     is_human_hchat_source,
     source_requires_manual_remote_api_permission,
@@ -14,14 +13,6 @@ class _FlexiblePolicyRuntime:
 
     def __init__(self, engine: str):
         self.config = SimpleNamespace(active_backend=engine)
-
-
-class _LegacyPolicyRuntime:
-    _source_requires_manual_permission = BridgeAgentRuntime._source_requires_manual_permission
-    _remote_backend_block_reason = BridgeAgentRuntime._remote_backend_block_reason
-
-    def __init__(self, engine: str):
-        self.config = SimpleNamespace(engine=engine)
 
 
 def test_remote_api_policy_allows_hchat_sources_for_flexible_runtime():
@@ -45,13 +36,6 @@ def test_remote_api_policy_still_blocks_automated_sources_for_flexible_runtime()
     assert "Blocked deepseek-api" in runtime._remote_backend_block_reason("bridge:mailbox")
     assert "Blocked deepseek-api" in runtime._remote_backend_block_reason("cos-query:status")
     assert "Blocked deepseek-api" in runtime._remote_backend_block_reason("ticket:123")
-
-
-def test_remote_api_policy_allows_hchat_sources_for_legacy_runtime():
-    runtime = _LegacyPolicyRuntime("openrouter-api")
-
-    assert runtime._remote_backend_block_reason("bridge:hchat") is None
-    assert runtime._remote_backend_block_reason("hchat-reply:zelda") is None
 
 
 def test_remote_api_policy_does_not_affect_cli_backends():

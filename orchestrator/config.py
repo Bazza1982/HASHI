@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Union
+from typing import Dict, Any, List
 
 from orchestrator.enterprise.profile import (
     parse_profile_context,
@@ -22,7 +22,8 @@ from orchestrator.flexible_backend_registry import (
 #   "project"   - the project root / repo root (sensible default)
 #   "drive"     - full drive root e.g. C:\ (least restrictive)
 VALID_ACCESS_SCOPES = {"workspace", "project", "drive"}
-LEGACY_FIXED_RUNTIME_ENV = "HASHI_ENABLE_LEGACY_FIXED_RUNTIME"
+SESSION_MODE_BACKENDS = frozenset({"claude-cli", "codex-cli", "grok-cli"})
+LEGACY_FIXED_CONFIG_BACKUP_SUFFIX = ".pre-flex-migration.bak"
 config_logger = logging.getLogger("BridgeU.Config")
 
 
@@ -89,14 +90,14 @@ class GlobalConfig:
 
 @dataclass
 class AgentConfig:
+    """Concrete one-backend adapter configuration built by Flex runtime."""
+
     name: str
     engine: str
     workspace_dir: Path
     system_md: Path
     model: str
     is_active: bool
-    resume_policy: str = "latest"
-    type: str = "fixed"
     access_scope: str = "project"
     extra: Dict[str, Any] = None
     project_root: Path = field(default=None, repr=False)
@@ -114,6 +115,7 @@ class FlexibleAgentConfig:
     active_backend: str
     is_active: bool = True
     type: str = "flex"
+    default_mode: str = "flex"
     access_scope: str = "project"
     extra: Dict[str, Any] = None
     project_root: Path = field(default=None, repr=False)
@@ -121,17 +123,87 @@ class FlexibleAgentConfig:
     def resolve_access_root(self) -> Path:
         return resolve_access_root(self.access_scope, self.workspace_dir, self.project_root)
 
-AgentConfigType = Union[AgentConfig, FlexibleAgentConfig]
-
 class ConfigManager:
     def __init__(self, config_path: Path, secrets_path: Path, bridge_home: Path | None = None):
         self.config_path = config_path
         self.secrets_path = secrets_path
         self.bridge_home = bridge_home or config_path.parent
 
-    def load(self) -> tuple[GlobalConfig, list[AgentConfigType], dict]:
+    def _migrate_legacy_fixed_agents(self, raw_cfg: dict) -> list[str]:
+        """Convert explicit legacy fixed rows to the sole Flex runtime shape.
+
+        The migration is deliberately limited to explicit ``type: fixed`` rows.
+        Missing types remain invalid so a typo can never select a runtime by
+        accident. Session-capable CLI backends retain their old conversational
+        behavior through Flex's supported ``default_mode: fixed`` contract.
+        """
+
+        migrated_names: list[str] = []
+        for index, original in enumerate(raw_cfg.get("agents", [])):
+            if not isinstance(original, dict) or original.get("type") != "fixed":
+                continue
+            row = dict(original)
+            name = str(row.get("name") or f"agent-{index}")
+            engine = canonical_backend_engine(row.pop("engine", None))
+            if not engine:
+                raise ValueError(
+                    f"Agent '{name}' uses legacy type='fixed' but has no engine to migrate."
+                )
+            model = row.pop("model", "default")
+            row.pop("resume_policy", None)
+            row["type"] = "flex"
+            row.setdefault("telegram_token_key", name)
+            row["active_backend"] = engine
+            if not row.get("allowed_backends"):
+                backend = {"engine": engine}
+                if model and model != "default":
+                    backend["model"] = model
+                row["allowed_backends"] = [backend]
+            row["default_mode"] = (
+                "fixed" if engine in SESSION_MODE_BACKENDS else "flex"
+            )
+            raw_cfg["agents"][index] = row
+            migrated_names.append(name)
+            config_logger.warning(
+                "Migrated retired type='fixed' agent '%s' to Flex runtime "
+                "(backend=%s, default_mode=%s).",
+                name,
+                engine,
+                row["default_mode"],
+            )
+        return migrated_names
+
+    def _persist_legacy_fixed_migration(self, raw_cfg: dict) -> None:
+        """Atomically persist the one-time config migration with a local backup."""
+
+        backup_path = self.config_path.with_name(
+            self.config_path.name + LEGACY_FIXED_CONFIG_BACKUP_SUFFIX
+        )
+        if not backup_path.exists():
+            backup_path.write_bytes(self.config_path.read_bytes())
+        temp_path = self.config_path.with_name(
+            f".{self.config_path.name}.fixed-migration-{os.getpid()}.tmp"
+        )
+        temp_path.write_text(
+            json.dumps(raw_cfg, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temp_path.replace(self.config_path)
+
+    def load(self) -> tuple[GlobalConfig, list[FlexibleAgentConfig], dict]:
         with open(self.config_path, "r", encoding="utf-8-sig") as f:
             raw_cfg = json.load(f)
+
+        migrated_fixed_agents = self._migrate_legacy_fixed_agents(raw_cfg)
+        if migrated_fixed_agents:
+            try:
+                self._persist_legacy_fixed_migration(raw_cfg)
+            except OSError as exc:
+                config_logger.warning(
+                    "Legacy fixed agents were migrated in memory but the normalized "
+                    "configuration could not be persisted: %s",
+                    exc,
+                )
 
         with open(self.secrets_path, "r", encoding="utf-8-sig") as f:
             secrets = json.load(f)
@@ -319,85 +391,52 @@ class ConfigManager:
                     "legacy fixed runtime no longer accepts accidental fallback."
                     % a_raw.get("name", "<unnamed>")
                 )
-            if agent_type not in {"flex", "limited", "fixed"}:
+            if agent_type not in {"flex", "limited"}:
                 raise ValueError(
-                    "Agent '%s' has unsupported type '%s'. Expected 'flex', 'limited', or 'fixed'."
+                    "Agent '%s' has unsupported type '%s'. Expected 'flex' or 'limited'."
                     % (a_raw.get("name", "<unnamed>"), agent_type)
                 )
-            if agent_type == "fixed" and os.environ.get(LEGACY_FIXED_RUNTIME_ENV) != "1":
+            name = a_raw.pop("name")
+            workspace_dir = resolve_path_value(
+                a_raw.pop("workspace_dir"),
+                config_dir=config_dir,
+                bridge_home=bridge_home,
+            )
+            system_md = resolve_path_value(
+                a_raw.pop("system_md"),
+                config_dir=config_dir,
+                bridge_home=bridge_home,
+            )
+            telegram_token_key = a_raw.pop("telegram_token_key", name)
+            allowed_backends = normalize_allowed_backends(a_raw.pop("allowed_backends"))
+            active_backend = canonical_backend_engine(a_raw.pop("active_backend"))
+            is_active = a_raw.pop("is_active", True)
+            default_mode = str(a_raw.pop("default_mode", "flex") or "flex").strip().lower()
+            if default_mode not in {"flex", "fixed"}:
                 raise ValueError(
-                    "Agent '%s' requests retired legacy fixed runtime. Convert it to type='flex' "
-                    "or set %s=1 for an explicit emergency legacy start."
-                    % (a_raw.get("name", "<unnamed>"), LEGACY_FIXED_RUNTIME_ENV)
+                    f"Agent '{name}' has unsupported default_mode '{default_mode}'. "
+                    "Expected 'flex' or 'fixed'."
                 )
-            if agent_type == "fixed":
+            if default_mode == "fixed" and active_backend not in SESSION_MODE_BACKENDS:
+                raise ValueError(
+                    f"Agent '{name}' requests default_mode='fixed' with stateless backend "
+                    f"'{active_backend}'. Use default_mode='flex'."
+                )
+            access_scope = a_raw.pop("access_scope", "project")
+            if access_scope not in VALID_ACCESS_SCOPES:
                 config_logger.warning(
-                    "Agent '%s' is using retired legacy fixed runtime because %s=1.",
-                    a_raw.get("name", "<unnamed>"),
-                    LEGACY_FIXED_RUNTIME_ENV,
+                    f"Agent '{name}': invalid access_scope '{access_scope}', defaulting to 'workspace'"
                 )
+                access_scope = "workspace"
 
-            if agent_type in {"flex", "limited"}:
-                name = a_raw.pop("name")
-                workspace_dir = resolve_path_value(
-                    a_raw.pop("workspace_dir"),
-                    config_dir=config_dir,
-                    bridge_home=bridge_home,
-                )
-                system_md = resolve_path_value(
-                    a_raw.pop("system_md"),
-                    config_dir=config_dir,
-                    bridge_home=bridge_home,
-                )
-                telegram_token_key = a_raw.pop("telegram_token_key", name)
-                allowed_backends = normalize_allowed_backends(a_raw.pop("allowed_backends"))
-                active_backend = canonical_backend_engine(a_raw.pop("active_backend"))
-                is_active = a_raw.pop("is_active", True)
-                access_scope = a_raw.pop("access_scope", "project")
-                if access_scope not in VALID_ACCESS_SCOPES:
-                    config_logger.warning(
-                        f"Agent '{name}': invalid access_scope '{access_scope}', defaulting to 'workspace'"
-                    )
-                    access_scope = "workspace"
-
-                extra = a_raw.pop("extra", None) or a_raw or None
-                cfg = FlexibleAgentConfig(
-                    name=name, workspace_dir=workspace_dir, system_md=system_md,
-                    telegram_token_key=telegram_token_key, allowed_backends=allowed_backends,
-                    active_backend=active_backend, is_active=is_active, type=agent_type,
-                    access_scope=access_scope, extra=extra, project_root=code_root
-                )
-                agents.append(cfg)
-            else:
-                # Extract core fields, leave rest in extra
-                name = a_raw.pop("name")
-                engine = a_raw.pop("engine")
-                workspace_dir = resolve_path_value(
-                    a_raw.pop("workspace_dir"),
-                    config_dir=config_dir,
-                    bridge_home=bridge_home,
-                )
-                system_md = resolve_path_value(
-                    a_raw.pop("system_md"),
-                    config_dir=config_dir,
-                    bridge_home=bridge_home,
-                )
-                model = a_raw.pop("model", "default")
-                is_active = a_raw.pop("is_active", True)
-                resume_policy = a_raw.pop("resume_policy", "latest")
-                access_scope = a_raw.pop("access_scope", "project")
-                if access_scope not in VALID_ACCESS_SCOPES:
-                    config_logger.warning(
-                        f"Agent '{name}': invalid access_scope '{access_scope}', defaulting to 'workspace'"
-                    )
-                    access_scope = "workspace"
-
-                cfg = AgentConfig(
-                    name=name, engine=engine, workspace_dir=workspace_dir,
-                    system_md=system_md, model=model, is_active=is_active,
-                    resume_policy=resume_policy, type="fixed",
-                    access_scope=access_scope, extra=a_raw, project_root=code_root
-                )
-                agents.append(cfg)
+            extra = a_raw.pop("extra", None) or a_raw or None
+            cfg = FlexibleAgentConfig(
+                name=name, workspace_dir=workspace_dir, system_md=system_md,
+                telegram_token_key=telegram_token_key, allowed_backends=allowed_backends,
+                active_backend=active_backend, is_active=is_active, type=agent_type,
+                default_mode=default_mode, access_scope=access_scope, extra=extra,
+                project_root=code_root,
+            )
+            agents.append(cfg)
 
         return global_cfg, agents, secrets

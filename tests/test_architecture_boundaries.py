@@ -117,3 +117,26 @@ def test_remote_port_compatibility_facade_derives_from_runtime_defaults():
         runtime_defaults.DEFAULT_WORKBENCH_URL
         == f"http://127.0.0.1:{runtime_defaults.DEFAULT_WORKBENCH_PORT}"
     )
+
+
+def test_legacy_fixed_runtime_cannot_reenter_active_architecture():
+    retired_paths = [
+        ROOT / "orchestrator" / "legacy" / "bridge_agent_runtime.py",
+        ROOT / "orchestrator" / "agent_runtime.py",
+    ]
+    assert [path for path in retired_paths if path.exists()] == []
+
+    forbidden_imports = (
+        "orchestrator.legacy.bridge_agent_runtime",
+        "BridgeAgentRuntime",
+        "HASHI_ENABLE_LEGACY_FIXED_RUNTIME",
+    )
+    violations = []
+    for package in ("orchestrator", "adapters", "onboarding", "tui"):
+        for path in (ROOT / package).rglob("*.py"):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for marker in forbidden_imports:
+                if marker in text:
+                    violations.append(f"{path.relative_to(ROOT)}: {marker}")
+
+    assert violations == []

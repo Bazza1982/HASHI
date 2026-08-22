@@ -76,8 +76,8 @@ def write_config(bridge_home: Path, engine: str, lang: dict, l_code: str, or_key
         if src.exists():
             shutil.copy(src, workspace_dir / fname)
 
-    # Prime conversation log with welcome prompt
-    log_path = workspace_dir / "conversation_log.jsonl"
+    # Prime the canonical Flex transcript with the welcome prompt.
+    log_path = workspace_dir / "transcript.jsonl"
     welcome = lang.get("welcomePrompt", "Hello! I am ready to assist you.")
     if log_path.exists():
         log_path.unlink()

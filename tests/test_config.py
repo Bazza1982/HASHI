@@ -3,7 +3,10 @@ import logging
 
 import pytest
 
-from orchestrator.config import ConfigManager, LEGACY_FIXED_RUNTIME_ENV
+from orchestrator.config import (
+    ConfigManager,
+    LEGACY_FIXED_CONFIG_BACKUP_SUFFIX,
+)
 
 
 def _write_base_files(tmp_path, agent):
@@ -42,7 +45,7 @@ def test_missing_agent_type_is_rejected(tmp_path):
         ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
 
-def test_explicit_fixed_agent_requires_emergency_flag(tmp_path):
+def test_explicit_fixed_stateless_agent_is_migrated_to_flex(tmp_path, caplog):
     config_path, secrets_path = _write_base_files(
         tmp_path,
         {
@@ -55,29 +58,55 @@ def test_explicit_fixed_agent_requires_emergency_flag(tmp_path):
         },
     )
 
-    with pytest.raises(ValueError, match=LEGACY_FIXED_RUNTIME_ENV):
-        ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+    original = config_path.read_text(encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="BridgeU.Config"):
+        _, agents, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+    assert agents[0].type == "flex"
+    assert agents[0].active_backend == "gemini-cli"
+    assert agents[0].allowed_backends == [
+        {"engine": "gemini-cli", "model": "gemini-3-flash"}
+    ]
+    assert agents[0].default_mode == "flex"
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["agents"][0]["type"] == "flex"
+    assert persisted["agents"][0]["default_mode"] == "flex"
+    backup_path = config_path.with_name(
+        config_path.name + LEGACY_FIXED_CONFIG_BACKUP_SUFFIX
+    )
+    assert backup_path.read_text(encoding="utf-8") == original
+    assert "Migrated retired type='fixed'" in caplog.text
 
 
-def test_explicit_fixed_agent_can_start_with_emergency_flag(tmp_path, caplog, monkeypatch):
-    monkeypatch.setenv(LEGACY_FIXED_RUNTIME_ENV, "1")
+def test_explicit_fixed_session_agent_keeps_fixed_working_mode(tmp_path, caplog):
     config_path, secrets_path = _write_base_files(
         tmp_path,
         {
             "name": "legacy",
             "type": "fixed",
-            "engine": "gemini-cli",
+            "engine": "codex-cli",
             "workspace_dir": "workspaces/legacy",
             "system_md": "workspaces/legacy/agent.md",
-            "model": "gemini-3-flash",
+            "model": "gpt-5.4",
+            "resume_policy": "latest",
         },
     )
 
     with caplog.at_level(logging.WARNING, logger="BridgeU.Config"):
         _, agents, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
-    assert agents[0].type == "fixed"
-    assert LEGACY_FIXED_RUNTIME_ENV in caplog.text
+    assert agents[0].type == "flex"
+    assert agents[0].active_backend == "codex-cli"
+    assert agents[0].allowed_backends == [
+        {"engine": "codex-cli", "model": "gpt-5.4"}
+    ]
+    assert agents[0].default_mode == "fixed"
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["agents"][0]["type"] == "flex"
+    assert persisted["agents"][0]["default_mode"] == "fixed"
+    assert "engine" not in persisted["agents"][0]
+    assert "resume_policy" not in persisted["agents"][0]
+    assert "default_mode=fixed" in caplog.text
 
 
 def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):

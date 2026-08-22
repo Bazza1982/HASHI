@@ -179,8 +179,8 @@ def run_onboarding():
     shutil.copy(project_root / "docs" / "AGENT_FYI.md", workspace_dir / "AGENT_FYI.md")
     _log(f"initial.md and AGENT_FYI.md copied to {workspace_dir}")
 
-    # 1. Prime the conversation log
-    log_path = workspace_dir / "conversation_log.jsonl"
+    # 1. Prime the canonical Flex transcript
+    log_path = workspace_dir / "transcript.jsonl"
     welcome_prompt = lang.get('welcomePrompt', "Hello! I am ready to assist you.")
 
     if log_path.exists():

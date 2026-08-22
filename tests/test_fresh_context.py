@@ -10,7 +10,6 @@ sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 from orchestrator.bridge_memory import BridgeContextAssembler
 from orchestrator.dual_brain_mode import DualBrainObserver
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
-from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime
 
 
 class FakeMemoryStore:
@@ -85,44 +84,6 @@ def test_bridge_context_assembler_splits_turn_and_saved_memory_flags():
     assert "RECENT CONTEXT" not in prompt
     assert "RELEVANT LONG-TERM MEMORY" not in prompt
     assert store.recent_calls == 0
-
-
-@pytest.mark.asyncio
-async def test_fixed_runtime_new_is_guarded_for_non_cli_backend():
-    runtime = BridgeAgentRuntime.__new__(BridgeAgentRuntime)
-    runtime.global_config = SimpleNamespace(authorized_id=123)
-    runtime.config = SimpleNamespace(engine="deepseek-api")
-
-    update = fake_update()
-    await runtime.cmd_new(update, fake_context())
-
-    assert "Use /fresh" in update.message.replies[0]
-
-
-@pytest.mark.asyncio
-async def test_fixed_runtime_fresh_clears_turns_and_disables_saved_memory():
-    runtime = BridgeAgentRuntime.__new__(BridgeAgentRuntime)
-    runtime.global_config = SimpleNamespace(authorized_id=123)
-    runtime.config = SimpleNamespace(engine="deepseek-api")
-    runtime._pending_auto_recall_context = "old"
-    store = FakeMemoryStore()
-    runtime.memory_store = store
-    runtime.context_assembler = BridgeContextAssembler(store, system_md=None)
-    enqueued = []
-
-    async def enqueue_request(*args, **kwargs):
-        enqueued.append((args, kwargs))
-
-    runtime.enqueue_request = enqueue_request
-
-    update = fake_update()
-    await runtime.cmd_fresh(update, fake_context())
-
-    assert store.turns_cleared == 1
-    assert runtime.context_assembler.turns_injection_enabled is True
-    assert runtime.context_assembler.saved_memory_injection_enabled is False
-    assert runtime._pending_auto_recall_context is None
-    assert enqueued[0][1]["skip_memory_injection"] is True
 
 
 @pytest.mark.asyncio

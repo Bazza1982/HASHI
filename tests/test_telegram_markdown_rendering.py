@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
-from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime
 from orchestrator.runtime_common import _md_to_html, _streaming_status_to_html
 
 
@@ -61,17 +60,10 @@ def test_streaming_status_renders_markdown_and_escapes_identity() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "flush_thinking",
-    [
-        pytest.param(FlexibleAgentRuntime._flush_thinking, id="flexible"),
-        pytest.param(BridgeAgentRuntime._flush_thinking, id="legacy"),
-    ],
-)
-async def test_think_delivery_renders_markdown_for_both_runtimes(flush_thinking) -> None:
+async def test_think_delivery_renders_markdown_for_flex_runtime() -> None:
     runtime = _runtime()
 
-    await flush_thinking(runtime, 123)
+    await FlexibleAgentRuntime._flush_thinking(runtime, 123)
 
     assert runtime.app.bot.sent == [
         {
@@ -81,25 +73,14 @@ async def test_think_delivery_renders_markdown_for_both_runtimes(flush_thinking)
                 "<code>release-proof.json</code> &lt;safely&gt;."
             ),
             "parse_mode": "HTML",
-            **(
-                {"disable_notification": False}
-                if flush_thinking is FlexibleAgentRuntime._flush_thinking
-                else {}
-            ),
+            "disable_notification": False,
         }
     ]
     assert "<i>" not in runtime.app.bot.sent[0]["text"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "flush_thinking",
-    [
-        pytest.param(FlexibleAgentRuntime._flush_thinking, id="flexible"),
-        pytest.param(BridgeAgentRuntime._flush_thinking, id="legacy"),
-    ],
-)
-async def test_think_delivery_chunks_long_commentary_without_truncating(flush_thinking) -> None:
+async def test_think_delivery_chunks_long_commentary_without_truncating() -> None:
     runtime = _runtime()
     commentary = "Codex commentary\n\n" + ("full-content " * 400)
     runtime._think_buffer = [commentary]
@@ -111,7 +92,7 @@ async def test_think_delivery_chunks_long_commentary_without_truncating(flush_th
 
     runtime.send_long_message = send_long_message
 
-    await flush_thinking(runtime, 123)
+    await FlexibleAgentRuntime._flush_thinking(runtime, 123)
 
     assert runtime.app.bot.sent == []
     assert long_sends == [

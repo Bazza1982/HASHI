@@ -12,7 +12,6 @@ sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
 from orchestrator import runtime_jobs
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
-from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime
 
 
 class _FakeSkillManager:
@@ -57,53 +56,6 @@ class _FakeQuery:
         self.edits.append({"text": text, **kwargs})
 
 
-def _runtime():
-    runtime = object.__new__(BridgeAgentRuntime)
-    runtime.name = "arale"
-    runtime.global_config = SimpleNamespace(
-        authorized_id=1,
-        project_root=Path("/tmp/hashi-test"),
-    )
-    runtime.skill_manager = _FakeSkillManager()
-    runtime.orchestrator = SimpleNamespace(
-        runtimes=[
-            SimpleNamespace(name="arale"),
-            SimpleNamespace(name="zhaojun"),
-        ]
-    )
-    return runtime
-
-
-@pytest.mark.asyncio
-async def test_fixed_agent_jobs_transfer_button_shows_target_selector():
-    runtime = _runtime()
-    query = _FakeQuery("skilljob:cron:transfer:arale-daily-security-scan:select")
-
-    await BridgeAgentRuntime.callback_skill(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
-
-    assert query.answers[-1]["text"] is None
-    assert "Transfer job" in query.edits[-1]["text"]
-    markup = query.edits[-1]["reply_markup"]
-    keyboard = markup.inline_keyboard
-    zhaojun_buttons = [button for row in keyboard for button in row if button.text == "zhaojun"]
-    assert zhaojun_buttons
-    assert zhaojun_buttons[0].callback_data.startswith("skilljob:cron:xferkey:")
-    assert len(zhaojun_buttons[0].callback_data) <= 64
-
-
-@pytest.mark.asyncio
-async def test_fixed_agent_jobs_transfer_target_moves_job():
-    runtime = _runtime()
-    callback_data = runtime._job_transfer_callback("cron", "arale-daily-security-scan", "zhaojun")
-    query = _FakeQuery(callback_data)
-
-    await BridgeAgentRuntime.callback_skill(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
-
-    assert runtime.skill_manager.transfers == [("cron", "arale-daily-security-scan", "zhaojun")]
-    assert query.answers[-1]["text"].startswith("Transferred to zhaojun")
-    assert "Job transferred to <b>zhaojun</b>" in query.edits[-1]["text"]
-
-
 def test_flexible_job_transfer_keyboard_uses_short_callbacks_for_long_targets():
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.name = "arale"
@@ -133,28 +85,27 @@ def test_flexible_job_transfer_keyboard_uses_short_callbacks_for_long_targets():
     assert any(callback_data.startswith("skilljob:cron:xferkey:") for callback_data in callbacks)
 
 
-def test_job_transfer_token_store_is_bounded_for_fixed_and_flexible_runtimes():
-    for runtime_cls in (BridgeAgentRuntime, FlexibleAgentRuntime):
-        runtime = object.__new__(runtime_cls)
-        runtime._ui_callback_tokens = {
-            "skilljob_transfer": {
-                f"old{idx}": {
-                    "payload": {"kind": "cron", "task_id": "old", "target_agent": "agent"},
-                    "created_at": float(idx),
-                    "expires_at": 9999999999.0,
-                }
-                for idx in range(256)
+def test_job_transfer_token_store_is_bounded_for_flex_runtime():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime._ui_callback_tokens = {
+        "skilljob_transfer": {
+            f"old{idx}": {
+                "payload": {"kind": "cron", "task_id": "old", "target_agent": "agent"},
+                "created_at": float(idx),
+                "expires_at": 9999999999.0,
             }
+            for idx in range(256)
         }
-        runtime._job_transfer_selections = {}
+    }
+    runtime._job_transfer_selections = {}
 
-        callback_data = runtime._job_transfer_callback("cron", "new-task", "zhaojun")
+    callback_data = runtime._job_transfer_callback("cron", "new-task", "zhaojun")
 
-        assert callback_data.startswith("skilljob:cron:xferkey:jtx")
-        assert len(callback_data) <= runtime_jobs.CALLBACK_DATA_LIMIT
-        token = callback_data.split(":")[3]
-        assert list(runtime._job_transfer_selections) == [token]
-        assert len(runtime._ui_callback_tokens["skilljob_transfer"]) == 256
+    assert callback_data.startswith("skilljob:cron:xferkey:jtx")
+    assert len(callback_data) <= runtime_jobs.CALLBACK_DATA_LIMIT
+    token = callback_data.split(":")[3]
+    assert list(runtime._job_transfer_selections) == [token]
+    assert len(runtime._ui_callback_tokens["skilljob_transfer"]) == 256
 
 
 def test_flexible_job_transfer_keyboard_logs_remote_instance_errors(tmp_path):

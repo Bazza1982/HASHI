@@ -68,10 +68,10 @@ class AgentDirectory:
             config_dir=self.config_path.parent,
             bridge_home=bridge_home,
         ) or (self.config_path.parent / row["workspace_dir"])
-        transcript_name = "conversation_log.jsonl" if row.get("type") == "fixed" else "transcript.jsonl"
+        transcript_name = "transcript.jsonl"
         engine = row.get("engine") or row.get("active_backend", "unknown")
         model = row.get("model", "unknown")
-        if row.get("type") == "flex":
+        if row.get("type") in {"flex", "limited"}:
             for backend in row.get("allowed_backends", []):
                 if backend.get("engine") == row.get("active_backend"):
                     model = backend.get("model", model)

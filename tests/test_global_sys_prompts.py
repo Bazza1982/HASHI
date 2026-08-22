@@ -327,11 +327,10 @@ async def test_sys_callback_honors_limited_agent_command_policy(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_flexible_and_legacy_runtimes_delegate_sys_to_the_same_module(
+async def test_flex_runtime_delegates_sys_to_the_shared_module(
     monkeypatch,
 ) -> None:
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
-    from orchestrator.legacy.bridge_agent_runtime import BridgeAgentRuntime
 
     calls: list[tuple[str, object, object, object]] = []
 
@@ -344,15 +343,14 @@ async def test_flexible_and_legacy_runtimes_delegate_sys_to_the_same_module(
     monkeypatch.setattr(runtime_sys_prompts, "cmd_sys", fake_cmd)
     monkeypatch.setattr(runtime_sys_prompts, "callback_sys", fake_callback)
 
-    for runtime_class in (FlexibleAgentRuntime, BridgeAgentRuntime):
-        runtime = object.__new__(runtime_class)
-        update = object()
-        context = object()
+    runtime = object.__new__(FlexibleAgentRuntime)
+    update = object()
+    context = object()
 
-        await runtime.cmd_sys(update, context)
-        await runtime.callback_sys(update, context)
+    await runtime.cmd_sys(update, context)
+    await runtime.callback_sys(update, context)
 
-        assert calls[-2:] == [
-            ("command", runtime, update, context),
-            ("callback", runtime, update, context),
-        ]
+    assert calls == [
+        ("command", runtime, update, context),
+        ("callback", runtime, update, context),
+    ]

@@ -54,7 +54,7 @@ def main():
     for a in cfg.get('agents', []):
         name = a['name']
         is_active = a.get('is_active', True)
-        agent_type = a.get('type', 'fixed')
+        agent_type = a.get('type', 'flex')
         backend = a.get('active_backend') or a.get('engine') or 'unknown'
         
         # Check token
