@@ -180,6 +180,18 @@ BACKEND_REGISTRY: dict[str, dict] = {
             "openrouter_key",
         ],
     },
+    "hashi-api": {
+        "label": "hashi",
+        "privacy_levels": [0, 1, 2],
+        "models": [
+            "gpt-5.6-luna",
+            "gpt-5.6-sol",
+        ],
+        "default_model": "gpt-5.6-luna",
+        "efforts": [],
+        "default_effort": None,
+        "secret_keys": [],
+    },
 }
 
 CLAUDE_MODEL_ALIASES = {

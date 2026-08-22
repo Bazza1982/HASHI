@@ -778,7 +778,13 @@ class FlexibleBackendManager:
         """Run a one-shot API render with no HASHI tool registry attached."""
 
         engine = canonical_backend_engine(engine)
-        if engine not in {"deepseek-api", "ollama-api", "openrouter-api", "xai-api"}:
+        if engine not in {
+            "deepseek-api",
+            "hashi-api",
+            "ollama-api",
+            "openrouter-api",
+            "xai-api",
+        }:
             raise ValueError(f"Backend {engine} is not a tool-free API renderer.")
         require_level_available(self.privacy_level)
         require_backend_compatibility(engine, self.privacy_level)
@@ -881,6 +887,7 @@ class FlexibleBackendManager:
             if engine in (
                 "openrouter-api",
                 "deepseek-api",
+                "hashi-api",
                 "ollama-api",
                 "xai-api",
                 "her-v2",
