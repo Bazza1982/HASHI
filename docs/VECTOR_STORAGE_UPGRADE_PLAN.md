@@ -34,9 +34,7 @@ which python3
 python3 --version
 
 # Install dependencies
-pip install sqlite-vec
-pip install onnxruntime          # CPU-only, no GPU required
-pip install transformers tokenizers
+python -m pip install -e ".[vector]"
 
 # Verify sqlite-vec loads
 python3 -c "import sqlite_vec; print('sqlite_vec OK:', sqlite_vec.__version__)"
@@ -429,7 +427,7 @@ if __name__ == "__main__":
 ## Testing Checklist (HASHI2)
 
 ```
-[ ] Step 0: pip install sqlite-vec onnxruntime transformers — no errors
+[ ] Step 0: `python -m pip install -e ".[vector]"` — no errors
 [ ] Step 1: BGE-M3 model downloaded, verify script prints shape (2, seq_len, 1024)
 [ ] Step 2: BgeM3Encoder added to bridge_memory.py, unit test encode() returns list of 1024 floats
 [ ] Step 3: _init_db() creates memory_vec and turns_vec tables without errors

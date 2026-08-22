@@ -374,8 +374,8 @@ bash mac/prepare_usb.sh           # builds USB with portable Python + all deps
 git clone https://github.com/Bazza1982/HASHI.git
 cd HASHI
 
-# Install Python dependencies
-pip install -r requirements.txt
+# Install the standard local runtime (core + media + Remote + TUI)
+python -m pip install -r requirements.txt
 
 # First run — TUI onboarding (language, API key, Telegram setup)
 python tui_onboarding.py
@@ -396,6 +396,12 @@ python main.py            # Any platform
   - [DeepSeek](https://platform.deepseek.com/) API key
   - [Ollama](https://ollama.com/) (local LLM, no API key needed)
 - Optional: Node.js 18+ (for Workbench UI)
+
+For a smaller headless environment, install the core with
+`python -m pip install -e .`. Named extras such as `media`, `remote`, `tui`,
+`browser`, `whatsapp`, `voice`, `transcription`, `ocr`, `vector`, `postgres`,
+and `kubernetes` add only the selected feature. See
+[Dependency profiles](docs/DEPENDENCIES.md) for the complete matrix.
 
 ---
 

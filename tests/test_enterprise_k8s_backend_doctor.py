@@ -10,7 +10,7 @@ def test_kubernetes_backend_doctor_static_contract_passes():
 
     assert result["ok"] is True
     assert result["checks"]["pyproject_extra"] is True
-    assert result["checks"]["requirements_comment"] is True
+    assert result["checks"]["standard_profile_excludes_kubernetes"] is True
     assert result["checks"]["docker_build_arg"] is True
     assert result["checks"]["docker_installs_extra"] is True
     assert result["checks"]["module_installed"] is False

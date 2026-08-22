@@ -66,7 +66,7 @@ No extra installation required.
 
 For higher quality cloud TTS:
 ```bash
-pip install edge-tts
+python -m pip install -e ".[voice]"
 ```
 Then in HASHI settings, change voice provider to `edge`.
 

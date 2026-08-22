@@ -20,17 +20,24 @@ def run_doctor(
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     dockerfile = (root / "Dockerfile.enterprise").read_text(encoding="utf-8")
     requirements = (root / "requirements.txt").read_text(encoding="utf-8")
+    standard_requirements = {
+        line.strip().lower()
+        for line in requirements.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
     module_installed = importlib.util.find_spec(import_name) is not None
     checks = {
         "pyproject_extra": 'kubernetes = ["kubernetes>=29.0.0,<32.0.0"]' in pyproject,
-        "requirements_comment": "Optional: Kubernetes Lease scheduler backend" in requirements,
+        "standard_profile_excludes_kubernetes": not any(
+            line.startswith("kubernetes") for line in standard_requirements
+        ),
         "docker_build_arg": 'ARG HASHI_ENTERPRISE_EXTRAS=""' in dockerfile,
         "docker_installs_extra": 'pip install --no-cache-dir ".[${HASHI_ENTERPRISE_EXTRAS}]"' in dockerfile,
         "module_installed": module_installed,
     }
     required = [
         "pyproject_extra",
-        "requirements_comment",
+        "standard_profile_excludes_kubernetes",
         "docker_build_arg",
         "docker_installs_extra",
     ]

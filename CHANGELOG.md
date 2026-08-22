@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Layered Python dependency profiles** — kept the normal source-checkout
+  runtime intact while moving tests and heavyweight integrations into explicit
+  extras. Minimal, standard, feature-specific, development, and complete
+  installation paths now share one authoritative `pyproject.toml` contract.
 - **Persistent `/delay` queue** — `/delay <minutes> <message>` stores an
   agent-owned FUTURE request and moves it into the existing READY FIFO when
   due, independently from cron, heartbeat, nudge, and automation jobs. Delays

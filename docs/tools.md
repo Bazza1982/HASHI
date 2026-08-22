@@ -275,11 +275,11 @@ python tools/browser_cli.py evaluate   --url https://site.com --script "() => do
 ### Prerequisites
 
 ```bash
-pip install playwright
+python -m pip install -e ".[browser]"
 playwright install chromium
 ```
 
-Playwright is listed as an optional dependency in `requirements.txt`.
+Playwright is isolated in the `browser` dependency profile.
 
 ### Cross-Platform
 
@@ -379,7 +379,8 @@ Agents can be started and stopped without restarting the bridge process.
 - Start: `workbench.bat`. Control: `workbench_ctl.ps1`.
 
 ## WhatsApp Transport
-- Optional; uses neonize (`pip install neonize`).
+- Optional; uses the complete WhatsApp profile
+  (`python -m pip install -e ".[whatsapp]"`).
 - Per-chat routing layer: `/agent <name>` routes to a specific agent; `/all` broadcasts to all.
 - Config in `agents.json` global section under `"whatsapp"`: `enabled`, `allowed_numbers`, `default_agent`, `session_dir`.
 - Credentials in `wa_session/` (gitignored, never commit).

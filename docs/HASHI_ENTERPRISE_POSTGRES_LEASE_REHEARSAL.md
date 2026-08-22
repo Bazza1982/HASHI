@@ -9,13 +9,13 @@ database before enabling multi-replica scheduler leases.
 - Optional Python driver installed in the HASHI environment:
 
 ```bash
-python -m pip install "psycopg[binary]"
+python -m pip install -e ".[postgres]"
 ```
 
 If you enable scheduler lease pooling, also install:
 
 ```bash
-python -m pip install psycopg_pool
+python -m pip install -e ".[postgres]"
 ```
 
 ## One-Shot Rehearsal

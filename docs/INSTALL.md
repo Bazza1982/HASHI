@@ -11,6 +11,7 @@
 - [Windows](#windows)
 - [macOS](#macos)
 - [Linux (native) / WSL2](#linux-native--wsl2)
+- [Python dependency profiles](#python-dependency-profiles)
 - [Multi-instance ports](#multi-instance-ports)
 - [Hashi Remote](#hashi-remote)
 
@@ -61,6 +62,35 @@
 
 ### Run
 - Preferred: `./bin/bridge-u.sh --resume-last --workbench`
+
+---
+
+## Python dependency profiles
+
+For a normal local HASHI installation, use the standard source profile:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+The standard profile includes the core plus media handling, Hashi Remote, and
+the terminal UI. Test packages are deliberately separate:
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
+Minimal or specialised environments can install from `pyproject.toml` instead:
+
+```bash
+python -m pip install -e .
+python -m pip install -e ".[media,remote]"
+python -m pip install -e ".[browser,voice]"
+python -m pip install -e ".[all]"
+```
+
+The last command installs every declared optional integration and can be very
+large. See [Dependency profiles](DEPENDENCIES.md) before choosing it.
 
 ---
 
