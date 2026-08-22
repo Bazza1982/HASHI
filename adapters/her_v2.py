@@ -7,7 +7,6 @@ import copy
 import hashlib
 import json
 import logging
-import math
 import re
 import ssl
 import time
@@ -324,35 +323,6 @@ def _infer_untyped_backend_failure(
         ProviderFailureCode.PROVIDER_UNKNOWN,
         True,
         "The provider failed for an unknown technical reason.",
-    )
-
-
-def _provider_timeout_error(
-    tracker: ProviderActivityTracker,
-    *,
-    label: str,
-    timeout_s: float,
-) -> StageInvocationError:
-    snapshot = tracker.snapshot()
-    if not tracker.response_started:
-        code = ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT
-        description = "The provider did not begin a response before the attempt deadline."
-    elif tracker.reasoning_event_count and not tracker.text_event_count and not tracker.tool_started:
-        code = ProviderFailureCode.PROVIDER_REASONING_ONLY_TIMEOUT
-        description = "The provider emitted reasoning but no usable response before the deadline."
-    elif tracker.text_event_count or tracker.tool_started:
-        code = ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT
-        description = "The provider response began but did not complete before the deadline."
-    else:
-        code = ProviderFailureCode.PROVIDER_STREAM_IDLE_TIMEOUT
-        description = "The provider stream stopped making usable progress before completion."
-    return StageInvocationError(
-        f"{label} exceeded its {timeout_s:g}s provider-attempt timeout",
-        retryable=True,
-        code=code,
-        human_description=description,
-        side_effects_possible=tracker.side_effects_possible,
-        details={"provider_activity": snapshot, "attempt_timeout_s": timeout_s},
     )
 
 
@@ -980,12 +950,6 @@ class HashiStageProvider(StageProvider):
             backend_extra["provider_reasoning"] = profile.reasoning
             backend_extra["reasoning_effort"] = profile.reasoning
         backend_extra.update(dict(profile.options))
-        if request.attempt_timeout_s > 0:
-            # This is an ephemeral backend.  Align its own silence watchdog
-            # with the attempt tier without mutating the Agent configuration.
-            backend_extra["idle_timeout_sec"] = max(
-                1, math.ceil(float(request.attempt_timeout_s))
-            )
         backend.config.extra = backend_extra
         if hasattr(backend, "set_reasoning_enabled"):
             normalized = str(profile.reasoning or "").strip().casefold()
@@ -1310,13 +1274,8 @@ control envelope.
         message_label: str,
         max_chars: int,
     ) -> str:
-        """Run one isolated, tool-free Persona call with one Tier-1 recovery."""
+        """Run one isolated, tool-free Persona call with one typed recovery."""
 
-        tier = self.retry_policy.tier_for(
-            Stage.IMMEDIATE_RESPONSE,
-            engine=profile.engine,
-            context={"persona_message_label": message_label},
-        )
         self._persona_invocation_serial += 1
         invocation_serial = self._persona_invocation_serial
         invocation_id = (
@@ -1348,25 +1307,18 @@ control envelope.
         turn_id = bound_turn_id or f"persona:{request_id}"
         request_ref = bound_request_ref or f"hashi-request:{request_id}"
         last_error: StageInvocationError | None = None
-        for attempt in (1, 2):
-            timeout_s = self.retry_policy.timeout_for(
-                tier, recovery_attempt=attempt > 1
-            )
+        for attempt in range(1, self.retry_policy.max_provider_retries + 2):
             tracker = ProviderActivityTracker()
             try:
-                rendered = await asyncio.wait_for(
-                    self._package_persona_text_once(
-                        profile,
-                        prompt=prompt,
-                        system_prompt=system_prompt,
-                        request_id=request_id,
-                        message_label=message_label,
-                        max_chars=max_chars,
-                        attempt=attempt,
-                        attempt_timeout_s=timeout_s,
-                        activity=tracker,
-                    ),
-                    timeout=timeout_s,
+                rendered = await self._package_persona_text_once(
+                    profile,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    request_id=request_id,
+                    message_label=message_label,
+                    max_chars=max_chars,
+                    attempt=attempt,
+                    activity=tracker,
                 )
                 if self.audit_log is not None:
                     self.audit_log.append(
@@ -1381,8 +1333,6 @@ control envelope.
                         attempt=attempt,
                         payload={
                             "message_label": message_label,
-                            "retry_tier": tier.label,
-                            "attempt_timeout_s": timeout_s,
                             "retry_invariant_hash": invariant_hash,
                             "provider_activity": tracker.snapshot(),
                             "rendered_text_sha256": hashlib.sha256(
@@ -1395,12 +1345,6 @@ control envelope.
                 raise
             except AuditPersistenceError:
                 raise
-            except asyncio.TimeoutError:
-                last_error = _provider_timeout_error(
-                    tracker,
-                    label=f"Persona {message_label}",
-                    timeout_s=timeout_s,
-                )
             except StageInvocationError as exc:
                 last_error = exc
             except Exception as exc:
@@ -1410,7 +1354,10 @@ control envelope.
                 )
 
             assert last_error is not None
-            will_retry = bool(last_error.retryable and attempt < 2)
+            will_retry = bool(
+                last_error.retryable
+                and attempt <= self.retry_policy.max_provider_retries
+            )
             retry_reason = "eligible" if will_retry else (
                 "failure_non_retryable"
                 if not last_error.retryable
@@ -1421,12 +1368,6 @@ control envelope.
                 if last_error.retry_after_s is not None
                 else 0.25
             )
-            next_timeout = self.retry_policy.timeout_for(
-                tier, recovery_attempt=True
-            )
-            if will_retry and retry_delay > next_timeout:
-                will_retry = False
-                retry_reason = "retry_after_exceeds_recovery_window"
             if self.audit_log is not None:
                 self.audit_log.append(
                     event_id=f"{invocation_id}:attempt:{attempt}:failed",
@@ -1444,8 +1385,6 @@ control envelope.
                         "will_retry": will_retry,
                         "retry_reason": retry_reason,
                         "retry_delay_s": retry_delay if will_retry else None,
-                        "retry_tier": tier.label,
-                        "attempt_timeout_s": timeout_s,
                         "fresh_connection_on_retry": will_retry,
                         "retry_invariant_hash": invariant_hash,
                         "retry_invariants": invariant_payload,
@@ -1472,8 +1411,6 @@ control envelope.
                     payload={
                         "next_attempt": attempt + 1,
                         "retry_delay_s": retry_delay,
-                        "retry_tier": tier.label,
-                        "next_attempt_timeout_s": next_timeout,
                         "fresh_connection": True,
                         "same_provider": True,
                         "same_model": True,
@@ -1485,10 +1422,9 @@ control envelope.
                     },
                 )
             self.logger.warning(
-                "HER v2 Persona provider retry: label=%s tier=%s attempt=%s "
+                "HER v2 Persona provider retry: label=%s attempt=%s "
                 "error_code=%s retry_after_s=%.3f fresh_connection=true",
                 message_label,
-                tier.label,
                 attempt,
                 last_error.error_code,
                 retry_delay,
@@ -1506,7 +1442,6 @@ control envelope.
         message_label: str,
         max_chars: int,
         attempt: int,
-        attempt_timeout_s: float,
         activity: ProviderActivityTracker,
     ) -> str:
         backend = None
@@ -1519,9 +1454,6 @@ control envelope.
                 backend_extra["provider_reasoning"] = profile.reasoning
                 backend_extra["reasoning_effort"] = profile.reasoning
             backend_extra.update(dict(profile.options))
-            backend_extra["idle_timeout_sec"] = max(
-                1, math.ceil(float(attempt_timeout_s))
-            )
             backend.config.extra = backend_extra
             if hasattr(backend, "set_reasoning_enabled"):
                 normalized = str(profile.reasoning or "").strip().casefold()
@@ -1979,8 +1911,8 @@ class HERv2Adapter(BaseBackend):
         request_id: str,
         timeout_s: float | None,
     ) -> StageResponse:
-        # ``timeout_s`` remains in the legacy callback signature.  The single
-        # source of truth is now the tiered provider-attempt policy.
+        # ``timeout_s`` remains in the legacy callback signature.  HER v2 does
+        # not turn it into a provider-attempt or maintenance-stage deadline.
         del timeout_s
         if self._v2_config is None:
             raise StageInvocationError(
@@ -1997,7 +1929,6 @@ class HERv2Adapter(BaseBackend):
             "may_contact_user": False,
             "may_enter_live_lifecycle": False,
         }
-        tier = policy.tier_for(stage, engine=profile.engine, context=context)
         invariant_hash = "sha256:" + hashlib.sha256(
             json.dumps(
                 {
@@ -2016,10 +1947,7 @@ class HERv2Adapter(BaseBackend):
         ).hexdigest()
         role = self._v2_config.stage_roles.get(stage, profile.name)
         last_error: StageInvocationError | None = None
-        for attempt in (1, 2):
-            attempt_timeout_s = policy.timeout_for(
-                tier, recovery_attempt=attempt > 1
-            )
+        for attempt in range(1, policy.max_provider_retries + 2):
             activity = ProviderActivityTracker()
             provider = self._new_stage_provider(on_stream_event=None, silent=True)
             invocation_id = f"{turn_id}:{stage.value}:maintenance:{request_id}"
@@ -2036,25 +1964,14 @@ class HERv2Adapter(BaseBackend):
                 allow_tools=False,
                 allow_side_effects=False,
                 invocation_id=invocation_id,
-                retry_tier=tier.label,
-                attempt_timeout_s=attempt_timeout_s,
                 retry_invariant_hash=invariant_hash,
                 provider_activity_callback=activity.record,
             )
             try:
-                response = await asyncio.wait_for(
-                    provider.invoke(profile, request),
-                    timeout=attempt_timeout_s,
-                )
+                response = await provider.invoke(profile, request)
                 return replace(response, provider_attempt=attempt)
             except asyncio.CancelledError:
                 raise
-            except asyncio.TimeoutError:
-                last_error = _provider_timeout_error(
-                    activity,
-                    label=stage.value,
-                    timeout_s=attempt_timeout_s,
-                )
             except StageInvocationError as exc:
                 last_error = exc
             except Exception as exc:
@@ -2064,7 +1981,10 @@ class HERv2Adapter(BaseBackend):
                 )
 
             assert last_error is not None
-            will_retry = bool(last_error.retryable and attempt == 1)
+            will_retry = bool(
+                last_error.retryable
+                and attempt <= policy.max_provider_retries
+            )
             retry_reason = "eligible" if will_retry else (
                 "failure_non_retryable"
                 if not last_error.retryable
@@ -2075,10 +1995,6 @@ class HERv2Adapter(BaseBackend):
                 if last_error.retry_after_s is not None
                 else 0.25
             )
-            next_timeout = policy.timeout_for(tier, recovery_attempt=True)
-            if will_retry and retry_delay > next_timeout:
-                will_retry = False
-                retry_reason = "retry_after_exceeds_recovery_window"
             self._audit_log.append(
                 event_id=f"{invocation_id}:attempt:{attempt}:failed",
                 turn_id=turn_id,
@@ -2091,8 +2007,6 @@ class HERv2Adapter(BaseBackend):
                 attempt=attempt,
                 payload={
                     **last_error.audit_payload(),
-                    "retry_tier": tier.label,
-                    "attempt_timeout_s": attempt_timeout_s,
                     "provider_activity": activity.snapshot(),
                     "will_retry": will_retry,
                     "retry_reason": retry_reason,
@@ -2118,10 +2032,8 @@ class HERv2Adapter(BaseBackend):
                 model=profile.model,
                 attempt=attempt,
                 payload={
-                    "retry_tier": tier.label,
                     "retry_delay_s": retry_delay,
                     "next_attempt": attempt + 1,
-                    "next_attempt_timeout_s": next_timeout,
                     "fresh_connection": True,
                     "same_provider": True,
                     "same_model": True,

@@ -833,6 +833,13 @@ async def test_background_learning_provider_retries_once_with_same_invariants(
         and row["payload"]["fresh_connection"] is True
         for row in rows
     )
+    assert all(
+        "retry_tier" not in row["payload"]
+        and "attempt_timeout_s" not in row["payload"]
+        and "next_attempt_timeout_s" not in row["payload"]
+        for row in rows
+        if row["event"].startswith("maintenance_provider_")
+    )
     await adapter.shutdown()
 
 
@@ -1322,10 +1329,10 @@ async def test_persona_packaging_retries_once_with_a_fresh_backend(tmp_path):
         "request-persona-retry"
     }
     assert all(backend.shutdown_called for backend in manager.backends)
-    assert [backend.config.extra["idle_timeout_sec"] for backend in manager.backends] == [
-        60,
-        180,
-    ]
+    assert all(
+        "idle_timeout_sec" not in backend.config.extra
+        for backend in manager.backends
+    )
     rows = [
         json.loads(line)
         for line in (tmp_path / "persona-audit.jsonl").read_text().splitlines()
@@ -1345,6 +1352,9 @@ async def test_persona_packaging_retries_once_with_a_fresh_backend(tmp_path):
     assert failed["turn_id"] == "turn-persona-retry"
     assert failed["request_ref"] == "hashi-request:request-persona-retry"
     assert failed["payload"]["will_retry"] is True
+    assert "retry_tier" not in failed["payload"]
+    assert "attempt_timeout_s" not in failed["payload"]
+    assert "next_attempt_timeout_s" not in retry["payload"]
     assert retry["payload"]["fresh_connection"] is True
     assert retry["payload"]["same_provider"] is True
     assert retry["payload"]["same_model"] is True
@@ -1355,6 +1365,8 @@ async def test_persona_packaging_retries_once_with_a_fresh_backend(tmp_path):
     assert failed["payload"]["retry_invariant_hash"] == (
         completed["payload"]["retry_invariant_hash"]
     )
+    assert "retry_tier" not in completed["payload"]
+    assert "attempt_timeout_s" not in completed["payload"]
 
 
 @pytest.mark.asyncio

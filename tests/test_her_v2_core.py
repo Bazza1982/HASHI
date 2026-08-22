@@ -21,11 +21,13 @@ from orchestrator.her_v2.models import (
     ExecutionDisposition,
     LifecycleState,
     Stage,
+    StageRequest,
     TerminalState,
     TriageClassification,
 )
 from orchestrator.her_v2.policy import resolve_policy, terminal_for_execution
 from orchestrator.her_v2.progress import ProgressTracker
+from orchestrator.her_v2.retry import ProviderRetryPolicy
 from orchestrator.her_v2.structured import extract_json_object
 
 
@@ -374,6 +376,15 @@ def test_her_v2_provider_profiles_reject_nested_execution_limits():
     profiles["premium"]["options"] = {"request_timeout_s": 300}
     with pytest.raises(HERv2ConfigurationError, match="request_timeout_s"):
         HERv2Config.from_mapping({"profiles": profiles})
+
+
+def test_provider_recovery_contract_contains_no_elapsed_limit_fields():
+    policy = ProviderRetryPolicy()
+
+    assert policy.max_provider_retries == 1
+    assert set(policy.__dataclass_fields__) == {"max_provider_retries"}
+    assert "retry_tier" not in StageRequest.__dataclass_fields__
+    assert "attempt_timeout_s" not in StageRequest.__dataclass_fields__
 
 
 def test_structured_parser_accepts_prose_wrapper_but_not_missing_object():

@@ -1691,6 +1691,80 @@ async def test_finalisation_retries_same_evidence_without_repeating_execution(
 
 
 @pytest.mark.asyncio
+async def test_provider_operations_have_no_elapsed_attempt_deadline(
+    tmp_path, monkeypatch
+):
+    class RecoveryOnlyPolicy:
+        max_provider_retries = 1
+
+    observed_wait_timeouts = []
+    real_wait = asyncio.wait
+
+    async def tracked_wait(awaitables, **kwargs):
+        observed_wait_timeouts.append(kwargs.get("timeout"))
+        return await real_wait(awaitables, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", tracked_wait)
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Completed without a clock."}
+            ],
+            Stage.FINALISATION: [{"report": "Completed without a clock."}],
+        }
+    )
+
+    result = await _runtime(
+        tmp_path,
+        ScriptedProvider(scripts),
+        retry_policy=RecoveryOnlyPolicy(),
+    ).run_turn(
+        "Run without an elapsed ceiling",
+        "request-no-attempt-deadline",
+        effort="low",
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED, result.error
+    assert observed_wait_timeouts
+    assert all(timeout is None for timeout in observed_wait_timeouts)
+    audit_text = (tmp_path / "her-v2" / "audit.jsonl").read_text()
+    assert "attempt_timeout_s" not in audit_text
+    assert "retry_tier" not in audit_text
+
+
+@pytest.mark.asyncio
+async def test_retry_after_is_not_rejected_by_a_fabricated_recovery_window(tmp_path):
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [{"message": "Recovered."}],
+        Stage.TRIAGE: [
+            StageInvocationError(
+                "temporarily rate limited",
+                code=ProviderFailureCode.PROVIDER_RATE_LIMITED,
+                retry_after_s=601,
+            ),
+            {"classification": "DIRECT_RESPONSE", "goal": "Reply"},
+        ],
+    }
+    runtime = _runtime(tmp_path, ScriptedProvider(scripts))
+    scheduled_delays = []
+
+    async def record_without_waiting(*_args, **kwargs):
+        scheduled_delays.append(kwargs["retry_delay"])
+
+    runtime._wait_for_stage_retry = record_without_waiting
+
+    result = await runtime.run_turn(
+        "Reply after the provider permits recovery",
+        "request-unbounded-retry-after",
+        effort="low",
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert scheduled_delays == [601]
+
+
+@pytest.mark.asyncio
 async def test_nonretryable_auth_failure_keeps_typed_code_and_single_attempt(tmp_path):
     scripts = {
         Stage.IMMEDIATE_RESPONSE: [

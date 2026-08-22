@@ -68,7 +68,7 @@ from .presentation import (
     RequiredUserMessage,
 )
 from .progress import ProgressTracker, ProviderActivityTracker
-from .retry import DEFAULT_PROVIDER_RETRY_POLICY, ProviderRetryPolicy, RetryTier
+from .retry import DEFAULT_PROVIDER_RETRY_POLICY, ProviderRetryPolicy
 from .structured import (
     parse_execution,
     parse_finalisation,
@@ -1293,12 +1293,6 @@ class HERv2Runtime:
             )
         )
         base_context = copy.deepcopy(dict(context or {}))
-        tier = self.retry_policy.tier_for(
-            stage,
-            engine=selected.engine,
-            classification=state.ledger.classification,
-            context=base_context,
-        )
         invariant_payload = {
             "provider": selected.engine,
             "model": selected.model,
@@ -1341,10 +1335,6 @@ class HERv2Runtime:
                     "Correct only the reported response-envelope defect. Preserve "
                     "the authoritative goal, classification, evidence, and uncertainty."
                 )
-            attempt_timeout_s = self.retry_policy.timeout_for(
-                tier,
-                recovery_attempt=attempt > 1,
-            )
             provider_activity = ProviderActivityTracker()
             request = StageRequest(
                 turn_id=state.ledger.turn_id,
@@ -1360,8 +1350,6 @@ class HERv2Runtime:
                 allow_tools=allow_tools,
                 allow_side_effects=allow_side_effects,
                 invocation_id=invocation_id,
-                retry_tier=tier.label,
-                attempt_timeout_s=attempt_timeout_s,
                 retry_invariant_hash=retry_invariant_hash,
                 progress_callback=self._progress_callback(state),
                 provider_activity_callback=provider_activity.record,
@@ -1390,8 +1378,6 @@ class HERv2Runtime:
                     "provider_reasoning": selected.reasoning,
                     "allow_tools": allow_tools,
                     "allow_side_effects": allow_side_effects,
-                    "retry_tier": tier.label,
-                    "attempt_timeout_s": attempt_timeout_s,
                     "fresh_connection": attempt > 1,
                     "provider_retry_count": provider_retry_count,
                     "retry_invariant_hash": retry_invariant_hash,
@@ -1408,12 +1394,8 @@ class HERv2Runtime:
             )
             response: StageResponse | None = None
             try:
-                response = await self._await_provider_operation(
-                    state,
-                    self.provider.invoke(selected, request),
-                    stage=stage,
-                    timeout_s=attempt_timeout_s,
-                    activity=provider_activity,
+                response = await state.control.run_cancellable(
+                    self.provider.invoke(selected, request)
                 )
                 response_ref = self._audit(
                     state,
@@ -1434,8 +1416,6 @@ class HERv2Runtime:
                             and str(response.reasoning_trace).strip()
                         ),
                         "validation_pending": True,
-                        "retry_tier": tier.label,
-                        "attempt_timeout_s": attempt_timeout_s,
                         "provider_activity": provider_activity.snapshot(),
                     },
                 )
@@ -1599,25 +1579,14 @@ class HERv2Runtime:
             will_retry = retry_reason == "eligible"
             retry_delay = 0.0
             if will_retry:
-                next_timeout = self.retry_policy.timeout_for(
-                    tier, recovery_attempt=True
-                )
                 retry_delay = (
                     last_error.retry_after_s
                     if last_error.retry_after_s is not None
                     else min(
                         5.0,
                         0.25 * (2 ** min(max(0, attempt - 1), 5)),
-                        next_timeout / 4,
                     )
                 )
-                if not is_structured_repair:
-                    if (
-                        last_error.retry_after_s is not None
-                        and retry_delay > next_timeout
-                    ):
-                        will_retry = False
-                        retry_reason = "retry_after_exceeds_recovery_window"
             try:
                 self._audit(
                     state,
@@ -1634,8 +1603,6 @@ class HERv2Runtime:
                         "retry_kind": retry_kind,
                         "retry_reason": retry_reason,
                         "retry_delay_s": retry_delay if will_retry else None,
-                        "retry_tier": tier.label,
-                        "attempt_timeout_s": attempt_timeout_s,
                         "fresh_connection_on_retry": will_retry,
                         "retry_invariant_hash": retry_invariant_hash,
                         "provider_response_received": response is not None,
@@ -1694,7 +1661,6 @@ class HERv2Runtime:
                 role=role,
                 provider=selected.engine,
                 model=selected.model,
-                tier=tier,
                 retry_kind=retry_kind,
                 retry_delay=retry_delay,
                 retry_invariant_hash=retry_invariant_hash,
@@ -1814,7 +1780,6 @@ class HERv2Runtime:
         role: str,
         provider: str,
         model: str,
-        tier: RetryTier,
         retry_kind: str,
         retry_delay: float,
         retry_invariant_hash: str,
@@ -1853,7 +1818,6 @@ class HERv2Runtime:
             attempt=attempt,
             payload={
                 "retry_kind": retry_kind,
-                "retry_tier": tier.label,
                 "failed_attempt": attempt,
                 "next_attempt": attempt + 1,
                 "retry_delay_s": delay,
@@ -1890,77 +1854,6 @@ class HERv2Runtime:
                 ),
                 attempts=attempt,
             )
-
-    async def _await_provider_operation(
-        self,
-        state: _TurnState,
-        operation,
-        *,
-        stage: Stage,
-        timeout_s: float,
-        activity: ProviderActivityTracker,
-    ) -> StageResponse:
-        task = asyncio.create_task(state.control.run_cancellable(operation))
-        try:
-            done, _pending = await asyncio.wait({task}, timeout=float(timeout_s))
-            if task not in done:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-                raise self._provider_attempt_timeout_error(
-                    stage=stage,
-                    timeout_s=timeout_s,
-                    activity=activity,
-                )
-            return await task
-        except asyncio.CancelledError:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            raise
-
-    def _provider_attempt_timeout_error(
-        self,
-        *,
-        stage: Stage,
-        timeout_s: float,
-        activity: ProviderActivityTracker,
-    ) -> StageInvocationError:
-        if not activity.response_started:
-            code = ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT
-            description = (
-                "The provider did not begin a response before the attempt deadline."
-            )
-        elif (
-            activity.reasoning_event_count
-            and not activity.text_event_count
-            and not activity.tool_started
-        ):
-            code = ProviderFailureCode.PROVIDER_REASONING_ONLY_TIMEOUT
-            description = (
-                "The provider emitted reasoning but no usable response before the "
-                "attempt deadline."
-            )
-        elif activity.text_event_count or activity.tool_started:
-            code = ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT
-            description = (
-                "The provider response began but did not complete before the attempt "
-                "deadline."
-            )
-        else:
-            code = ProviderFailureCode.PROVIDER_STREAM_IDLE_TIMEOUT
-            description = (
-                "The provider stream stopped making usable progress before completion."
-            )
-        return StageInvocationError(
-            f"{stage.value} exceeded its {timeout_s:g}s provider-attempt timeout",
-            retryable=True,
-            code=code,
-            human_description=description,
-            side_effects_possible=activity.side_effects_possible,
-            details={
-                "attempt_timeout_s": float(timeout_s),
-                "provider_activity": activity.snapshot(),
-            },
-        )
 
     def _record_triage(
         self, state: _TurnState, classification: TriageClassification

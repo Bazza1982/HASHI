@@ -167,8 +167,6 @@ class StageRequest:
     allow_tools: bool = False
     allow_side_effects: bool = False
     invocation_id: str = ""
-    retry_tier: str = ""
-    attempt_timeout_s: float = 0.0
     retry_invariant_hash: str = ""
     progress_callback: Callable[[str, str, bool], None] | None = field(
         default=None, compare=False, repr=False
