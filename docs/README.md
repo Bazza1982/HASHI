@@ -8,10 +8,9 @@ This directory contains developer documentation and operational notes for HASHI.
 > alpha target. It is deployment-artifact-ready for alpha testing, with full
 > enterprise-server production validation pending.
 >
-> **Platform release candidate:** HASHI `v4.0.0-alpha.2` consolidates the
-> advanced HER backend, certified HER `0.1.0-hashi.22`, seven effort levels,
-> conversation/delivery hardening, and the source-integrated `/rebuild`
-> workflow. See
+> **Platform release candidate:** HASHI `v4.0.0-alpha.2` consolidates HER v2,
+> conversation/delivery hardening, task-matched execution effort, and the lean
+> Flex-only runtime architecture. See
 > [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md).
 >
 > **Changelog:** see [`../CHANGELOG.md`](../CHANGELOG.md) · **Roadmap:** see [ROADMAP.md](ROADMAP.md).
@@ -91,8 +90,6 @@ deployment validation continues.
 - [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) — current unreleased integration identity, verification evidence, open rollout gates, and GitHub publication boundary
 - [HER_HABIT_MEDITATION.md](HER_HABIT_MEDITATION.md) — default-off adapter-direct HER Habit controls, JSON persistence, recovery, audit, and change notifications
 - [her_multimedia_multimodal_plan.md](her_multimedia_multimodal_plan.md) — implemented HER media bridge, security limits, compatibility paths, and remaining live rollout matrix
-- [HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md](HER_REBUILD_COMMAND_IMPLEMENTATION_PLAN.md) — transactional local Rust rebuild, verification, development selection, targeted reboot, and rollback plan
-- [HER_REBUILD_PARALLEL_DEVELOPMENT_CHECKPOINT.md](HER_REBUILD_PARALLEL_DEVELOPMENT_CHECKPOINT.md) — safe takeover, integration, live adoption, cache verification, and preserved Zelda release provenance
 - [HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) — authoritative HER v2 lifecycle, provider, delivery, and compatibility contract
 - [HER_V2_TESTING_PLAN.md](HER_V2_TESTING_PLAN.md) — consolidated HER v2 behavioral and integration test contract
 
@@ -121,7 +118,7 @@ deployment validation continues.
 
 ### Release Notes
 - [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md) — Enterprise AAI v0.1 alpha release notes and known limits
-- [RELEASE_NOTES_v4.0.0-alpha.2.md](RELEASE_NOTES_v4.0.0-alpha.2.md) — current v4 release candidate for advanced HER, seven effort levels, certified `.22`, and `/rebuild`
+- [RELEASE_NOTES_v4.0.0-alpha.2.md](RELEASE_NOTES_v4.0.0-alpha.2.md) — historical native-HER release-candidate record, superseded by the HER v1 retirement series
 - [RELEASE_PREPARATION_v4.0.0-alpha.2.md](RELEASE_PREPARATION_v4.0.0-alpha.2.md) — consolidation, verification, publication-hygiene findings, and remaining tag/push boundary
 - [RELEASE_NOTES_v4.0.0-alpha.1.md](RELEASE_NOTES_v4.0.0-alpha.1.md) — v4 alpha release notes for HER mode and Superloop foundation
 - [RELEASE_NOTES_v1.1.md](RELEASE_NOTES_v1.1.md) — v1.1 release notes

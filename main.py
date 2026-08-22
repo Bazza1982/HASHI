@@ -246,18 +246,9 @@ class UniversalOrchestrator:
             f"config={self.paths.config_path}"
         )
 
-        reconciled_rebuilds = self.her_rebuild_manager.reconcile_before_agent_startup()
-        if reconciled_rebuilds:
-            bridge_logger.warning(
-                "Reconciled %s interrupted HER rebuild transaction(s) before Agent startup.",
-                len(reconciled_rebuilds),
-            )
-
         startup_ok, wa_cfg = await self.startup_manager.start_initial_agents(global_cfg, agent_configs, secrets)
         if not startup_ok:
             return
-
-        await self.her_rebuild_manager.retry_pending_notifications()
 
         main_logger.info("Universal Orchestrator is online. Awaiting messages.")
 

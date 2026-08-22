@@ -52,20 +52,20 @@ SIEM, and Kubernetes/cloud validation remain post-alpha.
 The development accumulated after the first v4 foundation alpha is now
 consolidated as the `v4.0.0-alpha.2` release candidate:
 
-- certified Linux and Windows HER `0.1.0-hashi.22` packages from one reviewed
-  source identity;
-- `low`, `medium`, `high`, `xhigh`, `max`, and `max+` single-Agent effort
-  ceilings plus bounded HER-private `ultra` coordination;
+- provider-neutral HER v2 as the sole HER execution backend;
+- `low`, `medium`, `high`, `xhigh`, and `max` execution-effort policies,
+  independent from provider reasoning and tool-call count;
 - persistent direct-conversation ordering, isolated scheduler execution,
   reply-target snapshots, explicit stream ownership, and idempotent delivery;
-- adaptive TaskFrame planning/review, Tool Gateway/MCP, secure multimedia,
-  session resume, and optional agent-local Habit/Meditation;
-- integrated HER Rust source and transactional `/rebuild` development adoption;
+- explicit staged orchestration, Tool Gateway/MCP, secure multimedia, and
+  optional agent-local Habit/Meditation;
+- retirement of HER v1, native Rust source/packages, `/rebuild` machinery,
+  `claw-cli`, the legacy fixed runtime, and the OpenClaw importer;
 - canonical Workbench Agent Overview and shared-token-authenticated remote
   terminal execution.
 
-The final local Python, Rust, certification, architecture, documentation,
-publication-hygiene, and approved live HER canary gates are recorded as passed.
+The final local Python, architecture, documentation, publication-hygiene, and
+approved live HER v2 canary gates are recorded as passed.
 Remaining work is the publication boundary: review the final `main` tip and exact
 outbound range, then create the tag and push only after the destination and operation
 receive explicit approval. Wider runtime rollout remains a separate operator-controlled

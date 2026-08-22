@@ -47,19 +47,16 @@
     Wrapper, Audit, and Dual Brain preserve their full-context contracts
   - HER v2 remains the active Habit/Meditation owner and request-scoped
     eligibility prevents internal or ephemeral work from entering `/habit`
-    reuse, incremental changed-source builds, offline verification, atomic
-    selection, targeted adoption, failure preservation, and rollback
-  - `/rebuild` candidates remain explicitly development-only and do not alter
-    the certified manifest, baseline, release binaries, or version
-  - At least one live `her` canary after `/reboot min` validates provider/model
-    selection, fixed-mode continuation, repo-root read/write/edit, `media_read`
-    for image/PDF/audio, canonical and legacy screenshot image results,
+  - `/rebuild` is a side-effect-free one-version retirement notice and no
+    native HER manager/source/package is initialized at startup
+  - At least one live `her-v2` canary after `/reboot min` validates
+    provider/model selection, Flex Fixed-mode continuation for session CLI
+    backends, repo-root read/write/edit, `media_read` for image/PDF/audio,
+    canonical and legacy screenshot image results,
     `/habit` no-change/change/failure recovery, and Verbose notification
     behavior before release notes claim those capabilities
   - `/reboot max` and wider rollout happen only after the canary is green and
     logs contain no unexplained HER, Gateway, media, Habit, or reload errors
-  - Certification is platform-specific. Linux `.22` evidence must not be used
-    as a substitute for native Windows `.22` command and package evidence
 - Superloop alpha gates:
   - `python -m pytest tests/test_superloop_store.py tests/test_superloop_taskboard.py tests/test_superloop_waits.py tests/test_superloop_runner.py tests/test_superloop_scheduler.py tests/test_superloop_compiler.py tests/test_superloop_issues.py tests/test_superloop_commands.py tests/test_superloop_recording.py tests/test_superloop_nagare_adapter.py -q`
   - Taskboards use `task_id`, not `id`, and every in-progress or next-action task resolves to a real task

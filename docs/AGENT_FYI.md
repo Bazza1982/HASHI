@@ -80,7 +80,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   - `/reboot max` — restart all active agents.
   - `/reboot [number]` — restart a specific agent by number.
   - `/reboot help` — list modes and show all agents with numbers.
-- `/rebuild`: authorized-owner development command for integrated HER Rust changes. It runs Cargo in a supervised background transaction, verifies an immutable development candidate, waits until this Agent is idle, adopts through a targeted hot restart and automatically restores the prior HER if adoption/postcheck fails. `/rebuild status [job-id]` inspects durable state. It does not change certified HER release manifests or binaries.
+- `/rebuild`: one-version compatibility notice for the retired native HER build workflow. It performs no build, reload, restart, or status lookup. Use `/reboot` to adopt HASHI Python updates.
 - `/terminate`: shut down this agent.
 
 ## Backend and Model Configuration

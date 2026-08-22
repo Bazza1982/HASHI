@@ -639,7 +639,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/delay <minutes> <message>` | Persist a message for 1–10080 minutes, then append it to the normal request queue without interrupting active work |
 | `/queue [list\|show <id>\|cancel <id>\|clear]` | Inspect or manage READY requests and FUTURE delayed messages |
 | `/reboot [min\|max\|#]` | Hot restart agents |
-| `/rebuild [status [job-id]]` | Incrementally build, verify and safely adopt integrated HER Rust changes without modifying the certified package |
+| `/rebuild` | One-version compatibility notice: native HER rebuild is retired and performs no action |
 | `/restart` | Hard restart this HASHI instance through WatchTower supervision |
 | `/status [full]` | Show agent status, backend info |
 | `/memory [status\|on\|pause\|plus on\|plus off]` | Control normal memory injection and the independent Memory+ continuity layer |
@@ -1492,21 +1492,19 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 
 ## Release History
 
-### v4.0.0-alpha.2 *(release candidate)* — Advanced HER Runtime (August 2026)
+### v4.0.0-alpha.2 *(release candidate)* — HER v2 Runtime (August 2026)
 
-- **Task-matched effort** — seven HER levels from `low` direct execution to
-  bounded `ultra` multi-agent coordination, with adaptive planning, evidence,
-  review, and exact-test ceilings between them
-- **Certified runtime line** — Linux and Windows x86-64 HER
-  `0.1.0-hashi.22` packages share reviewed source provenance and checksum gates
+- **Provider-neutral orchestration** — HER v2 owns explicit Triage, Planning,
+  Execution, Review, and Finalisation stages without a native Claw runtime
+- **Task-matched execution effort** — orchestration depth remains independent
+  from provider reasoning and tool-call count
 - **Reliable conversation delivery** — direct-message continuity, scheduler
-  isolation, explicit stream-channel ownership, stable event IDs, and
-  request-scoped idempotency
-- **Integrated HER operations** — Tool Gateway/MCP, secure multimedia,
-  Habit/Meditation, session resume, and provider/model routing
-- **Source-integrated `/rebuild`** — incremental local Rust build, verification,
-  immutable candidate selection, targeted hot adoption, failure reasons, and
-  rollback without changing certified package metadata
+  isolation, explicit stream ownership, stable event IDs, and request-scoped
+  idempotency
+- **Integrated operations** — HASHI tools, secure multimedia,
+  Habit/Meditation, provider/model routing, and Flex Fixed mode
+- **Lean runtime** — HER v1, its Rust source/binaries, `/rebuild` machinery,
+  `claw-cli`, and the OpenClaw importer are retired; `her` resolves to HER v2
 - **Operator visibility and remote access** — canonical Workbench Agent
   Overview plus authenticated shared-token terminal execution
 - Full scope and alpha limits are recorded in

@@ -58,30 +58,3 @@ def test_manager_bundle_is_built_before_kernel_install(tmp_path):
     manager_registry.install_hot_manager_bundle(kernel, bundle)
 
     assert all(hasattr(kernel, spec.attribute) for spec in manager_registry.HOT_MANAGER_SPECS)
-    assert kernel.her_rebuild_manager.kernel is kernel
-
-
-def test_hot_manager_install_preserves_existing_stable_manager(tmp_path):
-    kernel = _kernel(tmp_path)
-    existing = object()
-    kernel.her_rebuild_manager = existing
-    upgraded = []
-
-    class FakeStableManager:
-        @classmethod
-        def upgrade_existing(cls, candidate):
-            upgraded.append(candidate)
-            return candidate
-
-    bundle = {spec.attribute: object() for spec in manager_registry.HOT_MANAGER_SPECS}
-
-    manager_registry.install_hot_manager_bundle(
-        kernel,
-        bundle,
-        module_loader=lambda _name: SimpleNamespace(
-            HERRebuildManager=FakeStableManager
-        ),
-    )
-
-    assert kernel.her_rebuild_manager is existing
-    assert upgraded == [existing]
