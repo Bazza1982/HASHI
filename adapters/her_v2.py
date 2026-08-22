@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
+import json
 import logging
+import math
+import re
+import ssl
 import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
+
+import httpx
 
 from adapters import her_persona
 from adapters.base import BackendCapabilities, BackendResponse, BaseBackend, TokenUsage
@@ -24,6 +31,7 @@ from adapters.stream_events import (
     KIND_INITIAL_RESOLUTION,
     KIND_TEXT_DELTA,
     KIND_THINKING,
+    KIND_TOOL_END,
     StreamCallback,
     StreamEvent,
     legacy_delivery_class,
@@ -40,6 +48,7 @@ from orchestrator.her_v2.config import HERv2Config, HERv2ConfigurationError, Pro
 from orchestrator.her_v2.interfaces import (
     DeliveryReceipt,
     DeliveryPort,
+    ProviderFailureCode,
     StageInvocationError,
     StageProvider,
 )
@@ -59,7 +68,12 @@ from orchestrator.her_v2.presentation import (
     RequiredPersonaRenderer,
     RequiredUserMessage,
 )
+from orchestrator.her_v2.progress import ProviderActivityTracker
 from orchestrator.her_v2.request_policy import resolve_request_effort
+from orchestrator.her_v2.retry import (
+    DEFAULT_PROVIDER_RETRY_POLICY,
+    ProviderRetryPolicy,
+)
 from orchestrator.her_v2.runtime import HERv2Runtime
 
 
@@ -115,6 +129,337 @@ def _provider_structured_data(response: BackendResponse) -> Mapping[str, Any]:
             if isinstance(value, Mapping):
                 return dict(value)
     return {}
+
+
+def _backend_response_error(
+    response: BackendResponse,
+    *,
+    fallback: str,
+) -> StageInvocationError:
+    metadata = (
+        dict(response.stream_metadata)
+        if isinstance(response.stream_metadata, Mapping)
+        else {}
+    )
+    inferred_code, inferred_retryable, inferred_description = (
+        _infer_untyped_backend_failure(response.error or fallback)
+    )
+    code = response.error_code or inferred_code
+    retryable = (
+        bool(response.error_retryable)
+        if response.error_retryable is not None
+        else (
+            _retryable_for_provider_code(code)
+            if response.error_code
+            else inferred_retryable
+        )
+    )
+    return StageInvocationError(
+        response.error or fallback,
+        retryable=retryable,
+        code=code,
+        human_description=str(
+            metadata.get("provider_failure_description")
+            or inferred_description
+        ),
+        http_status=response.http_status,
+        provider_request_id=response.provider_request_id or "",
+        retry_after_s=response.retry_after_s,
+        side_effects_possible=bool(response.side_effects_possible),
+        details={
+            "stop_reason": response.stop_reason,
+            "tool_call_count": int(response.tool_call_count or 0),
+            "tool_loop_count": int(response.tool_loop_count or 0),
+        },
+    )
+
+
+def _retryable_for_provider_code(code: ProviderFailureCode | str) -> bool:
+    value = code.value if isinstance(code, ProviderFailureCode) else str(code)
+    return value in {
+        ProviderFailureCode.PROVIDER_UNKNOWN.value,
+        ProviderFailureCode.PROVIDER_REQUEST_TIMEOUT.value,
+        ProviderFailureCode.PROVIDER_RATE_LIMITED.value,
+        ProviderFailureCode.PROVIDER_SERVER_ERROR.value,
+        ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value,
+        ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT.value,
+        ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM.value,
+        ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT.value,
+        ProviderFailureCode.PROVIDER_REASONING_ONLY_TIMEOUT.value,
+        ProviderFailureCode.PROVIDER_STREAM_IDLE_TIMEOUT.value,
+        ProviderFailureCode.PROVIDER_EMPTY_RESPONSE.value,
+        ProviderFailureCode.STRUCTURED_OUTPUT_INVALID.value,
+    }
+
+
+def _infer_untyped_backend_failure(
+    error: str,
+) -> tuple[ProviderFailureCode, bool, str]:
+    """Best-effort typing for legacy backends that return only error text."""
+
+    text = " ".join(str(error or "").split())
+    lowered = text.casefold()
+    status_match = re.search(
+        r"\b(?:http(?:\s+status)?(?:\s+code)?[\s:=]*)?"
+        r"(400|401|403|408|429|5\d\d)\b",
+        lowered,
+    )
+    status = int(status_match.group(1)) if status_match else None
+
+    if status == 400:
+        return (
+            ProviderFailureCode.PROVIDER_BAD_REQUEST,
+            False,
+            "The provider rejected the request as invalid.",
+        )
+    if status == 401 or any(
+        token in lowered
+        for token in ("unauthorized", "unauthorised", "authentication failed")
+    ):
+        return (
+            ProviderFailureCode.PROVIDER_AUTHENTICATION_FAILED,
+            False,
+            "The provider rejected the configured credentials.",
+        )
+    if status == 403 or "forbidden" in lowered:
+        return (
+            ProviderFailureCode.PROVIDER_PERMISSION_DENIED,
+            False,
+            "The provider denied access to this model or request.",
+        )
+    if status == 408:
+        return (
+            ProviderFailureCode.PROVIDER_REQUEST_TIMEOUT,
+            True,
+            "The provider timed out while handling the request.",
+        )
+    if status == 429 or "rate limit" in lowered or "rate-limit" in lowered:
+        return (
+            ProviderFailureCode.PROVIDER_RATE_LIMITED,
+            True,
+            "The provider rate-limited the request.",
+        )
+    if status is not None and 500 <= status <= 599:
+        return (
+            ProviderFailureCode.PROVIDER_SERVER_ERROR,
+            True,
+            "The provider reported a temporary server failure.",
+        )
+    if any(token in lowered for token in ("certificate", "ssl", "tls")):
+        return (
+            ProviderFailureCode.PROVIDER_TLS_ERROR,
+            False,
+            "The provider TLS certificate or trust configuration failed.",
+        )
+    if any(
+        token in lowered
+        for token in (
+            "invalid url",
+            "unsupported protocol",
+            "executable not found",
+            "command not found",
+            "no such file or directory",
+            "api key is not configured",
+            "api key not configured",
+            "credentials are not configured",
+            "provider is not initialized",
+        )
+    ):
+        return (
+            ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+            False,
+            "The configured provider executable, URL, or credentials are unavailable.",
+        )
+    if any(
+        token in lowered
+        for token in (
+            "no answer text",
+            "without a final assistant message",
+            "empty response",
+            "no complete response",
+        )
+    ):
+        return (
+            ProviderFailureCode.PROVIDER_EMPTY_RESPONSE,
+            True,
+            "The provider ended without a complete usable response.",
+        )
+    if any(
+        token in lowered
+        for token in ("timed out", "timeout", "idle for")
+    ):
+        return (
+            ProviderFailureCode.PROVIDER_REQUEST_TIMEOUT,
+            True,
+            "The provider connection or response timed out.",
+        )
+    if any(
+        token in lowered
+        for token in (
+            "connection reset",
+            "connection refused",
+            "connection failed",
+            "connection attempts failed",
+            "connecterror",
+            "network is unreachable",
+            "name resolution",
+            "dns",
+        )
+    ):
+        return (
+            ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+            True,
+            "The provider connection was interrupted or could not be established.",
+        )
+    if any(
+        token in lowered
+        for token in ("incomplete stream", "stream ended", "unexpected eof")
+    ):
+        return (
+            ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM,
+            True,
+            "The provider response ended before a complete result arrived.",
+        )
+    return (
+        ProviderFailureCode.PROVIDER_UNKNOWN,
+        True,
+        "The provider failed for an unknown technical reason.",
+    )
+
+
+def _provider_timeout_error(
+    tracker: ProviderActivityTracker,
+    *,
+    label: str,
+    timeout_s: float,
+) -> StageInvocationError:
+    snapshot = tracker.snapshot()
+    if not tracker.response_started:
+        code = ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT
+        description = "The provider did not begin a response before the attempt deadline."
+    elif tracker.reasoning_event_count and not tracker.text_event_count and not tracker.tool_started:
+        code = ProviderFailureCode.PROVIDER_REASONING_ONLY_TIMEOUT
+        description = "The provider emitted reasoning but no usable response before the deadline."
+    elif tracker.text_event_count or tracker.tool_started:
+        code = ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT
+        description = "The provider response began but did not complete before the deadline."
+    else:
+        code = ProviderFailureCode.PROVIDER_STREAM_IDLE_TIMEOUT
+        description = "The provider stream stopped making usable progress before completion."
+    return StageInvocationError(
+        f"{label} exceeded its {timeout_s:g}s provider-attempt timeout",
+        retryable=True,
+        code=code,
+        human_description=description,
+        side_effects_possible=tracker.side_effects_possible,
+        details={"provider_activity": snapshot, "attempt_timeout_s": timeout_s},
+    )
+
+
+def _provider_exception_error(
+    error: Exception,
+    *,
+    label: str,
+    side_effects_possible: bool = False,
+) -> StageInvocationError:
+    """Classify provider exceptions that escaped a backend response boundary."""
+
+    response = getattr(error, "response", None)
+    status = (
+        int(response.status_code)
+        if isinstance(response, httpx.Response)
+        else None
+    )
+    retryable = False
+    code = ProviderFailureCode.PROVIDER_UNKNOWN
+    description = "The provider failed for an unknown technical reason."
+
+    if status is not None:
+        if status == 400:
+            code = ProviderFailureCode.PROVIDER_BAD_REQUEST
+            description = "The provider rejected the request as invalid."
+        elif status == 401:
+            code = ProviderFailureCode.PROVIDER_AUTHENTICATION_FAILED
+            description = "The provider rejected the configured credentials."
+        elif status == 403:
+            code = ProviderFailureCode.PROVIDER_PERMISSION_DENIED
+            description = "The provider denied access to this model or request."
+        elif status == 408:
+            code = ProviderFailureCode.PROVIDER_REQUEST_TIMEOUT
+            description = "The provider timed out while handling the request."
+            retryable = True
+        elif status == 429:
+            code = ProviderFailureCode.PROVIDER_RATE_LIMITED
+            description = "The provider rate-limited the request."
+            retryable = True
+        elif 500 <= status <= 599:
+            code = ProviderFailureCode.PROVIDER_SERVER_ERROR
+            description = "The provider reported a temporary server failure."
+            retryable = True
+        elif 400 <= status <= 499:
+            code = ProviderFailureCode.PROVIDER_BAD_REQUEST
+            description = f"The provider rejected the request with HTTP {status}."
+    elif isinstance(error, (httpx.TimeoutException, TimeoutError)):
+        code = ProviderFailureCode.PROVIDER_REQUEST_TIMEOUT
+        description = "The provider connection or response timed out."
+        retryable = True
+    elif isinstance(
+        error,
+        (httpx.RemoteProtocolError, json.JSONDecodeError, UnicodeDecodeError),
+    ):
+        code = ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM
+        description = "The provider response ended before a complete result arrived."
+        retryable = True
+    elif isinstance(error, (httpx.InvalidURL, httpx.UnsupportedProtocol)):
+        code = ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR
+        description = "The configured provider URL or protocol is invalid."
+    elif isinstance(error, (ssl.SSLError,)):
+        code = ProviderFailureCode.PROVIDER_TLS_ERROR
+        description = "The provider TLS certificate or trust configuration failed."
+    elif isinstance(error, httpx.ConnectError):
+        lowered = str(error).casefold()
+        if any(token in lowered for token in ("certificate", "ssl", "tls")):
+            code = ProviderFailureCode.PROVIDER_TLS_ERROR
+            description = "The provider TLS certificate or trust configuration failed."
+        else:
+            code = ProviderFailureCode.PROVIDER_CONNECTION_FAILED
+            description = "A connection to the provider could not be established."
+            retryable = True
+    elif isinstance(error, (httpx.NetworkError, ConnectionError)):
+        code = ProviderFailureCode.PROVIDER_CONNECTION_FAILED
+        description = "The provider connection was interrupted."
+        retryable = True
+    elif isinstance(error, (FileNotFoundError, PermissionError)):
+        code = ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR
+        description = "The configured provider executable or resource is unavailable."
+    else:
+        # Unknown provider faults get the single conservative recovery attempt.
+        retryable = True
+
+    retry_after_s: float | None = None
+    provider_request_id = ""
+    if isinstance(response, httpx.Response):
+        raw_retry_after = str(response.headers.get("retry-after") or "").strip()
+        if raw_retry_after:
+            try:
+                retry_after_s = max(0.0, float(raw_retry_after))
+            except ValueError:
+                retry_after_s = None
+        for header in ("x-request-id", "request-id", "cf-ray", "x-amzn-requestid"):
+            provider_request_id = str(response.headers.get(header) or "").strip()
+            if provider_request_id:
+                break
+
+    return StageInvocationError(
+        f"{label}: {type(error).__name__}: {error}",
+        retryable=retryable,
+        code=code,
+        human_description=description,
+        http_status=status,
+        provider_request_id=provider_request_id,
+        retry_after_s=retry_after_s,
+        side_effects_possible=side_effects_possible,
+    )
 
 
 def _registry_allowed_names(registry: Any) -> tuple[str, ...]:
@@ -355,6 +700,11 @@ class _DelegatedToolRegistry:
     def is_allowed(self, tool_name: str) -> bool:
         return str(tool_name) in self._allowed
 
+    def is_read_only(self, tool_name: str) -> bool:
+        return self.is_allowed(tool_name) and _registry_is_read_only(
+            self._base, tool_name
+        )
+
     def get_tool_definitions(self, tiers=None):
         definitions = self._base.get_tool_definitions(tiers=tiers)
         return [
@@ -574,15 +924,38 @@ class HashiStageProvider(StageProvider):
         tool_registry: Any = None,
         on_stream_event: StreamCallback = None,
         silent: bool = False,
+        retry_policy: ProviderRetryPolicy | None = None,
+        audit_log: DurableAuditLog | None = None,
+        workzone_ref: str = "",
     ) -> None:
         self.backend_manager = backend_manager
         self.tool_registry = tool_registry
         self.on_stream_event = on_stream_event
         self.silent = silent
+        self.retry_policy = retry_policy or DEFAULT_PROVIDER_RETRY_POLICY
+        self.audit_log = audit_log
+        self.workzone_ref = str(workzone_ref or "")
+        self._persona_invocation_serial = 0
+        self._persona_audit_contexts: dict[str, tuple[str, str]] = {}
+        self.logger = logging.getLogger("HASHI.HERv2.StageProvider")
         self.usage = TokenUsage()
         self.cost_usd = 0.0
         self.tool_call_count = 0
         self.tool_loop_count = 0
+
+    def bind_persona_audit_context(
+        self,
+        request_id: str,
+        *,
+        turn_id: str,
+        request_ref: str,
+    ) -> None:
+        """Bind audit correlation without adding metadata to model inputs."""
+
+        self._persona_audit_contexts[str(request_id)] = (
+            str(turn_id),
+            str(request_ref),
+        )
 
     async def invoke(
         self, profile: ProviderProfile, request: StageRequest
@@ -595,6 +968,8 @@ class HashiStageProvider(StageProvider):
             raise StageInvocationError(
                 f"cannot create configured stage provider {profile.engine}/{profile.model}: {exc}",
                 retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description="The configured provider backend could not be created.",
             ) from exc
 
         # Provider reasoning remains provider-specific and never receives the
@@ -605,6 +980,12 @@ class HashiStageProvider(StageProvider):
             backend_extra["provider_reasoning"] = profile.reasoning
             backend_extra["reasoning_effort"] = profile.reasoning
         backend_extra.update(dict(profile.options))
+        if request.attempt_timeout_s > 0:
+            # This is an ephemeral backend.  Align its own silence watchdog
+            # with the attempt tier without mutating the Agent configuration.
+            backend_extra["idle_timeout_sec"] = max(
+                1, math.ceil(float(request.attempt_timeout_s))
+            )
         backend.config.extra = backend_extra
         if hasattr(backend, "set_reasoning_enabled"):
             normalized = str(profile.reasoning or "").strip().casefold()
@@ -616,12 +997,20 @@ class HashiStageProvider(StageProvider):
             raise StageInvocationError(
                 f"provider engine {profile.engine!r} does not support requested tool use",
                 retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description=(
+                    "The configured provider cannot satisfy this stage's tool contract."
+                ),
             )
         if supports_tools and not controls_tools:
             await backend.shutdown()
             raise StageInvocationError(
                 f"provider engine {profile.engine!r} cannot prove HASHI tool isolation",
                 retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description=(
+                    "The configured provider cannot prove HASHI-owned tool isolation."
+                ),
             )
         selected_registry = self.tool_registry if request.allow_tools else None
         if selected_registry is not None and (
@@ -638,7 +1027,10 @@ class HashiStageProvider(StageProvider):
             if not isinstance(delegated, list):
                 await backend.shutdown()
                 raise StageInvocationError(
-                    "sub-agent delegated_tools must be a list", retryable=False
+                    "sub-agent delegated_tools must be a list",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                    human_description="The delegated tool configuration is invalid.",
                 )
             selected_registry = _DelegatedToolRegistry(
                 selected_registry,
@@ -657,6 +1049,20 @@ class HashiStageProvider(StageProvider):
 
         async def _capture(event: StreamEvent) -> None:
             owner = str(event.delivery_class or "") or legacy_delivery_class(event.kind)
+            if request.provider_activity_callback is not None:
+                content = str(event.raw_delta or event.summary or "")
+                request.provider_activity_callback(
+                    {
+                        "kind": event.kind,
+                        "content": content,
+                        "tool_name": event.tool_name,
+                        "tool_read_only": (
+                            _registry_is_read_only(selected_registry, event.tool_name)
+                            if event.tool_name and selected_registry is not None
+                            else None
+                        ),
+                    }
+                )
             if owner == DELIVERY_REASONING or event.kind == KIND_THINKING:
                 trace = str(event.raw_delta or event.summary or "")
                 if trace:
@@ -665,11 +1071,7 @@ class HashiStageProvider(StageProvider):
             # invalid envelope retries are not meaningful execution progress.
             if event.kind == KIND_TEXT_DELTA:
                 return
-            if (
-                owner != DELIVERY_REASONING
-                and event.kind != KIND_THINKING
-                and request.progress_callback is not None
-            ):
+            if event.kind == KIND_TOOL_END and request.progress_callback is not None:
                 request.progress_callback(event.kind, event.summary, True)
             # Reasoning and execution activity retain their normal HASHI
             # presentation owners.
@@ -690,7 +1092,10 @@ class HashiStageProvider(StageProvider):
             initialized = await backend.initialize()
             if not initialized:
                 raise StageInvocationError(
-                    f"failed to initialize {profile.engine}/{profile.model}"
+                    f"failed to initialize {profile.engine}/{profile.model}",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                    human_description="The configured provider could not be initialized.",
                 )
             stage_prompt = render_stage_prompt(request)
             if request.stage in {
@@ -716,6 +1121,11 @@ class HashiStageProvider(StageProvider):
                         raise StageInvocationError(
                             "finalisation backend cannot isolate the HER v2 system prompt",
                             retryable=False,
+                            code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                            human_description=(
+                                "The configured Finalisation provider cannot isolate "
+                                "the required system prompt."
+                            ),
                         )
                     stage_prompt = f"{system_prompt}\n\n{stage_prompt}"
             else:
@@ -726,6 +1136,11 @@ class HashiStageProvider(StageProvider):
                         raise StageInvocationError(
                             "execution backend cannot isolate the HER v2 system prompt",
                             retryable=False,
+                            code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                            human_description=(
+                                "The configured Execution provider cannot isolate "
+                                "the required system prompt."
+                            ),
                         )
                     if not installed:
                         stage_prompt = f"{internal_prompt}\n\n{stage_prompt}"
@@ -737,9 +1152,27 @@ class HashiStageProvider(StageProvider):
                 on_stream_event=_capture,
             )
             if not response.is_success:
+                raise _backend_response_error(
+                    response,
+                    fallback=(
+                        f"{profile.engine}/{profile.model} returned an unsuccessful response"
+                    ),
+                )
+            if (
+                not _normalise_backend_text(response.text).strip()
+                and not _provider_structured_data(response)
+                and not response.tool_call_count
+                and str(response.stop_reason or "").casefold()
+                in {"", "error", "length", "incomplete"}
+            ):
                 raise StageInvocationError(
-                    response.error
-                    or f"{profile.engine}/{profile.model} returned an unsuccessful response"
+                    f"{profile.engine}/{profile.model} returned no complete response",
+                    retryable=True,
+                    code=ProviderFailureCode.PROVIDER_EMPTY_RESPONSE,
+                    human_description=(
+                        "The provider ended without a complete usable response."
+                    ),
+                    details={"stop_reason": response.stop_reason},
                 )
             if response.usage:
                 self.usage.input_tokens += int(response.usage.input_tokens or 0)
@@ -771,14 +1204,16 @@ class HashiStageProvider(StageProvider):
                     ),
                 },
                 evidence_refs=evidence_refs,
+                provider_attempt=request.attempt,
             )
         except StageInvocationError:
             raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            raise StageInvocationError(
-                f"{profile.engine}/{profile.model} invocation failed: {type(exc).__name__}: {exc}"
+            raise _provider_exception_error(
+                exc,
+                label=f"{profile.engine}/{profile.model} invocation failed",
             ) from exc
         finally:
             await backend.shutdown()
@@ -831,6 +1266,8 @@ or the Persona block. Return only the packaged commentary message.
             raise StageInvocationError(
                 f"unsupported required Persona message kind: {kind!r}",
                 retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description="The required Persona message kind is invalid.",
             )
         label = "FINAL REPORT" if kind == "final" else "CLARIFICATION QUESTION"
         kind_rule = (
@@ -873,8 +1310,205 @@ control envelope.
         message_label: str,
         max_chars: int,
     ) -> str:
-        """Run one isolated, tool-free Persona presentation invocation."""
+        """Run one isolated, tool-free Persona call with one Tier-1 recovery."""
 
+        tier = self.retry_policy.tier_for(
+            Stage.IMMEDIATE_RESPONSE,
+            engine=profile.engine,
+            context={"persona_message_label": message_label},
+        )
+        self._persona_invocation_serial += 1
+        invocation_serial = self._persona_invocation_serial
+        invocation_id = (
+            f"{request_id}:persona:{message_label}:invocation:{invocation_serial}"
+        )
+        invariant_payload = {
+            "provider": profile.engine,
+            "model": profile.model,
+            "goal": "render_validated_message_without_semantic_change",
+            "classification": None,
+            "authority": "presentation_only",
+            "allow_tools": False,
+            "allow_side_effects": False,
+            "workzone": self.workzone_ref or None,
+            "source_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "system_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
+        }
+        invariant_hash = "sha256:" + hashlib.sha256(
+            json.dumps(
+                invariant_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        bound_turn_id, bound_request_ref = self._persona_audit_contexts.pop(
+            str(request_id),
+            ("", ""),
+        )
+        turn_id = bound_turn_id or f"persona:{request_id}"
+        request_ref = bound_request_ref or f"hashi-request:{request_id}"
+        last_error: StageInvocationError | None = None
+        for attempt in (1, 2):
+            timeout_s = self.retry_policy.timeout_for(
+                tier, recovery_attempt=attempt > 1
+            )
+            tracker = ProviderActivityTracker()
+            try:
+                rendered = await asyncio.wait_for(
+                    self._package_persona_text_once(
+                        profile,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        request_id=request_id,
+                        message_label=message_label,
+                        max_chars=max_chars,
+                        attempt=attempt,
+                        attempt_timeout_s=timeout_s,
+                        activity=tracker,
+                    ),
+                    timeout=timeout_s,
+                )
+                if self.audit_log is not None:
+                    self.audit_log.append(
+                        event_id=f"{invocation_id}:attempt:{attempt}:completed",
+                        turn_id=turn_id,
+                        request_ref=request_ref,
+                        stage="persona_presentation",
+                        role="persona_packager",
+                        event="persona_provider_attempt_completed",
+                        provider=profile.engine,
+                        model=profile.model,
+                        attempt=attempt,
+                        payload={
+                            "message_label": message_label,
+                            "retry_tier": tier.label,
+                            "attempt_timeout_s": timeout_s,
+                            "retry_invariant_hash": invariant_hash,
+                            "provider_activity": tracker.snapshot(),
+                            "rendered_text_sha256": hashlib.sha256(
+                                rendered.encode("utf-8")
+                            ).hexdigest(),
+                        },
+                    )
+                return rendered
+            except asyncio.CancelledError:
+                raise
+            except AuditPersistenceError:
+                raise
+            except asyncio.TimeoutError:
+                last_error = _provider_timeout_error(
+                    tracker,
+                    label=f"Persona {message_label}",
+                    timeout_s=timeout_s,
+                )
+            except StageInvocationError as exc:
+                last_error = exc
+            except Exception as exc:
+                last_error = _provider_exception_error(
+                    exc,
+                    label=f"Persona {message_label} invocation failed",
+                )
+
+            assert last_error is not None
+            will_retry = bool(last_error.retryable and attempt < 2)
+            retry_reason = "eligible" if will_retry else (
+                "failure_non_retryable"
+                if not last_error.retryable
+                else "provider_recovery_already_used"
+            )
+            retry_delay = (
+                last_error.retry_after_s
+                if last_error.retry_after_s is not None
+                else 0.25
+            )
+            next_timeout = self.retry_policy.timeout_for(
+                tier, recovery_attempt=True
+            )
+            if will_retry and retry_delay > next_timeout:
+                will_retry = False
+                retry_reason = "retry_after_exceeds_recovery_window"
+            if self.audit_log is not None:
+                self.audit_log.append(
+                    event_id=f"{invocation_id}:attempt:{attempt}:failed",
+                    turn_id=turn_id,
+                    request_ref=request_ref,
+                    stage="persona_presentation",
+                    role="persona_packager",
+                    event="persona_provider_attempt_failed",
+                    provider=profile.engine,
+                    model=profile.model,
+                    attempt=attempt,
+                    payload={
+                        **last_error.audit_payload(),
+                        "message_label": message_label,
+                        "will_retry": will_retry,
+                        "retry_reason": retry_reason,
+                        "retry_delay_s": retry_delay if will_retry else None,
+                        "retry_tier": tier.label,
+                        "attempt_timeout_s": timeout_s,
+                        "fresh_connection_on_retry": will_retry,
+                        "retry_invariant_hash": invariant_hash,
+                        "retry_invariants": invariant_payload,
+                        "provider_activity": tracker.snapshot(),
+                    },
+                )
+            if not will_retry:
+                raise last_error.terminal_copy(
+                    f"Persona {message_label} failed after {attempt} attempt(s): "
+                    f"{last_error}",
+                    attempts=attempt,
+                ) from last_error
+            if self.audit_log is not None:
+                self.audit_log.append(
+                    event_id=f"{invocation_id}:attempt:{attempt}:retry-scheduled",
+                    turn_id=turn_id,
+                    request_ref=request_ref,
+                    stage="persona_presentation",
+                    role="persona_packager",
+                    event="persona_provider_retry_scheduled",
+                    provider=profile.engine,
+                    model=profile.model,
+                    attempt=attempt,
+                    payload={
+                        "next_attempt": attempt + 1,
+                        "retry_delay_s": retry_delay,
+                        "retry_tier": tier.label,
+                        "next_attempt_timeout_s": next_timeout,
+                        "fresh_connection": True,
+                        "same_provider": True,
+                        "same_model": True,
+                        "same_goal": True,
+                        "same_classification": True,
+                        "same_permissions": True,
+                        "same_workzone": True,
+                        "retry_invariant_hash": invariant_hash,
+                    },
+                )
+            self.logger.warning(
+                "HER v2 Persona provider retry: label=%s tier=%s attempt=%s "
+                "error_code=%s retry_after_s=%.3f fresh_connection=true",
+                message_label,
+                tier.label,
+                attempt,
+                last_error.error_code,
+                retry_delay,
+            )
+            await asyncio.sleep(retry_delay)
+        raise AssertionError("unreachable Persona retry state")
+
+    async def _package_persona_text_once(
+        self,
+        profile: ProviderProfile,
+        *,
+        prompt: str,
+        system_prompt: str,
+        request_id: str,
+        message_label: str,
+        max_chars: int,
+        attempt: int,
+        attempt_timeout_s: float,
+        activity: ProviderActivityTracker,
+    ) -> str:
         backend = None
         try:
             backend = self.backend_manager.create_ephemeral_backend(
@@ -885,6 +1519,9 @@ control envelope.
                 backend_extra["provider_reasoning"] = profile.reasoning
                 backend_extra["reasoning_effort"] = profile.reasoning
             backend_extra.update(dict(profile.options))
+            backend_extra["idle_timeout_sec"] = max(
+                1, math.ceil(float(attempt_timeout_s))
+            )
             backend.config.extra = backend_extra
             if hasattr(backend, "set_reasoning_enabled"):
                 normalized = str(profile.reasoning or "").strip().casefold()
@@ -896,31 +1533,48 @@ control envelope.
                 raise StageInvocationError(
                     f"Persona provider {profile.engine!r} cannot prove tool isolation",
                     retryable=False,
+                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                    human_description=(
+                        "The Persona provider cannot guarantee a tool-free invocation."
+                    ),
                 )
             if controls_tools:
                 backend.tool_registry = None
             backend.privacy_level = self.backend_manager.privacy_level
 
-            async def _discard_stream(_event: StreamEvent) -> None:
-                return None
+            async def _discard_stream(event: StreamEvent) -> None:
+                activity.record(
+                    {
+                        "kind": event.kind,
+                        "content": event.raw_delta or event.summary,
+                        "tool_name": event.tool_name,
+                    }
+                )
 
             initialized = await backend.initialize()
             if not initialized:
                 raise StageInvocationError(
-                    f"failed to initialize Persona provider {profile.engine}/{profile.model}"
+                    f"failed to initialize Persona provider {profile.engine}/{profile.model}",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                    human_description="The Persona provider could not be initialized.",
                 )
+            effective_prompt = prompt
             if not _install_system_prompt(backend, system_prompt):
-                prompt = f"{system_prompt}\n\n{prompt}"
+                effective_prompt = f"{system_prompt}\n\n{prompt}"
             response = await backend.generate_response(
-                prompt,
+                effective_prompt,
                 request_id,
+                is_retry=attempt > 1,
                 silent=True,
                 on_stream_event=_discard_stream,
             )
             if not response.is_success:
-                raise StageInvocationError(
-                    response.error
-                    or f"{profile.engine}/{profile.model} {message_label} render failed"
+                raise _backend_response_error(
+                    response,
+                    fallback=(
+                        f"{profile.engine}/{profile.model} {message_label} render failed"
+                    ),
                 )
             if response.usage:
                 self.usage.input_tokens += int(response.usage.input_tokens or 0)
@@ -930,12 +1584,18 @@ control envelope.
             text = str(response.text or "").strip()
             if not text:
                 raise StageInvocationError(
-                    f"Persona provider returned empty {message_label} text"
+                    f"Persona provider returned empty {message_label} text",
+                    code=ProviderFailureCode.PROVIDER_EMPTY_RESPONSE,
+                    human_description="The Persona provider returned no usable text.",
                 )
             if len(text) > max_chars:
                 raise StageInvocationError(
                     f"Persona provider returned oversized {message_label} text",
                     retryable=False,
+                    code=ProviderFailureCode.PROVIDER_BAD_REQUEST,
+                    human_description=(
+                        "The Persona provider returned a response beyond the safe size limit."
+                    ),
                 )
             return text
         except asyncio.CancelledError:
@@ -943,8 +1603,9 @@ control envelope.
         except StageInvocationError:
             raise
         except Exception as exc:
-            raise StageInvocationError(
-                f"Persona {message_label} invocation failed: {type(exc).__name__}: {exc}"
+            raise _provider_exception_error(
+                exc,
+                label=f"Persona {message_label} invocation failed",
             ) from exc
         finally:
             if backend is not None:
@@ -975,14 +1636,20 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
                 self.source.unavailable_reason or "persona_block_unavailable",
             )
         self.package_index += 1
+        package_request_id = f"{self.request_id}:persona-package:{self.package_index}"
         try:
+            binder = getattr(self.provider, "bind_persona_audit_context", None)
+            if callable(binder):
+                binder(
+                    package_request_id,
+                    turn_id=commentary.turn_id,
+                    request_ref=f"hashi-request:{self.request_id}",
+                )
             text = await self.provider.package_persona_commentary(
                 self.profile,
                 persona_block=self.source.guidance,
                 neutral_commentary=commentary.text,
-                request_id=(
-                    f"{self.request_id}:persona-package:{self.package_index}"
-                ),
+                request_id=package_request_id,
             )
         except asyncio.CancelledError:
             raise
@@ -1017,16 +1684,24 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
                 self.source.unavailable_reason or "persona_block_unavailable",
             )
         self.package_index += 1
+        package_request_id = (
+            f"{self.request_id}:persona-package:{message.kind}:"
+            f"{self.package_index}"
+        )
         try:
+            binder = getattr(self.provider, "bind_persona_audit_context", None)
+            if callable(binder):
+                binder(
+                    package_request_id,
+                    turn_id=message.turn_id,
+                    request_ref=f"hashi-request:{self.request_id}",
+                )
             text = await self.provider.package_persona_required_message(
                 self.profile,
                 persona_block=self.source.guidance,
                 neutral_message=message.text,
                 message_kind=message.kind,
-                request_id=(
-                    f"{self.request_id}:persona-package:{message.kind}:"
-                    f"{self.package_index}"
-                ),
+                request_id=package_request_id,
             )
         except asyncio.CancelledError:
             raise
@@ -1283,6 +1958,17 @@ class HERv2Adapter(BaseBackend):
             tool_registry=self.tool_registry,
             on_stream_event=on_stream_event,
             silent=silent,
+            retry_policy=self._provider_retry_policy(),
+            audit_log=self._audit_log,
+            workzone_ref=str(self.config.workspace_dir.resolve()),
+        )
+
+    def _provider_retry_policy(self) -> ProviderRetryPolicy:
+        injected = getattr(self.config, "_her_v2_retry_policy", None)
+        return (
+            injected
+            if isinstance(injected, ProviderRetryPolicy)
+            else DEFAULT_PROVIDER_RETRY_POLICY
         )
 
     async def _invoke_maintenance_model(
@@ -1293,32 +1979,161 @@ class HERv2Adapter(BaseBackend):
         request_id: str,
         timeout_s: float | None,
     ) -> StageResponse:
-        # ``timeout_s`` remains in the legacy maintenance callback signature,
-        # but HER v2 never treats it as a wall-clock execution ceiling.
+        # ``timeout_s`` remains in the legacy callback signature.  The single
+        # source of truth is now the tiered provider-attempt policy.
         del timeout_s
         if self._v2_config is None:
-            raise StageInvocationError("HER v2 is not initialized", retryable=False)
+            raise StageInvocationError(
+                "HER v2 is not initialized",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description="HER v2 learning services are not initialized.",
+            )
         profile = self._v2_config.profile_for(stage)
-        provider = self._new_stage_provider(on_stream_event=None, silent=True)
-        request = StageRequest(
-            turn_id=turn_id,
-            request_ref=f"hashi-background:{request_id}",
-            stage=stage,
-            role=self._v2_config.stage_roles.get(stage, profile.name),
-            attempt=1,
-            goal="Agent-local background learning maintenance",
-            classification=None,
-            effort=Effort.LOW,
-            context={
-                "maintenance_prompt": prompt,
-                "authority": "background_advisory_maintenance",
-                "may_contact_user": False,
-                "may_enter_live_lifecycle": False,
-            },
-            allow_tools=False,
-            allow_side_effects=False,
-        )
-        return await provider.invoke(profile, request)
+        policy = self._provider_retry_policy()
+        context = {
+            "maintenance_prompt": prompt,
+            "authority": "background_advisory_maintenance",
+            "may_contact_user": False,
+            "may_enter_live_lifecycle": False,
+        }
+        tier = policy.tier_for(stage, engine=profile.engine, context=context)
+        invariant_hash = "sha256:" + hashlib.sha256(
+            json.dumps(
+                {
+                    "provider": profile.engine,
+                    "model": profile.model,
+                    "goal": "Agent-local background learning maintenance",
+                    "classification": None,
+                    "allow_tools": False,
+                    "allow_side_effects": False,
+                    "workzone": str(self.config.workspace_dir.resolve()),
+                    "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        role = self._v2_config.stage_roles.get(stage, profile.name)
+        last_error: StageInvocationError | None = None
+        for attempt in (1, 2):
+            attempt_timeout_s = policy.timeout_for(
+                tier, recovery_attempt=attempt > 1
+            )
+            activity = ProviderActivityTracker()
+            provider = self._new_stage_provider(on_stream_event=None, silent=True)
+            invocation_id = f"{turn_id}:{stage.value}:maintenance:{request_id}"
+            request = StageRequest(
+                turn_id=turn_id,
+                request_ref=f"hashi-background:{request_id}",
+                stage=stage,
+                role=role,
+                attempt=attempt,
+                goal="Agent-local background learning maintenance",
+                classification=None,
+                effort=Effort.LOW,
+                context=copy.deepcopy(context),
+                allow_tools=False,
+                allow_side_effects=False,
+                invocation_id=invocation_id,
+                retry_tier=tier.label,
+                attempt_timeout_s=attempt_timeout_s,
+                retry_invariant_hash=invariant_hash,
+                provider_activity_callback=activity.record,
+            )
+            try:
+                response = await asyncio.wait_for(
+                    provider.invoke(profile, request),
+                    timeout=attempt_timeout_s,
+                )
+                return replace(response, provider_attempt=attempt)
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                last_error = _provider_timeout_error(
+                    activity,
+                    label=stage.value,
+                    timeout_s=attempt_timeout_s,
+                )
+            except StageInvocationError as exc:
+                last_error = exc
+            except Exception as exc:
+                last_error = _provider_exception_error(
+                    exc,
+                    label=f"{stage.value} maintenance provider failed",
+                )
+
+            assert last_error is not None
+            will_retry = bool(last_error.retryable and attempt == 1)
+            retry_reason = "eligible" if will_retry else (
+                "failure_non_retryable"
+                if not last_error.retryable
+                else "provider_recovery_already_used"
+            )
+            retry_delay = (
+                last_error.retry_after_s
+                if last_error.retry_after_s is not None
+                else 0.25
+            )
+            next_timeout = policy.timeout_for(tier, recovery_attempt=True)
+            if will_retry and retry_delay > next_timeout:
+                will_retry = False
+                retry_reason = "retry_after_exceeds_recovery_window"
+            self._audit_log.append(
+                event_id=f"{invocation_id}:attempt:{attempt}:failed",
+                turn_id=turn_id,
+                request_ref=f"hashi-background:{request_id}",
+                stage=stage.value,
+                role=role,
+                event="maintenance_provider_attempt_failed",
+                provider=profile.engine,
+                model=profile.model,
+                attempt=attempt,
+                payload={
+                    **last_error.audit_payload(),
+                    "retry_tier": tier.label,
+                    "attempt_timeout_s": attempt_timeout_s,
+                    "provider_activity": activity.snapshot(),
+                    "will_retry": will_retry,
+                    "retry_reason": retry_reason,
+                    "retry_delay_s": retry_delay if will_retry else None,
+                    "fresh_connection_on_retry": will_retry,
+                    "retry_invariant_hash": invariant_hash,
+                },
+            )
+            if not will_retry:
+                raise last_error.terminal_copy(
+                    f"{stage.value} maintenance failed after {attempt} attempt(s): "
+                    f"{last_error}",
+                    attempts=attempt,
+                ) from last_error
+            self._audit_log.append(
+                event_id=f"{invocation_id}:attempt:{attempt}:retry-scheduled",
+                turn_id=turn_id,
+                request_ref=f"hashi-background:{request_id}",
+                stage=stage.value,
+                role=role,
+                event="maintenance_provider_retry_scheduled",
+                provider=profile.engine,
+                model=profile.model,
+                attempt=attempt,
+                payload={
+                    "retry_tier": tier.label,
+                    "retry_delay_s": retry_delay,
+                    "next_attempt": attempt + 1,
+                    "next_attempt_timeout_s": next_timeout,
+                    "fresh_connection": True,
+                    "same_provider": True,
+                    "same_model": True,
+                    "same_goal": True,
+                    "same_classification": True,
+                    "same_permissions": True,
+                    "same_workzone": True,
+                    "retry_invariant_hash": invariant_hash,
+                },
+            )
+            await asyncio.sleep(retry_delay)
+        raise AssertionError("unreachable maintenance retry state")
 
     def _her_habit_store(self):
         if self._learning is None:
@@ -1417,7 +2232,7 @@ class HERv2Adapter(BaseBackend):
             role=self._v2_config.stage_roles.get(Stage.DREAM, profile.name),
             provider=response.provider or profile.engine,
             model=response.model or profile.model,
-            attempt=1,
+            attempt=response.provider_attempt,
             plan_id=None,
             trace=response.reasoning_trace,
         )
@@ -1450,6 +2265,11 @@ class HERv2Adapter(BaseBackend):
                 duration_ms=0,
                 error="HER v2 is not initialized",
                 is_success=False,
+                error_code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR.value,
+                error_retryable=False,
+                stream_metadata={
+                    "provider_failure_description": "HER v2 is not initialized."
+                },
             )
         try:
             effort_resolution = resolve_request_effort(
@@ -1462,6 +2282,13 @@ class HERv2Adapter(BaseBackend):
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
                 error=f"Invalid HER v2 request effort policy: {exc}",
                 is_success=False,
+                error_code=ProviderFailureCode.PROVIDER_BAD_REQUEST.value,
+                error_retryable=False,
+                stream_metadata={
+                    "provider_failure_description": (
+                        "The request selected an invalid HER v2 effort policy."
+                    )
+                },
             )
         self.logger.info(
             "HER v2 effort resolved request=%s configured=%s effective=%s "
@@ -1589,6 +2416,8 @@ class HERv2Adapter(BaseBackend):
             ),
             dream=getattr(self.config, "_her_v2_dream_maintainer", None),
             logger=self.logger,
+            retry_policy=self._provider_retry_policy(),
+            workzone_ref=str(self.config.workspace_dir.resolve()),
         )
         self._active_runtimes[request_id] = runtime
         try:
@@ -1640,6 +2469,14 @@ class HERv2Adapter(BaseBackend):
         technical_error = result.terminal_state is TerminalState.ERROR
         stopped = result.terminal_state is TerminalState.STOPPED
         error = result.error
+        terminal_error_code = ""
+        if error.startswith("[") and "]" in error:
+            terminal_error_code = error[1 : error.index("]")].strip()
+        if terminal_error_code:
+            metadata["her_v2"]["error"] = {
+                "code": terminal_error_code,
+                "description": error[error.index("]") + 1 :].strip(),
+            }
         if stopped and not error:
             error = "HER v2 turn was stopped by an authorised control path."
         return BackendResponse(
@@ -1658,6 +2495,8 @@ class HERv2Adapter(BaseBackend):
             tool_call_count=int(getattr(provider, "tool_call_count", 0) or 0),
             tool_loop_count=int(getattr(provider, "tool_loop_count", 0) or 0),
             stream_metadata=metadata,
+            error_code=terminal_error_code or None,
+            error_retryable=False if technical_error else None,
         )
 
     def record_transport_delivery_receipt(

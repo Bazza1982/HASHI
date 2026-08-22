@@ -1,11 +1,12 @@
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from adapters import deepseek_api
 from adapters.deepseek_api import DeepSeekAdapter
-from adapters.openrouter_api import _APIResult
+from adapters.openrouter_api import _APIResult, _backend_failure_response
 from orchestrator.enterprise import IdentityService, PolicyEvaluator
 from tools.registry import ToolResult
 
@@ -79,6 +80,75 @@ def test_deepseek_reasoning_helper_supports_old_api_result_shape():
     )
 
     assert result.reasoning_content == "legacy-safe reasoning"
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "retryable"),
+    [
+        (400, "PROVIDER_BAD_REQUEST", False),
+        (401, "PROVIDER_AUTHENTICATION_FAILED", False),
+        (403, "PROVIDER_PERMISSION_DENIED", False),
+        (408, "PROVIDER_REQUEST_TIMEOUT", True),
+        (429, "PROVIDER_RATE_LIMITED", True),
+        (500, "PROVIDER_SERVER_ERROR", True),
+        (503, "PROVIDER_SERVER_ERROR", True),
+    ],
+)
+def test_openai_compatible_http_failures_are_typed(status, code, retryable):
+    request = httpx.Request("POST", "https://provider.invalid/v1/chat")
+    response = httpx.Response(
+        status,
+        request=request,
+        headers={"x-request-id": "provider-123", "retry-after": "2"},
+    )
+    error = httpx.HTTPStatusError(
+        f"HTTP {status}", request=request, response=response
+    )
+
+    result = _backend_failure_response(error, duration_ms=12.5)
+
+    assert result.is_success is False
+    assert result.error_code == code
+    assert result.error_retryable is retryable
+    assert result.http_status == status
+    assert result.provider_request_id == "provider-123"
+    assert result.retry_after_s == 2.0
+
+
+def test_openai_compatible_connection_and_stream_failures_are_typed():
+    request = httpx.Request("POST", "https://provider.invalid/v1/chat")
+
+    connection = _backend_failure_response(
+        httpx.ConnectError("connection reset", request=request),
+        duration_ms=1,
+    )
+    incomplete = _backend_failure_response(
+        httpx.RemoteProtocolError("peer closed stream"),
+        duration_ms=2,
+    )
+    timeout = _backend_failure_response(
+        httpx.ReadTimeout("provider silent", request=request),
+        duration_ms=3,
+    )
+    invalid_url = _backend_failure_response(
+        httpx.InvalidURL("invalid provider URL"),
+        duration_ms=4,
+    )
+    tls = _backend_failure_response(
+        httpx.ConnectError("TLS certificate verification failed", request=request),
+        duration_ms=5,
+    )
+
+    assert connection.error_code == "PROVIDER_CONNECTION_FAILED"
+    assert connection.error_retryable is True
+    assert incomplete.error_code == "PROVIDER_INCOMPLETE_STREAM"
+    assert incomplete.error_retryable is True
+    assert timeout.error_code == "PROVIDER_REQUEST_TIMEOUT"
+    assert timeout.error_retryable is True
+    assert invalid_url.error_code == "PROVIDER_CONFIGURATION_ERROR"
+    assert invalid_url.error_retryable is False
+    assert tls.error_code == "PROVIDER_TLS_ERROR"
+    assert tls.error_retryable is False
 
 
 @pytest.mark.asyncio

@@ -70,6 +70,14 @@ class BackendResponse:
     # Keep new fields at the end so older positional construction remains valid.
     # Consumers must still apply their own semantic schema to provider-native data.
     structured_data: Optional[dict[str, Any]] = None
+    # Typed provider failure metadata.  These remain optional so every legacy
+    # backend can roll forward without changing successful response creation.
+    error_code: Optional[str] = None
+    error_retryable: Optional[bool] = None
+    http_status: Optional[int] = None
+    provider_request_id: Optional[str] = None
+    retry_after_s: Optional[float] = None
+    side_effects_possible: bool = False
 
 
 class BaseBackend(ABC):

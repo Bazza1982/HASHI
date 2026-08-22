@@ -174,13 +174,16 @@ HER v2 effort controls orchestration policy, not provider reasoning depth:
 | `xhigh` | required | evidence-triggered and bounded | at most one remediation cycle |
 | `max` | required | evidence-triggered and bounded | at most three remediation cycles |
 
-Replanning and Review/remediation are the only count-based HER v2 ceilings.
-There is no `max_subagents`, stage timeout, whole-turn hard timeout, retry-count
-limit, tool-round limit, turn limit, time budget, cumulative token budget, or
-output-token budget. Effort can make deeper orchestration available but cannot
-expand provider/model grants, tool authority, workzone authority, or provider
-reasoning. The meaningful-progress idle window remains a liveness detector and
-is never an elapsed-runtime budget.
+Replanning and Review/remediation are the only count-based orchestration loops.
+Separately, each provider operation has one typed, side-effect-aware
+fresh-connection recovery with Tier-1 `60/180`, Tier-2 `190/300`, or Tier-3
+`300/600` second attempt deadlines. There is no `max_subagents`, whole-turn hard
+timeout, generic retry setting, tool-round limit, turn limit, time budget,
+cumulative token budget, or output-token budget. Effort can make deeper
+orchestration available but cannot expand provider/model grants, tool
+authority, workzone authority, provider reasoning, or retry authority. The
+meaningful-progress idle window remains a separate turn-level liveness detector
+and is never an elapsed-runtime budget.
 
 For a validated `direct_response` profile, the acknowledgement field is the complete
 final answer and `remaining_work` must be empty. HER returns that answer once without a

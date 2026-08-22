@@ -3,21 +3,154 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Protocol, Sequence
+from enum import Enum
+from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
 from .config import ProviderProfile
 from .models import DeliveryRecord, StageRequest, StageResponse, TerminalState
 
 
+class ProviderFailureCode(str, Enum):
+    PROVIDER_UNKNOWN = "PROVIDER_UNKNOWN"
+    PROVIDER_CONFIGURATION_ERROR = "PROVIDER_CONFIGURATION_ERROR"
+    PROVIDER_BAD_REQUEST = "PROVIDER_BAD_REQUEST"
+    PROVIDER_AUTHENTICATION_FAILED = "PROVIDER_AUTHENTICATION_FAILED"
+    PROVIDER_PERMISSION_DENIED = "PROVIDER_PERMISSION_DENIED"
+    PROVIDER_REQUEST_TIMEOUT = "PROVIDER_REQUEST_TIMEOUT"
+    PROVIDER_RATE_LIMITED = "PROVIDER_RATE_LIMITED"
+    PROVIDER_SERVER_ERROR = "PROVIDER_SERVER_ERROR"
+    PROVIDER_CONNECTION_FAILED = "PROVIDER_CONNECTION_FAILED"
+    PROVIDER_TLS_ERROR = "PROVIDER_TLS_ERROR"
+    PROVIDER_RESPONSE_START_TIMEOUT = "PROVIDER_RESPONSE_START_TIMEOUT"
+    PROVIDER_INCOMPLETE_STREAM = "PROVIDER_INCOMPLETE_STREAM"
+    PROVIDER_INCOMPLETE_STREAM_TIMEOUT = "PROVIDER_INCOMPLETE_STREAM_TIMEOUT"
+    PROVIDER_REASONING_ONLY_TIMEOUT = "PROVIDER_REASONING_ONLY_TIMEOUT"
+    PROVIDER_STREAM_IDLE_TIMEOUT = "PROVIDER_STREAM_IDLE_TIMEOUT"
+    PROVIDER_EMPTY_RESPONSE = "PROVIDER_EMPTY_RESPONSE"
+    STRUCTURED_OUTPUT_INVALID = "STRUCTURED_OUTPUT_INVALID"
+    REPLAY_SAFETY_UNPROVEN = "REPLAY_SAFETY_UNPROVEN"
+    SIDE_EFFECT_REPLAY_BLOCKED = "SIDE_EFFECT_REPLAY_BLOCKED"
+    AUDIT_PERSISTENCE_FAILURE = "AUDIT_PERSISTENCE_FAILURE"
+
+
+_SECRET_ERROR_PATTERNS = (
+    re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"),
+    re.compile(r"(?i)((?:api[_-]?key|token|secret)\s*[:=]\s*)[^\s,;]+"),
+)
+
+
+def sanitise_provider_error(value: object, *, limit: int = 1200) -> str:
+    text = " ".join(str(value or "").split())
+    for pattern in _SECRET_ERROR_PATTERNS:
+        text = pattern.sub(r"\1[REDACTED]", text)
+    return text[: max(1, int(limit))]
+
+
 class StageInvocationError(RuntimeError):
-    def __init__(self, message: str, *, retryable: bool = True):
-        super().__init__(message)
-        self.retryable = retryable
+    """Typed provider/stage failure preserved through retry and audit."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        code: ProviderFailureCode | str = ProviderFailureCode.PROVIDER_UNKNOWN,
+        human_description: str = "",
+        http_status: int | None = None,
+        provider_request_id: str = "",
+        retry_after_s: float | None = None,
+        side_effects_possible: bool = False,
+        details: Mapping[str, Any] | None = None,
+        attempts: int = 1,
+    ):
+        safe_message = sanitise_provider_error(message)
+        super().__init__(safe_message)
+        self.retryable = bool(retryable)
+        try:
+            self.code = (
+                code
+                if isinstance(code, ProviderFailureCode)
+                else ProviderFailureCode(str(code))
+            )
+        except ValueError:
+            self.code = ProviderFailureCode.PROVIDER_UNKNOWN
+        self.human_description = sanitise_provider_error(
+            human_description or safe_message,
+            limit=600,
+        )
+        self.http_status = int(http_status) if http_status is not None else None
+        self.provider_request_id = sanitise_provider_error(
+            provider_request_id, limit=200
+        )
+        self.retry_after_s = (
+            max(0.0, float(retry_after_s)) if retry_after_s is not None else None
+        )
+        self.side_effects_possible = bool(side_effects_possible)
+        self.details = dict(details or {})
+        self.attempts = max(1, int(attempts))
+
+    @property
+    def error_code(self) -> str:
+        return self.code.value
+
+    def audit_payload(self) -> dict[str, Any]:
+        return {
+            "error_code": self.error_code,
+            "error_type": type(self).__name__,
+            "error": sanitise_provider_error(self),
+            "human_description": self.human_description,
+            "retryable": self.retryable,
+            "http_status": self.http_status,
+            "provider_request_id": self.provider_request_id or None,
+            "retry_after_s": self.retry_after_s,
+            "side_effects_possible": self.side_effects_possible,
+            "attempts": self.attempts,
+            "details": dict(self.details),
+        }
+
+    def terminal_copy(
+        self,
+        message: str,
+        *,
+        attempts: int,
+        code: ProviderFailureCode | None = None,
+        human_description: str = "",
+        side_effects_possible: bool | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> "StageInvocationError":
+        merged_details = dict(self.details)
+        merged_details.update(dict(details or {}))
+        return StageInvocationError(
+            message,
+            retryable=False,
+            code=code or self.code,
+            human_description=human_description or self.human_description,
+            http_status=self.http_status,
+            provider_request_id=self.provider_request_id,
+            retry_after_s=self.retry_after_s,
+            side_effects_possible=(
+                self.side_effects_possible
+                if side_effects_possible is None
+                else side_effects_possible
+            ),
+            details=merged_details,
+            attempts=attempts,
+        )
 
 
 class StructuredOutputError(StageInvocationError):
-    pass
+    def __init__(self, message: str, *, retryable: bool = True, **kwargs: Any):
+        super().__init__(
+            message,
+            retryable=retryable,
+            code=ProviderFailureCode.STRUCTURED_OUTPUT_INVALID,
+            human_description=(
+                "The provider returned an invalid structured response envelope."
+            ),
+            **kwargs,
+        )
 
 
 class TurnStopped(RuntimeError):

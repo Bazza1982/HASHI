@@ -166,7 +166,14 @@ class StageRequest:
     context: Mapping[str, Any] = field(default_factory=dict)
     allow_tools: bool = False
     allow_side_effects: bool = False
+    invocation_id: str = ""
+    retry_tier: str = ""
+    attempt_timeout_s: float = 0.0
+    retry_invariant_hash: str = ""
     progress_callback: Callable[[str, str, bool], None] | None = field(
+        default=None, compare=False, repr=False
+    )
+    provider_activity_callback: Callable[[Mapping[str, Any]], None] | None = field(
         default=None, compare=False, repr=False
     )
 
@@ -180,6 +187,7 @@ class StageResponse:
     model: str = ""
     usage: Mapping[str, int] = field(default_factory=dict)
     evidence_refs: tuple[str, ...] = ()
+    provider_attempt: int = 1
 
 
 @dataclass(frozen=True)

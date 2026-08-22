@@ -9,7 +9,11 @@ import pytest
 from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.commentary import RecordingCommentaryPort
 from orchestrator.her_v2.config import HERv2Config
-from orchestrator.her_v2.interfaces import RecordingDelivery, StageInvocationError
+from orchestrator.her_v2.interfaces import (
+    ProviderFailureCode,
+    RecordingDelivery,
+    StageInvocationError,
+)
 from orchestrator.her_v2.ledger import LedgerStore
 from orchestrator.her_v2.models import (
     Effort,
@@ -23,6 +27,7 @@ from orchestrator.her_v2.presentation import (
     RequiredUserMessage,
 )
 from orchestrator.her_v2.runtime import HERv2Runtime
+from orchestrator.her_v2.retry import ProviderRetryPolicy, RetryTier
 
 
 def _config(**overrides):
@@ -41,6 +46,69 @@ def _config(**overrides):
     }
     raw.update(overrides)
     return HERv2Config.from_mapping(raw)
+
+
+def _fast_retry_policy(
+    initial: float = 0.02,
+    recovery: float = 0.04,
+) -> ProviderRetryPolicy:
+    return ProviderRetryPolicy(
+        tier_timeouts={tier: (initial, recovery) for tier in RetryTier}
+    )
+
+
+def test_provider_retry_tiers_match_stage_complexity_and_local_promotion():
+    policy = ProviderRetryPolicy()
+
+    assert policy.tier_for(Stage.IMMEDIATE_RESPONSE, engine="deepseek-api") is RetryTier.TIER_1
+    assert policy.tier_for(Stage.TRIAGE, engine="deepseek-api") is RetryTier.TIER_1
+    assert policy.tier_for(Stage.FINALISATION, engine="deepseek-api") is RetryTier.TIER_1
+    assert policy.tier_for(Stage.PLANNING, engine="deepseek-api") is RetryTier.TIER_2
+    assert policy.tier_for(Stage.REPLANNING, engine="deepseek-api") is RetryTier.TIER_2
+    assert policy.tier_for(Stage.REVIEW, engine="deepseek-api") is RetryTier.TIER_2
+    assert policy.tier_for(Stage.MEDITATION, engine="deepseek-api") is RetryTier.TIER_2
+    assert policy.tier_for(Stage.DREAM, engine="deepseek-api") is RetryTier.TIER_2
+    assert (
+        policy.tier_for(
+            Stage.FINALISATION,
+            engine="deepseek-api",
+            context={"execution_json_valid": False},
+        )
+        is RetryTier.TIER_2
+    )
+    assert (
+        policy.tier_for(
+            Stage.FINALISATION,
+            engine="deepseek-api",
+            classification=TriageClassification.HIGH_VOLUME_TASK,
+        )
+        is RetryTier.TIER_2
+    )
+    small_threshold_policy = ProviderRetryPolicy(large_context_bytes=32)
+    large_context = {"payload": "x" * 64}
+    assert (
+        small_threshold_policy.tier_for(
+            Stage.TRIAGE,
+            engine="deepseek-api",
+            context=large_context,
+        )
+        is RetryTier.TIER_2
+    )
+    assert (
+        small_threshold_policy.tier_for(
+            Stage.PLANNING,
+            engine="deepseek-api",
+            context=large_context,
+        )
+        is RetryTier.TIER_3
+    )
+    assert policy.tier_for(Stage.TRIAGE, engine="codex-cli") is RetryTier.TIER_3
+    assert policy.timeout_for(RetryTier.TIER_1, recovery_attempt=False) == 60.0
+    assert policy.timeout_for(RetryTier.TIER_1, recovery_attempt=True) == 180.0
+    assert policy.timeout_for(RetryTier.TIER_2, recovery_attempt=False) == 190.0
+    assert policy.timeout_for(RetryTier.TIER_2, recovery_attempt=True) == 300.0
+    assert policy.timeout_for(RetryTier.TIER_3, recovery_attempt=False) == 300.0
+    assert policy.timeout_for(RetryTier.TIER_3, recovery_attempt=True) == 600.0
 
 
 class ScriptedProvider:
@@ -173,6 +241,7 @@ def _runtime(
     audit=None,
     commentary=None,
     required_persona=None,
+    retry_policy=None,
 ):
     root = tmp_path / "her-v2"
     return HERv2Runtime(
@@ -187,6 +256,7 @@ def _runtime(
         habits=habits,
         meditation=meditation if meditation is not None else habits,
         dream=dream,
+        retry_policy=retry_policy,
     )
 
 
@@ -1306,7 +1376,9 @@ async def test_subagent_side_effect_flag_must_be_a_real_boolean(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_finalisation_failure_is_one_call_and_runtime_error(tmp_path):
+async def test_finalisation_exhausts_one_recovery_without_repeating_execution(
+    tmp_path,
+):
     scripts = _initial("SIMPLE_TASK")
     scripts.update(
         {
@@ -1320,9 +1392,6 @@ async def test_finalisation_failure_is_one_call_and_runtime_error(tmp_path):
                 Stage.FINALISATION: [
                     StageInvocationError("report provider unavailable"),
                     StageInvocationError("report provider still unavailable"),
-                    StageInvocationError(
-                        "report provider rejected request", retryable=False
-                    ),
                 ],
         }
     )
@@ -1335,9 +1404,30 @@ async def test_finalisation_failure_is_one_call_and_runtime_error(tmp_path):
     assert result.terminal_state is TerminalState.ERROR
     assert result.evidence_refs == ("receipt:123",)
     assert sum(call.stage is Stage.EXECUTION for _profile, call in provider.requests) == 1
-    assert sum(call.stage is Stage.FINALISATION for _profile, call in provider.requests) == 1
-    assert "report provider unavailable" in result.error
+    finalisation_requests = [
+        call
+        for _profile, call in provider.requests
+        if call.stage is Stage.FINALISATION
+    ]
+    assert len(finalisation_requests) == 2
+    assert [call.attempt for call in finalisation_requests] == [1, 2]
+    assert [call.attempt_timeout_s for call in finalisation_requests] == [60.0, 180.0]
+    assert len({call.retry_invariant_hash for call in finalisation_requests}) == 1
+    assert len(
+        {
+            call.context["execution_evidence_hash"]
+            for call in finalisation_requests
+        }
+    ) == 1
+    assert len(
+        {call.context["finalisation_input_hash"] for call in finalisation_requests}
+    ) == 1
+    assert len(
+        {call.context["execution_invocation_id"] for call in finalisation_requests}
+    ) == 1
+    assert "report provider still unavailable" in result.error
     assert "marked ERROR" in result.text
+    assert "PROVIDER_UNKNOWN" in result.text
 
 
 @pytest.mark.asyncio
@@ -1576,24 +1666,28 @@ async def test_meaningful_progress_keeps_long_execution_alive(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_repeated_false_progress_cannot_keep_stalled_execution_alive(tmp_path):
+async def test_repeated_user_progress_cannot_extend_provider_attempt_deadline(tmp_path):
     async def false_progress(request):
         while True:
             request.progress_callback("commentary", "Still working", True)
             await asyncio.sleep(0.015)
 
     scripts = _initial("SIMPLE_TASK")
-    scripts[Stage.EXECUTION] = [false_progress]
+    scripts[Stage.EXECUTION] = [false_progress, false_progress]
+    scripts[Stage.FINALISATION] = [
+        {"report": "The stalled provider request could not be completed."}
+    ]
     provider = ScriptedProvider(scripts)
     result = await _runtime(
         tmp_path,
         provider,
         config=_config(user_idle_timeout_s=0.05),
+        retry_policy=_fast_retry_policy(0.04, 0.05),
     ).run_turn("Stalled task", "request-false-progress", effort="low")
 
     assert result.terminal_state is TerminalState.ERROR
-    assert "idle-progress timeout" in result.error
-    assert provider.cancelled[Stage.EXECUTION] == 1
+    assert ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT.value in result.error
+    assert provider.cancelled[Stage.EXECUTION] == 2
 
 
 @pytest.mark.asyncio
@@ -1617,7 +1711,7 @@ async def test_reviewer_technical_failure_does_not_discard_execution(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_slow_planning_has_no_stage_wall_clock_ceiling(tmp_path):
+async def test_slow_planning_within_tier_deadline_completes_without_retry(tmp_path):
     scripts = _initial("COMPLEX_TASK")
     scripts.update(
         {
@@ -1644,7 +1738,7 @@ async def test_slow_planning_has_no_stage_wall_clock_ceiling(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_slow_review_has_no_stage_wall_clock_ceiling(tmp_path):
+async def test_slow_review_within_tier_deadline_completes_without_retry(tmp_path):
     scripts = _initial("COMPLEX_TASK")
     scripts.update(
         {
@@ -1670,7 +1764,7 @@ async def test_slow_review_has_no_stage_wall_clock_ceiling(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_finalisation_does_not_retry_or_repeat_execution(
+async def test_finalisation_retries_same_evidence_without_repeating_execution(
     tmp_path,
 ):
     scripts = _initial("SIMPLE_TASK")
@@ -1685,8 +1779,6 @@ async def test_finalisation_does_not_retry_or_repeat_execution(
             ],
             Stage.FINALISATION: [
                 StageInvocationError("report transport failed"),
-                StageInvocationError("report transport failed again"),
-                StageInvocationError("report transport failed a third time"),
                 {"report": "Completed after recovery."},
             ],
         }
@@ -1697,16 +1789,456 @@ async def test_finalisation_does_not_retry_or_repeat_execution(
         "Perform once", "request-report-retries", effort="low"
     )
 
-    assert result.terminal_state is TerminalState.ERROR
-    assert "marked ERROR" in result.text
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.text == "Completed after recovery."
     assert result.evidence_refs == ("receipt:timeout-case",)
     assert sum(
         request.stage is Stage.EXECUTION for _profile, request in provider.requests
     ) == 1
+    finalisation_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.FINALISATION
+    ]
+    assert len(finalisation_requests) == 2
+    assert [request.attempt for request in finalisation_requests] == [1, 2]
+    assert len(
+        {
+            request.context["execution_evidence_hash"]
+            for request in finalisation_requests
+        }
+    ) == 1
+    assert len(
+        {
+            request.context["finalisation_input_hash"]
+            for request in finalisation_requests
+        }
+    ) == 1
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    retry = next(
+        row
+        for row in rows
+        if row["event"] == "stage_retry_scheduled"
+        and row["stage"] == Stage.FINALISATION.value
+    )
+    assert retry["payload"]["fresh_connection"] is True
+    assert retry["payload"]["same_provider"] is True
+    assert retry["payload"]["same_model"] is True
+    assert retry["payload"]["same_goal"] is True
+    assert retry["payload"]["same_classification"] is True
+    assert retry["payload"]["same_permissions"] is True
+    assert retry["payload"]["same_workzone"] is True
+
+
+@pytest.mark.asyncio
+async def test_tiered_stall_recovery_uses_fresh_attempt_clock_and_typed_audit(
+    tmp_path,
+):
+    never_release = asyncio.Event()
+
+    async def stalled_triage(_request):
+        await never_release.wait()
+
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [{"message": "Recovered."}],
+        Stage.TRIAGE: [
+            stalled_triage,
+            {"classification": "DIRECT_RESPONSE", "goal": "Reply"},
+        ],
+    }
+    provider = ScriptedProvider(scripts)
+    result = await _runtime(
+        tmp_path,
+        provider,
+        retry_policy=_fast_retry_policy(),
+    ).run_turn("Reply", "request-tiered-stall", effort="low")
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    triage_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.TRIAGE
+    ]
+    assert [request.attempt for request in triage_requests] == [1, 2]
+    assert [request.attempt_timeout_s for request in triage_requests] == [
+        0.02,
+        0.04,
+    ]
+    assert len({request.retry_invariant_hash for request in triage_requests}) == 1
+    assert provider.cancelled[Stage.TRIAGE] == 1
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    failed = next(
+        row
+        for row in rows
+        if row["event"] == "stage_attempt_failed"
+        and row["stage"] == Stage.TRIAGE.value
+    )
+    assert (
+        failed["payload"]["error_code"]
+        == ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT.value
+    )
+    assert failed["payload"]["will_retry"] is True
+    assert failed["payload"]["provider_activity"]["event_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_kind", "expected_code"),
+    [
+        (
+            "thinking",
+            ProviderFailureCode.PROVIDER_REASONING_ONLY_TIMEOUT,
+        ),
+        (
+            "text_delta",
+            ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT,
+        ),
+    ],
+)
+async def test_stalled_partial_streams_end_with_specific_typed_error(
+    tmp_path,
+    event_kind,
+    expected_code,
+):
+    never_release = asyncio.Event()
+
+    async def partial_then_stall(request):
+        request.provider_activity_callback(
+            {"kind": event_kind, "content": "partial provider output"}
+        )
+        await never_release.wait()
+
+    provider = ScriptedProvider(
+        {
+            Stage.IMMEDIATE_RESPONSE: [{"message": "I have it."}],
+            Stage.TRIAGE: [partial_then_stall, partial_then_stall],
+        }
+    )
+    result = await _runtime(
+        tmp_path,
+        provider,
+        retry_policy=_fast_retry_policy(initial=0.01, recovery=0.02),
+    ).run_turn("Classify this", f"request-{event_kind}-stall", effort="low")
+
+    assert result.terminal_state is TerminalState.ERROR
+    assert expected_code.value in result.error
+    assert expected_code.value in result.text
+    assert provider.cancelled[Stage.TRIAGE] == 2
+
+
+@pytest.mark.asyncio
+async def test_nonretryable_auth_failure_keeps_typed_code_and_single_attempt(tmp_path):
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [
+            StageInvocationError(
+                "credential rejected",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_AUTHENTICATION_FAILED,
+                human_description="The provider rejected the configured credentials.",
+                http_status=401,
+            )
+        ],
+        Stage.TRIAGE: [
+            {"classification": "DIRECT_RESPONSE", "goal": "Reply directly"}
+        ],
+    }
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Reply directly", "request-auth-nonretry", effort="low"
+    )
+
+    assert result.terminal_state is TerminalState.ERROR
+    assert ProviderFailureCode.PROVIDER_AUTHENTICATION_FAILED.value in result.error
+    assert ProviderFailureCode.PROVIDER_AUTHENTICATION_FAILED.value in result.text
     assert sum(
-        request.stage is Stage.FINALISATION
+        request.stage is Stage.IMMEDIATE_RESPONSE
         for _profile, request in provider.requests
     ) == 1
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    failure = next(
+        row
+        for row in rows
+        if row["event"] == "stage_attempt_failed"
+        and row["stage"] == Stage.IMMEDIATE_RESPONSE.value
+    )
+    assert failure["payload"]["http_status"] == 401
+    assert failure["payload"]["will_retry"] is False
+    assert failure["payload"]["retry_reason"] == "failure_non_retryable"
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_retry_honours_retry_after_and_preserves_route(tmp_path):
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [{"message": "Recovered."}],
+        Stage.TRIAGE: [
+            StageInvocationError(
+                "rate limited",
+                code=ProviderFailureCode.PROVIDER_RATE_LIMITED,
+                human_description="The provider rate-limited the request.",
+                http_status=429,
+                provider_request_id="provider-request-429",
+                retry_after_s=0.001,
+            ),
+            {"classification": "DIRECT_RESPONSE", "goal": "Reply"},
+        ],
+    }
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        retry_policy=_fast_retry_policy(),
+    ).run_turn("Reply", "request-rate-limit", effort="low")
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    failure = next(
+        row
+        for row in rows
+        if row["event"] == "stage_attempt_failed"
+        and row["stage"] == Stage.TRIAGE.value
+    )
+    retry = next(
+        row
+        for row in rows
+        if row["event"] == "stage_retry_scheduled"
+        and row["stage"] == Stage.TRIAGE.value
+    )
+    assert failure["payload"]["provider_request_id"] == "provider-request-429"
+    assert failure["payload"]["retry_after_s"] == pytest.approx(0.001)
+    assert retry["payload"]["retry_delay_s"] == pytest.approx(0.001)
+    assert retry["payload"]["same_provider"] is True
+    assert retry["payload"]["same_model"] is True
+
+
+@pytest.mark.asyncio
+async def test_execution_retries_once_before_any_tool_starts(tmp_path):
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [
+                StageInvocationError(
+                    "connection reset",
+                    code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+                    human_description="The provider connection was interrupted.",
+                ),
+                {"disposition": "COMPLETED", "summary": "Recovered safely."},
+            ],
+            Stage.FINALISATION: [{"report": "Recovered safely."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Inspect safely", "request-execution-pre-tool-retry", effort="low"
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    execution_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.EXECUTION
+        and not request.role.startswith("sub_agent:")
+    ]
+    assert [request.attempt for request in execution_requests] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_execution_retries_after_only_proven_read_only_tools(tmp_path):
+    async def read_then_disconnect(request):
+        request.provider_activity_callback(
+            {
+                "kind": "tool_start",
+                "content": "read",
+                "tool_name": "file_read",
+                "tool_read_only": True,
+            }
+        )
+        request.provider_activity_callback(
+            {
+                "kind": "file_read",
+                "content": "reading file",
+                "tool_name": "file_read",
+                "tool_read_only": True,
+            }
+        )
+        request.provider_activity_callback(
+            {
+                "kind": "tool_end",
+                "content": "read complete",
+                "tool_name": "file_read",
+                "tool_read_only": True,
+            }
+        )
+        raise StageInvocationError(
+            "connection reset after read",
+            code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+        )
+
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [
+                read_then_disconnect,
+                {"disposition": "COMPLETED", "summary": "Recovered after read."},
+            ],
+            Stage.FINALISATION: [{"report": "Recovered after read."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Read and inspect", "request-execution-read-retry", effort="low"
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert sum(
+        request.stage is Stage.EXECUTION
+        for _profile, request in provider.requests
+    ) == 2
+
+
+@pytest.mark.asyncio
+async def test_execution_never_replays_after_side_effect_tool_starts(tmp_path):
+    async def write_then_disconnect(request):
+        request.provider_activity_callback(
+            {
+                "kind": "tool_start",
+                "content": "write",
+                "tool_name": "file_write",
+                "tool_read_only": False,
+            }
+        )
+        raise StageInvocationError(
+            "connection reset after write began",
+            code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+        )
+
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [
+                write_then_disconnect,
+                {"disposition": "COMPLETED", "summary": "Must not run."},
+            ],
+            Stage.FINALISATION: [{"report": "Execution could not be replayed."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Write once", "request-execution-write-no-retry", effort="low"
+    )
+
+    assert result.terminal_state is TerminalState.ERROR
+    assert ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value in result.error
+    assert ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value in result.text
+    assert sum(
+        request.stage is Stage.EXECUTION
+        for _profile, request in provider.requests
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_execution_does_not_retry_with_incomplete_read_only_tool(tmp_path):
+    async def second_read_stalls_then_disconnects(request):
+        for kind in ("tool_start", "tool_end", "tool_start"):
+            request.provider_activity_callback(
+                {
+                    "kind": kind,
+                    "content": kind,
+                    "tool_name": "file_read",
+                    "tool_read_only": True,
+                }
+            )
+        raise StageInvocationError(
+            "connection reset during second read",
+            code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+        )
+
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [
+                second_read_stalls_then_disconnects,
+                {"disposition": "COMPLETED", "summary": "Must not run."},
+            ],
+            Stage.FINALISATION: [{"report": "Read execution was not replayed."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Read safely", "request-incomplete-read-no-retry", effort="low"
+    )
+
+    assert result.terminal_state is TerminalState.ERROR
+    assert ProviderFailureCode.REPLAY_SAFETY_UNPROVEN.value in result.error
+    assert ProviderFailureCode.REPLAY_SAFETY_UNPROVEN.value in result.text
+    assert "Possible side effects: none observed" in result.text
+    assert sum(
+        request.stage is Stage.EXECUTION
+        for _profile, request in provider.requests
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_read_only_subagent_retries_once_with_same_authority(tmp_path):
+    scripts = _initial("HIGH_VOLUME_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["delegate read-only inspection"],
+                    "sub_agents": [
+                        {
+                            "id": "reader",
+                            "task": "Inspect one source",
+                            "tools": ["file_read"],
+                        }
+                    ],
+                }
+            ],
+            Stage.EXECUTION: [
+                StageInvocationError(
+                    "reader connection reset",
+                    code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+                ),
+                {"disposition": "COMPLETED", "summary": "Reader recovered."},
+                {"disposition": "COMPLETED", "summary": "Primary assembled."},
+            ],
+            Stage.FINALISATION: [{"report": "Inspection complete."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Inspect in parallel", "request-readonly-subagent-retry", effort="medium"
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    sub_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.role == "sub_agent:reader"
+    ]
+    assert [request.attempt for request in sub_requests] == [1, 2]
+    assert all(request.allow_side_effects is False for request in sub_requests)
+    assert len({request.retry_invariant_hash for request in sub_requests}) == 1
 
 
 @pytest.mark.asyncio

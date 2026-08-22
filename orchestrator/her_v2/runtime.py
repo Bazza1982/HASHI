@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
+import json
 import logging
 import uuid
 from contextlib import suppress
@@ -27,6 +29,7 @@ from .interfaces import (
     NullDreamMaintainer,
     NullHabitAdvisor,
     NullMeditationRunner,
+    ProviderFailureCode,
     RecordingDelivery,
     StageInvocationError,
     StageProvider,
@@ -64,7 +67,8 @@ from .presentation import (
     RequiredPersonaRenderer,
     RequiredUserMessage,
 )
-from .progress import ProgressTracker
+from .progress import ProgressTracker, ProviderActivityTracker
+from .retry import DEFAULT_PROVIDER_RETRY_POLICY, ProviderRetryPolicy, RetryTier
 from .structured import (
     parse_execution,
     parse_finalisation,
@@ -104,6 +108,8 @@ class _TurnState:
     last_execution_response: StageResponse | None = None
     last_execution_structure_valid: bool = False
     last_execution_error: str = ""
+    last_execution_failure: StageInvocationError | None = None
+    last_execution_invocation_id: str = ""
     late_immediate_source_task: asyncio.Task | None = None
     late_immediate_delivery_task: asyncio.Task | None = None
 
@@ -125,6 +131,8 @@ class HERv2Runtime:
         meditation: MeditationRunner | None = None,
         dream: DreamMaintainer | None = None,
         logger: logging.Logger | None = None,
+        retry_policy: ProviderRetryPolicy | None = None,
+        workzone_ref: str = "",
     ) -> None:
         self.config = config
         self.provider = provider
@@ -140,6 +148,8 @@ class HERv2Runtime:
         # invoked from run_turn().
         self.dream = dream or NullDreamMaintainer()
         self.logger = logger or logging.getLogger("HASHI.HERv2")
+        self.retry_policy = retry_policy or DEFAULT_PROVIDER_RETRY_POLICY
+        self.workzone_ref = str(workzone_ref or "")
         self._controls: dict[str, TurnControl] = {}
         self._turn_tasks: dict[str, asyncio.Task] = {}
         self._background_tasks: set[asyncio.Task] = set()
@@ -183,7 +193,20 @@ class HERv2Runtime:
                 return await self._stopped_result(
                     state, f"AUDIT_PERSISTENCE_FAILURE: {exc}"
                 )
-            return await self._error_result(state, str(exc))
+            return await self._error_result(
+                state,
+                f"[{ProviderFailureCode.AUDIT_PERSISTENCE_FAILURE.value}] {exc}",
+                text=_technical_error_message(
+                    state.ledger.turn_id,
+                    code=ProviderFailureCode.AUDIT_PERSISTENCE_FAILURE.value,
+                    description=(
+                        "Required audit persistence failed, so execution stopped "
+                        "before any unaudited continuation."
+                    ),
+                    attempts=1,
+                    side_effects_possible=False,
+                ),
+            )
         except (LedgerInvariantError, LifecycleViolation) as exc:
             self.ledger_store.save(state.ledger)
             return self._result(
@@ -193,7 +216,13 @@ class HERv2Runtime:
                 error=str(exc),
             )
         except StageInvocationError as exc:
-            return await self._error_result(state, str(exc))
+            return await self._error_result(
+                state,
+                f"[{exc.error_code}] {exc.human_description}",
+                text=_technical_error_message_from_failure(
+                    state.ledger.turn_id, exc
+                ),
+            )
         finally:
             self._controls.pop(identity, None)
             self._turn_tasks.pop(identity, None)
@@ -395,9 +424,24 @@ class HERv2Runtime:
             triage.classification is TriageClassification.DIRECT_RESPONSE
             and immediate_pair is None
         ):
+            if isinstance(immediate_error, StageInvocationError):
+                raise immediate_error.terminal_copy(
+                    "direct response requires a valid Immediate Response: "
+                    f"{immediate_error}",
+                    attempts=immediate_error.attempts,
+                    human_description=(
+                        "direct response requires a valid Immediate Response; "
+                        f"{immediate_error.human_description}"
+                    ),
+                ) from immediate_error
             raise StageInvocationError(
                 "direct response requires a valid Immediate Response: "
-                f"{immediate_error or 'response unavailable'}"
+                f"{immediate_error or 'response unavailable'}",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_EMPTY_RESPONSE,
+                human_description=(
+                    "The required Immediate Response did not produce usable content."
+                ),
             )
 
         immediate_text = ""
@@ -655,49 +699,68 @@ class HERv2Runtime:
         raw_execution = state.last_execution_response
         finalisation: FinalisationOutcome | None = None
         finalisation_error = ""
+        finalisation_failure: StageInvocationError | None = None
+        execution_evidence = {
+            "raw_execution_output": (
+                {
+                    "text": raw_execution.text,
+                    "data": dict(raw_execution.data),
+                    "provider": raw_execution.provider,
+                    "model": raw_execution.model,
+                    "evidence_refs": list(raw_execution.evidence_refs),
+                }
+                if raw_execution is not None
+                else None
+            ),
+            "parsed_execution_result": (
+                _execution_payload(execution)
+                if execution is not None and state.last_execution_structure_valid
+                else None
+            ),
+            "execution_json_valid": state.last_execution_structure_valid,
+            "execution_stage_error": state.last_execution_error or None,
+            "evidence_refs": list(state.evidence_refs),
+            "limitations": list(state.limitations),
+            "review": (
+                {
+                    "outcome": state.last_review.outcome.value,
+                    "summary": state.last_review.summary,
+                    "findings": list(state.last_review.findings),
+                }
+                if state.last_review
+                else None
+            ),
+        }
+        execution_evidence_hash = _payload_hash(execution_evidence)
+        finalisation_context = {
+            **execution_evidence,
+            "execution_invocation_id": state.last_execution_invocation_id or None,
+            "execution_evidence_hash": execution_evidence_hash,
+        }
+        finalisation_context["finalisation_input_hash"] = _payload_hash(
+            {
+                "goal_ref": state.ledger.goal_ref,
+                "classification": (
+                    state.ledger.classification.value
+                    if state.ledger.classification
+                    else None
+                ),
+                "execution_invocation_id": state.last_execution_invocation_id or None,
+                "execution_evidence_hash": execution_evidence_hash,
+            }
+        )
         try:
             _response, finalisation = await self._invoke_stage(
                 state,
                 Stage.FINALISATION,
                 parse_finalisation,
                 allow_tools=False,
-                context={
-                    "raw_execution_output": (
-                        {
-                            "text": raw_execution.text,
-                            "data": dict(raw_execution.data),
-                            "provider": raw_execution.provider,
-                            "model": raw_execution.model,
-                            "evidence_refs": list(raw_execution.evidence_refs),
-                        }
-                        if raw_execution is not None
-                        else None
-                    ),
-                    "parsed_execution_result": (
-                        _execution_payload(execution)
-                        if execution is not None
-                        and state.last_execution_structure_valid
-                        else None
-                    ),
-                    "execution_json_valid": state.last_execution_structure_valid,
-                    "execution_stage_error": state.last_execution_error or None,
-                    "evidence_refs": list(state.evidence_refs),
-                    "limitations": list(state.limitations),
-                    "review": (
-                        {
-                            "outcome": state.last_review.outcome.value,
-                            "summary": state.last_review.summary,
-                            "findings": list(state.last_review.findings),
-                        }
-                        if state.last_review
-                        else None
-                    ),
-                },
-                retry_on_failure=False,
+                context=finalisation_context,
             )
             assert isinstance(finalisation, FinalisationOutcome)
         except StageInvocationError as exc:
             finalisation_error = str(exc)
+            finalisation_failure = exc
 
         canonical_execution = execution
         if state.last_execution_error:
@@ -756,7 +819,12 @@ class HERv2Runtime:
             desired_terminal = TerminalState.ERROR
             error = (
                 state.last_execution_error
-                or finalisation_error
+                or (
+                    f"[{finalisation_failure.error_code}] "
+                    f"{finalisation_failure.human_description}"
+                    if finalisation_failure is not None
+                    else finalisation_error
+                )
                 or "finalisation_result_unusable"
             )
             limitation = f"Finalisation failed: {error}"
@@ -772,6 +840,15 @@ class HERv2Runtime:
             report = finalisation.final_message
             provenance = "her_v2_combined_finalisation"
             detail = "persona_rendered_in_finalisation=true"
+
+        terminal_failure = state.last_execution_failure or finalisation_failure
+        if desired_terminal is TerminalState.ERROR and terminal_failure is not None:
+            diagnostic = _technical_error_message_from_failure(
+                state.ledger.turn_id,
+                terminal_failure,
+            )
+            if terminal_failure.error_code not in report:
+                report = f"{report.rstrip()}\n\n{diagnostic}"
 
         await self._settle_late_immediate(
             state,
@@ -830,6 +907,7 @@ class HERv2Runtime:
         state.last_execution_response = None
         state.last_execution_structure_valid = False
         state.last_execution_error = ""
+        state.last_execution_failure = None
         try:
             _response, execution = await self._invoke_stage(
                 state,
@@ -856,7 +934,10 @@ class HERv2Runtime:
         except (TurnStopped, AuditPersistenceError):
             raise
         except StageInvocationError as exc:
-            state.last_execution_error = str(exc)
+            state.last_execution_failure = exc
+            state.last_execution_error = (
+                f"[{exc.error_code}] {exc.human_description}"
+            )
             return None
 
         state.last_execution_response = _response
@@ -1003,7 +1084,7 @@ class HERv2Runtime:
                 context=request_context,
                 role_override=role,
                 publish_commentary=False,
-                retry_on_failure=False,
+                retry_on_failure=not side_effects_authorised,
             )
             assert isinstance(outcome, ExecutionOutcome)
             if outcome.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
@@ -1046,6 +1127,11 @@ class HERv2Runtime:
         except (TurnStopped, AuditPersistenceError):
             raise
         except Exception as exc:
+            failure_payload = (
+                exc.audit_payload()
+                if isinstance(exc, StageInvocationError)
+                else {"error_type": type(exc).__name__, "error": str(exc)}
+            )
             self._audit(
                 state,
                 stage=Stage.EXECUTION.value,
@@ -1054,7 +1140,7 @@ class HERv2Runtime:
                 event_id=f"{event_prefix}:failed",
                 provider=profile.engine,
                 model=profile.model,
-                payload={"error_type": type(exc).__name__, "error": str(exc)},
+                payload=failure_payload,
             )
             return SubAgentResult(
                 assignment.assignment_id,
@@ -1206,16 +1292,47 @@ class HERv2Runtime:
                 stage, selected.name
             )
         )
-        last_error: Exception | None = None
+        base_context = copy.deepcopy(dict(context or {}))
+        tier = self.retry_policy.tier_for(
+            stage,
+            engine=selected.engine,
+            classification=state.ledger.classification,
+            context=base_context,
+        )
+        invariant_payload = {
+            "provider": selected.engine,
+            "model": selected.model,
+            "provider_reasoning": selected.reasoning,
+            "goal_ref": state.ledger.goal_ref,
+            "classification": (
+                state.ledger.classification.value
+                if state.ledger.classification
+                else None
+            ),
+            "role": role,
+            "allow_tools": allow_tools,
+            "allow_side_effects": allow_side_effects,
+            "delegated_tools": base_context.get("delegated_tools"),
+            "workzone": self.workzone_ref or None,
+            "plan_id": state.ledger.plan_id,
+        }
+        retry_invariant_hash = _payload_hash(invariant_payload)
+        last_error: StageInvocationError | None = None
         structure_retry_feedback: Mapping[str, Any] | None = None
         state.stage_invocation_serial += 1
         invocation_serial = state.stage_invocation_serial
+        invocation_id = (
+            f"{state.ledger.turn_id}:{stage.value}:invocation:{invocation_serial}"
+        )
+        if stage is Stage.EXECUTION and not role.startswith("sub_agent:"):
+            state.last_execution_invocation_id = invocation_id
+        provider_retry_count = 0
         attempt = 0
         while True:
             attempt += 1
             if state.control.stopped:
                 raise TurnStopped(state.control.reason)
-            attempt_context = dict(context or {})
+            attempt_context = copy.deepcopy(base_context)
             if structure_retry_feedback is not None:
                 attempt_context["previous_structure_error"] = dict(
                     structure_retry_feedback
@@ -1224,6 +1341,11 @@ class HERv2Runtime:
                     "Correct only the reported response-envelope defect. Preserve "
                     "the authoritative goal, classification, evidence, and uncertainty."
                 )
+            attempt_timeout_s = self.retry_policy.timeout_for(
+                tier,
+                recovery_attempt=attempt > 1,
+            )
+            provider_activity = ProviderActivityTracker()
             request = StageRequest(
                 turn_id=state.ledger.turn_id,
                 request_ref=state.request_ref,
@@ -1237,7 +1359,12 @@ class HERv2Runtime:
                 context=attempt_context,
                 allow_tools=allow_tools,
                 allow_side_effects=allow_side_effects,
+                invocation_id=invocation_id,
+                retry_tier=tier.label,
+                attempt_timeout_s=attempt_timeout_s,
+                retry_invariant_hash=retry_invariant_hash,
                 progress_callback=self._progress_callback(state),
+                provider_activity_callback=provider_activity.record,
             )
             attempt_prefix = (
                 f"{state.ledger.turn_id}:{stage.value}:invocation:"
@@ -1263,6 +1390,12 @@ class HERv2Runtime:
                     "provider_reasoning": selected.reasoning,
                     "allow_tools": allow_tools,
                     "allow_side_effects": allow_side_effects,
+                    "retry_tier": tier.label,
+                    "attempt_timeout_s": attempt_timeout_s,
+                    "fresh_connection": attempt > 1,
+                    "provider_retry_count": provider_retry_count,
+                    "retry_invariant_hash": retry_invariant_hash,
+                    "retry_invariants": invariant_payload,
                     "context": attempt_context,
                 },
             )
@@ -1271,7 +1404,7 @@ class HERv2Runtime:
             state.progress.record(
                 "stage_started",
                 stage.value,
-                meaningful=attempt == 1,
+                meaningful=False,
             )
             response: StageResponse | None = None
             try:
@@ -1279,6 +1412,8 @@ class HERv2Runtime:
                     state,
                     self.provider.invoke(selected, request),
                     stage=stage,
+                    timeout_s=attempt_timeout_s,
+                    activity=provider_activity,
                 )
                 response_ref = self._audit(
                     state,
@@ -1299,6 +1434,9 @@ class HERv2Runtime:
                             and str(response.reasoning_trace).strip()
                         ),
                         "validation_pending": True,
+                        "retry_tier": tier.label,
+                        "attempt_timeout_s": attempt_timeout_s,
+                        "provider_activity": provider_activity.snapshot(),
                     },
                 )
                 state.ledger.add_log_ref(response_ref)
@@ -1387,6 +1525,8 @@ class HERv2Runtime:
                             effective_response.reasoning_trace
                         ),
                         "validation_source": validation_source,
+                        "retry_invariant_hash": retry_invariant_hash,
+                        "provider_activity": provider_activity.snapshot(),
                     },
                 )
                 state.ledger.add_log_ref(complete_ref)
@@ -1421,18 +1561,63 @@ class HERv2Runtime:
                     }
             except Exception as exc:
                 last_error = StageInvocationError(
-                    f"{stage.value} provider failure: {type(exc).__name__}: {exc}"
+                    f"{stage.value} provider failure: {type(exc).__name__}: {exc}",
+                    code=ProviderFailureCode.PROVIDER_UNKNOWN,
+                    human_description="The provider stage failed unexpectedly.",
                 )
-            # Attempts are deliberately not count-bounded. A retryable,
-            # side-effect-free stage may continue until success, explicit
-            # stop, or the meaningful-progress idle boundary. Side-effecting
-            # execution is never replayed here.
-            will_retry = bool(
-                retry_on_failure
-                and not allow_side_effects
-                and isinstance(last_error, StageInvocationError)
-                and last_error.retryable
+            assert isinstance(last_error, StageInvocationError)
+            is_structured_repair = isinstance(last_error, StructuredOutputError)
+            unobserved_side_effects = bool(
+                last_error.side_effects_possible
+                and not provider_activity.tool_started
             )
+            replay_safe = bool(
+                provider_activity.replay_safe(
+                    allow_side_effects=allow_side_effects
+                )
+                and not unobserved_side_effects
+            )
+            retry_kind = (
+                "structured_repair" if is_structured_repair else "provider_recovery"
+            )
+            retry_reason = "eligible"
+            if not retry_on_failure:
+                retry_reason = "retry_disabled_for_call"
+            elif not last_error.retryable:
+                retry_reason = "failure_non_retryable"
+            elif not replay_safe:
+                retry_reason = "side_effect_replay_blocked"
+            elif is_structured_repair and state.progress.expired(
+                self.config.user_idle_timeout_s
+            ):
+                retry_reason = "user_meaningful_progress_idle_expired"
+            elif (
+                not is_structured_repair
+                and provider_retry_count >= self.retry_policy.max_provider_retries
+            ):
+                retry_reason = "provider_recovery_already_used"
+            will_retry = retry_reason == "eligible"
+            retry_delay = 0.0
+            if will_retry:
+                next_timeout = self.retry_policy.timeout_for(
+                    tier, recovery_attempt=True
+                )
+                retry_delay = (
+                    last_error.retry_after_s
+                    if last_error.retry_after_s is not None
+                    else min(
+                        5.0,
+                        0.25 * (2 ** min(max(0, attempt - 1), 5)),
+                        next_timeout / 4,
+                    )
+                )
+                if not is_structured_repair:
+                    if (
+                        last_error.retry_after_s is not None
+                        and retry_delay > next_timeout
+                    ):
+                        will_retry = False
+                        retry_reason = "retry_after_exceeds_recovery_window"
             try:
                 self._audit(
                     state,
@@ -1444,23 +1629,76 @@ class HERv2Runtime:
                     model=selected.model,
                     attempt=attempt,
                     payload={
-                        "error_type": type(last_error).__name__,
-                        "error": str(last_error),
+                        **last_error.audit_payload(),
                         "will_retry": will_retry,
+                        "retry_kind": retry_kind,
+                        "retry_reason": retry_reason,
+                        "retry_delay_s": retry_delay if will_retry else None,
+                        "retry_tier": tier.label,
+                        "attempt_timeout_s": attempt_timeout_s,
+                        "fresh_connection_on_retry": will_retry,
+                        "retry_invariant_hash": retry_invariant_hash,
                         "provider_response_received": response is not None,
+                        "provider_activity": provider_activity.snapshot(),
+                        "replay_safe": replay_safe,
+                        "side_effects_possible": bool(
+                            provider_activity.side_effects_possible
+                            or unobserved_side_effects
+                        ),
                     },
                 )
             except AuditPersistenceError:
                 raise
             if not will_retry:
-                raise StageInvocationError(
-                    f"{stage.value} failed: {last_error}",
-                    retryable=False,
+                if not replay_safe and last_error.retryable:
+                    possible_side_effects = bool(
+                        provider_activity.side_effects_possible
+                        or unobserved_side_effects
+                    )
+                    blocked_code = (
+                        ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED
+                        if possible_side_effects
+                        else ProviderFailureCode.REPLAY_SAFETY_UNPROVEN
+                    )
+                    blocked_description = (
+                        "The provider failed after a tool with possible side effects "
+                        "started, so HASHI did not replay the execution."
+                        if possible_side_effects
+                        else "The provider failed while a proven read-only tool call "
+                        "remained incomplete, so HASHI could not prove replay safety."
+                    )
+                    raise last_error.terminal_copy(
+                        f"{stage.value} failed after tool activity; automatic replay "
+                        "was blocked: "
+                        f"{last_error}",
+                        attempts=attempt,
+                        code=blocked_code,
+                        human_description=blocked_description,
+                        side_effects_possible=possible_side_effects,
+                        details={
+                            "original_error_code": last_error.error_code,
+                            "retry_reason": retry_reason,
+                        },
+                    ) from last_error
+                raise last_error.terminal_copy(
+                    f"{stage.value} failed after {attempt} attempt(s): {last_error}",
+                    attempts=attempt,
+                    details={"retry_reason": retry_reason},
                 ) from last_error
+            if not is_structured_repair:
+                provider_retry_count += 1
             await self._wait_for_stage_retry(
                 state,
                 stage=stage,
                 attempt=attempt,
+                role=role,
+                provider=selected.engine,
+                model=selected.model,
+                tier=tier,
+                retry_kind=retry_kind,
+                retry_delay=retry_delay,
+                retry_invariant_hash=retry_invariant_hash,
+                invocation_id=invocation_id,
             )
 
     async def _publish_stage_commentary(
@@ -1573,29 +1811,84 @@ class HERv2Runtime:
         *,
         stage: Stage,
         attempt: int,
+        role: str,
+        provider: str,
+        model: str,
+        tier: RetryTier,
+        retry_kind: str,
+        retry_delay: float,
+        retry_invariant_hash: str,
+        invocation_id: str,
     ) -> None:
-        """Back off without turning retry count or elapsed runtime into a ceiling."""
+        """Audit and wait for a same-route fresh-connection recovery."""
 
-        idle_remaining = self.config.user_idle_timeout_s - state.progress.idle_for()
-        if idle_remaining <= 0:
-            raise StageInvocationError(
-                f"{stage.value} exceeded the user idle-progress timeout",
-                retryable=False,
+        delay = max(0.0, float(retry_delay))
+        if retry_kind == "structured_repair":
+            idle_remaining = (
+                self.config.user_idle_timeout_s - state.progress.idle_for()
             )
-        delay = min(5.0, 0.25 * (2 ** min(max(0, attempt - 1), 5)))
+            if idle_remaining <= 0:
+                raise StageInvocationError(
+                    f"{stage.value} structured repair exceeded the user "
+                    "meaningful-progress idle timeout",
+                    retryable=False,
+                    code=ProviderFailureCode.STRUCTURED_OUTPUT_INVALID,
+                    human_description=(
+                        "Structured response repair stopped after the user-visible "
+                        "progress boundary expired."
+                    ),
+                    attempts=attempt,
+                )
+            delay = min(delay, idle_remaining)
+        self._audit(
+            state,
+            stage=stage.value,
+            role=role,
+            event="stage_retry_scheduled",
+            event_id=(
+                f"{invocation_id}:attempt:{attempt}:retry-scheduled"
+            ),
+            provider=provider,
+            model=model,
+            attempt=attempt,
+            payload={
+                "retry_kind": retry_kind,
+                "retry_tier": tier.label,
+                "failed_attempt": attempt,
+                "next_attempt": attempt + 1,
+                "retry_delay_s": delay,
+                "fresh_connection": True,
+                "same_provider": True,
+                "same_model": True,
+                "same_goal": True,
+                "same_classification": True,
+                "same_permissions": True,
+                "same_workzone": True,
+                "retry_invariant_hash": retry_invariant_hash,
+            },
+        )
         try:
             stopped = await asyncio.wait_for(
                 state.control.stop_event.wait(),
-                timeout=min(delay, idle_remaining),
+                timeout=delay,
             )
         except asyncio.TimeoutError:
             stopped = False
         if stopped or state.control.stopped:
             raise TurnStopped(state.control.reason)
-        if state.progress.expired(self.config.user_idle_timeout_s):
+        if retry_kind == "structured_repair" and state.progress.expired(
+            self.config.user_idle_timeout_s
+        ):
             raise StageInvocationError(
-                f"{stage.value} exceeded the user idle-progress timeout",
+                f"{stage.value} structured repair exceeded the user "
+                "meaningful-progress idle timeout",
                 retryable=False,
+                code=ProviderFailureCode.STRUCTURED_OUTPUT_INVALID,
+                human_description=(
+                    "Structured response repair stopped after the user-visible "
+                    "progress boundary expired."
+                ),
+                attempts=attempt,
             )
 
     async def _await_provider_operation(
@@ -1604,32 +1897,70 @@ class HERv2Runtime:
         operation,
         *,
         stage: Stage,
+        timeout_s: float,
+        activity: ProviderActivityTracker,
     ) -> StageResponse:
         task = asyncio.create_task(state.control.run_cancellable(operation))
         try:
-            while not task.done():
-                idle_remaining = (
-                    self.config.user_idle_timeout_s - state.progress.idle_for()
+            done, _pending = await asyncio.wait({task}, timeout=float(timeout_s))
+            if task not in done:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise self._provider_attempt_timeout_error(
+                    stage=stage,
+                    timeout_s=timeout_s,
+                    activity=activity,
                 )
-                if idle_remaining <= 0:
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-                    raise StageInvocationError(
-                        f"{stage.value} exceeded the user idle-progress timeout",
-                        retryable=False,
-                    )
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(task),
-                        timeout=min(idle_remaining, 0.25),
-                    )
-                except asyncio.TimeoutError:
-                    continue
             return await task
         except asyncio.CancelledError:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             raise
+
+    def _provider_attempt_timeout_error(
+        self,
+        *,
+        stage: Stage,
+        timeout_s: float,
+        activity: ProviderActivityTracker,
+    ) -> StageInvocationError:
+        if not activity.response_started:
+            code = ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT
+            description = (
+                "The provider did not begin a response before the attempt deadline."
+            )
+        elif (
+            activity.reasoning_event_count
+            and not activity.text_event_count
+            and not activity.tool_started
+        ):
+            code = ProviderFailureCode.PROVIDER_REASONING_ONLY_TIMEOUT
+            description = (
+                "The provider emitted reasoning but no usable response before the "
+                "attempt deadline."
+            )
+        elif activity.text_event_count or activity.tool_started:
+            code = ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT
+            description = (
+                "The provider response began but did not complete before the attempt "
+                "deadline."
+            )
+        else:
+            code = ProviderFailureCode.PROVIDER_STREAM_IDLE_TIMEOUT
+            description = (
+                "The provider stream stopped making usable progress before completion."
+            )
+        return StageInvocationError(
+            f"{stage.value} exceeded its {timeout_s:g}s provider-attempt timeout",
+            retryable=True,
+            code=code,
+            human_description=description,
+            side_effects_possible=activity.side_effects_possible,
+            details={
+                "attempt_timeout_s": float(timeout_s),
+                "provider_activity": activity.snapshot(),
+            },
+        )
 
     def _record_triage(
         self, state: _TurnState, classification: TriageClassification
@@ -2048,7 +2379,13 @@ class HERv2Runtime:
             error=reason,
         )
 
-    async def _error_result(self, state: _TurnState, error: str) -> TurnResult:
+    async def _error_result(
+        self,
+        state: _TurnState,
+        error: str,
+        *,
+        text: str = "",
+    ) -> TurnResult:
         if not state.ledger.is_terminal:
             try:
                 await self._transition(
@@ -2065,7 +2402,7 @@ class HERv2Runtime:
         return self._result(
             state,
             terminal=TerminalState.ERROR,
-            text="",
+            text=text,
             error=error,
         )
 
@@ -2144,6 +2481,53 @@ def _execution_payload(outcome: ExecutionOutcome) -> dict[str, Any]:
         "remaining_work": list(outcome.remaining_work),
         "clarification": outcome.clarification or None,
     }
+
+
+def _payload_hash(payload: Mapping[str, Any]) -> str:
+    canonical = json.dumps(
+        dict(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _technical_error_message(
+    turn_id: str,
+    *,
+    code: str,
+    description: str,
+    attempts: int,
+    side_effects_possible: bool,
+) -> str:
+    side_effect_text = (
+        "possible; automatic replay was blocked"
+        if side_effects_possible
+        else "none observed"
+    )
+    return (
+        "⚠️ A technical provider failure prevented completion.\n\n"
+        f"Error code: `{code}`\n"
+        f"Description: {description}\n"
+        f"Provider attempts: {max(1, int(attempts))}\n"
+        f"Possible side effects: {side_effect_text}\n"
+        f"Reference: `{turn_id}`"
+    )
+
+
+def _technical_error_message_from_failure(
+    turn_id: str,
+    failure: StageInvocationError,
+) -> str:
+    return _technical_error_message(
+        turn_id,
+        code=failure.error_code,
+        description=failure.human_description,
+        attempts=failure.attempts,
+        side_effects_possible=failure.side_effects_possible,
+    )
 
 
 def _normalise_text(value: str) -> str:

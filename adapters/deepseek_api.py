@@ -1,4 +1,3 @@
-from __future__ import annotations
 """
 DeepSeek API adapter — OpenAI-compatible, inherits from OpenRouterAdapter.
 
@@ -9,6 +8,8 @@ Differences from OpenRouter:
   - Current model IDs are deepseek-v4-flash and deepseek-v4-pro
 """
 
+from __future__ import annotations
+
 import json
 from itertools import count
 
@@ -16,6 +17,7 @@ from adapters.openrouter_api import (
     OpenRouterAdapter,
     _APIResult,
     _assistant_content_text,
+    _backend_failure_response,
     _message_structured_data,
 )
 from adapters.stream_events import KIND_THINKING, StreamEvent
@@ -106,8 +108,9 @@ class DeepSeekAdapter(OpenRouterAdapter):
         text_chunks: list[str] = []
         reasoning_chunks: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
-        finish_reason = "stop"
+        finish_reason = ""
         stream_usage: dict = {}
+        saw_done = False
 
         async with self.client.stream("POST", _DEEPSEEK_URL, json=payload, headers=headers) as response:
             response.raise_for_status()
@@ -118,6 +121,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
                     continue
                 data_str = line[6:].strip()
                 if data_str == "[DONE]":
+                    saw_done = True
                     break
 
                 try:
@@ -175,13 +179,21 @@ class DeepSeekAdapter(OpenRouterAdapter):
                     if fn_delta.get("arguments"):
                         acc["function"]["arguments"] += fn_delta["arguments"]
 
+        if not saw_done and not finish_reason:
+            import httpx
+
+            raise httpx.RemoteProtocolError(
+                "provider stream ended without a completion marker"
+            )
         full_text = "".join(text_chunks)
         reasoning_content = "".join(reasoning_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
         comp_details = stream_usage.get("completion_tokens_details") or {}
         return _with_reasoning_content(
             _APIResult(
-                text=full_text, tool_calls=tool_calls, finish_reason=finish_reason,
+                text=full_text,
+                tool_calls=tool_calls,
+                finish_reason=finish_reason or "stop",
                 prompt_tokens=stream_usage.get("prompt_tokens", 0),
                 completion_tokens=stream_usage.get("completion_tokens", 0),
                 thinking_tokens=comp_details.get("reasoning_tokens", 0),
@@ -264,4 +276,9 @@ class DeepSeekAdapter(OpenRouterAdapter):
             if isinstance(e, _asyncio.CancelledError):
                 raise
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            return BackendResponse(text="", duration_ms=duration_ms, error=str(e), is_success=False)
+            return _backend_failure_response(
+                e,
+                duration_ms=duration_ms,
+                tool_call_count=total_tool_calls,
+                tool_loop_count=tool_loop_count,
+            )

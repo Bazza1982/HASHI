@@ -62,7 +62,8 @@ Provider reasoning controls remain provider-specific. HER selects the appropriat
 
 ### 3.2 Provider neutrality
 
-All execution parameters must be configurable, including:
+All deployment-varying route and authority parameters must be configurable,
+including:
 
 - provider and model names;
 - model role profiles;
@@ -72,13 +73,19 @@ All execution parameters must be configurable, including:
 - review limits;
 - tool and permission policies.
 
-Apart from the deliberate one-call Finalisation rule, HER v2 has exactly two
-count-based iterative orchestration ceilings: Replanning and
-Review/remediation, as defined by effort policy. It has no total execution
-clock, stage clock, generic retry-attempt ceiling, tool-round ceiling,
-sub-agent-count ceiling, turn ceiling, cumulative token budget, or per-request
-output-token ceiling. Legacy HER/Claw fields representing those ceilings are
-invalid HER v2 configuration and must be rejected rather than silently applied.
+The provider-recovery tiers below are a locked HER v2 safety policy rather than
+a provider/profile tuning field.
+
+HER v2 has exactly two count-based iterative orchestration ceilings:
+Replanning and Review/remediation, as defined by effort policy. In addition, a
+provider operation has one fixed recovery allowance: after an eligible
+transient failure, Runtime may make exactly one fresh-connection retry. Each
+provider attempt has the tiered deadline defined in section 17. HER still has no
+whole-turn hard clock, tool-round ceiling, sub-agent-count ceiling, turn
+ceiling, cumulative token budget, or per-request output-token ceiling. Legacy
+HER/Claw generic timeout and retry fields remain invalid configuration and must
+be rejected rather than silently applied; they cannot override the deliberate
+tiered recovery policy.
 
 Provider-specific request construction belongs in provider adapters, not in the HER orchestration core.
 
@@ -114,8 +121,10 @@ No stage may intentionally substitute a different objective. If intent is unclea
 
 HER prefers useful progress over perfection of intermediate artefacts:
 
-- retry a technically repairable, side-effect-free stage while it remains
-  retryable and the turn has not crossed its no-progress idle boundary;
+- give an eligible transient provider failure one fresh-connection recovery
+  attempt, subject to the side-effect replay rules in section 17;
+- treat structured-envelope correction as a separate semantic repair path,
+  bounded by the user meaningful-progress idle boundary;
 - replan when execution evidence invalidates the current approach;
 - do not fail because an optional commentary message was not delivered;
 - do not discard completed work because reporting failed;
@@ -148,9 +157,11 @@ JSON-string control-character repair accepts only the otherwise unchanged
 object produced by a non-strict JSON decoder; it does not complete truncated
 structures or infer fields. A retryable, side-effect-free stage receives the
 previous validation defect so it can correct the envelope instead of blindly
-repeating the same request. Main Execution and Finalisation are the exceptions
-defined below: Execution is never replayed to repair its envelope, and
-Finalisation is invoked exactly once.
+repeating the same request. Main Execution is never replayed merely to repair
+its envelope. A provider failure during main Execution may be recovered only
+before any tool call or after completed, provably read-only tool calls.
+Finalisation may use its one provider recovery attempt, but every attempt must
+receive the same immutable Execution evidence.
 
 ### 3.6 Work, commentary, Persona packaging, and delivery
 
@@ -688,11 +699,13 @@ The report communicates, as applicable:
 
 Reporting must be honest and must not claim unverified work as complete.
 
-Finalisation is one combined model call. It receives the current request, the
-complete raw Execution output, the parsed Execution result when that envelope
-was valid, optional Review findings, and only the explicit `[persona]` block
-from the configured Agent system file. It never receives the rest of that file
-and has no Tool Gateway.
+Finalisation is one combined model stage. Its ordinary path is one provider
+call; an eligible transient provider failure permits one fresh-connection
+recovery call. Both attempts receive the current request, the same complete raw
+Execution output, the same parsed Execution result when that envelope was
+valid, the same optional Review findings, and only the explicit `[persona]`
+block from the configured Agent system file. It never receives the rest of that
+file and has no Tool Gateway.
 
 Finalisation returns one JSON object containing `execution_result` and
 `final_message`. When parsed Execution JSON exists, its disposition is the
@@ -704,15 +717,28 @@ selects technical `ERROR`. `final_message` is rendered with the supplied
 Persona in the same call and must preserve Markdown, code, links, paths,
 identifiers, numbers, facts, uncertainty, limitations, and clarification.
 
-There is no independent structure-repair call and no second final Persona
-renderer. A Direct Response remains Persona-authored by Immediate Response.
+There is no independent structure-repair model and no separate final Persona
+renderer. A retry is another attempt at the same combined Finalisation
+operation, not a new reporting workflow. A Direct Response remains
+Persona-authored by Immediate Response.
 
 ### 12.3 Reporting failure
 
-Finalisation is invoked once. If the invocation fails or its JSON is unusable,
-Runtime does not call a repair model, repeat Finalisation, or replay Execution.
-It preserves Execution evidence, selects technical `ERROR`, and sends a
-deterministic local fallback report.
+For one transient provider-failure sequence, Finalisation may make at most two
+attempts: the initial Tier-1 attempt and one eligible recovery attempt.
+Structured-envelope correction remains the separate semantic repair path from
+section 3.7 and may issue another Finalisation-stage call under the user
+idle-progress boundary; it does not replenish the one provider-recovery
+allowance. Malformed/high-volume or large-context Finalisation is promoted to
+Tier 2, and a local/CLI provider is promoted to Tier 3. Runtime freezes and
+hashes the Finalisation input before the first attempt; every recovery or
+structure-correction attempt must reuse the same Execution invocation identity,
+raw output, parsed result, evidence references, Review findings, goal,
+classification, permissions, provider, model, and workzone. Execution is never
+called again. If recovery is unavailable or the applicable repair paths are
+exhausted, Runtime preserves Execution evidence, selects technical `ERROR`, and
+sends a deterministic local fallback report containing the typed error code and
+human-readable description.
 
 ## 13. Lifecycle State Machine
 
@@ -891,25 +917,50 @@ Logs must apply existing HASHI secret-redaction, access-control, retention, and 
 
 ### 17.1 Stage-local retry
 
-HER permits retry within the active process and current stage for technical failures such as:
+HER permits exactly one fresh-connection provider recovery within the active
+process and current logical stage. The recovery tiers are:
 
-- transient provider or network errors;
-- invalid structured output;
-- retryable tool transport errors;
-- side-effect-free Planning, Replanning, or Review transport failure.
+| Tier | Initial attempt | Recovery attempt | Default stages |
+| --- | ---: | ---: | --- |
+| Tier 1 | 60 seconds | 180 seconds | Immediate Response, Triage, ordinary Finalisation, Persona packaging |
+| Tier 2 | 190 seconds | 300 seconds | Planning, Replanning, Review, remote Execution, Meditation, Dream |
+| Tier 3 | 300 seconds | 600 seconds | local/CLI provider calls |
 
-Retry delays may back off, but attempt count and elapsed execution time are not
-ceilings. A retry does not change the Triage classification or user goal.
+Malformed/high-volume or large-context Finalisation is promoted from Tier 1 to
+Tier 2. A sufficiently large context promotes any remote stage by one tier,
+capped at Tier 3. Any local/CLI route is Tier 3. The tier bounds individual
+provider attempts; they are not a whole-turn runtime budget.
 
-Before a non-side-effect retry, HER records and supplies the prior validation
-error to the next attempt. Compatible carrier recovery occurs before retry and
-is recorded as such; it is not described as a model repair.
+Typed failures eligible for the one recovery are HTTP 408, HTTP 429, HTTP 5xx,
+connection/DNS/reset failures, response timeouts, an incomplete provider stream,
+an empty response, and a stream that never produces a usable tool or final
+result. Configuration failures, HTTP 400, HTTP 401, HTTP 403, invalid URL or TLS
+configuration, audit persistence failure, and an authorised user stop are not
+retried. Every terminal technical failure enters `ERROR` with a stable error
+code, a redacted human-readable description, attempt count, side-effect status,
+and a correlation reference.
 
-A side-effect-authorised Execution invocation is never replayed merely to
-repair its output format. Its complete raw output is passed directly to the
-single Finalisation call. Finalisation normalises clear meaning, while an
-unusable result becomes technical `ERROR`. Finalisation itself is never retried
-or followed by another model call.
+Every provider failure and retry decision is audited, including provider/model,
+tier, deadline, typed code, HTTP status and provider request ID when available,
+activity summary, retryability, replay-safety decision, delay, and whether the
+next attempt uses a fresh connection. A retry must preserve provider, model,
+goal, immutable Triage classification, role, provider reasoning, tool and
+side-effect permissions, delegated tool allowlist, workzone, and active plan.
+Runtime hashes those invariants and records the same hash on both attempts.
+
+Deterministic carrier recovery and structured-envelope correction occur before
+provider recovery. A side-effect-free structured correction receives the prior
+validation defect; it is a semantic repair path under the user idle-progress
+boundary, not another allowance for transport failures.
+
+Main Execution may use the provider recovery only when no tool has started or
+when every started tool is provably read-only and has completed. Unknown,
+incomplete, or side-effecting tool activity blocks automatic replay. A
+side-effect-authorised Execution result is never replayed merely to repair its
+output format; its raw output goes to Finalisation. Read-only sub-agents receive
+the same single provider recovery. Finalisation receives at most one recovery
+and reuses immutable Execution evidence; the Execution invocation count remains
+one.
 
 ### 17.2 No process-restart resumption
 
@@ -941,18 +992,27 @@ Measurable progress includes:
 
 No-op retries, heartbeat-only Ledger writes, idle waiting, and unlogged internal loops are not progress.
 
-### 18.2 Prohibited execution clocks and budgets
+### 18.2 Provider-attempt clock
 
-There is no stage timeout, retry timeout, whole-turn hard timeout, time budget,
-turn budget, tool-round budget, sub-agent budget, cumulative token budget, or
-output-token budget in HER v2. Meaningful activity may continue for arbitrarily
-long elapsed time. A process-level operator stop and the no-progress idle
-detector are liveness controls, not total-runtime ceilings.
+Each provider attempt owns an independent tier deadline and an attempt-local
+activity tracker. Provider reasoning, text deltas, tool starts, and tool results
+are recorded on that tracker for timeout classification and replay safety; they
+do not silently refresh the user meaningful-progress clock. The recovery
+attempt receives a fresh deadline, so a stalled first connection cannot consume
+the recovery window. Blank heartbeats are activity for neither clock.
 
-Transport operations may retain connection/read inactivity and protocol safety
-guards. Such guards must be scoped to the individual transport or parser, must
-not be presented as an HER execution budget, and must not cancel a turn that is
-still producing meaningful progress.
+The user meaningful-progress clock governs turn-level liveness and
+structured-envelope repair. The provider-attempt clock governs only the current
+provider operation. Neither clock may be substituted for the other.
+
+### 18.3 Prohibited total execution budgets
+
+There is no whole-turn hard timeout, time budget, turn budget, tool-round
+budget, sub-agent budget, cumulative token budget, or output-token budget in
+HER v2. A sequence of successful substantive units may continue for
+arbitrarily long elapsed time. The tiered attempt deadline, an authorised
+operator stop, and the no-progress idle detector are scoped liveness controls,
+not total-runtime ceilings.
 
 ## 19. Sub-Agent Governance
 
@@ -1071,8 +1131,9 @@ HER v2 is ready for production rollout only when:
   scheduled, manual, and recovery triggers; valid job overrides win without
   changing provider reasoning or leaking into later ordinary turns;
 - Replanning and Review loops cannot violate lifecycle order;
-- retries have no attempt/time ceiling, terminate correctly on no-progress idle
-  or non-retryable failure, and process restart does not resume an old stack;
+- eligible provider failures receive no more and no less than one safe
+  fresh-connection recovery; attempt tiers, typed exclusions, invariant hashes,
+  and process-restart non-resumption are enforced;
 - Ledger records remain minimal and auditable through log references;
 - all available reasoning traces are logged and correlated to the turn;
 - tools and permissions remain HASHI-owned;
@@ -1100,8 +1161,9 @@ The following decisions are authoritative for HER v2:
 3. Planning and Replanning may not change classification or goal.
 4. `/steer` stops the old turn and starts a newly triaged turn with new instructions.
 5. Lifecycle order is strict; stage content is flexible.
-6. Stage-local retry has no attempt or elapsed-time ceiling; only explicit stop,
-   non-retryable failure, or no-progress idle expiration may end it.
+6. Each eligible provider operation has exactly one fresh-connection recovery;
+   each attempt uses its tier deadline, while the turn itself has no aggregate
+   runtime ceiling.
 7. Immediate Response becomes the sole final user-facing answer for `DIRECT_RESPONSE`.
 8. Review is advisory and never user-facing.
 9. The Primary Agent owns execution and reporting.

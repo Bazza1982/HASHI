@@ -98,6 +98,7 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
         "orchestrator.flexible_backend_manager",
         "orchestrator.her_v2.config",
         "orchestrator.her_v2.models",
+        "orchestrator.her_v2.retry",
         "orchestrator.her_v2.runtime_configuration",
         "orchestrator.her_v2.interfaces",
         "orchestrator.her_v2.runtime",
@@ -115,6 +116,9 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
         "orchestrator.her_v2.interfaces"
     )
     assert ordered.index("orchestrator.her_v2.interfaces") < ordered.index(
+        "orchestrator.her_v2.runtime"
+    )
+    assert ordered.index("orchestrator.her_v2.retry") < ordered.index(
         "orchestrator.her_v2.runtime"
     )
     assert ordered.index("orchestrator.her_v2.config") < ordered.index(

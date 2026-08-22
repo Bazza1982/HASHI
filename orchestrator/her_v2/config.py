@@ -95,9 +95,10 @@ def _reject_removed_limits(
         return
     raise HERv2ConfigurationError(
         f"{location} contains removed execution limit field(s): "
-        f"{', '.join(sorted(found))}. HER v2 permits only idle-progress liveness "
-        "detection plus the explicitly designed Replan and Review limits; "
-        "legacy HER ceilings must not be applied."
+        f"{', '.join(sorted(found))}. HER v2 permits the meaningful-progress "
+        "liveness detector, the fixed tiered provider-recovery policy, and the "
+        "explicitly designed Replan and Review limits; legacy generic ceilings "
+        "must not be applied."
     )
 
 

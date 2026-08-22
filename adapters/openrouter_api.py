@@ -14,7 +14,6 @@ from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
 from adapters.stream_events import (
     KIND_FILE_EDIT,
     KIND_FILE_READ,
-    KIND_PROGRESS,
     KIND_SHELL_EXEC,
     KIND_TEXT_DELTA,
     KIND_THINKING,
@@ -37,6 +36,128 @@ class _APIResult:
     thinking_tokens: int = 0
     reasoning_content: str = ""
     structured_data: dict[str, Any] | None = None
+
+
+def _retry_after_seconds(response: httpx.Response | None) -> float | None:
+    if response is None:
+        return None
+    raw = str(response.headers.get("retry-after") or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None
+
+
+def _provider_request_id(response: httpx.Response | None) -> str:
+    if response is None:
+        return ""
+    for name in ("x-request-id", "request-id", "cf-ray", "x-amzn-requestid"):
+        value = str(response.headers.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _backend_failure_response(
+    error: Exception,
+    *,
+    duration_ms: float,
+    tool_call_count: int = 0,
+    tool_loop_count: int = 0,
+) -> BackendResponse:
+    """Convert OpenAI-compatible transport errors into a typed response."""
+
+    response = getattr(error, "response", None)
+    status = (
+        int(response.status_code)
+        if isinstance(response, httpx.Response)
+        else None
+    )
+    retryable = False
+    code = "PROVIDER_UNKNOWN"
+    description = "The provider request failed for an unknown technical reason."
+
+    if status is not None:
+        if status == 400:
+            code = "PROVIDER_BAD_REQUEST"
+            description = "The provider rejected the request as invalid."
+        elif status == 401:
+            code = "PROVIDER_AUTHENTICATION_FAILED"
+            description = "The provider rejected the configured credentials."
+        elif status == 403:
+            code = "PROVIDER_PERMISSION_DENIED"
+            description = "The provider denied access to this model or request."
+        elif status == 408:
+            code = "PROVIDER_REQUEST_TIMEOUT"
+            description = "The provider timed out while handling the request."
+            retryable = True
+        elif status == 429:
+            code = "PROVIDER_RATE_LIMITED"
+            description = "The provider rate-limited the request."
+            retryable = True
+        elif 500 <= status <= 599:
+            code = "PROVIDER_SERVER_ERROR"
+            description = "The provider reported a temporary server failure."
+            retryable = True
+        elif 400 <= status <= 499:
+            code = "PROVIDER_BAD_REQUEST"
+            description = f"The provider rejected the request with HTTP {status}."
+    elif isinstance(error, httpx.TimeoutException):
+        code = "PROVIDER_REQUEST_TIMEOUT"
+        description = "The provider connection or response timed out."
+        retryable = True
+    elif isinstance(error, httpx.RemoteProtocolError):
+        code = "PROVIDER_INCOMPLETE_STREAM"
+        description = "The provider response stream ended before completion."
+        retryable = True
+    elif isinstance(error, (httpx.InvalidURL, httpx.UnsupportedProtocol)):
+        code = "PROVIDER_CONFIGURATION_ERROR"
+        description = "The configured provider URL or protocol is invalid."
+    elif isinstance(error, httpx.ConnectError):
+        lowered = str(error).casefold()
+        if any(token in lowered for token in ("certificate", "ssl", "tls")):
+            code = "PROVIDER_TLS_ERROR"
+            description = "The provider TLS certificate or trust configuration failed."
+        else:
+            code = "PROVIDER_CONNECTION_FAILED"
+            description = "A connection to the provider could not be established."
+            retryable = True
+    elif isinstance(error, httpx.NetworkError):
+        code = "PROVIDER_CONNECTION_FAILED"
+        description = "The provider connection was interrupted."
+        retryable = True
+    elif isinstance(error, (json.JSONDecodeError, UnicodeDecodeError)):
+        code = "PROVIDER_INCOMPLETE_STREAM"
+        description = "The provider returned an incomplete or invalid response body."
+        retryable = True
+
+    side_effects_possible = bool(tool_call_count)
+    if side_effects_possible:
+        # The runtime performs the final replay-safety decision using actual
+        # tool activity.  Preserve uncertainty rather than claiming safety.
+        retryable = bool(retryable)
+    return BackendResponse(
+        text="",
+        duration_ms=duration_ms,
+        error=str(error),
+        is_success=False,
+        tool_call_count=int(tool_call_count),
+        tool_loop_count=int(tool_loop_count),
+        error_code=code,
+        error_retryable=retryable,
+        http_status=status,
+        provider_request_id=_provider_request_id(
+            response if isinstance(response, httpx.Response) else None
+        )
+        or None,
+        retry_after_s=_retry_after_seconds(
+            response if isinstance(response, httpx.Response) else None
+        ),
+        side_effects_possible=side_effects_possible,
+        stream_metadata={"provider_failure_description": description},
+    )
 
 
 def _assistant_content_text(content: Any) -> str:
@@ -386,8 +507,9 @@ class OpenRouterAdapter(BaseBackend):
         text_chunks: list[str] = []
         # tool_calls_acc: dict[int, dict] indexed by tool call index
         tool_calls_acc: dict[int, dict] = {}
-        finish_reason = "stop"
+        finish_reason = ""
         stream_usage: dict = {}  # usage from final streaming chunk
+        saw_done = False
 
         async with self.client.stream(
             "POST",
@@ -404,6 +526,7 @@ class OpenRouterAdapter(BaseBackend):
                     continue
                 data_str = line[6:].strip()
                 if data_str == "[DONE]":
+                    saw_done = True
                     break
 
                 try:
@@ -482,10 +605,16 @@ class OpenRouterAdapter(BaseBackend):
                     if fn_delta.get("arguments"):
                         acc["function"]["arguments"] += fn_delta["arguments"]
 
+        if not saw_done and not finish_reason:
+            raise httpx.RemoteProtocolError(
+                "provider stream ended without a completion marker"
+            )
         full_text = "".join(text_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
         return _APIResult(
-            text=full_text, tool_calls=tool_calls, finish_reason=finish_reason,
+            text=full_text,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason or "stop",
             prompt_tokens=stream_usage.get("prompt_tokens", 0),
             completion_tokens=stream_usage.get("completion_tokens", 0),
             thinking_tokens=stream_usage.get("thinking_tokens", 0),
@@ -589,7 +718,12 @@ class OpenRouterAdapter(BaseBackend):
             raise
         except Exception as e:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            return BackendResponse(text="", duration_ms=duration_ms, error=str(e), is_success=False)
+            return _backend_failure_response(
+                e,
+                duration_ms=duration_ms,
+                tool_call_count=total_tool_calls,
+                tool_loop_count=tool_loop_count,
+            )
 
     async def shutdown(self):
         if self.client is not None and not getattr(self.client, "is_closed", False):

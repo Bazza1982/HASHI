@@ -10,7 +10,11 @@ import pytest
 
 from adapters.base import BackendResponse, TokenUsage
 from adapters.her_habits import HERHabitStore
-from adapters.her_v2 import HERv2Adapter, HashiStageProvider
+from adapters.her_v2 import (
+    HERv2Adapter,
+    HashiStageProvider,
+    _backend_response_error,
+)
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
     DELIVERY_FINAL,
@@ -29,7 +33,8 @@ from orchestrator.flexible_backend_registry import (
 )
 from orchestrator.her_v2.config import ProviderProfile
 from orchestrator.her_v2.commentary import PackagedCommentary
-from orchestrator.her_v2.interfaces import StageInvocationError
+from orchestrator.her_v2.interfaces import ProviderFailureCode, StageInvocationError
+from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.ledger import ExecutionLedger, LedgerStore
 from orchestrator.her_v2.models import (
     Effort,
@@ -43,6 +48,7 @@ from orchestrator.her_v2.presentation import (
     RenderedRequiredMessage,
     RequiredUserMessage,
 )
+from orchestrator.her_v2.retry import ProviderRetryPolicy, RetryTier
 from orchestrator import runtime_her_dream, runtime_her_habits
 
 
@@ -55,6 +61,61 @@ def _profiles():
         }
         for name in ("lightweight", "triage", "premium", "reviewer", "orchestrator")
     }
+
+
+@pytest.mark.parametrize(
+    ("message", "code", "retryable"),
+    [
+        ("HTTP 400 Bad Request", ProviderFailureCode.PROVIDER_BAD_REQUEST, False),
+        (
+            "HTTP 401 Unauthorized",
+            ProviderFailureCode.PROVIDER_AUTHENTICATION_FAILED,
+            False,
+        ),
+        ("HTTP 403 Forbidden", ProviderFailureCode.PROVIDER_PERMISSION_DENIED, False),
+        ("HTTP 408 Request Timeout", ProviderFailureCode.PROVIDER_REQUEST_TIMEOUT, True),
+        ("HTTP 429 Rate Limited", ProviderFailureCode.PROVIDER_RATE_LIMITED, True),
+        ("HTTP 503 Service Unavailable", ProviderFailureCode.PROVIDER_SERVER_ERROR, True),
+        (
+            "connection reset by peer",
+            ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+            True,
+        ),
+        (
+            "Gemini CLI was idle for 300s with no output",
+            ProviderFailureCode.PROVIDER_REQUEST_TIMEOUT,
+            True,
+        ),
+        (
+            "Codex executable not found",
+            ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+            False,
+        ),
+        (
+            "TLS certificate verification failed",
+            ProviderFailureCode.PROVIDER_TLS_ERROR,
+            False,
+        ),
+        (
+            "Grok CLI returned no answer text",
+            ProviderFailureCode.PROVIDER_EMPTY_RESPONSE,
+            True,
+        ),
+    ],
+)
+def test_untyped_legacy_backend_failures_receive_safe_provider_types(
+    message,
+    code,
+    retryable,
+):
+    failure = _backend_response_error(
+        BackendResponse(text="", duration_ms=1, error=message, is_success=False),
+        fallback="provider failed",
+    )
+
+    assert failure.code is code
+    assert failure.retryable is retryable
+    assert failure.human_description
 
 
 def _agent_config(tmp_path, *, her_v2=None, effort="low"):
@@ -122,6 +183,26 @@ class _DreamProvider(_DirectProvider):
                 reasoning_trace="dream maintenance trace",
             )
         return await super().invoke(profile, request)
+
+
+class _RetryingMaintenanceProvider:
+    def __init__(self):
+        self.requests = []
+
+    async def invoke(self, profile, request):
+        self.requests.append((profile, request))
+        if len(self.requests) == 1:
+            raise StageInvocationError(
+                "temporary maintenance connection failure",
+                code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+                human_description="The provider connection was interrupted.",
+            )
+        return StageResponse(
+            text='{"groups":[]}' if request.stage is Stage.DREAM else '{"actions":[]}',
+            provider=profile.engine,
+            model=profile.model,
+            reasoning_trace="recovered maintenance trace",
+        )
 
 
 class _WorkAndMeditationProvider(_DirectProvider):
@@ -717,6 +798,50 @@ async def test_adapter_supplies_concrete_meditation_service_when_enabled(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stage", [Stage.MEDITATION, Stage.DREAM])
+async def test_background_learning_provider_retries_once_at_tier_two(
+    tmp_path,
+    stage,
+):
+    provider = _RetryingMaintenanceProvider()
+    config = _agent_config(tmp_path, her_v2={"profiles": _profiles()})
+    config._her_v2_stage_provider = provider
+    config._her_v2_retry_policy = ProviderRetryPolicy(
+        tier_timeouts={tier: (1.0, 1.0) for tier in RetryTier}
+    )
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize() is True
+
+    response = await adapter._invoke_maintenance_model(
+        stage,
+        "Maintain the local catalogue.",
+        f"turn-{stage.value}",
+        f"request-{stage.value}",
+        None,
+    )
+
+    assert response.provider_attempt == 2
+    requests = [request for _profile, request in provider.requests]
+    assert [request.attempt for request in requests] == [1, 2]
+    assert [request.retry_tier for request in requests] == ["tier_2", "tier_2"]
+    assert [request.attempt_timeout_s for request in requests] == [1.0, 1.0]
+    assert len({request.retry_invariant_hash for request in requests}) == 1
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "agent" / "her_v2_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert any(
+        row["event"] == "maintenance_provider_retry_scheduled"
+        and row["stage"] == stage.value
+        and row["payload"]["fresh_connection"] is True
+        for row in rows
+    )
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_adapter_runs_durable_meditation_after_completed_turn(tmp_path):
     provider = _WorkAndMeditationProvider()
     raw = {
@@ -1057,6 +1182,49 @@ class _CommentaryManager(_FakeManager):
         return backend
 
 
+class _FlakyPersonaBackend(_FakeBackend):
+    def __init__(self, manager):
+        super().__init__()
+        self.manager = manager
+        self.retry_flag = None
+        self.request_id = ""
+
+    async def generate_response(
+        self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
+    ):
+        del silent, on_stream_event
+        self.prompt = prompt
+        self.request_id = request_id
+        self.retry_flag = is_retry
+        if len(self.manager.backends) == 1:
+            return BackendResponse(
+                text="",
+                duration_ms=1,
+                error="connection reset",
+                is_success=False,
+                error_code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value,
+                error_retryable=True,
+                stream_metadata={
+                    "provider_failure_description": (
+                        "The provider connection was interrupted."
+                    )
+                },
+            )
+        return BackendResponse(
+            text="Captain, the verified result is ready.",
+            duration_ms=1,
+        )
+
+
+class _FlakyPersonaManager(_FakeManager):
+    def create_ephemeral_backend(self, engine, target_model=None):
+        assert engine == "openrouter-api"
+        assert target_model == "configured/model"
+        backend = _FlakyPersonaBackend(self)
+        self.backends.append(backend)
+        return backend
+
+
 class _BaseToolRegistry:
     def __init__(self):
         self.max_loops = 4
@@ -1118,6 +1286,79 @@ def _stage_request(stage, *, allow_tools, allow_side_effects=False):
         context={},
         allow_tools=allow_tools,
         allow_side_effects=allow_side_effects,
+    )
+
+
+@pytest.mark.asyncio
+async def test_persona_packaging_retries_once_with_a_fresh_backend(tmp_path):
+    manager = _FlakyPersonaManager()
+    audit = DurableAuditLog(
+        tmp_path / "persona-audit.jsonl",
+        tmp_path / "persona-audit-fallback.jsonl",
+    )
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        audit_log=audit,
+        workzone_ref=str(tmp_path / "workspace"),
+    )
+    profile = ProviderProfile(
+        "lightweight",
+        "openrouter-api",
+        "configured/model",
+        reasoning="provider-low",
+    )
+    provider.bind_persona_audit_context(
+        "request-persona-retry",
+        turn_id="turn-persona-retry",
+        request_ref="hashi-request:request-persona-retry",
+    )
+
+    rendered = await provider.package_persona_commentary(
+        profile,
+        persona_block="Address the user as Captain.",
+        neutral_commentary="The verified result is ready.",
+        request_id="request-persona-retry",
+    )
+
+    assert rendered == "Captain, the verified result is ready."
+    assert len(manager.backends) == 2
+    assert [backend.retry_flag for backend in manager.backends] == [False, True]
+    assert {backend.request_id for backend in manager.backends} == {
+        "request-persona-retry"
+    }
+    assert all(backend.shutdown_called for backend in manager.backends)
+    assert [backend.config.extra["idle_timeout_sec"] for backend in manager.backends] == [
+        60,
+        180,
+    ]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "persona-audit.jsonl").read_text().splitlines()
+    ]
+    failed = next(
+        row for row in rows if row["event"] == "persona_provider_attempt_failed"
+    )
+    retry = next(
+        row for row in rows if row["event"] == "persona_provider_retry_scheduled"
+    )
+    completed = next(
+        row for row in rows if row["event"] == "persona_provider_attempt_completed"
+    )
+    assert failed["payload"]["error_code"] == (
+        ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value
+    )
+    assert failed["turn_id"] == "turn-persona-retry"
+    assert failed["request_ref"] == "hashi-request:request-persona-retry"
+    assert failed["payload"]["will_retry"] is True
+    assert retry["payload"]["fresh_connection"] is True
+    assert retry["payload"]["same_provider"] is True
+    assert retry["payload"]["same_model"] is True
+    assert retry["payload"]["same_goal"] is True
+    assert retry["payload"]["same_classification"] is True
+    assert retry["payload"]["same_permissions"] is True
+    assert retry["payload"]["same_workzone"] is True
+    assert failed["payload"]["retry_invariant_hash"] == (
+        completed["payload"]["retry_invariant_hash"]
     )
 
 

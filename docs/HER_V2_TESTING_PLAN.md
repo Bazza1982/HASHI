@@ -651,10 +651,13 @@ Required:
 
 - execution is not repeated;
 - evidence remains available;
-- Finalisation is invoked exactly once;
+- Finalisation is invoked exactly twice when an eligible first provider attempt
+  fails and the recovery also fails;
+- both Finalisation attempts receive byte-equivalent immutable Execution
+  evidence and the same invariant hash;
 - no structure-repair or separate Persona model is invoked;
 - invalid or failed Finalisation produces a deterministic local report and
-  technical `ERROR`.
+  technical `ERROR` with the typed code and human-readable description.
 
 ### Journey H: Stop and Steer
 
@@ -737,14 +740,18 @@ across parser, runtime, adapter, and end-to-end suites.
 For a side-effect-authorised Execution response, tests must additionally prove:
 
 - `provider_response_received` and the available reasoning trace are durable before validation;
-- the original Execution provider is invoked exactly once;
+- the original Execution provider is not replayed after a side-effecting or
+  unknown tool starts;
+- a provider fault before tools, or after completed provably read-only tools,
+  receives exactly one recovery attempt;
 - Finalisation receives the complete raw Execution output and original evidence references;
-- malformed but meaningful output can be normalised by one Finalisation call;
+- malformed but meaningful output can be normalised by the combined
+  Finalisation stage without replaying Execution;
 - unusable output reaches Finalisation and then records technical `ERROR`;
 - a valid Execution disposition cannot be changed by Finalisation;
 - neither normalisation nor later recovery automatically replays the side effect.
 
-Stage failure after side-effect-free validation retries should be tested through a parameterised fault harness, with a small number of E2E representatives where downstream behaviour materially differs. Finalisation has a separate one-call failure test.
+Stage failure after side-effect-free validation retries should be tested through a parameterised fault harness, with a small number of E2E representatives where downstream behaviour materially differs. Finalisation has separate recovery-success and recovery-exhaustion tests, each asserting one Execution invocation.
 
 ## 10. Timeout, Retry, and Progress
 
@@ -771,32 +778,45 @@ False progress includes:
 
 Tests must prove that false progress cannot keep a stalled turn alive indefinitely.
 
-### 10.2 No fixed execution ceilings
+### 10.2 Tiered provider-attempt recovery
 
-Tests must prove that Planning, Replanning, Review, retryable side-effect-free
-provider stages, tool loops, and sub-agent execution are not ended by elapsed runtime
-or a fixed attempt/count budget. They must prove:
+Tests must prove the exact Tier-1 `60/180`, Tier-2 `190/300`, and Tier-3
+`300/600` second initial/recovery deadlines and the stage mapping. They must
+also prove malformed/high-volume and large-context promotion, local/CLI Tier-3
+promotion, and exactly one fresh-connection provider recovery.
 
-- retries remain within the current stage;
-- a retryable stage can succeed after more attempts than the retired retry cap;
-- a structured retry receives the prior validation error and a
-  structure-only correction instruction;
-- retry does not change goal or classification;
-- non-retryable failure and no-progress idle expiry choose the correct stage
-  and terminal outcome;
-- Finalisation remains the explicit one-call exception;
+The fault matrix must cover retryable HTTP 408/429/5xx, connection and timeout
+faults, empty responses, incomplete streams, no-response timeout,
+reasoning-only timeout, and no-tool incomplete-stream timeout. It must cover
+non-retryable configuration, HTTP 400/401/403, TLS/URL, audit-persistence, and
+user-stop cases. Every representative verifies the typed code, redacted
+human-readable terminal description, audit record, retry decision, and provider
+request ID/Retry-After metadata when supplied.
+
+Tests must prove:
+
+- provider attempts use an independent activity/deadline tracker and a stalled
+  first attempt cannot consume the recovery attempt's deadline;
+- provider reasoning or text cannot masquerade as user meaningful progress;
+- retry preserves provider, model, goal, classification, role, provider
+  reasoning, permissions, delegated tools, workzone, and plan;
+- a structured correction receives the prior validation error and remains
+  distinct from the one provider-recovery allowance;
+- Finalisation recovery reuses immutable Execution evidence and Execution is
+  invoked exactly once;
+- read-only sub-agents recover once;
+- main Execution recovers only before tool activity or after completed proven
+  read-only tools, and never after unknown or side-effecting activity;
+- Persona packaging uses Tier 1, Meditation and Dream use Tier 2, and local
+  providers promote all three to Tier 3 while existing fallbacks remain intact;
 - stage-local retry is not process-restart recovery.
 
-Required regressions include:
+### 10.3 No fixed total execution ceilings
 
-- meaningful progress continuing beyond every former stage or whole-turn
-  duration succeeds;
-- Finalisation failure is reported after exactly one call without repeating
-  Execution;
-- more than the former sub-agent ceiling is accepted when authority permits;
-- tool use continues beyond the former tool-round ceiling;
-- removed limit fields are rejected by HER v2 configuration rather than
-  silently restored.
+Required regressions prove that successful substantive work can continue beyond
+former whole-turn, tool-round, sub-agent-count, and token ceilings. The tiered
+provider-attempt deadlines do not reintroduce a whole-turn budget. Removed
+legacy generic limit fields remain rejected rather than silently restored.
 
 ## 11. Commentary and User Delivery
 
@@ -832,9 +852,11 @@ Tests must prove:
   change it, while malformed meaningful Execution output is normalised once;
 - combined Finalisation preserves Markdown, code blocks, inline code, links,
   paths, identifiers, numbers, facts, uncertainty, and limitations;
-- invalid or failed Finalisation is not retried and produces technical `ERROR`
-  plus a deterministic local fallback; Triage-clarification renderer failure
-  still preserves its validated question;
+- provider-failed Finalisation receives only its one eligible provider
+  recovery; invalid structured Finalisation follows the separate semantic
+  correction path without replenishing that recovery allowance; exhaustion
+  produces technical `ERROR` plus a deterministic local fallback;
+- Triage-clarification renderer failure still preserves its validated question;
 - Immediate Response receives the same `[persona]` block, never the rest of
   `system_md` or Bridge `/sys` packaging, and its model prompt contains no
   execution, planning, feasibility, or capability assessment task;
@@ -855,7 +877,9 @@ Tests must prove:
 - every ordinary final send writes its real outcome back to the HER v2 audit
   under the same stable `delivery_id` used by the deferred delivery intent;
 - a deferred-lane acceptance is never asserted as an actual transport delivery;
-- reporting failure follows the one-call Finalisation terminal policy.
+- reporting failure follows the single-provider-recovery Finalisation policy
+  while preserving one immutable Execution invocation and evidence set across
+  any transport recovery or structured correction.
 
 Exact wording should not be asserted unless a safety, authority, preservation,
 or protocol requirement depends on it. Commentary, Triage clarification,
