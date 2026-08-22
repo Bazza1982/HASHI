@@ -101,6 +101,50 @@ class RebootManager:
             )
             await asyncio.gather(*[_restore(name) for name in names])
 
+    async def _notify_targeted_reboot_rejection(
+        self,
+        requesting_agent: str | None,
+    ) -> None:
+        if not requesting_agent:
+            return
+        runtime = next(
+            (
+                candidate
+                for candidate in self.kernel.runtimes
+                if candidate.name == requesting_agent
+            ),
+            None,
+        )
+        sender = getattr(runtime, "_send_text", None)
+        primary_chat_id = getattr(runtime, "_primary_chat_id", None)
+        if not callable(sender) or not callable(primary_chat_id):
+            return
+        message = (
+            "⚠️ Targeted reboot not started.\n\n"
+            "The pending code changes include shared public interfaces, so "
+            "this targeted reboot cannot be applied safely while other agents remain "
+            "online. No agents were stopped. Run /reboot max explicitly to "
+            "adopt these changes across HASHI."
+        )
+        try:
+            await asyncio.wait_for(
+                sender(primary_chat_id(), message),
+                timeout=5.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - notification must not bypass the safety gate
+            main_logger.warning(
+                "Hot restart: could not notify requester '%s' about targeted "
+                "reboot rejection: %s",
+                requesting_agent,
+                exc,
+            )
+            bridge_logger.warning(
+                "Hot restart: could not notify requester '%s' about targeted "
+                "reboot rejection: %s",
+                requesting_agent,
+                exc,
+            )
+
     def rebuild_hot_managers(self):
         """Transactionally rebuild hot-reloadable managers after module reload."""
         registry = importlib.import_module("orchestrator.manager_registry")
@@ -271,38 +315,41 @@ class RebootManager:
 
         running_names = [runtime.name for runtime in self.kernel.runtimes]
         targeted_mode = mode in {"min", "number"}
-        targets_are_running = bool(targets) and all(
-            name in running_names for name in targets
-        )
+        non_target_running_names = [
+            name for name in running_names if name not in targets
+        ]
         if (
             targeted_mode
-            and targets_are_running
             and class_interface_changes
-            and targets != running_names
+            and non_target_running_names
         ):
-            original_targets = list(targets)
-            targets = running_names
             change_preview = ", ".join(class_interface_changes[:8])
             if len(class_interface_changes) > 8:
                 change_preview += (
                     f", +{len(class_interface_changes) - 8} more"
                 )
-            promotion_message = (
-                "Hot restart: promoted targeted %s reboot from %s to all running "
-                "agents before reload because loaded class interfaces changed: %s"
+            rejection_message = (
+                "Hot restart: rejected targeted %s reboot for %s before stopping "
+                "any agents because loaded class interfaces changed and %s "
+                "non-target agent(s) are running; explicitly request /reboot max "
+                "to adopt these changes process-wide: %s"
             )
-            main_logger.warning(
-                promotion_message,
+            rejection_args = (
                 mode,
-                original_targets,
+                targets,
+                len(non_target_running_names),
                 change_preview,
             )
-            bridge_logger.warning(
-                promotion_message,
-                mode,
-                original_targets,
-                change_preview,
+            main_logger.warning(rejection_message, *rejection_args)
+            bridge_logger.warning(rejection_message, *rejection_args)
+            await self._notify_targeted_reboot_rejection(requesting_agent)
+            print(
+                "\033[38;5;203m  ✗ targeted reboot rejected — loaded public "
+                "class interfaces changed; no agents were stopped. "
+                "Explicitly run /reboot max to adopt the changes.\033[0m\n",
+                flush=True,
             )
+            return False
 
         main_logger.info("Hot restart: stopping %s agent(s): %s", len(targets), targets)
         bridge_logger.warning(

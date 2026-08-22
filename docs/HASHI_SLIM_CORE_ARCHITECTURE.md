@@ -107,12 +107,15 @@ recovery path for function changes.
 `/reboot min` normally restarts the requesting agent and reloads project code.
 Before stopping any agent, HASHI compares public class members and callable
 signatures declared by the source about to be loaded with the classes currently
-held in memory. If a loaded public class interface changed, the transaction is
-promoted to restart every running agent. Python module dictionaries are
-process-global, so leaving another agent alive across that reload could combine
-a new consumer with an old class instance. Function-body-only changes and
-underscore-private implementation details keep the targeted behavior; Python
-data-model hooks such as `__init__` and `__call__` remain protected.
+held in memory. If a loaded public class interface changed while another Agent
+would remain running, the targeted request is rejected before any Agent is
+stopped. HASHI never widens `/reboot min` or `/reboot N` into an implicit
+`/reboot max`; adopting an interface change process-wide requires an explicit
+`/reboot max`. Python module dictionaries are process-global, so leaving another
+Agent alive across that reload could combine a new consumer with an old class
+instance. Function-body-only changes and underscore-private implementation
+details keep the targeted behavior; Python data-model hooks such as `__init__`
+and `__call__` remain protected.
 
 `/reboot max` restarts all running agents and reloads project code.
 

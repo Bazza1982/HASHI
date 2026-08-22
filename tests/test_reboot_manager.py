@@ -425,8 +425,17 @@ async def test_hot_restart_fails_when_target_does_not_restart_even_if_others_run
 
 
 @pytest.mark.asyncio
-async def test_min_hot_restart_promotes_to_all_running_agents_for_class_abi_change(
+@pytest.mark.parametrize(
+    "restart",
+    [
+        {"mode": "min", "agent_name": "zelda", "agent_number": None},
+        {"mode": "number", "agent_name": "zelda", "agent_number": 3},
+    ],
+)
+async def test_targeted_hot_restart_rejects_class_abi_change_without_widening_scope(
     monkeypatch,
+    capsys,
+    restart,
 ):
     class ConsoleHandler:
         def addFilter(self, _filter):
@@ -442,11 +451,23 @@ async def test_min_hot_restart_promotes_to_all_running_agents_for_class_abi_chan
         async def refresh_hot_services(self):
             self.refreshed = True
 
+    class Runtime:
+        def __init__(self, name, notifications):
+            self.name = name
+            self.notifications = notifications
+
+        def _primary_chat_id(self):
+            return 42
+
+        async def _send_text(self, chat_id, text):
+            self.notifications.append((chat_id, text))
+
     class Kernel:
         def __init__(self):
+            self.notifications = []
             self.runtimes = [
-                SimpleNamespace(name="zelda"),
-                SimpleNamespace(name="sunny"),
+                Runtime("zelda", self.notifications),
+                Runtime("sunny", self.notifications),
             ]
             self.whatsapp = None
             self.global_cfg = SimpleNamespace(workbench_port=18800)
@@ -474,6 +495,9 @@ async def test_min_hot_restart_promotes_to_all_running_agents_for_class_abi_chan
                 None,
             )
 
+        def configured_agent_names(self):
+            return ["zelda", "sunny", "offline"]
+
     kernel = Kernel()
     manager = RebootManager(kernel=kernel, console_handler=ConsoleHandler())
     monkeypatch.setattr(
@@ -487,7 +511,12 @@ async def test_min_hot_restart_promotes_to_all_running_agents_for_class_abi_chan
             "orchestrator.her_v2.config.HERv2Config.profile_for_route (new method)"
         ],
     )
-    monkeypatch.setattr(manager, "reload_project_modules", lambda _names: None)
+    reload_calls = []
+    monkeypatch.setattr(
+        manager,
+        "reload_project_modules",
+        lambda _names: reload_calls.append(True),
+    )
     monkeypatch.setattr(manager, "validate_agent_runtime_contract", lambda: None)
     monkeypatch.setattr(manager, "rebuild_hot_managers", lambda: None)
     monkeypatch.setattr(
@@ -495,18 +524,21 @@ async def test_min_hot_restart_promotes_to_all_running_agents_for_class_abi_chan
         lambda **_kwargs: None,
     )
 
-    result = await manager.hot_restart(
-        {"mode": "min", "agent_name": "zelda", "agent_number": None}
-    )
+    result = await manager.hot_restart(restart)
 
-    assert result is True
-    assert kernel.stop_calls == [
-        ("zelda", "hot-restart:min"),
-        ("sunny", "hot-restart:min"),
-    ]
-    assert kernel.start_calls == ["zelda", "sunny"]
+    assert result is False
+    assert kernel.stop_calls == []
+    assert kernel.start_calls == []
+    assert reload_calls == []
     assert sorted(runtime.name for runtime in kernel.runtimes) == ["sunny", "zelda"]
-    assert kernel.service_manager.refreshed is True
+    assert kernel.service_manager.refreshed is False
+    assert len(kernel.notifications) == 1
+    assert kernel.notifications[0][0] == 42
+    assert "no agents were stopped" in kernel.notifications[0][1].casefold()
+    assert "/reboot max explicitly" in kernel.notifications[0][1].casefold()
+    output = capsys.readouterr().out.casefold()
+    assert "no agents were stopped" in output
+    assert "explicitly run /reboot max" in output
 
 
 @pytest.mark.asyncio
