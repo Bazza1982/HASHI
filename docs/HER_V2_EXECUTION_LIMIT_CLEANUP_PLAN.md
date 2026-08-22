@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed implementation plan; design principles locked, runtime remediation pending |
+| Status | Implemented and verified in source; runtime activation awaits separately authorised `/reboot` |
 | Date | 2026-08-22 |
 | Authority | `HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md` section 3.2.1 |
 | Regression source | `839b10a5` (`Add tiered provider retry recovery to HER v2`) |
@@ -228,3 +228,21 @@ The cleanup is complete only when all of the following are true:
   design invariants; and
 - the functional commit remains unloaded until an explicitly authorised
   `/reboot` activates it.
+
+## 8. Verification record
+
+The source remediation was completed on 2026-08-22 in independently reviewable
+checkpoints:
+
+- `1ee8bbd` removed provider-attempt tiers and elapsed deadlines;
+- `61e4636` removed the implicit foreground-shell timeout and added exact local
+  process-group cleanup; and
+- `43eb6d9` preserved the primary provider failure, recovery decision, and
+  cleanup outcome through Runtime, audit, adapter metadata, and user-visible
+  diagnostics.
+
+The focused and broad deterministic suites passed. The explicitly enabled
+real-wall-clock canary completed one uninterrupted Execution in 601.44 seconds,
+crossing the largest former 600-second attempt boundary before successful
+Finalisation. No `/reboot` or `/restart` was performed as part of implementation
+or verification.

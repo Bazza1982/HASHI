@@ -10,7 +10,7 @@ Execute shell commands on the host Windows 11 machine.
 | Param | Required | Description |
 |-------|----------|-------------|
 | `command` | Yes | Shell command to execute |
-| `timeout` | No | Timeout in seconds (default 30) |
+| `timeout` | No | Optional timeout in seconds for this invocation only; omission means no time limit |
 
 ### file_read
 Read a file's contents.

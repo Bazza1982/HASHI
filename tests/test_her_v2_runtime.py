@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections import defaultdict, deque
 
 import pytest
 
+from orchestrator.her_v2 import runtime as runtime_module
 from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.commentary import RecordingCommentaryPort
 from orchestrator.her_v2.config import HERv2Config
@@ -26,6 +28,7 @@ from orchestrator.her_v2.presentation import (
     RenderedRequiredMessage,
     RequiredUserMessage,
 )
+from orchestrator.her_v2.progress import ProviderActivityTracker
 from orchestrator.her_v2.runtime import HERv2Runtime
 
 
@@ -1700,17 +1703,46 @@ async def test_provider_operations_have_no_elapsed_attempt_deadline(
     observed_wait_timeouts = []
     real_wait = asyncio.wait
 
+    class ControlledClock:
+        now = 0.0
+
+        def __call__(self):
+            return self.now
+
+    clock = ControlledClock()
+    monkeypatch.setattr(
+        runtime_module,
+        "ProviderActivityTracker",
+        lambda: ProviderActivityTracker(clock=clock),
+    )
+
     async def tracked_wait(awaitables, **kwargs):
         observed_wait_timeouts.append(kwargs.get("timeout"))
         return await real_wait(awaitables, **kwargs)
 
     monkeypatch.setattr(asyncio, "wait", tracked_wait)
+    crossed_boundaries = []
+
+    async def execution_across_former_boundaries(request):
+        for boundary in (60, 180, 190, 300, 600, 601):
+            clock.now = float(boundary)
+            crossed_boundaries.append(boundary)
+            request.provider_activity_callback(
+                {
+                    "kind": "progress",
+                    "content": f"work continued after {boundary} seconds",
+                }
+            )
+            await asyncio.sleep(0)
+        return {
+            "disposition": "COMPLETED",
+            "summary": "Completed after every former elapsed boundary.",
+        }
+
     scripts = _initial("SIMPLE_TASK")
     scripts.update(
         {
-            Stage.EXECUTION: [
-                {"disposition": "COMPLETED", "summary": "Completed without a clock."}
-            ],
+            Stage.EXECUTION: [execution_across_former_boundaries],
             Stage.FINALISATION: [{"report": "Completed without a clock."}],
         }
     )
@@ -1726,11 +1758,52 @@ async def test_provider_operations_have_no_elapsed_attempt_deadline(
     )
 
     assert result.terminal_state is TerminalState.COMPLETED, result.error
+    assert crossed_boundaries == [60, 180, 190, 300, 600, 601]
+    assert clock.now == 601
     assert observed_wait_timeouts
     assert all(timeout is None for timeout in observed_wait_timeouts)
     audit_text = (tmp_path / "her-v2" / "audit.jsonl").read_text()
     assert "attempt_timeout_s" not in audit_text
     assert "retry_tier" not in audit_text
+
+
+@pytest.mark.real_wall_clock
+@pytest.mark.skipif(
+    os.environ.get("HASHI_RUN_REAL_WALL_CLOCK_CANARY") != "1",
+    reason="set HASHI_RUN_REAL_WALL_CLOCK_CANARY=1 to run the 601-second canary",
+)
+@pytest.mark.asyncio
+async def test_real_wall_clock_execution_crosses_largest_former_deadline(tmp_path):
+    observed_elapsed = []
+
+    async def execution_after_601_seconds(_request):
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await asyncio.sleep(601)
+        observed_elapsed.append(loop.time() - started)
+        return {
+            "disposition": "COMPLETED",
+            "summary": "Completed beyond the former 600-second boundary.",
+        }
+
+    scripts = _initial("SIMPLE_TASK")
+    scripts.update(
+        {
+            Stage.EXECUTION: [execution_after_601_seconds],
+            Stage.FINALISATION: [
+                {"report": "Completed beyond the former 600-second boundary."}
+            ],
+        }
+    )
+
+    result = await _runtime(tmp_path, ScriptedProvider(scripts)).run_turn(
+        "Run beyond every former provider deadline",
+        "request-real-wall-clock-canary",
+        effort="low",
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED, result.error
+    assert observed_elapsed and observed_elapsed[0] >= 600
 
 
 @pytest.mark.asyncio

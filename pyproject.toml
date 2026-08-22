@@ -160,4 +160,5 @@ markers = [
     "integration: deterministic integration with subprocesses or multiple components",
     "live: requires an explicitly authorized external service or mutable live system",
     "platform: requires a named operating system or platform facility",
+    "real_wall_clock: deliberately crosses a historical real-time execution boundary",
 ]
