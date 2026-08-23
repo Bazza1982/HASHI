@@ -37,6 +37,7 @@ Supported OpenAI fields for this path:
   `parameters`
 - `tool_choice`: `auto`, `none`, `required`, or a named function
 - `parallel_tool_calls`: `true` or `false`
+- `reasoning_effort`: a model-supported request-scoped Codex effort
 - `stream`: `true` or `false`
 - `n`: `1`
 
@@ -49,6 +50,8 @@ Response behavior:
   streaming is not promised.
 - Backend/protocol/isolation failures are explicit errors. HASHI never converts
   a lost tool schema into a plain text completion.
+- The Gateway validates `reasoning_effort` before adapter acquisition and uses
+  it for the ephemeral app-server turn without mutating the pooled default.
 
 Limits:
 

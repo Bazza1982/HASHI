@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from aiohttp.test_utils import TestClient, TestServer
 
 from orchestrator.api_gateway import APIGatewayServer
 from orchestrator.api_gateway_config import (
@@ -108,6 +109,7 @@ class _FakeRequest:
 class _FakePool:
     def __init__(self):
         self.models = []
+        self.reasoning_efforts = []
 
     async def get(self, engine, model):
         self.models.append((engine, model))
@@ -116,8 +118,26 @@ class _FakePool:
     async def update_model(self, engine, model):
         self.models.append(("update", engine, model))
 
-    async def _generate_response(self, prompt, request_id, is_retry=False, silent=True, on_stream_event=None):
-        return SimpleNamespace(is_success=True, text="ok", error=None)
+    async def _generate_response(
+        self,
+        prompt,
+        request_id,
+        is_retry=False,
+        silent=True,
+        on_stream_event=None,
+        reasoning_effort=None,
+    ):
+        self.reasoning_efforts.append(reasoning_effort)
+        return SimpleNamespace(
+            is_success=True,
+            text="ok",
+            error=None,
+            usage=SimpleNamespace(
+                input_tokens=17,
+                output_tokens=3,
+                thinking_tokens=2,
+            ),
+        )
 
 
 class _FakeQuery:
@@ -158,7 +178,124 @@ async def test_api_gateway_uses_default_model_when_request_omits_model(tmp_path)
     assert response.status == 200
     body = json.loads(response.text)
     assert body["model"] == "gpt-5.5"
+    assert body["usage"] == {
+        "prompt_tokens": 17,
+        "completion_tokens": 3,
+        "total_tokens": 20,
+        "completion_tokens_details": {"reasoning_tokens": 2},
+    }
     assert fake_pool.models[0] == ("codex-cli", "gpt-5.5")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "reasoning_effort"),
+    [
+        ("gpt-5.6-luna", "high"),
+        ("gpt-5.6-sol", "max"),
+        ("gpt-5.6-luna", "none"),
+    ],
+)
+async def test_api_gateway_passes_valid_reasoning_effort_to_codex_request(
+    tmp_path, model, reasoning_effort
+):
+    server = APIGatewayServer(
+        _global_config(tmp_path),
+        secrets={},
+        workspace_root=tmp_path / "workspaces",
+    )
+    fake_pool = _FakePool()
+    server._pool = fake_pool
+
+    response = await server.handle_chat_completions(
+        _FakeRequest(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoning_effort": reasoning_effort,
+            }
+        )
+    )
+
+    assert response.status == 200
+    assert fake_pool.reasoning_efforts == [reasoning_effort]
+
+
+@pytest.mark.asyncio
+async def test_api_gateway_streams_backend_usage_with_request_effort(tmp_path):
+    server = APIGatewayServer(
+        _global_config(tmp_path),
+        secrets={},
+        workspace_root=tmp_path / "workspaces",
+    )
+    fake_pool = _FakePool()
+    server._pool = fake_pool
+
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoning_effort": "max",
+                "stream": True,
+            },
+        )
+        raw = await response.text()
+
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in raw.splitlines()
+        if line.startswith("data: {")
+    ]
+    assert response.status == 200
+    assert events[-1]["usage"] == {
+        "prompt_tokens": 17,
+        "completion_tokens": 3,
+        "total_tokens": 20,
+        "completion_tokens_details": {"reasoning_tokens": 2},
+    }
+    assert raw.rstrip().endswith("data: [DONE]")
+    assert fake_pool.reasoning_efforts == ["max"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "reasoning_effort"),
+    [
+        ("gpt-5.6-luna", "minimal"),
+        ("gpt-5.6-luna", "ultra"),
+        ("gpt-5.6-luna", 5),
+        ("gpt-5.6-luna", ""),
+        ("gpt-5.6-terra", "max"),
+    ],
+)
+async def test_api_gateway_rejects_invalid_reasoning_effort_before_adapter_init(
+    tmp_path, model, reasoning_effort
+):
+    server = APIGatewayServer(
+        _global_config(tmp_path),
+        secrets={},
+        workspace_root=tmp_path / "workspaces",
+    )
+    fake_pool = _FakePool()
+    server._pool = fake_pool
+
+    response = await server.handle_chat_completions(
+        _FakeRequest(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoning_effort": reasoning_effort,
+            }
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 400
+    assert payload["error"]["code"] == "invalid_reasoning_effort"
+    assert payload["error"]["param"] == "reasoning_effort"
+    assert fake_pool.models == []
 
 
 @pytest.mark.asyncio

@@ -207,6 +207,7 @@ async def test_external_tools_route_codex_models_through_adapter_contract(tmp_pa
                 "model": "gpt-5.5",
                 "messages": [{"role": "user", "content": "Use the tool"}],
                 "tools": [TOOL_SCHEMA],
+                "reasoning_effort": "high",
             }
         )
     )
@@ -217,6 +218,7 @@ async def test_external_tools_route_codex_models_through_adapter_contract(tmp_pa
     assert payload["choices"][0]["finish_reason"] == "tool_calls"
     assert server._pool.calls[0] == ("codex-cli", "gpt-5.5")
     assert adapter.calls[0]["model"] == "gpt-5.5"
+    assert adapter.calls[0]["request_options"]["reasoning_effort"] == "high"
 
 
 @pytest.mark.asyncio

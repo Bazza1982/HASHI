@@ -275,6 +275,31 @@ def test_codex_resume_is_used_only_in_explicit_session_mode(tmp_path):
     assert adapter._session_id is None
 
 
+def test_codex_command_reasoning_effort_is_request_scoped(tmp_path):
+    adapter = _build_adapter(tmp_path)
+
+    cmd = adapter._build_cmd(
+        "hello",
+        tmp_path / "out.txt",
+        reasoning_effort="max",
+    )
+
+    assert 'model_reasoning_effort="max"' in cmd
+    assert 'model_reasoning_effort="medium"' not in cmd
+    assert adapter.effort == "medium"
+
+
+def test_codex_command_rejects_unknown_request_reasoning_effort(tmp_path):
+    adapter = _build_adapter(tmp_path)
+
+    with pytest.raises(ValueError, match="Codex reasoning_effort"):
+        adapter._build_cmd(
+            "hello",
+            tmp_path / "out.txt",
+            reasoning_effort="ultra",
+        )
+
+
 @pytest.mark.asyncio
 async def test_codex_external_tools_refresh_mcp_inventory_each_request(
     tmp_path, monkeypatch
@@ -283,6 +308,7 @@ async def test_codex_external_tools_refresh_mcp_inventory_each_request(
     inventories = [("first",), ("first", "second")]
     discovered = []
     bridge_inventories = []
+    bridge_efforts = []
 
     async def discover():
         value = inventories[len(discovered)]
@@ -292,6 +318,7 @@ async def test_codex_external_tools_refresh_mcp_inventory_each_request(
     class _Bridge:
         def __init__(self, **kwargs):
             bridge_inventories.append(kwargs["disabled_mcp_servers"])
+            bridge_efforts.append(kwargs["effort"])
 
         async def run(self, *_args, **_kwargs):
             return BackendResponse(text="done", duration_ms=1)
@@ -299,14 +326,17 @@ async def test_codex_external_tools_refresh_mcp_inventory_each_request(
     monkeypatch.setattr(adapter, "_discover_mcp_servers", discover)
     monkeypatch.setattr("adapters.codex_cli.CodexAppServerToolBridge", _Bridge)
 
-    for request_id in ("req-one", "req-two"):
+    for request_id, effort in (("req-one", "high"), ("req-two", "max")):
         response = await adapter.generate_external_tool_response(
             [{"role": "user", "content": "hello"}],
             [],
             request_id,
             model="gpt-5.6-luna",
+            request_options={"reasoning_effort": effort},
         )
         assert response.is_success is True
 
     assert discovered == inventories
     assert bridge_inventories == inventories
+    assert bridge_efforts == ["high", "max"]
+    assert adapter.effort == "medium"

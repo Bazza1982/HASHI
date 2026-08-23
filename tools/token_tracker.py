@@ -56,6 +56,10 @@ PRICING: dict[str, dict[str, float]] = {
     "gpt-5.3-codex":            {"input": 1.75,  "cached": 0.175, "output": 14.00},
     "gpt-5.4":                  {"input": 2.50,  "cached": 0.25,  "output": 15.00},
     "gpt-5.4-mini":             {"input": 0.75,  "cached": 0.075, "output": 4.50},
+    # OpenRouter (2026-08-23). GPT-5.6 uses higher rates only when an
+    # individual provider call exceeds 272K prompt tokens; see PRICING_TIERS.
+    "gpt-5.6-luna":             {"input": 0.20,  "cached": 0.02,  "output": 1.20},
+    "gpt-5.6-sol":              {"input": 2.00,  "cached": 0.20,  "output": 10.00},
     # CLI fallback (treated as claude-sonnet-4-6 equivalent)
     "default":                  {"input": 3.00,  "cached": 0.30,  "output": 15.00},
 }
@@ -67,6 +71,12 @@ PRICING_TIERS: dict[str, tuple[tuple[int, dict[str, float]], ...]] = {
     "qwen/qwen3.7-flash": (
         (32_000, {"input": 0.10, "cached": 0.02, "output": 0.40}),
         (256_000, {"input": 0.20, "cached": 0.04, "output": 0.80}),
+    ),
+    "gpt-5.6-luna": (
+        (272_001, {"input": 0.40, "cached": 0.04, "output": 1.80}),
+    ),
+    "gpt-5.6-sol": (
+        (272_001, {"input": 4.00, "cached": 0.40, "output": 15.00}),
     ),
 }
 

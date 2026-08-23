@@ -65,11 +65,12 @@ BACKEND_REGISTRY: dict[str, dict] = {
         ],
         "default_model": "gpt-5.4",
         "efforts": ["low", "medium", "high", "xhigh"],
-        # GPT-5.6 Sol is the only Codex model currently documented with the
-        # deeper `max` reasoning tier. Keep this model-specific so the UI
-        # never offers an unverified effort to Terra or Luna.
+        # Current app-server capability probes prove the full set below for
+        # these two HASHI gateway models. Keep the override model-specific so
+        # unverified Codex variants do not inherit `none` or `max`.
         "model_efforts": {
-            "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max"],
+            "gpt-5.6-luna": ["none", "low", "medium", "high", "xhigh", "max"],
+            "gpt-5.6-sol": ["none", "low", "medium", "high", "xhigh", "max"],
         },
         "default_effort": "medium",
         "secret_keys": ["codex-cli_key"],
@@ -190,8 +191,8 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "default_model": "gpt-5.6-luna",
         "fast_model": "gpt-5.6-luna",
         "pro_model": "gpt-5.6-sol",
-        "efforts": [],
-        "default_effort": None,
+        "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+        "default_effort": "medium",
         "secret_keys": [],
     },
 }

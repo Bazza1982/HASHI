@@ -6,16 +6,31 @@ import pytest
 from adapters.hashi_api import HashiApiAdapter
 from adapters.openrouter_api import _APIResult
 from adapters.registry import get_backend_class
-from orchestrator.flexible_backend_registry import get_available_models
+from orchestrator.flexible_backend_registry import (
+    get_available_efforts,
+    get_available_models,
+)
 
 
-def _adapter(tmp_path, *, base_url="http://gateway.invalid/v1"):
+def _adapter(
+    tmp_path,
+    *,
+    base_url="http://gateway.invalid/v1",
+    model="gpt-5.6-luna",
+    effort=None,
+    provider_reasoning=None,
+):
+    extra = {}
+    if effort is not None:
+        extra["effort"] = effort
+    if provider_reasoning is not None:
+        extra["provider_reasoning"] = provider_reasoning
     config = SimpleNamespace(
         name="arale",
-        model="gpt-5.6-luna",
+        model=model,
         workspace_dir=tmp_path,
         system_md=None,
-        extra={},
+        extra=extra,
     )
     global_config = SimpleNamespace(
         her_providers={
@@ -23,7 +38,7 @@ def _adapter(tmp_path, *, base_url="http://gateway.invalid/v1"):
                 "hashi": {
                     "engine": "hashi-api",
                     "base_url": base_url,
-                    "status": "stable",
+                    "status": "provisional",
                 }
             }
         }
@@ -39,6 +54,45 @@ def test_hashi_api_is_registered_with_concrete_models():
         "gpt-5.6-luna",
         "gpt-5.6-sol",
     ]
+    assert get_available_efforts("hashi-api", "gpt-5.6-luna") == [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("model", "configured", "expected"),
+    [
+        ("gpt-5.6-luna", "high", "high"),
+        ("gpt-5.6-sol", "max", "max"),
+        ("gpt-5.6-luna", "off", "none"),
+    ],
+)
+def test_hashi_api_sends_gateway_reasoning_effort_not_openrouter_reasoning(
+    tmp_path, model, configured, expected
+):
+    adapter = _adapter(
+        tmp_path,
+        model=model,
+        effort="low",
+        provider_reasoning=configured,
+    )
+
+    payload = adapter._build_payload([{"role": "user", "content": "hello"}])
+
+    assert payload["reasoning_effort"] == expected
+    assert "reasoning" not in payload
+
+
+def test_hashi_api_rejects_unknown_reasoning_effort_before_http(tmp_path):
+    adapter = _adapter(tmp_path, provider_reasoning="ultra")
+
+    with pytest.raises(ValueError, match="HASHI reasoning effort"):
+        adapter._build_payload([{"role": "user", "content": "hello"}])
 
 
 @pytest.mark.asyncio

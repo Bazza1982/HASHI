@@ -4,6 +4,7 @@ import json
 import time
 import asyncio
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 import adapters.stream_events as stream_event_types
@@ -14,6 +15,10 @@ from adapters.stream_events import (
     StreamCallback, StreamEvent,
     KIND_TOOL_END,
     KIND_FILE_EDIT, KIND_SHELL_EXEC, KIND_PROGRESS,
+)
+
+_CODEX_REQUEST_REASONING_EFFORTS = frozenset(
+    {"none", "low", "medium", "high", "xhigh", "max"}
 )
 
 
@@ -141,6 +146,31 @@ class CodexCLIAdapter(BaseBackend):
         """Codex app-server dynamic tools back caller-owned function calls."""
         return bool(str(model or self.config.model or "").strip())
 
+    def _request_reasoning_effort(
+        self,
+        *,
+        request_options: Mapping | None = None,
+        reasoning_effort: str | None = None,
+    ) -> str | None:
+        """Resolve one request without mutating the pooled adapter default."""
+
+        configured = reasoning_effort
+        if configured is None and isinstance(request_options, Mapping):
+            configured = request_options.get("reasoning_effort")
+        if configured is None:
+            configured = self.effort
+        if configured is None:
+            return None
+        if not isinstance(configured, str) or not configured.strip():
+            raise ValueError("Codex reasoning_effort must be a non-empty string")
+        normalized = configured.strip().casefold()
+        if normalized not in _CODEX_REQUEST_REASONING_EFFORTS:
+            raise ValueError(
+                "Codex reasoning_effort must be one of: "
+                + ", ".join(sorted(_CODEX_REQUEST_REASONING_EFFORTS))
+            )
+        return normalized
+
     async def generate_external_tool_response(
         self,
         messages: list[dict],
@@ -155,7 +185,9 @@ class CodexCLIAdapter(BaseBackend):
         model: str | None = None,
     ) -> BackendResponse:
         """Capture one Codex dynamic-tool batch without executing caller tools."""
-        del request_options
+        selected_effort = self._request_reasoning_effort(
+            request_options=request_options,
+        )
         try:
             # Refresh on every request so an MCP server added after adapter
             # initialization can never escape the isolated tool-call boundary.
@@ -183,7 +215,7 @@ class CodexCLIAdapter(BaseBackend):
         bridge = CodexAppServerToolBridge(
             command=self.cmd_base,
             model=selected_model,
-            effort=self.effort,
+            effort=selected_effort or "medium",
             idle_timeout_sec=self.IDLE_TIMEOUT_SEC,
             disabled_mcp_servers=self._external_mcp_server_names,
             logger=self.logger,
@@ -370,7 +402,13 @@ class CodexCLIAdapter(BaseBackend):
         self._emit_stream_event(se, on_stream_event)
         return pending_agent_message
 
-    def _build_cmd(self, prompt_arg: str, output_path: Path) -> list[str]:
+    def _build_cmd(
+        self,
+        prompt_arg: str,
+        output_path: Path,
+        *,
+        reasoning_effort: str | None = None,
+    ) -> list[str]:
         """Build the codex exec command. Uses 'resume' sub-command if a session exists.
 
         Note: 'codex exec resume' supports fewer flags than 'codex exec' — notably
@@ -385,8 +423,11 @@ class CodexCLIAdapter(BaseBackend):
         ]
         if self.config.model and self.config.model != "default":
             base_flags += ["--model", self.config.model]
-        if self.effort:
-            base_flags += ["-c", f'model_reasoning_effort="{self.effort}"']
+        selected_effort = self._request_reasoning_effort(
+            reasoning_effort=reasoning_effort,
+        )
+        if selected_effort:
+            base_flags += ["-c", f'model_reasoning_effort="{selected_effort}"']
 
         if self._session_mode and self._session_id:
             # Resume existing session — access root already set in session, no --add-dir needed
@@ -436,6 +477,7 @@ class CodexCLIAdapter(BaseBackend):
     async def generate_response(
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
         on_stream_event: StreamCallback = None,
+        reasoning_effort: str | None = None,
     ) -> BackendResponse:
         # Reset per-request usage tracking
         self._last_usage = None
@@ -457,7 +499,11 @@ class CodexCLIAdapter(BaseBackend):
                 f"Prompt for {request_id} requires stdin transport; sending full prompt via stdin."
             )
 
-        cmd = self._build_cmd(prompt_arg, output_path)
+        cmd = self._build_cmd(
+            prompt_arg,
+            output_path,
+            reasoning_effort=reasoning_effort,
+        )
         session_mode = "resume" if self._session_id else "new"
         effective_workdir = self.effective_workdir
         stdout_lines: list[str] = []

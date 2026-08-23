@@ -40,6 +40,12 @@ from adapters.stream_events import (
 )
 
 _DEFAULT_HASHI_API_BASE_URL = "http://10.255.255.254:18801/v1"
+_HASHI_REASONING_EFFORTS = frozenset(
+    {"none", "low", "medium", "high", "xhigh", "max"}
+)
+_HASHI_REASONING_DISABLED_VALUES = frozenset(
+    {"off", "false", "0", "disabled"}
+)
 
 
 def _provider_base_url(global_config: Any) -> str:
@@ -74,12 +80,52 @@ class HashiApiAdapter(OpenRouterAdapter):
         super().__init__(agent_config, global_config, api_key)
         self.logger = logging.getLogger(f"Backend.HashiApi.{self.config.name}")
         extra = getattr(self.config, "extra", None) or {}
+        self.effort = str(extra.get("effort") or "medium").strip().casefold()
         configured = str(
             extra.get("hashi_api_url")
             or extra.get("base_url")
             or _provider_base_url(global_config)
         ).strip().rstrip("/")
         self.hashi_url = f"{configured}/chat/completions"
+
+    def _hashi_reasoning_effort(self) -> str:
+        """Resolve provider reasoning without losing HER's request-time override."""
+
+        extra = dict(getattr(self.config, "extra", None) or {})
+        configured = extra.get("provider_reasoning")
+        if configured is None:
+            configured = extra.get("reasoning_effort")
+        if configured is None and self.reasoning_enabled is False:
+            configured = "none"
+        if configured is None:
+            configured = self.effort or extra.get("effort") or "medium"
+
+        normalized = str(configured).strip().casefold()
+        if normalized in _HASHI_REASONING_DISABLED_VALUES:
+            normalized = "none"
+        if normalized not in _HASHI_REASONING_EFFORTS:
+            raise ValueError(
+                "HASHI reasoning effort must be one of: "
+                + ", ".join(sorted(_HASHI_REASONING_EFFORTS))
+            )
+        return normalized
+
+    def _build_payload(
+        self,
+        messages: list[dict],
+        use_streaming: bool = False,
+        tool_tiers: list[str] | None = ...,
+    ) -> dict:
+        payload = super()._build_payload(
+            messages,
+            use_streaming=use_streaming,
+            tool_tiers=tool_tiers,
+        )
+        # OpenRouter's nested ``reasoning`` object is not part of HASHI's
+        # Gateway contract. Send one request-scoped Codex effort instead.
+        payload.pop("reasoning", None)
+        payload["reasoning_effort"] = self._hashi_reasoning_effort()
+        return payload
 
     def _hashi_headers(self) -> dict:
         return {"Content-Type": "application/json"}

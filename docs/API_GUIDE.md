@@ -283,6 +283,17 @@ returns more than one call. In streaming mode, the gateway emits each complete
 tool call in `delta.tool_calls` before the terminal `tool_calls` finish reason;
 it does not currently stream partial JSON argument fragments.
 
+Codex requests may also include a top-level `reasoning_effort`. HASHI validates
+the value against the selected model before acquiring a pooled adapter and
+applies it only to that request, so concurrent clients cannot overwrite one
+another's effort. Current live-probed Luna and Sol values are `none`, `low`,
+`medium`, `high`, `xhigh`, and `max`. Invalid or unverified model/value pairs
+return `invalid_reasoning_effort` instead of silently falling back.
+
+For both synchronous and streaming Codex responses, HASHI returns the
+backend-reported token usage. Streaming places it on the terminal completion
+chunk; clients without provider usage retain the legacy text estimate.
+
 The gateway never executes these caller-owned tools. The client is responsible
 for executing each function and sending the next request with the assistant
 `tool_calls` message and matching `role: "tool"` / `tool_call_id` result.

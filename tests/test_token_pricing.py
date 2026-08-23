@@ -48,6 +48,44 @@ def test_glm53_uses_openrouter_prices():
     assert calc_cost(1_000_000, 1_000_000, "z-ai/glm-5.3") == pytest.approx(5.8)
 
 
+@pytest.mark.parametrize(
+    ("model", "base", "large_prompt"),
+    [
+        (
+            "gpt-5.6-luna",
+            {"input": 0.20, "cached": 0.02, "output": 1.20},
+            {"input": 0.40, "cached": 0.04, "output": 1.80},
+        ),
+        (
+            "gpt-5.6-sol",
+            {"input": 2.00, "cached": 0.20, "output": 10.00},
+            {"input": 4.00, "cached": 0.40, "output": 15.00},
+        ),
+    ],
+)
+def test_gpt56_openrouter_prices_switch_only_above_272k(
+    model, base, large_prompt
+):
+    assert get_price(model, input_tokens=272_000) == base
+    assert get_price(model, input_tokens=272_001) == large_prompt
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gpt-5.6-luna", 0.102),
+        ("gpt-5.6-sol", 0.99),
+    ],
+)
+def test_gpt56_large_prompt_cost_uses_matching_cached_rate(model, expected):
+    assert calc_cost(
+        300_000,
+        10_000,
+        model,
+        cached_tokens=100_000,
+    ) == pytest.approx(expected)
+
+
 def test_provider_reasoning_tokens_are_not_charged_twice():
     assert calc_cost(
         1_000,

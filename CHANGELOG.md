@@ -51,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **HASHI provider pricing and Codex reasoning propagation** — added the
+  OpenRouter Luna/Sol base and over-272K prompt pricing tiers used by `/token`,
+  declared the provider's live-probed effort levels, and now translates HER
+  `off` to Codex `none` while preserving request-scoped `high`/`max` through
+  both text and caller-tool Gateway paths. Sync and streaming Gateway responses
+  now preserve backend-reported token and reasoning usage for accurate pricing.
+  Invalid effort/model pairs fail before adapter acquisition instead of
+  silently using the pooled default.
 - **Codex caller-tool name collisions** — caller-owned function names are now
   deterministically aliased into a HASHI-only `dynamicTools` namespace and
   mapped back at the OpenAI API boundary. Reserved Codex names such as

@@ -179,14 +179,19 @@ def test_instance_configured_provider_can_create_her_ephemeral_backend(tmp_path)
     manager = _manager(tmp_path)
     manager.global_config.her_providers["providers"]["hashi"] = {
         "base_url": "http://127.0.0.1:18801/v1",
-        "status": "stable",
+        "status": "provisional",
     }
+
+    option = manager._her_v2_provider_option("hashi")
 
     backend = manager.create_ephemeral_backend(
         "hashi-api",
         target_model="gpt-5.6-luna",
     )
 
+    assert option is not None
+    assert option["status"] == "provisional"
+    assert option["available"] is True
     assert backend.config.engine == "hashi-api"
     assert backend.config.model == "gpt-5.6-luna"
     assert backend.hashi_url == "http://127.0.0.1:18801/v1/chat/completions"

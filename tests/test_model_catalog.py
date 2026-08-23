@@ -37,12 +37,24 @@ def test_codex_gpt56_variants_are_available_in_flex_backend_registry():
     assert "gpt-5.6" not in models
 
 
-def test_codex_gpt56_sol_exposes_max_effort_without_offering_it_to_other_variants():
-    assert get_available_efforts("codex-cli", "gpt-5.6-sol") == ["low", "medium", "high", "xhigh", "max"]
+def test_codex_gateway_models_expose_live_probed_reasoning_efforts():
+    expected = ["none", "low", "medium", "high", "xhigh", "max"]
+    assert get_available_efforts("codex-cli", "gpt-5.6-sol") == expected
+    assert get_available_efforts("codex-cli", "gpt-5.6-luna") == expected
     assert get_available_efforts("codex-cli", "gpt-5.6-terra") == ["low", "medium", "high", "xhigh"]
-    assert get_available_efforts("codex-cli", "gpt-5.6-luna") == ["low", "medium", "high", "xhigh"]
+    assert normalize_effort("codex-cli", "none", "gpt-5.6-luna") == "none"
+    assert normalize_effort("codex-cli", "max", "gpt-5.6-luna") == "max"
     assert normalize_effort("codex-cli", "max", "gpt-5.6-sol") == "max"
     assert normalize_effort("codex-cli", "max", "gpt-5.6-terra") == "medium"
+
+
+def test_hashi_api_declares_reasoning_efforts_for_both_gateway_models():
+    expected = ["none", "low", "medium", "high", "xhigh", "max"]
+    for model in ("gpt-5.6-luna", "gpt-5.6-sol"):
+        assert get_available_efforts("hashi-api", model) == expected
+        assert normalize_effort("hashi-api", None, model) == "medium"
+        assert normalize_effort("hashi-api", "high", model) == "high"
+        assert normalize_effort("hashi-api", "max", model) == "max"
 
 
 def test_current_grok_cli_models_are_available_to_flex_backend_registry():

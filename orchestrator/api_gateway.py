@@ -45,6 +45,7 @@ from orchestrator.model_catalog import (
 )
 from orchestrator.api_gateway_config import load_api_gateway_config
 from orchestrator.api_gateway_preflight import check_gateway_engines
+from orchestrator.flexible_backend_registry import get_available_efforts
 from adapters.stream_events import StreamEvent, KIND_TEXT_DELTA
 
 logger = logging.getLogger("BridgeU.APIGateway")
@@ -171,6 +172,37 @@ def _external_tool_error(
         },
         status=status,
     )
+
+
+def _validate_reasoning_effort(
+    body: dict[str, Any],
+    *,
+    engine: str,
+    model: str,
+) -> tuple[str | None, web.Response | None]:
+    """Validate a request-scoped Codex effort before acquiring an adapter."""
+
+    raw = body.get("reasoning_effort")
+    if raw is None or engine != "codex-cli":
+        return None, None
+    if not isinstance(raw, str) or not raw.strip():
+        return None, _external_tool_error(
+            "reasoning_effort must be a non-empty string",
+            code="invalid_reasoning_effort",
+            param="reasoning_effort",
+        )
+
+    normalized = raw.strip().casefold()
+    allowed = get_available_efforts(engine, model)
+    if normalized not in allowed:
+        supported = ", ".join(allowed) or "none"
+        return None, _external_tool_error(
+            f"reasoning_effort '{normalized}' is not supported by model "
+            f"'{model}'; supported values: {supported}",
+            code="invalid_reasoning_effort",
+            param="reasoning_effort",
+        )
+    return normalized, None
 
 
 def _validate_external_tool_request(
@@ -641,6 +673,18 @@ class APIGatewayServer:
         stream: bool = bool(body.get("stream", False))
         external_tool_mode = _uses_external_tool_protocol(body, messages)
 
+        reasoning_effort, reasoning_error = _validate_reasoning_effort(
+            body,
+            engine=engine,
+            model=model,
+        )
+        if reasoning_error is not None:
+            return reasoning_error
+        if reasoning_effort is not None:
+            # External tool adapters consume the complete request body. Store
+            # the normalized value so both text and tool paths see one value.
+            body["reasoning_effort"] = reasoning_effort
+
         external_tools: list[dict] = []
         if external_tool_mode:
             if engine not in _EXTERNAL_TOOL_ENGINES:
@@ -749,11 +793,26 @@ class APIGatewayServer:
 
         if stream:
             return await self._handle_streaming(
-                adapter, prompt, request_id, model, session_id, messages, t_start, request
+                adapter,
+                prompt,
+                request_id,
+                model,
+                session_id,
+                messages,
+                t_start,
+                request,
+                reasoning_effort=reasoning_effort,
             )
         else:
             return await self._handle_sync(
-                adapter, prompt, request_id, model, session_id, messages, t_start
+                adapter,
+                prompt,
+                request_id,
+                model,
+                session_id,
+                messages,
+                t_start,
+                reasoning_effort=reasoning_effort,
             )
 
     def _xai_base_url(self) -> str:
@@ -885,12 +944,32 @@ class APIGatewayServer:
         return reason or "stop"
 
     @staticmethod
-    def _external_usage(response) -> dict[str, int]:
+    def _external_usage(response) -> dict[str, Any]:
         usage = getattr(response, "usage", None)
         if usage is None:
             return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         prompt_tokens = int(getattr(usage, "input_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        payload: dict[str, Any] = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+        thinking_tokens = int(getattr(usage, "thinking_tokens", 0) or 0)
+        if thinking_tokens:
+            payload["completion_tokens_details"] = {
+                "reasoning_tokens": thinking_tokens,
+            }
+        return payload
+
+    @classmethod
+    def _text_usage(cls, response, prompt: str, text: str) -> dict[str, Any]:
+        """Prefer backend-reported usage, with the legacy estimate as fallback."""
+
+        if getattr(response, "usage", None) is not None:
+            return cls._external_usage(response)
+        prompt_tokens = len(prompt.split())
+        completion_tokens = len(text.split())
         return {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -1104,10 +1183,18 @@ class APIGatewayServer:
         session_id: str | None,
         messages: list[dict],
         t_start: float,
+        reasoning_effort: str | None = None,
     ) -> web.Response:
         try:
+            request_options = {}
+            if reasoning_effort is not None:
+                request_options["reasoning_effort"] = reasoning_effort
             response = await adapter.generate_response(
-                prompt, request_id, is_retry=False, silent=True
+                prompt,
+                request_id,
+                is_retry=False,
+                silent=True,
+                **request_options,
             )
         except Exception as e:
             logger.error(f"Backend error for {request_id}: {e}")
@@ -1139,11 +1226,7 @@ class APIGatewayServer:
                     "finish_reason": "stop",
                 }
             ],
-            "usage": {
-                "prompt_tokens": len(prompt.split()),
-                "completion_tokens": len(text.split()),
-                "total_tokens": len(prompt.split()) + len(text.split()),
-            },
+            "usage": self._text_usage(response, prompt, text),
         }
         return web.json_response(payload)
 
@@ -1159,6 +1242,7 @@ class APIGatewayServer:
         messages: list[dict],
         t_start: float,
         request: web.Request,
+        reasoning_effort: str | None = None,
     ) -> web.StreamResponse:
         resp = web.StreamResponse(
             status=200,
@@ -1199,9 +1283,13 @@ class APIGatewayServer:
                     pass
 
         try:
+            request_options = {}
+            if reasoning_effort is not None:
+                request_options["reasoning_effort"] = reasoning_effort
             response = await adapter.generate_response(
                 prompt, request_id, is_retry=False, silent=True,
                 on_stream_event=on_event,
+                **request_options,
             )
         except Exception as e:
             logger.error(f"Streaming backend error for {request_id}: {e}")
@@ -1249,6 +1337,7 @@ class APIGatewayServer:
             "created": int(t_start),
             "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": self._text_usage(response, prompt, final_text),
         }
         try:
             await resp.write(f"data: {json.dumps(final_chunk)}\n\n".encode())
