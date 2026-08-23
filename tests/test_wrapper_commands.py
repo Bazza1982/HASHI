@@ -1555,8 +1555,9 @@ async def test_her_v2_compact_typed_and_button_controls_are_independent(tmp_path
     update, context = _update(["compact", "status"])
     await FlexibleAgentRuntime.cmd_model(runtime, update, context)
     assert "HASHI Context Compact" in messages[-1]
-    assert "inherit_pro" in messages[-1]
-    assert "deepseek-api / deepseek-v4-pro" in messages[-1]
+    assert "inherit_quick" in messages[-1]
+    assert "deepseek-api / deepseek-v4-flash" in messages[-1]
+    assert "HER effort</b> · <code>high" in messages[-1]
 
     update, edits, answers = _callback_update("her_model_compact_mode:off")
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
@@ -1567,35 +1568,24 @@ async def test_her_v2_compact_typed_and_button_controls_are_independent(tmp_path
     assert manager.get_her_v2_configuration().to_dict() == before
 
 
-def test_explicit_compact_route_survives_main_provider_change_and_revalidates(tmp_path):
-    from orchestrator.context_compaction import (
-        configure_route,
-        load_route_config,
-        resolve_compact_route,
-    )
+def test_compact_route_follows_quick_target_after_provider_change(tmp_path):
+    from orchestrator.context_compaction import resolve_compact_route
 
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
-    configure_route(
-        runtime,
-        mode="explicit",
-        provider="deepseek-api",
-        model="deepseek-v4-pro",
-        reasoning="high",
-    )
 
+    before = resolve_compact_route(runtime)
     manager.apply_her_v2_configuration(
         manager.prepare_her_v2_provider("openrouter")
     )
+    after = resolve_compact_route(runtime)
 
-    persisted = load_route_config(runtime)
-    resolved = resolve_compact_route(runtime)
-    assert persisted.provider == "deepseek-api"
-    assert persisted.model == "deepseek-v4-pro"
-    assert persisted.cross_provider_confirmed is False
-    assert resolved.crosses_provider is True
-    assert resolved.eligible is False
-    assert "confirmation is absent" in resolved.lock_reason
+    assert before.provider == "deepseek-api"
+    assert before.model == "deepseek-v4-flash"
+    assert after.provider == manager.get_her_v2_configuration().fast_provider
+    assert after.model == manager.get_her_v2_configuration().fast_model
+    assert after.her_effort == "high"
+    assert after.crosses_provider is False
 
 
 @pytest.mark.asyncio

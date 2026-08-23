@@ -5,10 +5,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Sequence
+
+from orchestrator.multimodal_contract import (
+    attachment_manifest,
+    normalize_request_content,
+)
 
 from .audit import AuditPersistenceError, DurableAuditLog
 from .commentary import CommentaryPort, NullCommentaryPort
@@ -89,6 +95,11 @@ class _TurnState:
     effort: Effort
     ledger: ExecutionLedger
     control: TurnControl
+    request_content: Mapping[str, Any] | None = None
+    attachment_manifest: tuple[Mapping[str, Any], ...] = ()
+    media_routing_by_stage: dict[str, list[Mapping[str, Any]]] = field(
+        default_factory=dict
+    )
     progress: ProgressTracker = field(default_factory=ProgressTracker)
     deliveries: list[DeliveryRecord] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
@@ -114,6 +125,7 @@ class _TurnState:
     terminal_failure: StageInvocationError | None = None
     last_foreground_cleanup: Mapping[str, Any] = field(default_factory=dict)
     last_execution_invocation_id: str = ""
+    execution_elapsed_s: float = 0.0
     late_immediate_source_task: asyncio.Task | None = None
     late_immediate_delivery_task: asyncio.Task | None = None
 
@@ -165,6 +177,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         *,
         effort: Effort | str = Effort.MEDIUM,
         turn_id: str | None = None,
+        request_content: Mapping[str, Any] | None = None,
     ) -> TurnResult:
         prompt = str(request or "").strip()
         if not prompt:
@@ -175,6 +188,8 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         goal_ref = "sha256:" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         ledger = ExecutionLedger(identity, request_ref, goal_ref)
         control = TurnControl(identity)
+        normalized_request_content = normalize_request_content(request_content)
+        manifest = attachment_manifest(normalized_request_content)
         state = _TurnState(
             request=prompt,
             request_ref=request_ref,
@@ -182,6 +197,8 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             effort=effort_value,
             ledger=ledger,
             control=control,
+            request_content=normalized_request_content,
+            attachment_manifest=manifest,
         )
         self.ledger_store.save(ledger)
         self._controls[identity] = control
@@ -282,7 +299,18 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             role="primary",
             event="request_received",
             event_id=f"{state.ledger.turn_id}:request",
-            payload={"request": state.request, "effort": state.effort.value},
+            payload={
+                "request": state.request,
+                "effort": state.effort.value,
+                "request_content_version": (
+                    state.request_content.get("version")
+                    if isinstance(state.request_content, Mapping)
+                    else None
+                ),
+                "attachment_manifest": [
+                    dict(item) for item in state.attachment_manifest
+                ],
+            },
         )
         state.ledger.add_log_ref(ref)
         self.ledger_store.save(state.ledger)
@@ -350,6 +378,62 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
 
         _triage_response, triage = triage_pair
         assert isinstance(triage, TriageDecision)
+
+        if (
+            triage.classification is TriageClassification.DIRECT_RESPONSE
+            and state.attachment_manifest
+        ):
+            if immediate_pair is None and immediate_error is None:
+                await consume_immediate()
+
+            required_ids = {
+                str(item.get("attachment_id") or "")
+                for item in state.attachment_manifest
+            }
+
+            def native_ids(response: StageResponse | None) -> set[str]:
+                if response is None:
+                    return set()
+                return {
+                    str(item.get("attachment_id") or "")
+                    for item in response.media_routing
+                    if str(item.get("route") or "") == "native"
+                }
+
+            immediate_response = (
+                immediate_pair[0] if immediate_pair is not None else None
+            )
+            direct_media_fulfilled = bool(required_ids) and required_ids.issubset(
+                native_ids(_triage_response)
+            ) and required_ids.issubset(native_ids(immediate_response))
+            if not direct_media_fulfilled:
+                triage = replace(
+                    triage,
+                    classification=TriageClassification.SIMPLE_TASK,
+                )
+                self._audit(
+                    state,
+                    stage=Stage.TRIAGE.value,
+                    role=self.config.stage_roles[Stage.TRIAGE],
+                    event="direct_response_media_deferred_to_work",
+                    event_id=f"{state.ledger.turn_id}:triage:media-fallback",
+                    payload={
+                        "required_attachment_ids": sorted(required_ids),
+                        "triage_native_attachment_ids": sorted(
+                            native_ids(_triage_response)
+                        ),
+                        "immediate_native_attachment_ids": sorted(
+                            native_ids(immediate_response)
+                        ),
+                        "immediate_error_code": (
+                            immediate_error.error_code
+                            if immediate_error is not None
+                            else None
+                        ),
+                        "classification_override": TriageClassification.SIMPLE_TASK.value,
+                        "reason": "direct_response_media_capability_unfulfilled",
+                    },
+                )
 
         # Triage's model-authored goal is evidence, not authority.  Every
         # downstream request continues to receive the immutable user request.
@@ -789,6 +873,13 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 }
                 for receipt in state.tool_receipts.values()
             ],
+            "attachment_manifest": [
+                dict(item) for item in state.attachment_manifest
+            ],
+            "media_routing_by_stage": {
+                stage: [dict(entry) for entry in entries]
+                for stage, entries in state.media_routing_by_stage.items()
+            },
         }
         execution_evidence_hash = _payload_hash(execution_evidence)
         finalisation_context = {
@@ -952,6 +1043,19 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
     async def _execute_once(
         self, state: _TurnState, classification: TriageClassification
     ) -> ExecutionOutcome | None:
+        started_at = time.monotonic()
+        try:
+            return await self._execute_once_untracked(state, classification)
+        finally:
+            # Verification time is derived from the real wall-clock cost of every
+            # authoritative Execution attempt, including high-volume sub-agents and
+            # later remediation.  Accumulating attempts avoids shrinking the budget
+            # after a short remediation that followed a long initial execution.
+            state.execution_elapsed_s += max(0.0, time.monotonic() - started_at)
+
+    async def _execute_once_untracked(
+        self, state: _TurnState, classification: TriageClassification
+    ) -> ExecutionOutcome | None:
         sub_agent_results: tuple[SubAgentResult, ...] = ()
         if classification is TriageClassification.HIGH_VOLUME_TASK:
             sub_agent_results = await self._run_subagents(state)
@@ -985,6 +1089,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                             "summary": result.summary,
                             "evidence_refs": list(result.evidence_refs),
                             "limitations": list(result.limitations),
+                            "attachment_ids": list(result.attachment_ids),
                         }
                         for result in sub_agent_results
                     ],
@@ -1063,6 +1168,63 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     f"sub-agent assignment {assignment_id!r} allow_side_effects must be a boolean",
                     retryable=False,
                 )
+            ordered_available_attachment_ids = tuple(
+                str(item.get("attachment_id") or "")
+                for item in state.attachment_manifest
+                if str(item.get("attachment_id") or "")
+            )
+            available_attachment_ids = set(ordered_available_attachment_ids)
+            unauthorized_attachment_ids: set[str] = set()
+            raw_attachment_ids = raw.get("attachment_ids")
+            if raw_attachment_ids is None:
+                normalized_task = task.casefold()
+                compare_all = any(
+                    phrase in normalized_task
+                    for phrase in (
+                        "all images",
+                        "every image",
+                        "all attachments",
+                        "every attachment",
+                        "全部图片",
+                        "所有图片",
+                        "全部附件",
+                        "所有附件",
+                    )
+                )
+                selected_attachment_ids = (
+                    ordered_available_attachment_ids if compare_all else ()
+                )
+            else:
+                if not isinstance(raw_attachment_ids, list):
+                    raise StageInvocationError(
+                        f"sub-agent assignment {assignment_id!r} attachment_ids must be a list",
+                        retryable=False,
+                    )
+                requested_attachment_ids = tuple(
+                    str(item).strip()
+                    for item in raw_attachment_ids
+                    if str(item).strip()
+                )
+                unauthorized_attachment_ids = (
+                    set(requested_attachment_ids) - {"*"}
+                ) - available_attachment_ids
+                if "*" in requested_attachment_ids:
+                    selected_attachment_ids = ordered_available_attachment_ids
+                else:
+                    requested_set = set(requested_attachment_ids)
+                    selected_attachment_ids = tuple(
+                        attachment_id
+                        for attachment_id in ordered_available_attachment_ids
+                        if attachment_id in requested_set
+                    )
+            if unauthorized_attachment_ids:
+                raise StageInvocationError(
+                    f"sub-agent assignment {assignment_id!r} requests unauthorized attachments",
+                    retryable=False,
+                    details={
+                        "attachment_ids": sorted(unauthorized_attachment_ids)
+                    },
+                )
             assignments.append(
                 SubAgentAssignment(
                     assignment_id=assignment_id,
@@ -1070,6 +1232,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     profile=profile_name,
                     tools=tuple(str(item) for item in raw_tools if str(item).strip()),
                     allow_side_effects=requested_side_effects,
+                    attachment_ids=selected_attachment_ids,
                 )
             )
             seen.add(assignment_id)
@@ -1110,6 +1273,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 "task": assignment.task,
                 "profile": assignment.profile,
                 "delegated_tools": list(assignment.tools),
+                "attachment_ids": list(assignment.attachment_ids),
                 "side_effects_requested": assignment.allow_side_effects,
                 "allow_side_effects": side_effects_authorised,
                 "shadow_mode": self.config.shadow_mode,
@@ -1122,6 +1286,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             "assignment_id": assignment.assignment_id,
             "assigned_task": assignment.task,
             "delegated_tools": list(assignment.tools),
+            "authorized_attachment_ids": list(assignment.attachment_ids),
             "authority": "bounded_execution_only",
             "may_replan": False,
             "may_contact_user": False,
@@ -1159,6 +1324,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 outcome.summary,
                 evidence_refs,
                 outcome.limitations,
+                assignment.attachment_ids,
             )
             self._audit(
                 state,
@@ -1173,6 +1339,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     "summary": result.summary,
                     "evidence_refs": list(result.evidence_refs),
                     "limitations": list(result.limitations),
+                    "attachment_ids": list(result.attachment_ids),
                 },
             )
             return result
@@ -1200,6 +1367,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 f"Sub-agent execution failed: {exc}",
                 (),
                 ("Sub-agent result unavailable.",),
+                assignment.attachment_ids,
             )
 
     async def _perform_replan(
@@ -1353,7 +1521,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     "reviewer_authority": "advisory_read_only",
                     "delegated_tools": [
                         "workspace_inspect",
-                        "verification_run",
                         "file_read",
                         "file_list",
                         "process_list",
@@ -1465,7 +1632,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 Stage.VERIFICATION,
                 validate_verification_response,
                 allow_tools=True,
-                allow_side_effects=False,
+                allow_side_effects=not self.config.shadow_mode,
                 context={
                     "classification": classification.value,
                     "active_plan": state.active_plan,
@@ -1485,16 +1652,29 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     "maximum_verification_attempts": min(
                         3, self.config.verification_limits[state.effort]
                     ),
+                    "execution_elapsed_s": round(state.execution_elapsed_s, 6),
+                    "verification_run_policy": {
+                        "workspace": "authoritative_current_workspace",
+                        "workspace_copied": False,
+                        "process_authority": "inherited",
+                        "environment": "inherited",
+                        "network": "inherited",
+                        "timeout_basis": "cumulative_execution_elapsed",
+                    },
                     "evidence_refs": list(state.evidence_refs),
                     "delegated_tools": [
                         "workspace_inspect",
-                        "verification_run",
+                        *([] if self.config.shadow_mode else ["verification_run"]),
                         "file_read",
                         "file_list",
                         "process_list",
                         "media_read",
                     ],
-                    "verifier_authority": "advisory_read_only",
+                    "verifier_authority": (
+                        "advisory_read_only"
+                        if self.config.shadow_mode
+                        else "advisory_authoritative_workspace_verification"
+                    ),
                     "habits_included": False,
                 },
             )

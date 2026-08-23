@@ -165,7 +165,7 @@ def test_skill_callback_binding_includes_nudge_buttons():
         ("her_target_provider:fast:0:abcdef", "callback_model"),
         ("her_target_model:fast:0:abcdef:1:abcdef", "callback_model"),
         ("her_model_compact", "callback_model"),
-        ("her_model_compact_mode:inherit_pro", "callback_model"),
+        ("her_model_compact_mode:inherit_quick", "callback_model"),
         ("her_model_compact_confirm:1:abcdef:2:abcdef:high", "callback_model"),
         ("her_routes", "callback_model"),
         ("her_route_menu:execution_simple", "callback_model"),

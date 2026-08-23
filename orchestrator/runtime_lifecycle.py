@@ -93,7 +93,7 @@ async def initialize(runtime: Any) -> bool:
 
             if ensure_route_state(runtime):
                 runtime.logger.info(
-                    "Persisted HER v2 Compact migration default: inherit_pro"
+                    "Persisted HER v2 Compact default: active Quick/Light at high effort"
                 )
         migrated = migrate_legacy_memory_plus_runtime(runtime)
         if is_memory_plus_enabled(runtime.workspace_dir):
@@ -259,6 +259,11 @@ async def process_queue(runtime: Any) -> None:
             effective_prompt = turn_prompt.effective_prompt
             final_prompt = turn_prompt.final_prompt
             incremental = turn_prompt.incremental
+            runtime_pipeline.surface_context_compaction_warnings(
+                runtime,
+                item,
+                turn_prompt.context_warnings,
+            )
             runtime._notify_right_brain_started(
                 item,
                 effective_prompt,
@@ -455,52 +460,6 @@ async def process_queue(runtime: Any) -> None:
         except asyncio.CancelledError:
             break
         except Exception as exc:
-            from orchestrator.context_compaction import (
-                ContextCapacityError,
-                capacity_error_text,
-                record_capacity_blocked,
-            )
-
-            if isinstance(exc, ContextCapacityError):
-                runtime._mark_error(f"{exc.code}: {exc}")
-                try:
-                    record_capacity_blocked(
-                        runtime,
-                        request_ref=(item.request_id if item is not None else "unknown"),
-                        error=exc,
-                    )
-                except Exception as audit_exc:
-                    runtime.error_logger.error(
-                        "Context capacity-blocked audit failed: %s: %s",
-                        type(audit_exc).__name__,
-                        audit_exc,
-                    )
-                if item is not None:
-                    try:
-                        is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
-                        runtime._notify_right_brain_interrupted(
-                            item,
-                            item.prompt,
-                            is_bridge_request=is_bridge_request,
-                            reason="context_capacity_blocked",
-                            error=f"{exc.code}: {exc}",
-                        )
-                    except Exception:
-                        pass
-                    if item.deliver_to_telegram:
-                        await runtime.send_long_message(
-                            item.chat_id,
-                            capacity_error_text(exc),
-                            request_id=item.request_id,
-                            purpose="context-capacity-blocked",
-                        )
-                runtime.error_logger.warning(
-                    "HER v2 context capacity blocked: code=%s facts=%s",
-                    exc.code,
-                    exc.facts,
-                )
-                runtime.is_generating = False
-                continue
             runtime._mark_error(str(exc))
             if item is not None:
                 try:

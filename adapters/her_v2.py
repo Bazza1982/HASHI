@@ -54,6 +54,7 @@ from orchestrator.her_v2.retry import (
     ProviderRetryPolicy,
 )
 from orchestrator.her_v2.runtime import HERv2Runtime
+from orchestrator.multimodal_contract import resolve_input_capability
 
 HER_V2_DISPLAY_NAME = "HASHI Engine Runtime v2"
 HER_V2_VERSION = "2.0.0-alpha.1"
@@ -114,6 +115,61 @@ class HERv2Adapter(BaseBackend):
     def _backend_manager(self) -> Any:
         runtime = self._runtime_context()
         return getattr(runtime, "backend_manager", None)
+
+    def accepts_media_input(self, modality: str) -> bool:
+        """Prove ingress support from configured stage provider/model pairs.
+
+        HER is an orchestrator, so its outer ``supports_files`` flag cannot
+        establish what any foreground stage can actually consume.  This
+        ingress check stays fail-closed and only admits a modality when at
+        least one configured stage has an exact native transport.  Local tool
+        fallbacks are evaluated separately by the runtime.
+        """
+
+        resolved = self._v2_config
+        if resolved is None:
+            raw = self._extra.get("her_v2")
+            if not isinstance(raw, Mapping):
+                return False
+            try:
+                resolved = HERv2Config.from_mapping(raw)
+            except HERv2ConfigurationError:
+                return False
+
+        manager = self._backend_manager()
+        select_backend = getattr(manager, "_select_backend_cfg", None)
+        normalized_modality = str(modality or "").strip().casefold()
+        for profile in resolved.all_provider_profiles():
+            capability_config: dict[str, Any] = {}
+            if callable(select_backend):
+                try:
+                    configured = select_backend(
+                        profile.engine,
+                        target_model=profile.model,
+                    )
+                except (TypeError, ValueError):
+                    configured = None
+                if isinstance(configured, Mapping):
+                    nested_extra = configured.get("extra")
+                    if isinstance(nested_extra, Mapping):
+                        capability_config.update(dict(nested_extra))
+                    capability_config.update(dict(configured))
+            capability_config.update(dict(profile.options))
+            capability = resolve_input_capability(
+                profile.engine,
+                profile.model,
+                config=capability_config,
+            )
+            transports = capability.input_transports.get(
+                normalized_modality,
+                (),
+            )
+            if any(
+                capability.supports(normalized_modality, transport)
+                for transport in transports
+            ):
+                return True
+        return False
 
     def _habit_meditation_config(self) -> HabitMeditationConfig:
         """Resolve V2 learning controls with the existing persisted override."""
@@ -630,6 +686,7 @@ class HERv2Adapter(BaseBackend):
         is_retry: bool = False,
         silent: bool = False,
         on_stream_event: StreamCallback = None,
+        request_content: Mapping[str, Any] | None = None,
     ) -> BackendResponse:
         del is_retry
         started = time.perf_counter()
@@ -808,6 +865,7 @@ class HERv2Adapter(BaseBackend):
                 prompt,
                 request_id,
                 effort=effort_resolution.effective,
+                request_content=request_content,
             )
         finally:
             self._active_runtimes.pop(request_id, None)

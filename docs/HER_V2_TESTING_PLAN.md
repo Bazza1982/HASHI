@@ -246,14 +246,15 @@ tool isolation for tool-enabled stages, proven tool isolation for tool-capable
 no-tool stages, and safe acceptance of a previously unknown engine that has no
 tool capability. Engine-name allowlists are not an acceptance invariant.
 
-Auto Compact routing tests must treat Compact as independent from the Quick/Pro
-task slots. Quick/Fast may have a smaller context window than the selected
-source and must never be invoked merely because of its slot name. `/model` must
-persist Compact provider/model/reasoning/Tier 2-or-3 policy independently, with
-visible `inherit_pro` migration semantics and exact cross-provider grant
-validation. A declared local/slow capability may select Tier 3 without a
-hard-coded engine name. Changing Compact must not change task routes, HER
-effort, or provider reasoning elsewhere.
+Auto Compact routing tests must prove that Compact follows the initiating
+Agent's active HER v2 provider and Quick/Light model at fixed high HER effort.
+`/model compact` may select only the approved inherit-Quick policy, off, and the
+Tier 2-or-3 watchdog; it must not create a third provider/model path. Legacy
+`inherit_pro` or explicit route state migrates forward without a Pro/global
+fallback. Missing adapter declarations or Compact capacity remain diagnostic,
+while a missing active Quick grant is a configuration error. Provider reasoning
+is mapped separately and lack of granular provider effort must not block
+Compact.
 
 Representative policy combinations must cover:
 
@@ -486,16 +487,18 @@ Limit tests must prove:
 ### 7.9.1 Assured Verification and hard evidence
 
 Tests must prove that Assured (`max`) alone enters `VERIFYING` after Review and
-any Review-triggered remediation. The verifier has tools enabled, side effects
-disabled, and evaluates the latest Execution result and workspace state.
+any Review-triggered remediation. The verifier has tools enabled,
+validation-only side effects, and evaluates the latest Execution result and
+authoritative workspace state. It cannot remediate or broaden delegation.
 
 The accepted outcomes are `VERIFIED`, `PARTIALLY_VERIFIED`, `FAILED`,
 `NOT_AI_VERIFIABLE`, `UNAVAILABLE`, and `INCONCLUSIVE`. Tests must prove:
 
 - every verified or partly verified check cites a successful completed receipt
   from the exact current Verification invocation;
-- an `isolated_test` claim cites a successful `verification_run` recipe receipt
-  with exit code zero;
+- a `workspace_test` claim cites a successful direct-workspace
+  `verification_run` receipt with exit code zero, inherited process/filesystem/
+  environment/`HOME`/network authority, and a runtime-derived timeout;
 - failed or incomplete tools cannot support a passing claim, and failed tools
   support only `FAILED` or `INCONCLUSIVE`;
 - `VERIFIED`, `PARTIALLY_VERIFIED`, and `FAILED` require matching opening and
@@ -509,10 +512,13 @@ The accepted outcomes are `VERIFIED`, `PARTIALLY_VERIFIED`, `FAILED`,
 
 `workspace_inspect` tests cover status, diff, bounded search, hashes, artifacts,
 path escape rejection, and snapshot drift. `verification_run` tests prove that
-only registered argv recipes can run; arbitrary shell text is rejected; the
-workspace copy is temporary and size-bounded; common credential files and the
-host environment are absent; `HOME` is temporary; network is disabled; and a
-missing isolation facility returns `UNAVAILABLE` without a host fallback.
+configured recipes and direct argv commands run in the current workspace
+without a copy or implicit shell; large workspaces are not rejected merely for
+copy size; and process identity, filesystem access, environment, `HOME`, and
+network are inherited. Timeout tests prove the effective value is the maximum
+of configured, requested, minimum, and cumulative-Execution-derived values,
+including a one-hour Execution case where a 60-second request becomes 5,700
+seconds.
 
 ### 7.10 Tool, permission, and workzone authority
 
@@ -521,8 +527,13 @@ Tests must prove:
 - HER invokes tools only through the HASHI Tool Gateway;
 - an unregistered or disallowed tool cannot be executed;
 - HER, reviewers, verifiers, and sub-agents cannot elevate their own permission mode;
-- workzone and access-scope boundaries remain enforced;
-- reviewer and verifier calls are side-effect-free unless the governing design explicitly changes;
+- path-addressed inspection tools retain workzone/access-root checks;
+- `verification_run` fixes its working directory to the authoritative
+  workspace but deliberately inherits the HASHI process's filesystem authority
+  for runtimes, dependencies, services, and credentials outside that directory;
+- reviewer calls remain side-effect-free; verifier mutation is restricted to
+  delegated validation commands in the authoritative workspace and cannot be
+  represented as read-only;
 - sub-agent authority is no greater than the authority delegated by the Primary Agent and orchestrator;
 - tool denial becomes evidence and cannot be rewritten as successful execution.
 - read-only delegation consumes Tool Registry capability metadata, so an
@@ -755,9 +766,11 @@ Exercise primary log, fallback spool, total audit-persistence failure, and repla
 
 ### Journey K: Tool authority denial
 
-Attempt an unregistered tool, permission escalation, out-of-workzone access,
-reviewer side effect, and verifier side effect. Prove all are blocked and
-audited.
+Attempt an unregistered tool, permission escalation, an out-of-workzone path
+through an inspection tool, reviewer side effect, verifier remediation, and any
+verifier mutation outside `verification_run`. Prove all are blocked and
+audited. Separately prove that a validation child process retains its inherited
+filesystem authority.
 
 ### Journey L: Terminal truth
 
@@ -924,23 +937,23 @@ must prove the following boundaries.
 
 **Configuration and provider neutrality**
 
-- `/model` exposes Compact mode, provider, model, reasoning, effective context
-  capacity/provenance, and `tier_2`/`tier_3`/`auto` independently from Quick,
-  Pro, task routes, and HER effort;
-- `inherit_pro` follows Pro, while an explicit granted Compact route survives a
-  main `/provider` change and is revalidated rather than silently rewritten;
-- inherited Compact follows Pro's provider-specific reasoning, while explicit
-  Compact reasoning is independently configurable and never inferred from HER
-  effort or a hard-coded generic reasoning name;
-- Quick/Fast is never selected by slot-name convention, including when its
-  context window cannot read the source;
-- cross-provider Compact requires the exact provider/model grant, tool
-  disablement, dedicated-system-prompt isolation, privacy eligibility, and
-  explicit confirmation;
+- `/model compact` exposes the effective active provider, Quick/Light model,
+  fixed high HER effort, mapped provider reasoning, capacity provenance when
+  known, and `tier_2`/`tier_3`/`auto`;
+- provider or Quick/Light changes are followed at invocation time without an
+  independent Compact route or silent Pro/global fallback;
+- HER effort and provider reasoning remain separate, and enable-only providers
+  are accepted without inventing granular reasoning effort;
+- absent prompt-isolation, tool-disablement, semantic-reasoning, or Compact
+  capacity declarations do not lock the route; request-local authority is
+  still disabled and actual provider failures remain truthful;
+- the active provider/model must have an exact Agent grant; no retired
+  cross-provider confirmation or independent-route state may be consulted;
 - an unknown engine with declared capabilities works without a name allowlist,
-  while missing or fabricated capacity metadata fails safely; unknown target
-  capacity disables proactive ratios, and unknown Compact capacity cannot plan
-  compaction chunks.
+  while fabricated capacity metadata fails safely; unknown target capacity
+  uses the named 64,000→48,000 HASHI automatic threshold without pretending it is
+  provider metadata, and unknown Compact capacity uses conservative 32,000
+  estimated-token maintenance partitions.
 
 **Context authority and atomicity**
 
@@ -967,9 +980,16 @@ must prove the following boundaries.
   provider-capacity rejection;
 - response headroom is capacity accounting, not a main-model output-token
   ceiling;
-- soft failure continues unchanged when the original still fits;
-  `CONTEXT_PROTECTED_SET_TOO_LARGE` and `CONTEXT_CAPACITY_EXHAUSTED` are stable,
-  truthful hard-pressure outcomes without silent truncation or route switching;
+- every automatic Compact failure continues with the original or best reduced
+  prompt and emits a mandatory warning independently of `/verbose`;
+  `CONTEXT_PROTECTED_SET_TOO_LARGE` and `CONTEXT_CAPACITY_EXHAUSTED` remain
+  stable warning/audit codes without silent truncation or route switching;
+- for unknown target capacity, a Sunny-sized historical prompt is compacted
+  before HER when possible; if compaction fails, the unchanged prompt still
+  reaches the selected model and the user sees the warning;
+- with a 120,000 estimated-token threshold, exhaust both permitted Compact
+  attempts and prove that the original selected-model call still occurs exactly
+  once with the current request and protected context intact;
 - a target request is replayed after a capacity rejection only when that failed
   request produced no tool call or side effect.
 
@@ -1239,6 +1259,9 @@ Release must not proceed if any of the following is possible:
 - Auto Compact hard-codes Quick/Fast, mutates protected context or raw history,
   commits partial/unvalidated output, loses a concurrent append, or applies its
   Tier 2/Tier 3 deadline outside the isolated tool-free compactor call;
+- Auto Compact failure, timeout, retry exhaustion, or an estimated-token
+  threshold blocks the current selected-model call or fails without a mandatory
+  user-visible warning;
 - Auto Compact introduces Gemini session state, silently switches the target
   route, or changes the initial OpenRouter/DeepSeek unbounded tool-loop
   contract;
@@ -1338,14 +1361,15 @@ Before HER v2 is accepted, the suite must contain logically complete coverage of
 14. completed-work preservation;
 15. Habits, Meditation, and Dream authority boundaries;
 16. provider-neutral role configuration;
-17. at least one production-like canary with safe side effects disabled.
+17. at least one production-like canary with validation-only workspace effects
+    enabled and audited.
 18. retired-HER unreachability through aliases, startup, switching, and failure
     handling.
 19. runtime command separation: `/backend` never exposes `role-configured`,
     `/provider` atomically resolves Quick/Pro, `/model` defines Quick/Pro,
-    independently assigns model/reasoning per effective route, and exposes an
-    independent Compact provider/model/reasoning/Tier 2-or-3 policy; `/effort`
-    cannot mutate reasoning or Compact, and non-HER `/model` behaviour remains
+    independently assigns model/reasoning per effective route, and exposes the
+    active Quick/Light Compact policy plus Tier 2-or-3 watchdog; `/effort`
+    cannot mutate provider reasoning or Compact, and non-HER `/model` behaviour remains
     unchanged.
 20. scheduled-job policy separation: cron/heartbeat prompt work uses a
     request-local low default or explicit override across scheduled, manual,

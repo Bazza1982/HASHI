@@ -53,6 +53,7 @@ deployment validation continues.
 
 ### Core references
 - [AGENT_FYI.md](AGENT_FYI.md) — Bridge environment FYI (operational reference)
+- [AGENT_PERSONA_SPEC.md](AGENT_PERSONA_SPEC.md) — persona block format and authoring guidance for new agents
 - [STEER_COMMAND.md](STEER_COMMAND.md) — Telegram `/steer` mid-task course correction (busy wrapper vs idle plain text, error suppression)
 - [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md) — Telegram `/focus` scope correction and `/recall [count]` queued-request withdrawal
 - [DELAY_COMMAND.md](DELAY_COMMAND.md) — persistent `/delay` messages, timing semantics, queue interaction, cancellation, and lifecycle safety
@@ -93,7 +94,8 @@ deployment validation continues.
 - [her_multimedia_multimodal_plan.md](her_multimedia_multimodal_plan.md) — implemented HER media bridge, security limits, compatibility paths, and remaining live rollout matrix
 - [HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) — authoritative HER v2 lifecycle, provider, delivery, and compatibility contract
 - [HER_V2_TESTING_PLAN.md](HER_V2_TESTING_PLAN.md) — consolidated HER v2 behavioral and integration test contract
-- [HER_V2_AUTO_COMPACTION_DESIGN.md](HER_V2_AUTO_COMPACTION_DESIGN.md) — approved HER v2 context-capacity design for independent Compact routing, protected context, Tier 2/Tier 3 isolation, and provider boundaries
+- [HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md](HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md) — implementation-ready fixed 10-result/5-minute high-risk safe-boundary checkpoint and regression plan
+- [HER_V2_AUTO_COMPACTION_DESIGN.md](HER_V2_AUTO_COMPACTION_DESIGN.md) — HER v2 Quick/Light high-effort compaction policy, protected context, atomic commit, and Tier 2/Tier 3 isolation
 
 ### Nagare Flow System (v2.1)
 - [NAGARE_FLOW_SYSTEM.md](NAGARE_FLOW_SYSTEM.md) — Complete technical reference for the multi-agent workflow orchestration engine

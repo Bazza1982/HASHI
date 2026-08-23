@@ -68,6 +68,17 @@ def _outcome_text(outcome: Any) -> str:
             f"{html.escape(str(outcome.route_provider or '-'))} / "
             f"{html.escape(str(outcome.route_model or '-'))}</code>"
         )
+        lines.append(
+            f"<b>HER effort</b> · <code>{html.escape(str(outcome.her_effort or 'high'))}</code>"
+        )
+        lines.append(
+            "<b>Provider reasoning</b> · <code>"
+            f"{html.escape(str(outcome.route_reasoning or '-'))}</code>"
+        )
+    if getattr(outcome, "trigger", None):
+        lines.append(
+            f"<b>Trigger</b> · <code>{html.escape(str(outcome.trigger))}</code>"
+        )
     if outcome.changed:
         lines.extend(
             [

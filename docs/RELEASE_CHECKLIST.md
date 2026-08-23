@@ -58,11 +58,16 @@
   - Reviewed and Assured regressions prove read-only tool delegation, exact
     current-invocation receipts, stable before/after snapshots, one Reviewed
     closure check, and the three-attempt Assured Verification ceiling
-  - `verification_run` accepts only registered recipes, excludes workspace and
-    environment credentials, uses a temporary `HOME`, disables network, cleans
-    the temporary copy, and refuses host fallback when isolation is unavailable
+  - `verification_run` runs configured recipes or direct argv in the
+    authoritative workspace without copying, inherits the execution process's
+    filesystem/environment/`HOME`/network authority, and enforces a timeout
+    floor derived from cumulative Execution duration
   - Review/Verification unavailable, partly verified, and not-AI-verifiable
     results are reported honestly without replacing Execution disposition
+  - Auto Compact failure, timeout, unavailable routing, non-shrinking output,
+    and retry exhaustion never suppress the selected-model call; the 120,000
+    estimated-token regression proves the original request continues and a
+    mandatory warning is exposed independently of `/verbose`
   - `/rebuild` is a side-effect-free one-version retirement notice and no
     native HER manager/source/package is initialized at startup
   - At least one live `her-v2` canary after `/reboot min` validates

@@ -8,7 +8,7 @@ from tools import her_verification
 from tools.registry import ToolRegistry
 
 
-def test_verification_tools_are_registry_owned_and_read_only(tmp_path):
+def test_verification_tools_have_truthful_registry_safety_metadata(tmp_path):
     registry = ToolRegistry(
         allowed_tools=["workspace_inspect", "verification_run"],
         access_root=tmp_path,
@@ -23,7 +23,7 @@ def test_verification_tools_are_registry_owned_and_read_only(tmp_path):
         "verification_run",
     }
     assert registry.is_read_only("workspace_inspect") is True
-    assert registry.is_read_only("verification_run") is True
+    assert registry.is_read_only("verification_run") is False
 
 
 @pytest.mark.asyncio
@@ -109,7 +109,7 @@ async def test_workspace_search_reports_unavailable_without_a_search_binary(
 
 
 @pytest.mark.asyncio
-async def test_verification_run_lists_only_registered_recipes_and_rejects_shell_text(
+async def test_verification_run_lists_recipes_and_rejects_legacy_shell_text(
     tmp_path,
 ):
     listed = await her_verification.execute_verification_run(
@@ -124,60 +124,41 @@ async def test_verification_run_lists_only_registered_recipes_and_rejects_shell_
         workspace_dir=tmp_path,
     )
 
-    assert set(json.loads(listed.output)) == {
+    catalog = json.loads(listed.output)
+    assert set(catalog["recipes"]) == {
         "pytest_core",
         "pytest_offline",
         "python_compile",
     }
-    assert rejected.output.startswith("Error: unknown verification recipe")
+    assert catalog["direct_argv_supported"] is True
+    assert catalog["execution_scope"] == "authoritative_current_workspace"
+    assert catalog["workspace_copied"] is False
+    assert catalog["authority"]["process_authority"] == "inherited"
+    assert rejected.output.startswith(
+        "Error: verification_run does not accept implicit-shell command text"
+    )
     assert not (tmp_path / "should-not-exist").exists()
 
 
 @pytest.mark.asyncio
-async def test_verification_run_refuses_unsafe_fallback_when_isolation_is_unavailable(
+async def test_verification_run_executes_registered_argv_in_current_workspace(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(her_verification, "_bubblewrap_available", lambda: False)
-
-    async def forbidden(*_args, **_kwargs):
-        raise AssertionError("unsafe fallback executed")
-
-    monkeypatch.setattr(her_verification, "_run_isolated", forbidden)
-    result = await her_verification.execute_verification_run(
-        {"operation": "run", "recipe": "python_compile"},
-        workspace_dir=tmp_path,
-    )
-
-    assert result.output.startswith("Error: verification isolation is unavailable")
-    assert result.details["unavailable"] is True
-    assert result.details["isolated"] is False
-
-
-@pytest.mark.asyncio
-async def test_verification_run_clears_credentials_and_disables_network(
-    tmp_path, monkeypatch
-):
-    if not her_verification._bubblewrap_available():
-        pytest.skip("bubblewrap is unavailable on this platform")
-    monkeypatch.setenv("HASHI_TEST_SECRET", "must-not-cross-boundary")
-    (tmp_path / ".env").write_text("HASHI_FILE_SECRET=hidden\n", encoding="utf-8")
-    (tmp_path / "secrets.json").write_text('{"token":"hidden"}\n', encoding="utf-8")
+    monkeypatch.setenv("HASHI_TEST_CONTEXT", "visible-to-registered-recipe")
     probe = (
-        "import os,pathlib,socket; "
-        "assert os.environ.get('HASHI_TEST_SECRET') is None; "
-        "assert os.environ['HOME'] == '/verification-home'; "
-        "assert not pathlib.Path('.env').exists(); "
-        "assert not pathlib.Path('secrets.json').exists(); "
-        "s=socket.socket(); "
-        "assert s.connect_ex(('1.1.1.1', 53)) != 0; "
-        "print('isolated-ok')"
+        "import os,pathlib; "
+        "assert os.environ['HASHI_TEST_CONTEXT'] == 'visible-to-registered-recipe'; "
+        "assert pathlib.Path.cwd() == pathlib.Path(os.environ['EXPECTED_WORKSPACE']); "
+        "pathlib.Path('verification-marker.txt').write_text('direct\\n'); "
+        "print('workspace-ok')"
     )
+    monkeypatch.setenv("EXPECTED_WORKSPACE", str(tmp_path.resolve()))
     result = await her_verification.execute_verification_run(
-        {"operation": "run", "recipe": "isolation_probe"},
+        {"operation": "run", "recipe": "workspace_probe"},
         workspace_dir=tmp_path,
         options={
             "recipes": {
-                "isolation_probe": {
+                "workspace_probe": {
                     "argv": ["{python}", "-c", probe],
                     "timeout_s": 10,
                 }
@@ -185,24 +166,160 @@ async def test_verification_run_clears_credentials_and_disables_network(
         },
     )
 
-    assert result.output.strip() == "isolated-ok"
-    assert result.details == {
-        "operation": "run",
-        "recipe": "isolation_probe",
-        "exit_code": 0,
-        "timed_out": False,
-        "isolated": True,
-        "network_disabled": True,
-        "credentials_cleared": True,
-        "workspace_copy_bytes": 0,
-        "temporary_workspace_destroyed": True,
+    assert result.output.strip() == "workspace-ok"
+    assert (tmp_path / "verification-marker.txt").read_text() == "direct\n"
+    assert result.details["operation"] == "run"
+    assert result.details["recipe"] == "workspace_probe"
+    assert result.details["command_source"] == "registered_recipe"
+    assert result.details["exit_code"] == 0
+    assert result.details["timed_out"] is False
+    assert result.details["execution_scope"] == "workspace"
+    assert result.details["workspace_root"] == str(tmp_path.resolve())
+    assert result.details["workspace_copied"] is False
+    assert result.details["argv_registered"] is True
+    assert result.details["shell"] is False
+    assert result.details["process_isolated"] is False
+    assert result.details["process_authority"] == "inherited"
+    assert result.details["identity_policy"] == "inherited"
+    assert result.details["filesystem_policy"] == "inherited"
+    assert result.details["environment_policy"] == "inherited"
+    assert result.details["network_policy"] == "inherited"
+    assert result.details["home_policy"] == "inherited"
+    assert result.details["foreground_cleanup"]["status"] == "normal_completion"
+    assert result.details["workspace_access"] == {
+        "read": True,
+        "write": True,
+        "execute": True,
     }
 
 
 @pytest.mark.asyncio
+async def test_verification_run_accepts_direct_argv_without_an_implicit_shell(tmp_path):
+    result = await her_verification.execute_verification_run(
+        {
+            "operation": "run",
+            "argv": [
+                "{python}",
+                "-c",
+                "import pathlib; pathlib.Path('argv-marker').write_text('ok'); print('argv-ok')",
+            ],
+        },
+        workspace_dir=tmp_path,
+    )
+
+    assert result.output.strip() == "argv-ok"
+    assert (tmp_path / "argv-marker").read_text() == "ok"
+    assert result.details["command_source"] == "direct_argv"
+    assert result.details["argv_registered"] is False
+    assert result.details["shell"] is False
+    assert result.details["process_authority"] == "inherited"
+
+
+@pytest.mark.asyncio
+async def test_verification_timeout_grows_from_cumulative_execution_time(
+    tmp_path, monkeypatch
+):
+    captured = {}
+
+    async def fake_run(command, *, cwd, timeout_s):
+        captured.update(command=list(command), cwd=cwd, timeout_s=timeout_s)
+        return 0, b"dynamic-ok\n", b"", False, {
+            "status": "normal_completion",
+            "scope": "process_group",
+            "forced": False,
+            "process_reaped": True,
+        }
+
+    monkeypatch.setattr(her_verification, "_run_workspace_command", fake_run)
+    result = await her_verification.execute_verification_run(
+        {
+            "operation": "run",
+            "argv": ["{python}", "-V"],
+            "timeout_s": 60,
+            "_hashi_verification_policy": {"execution_elapsed_s": 3600},
+        },
+        workspace_dir=tmp_path,
+        options={
+            "direct_timeout_s": 60,
+            "minimum_timeout_s": 300,
+            "execution_timeout_multiplier": 1.5,
+            "timeout_grace_s": 300,
+        },
+    )
+
+    assert result.output.strip() == "dynamic-ok"
+    assert captured["cwd"] == tmp_path.resolve()
+    assert captured["timeout_s"] == 5700
+    policy = result.details["timeout_policy"]
+    assert policy["execution_elapsed_s"] == 3600
+    assert policy["requested_timeout_s"] == 60
+    assert policy["execution_floor_s"] == 5700
+    assert policy["effective_timeout_s"] == 5700
+
+    hard_floor = her_verification._timeout_policy(
+        configured_timeout_s=1,
+        requested_timeout_s=1,
+        arguments={
+            "_hashi_verification_policy": {"execution_elapsed_s": 3600}
+        },
+        options={
+            "minimum_timeout_s": 0,
+            "execution_timeout_multiplier": 0,
+            "timeout_grace_s": 0,
+        },
+    )
+    assert hard_floor["minimum_timeout_s"] == 300
+    assert hard_floor["execution_timeout_multiplier"] == 1
+    assert hard_floor["timeout_grace_s"] == 60
+    assert hard_floor["effective_timeout_s"] == 3660
+
+
+@pytest.mark.asyncio
+async def test_workspace_validation_timeout_reaps_the_process_group(tmp_path):
+    exit_code, _stdout, _stderr, timed_out, cleanup = (
+        await her_verification._run_workspace_command(
+            [her_verification.sys.executable, "-c", "import time; time.sleep(60)"],
+            cwd=tmp_path,
+            timeout_s=0.05,
+        )
+    )
+
+    assert exit_code != 0
+    assert timed_out is True
+    assert cleanup["status"] in {"terminated", "forced"}
+    assert cleanup["process_reaped"] is True
+
+
+@pytest.mark.asyncio
+async def test_verification_run_does_not_copy_or_reject_large_workspace(tmp_path):
+    large = tmp_path / "large-sparse.bin"
+    with large.open("wb") as handle:
+        handle.truncate(513 * 1024 * 1024)
+    probe = (
+        "import pathlib; "
+        "assert pathlib.Path('large-sparse.bin').stat().st_size > 512 * 1024 * 1024; "
+        "print('large-workspace-ok')"
+    )
+    result = await her_verification.execute_verification_run(
+        {"operation": "run", "recipe": "large_workspace_probe"},
+        workspace_dir=tmp_path,
+        options={
+            "recipes": {
+                "large_workspace_probe": {
+                    "argv": ["{python}", "-c", probe],
+                    "timeout_s": 10,
+                }
+            }
+        },
+    )
+
+    assert result.output.strip() == "large-workspace-ok"
+    assert result.details["workspace_copied"] is False
+    assert result.details["execution_scope"] == "workspace"
+
+
+@pytest.mark.asyncio
 async def test_verification_run_failure_is_a_completed_failed_recipe(tmp_path):
-    if not her_verification._bubblewrap_available():
-        pytest.skip("bubblewrap is unavailable on this platform")
     result = await her_verification.execute_verification_run(
         {"operation": "run", "recipe": "expected_failure"},
         workspace_dir=tmp_path,
@@ -217,8 +334,8 @@ async def test_verification_run_failure_is_a_completed_failed_recipe(tmp_path):
     )
 
     assert result.output.startswith(
-        "Error: verification recipe expected_failure failed with exit code 7"
+        "Error: verification expected_failure failed with exit code 7"
     )
     assert result.details["exit_code"] == 7
-    assert result.details["isolated"] is True
-    assert result.details["temporary_workspace_destroyed"] is True
+    assert result.details["execution_scope"] == "workspace"
+    assert result.details["workspace_copied"] is False

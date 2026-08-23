@@ -23,6 +23,17 @@ from adapters.stream_events import (
     StreamEvent,
 )
 from orchestrator.enterprise.policy import evaluate_governance_policy
+from orchestrator.multimodal_contract import (
+    InputCapability,
+    MultimodalContractError,
+    attachment_manifest,
+    materialize_openai_user_content,
+    native_attachment_reference_aliases,
+    normalize_request_content,
+    request_content_has_media,
+    routing_decisions_payload,
+    validate_authorized_media_references,
+)
 
 
 HASHI_COMPACTION_CAPABILITIES = {
@@ -44,10 +55,65 @@ _STABLE_CONTEXT_CAPACITY_CODES = frozenset(
     }
 )
 
+_STABLE_MODALITY_UNSUPPORTED_CODES = frozenset(
+    {
+        "modality_unsupported",
+        "provider_modality_unsupported",
+        "unsupported_modality",
+        "unsupported_media",
+        "unsupported_media_type",
+        "image_input_not_supported",
+    }
+)
+
 _REASONING_DISABLED_VALUES = frozenset({"off", "none", "false", "0", "disabled"})
 _REASONING_EFFORT_VALUES = frozenset(
     {"minimal", "low", "medium", "high", "xhigh", "max"}
 )
+_MEDIA_FALLBACK_TOOL_NAMES = frozenset({"media_read", "vision_inspect"})
+
+
+def _argument_string_values(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, Mapping):
+        values: set[str] = set()
+        for item in value.values():
+            values.update(_argument_string_values(item))
+        return values
+    if isinstance(value, (list, tuple, set, frozenset)):
+        values = set()
+        for item in value:
+            values.update(_argument_string_values(item))
+        return values
+    return set()
+
+
+def _references_native_attachment(
+    arguments: Mapping[str, Any],
+    *,
+    attachment_ids: set[str],
+    local_refs: set[str],
+) -> bool:
+    for raw in _argument_string_values(arguments):
+        value = str(raw or "").strip()
+        if (
+            value in local_refs
+            or Path(value).name in local_refs
+            or value in attachment_ids
+        ):
+            return True
+        try:
+            resolved_value = str(
+                Path(value).expanduser().resolve(strict=False)
+            )
+        except (OSError, RuntimeError, ValueError):
+            resolved_value = ""
+        if resolved_value and resolved_value in local_refs:
+            return True
+        if any(value.endswith(f":{attachment_id}") for attachment_id in attachment_ids):
+            return True
+    return False
 
 
 def _stable_provider_error_code(response: httpx.Response | None) -> str:
@@ -72,7 +138,54 @@ def _stable_provider_error_code(response: httpx.Response | None) -> str:
         normalized = str(candidate or "").strip().lower()
         if normalized in _STABLE_CONTEXT_CAPACITY_CODES:
             return "CONTEXT_CAPACITY_REJECTED"
+        if normalized in _STABLE_MODALITY_UNSUPPORTED_CODES:
+            return "PROVIDER_MODALITY_UNSUPPORTED"
     return ""
+
+
+def _stream_error_exception(
+    payload: Mapping[str, Any],
+    *,
+    request: httpx.Request,
+    provider_activity_observed: bool,
+) -> httpx.HTTPStatusError | None:
+    """Convert an OpenAI-compatible SSE error event into a typed HTTP error.
+
+    Streaming endpoints have already committed HTTP 200 before a backend can
+    fail.  Preserve the event payload on a synthetic response so the normal
+    stable provider-code handling remains identical to non-streaming calls.
+    """
+
+    raw_error = payload.get("error")
+    if raw_error in (None, ""):
+        return None
+    error = raw_error if isinstance(raw_error, Mapping) else {}
+    raw_status = error.get("status", payload.get("status", 502))
+    try:
+        status = int(raw_status)
+    except (TypeError, ValueError):
+        status = 502
+    if status < 400 or status > 599:
+        status = 502
+    message = str(error.get("message") or raw_error or "provider stream error")
+    response = httpx.Response(status, request=request, json=dict(payload))
+    exception = httpx.HTTPStatusError(
+        message,
+        request=request,
+        response=response,
+    )
+    metadata = error.get("metadata")
+    reported_activity = (
+        bool(metadata.get("provider_activity"))
+        if isinstance(metadata, Mapping)
+        else False
+    )
+    setattr(
+        exception,
+        "provider_activity_observed",
+        bool(provider_activity_observed or reported_activity),
+    )
+    return exception
 
 
 @dataclass
@@ -149,11 +262,17 @@ def _backend_failure_response(
     code = "PROVIDER_UNKNOWN"
     description = "The provider request failed for an unknown technical reason."
 
-    if status is not None:
+    if isinstance(error, MultimodalContractError):
+        code = error.code
+        description = str(error)
+    elif status is not None:
         stable_code = _stable_provider_error_code(response)
-        if stable_code:
+        if stable_code == "CONTEXT_CAPACITY_REJECTED":
             code = stable_code
             description = "The provider rejected the serialized request because it exceeds the model context capacity."
+        elif stable_code == "PROVIDER_MODALITY_UNSUPPORTED":
+            code = stable_code
+            description = "The provider explicitly rejected the requested input modality."
         elif status == 400:
             code = "PROVIDER_BAD_REQUEST"
             description = "The provider rejected the request as invalid."
@@ -230,7 +349,12 @@ def _backend_failure_response(
             response if isinstance(response, httpx.Response) else None
         ),
         side_effects_possible=side_effects_possible,
-        stream_metadata={"provider_failure_description": description},
+        stream_metadata={
+            "provider_failure_description": description,
+            "provider_activity_observed": bool(
+                getattr(error, "provider_activity_observed", False)
+            ),
+        },
     )
 
 
@@ -395,8 +519,160 @@ class OpenRouterAdapter(BaseBackend):
     # Subclasses (e.g. OllamaAdapter) override with smaller defaults.
     DEFAULT_TOOL_TIERS: list[str] | None = None
 
-    def _build_payload(self, messages: list[dict], use_streaming: bool = False,
-                       tool_tiers: list[str] | None = ...) -> dict:
+    def _media_fallback_modalities(self) -> frozenset[str]:
+        registry = getattr(self, "tool_registry", None)
+        is_allowed = getattr(registry, "is_allowed", None)
+        if not callable(is_allowed):
+            return frozenset()
+        modalities: set[str] = set()
+        if is_allowed("media_read"):
+            modalities.update({"image", "audio", "video", "document"})
+        if is_allowed("vision_inspect"):
+            modalities.add("image")
+        if is_allowed("file_read"):
+            modalities.add("document")
+        return frozenset(modalities)
+
+    def _initial_messages(
+        self,
+        prompt: str,
+        request_content: Mapping[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], tuple[dict[str, Any], ...]]:
+        normalized = normalize_request_content(request_content)
+        if normalized is None or not request_content_has_media(normalized):
+            return (
+                [
+                    {"role": "system", "content": self.sys_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                (),
+            )
+        capability = self.resolve_input_capability()
+        validate_authorized_media_references(
+            normalized,
+            authorized_roots=self.authorized_media_roots(),
+        )
+        content, decisions = materialize_openai_user_content(
+            prompt,
+            normalized,
+            capability,
+            authorized_roots=self.authorized_media_roots(),
+            fallback_modalities=self._media_fallback_modalities(),
+        )
+        unsupported = [item for item in decisions if item.route == "unsupported"]
+        if unsupported:
+            first = unsupported[0]
+            error_code = (
+                "MEDIA_LIMIT_EXCEEDED"
+                if "limit_exceeded" in first.reason
+                else "PROVIDER_MODALITY_UNSUPPORTED"
+            )
+            raise MultimodalContractError(
+                f"{capability.provider}/{capability.model} cannot consume "
+                f"{first.modality} attachment {first.attachment_id!r} and no "
+                "authorized local fallback is available",
+                code=error_code,
+                attachment_id=first.attachment_id,
+            )
+        return (
+            [
+                {"role": "system", "content": self.sys_prompt},
+                {"role": "user", "content": content},
+            ],
+            routing_decisions_payload(decisions),
+        )
+
+    def _can_replay_typed_media_fallback(
+        self,
+        error: Exception,
+        *,
+        media_routing: tuple[dict[str, Any], ...],
+        fallback_attempted: bool,
+        provider_call_count: int,
+        tool_call_count: int,
+    ) -> bool:
+        if (
+            fallback_attempted
+            or provider_call_count
+            or tool_call_count
+            or bool(getattr(error, "provider_activity_observed", False))
+        ):
+            return False
+        response = getattr(error, "response", None)
+        if not isinstance(response, httpx.Response):
+            return False
+        if _stable_provider_error_code(response) != "PROVIDER_MODALITY_UNSUPPORTED":
+            return False
+        if not media_routing or not any(
+            str(item.get("route") or "") == "native" for item in media_routing
+        ):
+            return False
+        fallback_modalities = self._media_fallback_modalities()
+        return bool(fallback_modalities) and all(
+            str(item.get("modality") or "") in fallback_modalities
+            for item in media_routing
+        )
+
+    def _typed_media_fallback_messages(
+        self,
+        prompt: str,
+        request_content: Mapping[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        capability = self.resolve_input_capability()
+        content, _decisions = materialize_openai_user_content(
+            prompt,
+            request_content,
+            InputCapability(
+                provider=capability.provider,
+                model=capability.model,
+                input_modalities=frozenset({"text"}),
+                input_transports={},
+                limits=capability.limits,
+                privacy_eligible=capability.privacy_eligible,
+                source="typed_local_fallback",
+            ),
+            authorized_roots=self.authorized_media_roots(),
+            fallback_modalities=self._media_fallback_modalities(),
+        )
+        return [
+            {"role": "system", "content": self.sys_prompt},
+            {"role": "user", "content": content},
+        ]
+
+    def _enable_request_local_media_fallback(
+        self,
+        attachment_ids: set[str],
+    ) -> None:
+        enable = getattr(
+            getattr(self, "tool_registry", None),
+            "enable_local_media_fallback",
+            None,
+        )
+        if callable(enable):
+            enable(set(attachment_ids))
+
+    @staticmethod
+    def _typed_media_fallback_routing(
+        media_routing: tuple[dict[str, Any], ...],
+    ) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            {
+                **dict(item),
+                "route": "local_fallback",
+                "reason": "provider_typed_modality_unsupported",
+                "transport": None,
+            }
+            for item in media_routing
+        )
+
+    def _build_payload(
+        self,
+        messages: list[dict],
+        use_streaming: bool = False,
+        tool_tiers: list[str] | None = ...,
+        *,
+        excluded_tool_names: frozenset[str] = frozenset(),
+    ) -> dict:
         payload: dict = {
             "model": self.config.model,
             "messages": messages,
@@ -410,6 +686,13 @@ class OpenRouterAdapter(BaseBackend):
         if self.tool_registry:
             tiers = self.DEFAULT_TOOL_TIERS if tool_tiers is ... else tool_tiers
             tool_defs = self.tool_registry.get_tool_definitions(tiers=tiers)
+            if excluded_tool_names:
+                tool_defs = [
+                    item
+                    for item in tool_defs
+                    if str((item.get("function") or {}).get("name") or "")
+                    not in excluded_tool_names
+                ]
             if tool_defs:
                 payload["tools"] = tool_defs
         return payload
@@ -445,6 +728,10 @@ class OpenRouterAdapter(BaseBackend):
         tool_calls: list[dict],
         messages: list[dict],
         on_stream_event: StreamCallback,
+        *,
+        native_attachment_ids: set[str] | None = None,
+        native_local_refs: set[str] | None = None,
+        all_media_native: bool = False,
     ) -> None:
         """Execute all tool_calls and append tool result messages to `messages`."""
         for tc in tool_calls:
@@ -480,6 +767,33 @@ class OpenRouterAdapter(BaseBackend):
                     "tool_call_id": tc_id,
                     "content": result_text,
                 })
+                continue
+
+            if tool_name in _MEDIA_FALLBACK_TOOL_NAMES and (
+                all_media_native
+                or _references_native_attachment(
+                    arguments,
+                    attachment_ids=set(native_attachment_ids or ()),
+                    local_refs=set(native_local_refs or ()),
+                )
+            ):
+                result_text = (
+                    "Error: this attachment was already supplied through the native "
+                    "media route; duplicate fallback processing is blocked."
+                )
+                await self._emit(
+                    on_stream_event,
+                    KIND_TOOL_END,
+                    f"{tool_name}: duplicate media fallback blocked",
+                    tool_name=tool_name,
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": result_text,
+                    }
+                )
                 continue
 
             policy = self._evaluate_tool_policy(tool_name, arguments)
@@ -633,6 +947,7 @@ class OpenRouterAdapter(BaseBackend):
         finish_reason = ""
         stream_usage: dict = {}  # usage from final streaming chunk
         saw_done = False
+        provider_activity_observed = False
 
         async with self.client.stream(
             "POST",
@@ -656,10 +971,21 @@ class OpenRouterAdapter(BaseBackend):
                     data = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(data, Mapping):
+                    continue
+
+                stream_error = _stream_error_exception(
+                    data,
+                    request=response.request,
+                    provider_activity_observed=provider_activity_observed,
+                )
+                if stream_error is not None:
+                    raise stream_error
 
                 # Capture usage from streaming chunks (sent in final chunk)
                 if data.get("usage"):
                     stream_usage = data["usage"]
+                    provider_activity_observed = True
 
                 choices = data.get("choices", [])
                 if not choices:
@@ -673,6 +999,15 @@ class OpenRouterAdapter(BaseBackend):
                 content = delta.get("content", "")
                 reasoning_text = str(delta.get("reasoning") or "")
                 reasoning_details = delta.get("reasoning_details") or []
+                tool_call_deltas = delta.get("tool_calls") or []
+                if (
+                    content
+                    or reasoning_text
+                    or reasoning_details
+                    or tool_call_deltas
+                    or finish_reason
+                ):
+                    provider_activity_observed = True
 
                 if reasoning_text and on_stream_event:
                     await on_stream_event(
@@ -711,7 +1046,7 @@ class OpenRouterAdapter(BaseBackend):
                         )
 
                 # Accumulate tool_calls deltas
-                for tc_delta in (delta.get("tool_calls") or []):
+                for tc_delta in tool_call_deltas:
                     idx = tc_delta.get("index", 0)
                     if idx not in tool_calls_acc:
                         tool_calls_acc[idx] = {
@@ -755,15 +1090,12 @@ class OpenRouterAdapter(BaseBackend):
         is_retry: bool = False,
         silent: bool = False,
         on_stream_event: StreamCallback = None,
+        request_content: Mapping[str, Any] | None = None,
     ) -> BackendResponse:
         started = time.perf_counter()
         self._ensure_client()
 
         use_streaming = on_stream_event is not None
-        messages = [
-            {"role": "system", "content": self.sys_prompt},
-            {"role": "user", "content": prompt},
-        ]
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -783,17 +1115,79 @@ class OpenRouterAdapter(BaseBackend):
         provider_calls: list[dict[str, Any]] = []
         total_tool_calls = 0
         tool_loop_count = 0
+        media_routing: tuple[dict[str, Any], ...] = ()
+        media_fallback_attempted = False
 
         try:
             self._touch_activity()
+            messages, media_routing = self._initial_messages(prompt, request_content)
+            self._last_media_routing = media_routing
+            normalized_request_content = normalize_request_content(request_content)
+            manifest = attachment_manifest(normalized_request_content)
+            native_attachment_ids = {
+                str(item.get("attachment_id") or "")
+                for item in media_routing
+                if str(item.get("route") or "") == "native"
+            }
+            native_local_refs = native_attachment_reference_aliases(
+                manifest,
+                native_attachment_ids,
+            )
+            all_media_native = bool(media_routing) and all(
+                str(item.get("route") or "") == "native" for item in media_routing
+            )
 
             for loop_idx in count():
-                payload = self._build_payload(messages, use_streaming=use_streaming)
+                while True:
+                    payload = self._build_payload(
+                        messages,
+                        use_streaming=use_streaming,
+                        excluded_tool_names=(
+                            _MEDIA_FALLBACK_TOOL_NAMES
+                            if all_media_native
+                            else frozenset()
+                        ),
+                    )
 
-                if use_streaming:
-                    result = await self._stream_api_once(payload, headers, on_stream_event)
-                else:
-                    result = await self._call_api_once(payload, headers, on_stream_event)
+                    try:
+                        if use_streaming:
+                            result = await self._stream_api_once(
+                                payload,
+                                headers,
+                                on_stream_event,
+                            )
+                        else:
+                            result = await self._call_api_once(
+                                payload,
+                                headers,
+                                on_stream_event,
+                            )
+                    except Exception as exc:
+                        if not self._can_replay_typed_media_fallback(
+                            exc,
+                            media_routing=media_routing,
+                            fallback_attempted=media_fallback_attempted,
+                            provider_call_count=provider_call_count,
+                            tool_call_count=total_tool_calls,
+                        ):
+                            raise
+                        media_fallback_attempted = True
+                        self._enable_request_local_media_fallback(
+                            native_attachment_ids
+                        )
+                        messages = self._typed_media_fallback_messages(
+                            prompt,
+                            request_content,
+                        )
+                        media_routing = self._typed_media_fallback_routing(
+                            media_routing
+                        )
+                        self._last_media_routing = media_routing
+                        native_attachment_ids = set()
+                        native_local_refs = set()
+                        all_media_native = False
+                        continue
+                    break
 
                 # Accumulate usage from each API call
                 total_prompt += result.prompt_tokens
@@ -838,7 +1232,14 @@ class OpenRouterAdapter(BaseBackend):
                 messages.append(assistant_msg)
 
                 # Execute tools, append results
-                await self._run_tool_calls(result.tool_calls, messages, on_stream_event)
+                await self._run_tool_calls(
+                    result.tool_calls,
+                    messages,
+                    on_stream_event,
+                    native_attachment_ids=native_attachment_ids,
+                    native_local_refs=native_local_refs,
+                    all_media_native=all_media_native,
+                )
 
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             from adapters.base import TokenUsage
@@ -861,6 +1262,8 @@ class OpenRouterAdapter(BaseBackend):
                 ),
                 stream_metadata={
                     "meter": {"provider_calls": provider_calls},
+                    "multimodal_routing": list(media_routing),
+                    "multimodal_fallback_attempted": media_fallback_attempted,
                 },
                 tool_call_count=total_tool_calls,
                 tool_loop_count=tool_loop_count,
@@ -871,12 +1274,19 @@ class OpenRouterAdapter(BaseBackend):
             raise
         except Exception as e:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            return _backend_failure_response(
+            failure = _backend_failure_response(
                 e,
                 duration_ms=duration_ms,
                 tool_call_count=total_tool_calls,
                 tool_loop_count=tool_loop_count,
             )
+            metadata = dict(failure.stream_metadata or {})
+            metadata["multimodal_routing"] = list(media_routing)
+            metadata["multimodal_fallback_attempted"] = media_fallback_attempted
+            if isinstance(e, MultimodalContractError) and e.attachment_id:
+                metadata["attachment_id"] = e.attachment_id
+            failure.stream_metadata = metadata
+            return failure
 
     async def shutdown(self):
         if self.client is not None and not getattr(self.client, "is_closed", False):

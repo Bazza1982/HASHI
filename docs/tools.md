@@ -82,6 +82,8 @@ Five execution modes:
 - `/backend` — switch active backend in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the backend picker. Selecting `her-v2` switches only the backend; it never asks the user to select the internal `role-configured` sentinel.
 - `/provider [name|hybrid]` — HER v2-only routing-mode picker. A named provider keeps the immediate Single-provider flow; `hybrid` opens a draft with independent Quick and Pro provider/model targets.
 - `/model` — for HER v2, edit complete Quick/Pro targets and let each effective task route follow Quick, follow Pro, or use a Custom provider/model target. Use `/model quick|pro [provider] <model>`, `/model route <route> <quick|pro>`, `/model route <route> custom <provider> <model>`, `/model reasoning <route> <value|inherit>`, and `/model apply|discard`. Other backends retain their existing single-model `/model [name]` behaviour.
+- `/compact [status|cancel]` — HER v2-only context maintenance. Manual and automatic Compact follow the active Quick/Light provider and model at fixed high HER effort. Unknown target capacity uses HASHI's 64,000→48,000 automatic maintenance threshold. Automatic failure or retry exhaustion preserves the best available prompt, sends a mandatory warning, and still calls the selected model; Compact is never a hard gate on the current task.
+- `/model compact inherit_quick [auto|tier_2|tier_3]` or `/model compact off` — enable the approved inherited Quick/Light Compact policy, choose its isolated watchdog tier, or turn it off. Legacy inherited-Pro and explicit Compact records migrate to `inherit_quick`.
 - Non-HER backend/model selection continues to the existing optional effort step when supported. HER v2 keeps backend, provider, models/reasoning, and effort as independent controls.
 - `/effort [level]` — HER v2 opens the **HER execution mode** control: Fast path (`low`), Planned (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`). Descriptive aliases are accepted and persisted as their canonical wire values. Reviewed adds independent read-only Review and closure; Assured adds latest-state Verification with at most three attempts. It never reads or writes provider reasoning. Other backends retain their model-aware effort behaviour.
 
@@ -183,17 +185,20 @@ Replanning, Review, and Finalisation follow Pro. Any task route may instead use
 a Custom target. This phase adds no automatic cross-provider failover and no
 picture/media-specific routing.
 
-Assured Verification also follows the reviewer/Pro route by default. Review and
-Verification receive tools but no side-effect authority. `workspace_inspect`
+Assured Verification also follows the reviewer/Pro route by default. Review is
+read-only. Verification receives validation-only side-effect authority.
+`workspace_inspect`
 provides read-only snapshots, status, diff, search, and artifact hashes.
 Its search operation uses ripgrep when available and falls back to the system
 grep binary, so it does not depend on the service inheriting a developer-shell
 PATH.
-`verification_run` accepts only registered recipes and runs them in a temporary
-writable copy with network disabled, environment credentials cleared, common
-credential files and host configuration excluded, and a temporary `HOME`. If
-process isolation is not available, it reports unavailable and does not run on
-the host as a fallback.
+`verification_run` runs a configured recipe or direct process `argv` in the
+authoritative current workspace. It does not copy or sandbox the workspace and
+does not invoke an implicit shell. The command inherits HASHI's process
+identity, filesystem access, environment, `HOME`, and network. Its effective
+timeout is the maximum of its configured/requested values, five minutes, and
+cumulative Execution time multiplied by 1.5 plus five minutes; requested values
+can raise but never shorten that budget.
 Passing claims require exact completed receipts from the current stage
 invocation and matching before/after snapshots.
 

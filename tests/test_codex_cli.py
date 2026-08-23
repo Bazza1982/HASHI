@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 from adapters.base import BackendResponse
 from adapters.codex_cli import CodexCLIAdapter
 from adapters.stream_events import KIND_COMMENTARY, KIND_THINKING
+from orchestrator.multimodal_contract import canonical_request_content
 from tests.mocks.mock_adapters import SimpleGlobalConfig, SimpleTestConfig
 
 
@@ -57,6 +59,142 @@ def _build_adapter(tmp_path: Path) -> CodexCLIAdapter:
     cfg.model = "gpt-5.4"
     global_cfg = SimpleGlobalConfig()
     return CodexCLIAdapter(cfg, global_cfg)
+
+
+@pytest.mark.asyncio
+async def test_codex_normal_generate_attaches_validated_native_image_path(
+    tmp_path, monkeypatch
+):
+    adapter = _build_adapter(tmp_path)
+    image = tmp_path / "one.png"
+    payload = b"\x89PNG\r\n\x1a\nimage"
+    image.write_bytes(payload)
+    content = canonical_request_content(
+        [
+            {"type": "text", "item_index": 1, "text": "Inspect it."},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": "attachment-1",
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/png",
+                "filename": image.name,
+                "caption": "",
+                "local_ref": str(image),
+                "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "transport": {},
+            },
+        ]
+    )
+    proc = _HangingProc(
+        [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "seen"},
+                }
+            ),
+            json.dumps({"type": "turn.completed"}),
+        ]
+    )
+    captured_command = []
+
+    async def create_subprocess(*args, **_kwargs):
+        captured_command.extend(args)
+        proc.finish(0)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    response = await adapter.generate_response(
+        "Inspect it.",
+        "request-image",
+        request_content=content,
+        reasoning_effort="high",
+    )
+
+    assert response.is_success is True
+    assert response.text == "seen"
+    assert "--image" in captured_command
+    assert captured_command[captured_command.index("--image") + 1] == str(
+        image.resolve()
+    )
+    prompt_argument = captured_command[captured_command.index("--") + 1]
+    assert str(image) not in prompt_argument
+    assert 'model_reasoning_effort="high"' in captured_command
+    assert response.stream_metadata["multimodal_routing"][0]["attachment_id"] == (
+        "attachment-1"
+    )
+    assert response.stream_metadata["multimodal_routing"][0]["transport"] == (
+        "local_path"
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_document_keeps_established_local_file_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    adapter = _build_adapter(tmp_path)
+    document = tmp_path / "notes.txt"
+    payload = b"verified notes"
+    document.write_bytes(payload)
+    content = canonical_request_content(
+        [
+            {"type": "text", "item_index": 1, "text": "Read the notes."},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": "attachment-document",
+                "modality": "document",
+                "kind": "document",
+                "mime_type": "text/plain",
+                "filename": document.name,
+                "caption": "",
+                "local_ref": str(document),
+                "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "transport": {},
+            },
+        ]
+    )
+    proc = _HangingProc(
+        [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "read"},
+                }
+            ),
+            json.dumps({"type": "turn.completed"}),
+        ]
+    )
+    captured_command = []
+
+    async def create_subprocess(*args, **_kwargs):
+        captured_command.extend(args)
+        proc.finish(0)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    response = await adapter.generate_response(
+        "Read the received document.",
+        "request-document",
+        request_content=content,
+    )
+
+    assert response.is_success is True
+    assert "--image" not in captured_command
+    prompt_argument = captured_command[captured_command.index("--") + 1]
+    assert "attachment-document" in prompt_argument
+    assert str(document) in prompt_argument
+    assert "media bytes were not sent natively" in prompt_argument
+    assert response.stream_metadata["multimodal_routing"][0]["route"] == (
+        "local_fallback"
+    )
 
 
 class _CompletedProc:

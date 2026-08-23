@@ -40,6 +40,12 @@ Contains examples for:
 - Flexible agents (switchable backends)
 - Specialized task agents (coding, research, etc.)
 
+### `agent.md.sample`
+Minimal persona-file template for a new agent. It demonstrates the required
+`[persona]` / `[persona_end]` block and recommended sections for identity, tone,
+responsibilities, boundaries, and output format. See also
+[`../docs/AGENT_PERSONA_SPEC.md`](../docs/AGENT_PERSONA_SPEC.md) for the full rules.
+
 ---
 
 ### `agent_capabilities.json.example`

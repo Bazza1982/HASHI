@@ -430,7 +430,7 @@ def test_review_technical_unavailability_is_not_a_conditional_pass():
     assert finding.outcome is ReviewOutcome.UNAVAILABLE
 
 
-def _isolated_verification_response(*, result="VERIFIED", status=None, exit_code=0):
+def _workspace_verification_response(*, result="VERIFIED", status=None, exit_code=0):
     receipt_status = status or (
         ToolReceiptStatus.SUCCESS
         if exit_code == 0
@@ -439,13 +439,13 @@ def _isolated_verification_response(*, result="VERIFIED", status=None, exit_code
     return StageResponse(
         data={
             "outcome": result,
-            "summary": "The isolated core recipe was assessed.",
+            "summary": "The workspace core recipe was assessed.",
             "checks": [
                 {
                     "claim": "The core recipe passes",
                     "verifiability": "VERIFIABLE",
                     "result": result,
-                    "method": "isolated_test",
+                    "method": "workspace_test",
                     "evidence_refs": ["test-run"],
                     "observed": f"exit code {exit_code}",
                 }
@@ -464,7 +464,25 @@ def _isolated_verification_response(*, result="VERIFIED", status=None, exit_code
                     "operation": "run",
                     "recipe": "pytest_core",
                     "exit_code": exit_code,
-                    "isolated": True,
+                    "execution_scope": "workspace",
+                    "workspace_copied": False,
+                    "process_isolated": False,
+                    "process_authority": "inherited",
+                    "identity_policy": "inherited",
+                    "filesystem_policy": "inherited",
+                    "environment_policy": "inherited",
+                    "network_policy": "inherited",
+                    "home_policy": "inherited",
+                    "workspace_access": {
+                        "read": True,
+                        "write": True,
+                        "execute": True,
+                    },
+                    "timeout_s": 1800.0,
+                    "timeout_policy": {
+                        "execution_floor_s": 300.0,
+                        "effective_timeout_s": 1800.0,
+                    },
                 },
             ),
             _snapshot("after", stage=Stage.VERIFICATION),
@@ -473,9 +491,9 @@ def _isolated_verification_response(*, result="VERIFIED", status=None, exit_code
 
 
 def test_assured_verification_binds_success_and_failure_to_real_run_receipts():
-    verified = validate_verification_response(_isolated_verification_response())
+    verified = validate_verification_response(_workspace_verification_response())
     failed = validate_verification_response(
-        _isolated_verification_response(result="FAILED", exit_code=1)
+        _workspace_verification_response(result="FAILED", exit_code=1)
     )
 
     assert verified.outcome is VerificationOutcome.VERIFIED
@@ -485,10 +503,10 @@ def test_assured_verification_binds_success_and_failure_to_real_run_receipts():
 def test_assured_verification_rejects_false_success_and_cross_stage_receipts():
     with pytest.raises(StructuredOutputError, match="successful current receipts"):
         validate_verification_response(
-            _isolated_verification_response(result="VERIFIED", exit_code=1)
+            _workspace_verification_response(result="VERIFIED", exit_code=1)
         )
 
-    response = _isolated_verification_response()
+    response = _workspace_verification_response()
     stale = tuple(
         ToolEvidenceReceipt(
             **{
@@ -504,8 +522,48 @@ def test_assured_verification_rejects_false_success_and_cross_stage_receipts():
         )
 
 
+@pytest.mark.parametrize(
+    "detail_updates",
+    [
+        {"network_policy": "disabled"},
+        {"filesystem_policy": "read_only"},
+        {"workspace_access": {"read": True, "write": False, "execute": True}},
+        {
+            "timeout_s": 60.0,
+            "timeout_policy": {
+                "execution_floor_s": 5700.0,
+                "effective_timeout_s": 60.0,
+            },
+        },
+    ],
+)
+def test_assured_verification_rejects_crippled_authority_or_short_timeout(
+    detail_updates,
+):
+    response = _workspace_verification_response()
+    receipts = tuple(
+        ToolEvidenceReceipt(
+            **{
+                **receipt.__dict__,
+                "details": {**dict(receipt.details), **detail_updates},
+            }
+        )
+        if receipt.evidence_ref == "test-run"
+        else receipt
+        for receipt in response.tool_receipts
+    )
+
+    with pytest.raises(
+        StructuredOutputError,
+        match="inherited authority and a runtime-derived timeout",
+    ):
+        validate_verification_response(
+            StageResponse(**{**response.__dict__, "tool_receipts": receipts})
+        )
+
+
 def test_assured_verification_rejects_an_invented_verification_method():
-    response = _isolated_verification_response()
+    response = _workspace_verification_response()
     data = dict(response.data)
     data["checks"] = [
         {**dict(response.data["checks"][0]), "method": "trust_the_model"}

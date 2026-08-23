@@ -32,8 +32,10 @@ from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
     canonical_backend_engine,
 )
-from orchestrator.privacy_levels import require_backend_compatibility, require_level_available
-
+from orchestrator.privacy_levels import (
+    require_backend_compatibility,
+    require_level_available,
+)
 
 STATE_KEY = "context_compaction"
 MANAGED_HISTORY_TITLE = "HASHI MANAGED CONVERSATION HISTORY"
@@ -52,6 +54,15 @@ DEFAULT_LOW_WATERMARK = 0.60
 DEFAULT_RECENT_EXCHANGES = 10
 DEFAULT_RESPONSE_HEADROOM_TOKENS = 16_384
 DEFAULT_MAX_CAPSULE_CHARS = 24_000
+# Unknown provider capacity must not disable HASHI's own context maintenance.
+# These are product budgets, not claims about a model's actual context window.
+DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS = 64_000
+DEFAULT_UNKNOWN_TARGET_LOW_TOKENS = 48_000
+# Live HASHI API evidence showed that a 64k mixed-character estimate serializes
+# to roughly 100k provider tokens once the maintenance schema and provider
+# envelope are included.  Keep unknown-capacity maintenance chunks well below
+# that observed edge.
+DEFAULT_UNKNOWN_COMPACTOR_BUDGET_TOKENS = 32_000
 DEFAULT_TIER_2_ATTEMPT_SECONDS = 190.0
 DEFAULT_TIER_2_RECOVERY_SECONDS = 300.0
 DEFAULT_TIER_3_ATTEMPT_SECONDS = 300.0
@@ -189,10 +200,10 @@ class CapacityProfile:
 
 @dataclass(frozen=True)
 class CompactRouteConfig:
-    mode: str = "inherit_pro"
+    mode: str = "inherit_quick"
     provider: str | None = None
     model: str | None = None
-    reasoning: str = "inherit_pro"
+    reasoning: str = "high"
     timeout_tier: str = "auto"
     cross_provider_confirmed: bool = False
 
@@ -214,6 +225,8 @@ class CompactionPolicy:
     recent_exchanges: int = DEFAULT_RECENT_EXCHANGES
     response_headroom_tokens: int = DEFAULT_RESPONSE_HEADROOM_TOKENS
     max_capsule_chars: int = DEFAULT_MAX_CAPSULE_CHARS
+    unknown_target_high_tokens: int = DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS
+    unknown_target_low_tokens: int = DEFAULT_UNKNOWN_TARGET_LOW_TOKENS
     tier_2_attempt_seconds: float = DEFAULT_TIER_2_ATTEMPT_SECONDS
     tier_2_recovery_seconds: float = DEFAULT_TIER_2_RECOVERY_SECONDS
     tier_3_attempt_seconds: float = DEFAULT_TIER_3_ATTEMPT_SECONDS
@@ -226,12 +239,28 @@ class ResolvedCompactRoute:
     provider: str = ""
     model: str = ""
     reasoning: str = ""
+    her_effort: str = "high"
     timeout_tier: str = ""
     capacity: CapacityProfile | None = None
     eligible: bool = False
     lock_reason: str = ""
     crosses_provider: bool = False
     capabilities: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CompactionTriggerBudget:
+    """Effective proactive budget without fabricating provider capacity."""
+
+    high_projected_tokens: int
+    low_input_tokens: int
+    response_headroom_tokens: int
+    provenance: str
+    target: CapacityProfile | None = None
+
+    @property
+    def is_unknown_capacity_guard(self) -> bool:
+        return self.target is None
 
 
 @dataclass(frozen=True)
@@ -244,6 +273,7 @@ class CompactionRequest:
     provider: str
     model: str
     reasoning: str
+    her_effort: str
     timeout_tier: str
     deadline_s: float
     attempt: int
@@ -281,6 +311,8 @@ class CompactionOutcome:
     capsule_ref: str = ""
     route_provider: str = ""
     route_model: str = ""
+    route_reasoning: str = ""
+    her_effort: str = "high"
     attempt_count: int = 0
 
 
@@ -507,12 +539,14 @@ def _workspace_state(runtime: Any) -> dict[str, Any]:
 
 def _route_from_mapping(raw: Mapping[str, Any] | None) -> CompactRouteConfig:
     value = dict(raw or {})
-    mode = str(value.get("mode") or "inherit_pro").strip().lower()
-    if mode not in {"inherit_pro", "explicit", "off"}:
-        mode = "inherit_pro"
-    provider = canonical_backend_engine(str(value.get("provider") or "").strip()) or None
-    model = str(value.get("model") or "").strip() or None
-    reasoning = str(value.get("reasoning") or "inherit_pro").strip().lower()
+    legacy_mode = str(value.get("mode") or "inherit_quick").strip().lower()
+    # Compact now follows the active HER v2 Quick/Light target.  Old persisted
+    # inherit_pro/explicit routes are read as the new default without rewriting
+    # state during a status/read operation.
+    mode = "off" if legacy_mode == "off" else "inherit_quick"
+    provider = None
+    model = None
+    reasoning = "high"
     timeout_tier = str(value.get("timeout_tier") or "auto").strip().lower().replace("-", "_")
     if timeout_tier not in {"auto", "tier_2", "tier_3"}:
         timeout_tier = "auto"
@@ -549,7 +583,7 @@ def ensure_route_state(runtime: Any) -> bool:
         existing = state.get(STATE_KEY)
         existing = dict(existing) if isinstance(existing, Mapping) else {}
         if not isinstance(existing.get("route"), Mapping):
-            existing["version"] = 1
+            existing["version"] = 2
             existing["route"] = CompactRouteConfig().to_dict()
         state[STATE_KEY] = existing
         return state
@@ -566,6 +600,18 @@ def load_policy(runtime: Any) -> CompactionPolicy:
     low = _safe_float(raw.get("low_watermark"), minimum=0.01, maximum=0.98) or DEFAULT_LOW_WATERMARK
     if low >= high:
         low, high = DEFAULT_LOW_WATERMARK, DEFAULT_HIGH_WATERMARK
+    unknown_high = (
+        _safe_int(raw.get("unknown_target_high_tokens"), minimum=4_096)
+        or DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS
+    )
+    unknown_low = (
+        _safe_int(raw.get("unknown_target_low_tokens"), minimum=2_048)
+        or DEFAULT_UNKNOWN_TARGET_LOW_TOKENS
+    )
+    if unknown_low >= unknown_high:
+        unknown_low = DEFAULT_UNKNOWN_TARGET_LOW_TOKENS
+        unknown_high = DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS
+
     def deadline(name: str, default: float) -> float:
         return _safe_float(raw.get(name), minimum=1.0, maximum=3600.0) or default
 
@@ -575,6 +621,8 @@ def load_policy(runtime: Any) -> CompactionPolicy:
         recent_exchanges=_safe_int(raw.get("recent_exchanges")) or DEFAULT_RECENT_EXCHANGES,
         response_headroom_tokens=_safe_int(raw.get("response_headroom_tokens")) or DEFAULT_RESPONSE_HEADROOM_TOKENS,
         max_capsule_chars=_safe_int(raw.get("max_capsule_chars"), minimum=256) or DEFAULT_MAX_CAPSULE_CHARS,
+        unknown_target_high_tokens=unknown_high,
+        unknown_target_low_tokens=unknown_low,
         tier_2_attempt_seconds=deadline("tier_2_attempt_seconds", DEFAULT_TIER_2_ATTEMPT_SECONDS),
         tier_2_recovery_seconds=deadline("tier_2_recovery_seconds", DEFAULT_TIER_2_RECOVERY_SECONDS),
         tier_3_attempt_seconds=deadline("tier_3_attempt_seconds", DEFAULT_TIER_3_ATTEMPT_SECONDS),
@@ -730,42 +778,107 @@ def resolve_target_capacity(runtime: Any) -> CapacityProfile | None:
     return min(resolved, key=lambda item: item.usable_input_tokens)
 
 
+def resolve_trigger_budget(
+    runtime: Any,
+    *,
+    policy: CompactionPolicy | None = None,
+) -> CompactionTriggerBudget:
+    """Resolve automatic pressure thresholds for known and unknown targets.
+
+    A declared provider capacity keeps the ratio-based policy.  When capacity
+    metadata is absent, HASHI uses an explicitly named absolute input budget;
+    this enables proactive maintenance without pretending the budget is the
+    model's true context window.
+    """
+
+    effective_policy = policy or load_policy(runtime)
+    target = resolve_target_capacity(runtime)
+    if target is None:
+        return CompactionTriggerBudget(
+            high_projected_tokens=effective_policy.unknown_target_high_tokens,
+            low_input_tokens=effective_policy.unknown_target_low_tokens,
+            response_headroom_tokens=0,
+            provenance="hashi_unknown_target_guard_v1",
+            target=None,
+        )
+    return CompactionTriggerBudget(
+        high_projected_tokens=max(
+            1,
+            int(target.context_window_tokens * effective_policy.high_watermark),
+        ),
+        low_input_tokens=max(
+            1,
+            int(target.context_window_tokens * effective_policy.low_watermark)
+            - target.response_headroom_tokens,
+        ),
+        response_headroom_tokens=target.response_headroom_tokens,
+        provenance=target.provenance,
+        target=target,
+    )
+
+
+def _compact_provider_reasoning(provider: str, model: str) -> str:
+    """Map fixed HER Compact effort to a provider-supported reasoning control.
+
+    HER effort remains ``high`` regardless of provider syntax. Providers with
+    an explicit high effort use it; providers without granular effort receive
+    an enable-only value and are never rejected for lacking effort levels.
+    """
+
+    try:
+        from orchestrator.flexible_backend_registry import get_backend_entry
+
+        entry = get_backend_entry(provider)
+    except Exception:
+        entry = {}
+    model_efforts = entry.get("model_efforts") if isinstance(entry, Mapping) else None
+    efforts = (
+        model_efforts.get(model)
+        if isinstance(model_efforts, Mapping)
+        else entry.get("efforts") if isinstance(entry, Mapping) else None
+    )
+    normalized = {
+        str(value).strip().lower()
+        for value in (efforts or ())
+        if str(value).strip()
+    }
+    return "high" if "high" in normalized else "enabled"
+
+
 def resolve_compact_route(runtime: Any) -> ResolvedCompactRoute:
     config = load_route_config(runtime)
     if config.mode == "off":
         return ResolvedCompactRoute(config=config, lock_reason="Compact route is off")
     manager = getattr(runtime, "backend_manager", None)
     if manager is None:
-        return ResolvedCompactRoute(config=config, lock_reason="backend manager is unavailable")
+        return ResolvedCompactRoute(
+            config=config,
+            lock_reason="HER v2 backend manager is unavailable",
+        )
     try:
         selected = manager.get_her_v2_configuration()
     except Exception as exc:
-        return ResolvedCompactRoute(config=config, lock_reason=f"HER v2 configuration unavailable: {type(exc).__name__}")
+        return ResolvedCompactRoute(
+            config=config,
+            lock_reason=(
+                "HER v2 active provider/Quick configuration is unavailable: "
+                f"{type(exc).__name__}"
+            ),
+        )
 
-    pro_provider = canonical_backend_engine(
-        str(getattr(selected, "pro_provider", selected.provider))
+    provider = canonical_backend_engine(
+        str(getattr(selected, "fast_provider", getattr(selected, "provider", "")))
     )
-    if config.mode == "inherit_pro":
-        provider = pro_provider
-        model = str(selected.pro_model)
-        reasoning = "default"
-        raw = _effective_her_config(runtime)
-        profiles = raw.get("profiles")
-        if isinstance(profiles, Mapping):
-            for profile in profiles.values():
-                if not isinstance(profile, Mapping):
-                    continue
-                if canonical_backend_engine(str(profile.get("engine") or "")) == provider and str(profile.get("model") or "") == model:
-                    value = profile.get("reasoning")
-                    if value is not None and str(value).strip():
-                        reasoning = str(value).strip().lower()
-                        break
-    else:
-        provider = canonical_backend_engine(config.provider)
-        model = str(config.model or "")
-        reasoning = str(config.reasoning or "").strip().lower()
+    model = str(getattr(selected, "fast_model", "") or "").strip()
+    reasoning = _compact_provider_reasoning(provider, model)
     if not provider or not model:
-        return ResolvedCompactRoute(config=config, lock_reason="Compact provider/model is incomplete")
+        return ResolvedCompactRoute(
+            config=config,
+            provider=provider,
+            model=model,
+            reasoning=reasoning,
+            lock_reason="HER v2 active provider or Quick/Light model is missing",
+        )
     grant = _exact_grant(runtime, provider, model)
     if grant is None:
         return ResolvedCompactRoute(
@@ -773,47 +886,34 @@ def resolve_compact_route(runtime: Any) -> ResolvedCompactRoute:
             provider=provider,
             model=model,
             reasoning=reasoning,
-            lock_reason="exact provider/model grant is absent",
-            crosses_provider=provider != pro_provider,
+            lock_reason="active HER v2 Quick/Light provider/model grant is absent",
         )
+
     capabilities, _capacities = _adapter_declarations(provider)
     capabilities = dict(capabilities)
     if isinstance(grant.get("semantic_reasoning"), bool):
         capabilities["semantic_reasoning"] = grant["semantic_reasoning"]
-    missing = [
-        label
-        for key, label in (
-            ("prompt_isolation", "prompt isolation is not declared"),
-            ("tool_disablement", "tool disablement is not declared"),
-            ("semantic_reasoning", "semantic reasoning is not declared"),
-        )
-        if capabilities.get(key) is not True
-    ]
     capacity = resolve_capacity_profile(runtime, provider, model)
-    if capacity is None:
-        missing.append("Compact model context capacity is unknown")
-    if reasoning in {"off", "none", "false", "0"}:
-        missing.append("Compact reasoning is disabled")
     requested_tier = config.timeout_tier
-    if requested_tier == "auto":
-        timeout_tier = "tier_3" if capabilities.get("local_or_slow") is True else "tier_2"
-    else:
-        timeout_tier = requested_tier
+    timeout_tier = (
+        "tier_3"
+        if requested_tier == "auto" and capabilities.get("local_or_slow") is True
+        else "tier_2" if requested_tier == "auto" else requested_tier
+    )
+    missing = []
     if timeout_tier not in {"tier_2", "tier_3"}:
-        missing.append("semantic Compact cannot use Tier 1")
-    crosses = provider != pro_provider
-    if crosses and not config.cross_provider_confirmed:
-        missing.append("cross-provider Compact confirmation is absent")
+        missing.append("Compact timeout tier must be tier_2 or tier_3")
     return ResolvedCompactRoute(
         config=config,
         provider=provider,
         model=model,
         reasoning=reasoning,
+        her_effort="high",
         timeout_tier=timeout_tier,
         capacity=capacity,
         eligible=not missing,
         lock_reason="; ".join(missing),
-        crosses_provider=crosses,
+        crosses_provider=False,
         capabilities=capabilities,
     )
 
@@ -828,44 +928,34 @@ def configure_route(
     timeout_tier: str = "auto",
     confirmed_cross_provider: bool = False,
 ) -> CompactRouteConfig:
+    """Persist only the simplified Quick/Light Compact policy.
+
+    Legacy callers may still say ``inherit_pro``; it is migrated forward to
+    ``inherit_quick``. Independent provider/model/reasoning routes are no
+    longer accepted because Compact follows the Agent's active HER v2 setup.
+    """
+
     manager = getattr(runtime, "backend_manager", None)
     if getattr(getattr(manager, "config", None), "active_backend", None) != HER_V2_ENGINE:
-        raise ValueError("Compact route is configurable only while HER v2 is active")
+        raise ValueError("Compact is configurable only while HER v2 is active")
     busy = getattr(runtime, "_backend_busy", None)
     if callable(busy) and busy():
-        raise ValueError("Compact route configuration is blocked while a request is running or queued")
-    mode = str(mode or "").strip().lower()
-    if mode not in {"inherit_pro", "explicit", "off"}:
-        raise ValueError("Compact mode must be inherit_pro, explicit, or off")
+        raise ValueError("Compact configuration is blocked while a request is running or queued")
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode in {"inherit", "inherit_pro", "pro", "quick", "inherit_quick"}:
+        normalized_mode = "inherit_quick"
+    if normalized_mode not in {"inherit_quick", "off"}:
+        raise ValueError(
+            "Compact follows the active HER v2 Quick/Light model; only inherit_quick or off is supported"
+        )
     timeout_tier = str(timeout_tier or "auto").strip().lower().replace("-", "_")
     if timeout_tier not in {"auto", "tier_2", "tier_3"}:
         raise ValueError("Compact timeout tier must be auto, tier_2, or tier_3")
-    selected = manager.get_her_v2_configuration()
-    pro_provider = canonical_backend_engine(
-        str(getattr(selected, "pro_provider", selected.provider))
+    candidate = CompactRouteConfig(
+        mode=normalized_mode,
+        reasoning="high",
+        timeout_tier=timeout_tier,
     )
-    if mode == "explicit":
-        provider = canonical_backend_engine(provider)
-        model = str(model or "").strip()
-        reasoning = str(reasoning or "").strip().lower()
-        if not provider or not model or not reasoning:
-            raise ValueError("explicit Compact requires provider, model, and reasoning")
-        if _exact_grant(runtime, provider, model) is None:
-            raise ValueError("explicit Compact provider/model lacks an exact Agent grant")
-        if provider != pro_provider and not confirmed_cross_provider:
-            raise ValueError("cross-provider Compact requires explicit confirmation")
-        candidate = CompactRouteConfig(
-            mode,
-            provider,
-            model,
-            reasoning,
-            timeout_tier,
-            bool(confirmed_cross_provider),
-        )
-    elif mode == "off":
-        candidate = CompactRouteConfig(mode="off", timeout_tier=timeout_tier)
-    else:
-        candidate = CompactRouteConfig(mode="inherit_pro", reasoning="inherit_pro", timeout_tier=timeout_tier)
 
     state_store = getattr(manager, "state_store", None)
     if state_store is None:
@@ -874,7 +964,7 @@ def configure_route(
     def update(state: dict[str, Any]) -> dict[str, Any]:
         block = state.get(STATE_KEY)
         block = dict(block) if isinstance(block, Mapping) else {}
-        block["version"] = 1
+        block["version"] = 2
         block["route"] = candidate.to_dict()
         state[STATE_KEY] = block
         return state
@@ -1456,9 +1546,17 @@ class ContextCompactionCoordinator:
         if hasattr(backend, "tool_registry"):
             backend.tool_registry = None
         extra = dict(getattr(backend.config, "extra", None) or {})
+        # HER Compact effort is a lifecycle policy; provider reasoning is a
+        # separate adapter-specific control.  Keep both explicit and never
+        # grant execution authority to this maintenance invocation.
+        extra["her_effort"] = route.her_effort
+        extra["effort"] = route.her_effort
         extra["provider_reasoning"] = route.reasoning
         extra["reasoning_effort"] = route.reasoning
         extra["context_compaction"] = True
+        extra["tools_authorised_for_this_stage"] = False
+        extra["external_side_effects_authorised_for_this_stage"] = False
+        extra["sub_agents_authorised_for_this_stage"] = False
         backend.config.extra = extra
         reasoning_toggle = getattr(backend, "set_reasoning_enabled", None)
         if callable(reasoning_toggle):
@@ -1550,6 +1648,7 @@ class ContextCompactionCoordinator:
                 provider=route.provider,
                 model=route.model,
                 reasoning=route.reasoning,
+                her_effort=route.her_effort,
                 timeout_tier=route.timeout_tier,
                 deadline_s=float(deadline),
                 attempt=attempt,
@@ -1566,7 +1665,11 @@ class ContextCompactionCoordinator:
                     "source_segment_ids": source_ids,
                     "compact_provider": route.provider,
                     "compact_model": route.model,
-                    "compact_reasoning": route.reasoning,
+                    "provider_reasoning": route.reasoning,
+                    "her_effort": route.her_effort,
+                    "tools_authorised": False,
+                    "external_side_effects_authorised": False,
+                    "sub_agents_authorised": False,
                     "timeout_tier": route.timeout_tier,
                     "attempt": attempt,
                     "attempt_deadline_s": float(deadline),
@@ -1654,10 +1757,14 @@ class ContextCompactionCoordinator:
         trigger: str,
         policy: CompactionPolicy,
     ) -> _CapsuleCandidate:
-        assert route.capacity is not None
-        budget = max(
-            512,
-            int(route.capacity.usable_input_tokens * 0.60) - 4096,
+        # Capacity metadata improves chunk sizing but is not an eligibility
+        # gate.  When it is absent, use a conservative maintenance-call budget;
+        # any genuine provider capacity rejection remains a real execution
+        # error and the active pointer stays unchanged.
+        budget = (
+            max(512, int(route.capacity.usable_input_tokens * 0.60) - 4096)
+            if route.capacity is not None
+            else DEFAULT_UNKNOWN_COMPACTOR_BUDGET_TOKENS
         )
         groups = _partition(selection.records, budget)
         _validate_partition_source_coverage(selection.records, groups)
@@ -1777,6 +1884,7 @@ class ContextCompactionCoordinator:
         request_ref: str,
         force: bool = False,
         required_reduction_tokens: int | None = None,
+        continue_request_on_failure: bool = False,
     ) -> CompactionOutcome:
         task = asyncio.current_task()
         async with self._operation_lock:
@@ -1784,6 +1892,28 @@ class ContextCompactionCoordinator:
             compaction_id = f"cmp-{uuid.uuid4().hex}"
             route = resolve_compact_route(self.runtime)
             if not route.eligible:
+                with contextlib.suppress(Exception):
+                    self.store.append_audit(
+                        "route_rejected",
+                        compaction_id=compaction_id,
+                        payload={
+                            "request_ref": request_ref,
+                            "trigger": trigger,
+                            "code": "COMPACTION_ROUTE_LOCKED",
+                            "reason": route.lock_reason,
+                            "compact_provider": route.provider,
+                            "compact_model": route.model,
+                            "provider_reasoning": route.reasoning,
+                            "her_effort": route.her_effort,
+                            "original_context_unchanged": True,
+                            "will_continue": bool(continue_request_on_failure),
+                            "continuation_decision": (
+                                "continue_original_request_with_warning"
+                                if continue_request_on_failure
+                                else "caller_decides"
+                            ),
+                        },
+                    )
                 self._active_task = None
                 return CompactionOutcome(
                     status="locked",
@@ -1793,10 +1923,16 @@ class ContextCompactionCoordinator:
                     message=route.lock_reason,
                     route_provider=route.provider,
                     route_model=route.model,
+                    route_reasoning=route.reasoning,
+                    her_effort=route.her_effort,
                 )
             policy = load_policy(self.runtime)
             try:
                 snapshot = self.snapshot()
+                trigger_budget = resolve_trigger_budget(
+                    self.runtime,
+                    policy=policy,
+                )
                 selection = _selection(
                     snapshot,
                     required_reduction_tokens=required_reduction_tokens,
@@ -1814,6 +1950,8 @@ class ContextCompactionCoordinator:
                         covered_through_turn_id=snapshot.covered_through_turn_id,
                         route_provider=route.provider,
                         route_model=route.model,
+                        route_reasoning=route.reasoning,
+                        her_effort=route.her_effort,
                     )
                 if route.crosses_provider:
                     secret_bearing = [
@@ -1848,7 +1986,11 @@ class ContextCompactionCoordinator:
                         ),
                         "compact_provider": route.provider,
                         "compact_model": route.model,
-                        "compact_reasoning": route.reasoning,
+                        "provider_reasoning": route.reasoning,
+                        "her_effort": route.her_effort,
+                        "tools_authorised": False,
+                        "external_side_effects_authorised": False,
+                        "sub_agents_authorised": False,
                         "compact_context_window_tokens": (
                             route.capacity.context_window_tokens
                             if route.capacity
@@ -1872,6 +2014,13 @@ class ContextCompactionCoordinator:
                         "estimator": route.capacity.estimator if route.capacity else None,
                         "high_watermark": policy.high_watermark,
                         "low_watermark": policy.low_watermark,
+                        "trigger_budget_high_tokens": (
+                            trigger_budget.high_projected_tokens
+                        ),
+                        "trigger_budget_low_tokens": (
+                            trigger_budget.low_input_tokens
+                        ),
+                        "trigger_budget_provenance": trigger_budget.provenance,
                         "required_reduction_tokens": required_reduction_tokens,
                     },
                 )
@@ -1948,7 +2097,8 @@ class ContextCompactionCoordinator:
                     "route": {
                         "provider": route.provider,
                         "model": route.model,
-                        "reasoning": route.reasoning,
+                        "her_effort": route.her_effort,
+                        "provider_reasoning": route.reasoning,
                         "timeout_tier": route.timeout_tier,
                     },
                 }
@@ -1997,6 +2147,11 @@ class ContextCompactionCoordinator:
                         "before_tokens": selection.before_tokens,
                         "after_tokens": after_tokens,
                         "attempt_count": candidate.attempt_count,
+                        "trigger": trigger,
+                        "compact_provider": route.provider,
+                        "compact_model": route.model,
+                        "provider_reasoning": route.reasoning,
+                        "her_effort": route.her_effort,
                     },
                 )
                 return CompactionOutcome(
@@ -2012,6 +2167,8 @@ class ContextCompactionCoordinator:
                     capsule_ref=capsule_ref,
                     route_provider=route.provider,
                     route_model=route.model,
+                    route_reasoning=route.reasoning,
+                    her_effort=route.her_effort,
                     attempt_count=candidate.attempt_count,
                 )
             except asyncio.CancelledError:
@@ -2019,7 +2176,15 @@ class ContextCompactionCoordinator:
                     self.store.append_audit(
                         "cancelled",
                         compaction_id=compaction_id,
-                        payload={"request_ref": request_ref, "original_context_unchanged": True},
+                        payload={
+                            "request_ref": request_ref,
+                            "trigger": trigger,
+                            "compact_provider": route.provider,
+                            "compact_model": route.model,
+                            "provider_reasoning": route.reasoning,
+                            "her_effort": route.her_effort,
+                            "original_context_unchanged": True,
+                        },
                     )
                 raise
             except CompactionFailure as exc:
@@ -2029,11 +2194,20 @@ class ContextCompactionCoordinator:
                         compaction_id=compaction_id,
                         payload={
                             "request_ref": request_ref,
+                            "trigger": trigger,
+                            "compact_provider": route.provider,
+                            "compact_model": route.model,
+                            "provider_reasoning": route.reasoning,
+                            "her_effort": route.her_effort,
                             "code": exc.code,
                             "error": _redact_control_text(exc),
                             "original_context_unchanged": True,
-                            "will_continue": None,
-                            "continuation_decision": "caller_capacity_check_required",
+                            "will_continue": bool(continue_request_on_failure),
+                            "continuation_decision": (
+                                "continue_original_request_with_warning"
+                                if continue_request_on_failure
+                                else "caller_decides"
+                            ),
                         },
                     )
                 return CompactionOutcome(
@@ -2044,6 +2218,8 @@ class ContextCompactionCoordinator:
                     message=str(exc),
                     route_provider=route.provider,
                     route_model=route.model,
+                    route_reasoning=route.reasoning,
+                    her_effort=route.her_effort,
                 )
             except Exception as exc:
                 safe_error = _redact_control_text(exc)
@@ -2053,12 +2229,21 @@ class ContextCompactionCoordinator:
                         compaction_id=compaction_id,
                         payload={
                             "request_ref": request_ref,
+                            "trigger": trigger,
+                            "compact_provider": route.provider,
+                            "compact_model": route.model,
+                            "provider_reasoning": route.reasoning,
+                            "her_effort": route.her_effort,
                             "code": "COMPACTION_INTERNAL_FAILURE",
                             "error_type": type(exc).__name__,
                             "error": safe_error,
                             "original_context_unchanged": True,
-                            "will_continue": None,
-                            "continuation_decision": "caller_capacity_check_required",
+                            "will_continue": bool(continue_request_on_failure),
+                            "continuation_decision": (
+                                "continue_original_request_with_warning"
+                                if continue_request_on_failure
+                                else "caller_decides"
+                            ),
                         },
                     )
                 return CompactionOutcome(
@@ -2069,6 +2254,8 @@ class ContextCompactionCoordinator:
                     message=f"Context compaction failed safely: {type(exc).__name__}: {safe_error}",
                     route_provider=route.provider,
                     route_model=route.model,
+                    route_reasoning=route.reasoning,
+                    her_effort=route.her_effort,
                 )
             finally:
                 if self._active_task is task:
@@ -2082,39 +2269,37 @@ class ContextCompactionCoordinator:
         trigger: str = "soft_watermark",
         additional_tokens: int = 0,
     ) -> CompactionOutcome:
-        target = resolve_target_capacity(self.runtime)
-        if target is None:
-            return CompactionOutcome(
-                status="not_evaluated",
-                trigger=trigger,
-                code="TARGET_CAPACITY_UNKNOWN",
-                message="Target capacity is unknown; proactive ratio triggering is disabled.",
-            )
         policy = load_policy(self.runtime)
+        budget = resolve_trigger_budget(self.runtime, policy=policy)
         prompt_tokens = estimate_tokens(prompt)
         projected = (
             prompt_tokens
             + max(0, int(additional_tokens))
-            + target.response_headroom_tokens
+            + budget.response_headroom_tokens
         )
-        high = int(target.context_window_tokens * policy.high_watermark)
-        if projected < high:
+        if projected < budget.high_projected_tokens:
             return CompactionOutcome(
                 status="not_needed",
                 trigger=trigger,
                 before_tokens=prompt_tokens,
-                message="Target prompt is below the proactive watermark.",
+                message=(
+                    "Target prompt is below the proactive watermark."
+                    if budget.target is not None
+                    else "Target prompt is below the HASHI unknown-capacity maintenance threshold."
+                ),
             )
-        lower_input = max(1, int(target.context_window_tokens * policy.low_watermark) - target.response_headroom_tokens)
         required = max(
             1,
-            prompt_tokens + max(0, int(additional_tokens)) - lower_input,
+            prompt_tokens
+            + max(0, int(additional_tokens))
+            - budget.low_input_tokens,
         )
         return await self.compact(
             trigger=trigger,
             request_ref=request_ref,
             force=False,
             required_reduction_tokens=required,
+            continue_request_on_failure=True,
         )
 
 
@@ -2151,7 +2336,7 @@ async def cancel_runtime_compaction(runtime: Any) -> bool:
     return bool(scheduled) or active_cancelled
 
 
-def record_capacity_blocked(
+def record_capacity_warning(
     runtime: Any,
     *,
     request_ref: str,
@@ -2159,21 +2344,46 @@ def record_capacity_blocked(
 ) -> str:
     event_id = f"capacity-{uuid.uuid4().hex}"
     coordinator_for(runtime).store.append_audit(
-        "capacity_blocked",
+        "capacity_warning",
         compaction_id=event_id,
         payload={
             "request_ref": str(request_ref),
             "code": error.code,
             "facts": dict(error.facts),
-            "original_context_unchanged": True,
-            "will_continue": False,
+            "original_context_unchanged": bool(
+                error.facts.get("original_context_unchanged", True)
+            ),
+            "will_continue": True,
+            "continuation_decision": "continue_model_request_with_warning",
             "terminal_claim": False,
         },
     )
     return event_id
 
 
-def schedule_post_turn(runtime: Any, *, request_ref: str, prompt_tokens: int) -> None:
+def record_capacity_blocked(
+    runtime: Any,
+    *,
+    request_ref: str,
+    error: ContextCapacityError,
+) -> str:
+    """Backward-compatible name for the now non-blocking warning record."""
+
+    return record_capacity_warning(
+        runtime,
+        request_ref=request_ref,
+        error=error,
+    )
+
+
+def schedule_post_turn(
+    runtime: Any,
+    *,
+    request_ref: str,
+    prompt_tokens: int,
+    chat_id: Any | None = None,
+    deliver_to_telegram: bool = False,
+) -> None:
     if str(getattr(getattr(runtime, "config", None), "active_backend", "")) != HER_V2_ENGINE:
         return
     if getattr(
@@ -2182,18 +2392,80 @@ def schedule_post_turn(runtime: Any, *, request_ref: str, prompt_tokens: int) ->
         True,
     ) is False:
         return
-    target = resolve_target_capacity(runtime)
-    if target is None:
-        return
     policy = load_policy(runtime)
+    budget = resolve_trigger_budget(runtime, policy=policy)
     overhead_tokens = estimate_target_overhead_tokens(runtime)
-    if int(prompt_tokens) + overhead_tokens + target.response_headroom_tokens < int(target.context_window_tokens * policy.high_watermark):
+    if (
+        int(prompt_tokens)
+        + overhead_tokens
+        + budget.response_headroom_tokens
+        < budget.high_projected_tokens
+    ):
         return
     coordinator = coordinator_for(runtime)
 
+    async def warn_user(error: ContextCapacityError) -> None:
+        warning_id = ""
+        try:
+            warning_id = record_capacity_warning(
+                runtime,
+                request_ref=request_ref,
+                error=error,
+            )
+        except Exception as audit_exc:
+            logger.warning(
+                "Post-turn context compaction warning audit failed safely: %s: %s",
+                type(audit_exc).__name__,
+                _redact_control_text(audit_exc),
+            )
+        rendered = capacity_warning_text(error)
+        logger.warning(
+            "Post-turn context compaction warning; request continued: %s",
+            _redact_control_text(error),
+        )
+        if not deliver_to_telegram or chat_id is None:
+            return
+        try:
+            _elapsed, chunk_count = await runtime.send_long_message(
+                chat_id,
+                rendered,
+                request_id=request_ref,
+                purpose="context-compaction-warning",
+            )
+            with contextlib.suppress(Exception):
+                coordinator.store.append_audit(
+                    "capacity_warning_delivery",
+                    compaction_id=warning_id or f"warning-{uuid.uuid4().hex}",
+                    payload={
+                        "request_ref": request_ref,
+                        "channel": "telegram",
+                        "delivered": bool(chunk_count > 0),
+                        "chunk_count": int(chunk_count),
+                        "will_continue": True,
+                    },
+                )
+        except Exception as exc:
+            logger.warning(
+                "Post-turn context compaction warning delivery failed safely: %s: %s",
+                type(exc).__name__,
+                _redact_control_text(exc),
+            )
+            with contextlib.suppress(Exception):
+                coordinator.store.append_audit(
+                    "capacity_warning_delivery",
+                    compaction_id=warning_id or f"warning-{uuid.uuid4().hex}",
+                    payload={
+                        "request_ref": request_ref,
+                        "channel": "telegram",
+                        "delivered": False,
+                        "error_type": type(exc).__name__,
+                        "will_continue": True,
+                    },
+                )
+
     async def run() -> None:
         try:
-            await coordinator.compact(
+            outcome = await coordinator.compact(
                 trigger="post_turn_watermark",
                 request_ref=request_ref,
                 force=False,
@@ -2201,17 +2473,38 @@ def schedule_post_turn(runtime: Any, *, request_ref: str, prompt_tokens: int) ->
                     1,
                     int(prompt_tokens)
                     + overhead_tokens
-                    - max(
-                        1,
-                        int(target.context_window_tokens * policy.low_watermark)
-                        - target.response_headroom_tokens,
-                    ),
+                    - budget.low_input_tokens,
                 ),
+                continue_request_on_failure=True,
             )
+            if not outcome.changed:
+                await warn_user(
+                    ContextCapacityError(
+                        str(outcome.code or "COMPACTION_NOT_COMPLETED"),
+                        "Background context compaction did not complete; it did not stop or invalidate the current task.",
+                        facts={
+                            "effective_tokens": int(prompt_tokens),
+                            "context_budget_tokens": budget.high_projected_tokens,
+                            "budget_provenance": budget.provenance,
+                            "compaction_status": outcome.status,
+                            "compaction_code": outcome.code,
+                            "original_context_unchanged": True,
+                        },
+                    )
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning("Post-turn context compaction failed safely: %s", _redact_control_text(exc))
+            await warn_user(
+                ContextCapacityError(
+                    "COMPACTION_INTERNAL_FAILURE",
+                    "Background context compaction failed unexpectedly; it did not stop or invalidate the current task.",
+                    facts={
+                        "error_type": type(exc).__name__,
+                        "original_context_unchanged": True,
+                    },
+                )
+            )
 
     task = asyncio.create_task(run(), name=f"context-compact-{getattr(runtime, 'name', 'agent')}-{request_ref}")
     tasks = getattr(runtime, "_context_compaction_tasks", None)
@@ -2226,6 +2519,8 @@ def compact_status_text(runtime: Any) -> str:
     status = coordinator_for(runtime).status()
     route: ResolvedCompactRoute = status["route"]
     target: CapacityProfile | None = status["target_capacity"]
+    policy = load_policy(runtime)
+    trigger_budget = resolve_trigger_budget(runtime, policy=policy)
     capacity_text = (
         f"{route.capacity.context_window_tokens:,} tokens ({route.capacity.provenance})"
         if route.capacity
@@ -2234,7 +2529,11 @@ def compact_status_text(runtime: Any) -> str:
     target_text = (
         f"{target.provider}/{target.model} · {target.context_window_tokens:,} tokens ({target.provenance})"
         if target
-        else "unknown — proactive ratio trigger disabled"
+        else (
+            "unknown · HASHI maintenance threshold "
+            f"{trigger_budget.high_projected_tokens:,}→"
+            f"{trigger_budget.low_input_tokens:,} tokens"
+        )
     )
     eligibility = "READY" if route.eligible and not status["state_error"] else "LOCKED"
     reason = html.escape(
@@ -2249,7 +2548,8 @@ def compact_status_text(runtime: Any) -> str:
         f"<b>Status</b> · <code>{eligibility}</code>\n"
         f"<b>Mode</b> · <code>{html.escape(route.config.mode)}</code>\n"
         f"<b>Compact route</b> · <code>{html.escape(route.provider or '-')} / {html.escape(route.model or '-')}</code>\n"
-        f"<b>Reasoning</b> · <code>{html.escape(route.reasoning or '-')}</code>\n"
+        f"<b>HER effort</b> · <code>{html.escape(route.her_effort or 'high')}</code>\n"
+        f"<b>Provider reasoning</b> · <code>{html.escape(route.reasoning or '-')}</code>\n"
         f"<b>Timeout tier</b> · <code>{html.escape(route.timeout_tier or route.config.timeout_tier)}</code>\n"
         f"<b>Compact capacity</b> · <code>{html.escape(capacity_text)}</code>\n"
         f"<b>Target capacity</b> · <code>{html.escape(target_text)}</code>\n"
@@ -2263,12 +2563,15 @@ def compact_status_text(runtime: Any) -> str:
     )
 
 
-def capacity_error_text(error: ContextCapacityError) -> str:
+def capacity_warning_text(error: ContextCapacityError) -> str:
     facts = dict(error.facts)
     ordered = (
         "provider",
         "model",
         "context_window_tokens",
+        "context_budget_tokens",
+        "post_compaction_target_tokens",
+        "budget_provenance",
         "protected_tokens",
         "effective_tokens",
         "response_headroom_tokens",
@@ -2278,7 +2581,7 @@ def capacity_error_text(error: ContextCapacityError) -> str:
         "compaction_code",
     )
     lines = [
-        "⚠️ <b>HER v2 context capacity blocked</b>",
+        "⚠️ <b>HER v2 context compaction warning</b>",
         "",
         f"<b>Code</b> · <code>{html.escape(error.code)}</code>",
         f"<b>Reason</b> · {html.escape(_redact_control_text(error))}",
@@ -2292,10 +2595,18 @@ def capacity_error_text(error: ContextCapacityError) -> str:
         [
             "",
             "Protected authority and the current request were not trimmed. "
-            "The original raw history and active context pointer remain available.",
+            "The original raw history remains available, and this model request is "
+            "continuing with the best context HASHI could safely assemble. The target "
+            "provider may still reject the request if its own context limit is exceeded.",
         ]
     )
     return "\n".join(lines)
+
+
+def capacity_error_text(error: ContextCapacityError) -> str:
+    """Backward-compatible renderer for the non-blocking capacity warning."""
+
+    return capacity_warning_text(error)
 
 
 __all__ = [
@@ -2303,31 +2614,35 @@ __all__ = [
     "CONTEXT_CAPACITY_EXHAUSTED",
     "CONTEXT_CAPACITY_REJECTED",
     "CONTEXT_PROTECTED_SET_TOO_LARGE",
+    "MANAGED_HISTORY_TITLE",
     "CapacityProfile",
     "CompactRouteConfig",
     "CompactionOutcome",
     "CompactionPolicy",
     "CompactionRequest",
+    "CompactionTriggerBudget",
     "ContextCapacityError",
     "ContextCompactionCoordinator",
     "ContextSegment",
-    "MANAGED_HISTORY_TITLE",
     "cancel_runtime_compaction",
     "capacity_error_text",
+    "capacity_warning_text",
     "compact_status_text",
     "configure_route",
     "coordinator_for",
-    "estimate_tokens",
-    "estimate_target_overhead_tokens",
     "ensure_route_state",
+    "estimate_target_overhead_tokens",
+    "estimate_tokens",
     "install_history_section",
     "load_policy",
     "load_route_config",
     "managed_history_present",
     "record_capacity_blocked",
+    "record_capacity_warning",
     "render_history",
     "resolve_capacity_profile",
     "resolve_compact_route",
     "resolve_target_capacity",
+    "resolve_trigger_budget",
     "schedule_post_turn",
 ]

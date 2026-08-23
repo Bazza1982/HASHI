@@ -282,7 +282,7 @@ def _manager(tmp_path: Path) -> FlexibleBackendManager:
     return FlexibleBackendManager(config, global_config, {})
 
 
-def test_backend_manager_exposes_vision_only_in_tool_mode(tmp_path):
+def test_backend_manager_keeps_fallback_available_with_native_media(tmp_path):
     manager = _manager(tmp_path)
     tools = {
         "allowed": ["file_read", "vision_inspect"],
@@ -296,7 +296,10 @@ def test_backend_manager_exposes_vision_only_in_tool_mode(tmp_path):
         {"engine": "openrouter-api", "image_input": "tool", "tools": tools}
     )
 
-    assert native is not None and native["allowed"] == ["file_read"]
+    assert native is not None and set(native["allowed"]) == {
+        "file_read",
+        "vision_inspect",
+    }
     assert tool is not None and set(tool["allowed"]) == {"file_read", "vision_inspect"}
 
 

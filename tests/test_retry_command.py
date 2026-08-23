@@ -10,6 +10,7 @@ import pytest
 
 from orchestrator import runtime_control, runtime_retry
 from orchestrator.handoff_builder import HandoffBuilder
+from orchestrator.multimodal_contract import canonical_request_content
 from orchestrator.runtime_command_binding import BOT_COMMAND_BINDINGS, COMMAND_BINDINGS
 
 
@@ -190,6 +191,59 @@ def test_retry_state_survives_restart_and_keeps_bridge_output(tmp_path):
     assert state["version"] == runtime_retry.RETRY_STATE_VERSION
     assert state["last_prompt"]["request_id"] == "req-bridge"
     assert state["last_output"]["request_id"] == "req-bridge"
+
+
+def _retry_media_content(tmp_path):
+    return canonical_request_content(
+        [
+            {"type": "text", "item_index": 1, "text": "Inspect it."},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": "attachment-retry",
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/jpeg",
+                "filename": "retry.jpg",
+                "caption": "",
+                "local_ref": str(tmp_path / "retry.jpg"),
+                "size_bytes": 0,
+                "sha256": "0" * 64,
+                "transport": {"message_id": 99},
+            },
+        ]
+    )
+
+
+def test_retry_snapshot_persists_attachment_identity_without_inline_bytes(tmp_path):
+    runtime = SimpleNamespace(workspace_dir=tmp_path, logger=_Logger())
+    content = _retry_media_content(tmp_path)
+    item = SimpleNamespace(
+        request_id="req-media",
+        chat_id=42,
+        prompt="Inspect it.",
+        source="photo",
+        summary="Photo",
+        silent=False,
+        request_content=content,
+    )
+
+    runtime_retry.remember_retryable_prompt(runtime, item)
+    restarted = SimpleNamespace(
+        workspace_dir=tmp_path,
+        logger=_Logger(),
+        current_request_meta=None,
+        last_prompt=None,
+        transcript_log_path=tmp_path / "missing.jsonl",
+    )
+    snapshot = runtime_retry.capture_retryable_prompt(restarted)
+
+    assert snapshot is not None
+    assert snapshot.request_content == content
+    assert snapshot.request_content is not content
+    persisted = runtime_retry.retry_state_path(runtime).read_text(encoding="utf-8")
+    assert "attachment-retry" in persisted
+    assert "base64," not in persisted
 
 
 def test_internal_retry_handoff_never_replaces_user_retry_or_resend_state(tmp_path):
@@ -403,6 +457,21 @@ async def test_retry_stops_resets_handoffs_then_requeues_original_prompt(tmp_pat
     assert replies and "Clean context: /new semantics." in replies[-1]
     assert "cleared 2 waiting request(s)" in replies[-1]
     assert "req-retry" in replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_retry_requeues_the_same_canonical_attachment_content(tmp_path):
+    runtime, _replies, enqueued, _store, _backend = _runtime(
+        tmp_path, handoff_prompt=""
+    )
+    content = _retry_media_content(tmp_path)
+    runtime.current_request_meta["request_content"] = content
+
+    await runtime_control.cmd_retry(runtime, _update(), SimpleNamespace(args=[]))
+
+    assert len(enqueued) == 1
+    _args, kwargs = enqueued[0]
+    assert kwargs["request_content"] == content
 
 
 @pytest.mark.asyncio

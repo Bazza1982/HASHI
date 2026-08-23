@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -8,6 +9,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from orchestrator.multimodal_contract import (
+    attachment_manifest,
+    normalize_request_content,
+)
 
 
 RETRY_STATE_VERSION = 2
@@ -55,6 +61,7 @@ class RetryPromptSnapshot:
     summary: str
     request_id: str | None = None
     recorded_at: float = 0.0
+    request_content: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +90,7 @@ class InterruptedTaskSnapshot:
     backend: str = ""
     reason: str = "user_stop"
     interrupted_at: float = 0.0
+    request_content: dict[str, Any] | None = None
 
 
 def _workspace_dir(runtime: Any) -> Path | None:
@@ -201,6 +209,12 @@ def _prompt_snapshot(
         recorded_at = float(recorded_at or 0.0)
     except (TypeError, ValueError):
         recorded_at = 0.0
+    raw_request_content = _value(candidate, "request_content")
+    request_content = (
+        normalize_request_content(raw_request_content)
+        if raw_request_content is not None
+        else None
+    )
     return RetryPromptSnapshot(
         prompt=prompt,
         chat_id=chat_id,
@@ -208,6 +222,7 @@ def _prompt_snapshot(
         summary=summary,
         request_id=str(request_id) if request_id else None,
         recorded_at=recorded_at,
+        request_content=copy.deepcopy(request_content),
     )
 
 
@@ -224,6 +239,7 @@ def remember_retryable_prompt(runtime: Any, item: Any) -> RetryPromptSnapshot | 
         summary=snapshot.summary,
         request_id=snapshot.request_id,
         recorded_at=time.time(),
+        request_content=copy.deepcopy(snapshot.request_content),
     )
     runtime._last_retryable_prompt = snapshot
     _write_state(runtime, "last_prompt", asdict(snapshot))
@@ -302,6 +318,12 @@ def _interrupted_task_snapshot(candidate: Any) -> InterruptedTaskSnapshot | None
         interrupted_at = float(interrupted_at or 0.0)
     except (TypeError, ValueError):
         interrupted_at = 0.0
+    raw_request_content = _value(candidate, "request_content")
+    request_content = (
+        normalize_request_content(raw_request_content)
+        if raw_request_content is not None
+        else None
+    )
     return InterruptedTaskSnapshot(
         prompt=prompt,
         chat_id=_value(candidate, "chat_id"),
@@ -311,6 +333,7 @@ def _interrupted_task_snapshot(candidate: Any) -> InterruptedTaskSnapshot | None
         backend=str(_value(candidate, "backend", "") or ""),
         reason=str(_value(candidate, "reason", "user_stop") or "user_stop"),
         interrupted_at=interrupted_at,
+        request_content=copy.deepcopy(request_content),
     )
 
 
@@ -336,6 +359,7 @@ def remember_interrupted_task(
         backend=snapshot.backend or str(backend or ""),
         reason=str(reason or "user_stop"),
         interrupted_at=time.time(),
+        request_content=copy.deepcopy(snapshot.request_content),
     )
     runtime._interrupted_task = snapshot
     _write_state(runtime, "unfinished_task", asdict(snapshot))
@@ -426,6 +450,14 @@ def prepare_interrupted_task_continuation(
         current_meta["resumed_interrupted_task"] = metadata
     try:
         setattr(item, "_resumed_interrupted_task", metadata)
+        if snapshot.request_content is not None:
+            item.request_content = copy.deepcopy(snapshot.request_content)
+            item.attachment_manifest = attachment_manifest(item.request_content)
+            if isinstance(current_meta, dict):
+                current_meta["request_content"] = copy.deepcopy(item.request_content)
+                current_meta["attachment_manifest"] = [
+                    copy.deepcopy(entry) for entry in item.attachment_manifest
+                ]
     except Exception:
         pass
     logger = getattr(runtime, "logger", None)

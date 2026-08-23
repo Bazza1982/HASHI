@@ -1819,6 +1819,100 @@ async def test_hashi_stage_provider_records_exact_completed_tool_evidence_receip
 
 
 @pytest.mark.asyncio
+async def test_verification_injects_runtime_timeout_basis_and_workspace_authority():
+    class VerificationToolRegistry(_BaseToolRegistry):
+        def is_allowed(self, name):
+            return name == "verification_run" or super().is_allowed(name)
+
+        def allowed_tool_names(self):
+            return (*super().allowed_tool_names(), "verification_run")
+
+        def get_tool_definitions(self, tiers=None):
+            return [
+                *super().get_tool_definitions(tiers=tiers),
+                {"type": "function", "function": {"name": "verification_run"}},
+            ]
+
+    class CallingVerificationBackend(_FakeBackend):
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+        ):
+            del request_id, is_retry, silent, on_stream_event
+            self.prompt = prompt
+            await self.tool_registry.execute(
+                "verification_run",
+                {
+                    "operation": "run",
+                    "argv": ["python", "-V"],
+                    "timeout_s": 60,
+                    "_hashi_verification_policy": {"execution_elapsed_s": 1},
+                },
+                "verification-call",
+            )
+            return BackendResponse(
+                text='{"outcome":"UNAVAILABLE","summary":"policy captured"}',
+                duration_ms=1,
+                tool_call_count=1,
+                tool_loop_count=1,
+            )
+
+    class CallingVerificationManager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            backend = CallingVerificationBackend(self.system_md)
+            self.backends.append(backend)
+            return backend
+
+    manager = CallingVerificationManager()
+    registry = VerificationToolRegistry()
+    provider = HashiStageProvider(backend_manager=manager, tool_registry=registry)
+    request = _stage_request(
+        Stage.VERIFICATION,
+        allow_tools=True,
+        allow_side_effects=True,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "context": {
+                "delegated_tools": ["verification_run"],
+                "execution_elapsed_s": 3600,
+                "verification_run_policy": {
+                    "workspace": "authoritative_current_workspace",
+                    "environment": "inherited",
+                    "network": "inherited",
+                },
+            },
+        }
+    )
+
+    await provider.invoke(
+        ProviderProfile("reviewer", "openrouter-api", "configured/model"),
+        request,
+    )
+
+    _name, arguments, _call_id = registry.executed[-1]
+    assert arguments["timeout_s"] == 60
+    assert arguments["_hashi_verification_policy"] == {
+        "workspace": "authoritative_current_workspace",
+        "environment": "inherited",
+        "network": "inherited",
+        "execution_elapsed_s": 3600,
+    }
+    assert registry.execution_contexts[-1]["safety_mode"] == (
+        "workspace_verification"
+    )
+    assert registry.execution_contexts[-1]["authority_mode"] == (
+        "her_v2_assured_verification"
+    )
+    assert registry.execution_contexts[-1]["verification_execution_elapsed_s"] == 3600
+
+
+@pytest.mark.asyncio
 async def test_hashi_stage_provider_makes_every_effort_tool_loop_unbounded():
     manager = _FakeManager()
     registry = _BaseToolRegistry()

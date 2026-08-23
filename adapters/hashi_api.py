@@ -24,11 +24,13 @@ import httpx
 
 from adapters.base import BackendCapabilities, BackendResponse, TokenUsage
 from adapters.openrouter_api import (
+    _MEDIA_FALLBACK_TOOL_NAMES,
     OpenRouterAdapter,
     _APIResult,
     _assistant_content_text,
     _backend_failure_response,
     _message_structured_data,
+    _stream_error_exception,
     _usage_cost_usd,
     _usage_thinking_tokens,
 )
@@ -37,6 +39,11 @@ from adapters.stream_events import (
     KIND_THINKING,
     StreamCallback,
     StreamEvent,
+)
+from orchestrator.multimodal_contract import (
+    attachment_manifest,
+    native_attachment_reference_aliases,
+    normalize_request_content,
 )
 
 _DEFAULT_HASHI_API_BASE_URL = "http://10.255.255.254:18801/v1"
@@ -115,11 +122,14 @@ class HashiApiAdapter(OpenRouterAdapter):
         messages: list[dict],
         use_streaming: bool = False,
         tool_tiers: list[str] | None = ...,
+        *,
+        excluded_tool_names: frozenset[str] = frozenset(),
     ) -> dict:
         payload = super()._build_payload(
             messages,
             use_streaming=use_streaming,
             tool_tiers=tool_tiers,
+            excluded_tool_names=excluded_tool_names,
         )
         # OpenRouter's nested ``reasoning`` object is not part of HASHI's
         # Gateway contract. Send one request-scoped Codex effort instead.
@@ -194,6 +204,7 @@ class HashiApiAdapter(OpenRouterAdapter):
         finish_reason = ""
         stream_usage: dict = {}
         saw_done = False
+        provider_activity_observed = False
 
         async with self.client.stream(
             "POST", self.hashi_url, json=payload, headers=headers
@@ -214,9 +225,20 @@ class HashiApiAdapter(OpenRouterAdapter):
                     data = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(data, Mapping):
+                    continue
+
+                stream_error = _stream_error_exception(
+                    data,
+                    request=response.request,
+                    provider_activity_observed=provider_activity_observed,
+                )
+                if stream_error is not None:
+                    raise stream_error
 
                 if data.get("usage"):
                     stream_usage = data["usage"]
+                    provider_activity_observed = True
 
                 choices = data.get("choices", [])
                 if not choices:
@@ -228,6 +250,9 @@ class HashiApiAdapter(OpenRouterAdapter):
 
                 content = delta.get("content", "")
                 reasoning_text = str(delta.get("reasoning") or "")
+                tool_call_deltas = delta.get("tool_calls") or []
+                if content or reasoning_text or tool_call_deltas or finish_reason:
+                    provider_activity_observed = True
 
                 if reasoning_text and on_stream_event:
                     await on_stream_event(
@@ -245,7 +270,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                             StreamEvent(kind=KIND_TEXT_DELTA, summary=content)
                         )
 
-                for tc_delta in (delta.get("tool_calls") or []):
+                for tc_delta in tool_call_deltas:
                     idx = tc_delta.get("index", 0)
                     if idx not in tool_calls_acc:
                         tool_calls_acc[idx] = {
@@ -285,16 +310,12 @@ class HashiApiAdapter(OpenRouterAdapter):
         is_retry: bool = False,
         silent: bool = False,
         on_stream_event: StreamCallback = None,
+        request_content: Mapping[str, Any] | None = None,
     ) -> BackendResponse:
         started = time.perf_counter()
         self._ensure_client()
 
         use_streaming = on_stream_event is not None
-        messages = [
-            {"role": "system", "content": self.sys_prompt},
-            {"role": "user", "content": prompt},
-        ]
-
         headers = self._hashi_headers()
 
         last_text = ""
@@ -308,17 +329,79 @@ class HashiApiAdapter(OpenRouterAdapter):
         provider_calls: list[dict[str, Any]] = []
         total_tool_calls = 0
         tool_loop_count = 0
+        media_routing: tuple[dict[str, Any], ...] = ()
+        media_fallback_attempted = False
 
         try:
             self._touch_activity()
+            messages, media_routing = self._initial_messages(prompt, request_content)
+            self._last_media_routing = media_routing
+            normalized_request_content = normalize_request_content(request_content)
+            manifest = attachment_manifest(normalized_request_content)
+            native_attachment_ids = {
+                str(item.get("attachment_id") or "")
+                for item in media_routing
+                if str(item.get("route") or "") == "native"
+            }
+            native_local_refs = native_attachment_reference_aliases(
+                manifest,
+                native_attachment_ids,
+            )
+            all_media_native = bool(media_routing) and all(
+                str(item.get("route") or "") == "native" for item in media_routing
+            )
 
             for loop_idx in count():
-                payload = self._build_payload(messages, use_streaming=use_streaming)
+                while True:
+                    payload = self._build_payload(
+                        messages,
+                        use_streaming=use_streaming,
+                        excluded_tool_names=(
+                            _MEDIA_FALLBACK_TOOL_NAMES
+                            if all_media_native
+                            else frozenset()
+                        ),
+                    )
 
-                if use_streaming:
-                    result = await self._stream_api_once(payload, headers, on_stream_event)
-                else:
-                    result = await self._call_api_once(payload, headers, on_stream_event)
+                    try:
+                        if use_streaming:
+                            result = await self._stream_api_once(
+                                payload,
+                                headers,
+                                on_stream_event,
+                            )
+                        else:
+                            result = await self._call_api_once(
+                                payload,
+                                headers,
+                                on_stream_event,
+                            )
+                    except Exception as exc:
+                        if not self._can_replay_typed_media_fallback(
+                            exc,
+                            media_routing=media_routing,
+                            fallback_attempted=media_fallback_attempted,
+                            provider_call_count=provider_call_count,
+                            tool_call_count=total_tool_calls,
+                        ):
+                            raise
+                        media_fallback_attempted = True
+                        self._enable_request_local_media_fallback(
+                            native_attachment_ids
+                        )
+                        messages = self._typed_media_fallback_messages(
+                            prompt,
+                            request_content,
+                        )
+                        media_routing = self._typed_media_fallback_routing(
+                            media_routing
+                        )
+                        self._last_media_routing = media_routing
+                        native_attachment_ids = set()
+                        native_local_refs = set()
+                        all_media_native = False
+                        continue
+                    break
 
                 total_prompt += result.prompt_tokens
                 total_completion += result.completion_tokens
@@ -354,7 +437,14 @@ class HashiApiAdapter(OpenRouterAdapter):
                 assistant_msg["tool_calls"] = result.tool_calls
                 messages.append(assistant_msg)
 
-                await self._run_tool_calls(result.tool_calls, messages, on_stream_event)
+                await self._run_tool_calls(
+                    result.tool_calls,
+                    messages,
+                    on_stream_event,
+                    native_attachment_ids=native_attachment_ids,
+                    native_local_refs=native_local_refs,
+                    all_media_native=all_media_native,
+                )
 
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             usage = TokenUsage(
@@ -376,6 +466,8 @@ class HashiApiAdapter(OpenRouterAdapter):
                 ),
                 stream_metadata={
                     "meter": {"provider_calls": provider_calls},
+                    "multimodal_routing": list(media_routing),
+                    "multimodal_fallback_attempted": media_fallback_attempted,
                 },
                 tool_call_count=total_tool_calls,
                 tool_loop_count=tool_loop_count,
@@ -388,9 +480,17 @@ class HashiApiAdapter(OpenRouterAdapter):
         # convert all of them into the adapter's stable failure response.
         except Exception as e:  # noqa: BLE001
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            return _backend_failure_response(
+            failure = _backend_failure_response(
                 e,
                 duration_ms=duration_ms,
                 tool_call_count=total_tool_calls,
                 tool_loop_count=tool_loop_count,
             )
+            metadata = dict(failure.stream_metadata or {})
+            metadata["multimodal_routing"] = list(media_routing)
+            metadata["multimodal_fallback_attempted"] = media_fallback_attempted
+            attachment_id = str(getattr(e, "attachment_id", "") or "")
+            if attachment_id:
+                metadata["attachment_id"] = attachment_id
+            failure.stream_metadata = metadata
+            return failure

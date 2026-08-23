@@ -111,7 +111,7 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
     )
 
 
-def test_review_and_verification_prompts_enforce_tool_backed_read_only_evidence() -> None:
+def test_review_and_verification_prompts_enforce_tool_backed_bounded_evidence() -> None:
     review_system = render_internal_stage_system_prompt(_request(Stage.REVIEW))
     verification_system = render_internal_stage_system_prompt(
         _request(Stage.VERIFICATION)
@@ -128,6 +128,12 @@ def test_review_and_verification_prompts_enforce_tool_backed_read_only_evidence(
     )
 
     assert "Assured Verifier" in verification_system
+    assert "authoritative current workspace" in verification_system
+    assert "inherits HASHI's process identity" in verification_system
+    assert "automatically grows from the cumulative Execution duration" in (
+        verification_system
+    )
+    assert "workspace_test" in verification_system
     assert "Fabricated, stale, or prior-invocation references are forbidden" in (
         verification_system
     )

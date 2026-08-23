@@ -16,6 +16,15 @@ from adapters.stream_events import (
     KIND_TOOL_END,
     KIND_FILE_EDIT, KIND_SHELL_EXEC, KIND_PROGRESS,
 )
+from orchestrator.multimodal_contract import (
+    local_fallback_attachment_text,
+    MultimodalContractError,
+    normalize_request_content,
+    request_content_has_media,
+    route_request_content,
+    routing_decisions_payload,
+    validate_authorized_media_references,
+)
 
 _CODEX_REQUEST_REASONING_EFFORTS = frozenset(
     {"none", "low", "medium", "high", "xhigh", "max"}
@@ -152,6 +161,10 @@ class CodexCLIAdapter(BaseBackend):
         """Codex app-server dynamic tools back caller-owned function calls."""
         return bool(str(model or self.config.model or "").strip())
 
+    def supports_structured_conversation(self, model: str | None = None) -> bool:
+        """Codex app-server accepts ordered text/image conversation parts."""
+        return bool(str(model or self.config.model or "").strip())
+
     def _request_reasoning_effort(
         self,
         *,
@@ -237,6 +250,30 @@ class CodexCLIAdapter(BaseBackend):
             parallel_tool_calls=parallel_tool_calls,
             use_streaming=use_streaming,
             on_stream_event=on_stream_event,
+        )
+
+    async def generate_structured_response(
+        self,
+        messages: list[dict],
+        request_id: str,
+        *,
+        use_streaming: bool = False,
+        request_options: dict | None = None,
+        on_stream_event=None,
+        model: str | None = None,
+    ) -> BackendResponse:
+        """Run multipart conversation input without entering caller-tool mode."""
+
+        return await self.generate_external_tool_response(
+            messages,
+            [],
+            request_id,
+            tool_choice="none",
+            parallel_tool_calls=False,
+            use_streaming=use_streaming,
+            request_options=request_options,
+            on_stream_event=on_stream_event,
+            model=model,
         )
 
     async def handle_new_session(self) -> bool:
@@ -414,6 +451,7 @@ class CodexCLIAdapter(BaseBackend):
         output_path: Path,
         *,
         reasoning_effort: str | None = None,
+        image_paths: tuple[Path, ...] = (),
     ) -> list[str]:
         """Build the codex exec command. Uses 'resume' sub-command if a session exists.
 
@@ -434,6 +472,8 @@ class CodexCLIAdapter(BaseBackend):
         )
         if selected_effort:
             base_flags += ["-c", f'model_reasoning_effort="{selected_effort}"']
+        for image_path in image_paths:
+            base_flags += ["--image", str(image_path)]
 
         if self._session_mode and self._session_id:
             # Resume existing session — access root already set in session, no --add-dir needed
@@ -484,9 +524,135 @@ class CodexCLIAdapter(BaseBackend):
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
         on_stream_event: StreamCallback = None,
         reasoning_effort: str | None = None,
+        request_content: Mapping | None = None,
     ) -> BackendResponse:
         # Reset per-request usage tracking
         self._last_usage = None
+
+        try:
+            normalized_request_content = normalize_request_content(request_content)
+        except MultimodalContractError as exc:
+            return BackendResponse(
+                text="",
+                duration_ms=0,
+                error=str(exc),
+                is_success=False,
+                error_code=exc.code,
+                error_retryable=False,
+                stream_metadata={"attachment_id": exc.attachment_id or None},
+            )
+        media_routing: tuple[dict, ...] = ()
+        native_image_paths: tuple[Path, ...] = ()
+        native_image_refs: tuple[str, ...] = ()
+        local_fallback_descriptors: tuple[str, ...] = ()
+
+        def with_media_metadata(response: BackendResponse) -> BackendResponse:
+            if media_routing:
+                metadata = dict(response.stream_metadata or {})
+                metadata["multimodal_routing"] = list(media_routing)
+                response.stream_metadata = metadata
+            return response
+
+        if request_content_has_media(normalized_request_content):
+            capability = self.resolve_input_capability()
+            try:
+                resolved_paths = validate_authorized_media_references(
+                    normalized_request_content,
+                    authorized_roots=self.authorized_media_roots(),
+                )
+            except MultimodalContractError as exc:
+                return BackendResponse(
+                    text="",
+                    duration_ms=0,
+                    error=str(exc),
+                    is_success=False,
+                    error_code=exc.code,
+                    error_retryable=False,
+                    stream_metadata={"attachment_id": exc.attachment_id or None},
+                )
+            decisions = route_request_content(
+                normalized_request_content,
+                capability,
+                # Codex's established local CLI path can read ordinary
+                # documents named in the prompt.  This compatibility signal is
+                # intentionally limited to documents and does not grant native
+                # audio/video understanding.
+                fallback_modalities={"document"},
+                transport_preferences={"image": ("local_path",)},
+            )
+            media_routing = routing_decisions_payload(decisions)
+            unsupported = [item for item in decisions if item.route == "unsupported"]
+            if unsupported:
+                first = unsupported[0]
+                return with_media_metadata(
+                    BackendResponse(
+                        text="",
+                        duration_ms=0,
+                        error=(
+                            f"{capability.provider}/{capability.model} cannot consume "
+                            f"{first.modality} attachment {first.attachment_id!r}"
+                        ),
+                        is_success=False,
+                        error_code=(
+                            "MEDIA_LIMIT_EXCEEDED"
+                            if "limit_exceeded" in first.reason
+                            else "PROVIDER_MODALITY_UNSUPPORTED"
+                        ),
+                        error_retryable=False,
+                        stream_metadata={"attachment_id": first.attachment_id},
+                    )
+                )
+            native_image_paths = tuple(
+                resolved_paths[item.attachment_id]
+                for item in decisions
+                if item.route == "native" and item.modality == "image"
+            )
+            native_ids = {
+                item.attachment_id
+                for item in decisions
+                if item.route == "native" and item.modality == "image"
+            }
+            native_image_refs = tuple(
+                str(part.get("local_ref") or "")
+                for part in normalized_request_content["parts"]
+                if part.get("type") == "media"
+                and str(part.get("attachment_id") or "") in native_ids
+                and str(part.get("local_ref") or "")
+            )
+            fallback_ids = {
+                item.attachment_id
+                for item in decisions
+                if item.route == "local_fallback"
+            }
+            local_fallback_descriptors = tuple(
+                local_fallback_attachment_text(part)
+                for part in normalized_request_content["parts"]
+                if part.get("type") == "media"
+                and str(part.get("attachment_id") or "") in fallback_ids
+            )
+            if any(
+                item.route == "native" and item.modality != "image"
+                for item in decisions
+            ):
+                first = next(
+                    item
+                    for item in decisions
+                    if item.route == "native" and item.modality != "image"
+                )
+                return with_media_metadata(
+                    BackendResponse(
+                        text="",
+                        duration_ms=0,
+                        error=(
+                            "Codex CLI has no registered native command transport for "
+                            f"{first.modality} attachment {first.attachment_id!r}"
+                        ),
+                        is_success=False,
+                        error_code="MEDIA_TRANSPORT_UNSUPPORTED",
+                        error_retryable=False,
+                        stream_metadata={"attachment_id": first.attachment_id},
+                    )
+                )
 
         started = time.perf_counter()
         output_path = self.config.workspace_dir / f".codex_last_{request_id}.txt"
@@ -495,7 +661,24 @@ class CodexCLIAdapter(BaseBackend):
 
         # Prompt size selects a transport, never a content ceiling. Long input
         # is streamed over stdin unchanged on Linux and Windows.
-        built_prompt = self._sanitize_for_codex(prompt)
+        prompt_for_codex = str(prompt or "")
+        for local_ref in native_image_refs:
+            replacement = "[image supplied through Codex native attachment input]"
+            prompt_for_codex = prompt_for_codex.replace(local_ref, replacement)
+            # JSON receipts escape Windows separators.  Scrub that spelling as
+            # well so the model cannot take a second local-tool route merely
+            # because the same native image path appeared in context.
+            escaped_ref = json.dumps(local_ref, ensure_ascii=False)[1:-1]
+            if escaped_ref != local_ref:
+                prompt_for_codex = prompt_for_codex.replace(
+                    escaped_ref,
+                    replacement,
+                )
+        if local_fallback_descriptors:
+            prompt_for_codex = "\n\n".join(
+                [prompt_for_codex, *local_fallback_descriptors]
+            )
+        built_prompt = self._sanitize_for_codex(prompt_for_codex)
         stdin_data = None
         prompt_arg = built_prompt
         if self._should_use_stdin_transport(built_prompt):
@@ -509,6 +692,7 @@ class CodexCLIAdapter(BaseBackend):
             prompt_arg,
             output_path,
             reasoning_effort=reasoning_effort,
+            image_paths=native_image_paths,
         )
         session_mode = "resume" if self._session_id else "new"
         effective_workdir = self.effective_workdir
@@ -631,11 +815,13 @@ class CodexCLIAdapter(BaseBackend):
                 error_text = (
                     f"Codex CLI was idle for {self.IDLE_TIMEOUT_SEC}s with no output."
                 )
-                return BackendResponse(
-                    text="",
-                    duration_ms=duration_ms,
-                    error=self._error_with_last_message(error_text, response),
-                    is_success=False,
+                return with_media_metadata(
+                    BackendResponse(
+                        text="",
+                        duration_ms=duration_ms,
+                        error=self._error_with_last_message(error_text, response),
+                        is_success=False,
+                    )
                 )
 
             if forced_completion and proc.returncode is None:
@@ -673,7 +859,14 @@ class CodexCLIAdapter(BaseBackend):
                 if not err_msg:
                     err_msg = "Codex CLI exited with a non-zero status."
                 err_msg = self._error_with_last_message(err_msg, response)
-                return BackendResponse(text="", duration_ms=duration_ms, error=err_msg, is_success=False)
+                return with_media_metadata(
+                    BackendResponse(
+                        text="",
+                        duration_ms=duration_ms,
+                        error=err_msg,
+                        is_success=False,
+                    )
+                )
 
             # Persist the session ID from this turn so the next request can resume it
             if self._session_mode and captured_thread_id and captured_thread_id != self._session_id:
@@ -686,14 +879,23 @@ class CodexCLIAdapter(BaseBackend):
                 self._session_id = None
 
             if not response:
-                return BackendResponse(
-                    text="",
-                    duration_ms=duration_ms,
-                    error="Codex CLI completed without a final assistant message.",
-                    is_success=False,
+                return with_media_metadata(
+                    BackendResponse(
+                        text="",
+                        duration_ms=duration_ms,
+                        error="Codex CLI completed without a final assistant message.",
+                        is_success=False,
+                    )
                 )
 
-            return BackendResponse(text=response, duration_ms=duration_ms, is_success=True, usage=self._last_usage)
+            return with_media_metadata(
+                BackendResponse(
+                    text=response,
+                    duration_ms=duration_ms,
+                    is_success=True,
+                    usage=self._last_usage,
+                )
+            )
 
         except asyncio.CancelledError:
             self.logger.warning(f"Generation cancelled for {request_id}")
@@ -706,7 +908,14 @@ class CodexCLIAdapter(BaseBackend):
             self._persist_stdout_lines(stdout_lines)
             raise
         except Exception as e:
-            return BackendResponse(text="", duration_ms=0, error=str(e), is_success=False)
+            return with_media_metadata(
+                BackendResponse(
+                    text="",
+                    duration_ms=0,
+                    error=str(e),
+                    is_success=False,
+                )
+            )
         finally:
             output_path.unlink(missing_ok=True)
 

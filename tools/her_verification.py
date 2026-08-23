@@ -1,18 +1,18 @@
-"""Read-only inspection and isolated test recipes for HER review stages."""
+"""Read-only inspection and authoritative-workspace verification commands."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import math
 import os
 import shutil
 import signal
 import subprocess
 import sys
-import tempfile
+import time
 from collections.abc import Mapping, Sequence
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -41,21 +41,15 @@ _IGNORED_COPY_DIRS = frozenset(
         "workspaces",
     }
 )
-_CREDENTIAL_FILE_NAMES = frozenset(
-    {
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
-        "auth.json",
-        "credentials.json",
-        "secrets.json",
-        "tokens.json",
-    }
-)
-_PRIVATE_KEY_SUFFIXES = frozenset({".key", ".p12", ".pfx", ".pem"})
-_PUBLIC_ENV_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template"})
 _MAX_OUTPUT_CHARS = 80_000
-_DEFAULT_COPY_LIMIT_BYTES = 512 * 1024 * 1024
+_MAX_ARTIFACT_HASH_BYTES = 512 * 1024 * 1024
+_HASHI_VERIFICATION_POLICY_ARGUMENT = "_hashi_verification_policy"
+_DEFAULT_DIRECT_TIMEOUT_S = 1800.0
+_DEFAULT_MINIMUM_TIMEOUT_S = 300.0
+_DEFAULT_EXECUTION_TIMEOUT_MULTIPLIER = 1.5
+_DEFAULT_TIMEOUT_GRACE_S = 300.0
+_MIN_EXECUTION_TIMEOUT_MULTIPLIER = 1.0
+_MIN_TIMEOUT_GRACE_S = 60.0
 
 
 def _result(output: str, **details: Any) -> BuiltinExecutionResult:
@@ -171,7 +165,7 @@ def _filesystem_snapshot(root: Path) -> tuple[str, dict[str, Any]]:
             stat = path.stat()
             file_count += 1
             byte_count += stat.st_size
-            if file_count > 50_000 or byte_count > _DEFAULT_COPY_LIMIT_BYTES:
+            if file_count > 50_000 or byte_count > _MAX_ARTIFACT_HASH_BYTES:
                 raise ValueError("workspace is too large for a bounded review snapshot")
             digest.update(f"file\0{relative}\0{stat.st_size}\0".encode())
             digest.update(_sha256_file(path).encode("ascii"))
@@ -380,7 +374,7 @@ def _recipe_catalog(options: Mapping[str, Any] | None) -> dict[str, dict[str, An
             "timeout_s": 3600.0,
         },
         "python_compile": {
-            "description": "Compile all Python sources in the isolated copy.",
+            "description": "Compile all Python sources in the current workspace.",
             "argv": [python, "-m", "compileall", "-q", "."],
             "timeout_s": 900.0,
         },
@@ -413,212 +407,203 @@ def _recipe_catalog(options: Mapping[str, Any] | None) -> dict[str, dict[str, An
     return recipes
 
 
-@lru_cache(maxsize=1)
-def _bubblewrap_available() -> bool:
-    executable = shutil.which("bwrap")
-    if not executable:
-        return False
-    probe = subprocess.run(
-        [
-            executable,
-            "--die-with-parent",
-            "--unshare-net",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--symlink",
-            "usr/bin",
-            "/bin",
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib64",
-            "/lib64",
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            "--",
-            "/usr/bin/true",
-        ],
-        capture_output=True,
-        check=False,
+def _finite_number(value: Any, *, default: float, minimum: float) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number) or number < minimum:
+        return default
+    return number
+
+
+def _requested_timeout(arguments: Mapping[str, Any]) -> tuple[float | None, str | None]:
+    if "timeout_s" not in arguments or arguments.get("timeout_s") is None:
+        return None, None
+    value = arguments.get("timeout_s")
+    if isinstance(value, bool):
+        return None, "timeout_s must be a positive number"
+    try:
+        timeout_s = float(value)
+    except (TypeError, ValueError):
+        return None, "timeout_s must be a positive number"
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        return None, "timeout_s must be a positive number"
+    return timeout_s, None
+
+
+def _timeout_policy(
+    *,
+    configured_timeout_s: float,
+    requested_timeout_s: float | None,
+    arguments: Mapping[str, Any],
+    options: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    configured = dict(options or {})
+    runtime_policy = arguments.get(_HASHI_VERIFICATION_POLICY_ARGUMENT)
+    runtime_policy = dict(runtime_policy) if isinstance(runtime_policy, Mapping) else {}
+    execution_elapsed_s = _finite_number(
+        runtime_policy.get("execution_elapsed_s"), default=0.0, minimum=0.0
     )
-    return probe.returncode == 0
-
-
-def _copy_size(root: Path, *, limit: int) -> int:
-    total = 0
-    for current, dirs, files in os.walk(root, followlinks=False):
-        dirs[:] = [name for name in dirs if name not in _IGNORED_COPY_DIRS]
-        for name in files:
-            path = Path(current) / name
-            if _is_credential_path(path.relative_to(root)):
-                continue
-            if path.is_symlink():
-                continue
-            try:
-                total += path.stat().st_size
-            except OSError:
-                continue
-            if total > limit:
-                raise ValueError(
-                    f"workspace copy exceeds configured isolation limit of {limit} bytes"
-                )
-    return total
-
-
-def _is_credential_path(relative: Path) -> bool:
-    """Reject common workspace-local credential material from the test copy."""
-
-    parts = tuple(part.casefold() for part in relative.parts)
-    if any(part in _IGNORED_COPY_DIRS for part in parts[:-1]):
-        return True
-    name = parts[-1] if parts else ""
-    return (
-        name == ".env"
-        or (name.startswith(".env.") and name not in _PUBLIC_ENV_TEMPLATES)
-        or name in _CREDENTIAL_FILE_NAMES
-        or Path(name).suffix in _PRIVATE_KEY_SUFFIXES
+    minimum_timeout_s = max(
+        _DEFAULT_MINIMUM_TIMEOUT_S,
+        _finite_number(
+            configured.get("minimum_timeout_s"),
+            default=_DEFAULT_MINIMUM_TIMEOUT_S,
+            minimum=0.0,
+        ),
     )
-
-
-def _copy_workspace(source: Path, destination: Path, *, limit: int) -> int:
-    size = _copy_size(source, limit=limit)
-
-    def ignore(directory: str, names: list[str]) -> set[str]:
-        current = Path(directory)
-        return {
-            name
-            for name in names
-            if name in _IGNORED_COPY_DIRS
-            or name == ".git"
-            or _is_credential_path((current / name).relative_to(source))
-        }
-
-    shutil.copytree(source, destination, symlinks=True, ignore=ignore)
-    return size
-
-
-def _parent_dir_args(paths: Sequence[Path]) -> list[str]:
-    """Create each bind target parent once, shallowest first."""
-
-    unique: set[Path] = set()
-    for path in paths:
-        unique.update(
-            parent for parent in path.parents if str(parent) not in {".", "/"}
-        )
-    result: list[str] = []
-    for parent in sorted(unique, key=lambda item: (len(item.parts), str(item))):
-        result.extend(["--dir", str(parent)])
-    return result
-
-
-def _covered_by(path: Path, roots: Sequence[Path]) -> bool:
-    return any(path == root or root in path.parents for root in roots)
-
-
-def _sandbox_command(*, work: Path, home: Path, argv: Sequence[str]) -> list[str]:
-    executable = shutil.which("bwrap") or "bwrap"
-    # Preserve both lexical and resolved roots. uv-managed virtual environments
-    # commonly point at a version alias which is itself a symlink; mounting only
-    # the resolved interpreter root leaves the venv's python entry point broken
-    # inside the otherwise-correct sandbox.
-    venv_root = Path(sys.prefix)
-    python_root = Path(sys._base_executable).parent.parent
-    # Do not expose host /etc: it may contain readable service credentials.
-    # The sandbox needs the runtime under /usr, not host configuration.
-    system_roots = tuple(Path(item) for item in ("/usr",) if Path(item).exists())
-    extra_roots = tuple(
-        path
-        for path in dict.fromkeys(
-            (venv_root, venv_root.resolve(), python_root, python_root.resolve())
-        )
-        if not _covered_by(path, system_roots)
+    multiplier = max(
+        _MIN_EXECUTION_TIMEOUT_MULTIPLIER,
+        _finite_number(
+            configured.get("execution_timeout_multiplier"),
+            default=_DEFAULT_EXECUTION_TIMEOUT_MULTIPLIER,
+            minimum=0.0,
+        ),
     )
-    command = [
-        executable,
-        "--die-with-parent",
-        "--new-session",
-        "--unshare-net",
-        "--unshare-pid",
-        "--unshare-ipc",
-        "--unshare-uts",
-    ]
-    for system_path in system_roots:
-        command.extend(["--ro-bind", str(system_path), str(system_path)])
-    for link_path in (Path("/bin"), Path("/lib"), Path("/lib64")):
-        if link_path.is_symlink():
-            command.extend(["--symlink", os.readlink(link_path), str(link_path)])
-    command.extend(["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"])
-    command.extend(_parent_dir_args(extra_roots))
-    for extra_root in extra_roots:
-        command.extend(["--ro-bind", str(extra_root), str(extra_root)])
-    command.extend(
-        [
-            "--dir",
-            "/verification-home",
-            "--bind",
-            str(work),
-            "/work",
-            "--bind",
-            str(home),
-            "/verification-home",
-            "--clearenv",
-            "--setenv",
-            "HOME",
-            "/verification-home",
-            "--setenv",
-            "PATH",
-            f"{venv_root / 'bin'}:/usr/bin:/bin",
-            "--setenv",
-            "LANG",
-            "C.UTF-8",
-            "--setenv",
-            "LC_ALL",
-            "C.UTF-8",
-            "--setenv",
-            "PYTHONNOUSERSITE",
-            "1",
-            "--chdir",
-            "/work",
-            "--",
-            *[str(item) for item in argv],
-        ]
+    grace_s = max(
+        _MIN_TIMEOUT_GRACE_S,
+        _finite_number(
+            configured.get("timeout_grace_s"),
+            default=_DEFAULT_TIMEOUT_GRACE_S,
+            minimum=0.0,
+        ),
     )
-    return command
+    execution_floor_s = execution_elapsed_s * multiplier + grace_s
+    candidates = [configured_timeout_s, minimum_timeout_s, execution_floor_s]
+    if requested_timeout_s is not None:
+        candidates.append(requested_timeout_s)
+    effective_timeout_s = max(candidates)
+    return {
+        "configured_timeout_s": configured_timeout_s,
+        "requested_timeout_s": requested_timeout_s,
+        "execution_elapsed_s": execution_elapsed_s,
+        "execution_timeout_multiplier": multiplier,
+        "timeout_grace_s": grace_s,
+        "minimum_timeout_s": minimum_timeout_s,
+        "execution_floor_s": execution_floor_s,
+        "effective_timeout_s": effective_timeout_s,
+        "formula": (
+            "max(configured, requested, minimum, "
+            "execution_elapsed*multiplier+grace)"
+        ),
+    }
 
 
-async def _run_isolated(
-    command: Sequence[str], *, timeout_s: float
-) -> tuple[int, bytes, bytes, bool]:
+def _direct_argv(value: Any) -> list[str] | None:
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(item, str) or not item for item in value)
+    ):
+        return None
+    python = str(Path(sys.executable))
+    return [python if item == "{python}" else item for item in value]
+
+
+def _workspace_authority(root: Path) -> dict[str, Any]:
+    return {
+        "process_authority": "inherited",
+        "identity_policy": "inherited",
+        "filesystem_policy": "inherited",
+        "environment_policy": "inherited",
+        "network_policy": "inherited",
+        "home_policy": "inherited",
+        "workspace_access": {
+            "read": os.access(root, os.R_OK),
+            "write": os.access(root, os.W_OK),
+            "execute": os.access(root, os.X_OK),
+        },
+    }
+
+
+async def _run_workspace_command(
+    command: Sequence[str], *, cwd: Path, timeout_s: float
+) -> tuple[int, bytes, bytes, bool, dict[str, Any]]:
     proc = await asyncio.create_subprocess_exec(
         *command,
+        cwd=str(cwd),
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
+        start_new_session=os.name == "posix",
     )
-    timed_out = False
+    communicate_task = asyncio.create_task(proc.communicate())
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-    except asyncio.TimeoutError:
-        timed_out = True
-        if proc.pid:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        done, _pending = await asyncio.wait({communicate_task}, timeout=timeout_s)
+        if communicate_task in done:
+            stdout, stderr = await communicate_task
+            return (
+                int(proc.returncode or 0),
+                stdout,
+                stderr,
+                False,
+                {
+                    "status": "normal_completion",
+                    "scope": "process_group" if os.name == "posix" else "process",
+                    "forced": False,
+                    "process_reaped": proc.returncode is not None,
+                },
+            )
+
+        cleanup = await _stop_workspace_process(proc, communicate_task)
+        stdout, stderr = cleanup.pop("stdout"), cleanup.pop("stderr")
+        return int(proc.returncode or 0), stdout, stderr, True, cleanup
+    except asyncio.CancelledError as exc:
+        cleanup = await _stop_workspace_process(proc, communicate_task)
+        cleanup.pop("stdout", None)
+        cleanup.pop("stderr", None)
+        setattr(exc, "hashi_tool_details", {"foreground_cleanup": cleanup})
+        raise
+
+
+async def _stop_workspace_process(
+    proc: asyncio.subprocess.Process,
+    communicate_task: asyncio.Task,
+) -> dict[str, Any]:
+    """Terminate and reap the whole validation process group."""
+
+    errors: list[str] = []
+    forced = False
+    scope = "process_group" if os.name == "posix" else "process"
+    if proc.returncode is None:
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
-        except asyncio.TimeoutError:
-            if proc.pid:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            stdout, stderr = await proc.communicate()
-    return int(proc.returncode or 0), stdout, stderr, timed_out
+            if os.name == "posix" and proc.pid:
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            pass
+        except Exception as exc:
+            errors.append(f"terminate:{type(exc).__name__}:{exc}")
+    done, _pending = await asyncio.wait({communicate_task}, timeout=5.0)
+    if communicate_task not in done:
+        forced = True
+        try:
+            if os.name == "posix" and proc.pid:
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception as exc:
+            errors.append(f"kill:{type(exc).__name__}:{exc}")
+    try:
+        stdout, stderr = await communicate_task
+    except Exception as exc:
+        errors.append(f"communicate:{type(exc).__name__}:{exc}")
+        stdout, stderr = b"", b""
+    return {
+        "status": "forced" if forced else "terminated",
+        "scope": scope,
+        "forced": forced,
+        "process_reaped": proc.returncode is not None,
+        "errors": errors,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
 
 
 async def execute_verification_run(
@@ -627,105 +612,177 @@ async def execute_verification_run(
     workspace_dir: Path,
     options: Mapping[str, Any] | None = None,
 ) -> BuiltinExecutionResult:
-    """List or run an operator-registered recipe in an ephemeral no-network copy."""
+    """List recipes or run a direct argv validation in the real workspace."""
 
     operation = str(arguments.get("operation") or "").strip().casefold()
     recipes = _recipe_catalog(options)
+    source = Path(workspace_dir).resolve()
+    runtime_policy = arguments.get(_HASHI_VERIFICATION_POLICY_ARGUMENT)
+    policy_arguments = {
+        _HASHI_VERIFICATION_POLICY_ARGUMENT: (
+            dict(runtime_policy) if isinstance(runtime_policy, Mapping) else {}
+        )
+    }
     if operation == "list":
-        visible = {
+        visible_recipes = {
             name: {
                 "description": item["description"],
-                "timeout_s": item["timeout_s"],
+                "configured_timeout_s": item["timeout_s"],
+                "effective_timeout_s": _timeout_policy(
+                    configured_timeout_s=float(item["timeout_s"]),
+                    requested_timeout_s=None,
+                    arguments=policy_arguments,
+                    options=options,
+                )["effective_timeout_s"],
             }
             for name, item in sorted(recipes.items())
+        }
+        direct_policy = _timeout_policy(
+            configured_timeout_s=_finite_number(
+                (options or {}).get("direct_timeout_s"),
+                default=_DEFAULT_DIRECT_TIMEOUT_S,
+                minimum=0.000001,
+            ),
+            requested_timeout_s=None,
+            arguments=policy_arguments,
+            options=options,
+        )
+        visible = {
+            "execution_scope": "authoritative_current_workspace",
+            "workspace_copied": False,
+            "direct_argv_supported": True,
+            "shell": False,
+            "authority": _workspace_authority(source),
+            "timeout_policy": direct_policy,
+            "recipes": visible_recipes,
         }
         return _result(
             json.dumps(visible, ensure_ascii=False, sort_keys=True, indent=2),
             operation="list",
-            recipe_count=len(visible),
+            recipe_count=len(visible_recipes),
+            execution_scope="workspace",
+            workspace_copied=False,
+            direct_argv_supported=True,
+            effective_timeout_s=direct_policy["effective_timeout_s"],
         )
     if operation != "run":
         return _result("Error: operation must be list or run", operation=operation)
+    if "command" in arguments:
+        return _result(
+            "Error: verification_run does not accept implicit-shell command text; "
+            "use argv or a configured recipe",
+            operation="run",
+        )
 
     recipe_name = str(arguments.get("recipe") or "").strip()
-    recipe = recipes.get(recipe_name)
-    if recipe is None:
+    raw_argv = arguments.get("argv")
+    if recipe_name and raw_argv is not None:
+        return _result(
+            "Error: verification_run accepts either recipe or argv, not both",
+            operation="run",
+            recipe=recipe_name,
+        )
+    recipe = recipes.get(recipe_name) if recipe_name else None
+    argv_registered = recipe is not None
+    if recipe_name and recipe is None:
         return _result(
             f"Error: unknown verification recipe {recipe_name!r}; call list first",
             operation="run",
             recipe=recipe_name,
             unavailable=True,
         )
-    if not _bubblewrap_available():
+    if recipe is not None:
+        command = list(recipe["argv"])
+        configured_timeout_s = float(recipe["timeout_s"])
+        command_ref = recipe_name
+    else:
+        command = _direct_argv(raw_argv)
+        if command is None:
+            return _result(
+                "Error: verification_run operation=run requires a registered recipe "
+                "or a non-empty argv string array",
+                operation="run",
+                unavailable=True,
+            )
+        configured_timeout_s = _finite_number(
+            (options or {}).get("direct_timeout_s"),
+            default=_DEFAULT_DIRECT_TIMEOUT_S,
+            minimum=0.000001,
+        )
+        command_ref = "direct_argv"
+
+    requested_timeout_s, timeout_error = _requested_timeout(arguments)
+    if timeout_error is not None:
         return _result(
-            "Error: verification isolation is unavailable; refusing unsafe fallback",
+            f"Error: verification {timeout_error}",
+            operation="run",
+            recipe=recipe_name or None,
+        )
+    timeout_policy = _timeout_policy(
+        configured_timeout_s=configured_timeout_s,
+        requested_timeout_s=requested_timeout_s,
+        arguments=arguments,
+        options=options,
+    )
+    if not source.is_dir():
+        return _result(
+            f"Error: verification workspace is unavailable: {source}",
             operation="run",
             recipe=recipe_name,
             unavailable=True,
-            isolated=False,
         )
 
-    source = Path(workspace_dir).resolve()
+    started_at = time.monotonic()
     try:
-        copy_limit = int((options or {}).get("copy_limit_bytes", _DEFAULT_COPY_LIMIT_BYTES))
-    except (TypeError, ValueError):
-        copy_limit = _DEFAULT_COPY_LIMIT_BYTES
-    if copy_limit <= 0:
-        return _result(
-            "Error: verification copy_limit_bytes must be positive",
-            operation="run",
-            recipe=recipe_name,
-            unavailable=True,
+        exit_code, stdout, stderr, timed_out, cleanup = await _run_workspace_command(
+            command,
+            cwd=source,
+            timeout_s=float(timeout_policy["effective_timeout_s"]),
         )
-
-    final_output = ""
-    final_details: dict[str, Any] = {}
-    try:
-        with tempfile.TemporaryDirectory(prefix="hashi-verification-") as raw_temp:
-            temp_root = Path(raw_temp)
-            isolated_work = temp_root / "work"
-            isolated_home = temp_root / "home"
-            isolated_home.mkdir()
-            copied_bytes = await asyncio.to_thread(
-                _copy_workspace, source, isolated_work, limit=copy_limit
-            )
-            command = _sandbox_command(
-                work=isolated_work,
-                home=isolated_home,
-                argv=recipe["argv"],
-            )
-            exit_code, stdout, stderr, timed_out = await _run_isolated(
-                command, timeout_s=float(recipe["timeout_s"])
-            )
-            combined = _bounded_text(stdout + (b"\n" if stdout and stderr else b"") + stderr)
-            final_output = combined or f"Recipe {recipe_name} exited with code {exit_code}."
-            if timed_out:
-                final_output = (
-                    f"Error: verification recipe {recipe_name} timed out after "
-                    f"{recipe['timeout_s']} seconds\n{final_output}"
-                )
-            elif exit_code != 0:
-                final_output = (
-                    f"Error: verification recipe {recipe_name} failed with exit code "
-                    f"{exit_code}\n{final_output}"
-                )
-            final_details = {
-                "operation": "run",
-                "recipe": recipe_name,
-                "exit_code": exit_code,
-                "timed_out": timed_out,
-                "isolated": True,
-                "network_disabled": True,
-                "credentials_cleared": True,
-                "workspace_copy_bytes": copied_bytes,
-            }
     except Exception as exc:
         return _result(
-            f"Error: verification isolation unavailable: {exc}",
+            f"Error: verification command could not start: {exc}",
             operation="run",
-            recipe=recipe_name,
+            recipe=recipe_name or None,
             unavailable=True,
-            isolated=False,
+            execution_scope="workspace",
+            workspace_copied=False,
+            argv_registered=argv_registered,
+            timeout_policy=timeout_policy,
         )
-    final_details["temporary_workspace_destroyed"] = True
-    return _result(final_output, **final_details)
+
+    combined = _bounded_text(stdout + (b"\n" if stdout and stderr else b"") + stderr)
+    final_output = combined or f"Verification {command_ref} exited with code {exit_code}."
+    if timed_out:
+        final_output = (
+            f"Error: verification {command_ref} timed out after "
+            f"{timeout_policy['effective_timeout_s']:g} seconds\n{final_output}"
+        )
+    elif exit_code != 0:
+        final_output = (
+            f"Error: verification {command_ref} failed with exit code "
+            f"{exit_code}\n{final_output}"
+        )
+    authority = _workspace_authority(source)
+    return _result(
+        final_output,
+        operation="run",
+        recipe=recipe_name or None,
+        command_source="registered_recipe" if argv_registered else "direct_argv",
+        exit_code=exit_code,
+        timed_out=timed_out,
+        elapsed_s=round(max(0.0, time.monotonic() - started_at), 6),
+        timeout_s=timeout_policy["effective_timeout_s"],
+        timeout_policy=timeout_policy,
+        execution_scope="workspace",
+        workspace_root=str(source),
+        workspace_copied=False,
+        argv_registered=argv_registered,
+        argv_sha256=hashlib.sha256(
+            json.dumps(command, ensure_ascii=False).encode("utf-8")
+        ).hexdigest(),
+        shell=False,
+        process_isolated=False,
+        foreground_cleanup=cleanup,
+        **authority,
+    )

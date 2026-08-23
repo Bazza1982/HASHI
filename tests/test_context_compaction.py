@@ -10,34 +10,42 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.base import BackendResponse
+from orchestrator import runtime_pipeline
 from orchestrator.admin_local_testing import execute_local_command
 from orchestrator.bridge_memory import BridgeContextAssembler
 from orchestrator.context_compaction import (
     CAPSULE_FORMAT,
     CONTEXT_PROTECTED_SET_TOO_LARGE,
+    DEFAULT_UNKNOWN_COMPACTOR_BUDGET_TOKENS,
+    DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS,
+    DEFAULT_UNKNOWN_TARGET_LOW_TOKENS,
+    CapacityProfile,
     CompactionFailure,
+    CompactionRequest,
+    CompactionStore,
+    CompactRouteConfig,
     ContextCapacityError,
     ContextCompactionCoordinator,
-    CompactionStore,
-    CapacityProfile,
-    CompactRouteConfig,
-    CompactionRequest,
     ResolvedCompactRoute,
     cancel_runtime_compaction,
     capacity_error_text,
     compact_status_text,
     configure_route,
     ensure_route_state,
+    estimate_tokens,
     install_history_section,
+    load_route_config,
     resolve_compact_route,
     resolve_target_capacity,
+    resolve_trigger_budget,
     schedule_post_turn,
 )
-from orchestrator.her_v2.models import StageRequest
 from orchestrator.her_v2.interfaces import StageInvocationError
-from orchestrator.runtime_pipeline import _typed_capacity_recovery_is_safe
-from orchestrator.runtime_pipeline import recover_typed_context_capacity_rejection
-from orchestrator import runtime_pipeline
+from orchestrator.her_v2.models import StageRequest
+from orchestrator.runtime_pipeline import (
+    _typed_capacity_recovery_is_safe,
+    recover_typed_context_capacity_rejection,
+)
 
 
 class _StateStore:
@@ -170,16 +178,17 @@ def _valid_invoker(calls: list | None = None):
     return invoke
 
 
-def test_default_route_inherits_pro_not_quick_and_uses_tier_2(tmp_path):
+def test_default_route_uses_active_quick_model_high_effort_and_tier_2(tmp_path):
     runtime = _Runtime(tmp_path)
 
     route = resolve_compact_route(runtime)
 
     assert route.eligible is True
     assert route.provider == "deepseek-api"
-    assert route.model == "deepseek-v4-pro"
-    assert route.model != runtime.backend_manager.get_her_v2_configuration().fast_model
-    assert route.reasoning == "high"
+    assert route.model == "deepseek-v4-flash"
+    assert route.model == runtime.backend_manager.get_her_v2_configuration().fast_model
+    assert route.her_effort == "high"
+    assert route.reasoning == "enabled"
     assert route.timeout_tier == "tier_2"
     assert route.capacity.context_window_tokens == 1_000_000
     assert resolve_target_capacity(runtime).context_window_tokens == 1_000_000
@@ -194,105 +203,123 @@ def test_migration_default_is_persisted_once_without_overwriting_policy(tmp_path
     assert ensure_route_state(runtime) is True
     assert ensure_route_state(runtime) is False
     block = runtime.state_store.value["context_compaction"]
-    assert block["route"]["mode"] == "inherit_pro"
+    assert block["version"] == 2
+    assert block["route"]["mode"] == "inherit_quick"
+    assert block["route"]["reasoning"] == "high"
     assert block["policy"]["recent_exchanges"] == 7
 
 
-def test_explicit_cross_provider_route_requires_confirmation_and_persists(tmp_path):
+def test_legacy_route_state_migrates_in_memory_to_active_quick_without_rewrite(tmp_path):
+    runtime = _Runtime(tmp_path)
+    legacy = {
+        "version": 1,
+        "route": {
+            "mode": "explicit",
+            "provider": "openrouter-api",
+            "model": "test/compact-model",
+            "reasoning": "max",
+            "timeout_tier": "tier_3",
+            "cross_provider_confirmed": True,
+        },
+    }
+    runtime.state_store.value = {"context_compaction": deepcopy(legacy)}
+
+    configured = load_route_config(runtime)
+    route = resolve_compact_route(runtime)
+
+    assert configured.mode == "inherit_quick"
+    assert configured.provider is None
+    assert configured.model is None
+    assert configured.reasoning == "high"
+    assert configured.timeout_tier == "tier_3"
+    assert route.provider == "deepseek-api"
+    assert route.model == "deepseek-v4-flash"
+    assert runtime.state_store.value["context_compaction"] == legacy
+
+
+def test_explicit_compact_route_is_rejected_and_cannot_create_third_model_path(tmp_path):
     runtime = _Runtime(tmp_path)
 
-    with pytest.raises(ValueError, match="confirmation"):
+    with pytest.raises(ValueError, match="Quick/Light"):
         configure_route(
             runtime,
             mode="explicit",
             provider="openrouter-api",
             model="test/compact-model",
             reasoning="high",
+            confirmed_cross_provider=True,
         )
 
-    configured = configure_route(
-        runtime,
-        mode="explicit",
-        provider="openrouter-api",
-        model="test/compact-model",
-        reasoning="high",
-        timeout_tier="tier_3",
-        confirmed_cross_provider=True,
-    )
-
-    assert configured.mode == "explicit"
-    assert configured.cross_provider_confirmed is True
-    assert runtime.state_store.value["context_compaction"]["route"]["model"] == "test/compact-model"
-    route = resolve_compact_route(runtime)
-    assert route.crosses_provider is True
-    assert route.timeout_tier == "tier_3"
-    assert route.eligible is True
+    assert runtime.state_store.value == {}
 
 
-def test_main_provider_change_locks_unconfirmed_explicit_compact_route(tmp_path):
+def test_active_quick_provider_change_is_followed_without_compact_reconfiguration(tmp_path):
     runtime = _Runtime(tmp_path)
-    configured = configure_route(
-        runtime,
-        mode="explicit",
-        provider="deepseek-api",
-        model="deepseek-v4-pro",
-        reasoning="high",
-    )
-    assert configured.cross_provider_confirmed is False
-
     runtime.backend_manager._selected = SimpleNamespace(
         provider="openrouter-api",
+        fast_provider="openrouter-api",
+        pro_provider="openrouter-api",
         fast_model="test/compact-model",
         pro_model="test/compact-model",
     )
+
     route = resolve_compact_route(runtime)
 
-    assert route.crosses_provider is True
-    assert route.eligible is False
-    assert "confirmation is absent" in route.lock_reason
-    assert runtime.state_store.value["context_compaction"]["route"]["provider"] == "deepseek-api"
+    assert route.provider == "openrouter-api"
+    assert route.model == "test/compact-model"
+    assert route.eligible is True
+    assert route.capacity.context_window_tokens == 1_000_000
+    assert route.her_effort == "high"
 
 
-def test_declared_local_route_uses_tier_3_and_removed_grant_locks_without_rewrite(
+def test_missing_active_quick_grant_locks_without_fallback(tmp_path):
+    runtime = _Runtime(tmp_path)
+    runtime.backend_manager._selected = SimpleNamespace(
+        provider="deepseek-api",
+        fast_provider="deepseek-api",
+        pro_provider="deepseek-api",
+        fast_model="not-granted",
+        pro_model="deepseek-v4-pro",
+    )
+
+    locked = resolve_compact_route(runtime)
+
+    assert locked.eligible is False
+    assert locked.model == "not-granted"
+    assert "Quick/Light provider/model grant is absent" in locked.lock_reason
+
+
+def test_hashi_api_quick_route_is_ready_without_compaction_declarations_or_capacity(
     tmp_path,
 ):
     runtime = _Runtime(tmp_path)
     runtime.backend_manager.config.allowed_backends.append(
         {
-            "engine": "ollama-api",
-            "model": "qwen3:32b",
-            "models": ["qwen3:32b"],
-            "context_window_tokens": 131_072,
-            "semantic_reasoning": True,
+            "engine": "hashi-api",
+            "models": ["gpt-5.6-luna", "gpt-5.6-sol"],
+            "default_model": "gpt-5.6-luna",
+            "fast_model": "gpt-5.6-luna",
+            "pro_model": "gpt-5.6-sol",
         }
     )
-
-    configured = configure_route(
-        runtime,
-        mode="explicit",
-        provider="ollama-api",
-        model="qwen3:32b",
-        reasoning="high",
-        timeout_tier="auto",
-        confirmed_cross_provider=True,
+    runtime.backend_manager._selected = SimpleNamespace(
+        provider="hashi-api",
+        fast_provider="hashi-api",
+        pro_provider="hashi-api",
+        fast_model="gpt-5.6-luna",
+        pro_model="gpt-5.6-sol",
     )
 
-    assert configured.timeout_tier == "auto"
-    assert resolve_compact_route(runtime).timeout_tier == "tier_3"
-    with pytest.raises(ValueError, match="timeout tier"):
-        configure_route(runtime, mode="inherit_pro", timeout_tier="tier_1")
+    route = resolve_compact_route(runtime)
 
-    runtime.backend_manager.config.allowed_backends = [
-        row
-        for row in runtime.backend_manager.config.allowed_backends
-        if row["engine"] != "ollama-api"
-    ]
-    locked = resolve_compact_route(runtime)
-    persisted = runtime.state_store.value["context_compaction"]["route"]
-    assert locked.eligible is False
-    assert "exact provider/model grant is absent" in locked.lock_reason
-    assert persisted["provider"] == "ollama-api"
-    assert persisted["model"] == "qwen3:32b"
+    assert route.eligible is True
+    assert route.provider == "hashi-api"
+    assert route.model == "gpt-5.6-luna"
+    assert route.her_effort == "high"
+    assert route.reasoning == "high"
+    assert route.capacity is None
+    assert route.lock_reason == ""
+    assert route.capabilities == {}
 
 
 @pytest.mark.asyncio
@@ -315,8 +342,26 @@ async def test_successful_compaction_keeps_raw_turns_and_commits_once(tmp_path):
     assert outcome.changed is True
     assert outcome.after_tokens < outcome.before_tokens
     assert calls
-    assert all(call[1].model == "deepseek-v4-pro" for call in calls)
+    assert all(call[1].model == "deepseek-v4-flash" for call in calls)
+    assert all(call[0].her_effort == "high" for call in calls)
     assert all("no tools" in call[2].lower() for call in calls)
+    audit_rows = [
+        json.loads(line)
+        for line in coordinator.store.audit_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    started = next(row["payload"] for row in audit_rows if row["event"] == "started")
+    completed = next(row["payload"] for row in audit_rows if row["event"] == "completed")
+    for payload in (started, completed):
+        assert payload["trigger"] == "test"
+        assert payload["compact_provider"] == "deepseek-api"
+        assert payload["compact_model"] == "deepseek-v4-flash"
+        assert payload["provider_reasoning"] == "enabled"
+        assert payload["her_effort"] == "high"
+    assert started["tools_authorised"] is False
+    assert started["external_side_effects_authorised"] is False
+    assert started["sub_agents_authorised"] is False
+    assert completed["commit_outcome"] == "committed"
     state = coordinator.store.read_state()
     assert state["generation"] == 1
     record, archive = coordinator.store.load_active(state)
@@ -337,42 +382,6 @@ async def test_successful_compaction_keeps_raw_turns_and_commits_once(tmp_path):
     assert "COMPACTED HISTORY CAPSULE" in rendered
     assert "user-0:" not in rendered
     assert "user-2:" in rendered
-
-
-@pytest.mark.asyncio
-async def test_cross_provider_secret_like_source_is_blocked_before_model_call(tmp_path):
-    runtime = _Runtime(tmp_path)
-    _write_turns(runtime, 12, chars=600)
-    with sqlite3.connect(runtime.memory_store.db_path) as connection:
-        connection.execute(
-            "UPDATE turns SET text=? WHERE id=1",
-            ("api_key=must-not-cross-provider",),
-        )
-        connection.commit()
-    configure_route(
-        runtime,
-        mode="explicit",
-        provider="openrouter-api",
-        model="test/compact-model",
-        reasoning="high",
-        confirmed_cross_provider=True,
-    )
-    calls = []
-    coordinator = ContextCompactionCoordinator(
-        runtime,
-        invoker=_valid_invoker(calls),
-    )
-
-    outcome = await coordinator.compact(
-        trigger="privacy-test",
-        request_ref="req-privacy",
-        force=True,
-    )
-
-    assert outcome.status == "failed"
-    assert outcome.code == "COMPACTION_PRIVACY_BLOCKED"
-    assert calls == []
-    assert coordinator.store.read_state()["generation"] == 0
 
 
 @pytest.mark.asyncio
@@ -631,6 +640,7 @@ async def test_compactor_deadline_isolated_prompt_tool_free_and_backend_reaped(t
         provider=route.provider,
         model=route.model,
         reasoning=route.reasoning,
+        her_effort=route.her_effort,
         timeout_tier=route.timeout_tier,
         deadline_s=0.01,
         attempt=1,
@@ -649,7 +659,12 @@ async def test_compactor_deadline_isolated_prompt_tool_free_and_backend_reaped(t
     assert caught.value.code == "COMPACTION_TIMEOUT"
     assert backend.sys_prompt == "isolated compact system"
     assert backend.tool_registry is None
+    assert backend.config.extra["her_effort"] == "high"
+    assert backend.config.extra["effort"] == "high"
     assert backend.config.extra["provider_reasoning"] == "max"
+    assert backend.config.extra["tools_authorised_for_this_stage"] is False
+    assert backend.config.extra["external_side_effects_authorised_for_this_stage"] is False
+    assert backend.config.extra["sub_agents_authorised_for_this_stage"] is False
     assert backend.shutdown_calls == 1
 
 
@@ -713,7 +728,7 @@ async def test_oversized_record_is_paged_then_committed_with_original_source_ids
     assert list(record["source_hashes"]) == ["turn:1", "turn:2", "turn:3", "turn:4"]
 
 
-def test_unknown_target_capacity_disables_proactive_trigger(tmp_path):
+def test_unknown_target_capacity_uses_hashi_absolute_auto_guard(tmp_path):
     runtime = _Runtime(tmp_path)
     for grant in runtime.backend_manager.config.allowed_backends:
         grant.pop("context_window_tokens", None)
@@ -734,8 +749,16 @@ def test_unknown_target_capacity_disables_proactive_trigger(tmp_path):
 
     assert resolve_target_capacity(runtime) is None
     route = resolve_compact_route(runtime)
-    assert route.eligible is False
-    assert "capacity is unknown" in route.lock_reason
+    assert route.eligible is True
+    assert route.capacity is None
+    assert route.lock_reason == ""
+    budget = resolve_trigger_budget(runtime)
+    assert budget.target is None
+    assert budget.is_unknown_capacity_guard is True
+    assert budget.high_projected_tokens == DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS
+    assert budget.low_input_tokens == DEFAULT_UNKNOWN_TARGET_LOW_TOKENS
+    assert budget.provenance == "hashi_unknown_target_guard_v1"
+    assert DEFAULT_UNKNOWN_COMPACTOR_BUDGET_TOKENS == 32_000
 
 
 def test_capacity_error_rendering_is_stable_and_escaped():
@@ -750,10 +773,12 @@ def test_capacity_error_rendering_is_stable_and_escaped():
     assert CONTEXT_PROTECTED_SET_TOO_LARGE in rendered
     assert "unsafe &lt;value&gt;" in rendered
     assert "x&lt;y" in rendered
+    assert "blocked" not in rendered.lower()
+    assert "continuing" in rendered
 
 
 @pytest.mark.asyncio
-async def test_build_turn_prompt_refuses_to_trim_protected_current_request(
+async def test_build_turn_prompt_preserves_oversized_protected_request_and_warns(
     tmp_path,
     monkeypatch,
 ):
@@ -794,15 +819,16 @@ async def test_build_turn_prompt_refuses_to_trim_protected_current_request(
         skip_memory_injection=False,
     )
 
-    with pytest.raises(ContextCapacityError) as caught:
-        await runtime_pipeline.build_turn_prompt(
-            runtime,
-            item,
-            is_bridge_request=False,
-        )
+    result = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
 
-    assert caught.value.code == CONTEXT_PROTECTED_SET_TOO_LARGE
-    assert caught.value.facts["protected_tokens"] > 1_000
+    assert "CURRENT-AUTHORITY:" in result.final_prompt
+    assert result.context_warnings
+    assert CONTEXT_PROTECTED_SET_TOO_LARGE in result.context_warnings[0]
+    assert "continuing" in result.context_warnings[0]
 
 
 @pytest.mark.asyncio
@@ -867,6 +893,473 @@ async def test_build_turn_prompt_auto_compacts_above_watermark_and_preserves_req
     assert "user-11:" in result.final_prompt
     assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 1
     assert runtime._last_prompt_audit["budget_applied"] is False
+
+
+@pytest.mark.asyncio
+async def test_unknown_capacity_auto_compacts_sunny_sized_history_before_her(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = _Runtime(tmp_path)
+    for grant in runtime.backend_manager.config.allowed_backends:
+        grant.pop("context_window_tokens", None)
+        grant.pop("response_headroom_tokens", None)
+    runtime.backend_manager._selected = SimpleNamespace(
+        provider="openrouter-api",
+        fast_model="test/compact-model",
+        pro_model="test/compact-model",
+    )
+    runtime.backend_manager._effective_her_v2_config = lambda: {
+        "profiles": {
+            "only": {
+                "engine": "openrouter-api",
+                "model": "test/compact-model",
+                "reasoning": "high",
+            }
+        }
+    }
+    runtime.state_store.value = {
+        "context_compaction": {"policy": {"recent_exchanges": 1}}
+    }
+    _write_turns(runtime, 14, chars=12_000)
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=None,
+        tool_registry=None,
+        capabilities=SimpleNamespace(supports_sessions=False),
+    )
+    runtime.context_assembler = BridgeContextAssembler(runtime.memory_store, None)
+    calls = []
+    runtime._context_compaction_coordinator = ContextCompactionCoordinator(
+        runtime,
+        invoker=_valid_invoker(calls),
+    )
+    runtime._consume_session_primer = lambda item: item.prompt
+    runtime._workzone_prompt_section = lambda: []
+
+    async def pre_turn(*_args, **_kwargs):
+        return []
+
+    runtime._build_pre_turn_context_sections = pre_turn
+    runtime.current_request_meta = {}
+    runtime._last_prompt_audit = {}
+    runtime._thinking_chars_this_req = 0
+    runtime._last_full_prompt_tokens = 0
+    monkeypatch.setattr(
+        runtime_pipeline.runtime_cross_session,
+        "prepare_reply_binding",
+        lambda _runtime, _item, prompt: prompt,
+    )
+    monkeypatch.setattr(
+        runtime_pipeline.runtime_retry,
+        "prepare_interrupted_task_continuation",
+        lambda _runtime, _item, prompt, **_kwargs: prompt,
+    )
+    monkeypatch.setattr(runtime_pipeline, "is_memory_plus_enabled", lambda _path: False)
+    item = SimpleNamespace(
+        request_id="req-unknown-auto",
+        prompt="CURRENT-UNKNOWN-CAPACITY-AUTHORITY",
+        source="text",
+        silent=False,
+        skip_memory_injection=False,
+    )
+
+    result = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
+
+    assert "CURRENT-UNKNOWN-CAPACITY-AUTHORITY" in result.final_prompt
+    assert "COMPACTED HISTORY CAPSULE" in result.final_prompt
+    assert calls
+    assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 1
+    assert (
+        resolve_trigger_budget(runtime).is_unknown_capacity_guard
+        is True
+    )
+    assert estimate_tokens(result.final_prompt) < DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_unknown_capacity_compaction_failure_warns_and_continues_to_her(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = _Runtime(tmp_path)
+    for grant in runtime.backend_manager.config.allowed_backends:
+        grant.pop("context_window_tokens", None)
+        grant.pop("response_headroom_tokens", None)
+    runtime.backend_manager._selected = SimpleNamespace(
+        provider="openrouter-api",
+        fast_model="test/compact-model",
+        pro_model="test/compact-model",
+    )
+    runtime.backend_manager._effective_her_v2_config = lambda: {
+        "profiles": {
+            "only": {
+                "engine": "openrouter-api",
+                "model": "test/compact-model",
+                "reasoning": "high",
+            }
+        }
+    }
+    runtime.state_store.value = {
+        "context_compaction": {"policy": {"recent_exchanges": 1}}
+    }
+    _write_turns(runtime, 14, chars=12_000)
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=None,
+        tool_registry=None,
+        capabilities=SimpleNamespace(supports_sessions=False),
+    )
+    runtime.context_assembler = BridgeContextAssembler(runtime.memory_store, None)
+
+    async def invalid(*_args):
+        return SimpleNamespace(text="{}", structured_data=None)
+
+    runtime._context_compaction_coordinator = ContextCompactionCoordinator(
+        runtime,
+        invoker=invalid,
+    )
+    runtime._consume_session_primer = lambda item: item.prompt
+    runtime._workzone_prompt_section = lambda: []
+
+    async def pre_turn(*_args, **_kwargs):
+        return []
+
+    runtime._build_pre_turn_context_sections = pre_turn
+    runtime.current_request_meta = {}
+    runtime._last_prompt_audit = {}
+    runtime._thinking_chars_this_req = 0
+    runtime._last_full_prompt_tokens = 0
+    monkeypatch.setattr(
+        runtime_pipeline.runtime_cross_session,
+        "prepare_reply_binding",
+        lambda _runtime, _item, prompt: prompt,
+    )
+    monkeypatch.setattr(
+        runtime_pipeline.runtime_retry,
+        "prepare_interrupted_task_continuation",
+        lambda _runtime, _item, prompt, **_kwargs: prompt,
+    )
+    monkeypatch.setattr(runtime_pipeline, "is_memory_plus_enabled", lambda _path: False)
+    item = SimpleNamespace(
+        request_id="req-unknown-continues",
+        prompt="CURRENT-MUST-REACH-HER-UNCOMPACTED",
+        source="text",
+        silent=False,
+        skip_memory_injection=False,
+    )
+
+    result = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
+
+    assert "CURRENT-MUST-REACH-HER-UNCOMPACTED" in result.final_prompt
+    assert "user-0:" in result.final_prompt
+    assert result.context_warnings
+    assert "CONTEXT_CAPACITY_EXHAUSTED" in result.context_warnings[0]
+    assert f"{DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS}" in result.context_warnings[0]
+    assert "continuing" in result.context_warnings[0]
+    assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 0
+
+
+@pytest.mark.asyncio
+async def test_120k_retry_exhaustion_warns_and_still_calls_selected_model(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = _Runtime(tmp_path)
+    for grant in runtime.backend_manager.config.allowed_backends:
+        grant.pop("context_window_tokens", None)
+        grant.pop("response_headroom_tokens", None)
+    runtime.backend_manager._selected = SimpleNamespace(
+        provider="openrouter-api",
+        fast_model="test/compact-model",
+        pro_model="test/compact-model",
+    )
+    runtime.backend_manager._effective_her_v2_config = lambda: {
+        "profiles": {
+            "only": {
+                "engine": "openrouter-api",
+                "model": "test/compact-model",
+                "reasoning": "high",
+            }
+        }
+    }
+    runtime.state_store.value = {
+        "context_compaction": {
+            "policy": {
+                "recent_exchanges": 1,
+                "unknown_target_high_tokens": 120_000,
+                "unknown_target_low_tokens": 90_000,
+            }
+        }
+    }
+    _write_turns(runtime, 14, chars=20_000)
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=None,
+        tool_registry=None,
+        capabilities=SimpleNamespace(supports_sessions=False),
+    )
+    runtime.context_assembler = BridgeContextAssembler(runtime.memory_store, None)
+    compact_calls = []
+
+    async def always_transient(*args):
+        compact_calls.append(args)
+        raise CompactionFailure(
+            "PROVIDER_SERVER_ERROR",
+            "temporary compactor failure",
+            retryable=True,
+        )
+
+    runtime._context_compaction_coordinator = ContextCompactionCoordinator(
+        runtime,
+        invoker=always_transient,
+    )
+    runtime._consume_session_primer = lambda item: item.prompt
+    runtime._workzone_prompt_section = lambda: []
+
+    async def pre_turn(*_args, **_kwargs):
+        return []
+
+    runtime._build_pre_turn_context_sections = pre_turn
+    runtime.current_request_meta = {}
+    runtime._last_prompt_audit = {}
+    runtime._thinking_chars_this_req = 0
+    runtime._last_full_prompt_tokens = 0
+    monkeypatch.setattr(
+        runtime_pipeline.runtime_cross_session,
+        "prepare_reply_binding",
+        lambda _runtime, _item, prompt: prompt,
+    )
+    monkeypatch.setattr(
+        runtime_pipeline.runtime_retry,
+        "prepare_interrupted_task_continuation",
+        lambda _runtime, _item, prompt, **_kwargs: prompt,
+    )
+    monkeypatch.setattr(runtime_pipeline, "is_memory_plus_enabled", lambda _path: False)
+    item = SimpleNamespace(
+        request_id="req-120k-retry-exhausted",
+        prompt="CURRENT-REQUEST-MUST-CONTINUE-AFTER-RETRIES",
+        source="text",
+        silent=False,
+        is_retry=False,
+        deliver_to_telegram=False,
+        skip_memory_injection=False,
+    )
+
+    result = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
+
+    assert estimate_tokens(result.final_prompt) >= 120_000
+    assert len(compact_calls) == 2
+    assert "CURRENT-REQUEST-MUST-CONTINUE-AFTER-RETRIES" in result.final_prompt
+    assert "user-0:" in result.final_prompt
+    assert result.context_warnings
+    assert "PROVIDER_SERVER_ERROR" in result.context_warnings[0]
+    assert "continuing" in result.context_warnings[0]
+
+    model_calls = []
+
+    async def generate(prompt, request_id, **kwargs):
+        model_calls.append((prompt, request_id, kwargs))
+        return BackendResponse(text="continued", duration_ms=1, is_success=True)
+
+    runtime.backend_manager.generate_response = generate
+    runtime.config.extra = {}
+    runtime._think = False
+    runtime.is_generating = True
+    generation = await runtime_pipeline.run_backend_generation(
+        runtime,
+        item,
+        result.final_prompt,
+        on_stream_event=None,
+        audit_active=False,
+    )
+
+    assert generation.response.is_success is True
+    assert len(model_calls) == 1
+    assert model_calls[0][0] == result.final_prompt
+
+    audit_rows = [
+        json.loads(line)
+        for line in runtime._context_compaction_coordinator.store.audit_path.read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    failed = [row for row in audit_rows if row["event"] == "failed"][-1]
+    assert failed["payload"]["will_continue"] is True
+    assert (
+        failed["payload"]["continuation_decision"]
+        == "continue_original_request_with_warning"
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_compaction_warning_delivery_is_mandatory_and_nonblocking():
+    sent = []
+    runtime = SimpleNamespace(
+        _request_meta_by_id={"req-warning": {"request_id": "req-warning"}},
+        current_request_meta={"request_id": "req-warning"},
+        _background_tasks=set(),
+        _verbose=False,
+        request_activity=None,
+        logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        error_logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+    )
+
+    async def send_long_message(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+        return 0.0, 1
+
+    runtime.send_long_message = send_long_message
+    item = SimpleNamespace(
+        request_id="req-warning",
+        chat_id=123,
+        deliver_to_telegram=True,
+    )
+
+    runtime_pipeline.surface_context_compaction_warnings(
+        runtime,
+        item,
+        ("⚠️ required compaction warning · request continuing",),
+    )
+    tasks = tuple(runtime._background_tasks)
+
+    assert tasks
+    assert all(not task.done() for task in tasks)
+    assert runtime._request_meta_by_id["req-warning"][
+        "context_compaction_warnings"
+    ]
+    await asyncio.gather(*tasks)
+    assert sent == [
+        (
+            123,
+            "⚠️ required compaction warning · request continuing",
+            {
+                "request_id": "req-warning",
+                "purpose": "context-compaction-warning",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unknown_capacity_post_turn_uses_same_absolute_guard(tmp_path):
+    runtime = _Runtime(tmp_path)
+    for grant in runtime.backend_manager.config.allowed_backends:
+        grant.pop("context_window_tokens", None)
+        grant.pop("response_headroom_tokens", None)
+    runtime.backend_manager._selected = SimpleNamespace(
+        provider="openrouter-api",
+        fast_model="test/compact-model",
+        pro_model="test/compact-model",
+    )
+    runtime.backend_manager._effective_her_v2_config = lambda: {
+        "profiles": {
+            "only": {
+                "engine": "openrouter-api",
+                "model": "test/compact-model",
+                "reasoning": "high",
+            }
+        }
+    }
+    _write_turns(runtime, 30, chars=4_000)
+    runtime.context_assembler = SimpleNamespace(turns_injection_enabled=True)
+    calls = []
+    runtime._context_compaction_coordinator = ContextCompactionCoordinator(
+        runtime,
+        invoker=_valid_invoker(calls),
+    )
+
+    schedule_post_turn(
+        runtime,
+        request_ref="req-unknown-below",
+        prompt_tokens=DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS - 1,
+    )
+    assert not getattr(runtime, "_context_compaction_tasks", set())
+
+    schedule_post_turn(
+        runtime,
+        request_ref="req-unknown-above",
+        prompt_tokens=DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS,
+    )
+    tasks = tuple(runtime._context_compaction_tasks)
+    assert tasks
+    await asyncio.gather(*tasks)
+
+    assert calls
+    request = calls[0][1]
+    assert request.trigger == "post_turn_watermark"
+    assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 1
+
+
+@pytest.mark.asyncio
+async def test_post_turn_compaction_failure_is_visible_without_blocking_completion(
+    tmp_path,
+):
+    runtime = _Runtime(tmp_path, capacity=20_000, headroom=512)
+    runtime.state_store.value = {
+        "context_compaction": {
+            "policy": {
+                "recent_exchanges": 1,
+                "high_watermark": 0.10,
+                "low_watermark": 0.05,
+            }
+        }
+    }
+    _write_turns(runtime, 12, chars=1_000)
+    runtime.context_assembler = SimpleNamespace(turns_injection_enabled=True)
+
+    async def invalid(*_args):
+        return SimpleNamespace(text="{}", structured_data=None)
+
+    runtime._context_compaction_coordinator = ContextCompactionCoordinator(
+        runtime,
+        invoker=invalid,
+    )
+    sent = []
+
+    async def send_long_message(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+        return 0.0, 1
+
+    runtime.send_long_message = send_long_message
+
+    schedule_post_turn(
+        runtime,
+        request_ref="req-post-turn-warning",
+        prompt_tokens=3_000,
+        chat_id=123,
+        deliver_to_telegram=True,
+    )
+    tasks = tuple(runtime._context_compaction_tasks)
+    assert tasks
+    await asyncio.gather(*tasks)
+
+    assert sent
+    assert sent[0][0] == 123
+    assert "context compaction warning" in sent[0][1].lower()
+    assert "continuing" in sent[0][1]
+    audit_rows = [
+        json.loads(line)
+        for line in runtime._context_compaction_coordinator.store.audit_path.read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    warning_rows = [row for row in audit_rows if row["event"] == "capacity_warning"]
+    assert warning_rows
+    assert warning_rows[-1]["payload"]["will_continue"] is True
+    delivery_rows = [
+        row for row in audit_rows if row["event"] == "capacity_warning_delivery"
+    ]
+    assert delivery_rows[-1]["payload"]["delivered"] is True
 
 
 @pytest.mark.asyncio
@@ -1019,6 +1512,8 @@ async def test_soft_pressure_compactor_failure_continues_with_unchanged_fitting_
     assert "user-0:" in result.final_prompt
     assert "COMPACTED HISTORY CAPSULE" not in result.final_prompt
     assert calls
+    assert result.context_warnings
+    assert "continuing" in result.context_warnings[0]
     assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 0
 
 
@@ -1148,8 +1643,9 @@ def test_status_reports_effective_route_and_pointer(tmp_path):
     text = compact_status_text(runtime)
 
     assert "READY" in text
-    assert "inherit_pro" in text
-    assert "deepseek-api / deepseek-v4-pro" in text
+    assert "inherit_quick" in text
+    assert "deepseek-api / deepseek-v4-flash" in text
+    assert "HER effort</b> · <code>high" in text
     assert "1,000,000 tokens" in text
 
 
@@ -1162,7 +1658,7 @@ async def test_registered_compact_command_executes_through_local_command_path(tm
     assert result["ok"] is True
     assert result["command"] == "compact"
     assert "HASHI Context Compact" in result["messages"][0]["text"]
-    assert "deepseek-api / deepseek-v4-pro" in result["messages"][0]["text"]
+    assert "deepseek-api / deepseek-v4-flash" in result["messages"][0]["text"]
 
 
 def test_invalid_pointer_falls_back_to_complete_raw_history_without_rewriting_it(tmp_path):

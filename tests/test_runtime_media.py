@@ -72,7 +72,18 @@ def _runtime(tmp_path: Path):
     replies = []
     runtime = SimpleNamespace(
         app=SimpleNamespace(bot=_Bot()),
-        backend_manager=SimpleNamespace(current_backend=SimpleNamespace(capabilities=SimpleNamespace(supports_files=True))),
+        backend_manager=SimpleNamespace(
+            current_backend=SimpleNamespace(
+                capabilities=SimpleNamespace(
+                    supports_files=True,
+                    input_modalities=frozenset({"text"}),
+                ),
+                tool_registry=SimpleNamespace(
+                    is_allowed=lambda tool_name: tool_name
+                    in {"file_read", "media_read", "vision_inspect"}
+                ),
+            )
+        ),
         error_logger=_Logger(),
         logger=_Logger(),
         media_dir=tmp_path / "media",
@@ -145,6 +156,46 @@ def test_build_media_prompt_for_image_document():
     assert "image file" in prompt
     assert "receipt" in prompt
     assert summary == "receipt"
+
+
+def test_legacy_supports_files_does_not_imply_all_media_modalities():
+    backend = SimpleNamespace(
+        capabilities=SimpleNamespace(
+            supports_files=True,
+            input_modalities=frozenset({"text"}),
+        )
+    )
+
+    assert runtime_media._backend_accepts_media_bridge(
+        backend, "document", "notes.txt"
+    ) is True
+    assert runtime_media._backend_accepts_media_bridge(
+        backend, "photo", "photo.jpg"
+    ) is False
+    assert runtime_media._backend_accepts_media_bridge(
+        backend, "audio", "voice.ogg"
+    ) is False
+
+
+def test_her_ingress_uses_exact_stage_capability_resolver():
+    backend = SimpleNamespace(
+        capabilities=SimpleNamespace(
+            supports_files=True,
+            input_modalities=frozenset({"text"}),
+        ),
+        accepts_media_input=lambda modality: modality == "image",
+    )
+
+    assert runtime_media._backend_accepts_media_bridge(
+        backend,
+        "photo",
+        "photo.jpg",
+    ) is True
+    assert runtime_media._backend_accepts_media_bridge(
+        backend,
+        "audio",
+        "voice.ogg",
+    ) is False
 
 
 @pytest.mark.asyncio
@@ -306,6 +357,18 @@ async def test_end_before_five_photo_album_still_enqueues_one_multimodal_request
     assert all(receipt["status"] == "received" for receipt in receipts)
     assert all(receipt["size_bytes"] == 5 for receipt in receipts)
     assert all(len(receipt["sha256"]) == 64 for receipt in receipts)
+    assert request["request_content"]["version"] == 1
+    media_parts = [
+        part
+        for part in request["request_content"]["parts"]
+        if part["type"] == "media"
+    ]
+    assert len(media_parts) == 5
+    assert [part["item_index"] for part in media_parts] == [2, 3, 4, 5, 6]
+    assert [part["attachment_id"] for part in media_parts] == [
+        receipt["attachment_id"] for receipt in receipts
+    ]
+    assert all("data:" not in part["local_ref"] for part in media_parts)
     assert request["prompt"].count("[Transport receipt]") == 5
     assert "Compare all five images and report once." in request["prompt"]
     assert "Read or inspect every referenced file before replying" not in request["prompt"]

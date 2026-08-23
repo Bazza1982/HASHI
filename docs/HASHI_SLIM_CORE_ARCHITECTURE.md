@@ -153,12 +153,13 @@ one read-only independent Review, optional Primary-Agent remediation, and one
 closure Review. Assured (`max`) adds a `VERIFYING` lifecycle state and at most
 three latest-state Verification attempts.
 
-Reviewer and verifier calls receive tools but never side-effect authority.
-Their claims are accepted only when they cite exact completed receipts bound to
-the current stage, provider attempt, invocation, and tool call. Predefined test
-recipes run in an ephemeral credential-cleared, no-network workspace copy; if
-the isolation facility is unavailable, the stage reports that limitation and
-does not fall back to host execution.
+Reviewers remain read-only. Verifiers receive only the additional authority to
+run validation commands in the authoritative workspace; they cannot remediate
+or widen delegation. Claims are accepted only when they cite exact completed
+receipts bound to the current stage, provider attempt, invocation, and tool
+call. Configured recipes or direct argv checks inherit the HASHI process's
+filesystem, environment, `HOME`, and network authority. Their timeout grows
+from cumulative Execution duration and cannot be shortened by the verifier.
 
 These modules and schemas are adopted through the ordinary targeted reboot
 flow. Adding lifecycle states, routes, response fields, or public helper

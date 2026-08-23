@@ -29,6 +29,18 @@ _SCHEMAS = {
         "plan": ["ordered, concrete action"],
         "success_criteria": ["observable criterion"],
         "parallel_groups": [],
+        "sub_agents": [
+            {
+                "id": "unique bounded assignment id",
+                "task": "bounded task",
+                "profile": "configured execution profile",
+                "tools": [],
+                "attachment_ids": [
+                    "only attachment_id values required and explicitly delegated"
+                ],
+                "allow_side_effects": False,
+            }
+        ],
         "commentary": (
             "optional concise neutral user-facing update based only on this "
             "completed stage result; omit when no useful update exists"
@@ -89,7 +101,7 @@ _SCHEMAS = {
                     "NOT_AI_VERIFIABLE | UNAVAILABLE | INCONCLUSIVE"
                 ),
                 "method": (
-                    "isolated_test | workspace_snapshot | workspace_status | "
+                    "workspace_test | workspace_snapshot | workspace_status | "
                     "workspace_diff | workspace_search | file_hash | "
                     "artifact_inspection | process_health | read_only_api | "
                     "visual_inspection"
@@ -216,9 +228,16 @@ def render_stage_prompt(request: StageRequest) -> str:
             )
         assignment_section = ""
         if request.role.startswith("sub_agent:"):
+            assignment_keys = [
+                "assignment_id",
+                "assigned_task",
+                "delegated_tools",
+                "authorized_attachment_ids",
+            ]
+            if "authorized_attachment_manifest" in request.context:
+                assignment_keys.append("authorized_attachment_manifest")
             assignment = {
-                key: request.context.get(key)
-                for key in ("assignment_id", "assigned_task", "delegated_tools")
+                key: request.context.get(key) for key in assignment_keys
             }
             assignment_section = "\n\nBounded assignment:\n" + json.dumps(
                 assignment, ensure_ascii=False, indent=2
@@ -257,7 +276,7 @@ def render_stage_prompt(request: StageRequest) -> str:
         "stage_context": dict(request.context),
     }
     reviewer_rule = ""
-    if request.stage in {Stage.REVIEW, Stage.VERIFICATION}:
+    if request.stage is Stage.REVIEW:
         reviewer_rule = (
             "You are an independent read-only assessor. You may call only the delegated "
             "read-only tools. Begin and end every evidence-backed assessment with "
@@ -269,6 +288,23 @@ def render_stage_prompt(request: StageRequest) -> str:
             "return INCONCLUSIVE. Never contact the user, change the goal or "
             "classification, activate a plan, authorise side effects, mutate state, or "
             "write the final answer."
+        )
+    elif request.stage is Stage.VERIFICATION:
+        reviewer_rule = (
+            "You are an independent assessor. You may call only the delegated tools. "
+            "verification_run is the sole mutating-capable tool and may run only a "
+            "configured recipe or direct argv validation command in the authoritative "
+            "current workspace; never perform remediation. It inherits HASHI's process "
+            "identity, filesystem access, environment, HOME, and network, and HASHI "
+            "automatically grows its timeout from cumulative Execution duration. Begin and "
+            "end every evidence-backed assessment with workspace_inspect "
+            "operation=snapshot. Cite only exact "
+            "HASHI_EVIDENCE_RECEIPT values returned during this invocation. A tool start "
+            "without a completed receipt is not evidence; a failed receipt can support "
+            "only FAILED or INCONCLUSIVE. If the before/after snapshot digests differ, "
+            "return INCONCLUSIVE. Never contact the user, change the goal or "
+            "classification, activate a plan, authorise any other side effect, or write "
+            "the final answer."
         )
     sub_agent_rule = (
         "You are a bounded sub-agent. Execute only the assigned task. You may not change "

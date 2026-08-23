@@ -359,6 +359,137 @@ def test_codex_tool_conversion_preserves_schema_and_structured_history():
         f"'get_weather' -> '{WEATHER_CODEX_TOOL}'"
         in conversation.developer_instructions
     )
+
+
+def test_final_user_multiple_images_preserve_turn_input_order_and_detail():
+    conversation = openai_messages_to_codex_conversation(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Compare both."},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,AAAA",
+                            "detail": "high",
+                        },
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/jpeg;base64,BBBB"},
+                    },
+                ],
+            }
+        ],
+        tools=[],
+        tool_choice="none",
+    )
+
+    assert conversation.turn_input == [
+        {"type": "text", "text": "Compare both."},
+        {
+            "type": "image",
+            "url": "data:image/png;base64,AAAA",
+            "detail": "high",
+        },
+        {"type": "image", "url": "data:image/jpeg;base64,BBBB"},
+    ]
+
+
+def test_historical_user_images_are_preserved_but_assistant_images_are_not_user_input():
+    conversation = openai_messages_to_codex_conversation(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "First turn."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,HISTORY"},
+                    },
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "I saw it."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,ASSISTANT"},
+                    },
+                ],
+            },
+            {"role": "user", "content": "Continue."},
+        ],
+        tools=[],
+    )
+
+    assert conversation.history_items == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "First turn."},
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,HISTORY",
+                },
+            ],
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "I saw it."}],
+        },
+    ]
+    assert conversation.turn_input == [{"type": "text", "text": "Continue."}]
+
+
+def test_structured_tool_image_result_preserves_function_output_shape():
+    conversation = openai_messages_to_codex_conversation(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-image",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-image",
+                "content": [
+                    {"type": "text", "text": "Rendered chart"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,TOOL",
+                            "detail": "original",
+                        },
+                    },
+                ],
+            },
+        ],
+        tools=[WEATHER_TOOL],
+    )
+
+    assert conversation.history_items[-1] == {
+        "type": "function_call_output",
+        "call_id": "call-image",
+        "output": [
+            {"type": "input_text", "text": "Rendered chart"},
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,TOOL",
+                "detail": "original",
+            },
+        ],
+    }
     assert "Make at most one dynamic function call" in conversation.developer_instructions
 
 

@@ -32,6 +32,7 @@ from orchestrator.her_v2.presentation import (
 )
 from orchestrator.her_v2.progress import ProviderActivityTracker
 from orchestrator.her_v2.runtime import HERv2Runtime
+from orchestrator.multimodal_contract import canonical_request_content
 
 
 def _config(**overrides):
@@ -82,8 +83,8 @@ def _scripted_verification_response(profile, request, value):
         if result in {"VERIFIED", "PARTIALLY_VERIFIED", "FAILED"}:
             evidence_ref = f"test-tool:{prefix}:check-{index}"
             check.setdefault("evidence_refs", [evidence_ref])
-            isolated = method == "isolated_test"
-            failed = result == "FAILED" and isolated
+            workspace_test = method == "workspace_test"
+            failed = result == "FAILED" and workspace_test
             receipts.append(
                 ToolEvidenceReceipt(
                     evidence_ref,
@@ -91,7 +92,7 @@ def _scripted_verification_response(profile, request, value):
                     prefix,
                     request.attempt,
                     f"check-{index}",
-                    "verification_run" if isolated else "workspace_inspect",
+                    "verification_run" if workspace_test else "workspace_inspect",
                     ToolReceiptStatus.FAILED if failed else ToolReceiptStatus.SUCCESS,
                     True,
                     True,
@@ -101,9 +102,27 @@ def _scripted_verification_response(profile, request, value):
                             "operation": "run",
                             "recipe": "pytest_core",
                             "exit_code": 1 if failed else 0,
-                            "isolated": True,
+                            "execution_scope": "workspace",
+                            "workspace_copied": False,
+                            "process_isolated": False,
+                            "process_authority": "inherited",
+                            "identity_policy": "inherited",
+                            "filesystem_policy": "inherited",
+                            "environment_policy": "inherited",
+                            "network_policy": "inherited",
+                            "home_policy": "inherited",
+                            "workspace_access": {
+                                "read": True,
+                                "write": True,
+                                "execute": True,
+                            },
+                            "timeout_s": 1800.0,
+                            "timeout_policy": {
+                                "execution_floor_s": 300.0,
+                                "effective_timeout_s": 1800.0,
+                            },
                         }
-                        if isolated
+                        if workspace_test
                         else {"operation": "diff", "exit_code": 0}
                     ),
                 )
@@ -398,6 +417,282 @@ async def test_direct_response_race_delivers_exactly_one_answer(tmp_path, delays
         Stage.IMMEDIATE_RESPONSE,
         Stage.TRIAGE,
     }
+
+
+def _multimodal_request_content(
+    tmp_path,
+    *,
+    attachment_ids=("attachment-1", "attachment-2"),
+):
+    return canonical_request_content(
+        [
+            {"type": "text", "item_index": 1, "text": "Compare both."},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": attachment_ids[0],
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/png",
+                "filename": "one.png",
+                "caption": "",
+                "local_ref": str(tmp_path / "one.png"),
+                "size_bytes": 10,
+                "sha256": "1" * 64,
+                "transport": {"message_id": 1},
+            },
+            {
+                "type": "media",
+                "item_index": 3,
+                "attachment_id": attachment_ids[1],
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/png",
+                "filename": "two.png",
+                "caption": "",
+                "local_ref": str(tmp_path / "two.png"),
+                "size_bytes": 11,
+                "sha256": "2" * 64,
+                "transport": {"message_id": 2},
+            },
+        ]
+    )
+
+
+def _native_media_routes():
+    return (
+        {
+            "attachment_id": "attachment-1",
+            "item_index": 2,
+            "modality": "image",
+            "route": "native",
+            "reason": "native_capability_available",
+            "transport": "data_url",
+        },
+        {
+            "attachment_id": "attachment-2",
+            "item_index": 3,
+            "modality": "image",
+            "route": "native",
+            "reason": "native_capability_available",
+            "transport": "data_url",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_response_and_triage_receive_same_ordered_images(tmp_path):
+    routes = _native_media_routes()
+    provider = ScriptedProvider(
+        {
+            Stage.IMMEDIATE_RESPONSE: [
+                StageResponse(data={"message": "They differ."}, media_routing=routes)
+            ],
+            Stage.TRIAGE: [
+                StageResponse(
+                    data={"classification": "DIRECT_RESPONSE"},
+                    media_routing=routes,
+                )
+            ],
+        }
+    )
+    content = _multimodal_request_content(tmp_path)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Compare both.",
+        "request-native-direct",
+        effort="low",
+        request_content=content,
+    )
+
+    assert result.classification is TriageClassification.DIRECT_RESPONSE
+    assert result.final_was_immediate is True
+    foreground = [request for _profile, request in provider.requests]
+    assert {request.stage for request in foreground} == {
+        Stage.IMMEDIATE_RESPONSE,
+        Stage.TRIAGE,
+    }
+    assert all(request.request_content == content for request in foreground)
+    assert all(
+        [item["attachment_id"] for item in request.attachment_manifest]
+        == ["attachment-1", "attachment-2"]
+        for request in foreground
+    )
+
+
+@pytest.mark.asyncio
+async def test_unfulfillable_multimodal_direct_response_uses_work_path(tmp_path):
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [
+            StageInvocationError(
+                "native media unavailable",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+            )
+        ],
+        Stage.TRIAGE: [
+            StageResponse(data={"classification": "DIRECT_RESPONSE"})
+        ],
+        Stage.EXECUTION: [
+            StageResponse(
+                data={"disposition": "COMPLETED", "summary": "Inspected both."},
+                media_routing=tuple(
+                    {**route, "route": "local_fallback"}
+                    for route in _native_media_routes()
+                ),
+            )
+        ],
+        Stage.FINALISATION: [{"report": "Inspected both."}],
+    }
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Compare both.",
+        "request-media-fallback",
+        effort="low",
+        request_content=_multimodal_request_content(tmp_path),
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.classification is TriageClassification.SIMPLE_TASK
+    assert result.final_was_immediate is False
+    assert Stage.EXECUTION in {
+        request.stage for _profile, request in provider.requests
+    }
+
+
+@pytest.mark.asyncio
+async def test_subagent_receives_only_authorized_attachment_subset(tmp_path):
+    scripts = _initial("HIGH_VOLUME_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["inspect the first image", "synthesise"],
+                    "sub_agents": [
+                        {
+                            "id": "first-only",
+                            "task": "Inspect the first image only",
+                            "profile": "lightweight",
+                            "tools": [],
+                            "attachment_ids": ["attachment-1"],
+                        }
+                    ],
+                }
+            ],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "First image inspected.",
+                },
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Primary synthesis completed.",
+                },
+            ],
+            Stage.REVIEW: [{"outcome": "PASS", "summary": "Acceptable."}],
+            Stage.FINALISATION: [{"report": "Completed."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+    content = _multimodal_request_content(tmp_path)
+    aggregate_goal = (
+        f"Compare {tmp_path / 'one.png'} with {tmp_path / 'two.png'} and report."
+    )
+    content_parts = [dict(part) for part in content["parts"]]
+    content_parts[0]["text"] = aggregate_goal
+    content = canonical_request_content(content_parts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        aggregate_goal,
+        "request-bounded-media",
+        effort=Effort.MAX,
+        request_content=content,
+    )
+
+    sub_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.role == "sub_agent:first-only"
+    )
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert [
+        item["attachment_id"] for item in sub_request.attachment_manifest
+    ] == ["attachment-1"]
+    assert [
+        item["attachment_id"]
+        for item in sub_request.context["authorized_attachment_manifest"]
+    ] == ["attachment-1"]
+    assert str(tmp_path / "two.png") not in sub_request.goal
+    assert all(
+        part.get("attachment_id") != "attachment-2"
+        for part in sub_request.request_content["parts"]
+    )
+    assert all(
+        str(tmp_path / "two.png") not in str(part.get("text") or "")
+        for part in sub_request.request_content["parts"]
+        if part.get("type") == "text"
+    )
+
+
+@pytest.mark.asyncio
+async def test_compare_all_subagent_receives_every_image_in_original_order(tmp_path):
+    scripts = _initial("HIGH_VOLUME_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["compare all images", "synthesise"],
+                    "sub_agents": [
+                        {
+                            "id": "compare-all",
+                            "task": "Compare all images and report their differences",
+                            "profile": "lightweight",
+                            "tools": [],
+                        }
+                    ],
+                }
+            ],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "All images compared.",
+                },
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Primary synthesis completed.",
+                },
+            ],
+            Stage.REVIEW: [{"outcome": "PASS", "summary": "Acceptable."}],
+            Stage.FINALISATION: [{"report": "Completed."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+    content = _multimodal_request_content(
+        tmp_path,
+        attachment_ids=("z-first", "a-second"),
+    )
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Compare every image.",
+        "request-compare-all-media",
+        effort=Effort.MAX,
+        request_content=content,
+    )
+
+    sub_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.role == "sub_agent:compare-all"
+    )
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert [
+        item["attachment_id"] for item in sub_request.attachment_manifest
+    ] == ["z-first", "a-second"]
+    assert sub_request.context["authorized_attachment_ids"] == [
+        "z-first",
+        "a-second",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1268,7 +1563,7 @@ async def test_max_assurance_remediation_and_verification_are_bounded_at_three(t
                             "claim": "Core tests pass",
                             "verifiability": "VERIFIABLE",
                             "result": "FAILED",
-                            "method": "isolated_test",
+                            "method": "workspace_test",
                             "observed": f"Core tests failed on attempt {index}.",
                         }
                     ],
@@ -1333,8 +1628,8 @@ async def test_max_runs_review_then_comprehensive_assured_verification(tmp_path)
                             "claim": "Core tests pass",
                             "verifiability": "VERIFIABLE",
                             "result": "VERIFIED",
-                            "method": "isolated_test",
-                            "observed": "The isolated core recipe exited 0.",
+                            "method": "workspace_test",
+                            "observed": "The workspace core recipe exited 0.",
                         }
                     ],
                 }
@@ -1342,7 +1637,7 @@ async def test_max_runs_review_then_comprehensive_assured_verification(tmp_path)
             Stage.FINALISATION: [finalisation],
         }
     )
-    provider = ScriptedProvider(scripts)
+    provider = ScriptedProvider(scripts, delays={Stage.EXECUTION: 0.01})
 
     result = await _runtime(tmp_path, provider).run_turn(
         "Implement with assurance", "request-assured-pass", effort="assured"
@@ -1377,8 +1672,20 @@ async def test_max_runs_review_then_comprehensive_assured_verification(tmp_path)
         if request.stage is Stage.VERIFICATION
     )
     assert verification_request.allow_tools is True
-    assert verification_request.allow_side_effects is False
+    assert verification_request.allow_side_effects is True
     assert "verification_run" in verification_request.context["delegated_tools"]
+    assert verification_request.context["verifier_authority"] == (
+        "advisory_authoritative_workspace_verification"
+    )
+    assert verification_request.context["execution_elapsed_s"] >= 0.005
+    assert verification_request.context["verification_run_policy"] == {
+        "workspace": "authoritative_current_workspace",
+        "workspace_copied": False,
+        "process_authority": "inherited",
+        "environment": "inherited",
+        "network": "inherited",
+        "timeout_basis": "cumulative_execution_elapsed",
+    }
 
 
 @pytest.mark.asyncio
@@ -1395,14 +1702,14 @@ async def test_max_failed_verification_remediates_then_checks_latest_execution(t
             Stage.VERIFICATION: [
                 {
                     "outcome": "FAILED",
-                    "summary": "The isolated recipe failed.",
+                    "summary": "The workspace recipe failed.",
                     "checks": [
                         {
                             "claim": "Core tests pass",
                             "verifiability": "VERIFIABLE",
                             "result": "FAILED",
-                            "method": "isolated_test",
-                            "observed": "The isolated recipe exited 1.",
+                            "method": "workspace_test",
+                            "observed": "The workspace recipe exited 1.",
                         }
                     ],
                 },
@@ -1414,8 +1721,8 @@ async def test_max_failed_verification_remediates_then_checks_latest_execution(t
                             "claim": "Core tests pass",
                             "verifiability": "VERIFIABLE",
                             "result": "VERIFIED",
-                            "method": "isolated_test",
-                            "observed": "The isolated recipe exited 0.",
+                            "method": "workspace_test",
+                            "observed": "The workspace recipe exited 0.",
                         }
                     ],
                 },

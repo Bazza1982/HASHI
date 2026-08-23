@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib as _hashlib
 import inspect
 import json
@@ -19,12 +20,16 @@ from orchestrator import (
     telegram_delivery_failover,
     telegram_stream_policy,
 )
+from orchestrator.flexible_backend_registry import canonical_backend_engine
 from orchestrator.memory_plus_mode import (
     extract_memory_plus_update_details,
     is_memory_plus_enabled,
 )
-from orchestrator.flexible_backend_registry import canonical_backend_engine
-from orchestrator.runtime_common import _md_to_html, _print_final_response, _safe_excerpt
+from orchestrator.runtime_common import (
+    _md_to_html,
+    _print_final_response,
+    _safe_excerpt,
+)
 from orchestrator.telegram_notifications import disable_notification
 
 EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
@@ -216,6 +221,171 @@ def request_meta_for(runtime, request_id: str) -> dict[str, Any]:
     return {}
 
 
+def _store_context_compaction_warnings(
+    runtime,
+    request_id: str,
+    warnings: tuple[str, ...],
+) -> None:
+    if not warnings:
+        return
+    warning_list = list(warnings)
+    registry = getattr(runtime, "_request_meta_by_id", None)
+    if isinstance(registry, dict):
+        meta = registry.get(str(request_id or ""))
+        if isinstance(meta, dict):
+            meta["context_compaction_warnings"] = warning_list
+    current = getattr(runtime, "current_request_meta", None)
+    if isinstance(current, dict) and str(current.get("request_id") or "") == str(
+        request_id or ""
+    ):
+        current["context_compaction_warnings"] = warning_list
+
+
+def request_context_warning_fields(runtime, request_id: str) -> dict[str, Any]:
+    warnings = request_meta_for(runtime, request_id).get(
+        "context_compaction_warnings"
+    )
+    if not isinstance(warnings, list) or not warnings:
+        return {}
+    return {"context_compaction_warnings": list(warnings)}
+
+
+def surface_context_compaction_warnings(runtime, item, warnings: tuple[str, ...]) -> None:
+    """Expose mandatory warnings without delaying or cancelling model work."""
+
+    if not warnings:
+        return
+
+    def audit_presentation(
+        event: str,
+        warning: str,
+        index: int,
+        **payload: Any,
+    ) -> None:
+        try:
+            from orchestrator.context_compaction import coordinator_for
+
+            coordinator_for(runtime).store.append_audit(
+                event,
+                compaction_id=(
+                    "warning-"
+                    + _sha256_text(
+                        f"{item.request_id}:{index}:{warning}"
+                    ).removeprefix("sha256:")[:24]
+                ),
+                payload={
+                    "request_ref": item.request_id,
+                    "warning_index": index,
+                    "warning_sha256": _sha256_text(warning),
+                    "will_continue": True,
+                    **payload,
+                },
+            )
+        except Exception as exc:  # warning audit must not gate model work
+            runtime.logger.warning(
+                "Context compaction warning presentation audit failed safely for %s: %s",
+                item.request_id,
+                type(exc).__name__,
+            )
+
+    _store_context_compaction_warnings(runtime, item.request_id, warnings)
+    for index, warning in enumerate(warnings, start=1):
+        runtime.logger.warning(
+            "Context compaction warning; continuing request=%s: %s",
+            item.request_id,
+            _safe_excerpt(warning, 600),
+        )
+        audit_presentation(
+            "capacity_warning_scheduled",
+            warning,
+            index,
+            telegram_requested=bool(
+                getattr(item, "deliver_to_telegram", False)
+            ),
+            request_metadata_exposed=True,
+        )
+
+    activity_store = getattr(runtime, "request_activity", None)
+    if activity_store is not None:
+        try:
+            from adapters.stream_events import (
+                DELIVERY_CONTROL,
+                KIND_PROGRESS,
+                StreamEvent,
+            )
+
+            for index, warning in enumerate(warnings, start=1):
+                activity_store.publish_stream(
+                    item.request_id,
+                    StreamEvent(
+                        kind=KIND_PROGRESS,
+                        summary=(
+                            "⚠️ Context compaction did not complete; the current "
+                            "model request is continuing."
+                        ),
+                        detail=_safe_excerpt(warning, 1200),
+                        event_id=(
+                            f"context-compaction-warning:{item.request_id}:{index}"
+                        ),
+                        delivery_class=DELIVERY_CONTROL,
+                        origin="hashi_context_compaction",
+                        phase="pre_model",
+                        required=True,
+                    ),
+                )
+        except Exception as exc:  # presentation telemetry must never stop work
+            runtime.logger.warning(
+                "Context compaction activity warning failed safely for %s: %s",
+                item.request_id,
+                type(exc).__name__,
+            )
+
+    if not bool(getattr(item, "deliver_to_telegram", False)):
+        return
+
+    async def deliver() -> None:
+        for index, warning in enumerate(warnings, start=1):
+            try:
+                _elapsed, chunk_count = await runtime.send_long_message(
+                    item.chat_id,
+                    warning,
+                    request_id=item.request_id,
+                    purpose="context-compaction-warning",
+                )
+                audit_presentation(
+                    "capacity_warning_delivery",
+                    warning,
+                    index,
+                    channel="telegram",
+                    delivered=bool(chunk_count > 0),
+                    chunk_count=int(chunk_count),
+                )
+            except Exception as exc:  # warning delivery cannot gate model work
+                runtime.error_logger.warning(
+                    "Context compaction user warning delivery failed safely for %s: %s: %s",
+                    item.request_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                audit_presentation(
+                    "capacity_warning_delivery",
+                    warning,
+                    index,
+                    channel="telegram",
+                    delivered=False,
+                    error_type=type(exc).__name__,
+                )
+
+    task = asyncio.create_task(
+        deliver(),
+        name=f"context-compaction-warning-{item.request_id}",
+    )
+    background_tasks = getattr(runtime, "_background_tasks", None)
+    if isinstance(background_tasks, set):
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
+
+
 def _her_v2_delivery_metadata(response: Any) -> dict[str, Any]:
     metadata = getattr(response, "stream_metadata", None)
     if not isinstance(metadata, dict):
@@ -308,6 +478,7 @@ class TurnPrompt:
     extra_sections: list[tuple[str, str]]
     incremental: bool
     prompt_audit: dict[str, Any]
+    context_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -409,7 +580,15 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         request_meta["scheduler_context"] = dict(scheduler_context)
     request_metadata = getattr(item, "request_metadata", None)
     if isinstance(request_metadata, dict) and request_metadata:
-        request_meta["request_metadata"] = dict(request_metadata)
+        request_meta["request_metadata"] = copy.deepcopy(request_metadata)
+    request_content = getattr(item, "request_content", None)
+    if isinstance(request_content, dict) and request_content:
+        request_meta["request_content"] = copy.deepcopy(request_content)
+    manifest = getattr(item, "attachment_manifest", ())
+    if manifest:
+        request_meta["attachment_manifest"] = [
+            copy.deepcopy(entry) for entry in manifest
+        ]
     runtime.current_request_meta = request_meta
     registry = getattr(runtime, "_request_meta_by_id", None)
     if not isinstance(registry, dict):
@@ -522,21 +701,28 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         )
 
     prompt_payload = assemble(extra_sections)
+    context_warnings: list[str] = []
     if runtime.config.active_backend == "her-v2" and not incremental:
         from orchestrator.context_compaction import (
             CONTEXT_CAPACITY_EXHAUSTED,
             CONTEXT_PROTECTED_SET_TOO_LARGE,
             ContextCapacityError,
+            capacity_warning_text,
             coordinator_for,
             estimate_target_overhead_tokens,
             estimate_tokens,
             install_history_section,
-            resolve_target_capacity,
+            record_capacity_warning,
+            resolve_trigger_budget,
         )
 
-        target = resolve_target_capacity(runtime)
-        target_overhead_tokens = estimate_target_overhead_tokens(runtime)
-        if target is not None:
+        original_prompt_payload = prompt_payload
+        original_extra_sections = extra_sections
+        capacity_warning = None
+        try:
+            trigger_budget = resolve_trigger_budget(runtime)
+            target = trigger_budget.target
+            target_overhead_tokens = estimate_target_overhead_tokens(runtime)
             if compaction_snapshot is not None:
                 protected_sections, _protected_snapshot = install_history_section(
                     runtime,
@@ -547,92 +733,215 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             else:
                 protected_prompt = prompt_payload["final_prompt"]
             protected_tokens = estimate_tokens(protected_prompt)
-            if (
+            protected_projected_tokens = (
                 protected_tokens
                 + target_overhead_tokens
-                + target.response_headroom_tokens
-                > target.context_window_tokens
-            ):
-                raise ContextCapacityError(
+                + trigger_budget.response_headroom_tokens
+            )
+            previous_tokens = estimate_tokens(prompt_payload["final_prompt"])
+            initial_projected_tokens = (
+                previous_tokens
+                + target_overhead_tokens
+                + trigger_budget.response_headroom_tokens
+            )
+            pressure_active = (
+                initial_projected_tokens >= trigger_budget.high_projected_tokens
+            )
+            last_outcome = None
+            compaction_problem = None
+
+            if compaction_snapshot is not None:
+                coordinator = coordinator_for(runtime)
+                while True:
+                    last_outcome = await coordinator.maybe_compact_prompt(
+                        prompt=prompt_payload["final_prompt"],
+                        request_ref=item.request_id,
+                        trigger="pre_her_stage_boundary",
+                        additional_tokens=target_overhead_tokens,
+                    )
+                    if not last_outcome.changed:
+                        # Another coordinator can win the CAS while this request is
+                        # compacting. Rebuild from the committed pointer even when
+                        # our own outcome reports COMPACTION_CAS_LOST/failed.
+                        fresh_snapshot = coordinator.snapshot()
+                        if fresh_snapshot.generation != compaction_snapshot.generation:
+                            extra_sections, compaction_snapshot = install_history_section(
+                                runtime,
+                                base_extra_sections,
+                            )
+                            prompt_payload = assemble(extra_sections)
+                            previous_tokens = estimate_tokens(
+                                prompt_payload["final_prompt"]
+                            )
+                            continue
+                        current_projected_tokens = (
+                            previous_tokens
+                            + target_overhead_tokens
+                            + trigger_budget.response_headroom_tokens
+                        )
+                        if (
+                            current_projected_tokens
+                            >= trigger_budget.high_projected_tokens
+                        ):
+                            compaction_problem = last_outcome
+                        break
+                    extra_sections, compaction_snapshot = install_history_section(
+                        runtime,
+                        base_extra_sections,
+                    )
+                    candidate_payload = assemble(extra_sections)
+                    candidate_tokens = estimate_tokens(
+                        candidate_payload["final_prompt"]
+                    )
+                    if candidate_tokens >= previous_tokens:
+                        # The atomic pointer remains valid, but it did not help this
+                        # exact envelope. Use the unchanged prompt for this turn and
+                        # continue instead of turning maintenance into a gate.
+                        capacity_warning = ContextCapacityError(
+                            CONTEXT_CAPACITY_EXHAUSTED,
+                            "A committed capsule did not reduce this effective prompt; the current model request will continue with its original context.",
+                            facts={
+                                "before_tokens": previous_tokens,
+                                "after_tokens": candidate_tokens,
+                                "compaction_id": last_outcome.compaction_id,
+                                "compaction_status": last_outcome.status,
+                                "original_context_unchanged": True,
+                            },
+                        )
+                        prompt_payload = original_prompt_payload
+                        extra_sections = original_extra_sections
+                        previous_tokens = estimate_tokens(
+                            prompt_payload["final_prompt"]
+                        )
+                        break
+                    prompt_payload = candidate_payload
+                    previous_tokens = candidate_tokens
+            elif pressure_active:
+                capacity_warning = ContextCapacityError(
                     CONTEXT_PROTECTED_SET_TOO_LARGE,
-                    "Protected context and response headroom exceed the selected target model capacity.",
+                    "No eligible managed history was available to compact; the current model request will continue without trimming protected context.",
+                    facts={
+                        "protected_tokens": protected_tokens,
+                        "effective_tokens": previous_tokens,
+                        "context_budget_tokens": trigger_budget.high_projected_tokens,
+                        "budget_provenance": trigger_budget.provenance,
+                        "target_overhead_tokens": target_overhead_tokens,
+                        "original_context_unchanged": True,
+                    },
+                )
+
+            effective_projected_tokens = (
+                previous_tokens
+                + target_overhead_tokens
+                + trigger_budget.response_headroom_tokens
+            )
+            if (
+                target is not None
+                and effective_projected_tokens > target.context_window_tokens
+            ):
+                warning_code = (
+                    CONTEXT_PROTECTED_SET_TOO_LARGE
+                    if protected_projected_tokens > target.context_window_tokens
+                    else CONTEXT_CAPACITY_EXHAUSTED
+                )
+                capacity_warning = ContextCapacityError(
+                    warning_code,
+                    "The best safely assembled context still exceeds the declared target capacity; HASHI will warn the user and call the selected model anyway.",
                     facts={
                         "provider": target.provider,
                         "model": target.model,
                         "context_window_tokens": target.context_window_tokens,
                         "protected_tokens": protected_tokens,
-                        "response_headroom_tokens": target.response_headroom_tokens,
-                        "target_overhead_tokens": target_overhead_tokens,
-                        "estimator": target.estimator,
-                    },
-                )
-
-        if compaction_snapshot is not None:
-            coordinator = coordinator_for(runtime)
-            previous_tokens = estimate_tokens(prompt_payload["final_prompt"])
-            last_outcome = None
-            while True:
-                last_outcome = await coordinator.maybe_compact_prompt(
-                    prompt=prompt_payload["final_prompt"],
-                    request_ref=item.request_id,
-                    trigger="pre_her_stage_boundary",
-                    additional_tokens=target_overhead_tokens,
-                )
-                if not last_outcome.changed:
-                    # Another coordinator can win the CAS while this request is
-                    # compacting. Rebuild from the committed pointer even when
-                    # our own outcome reports COMPACTION_CAS_LOST/failed.
-                    fresh_snapshot = coordinator.snapshot()
-                    if fresh_snapshot.generation != compaction_snapshot.generation:
-                        extra_sections, compaction_snapshot = install_history_section(
-                            runtime,
-                            base_extra_sections,
-                        )
-                        prompt_payload = assemble(extra_sections)
-                        previous_tokens = estimate_tokens(
-                            prompt_payload["final_prompt"]
-                        )
-                        continue
-                    break
-                extra_sections, compaction_snapshot = install_history_section(
-                    runtime,
-                    base_extra_sections,
-                )
-                candidate_payload = assemble(extra_sections)
-                candidate_tokens = estimate_tokens(candidate_payload["final_prompt"])
-                if candidate_tokens >= previous_tokens:
-                    raise ContextCapacityError(
-                        CONTEXT_CAPACITY_EXHAUSTED,
-                        "A committed capsule did not reduce the effective target prompt.",
-                        facts={
-                            "before_tokens": previous_tokens,
-                            "after_tokens": candidate_tokens,
-                            "compaction_id": last_outcome.compaction_id,
-                        },
-                    )
-                prompt_payload = candidate_payload
-                previous_tokens = candidate_tokens
-
-            if (
-                target is not None
-                and previous_tokens + target.response_headroom_tokens
-                + target_overhead_tokens
-                > target.context_window_tokens
-            ):
-                raise ContextCapacityError(
-                    CONTEXT_CAPACITY_EXHAUSTED,
-                    "Effective context still exceeds the selected target model after safe compaction.",
-                    facts={
-                        "provider": target.provider,
-                        "model": target.model,
-                        "context_window_tokens": target.context_window_tokens,
                         "effective_tokens": previous_tokens,
                         "response_headroom_tokens": target.response_headroom_tokens,
                         "target_overhead_tokens": target_overhead_tokens,
-                        "compaction_status": getattr(last_outcome, "status", "not_run"),
+                        "compaction_status": getattr(
+                            last_outcome, "status", "not_run"
+                        ),
                         "compaction_code": getattr(last_outcome, "code", ""),
                         "estimator": target.estimator,
+                        "original_context_unchanged": (
+                            prompt_payload is original_prompt_payload
+                        ),
                     },
+                )
+            elif (
+                target is None
+                and effective_projected_tokens
+                >= trigger_budget.high_projected_tokens
+            ):
+                warning_code = (
+                    CONTEXT_PROTECTED_SET_TOO_LARGE
+                    if protected_projected_tokens
+                    >= trigger_budget.high_projected_tokens
+                    else CONTEXT_CAPACITY_EXHAUSTED
+                )
+                capacity_warning = ContextCapacityError(
+                    warning_code,
+                    "The best safely assembled context remains above the HASHI unknown-capacity maintenance threshold; HASHI will warn the user and call the selected model anyway.",
+                    facts={
+                        "protected_tokens": protected_tokens,
+                        "effective_tokens": previous_tokens,
+                        "context_budget_tokens": trigger_budget.high_projected_tokens,
+                        "post_compaction_target_tokens": trigger_budget.low_input_tokens,
+                        "budget_provenance": trigger_budget.provenance,
+                        "target_overhead_tokens": target_overhead_tokens,
+                        "compaction_status": getattr(
+                            last_outcome, "status", "not_run"
+                        ),
+                        "compaction_code": getattr(last_outcome, "code", ""),
+                        "estimator": "hashi_mixed_char_estimator_v1",
+                        "original_context_unchanged": (
+                            prompt_payload is original_prompt_payload
+                        ),
+                    },
+                )
+            elif compaction_problem is not None:
+                capacity_warning = ContextCapacityError(
+                    str(compaction_problem.code or "COMPACTION_NOT_COMPLETED"),
+                    "Context compaction did not complete, but the current model request is continuing with the best safely assembled context.",
+                    facts={
+                        "effective_tokens": previous_tokens,
+                        "context_budget_tokens": trigger_budget.high_projected_tokens,
+                        "budget_provenance": trigger_budget.provenance,
+                        "compaction_status": compaction_problem.status,
+                        "compaction_code": compaction_problem.code,
+                        "original_context_unchanged": (
+                            prompt_payload is original_prompt_payload
+                        ),
+                    },
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Context maintenance is never allowed to become a pre-model gate.
+            # Fall back to the exact pre-compaction payload and make the failure
+            # visible while the original request continues.
+            prompt_payload = original_prompt_payload
+            extra_sections = original_extra_sections
+            capacity_warning = ContextCapacityError(
+                "COMPACTION_INTERNAL_FAILURE",
+                "Context compaction failed unexpectedly; the current model request is continuing with its original context.",
+                facts={
+                    "error_type": type(exc).__name__,
+                    "original_context_unchanged": True,
+                },
+            )
+
+        if capacity_warning is not None:
+            context_warnings.append(capacity_warning_text(capacity_warning))
+            try:
+                record_capacity_warning(
+                    runtime,
+                    request_ref=item.request_id,
+                    error=capacity_warning,
+                )
+            except Exception as exc:
+                runtime.logger.warning(
+                    "Context capacity-warning audit failed safely for %s: %s: %s",
+                    item.request_id,
+                    type(exc).__name__,
+                    exc,
                 )
 
         prompt_tokens = estimate_tokens(prompt_payload["final_prompt"])
@@ -679,6 +988,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         extra_sections=extra_sections,
         incremental=incremental,
         prompt_audit=prompt_audit,
+        context_warnings=tuple(context_warnings),
     )
 
 
@@ -706,14 +1016,21 @@ async def run_backend_generation(
     if runtime.config.active_backend == "openrouter-api" and hasattr(current_backend, "set_reasoning_enabled"):
         current_backend.set_reasoning_enabled(runtime._think or audit_active)
 
+    generation_kwargs = {
+        "is_retry": item.is_retry,
+        "silent": item.silent,
+        "on_stream_event": on_stream_event,
+    }
+    request_content = getattr(item, "request_content", None)
+    if request_content is not None:
+        generation_kwargs["request_content"] = copy.deepcopy(request_content)
+
     if background_mode:
         generation_task = asyncio.create_task(
             runtime.backend_manager.generate_response(
                 final_prompt,
                 item.request_id,
-                is_retry=item.is_retry,
-                silent=item.silent,
-                on_stream_event=on_stream_event,
+                **generation_kwargs,
             )
         )
         try:
@@ -746,9 +1063,7 @@ async def run_backend_generation(
         response = await runtime.backend_manager.generate_response(
             final_prompt,
             item.request_id,
-            is_retry=item.is_retry,
-            silent=item.silent,
-            on_stream_event=on_stream_event,
+            **generation_kwargs,
         )
     finally:
         runtime.is_generating = False
@@ -1718,6 +2033,7 @@ async def handle_empty_success_response(runtime, item) -> None:
             "error": err_msg,
             "source": item.source,
             "summary": item.summary,
+            **request_context_warning_fields(runtime, item.request_id),
         },
     )
 
@@ -1779,6 +2095,7 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
             "error": None,
             "source": item.source,
             "summary": item.summary,
+            **request_context_warning_fields(runtime, item.request_id),
             **runtime._wrapper_listener_fields(safe_core_raw, visible_text, wrapper_result),
         },
     )
@@ -1834,7 +2151,11 @@ def record_foreground_usage_audit(
     incremental: bool,
 ) -> None:
     try:
-        from tools.token_tracker import estimate_tokens, record_audit_event, record_usage
+        from tools.token_tracker import (
+            estimate_tokens,
+            record_audit_event,
+            record_usage,
+        )
 
         meter_line_items = _meter_line_items_from_response(response)
         if response.usage:
@@ -1967,7 +2288,10 @@ def persist_success_memory(
             is_bridge_request=is_bridge_request,
         )
         try:
-            from orchestrator.context_compaction import estimate_tokens, schedule_post_turn
+            from orchestrator.context_compaction import (
+                estimate_tokens,
+                schedule_post_turn,
+            )
 
             request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", {})
             prompt_tokens = int(request_tokens.get(item.request_id) or 0)
@@ -1978,6 +2302,8 @@ def persist_success_memory(
                     prompt_tokens=(
                         prompt_tokens + estimate_tokens(memory_assistant_text)
                     ),
+                    chat_id=item.chat_id,
+                    deliver_to_telegram=bool(item.deliver_to_telegram),
                 )
         except Exception as exc:
             runtime.logger.warning(
@@ -2189,6 +2515,7 @@ async def handle_backend_error(
                 "summary": item.summary,
                 "interrupted": True,
                 "interrupt_reason": user_interrupt_reason,
+                **request_context_warning_fields(runtime, item.request_id),
             },
         )
         runtime._log_maintenance(
@@ -2221,6 +2548,7 @@ async def handle_backend_error(
             "error": err_msg,
             "source": item.source,
             "summary": item.summary,
+            **request_context_warning_fields(runtime, item.request_id),
         },
     )
     # Silent suppresses routine success chatter, never a concrete terminal

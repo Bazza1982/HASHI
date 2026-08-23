@@ -10,7 +10,13 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from adapters.base import BackendResponse, TokenUsage
 from adapters.stream_events import KIND_TEXT_DELTA, StreamEvent
-from orchestrator.api_gateway import APIGatewayServer, _AdapterPool, _uses_external_tool_protocol
+from orchestrator.api_gateway import (
+    APIGatewayServer,
+    _AdapterPool,
+    _contains_inline_media,
+    _uses_external_tool_protocol,
+    _uses_structured_conversation,
+)
 from orchestrator.service_manager import ServiceManager
 
 
@@ -37,6 +43,25 @@ TOOL_CALL = {
 def test_empty_tools_do_not_force_legacy_clients_into_external_mode():
     messages = [{"role": "user", "content": "hello"}]
     assert _uses_external_tool_protocol({"tools": []}, messages) is False
+
+
+def test_multipart_messages_use_structured_path_independently_from_tools():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Compare."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+                },
+            ],
+        }
+    ]
+
+    assert _uses_external_tool_protocol({"tools": []}, messages) is False
+    assert _uses_structured_conversation(messages) is True
+    assert _contains_inline_media(messages) is True
 
 
 class _ExternalAdapter:
@@ -88,6 +113,42 @@ class _ExternalAdapter:
         )
 
 
+class _StructuredAdapter(_ExternalAdapter):
+    def supports_structured_conversation(self, model=None):
+        self.structured_capability_model = model
+        return self.supports
+
+    async def generate_structured_response(
+        self,
+        messages,
+        request_id,
+        *,
+        use_streaming=False,
+        request_options=None,
+        on_stream_event=None,
+        model=None,
+    ):
+        self.calls.append(
+            {
+                "messages": messages,
+                "request_id": request_id,
+                "use_streaming": use_streaming,
+                "request_options": request_options,
+                "model": model,
+            }
+        )
+        text = self.stream_text or "I saw both images."
+        if use_streaming and on_stream_event is not None:
+            await on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary=text))
+        return BackendResponse(
+            text=text,
+            duration_ms=1,
+            is_success=True,
+            stop_reason="stop",
+            usage=TokenUsage(input_tokens=18, output_tokens=6),
+        )
+
+
 class _Pool:
     def __init__(self, adapter):
         self.adapter = adapter
@@ -125,6 +186,402 @@ def _server(tmp_path: Path, adapter: _ExternalAdapter) -> APIGatewayServer:
     server._engine_status["codex-cli"] = {"available": True, "reason": "test"}
     server._pool = _Pool(adapter)
     return server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools_field", [None, []])
+async def test_gateway_multimodal_without_external_tools_preserves_all_parts(
+    tmp_path, tools_field
+):
+    adapter = _StructuredAdapter()
+    server = _server(tmp_path, adapter)
+    content = [
+        {"type": "text", "text": "Compare both."},
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgo=",
+                "detail": "high",
+            },
+        },
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQ"},
+        },
+    ]
+    body = {
+        "model": "gpt-5.5",
+        "messages": [{"role": "user", "content": content}],
+        "reasoning_effort": "high",
+    }
+    if tools_field is not None:
+        body["tools"] = tools_field
+
+    response = await server.handle_chat_completions(_Request(body))
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["choices"][0]["message"]["content"] == "I saw both images."
+    assert adapter.calls[0]["messages"][0]["content"] == content
+    assert adapter.calls[0]["request_options"]["reasoning_effort"] == "high"
+    assert adapter.calls[0]["use_streaming"] is False
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_inline_image_signature_mismatch_before_adapter_init(
+    tmp_path,
+):
+    adapter = _StructuredAdapter()
+    server = _server(tmp_path, adapter)
+
+    response = await server.handle_chat_completions(
+        _Request(
+            {
+                "model": "gpt-5.5",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Inspect this."},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,bm90LWEtcG5n"
+                                },
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 400
+    assert payload["error"]["code"] == "invalid_media"
+    assert adapter.calls == []
+    assert server._pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_multimodal_stream_uses_same_structured_messages(tmp_path):
+    adapter = _StructuredAdapter(stream_text="Both images differ.")
+    server = _server(tmp_path, adapter)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Compare."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+                },
+            ],
+        }
+    ]
+
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-5.5", "messages": messages, "stream": True},
+        )
+        body = await response.text()
+
+    assert response.status == 200
+    assert "Both images differ." in body
+    assert "data: [DONE]" in body
+    assert adapter.calls[0]["messages"] == messages
+    assert adapter.calls[0]["use_streaming"] is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_structured_stream_preserves_typed_backend_error(tmp_path):
+    class _FailedStructuredAdapter(_StructuredAdapter):
+        async def generate_structured_response(self, *_args, **_kwargs):
+            return BackendResponse(
+                text="",
+                duration_ms=1,
+                error="provider rejected image input",
+                is_success=False,
+                error_code="PROVIDER_MODALITY_UNSUPPORTED",
+                http_status=400,
+            )
+
+    server = _server(tmp_path, _FailedStructuredAdapter())
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Inspect."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+                },
+            ],
+        }
+    ]
+
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-5.5", "messages": messages, "stream": True},
+        )
+        raw = await response.text()
+
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in raw.splitlines()
+        if line.startswith("data: {")
+    ]
+    error = next(event["error"] for event in events if "error" in event)
+    assert error["code"] == "PROVIDER_MODALITY_UNSUPPORTED"
+    assert error["status"] == 400
+    assert "metadata" not in error
+    assert raw.rstrip().endswith("data: [DONE]")
+
+
+@pytest.mark.asyncio
+async def test_gateway_structured_stream_preserves_reasoning_activity_marker(
+    tmp_path,
+):
+    class _FailedStructuredAdapter(_StructuredAdapter):
+        async def generate_structured_response(self, *_args, **_kwargs):
+            return BackendResponse(
+                text="",
+                duration_ms=1,
+                error="provider rejected image input after reasoning",
+                is_success=False,
+                error_code="PROVIDER_MODALITY_UNSUPPORTED",
+                http_status=400,
+                stream_metadata={"provider_activity_observed": True},
+            )
+
+    server = _server(tmp_path, _FailedStructuredAdapter())
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Inspect."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+                },
+            ],
+        }
+    ]
+
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-5.5", "messages": messages, "stream": True},
+        )
+        raw = await response.text()
+
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in raw.splitlines()
+        if line.startswith("data: {")
+    ]
+    error = next(event["error"] for event in events if "error" in event)
+    assert error["metadata"] == {"provider_activity": True}
+
+
+@pytest.mark.asyncio
+async def test_gateway_external_stream_marks_activity_on_typed_backend_error(
+    tmp_path,
+):
+    class _FailedExternalAdapter(_ExternalAdapter):
+        async def generate_external_tool_response(
+            self, *_args, on_stream_event=None, **_kwargs
+        ):
+            if on_stream_event is not None:
+                await on_stream_event(
+                    StreamEvent(kind=KIND_TEXT_DELTA, summary="partial")
+                )
+            return BackendResponse(
+                text="",
+                duration_ms=1,
+                error="provider rejected image input",
+                is_success=False,
+                error_code="PROVIDER_MODALITY_UNSUPPORTED",
+                http_status=400,
+                tool_call_count=1,
+                side_effects_possible=True,
+            )
+
+    server = _server(tmp_path, _FailedExternalAdapter())
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-5.5",
+                "messages": [{"role": "user", "content": "Use the tool."}],
+                "tools": [TOOL_SCHEMA],
+                "stream": True,
+            },
+        )
+        raw = await response.text()
+
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in raw.splitlines()
+        if line.startswith("data: {")
+    ]
+    error = next(event["error"] for event in events if "error" in event)
+    assert error["code"] == "PROVIDER_MODALITY_UNSUPPORTED"
+    assert error["metadata"] == {"provider_activity": True}
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_media_in_developer_messages_before_adapter_init(
+    tmp_path,
+):
+    adapter = _StructuredAdapter()
+    server = _server(tmp_path, adapter)
+    response = await server.handle_chat_completions(
+        _Request(
+            {
+                "model": "gpt-5.5",
+                "messages": [
+                    {
+                        "role": "developer",
+                        "content": [
+                            {"type": "text", "text": "Inspect this policy image."},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,iVBORw0KGgo="
+                                },
+                            },
+                        ],
+                    },
+                    {"role": "user", "content": "Continue."},
+                ],
+            }
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 400
+    assert payload["error"]["code"] == "unsupported_media_role"
+    assert adapter.calls == []
+    assert server._pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_never_caches_inline_media_in_session_transcript(tmp_path):
+    adapter = _StructuredAdapter()
+    server = _server(tmp_path, adapter)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Inspect."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+                },
+            ],
+        }
+    ]
+
+    response = await server.handle_chat_completions(
+        _Request(
+            {
+                "model": "gpt-5.5",
+                "messages": messages,
+                "session_id": "session-with-inline-image",
+            }
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 400
+    assert payload["error"]["code"] == "inline_media_session_unsupported"
+    assert server._sessions.get("session-with-inline-image") is None
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_never_caches_embedded_data_url_text_in_session(tmp_path):
+    adapter = _StructuredAdapter()
+    server = _server(tmp_path, adapter)
+
+    response = await server.handle_chat_completions(
+        _Request(
+            {
+                "model": "gpt-5.5",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Inspect embedded payload: "
+                            "data:image/png;base64,iVBORw0KGgo="
+                        ),
+                    }
+                ],
+                "session_id": "session-with-inline-text",
+            }
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 400
+    assert payload["error"]["code"] == "inline_media_session_unsupported"
+    assert server._sessions.get("session-with-inline-text") is None
+    assert adapter.calls == []
+
+
+def test_gateway_session_cache_rejects_backend_generated_inline_payload(tmp_path):
+    server = _server(tmp_path, _StructuredAdapter())
+
+    stored = server._sessions.set(
+        "session-generated-inline",
+        [
+            {
+                "role": "assistant",
+                "content": "generated data:image/png;base64,iVBORw0KGgo=",
+            }
+        ],
+    )
+
+    assert stored is False
+    assert server._sessions.get("session-generated-inline") is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_external_tool_mode_preserves_multipart_user_content(tmp_path):
+    adapter = _ExternalAdapter()
+    server = _server(tmp_path, adapter)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Inspect, then use the tool."},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,iVBORw0KGgo=",
+                        "detail": "original",
+                    },
+                },
+            ],
+        }
+    ]
+
+    response = await server.handle_chat_completions(
+        _Request(
+            {
+                "model": "gpt-5.5",
+                "messages": messages,
+                "tools": [TOOL_SCHEMA],
+            }
+        )
+    )
+
+    assert response.status == 200
+    assert adapter.calls[0]["messages"] == messages
+    assert adapter.calls[0]["tools"] == [TOOL_SCHEMA]
 
 
 @pytest.mark.asyncio

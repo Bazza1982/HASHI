@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from orchestrator.multimodal_contract import (
+    MultimodalContractError,
+    attachment_manifest,
+    canonical_request_content,
+    infer_mime_type,
+    modality_for_attachment,
+)
 from orchestrator.runtime_common import _print_user_message, _safe_excerpt
 
 
@@ -54,6 +61,8 @@ class LongBatchSubmission:
     text_count: int
     media_count: int
     batch_id: str
+    request_content: dict[str, Any]
+    attachment_manifest: tuple[dict[str, Any], ...] = ()
     attachment_receipts: tuple[dict[str, Any], ...] = ()
 
     @property
@@ -71,6 +80,10 @@ class LongBatchSubmission:
             "text_count": self.text_count,
             "media_count": self.media_count,
             "attachment_receipts": [dict(receipt) for receipt in self.attachment_receipts],
+            "canonical_content_version": self.request_content["version"],
+            "attachment_manifest": [
+                dict(attachment) for attachment in self.attachment_manifest
+            ],
             "response_contract": "one_consolidated_report",
         }
 
@@ -246,6 +259,7 @@ def reserve_media(
     item_id = f"attachment-{uuid4().hex}"
     receipt = {
         "receipt_id": item_id,
+        "attachment_id": item_id,
         "status": "pending",
         "kind": kind,
         "summary": str(summary or "").strip(),
@@ -283,10 +297,22 @@ def complete_media(
     receipt["status"] = "received"
     if local_path is not None:
         path = Path(local_path)
+        receipt["local_ref"] = str(path)
+        # Compatibility for request metadata consumers during rolling upgrade.
         receipt["local_path"] = str(path)
         try:
             receipt["size_bytes"] = path.stat().st_size
             receipt["sha256"] = _sha256_file(path)
+            modality = modality_for_attachment(
+                str(receipt.get("kind") or ""),
+                mime_type=str(receipt.get("mime_type") or ""),
+                filename=str(receipt.get("filename") or path.name),
+            )
+            receipt["modality"] = modality
+            receipt["mime_type"] = str(
+                receipt.get("mime_type")
+                or infer_mime_type(path.name, modality=modality)
+            ).casefold()
         except OSError:
             # The path remains useful evidence even if metadata collection races
             # with an external cleanup. Content processing will fail explicitly.
@@ -478,6 +504,62 @@ def _build_multimodal_prompt(
     return f"{MULTIMODAL_BATCH_HEADER}\n" + "\n\n".join(rendered_items) + "\n\n[End multimodal batch]"
 
 
+def _build_canonical_batch_content(
+    buffer: list[str],
+    kinds: list[str],
+    metadata: list[dict[str, Any] | None],
+) -> dict[str, Any]:
+    parts: list[dict[str, Any]] = []
+    for index, (content, kind, receipt) in enumerate(
+        zip(buffer, kinds, metadata), start=1
+    ):
+        if kind == "text" or not isinstance(receipt, dict) or not receipt.get(
+            "local_ref"
+        ):
+            if str(content or ""):
+                parts.append(
+                    {"type": "text", "item_index": index, "text": str(content)}
+                )
+            continue
+        modality = str(
+            receipt.get("modality")
+            or modality_for_attachment(
+                kind,
+                mime_type=str(receipt.get("mime_type") or ""),
+                filename=str(receipt.get("filename") or ""),
+            )
+        )
+        parts.append(
+            {
+                "type": "media",
+                "item_index": index,
+                "attachment_id": str(
+                    receipt.get("attachment_id") or receipt.get("receipt_id") or ""
+                ),
+                "modality": modality,
+                "kind": kind,
+                "mime_type": str(
+                    receipt.get("mime_type")
+                    or infer_mime_type(
+                        str(receipt.get("filename") or receipt.get("local_ref") or ""),
+                        modality=modality,
+                    )
+                ),
+                "filename": str(receipt.get("filename") or ""),
+                "caption": str(receipt.get("caption") or ""),
+                "local_ref": str(receipt["local_ref"]),
+                "size_bytes": int(receipt.get("size_bytes") or 0),
+                "sha256": str(receipt.get("sha256") or ""),
+                "transport": {
+                    key: receipt[key]
+                    for key in ("update_id", "message_id", "media_group_id")
+                    if receipt.get(key) not in (None, "")
+                },
+            }
+        )
+    return canonical_request_content(parts)
+
+
 def consume_batch(runtime: Any, fallback_chat_id: int) -> LongBatchSubmission | None:
     _ensure_batch_state(runtime)
     _cancel_task(runtime, "_long_buffer_timeout_task")
@@ -537,6 +619,9 @@ def consume_batch(runtime: Any, fallback_chat_id: int) -> LongBatchSubmission | 
         summary = _safe_excerpt(prompt)
         source = "text"
 
+    request_content = _build_canonical_batch_content(buffer, kinds, metadata)
+    manifest = attachment_manifest(request_content)
+
     return LongBatchSubmission(
         chat_id=int(chat_id),
         prompt=prompt,
@@ -545,6 +630,8 @@ def consume_batch(runtime: Any, fallback_chat_id: int) -> LongBatchSubmission | 
         text_count=text_count,
         media_count=media_count,
         batch_id=batch_id,
+        request_content=request_content,
+        attachment_manifest=manifest,
         attachment_receipts=tuple(
             {**dict(receipt), "item_index": index}
             for index, (kind, receipt) in enumerate(zip(kinds, metadata), start=1)
@@ -607,7 +694,29 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
     reason = str(getattr(runtime, "_long_finalize_reason", "user") or "user")
     update = getattr(runtime, "_long_finalize_update", None)
     discarded_voice = int(getattr(runtime, "_long_finalize_discarded_voice", 0) or 0)
-    submission = consume_batch(runtime, int(chat_id))
+    try:
+        submission = consume_batch(runtime, int(chat_id))
+    except MultimodalContractError as exc:
+        attachment = (
+            f" for attachment {exc.attachment_id}" if exc.attachment_id else ""
+        )
+        message = (
+            "⚠️ /long media validation failed"
+            f"{attachment} ({exc.code}). Nothing was submitted."
+        )
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.warning(f"{message} {exc}")
+        if update is not None:
+            await runtime._reply_text(update, message)
+        else:
+            await runtime.send_long_message(
+                int(chat_id),
+                message,
+                request_id=f"long-invalid-{uuid4().hex[:8]}",
+                purpose="long-invalid-media",
+            )
+        return
     if submission is None:
         if reason == "timeout":
             suffix = (
@@ -671,6 +780,7 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
         submission.prompt,
         submission.source,
         submission.summary,
+        request_content=submission.request_content,
         **enqueue_kwargs,
     )
 

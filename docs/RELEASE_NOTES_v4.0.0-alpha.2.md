@@ -21,8 +21,10 @@ interfaces. Its release contract includes:
   comprehensive latest-state Verification;
 - hard evidence receipts that reject paper-only, fabricated, stale,
   cross-stage, incomplete, and failed passing claims;
-- predefined test recipes in temporary credential-cleared, no-network copies;
-- provider-neutral routing with independent Quick, Pro, and Compact targets;
+- configured recipes or direct argv checks in the authoritative workspace with
+  inherited authority and execution-derived timeouts;
+- provider-neutral Quick and Pro routing, with Compact following the active
+  Quick/Light target at fixed high HER effort;
 - explicit stream-channel ownership and idempotent user delivery;
 - isolated scheduler execution with one authoritative user conversation;
 - HASHI Tool Gateway access, secure multimedia, and agent-local Habits.
@@ -46,26 +48,37 @@ compatible.
 `xhigh` and `max`. Fast path, Planned, and Adaptive aliases normalize in the
 same way. Non-HER backends retain their established reasoning-effort UI.
 
-Review and Verification have tools enabled but side effects disabled. Passing
-or failing findings require completed receipts from the exact current stage
-invocation and stable opening/closing workspace snapshots. A failed tool may
+Review is read-only; Verification has validation-only workspace authority.
+Passing or failing findings require completed receipts from the exact current
+stage invocation and stable opening/closing workspace snapshots. A failed tool may
 support only a failed or inconclusive result. Technical failure is reported as
 unavailable, never softened into a conditional pass, and assurance never
 overwrites Execution's disposition.
 
-## Isolated Verification
+## Authoritative-workspace Verification
 
 `workspace_inspect` provides bounded read-only status, diff, search, hash,
-artifact, and snapshot evidence. `verification_run` never accepts arbitrary
-shell text: it runs only predefined argv recipes in an ephemeral writable copy.
-The sandbox disables network access, clears the environment, uses an empty
-temporary `HOME`, excludes common workspace credential files, and destroys the
-copy after the run. Host configuration is not mounted. Missing process
-isolation returns `UNAVAILABLE`; there is no unsafe host fallback.
+artifact, and snapshot evidence. `verification_run` runs configured recipes or
+direct process argv in the authoritative current workspace without a copy or
+implicit shell. It inherits the HASHI process identity, filesystem,
+environment, `HOME`, and network authority. The effective timeout grows from
+cumulative Execution duration (default: 1.5× plus five minutes), and a
+verifier-requested value can raise but never reduce it.
 
 The final report distinguishes verified, partly verified, not AI-verifiable,
 and unavailable outcomes while preserving the Primary Agent's substantive
 Execution result.
+
+## Context Compaction Continuity
+
+Automatic Compact is capacity maintenance, never a hard gate on user work.
+When a watermark is reached, HASHI may compact eligible older history through
+the active Quick/Light route. If that maintenance is unavailable, times out,
+fails validation, exhausts both attempts, or cannot shrink enough, HASHI keeps
+the original or best reduced prompt, issues a mandatory user-visible warning,
+and still calls the selected model. This continuation rule remains in force at
+120,000 estimated tokens or above; only the provider can truthfully reject the
+actual submitted request for its own context limit.
 
 
 ## Conversation and Message Delivery
@@ -113,8 +126,9 @@ restart.
 ## Alpha Boundaries
 
 - This remains an alpha release candidate, not a production certification.
-- Assured test execution requires supported process isolation; otherwise it is
-  reported as unavailable without weakening the sandbox.
+- Assured test execution deliberately shares the authoritative workspace and
+  HASHI process authority; its validation-only effects and timeout basis are
+  recorded in evidence receipts.
 - Enterprise server, IdP, SIEM, HA, and cloud validation remain tracked by the
   separate Enterprise AAI line.
 - Superloop remains an explicit-evidence operational foundation rather than a
@@ -125,7 +139,7 @@ restart.
 The release gate requires:
 
 - the full HASHI Python suite;
-- focused lifecycle, receipt-integrity, Review, Verification, isolation,
+- focused lifecycle, receipt-integrity, Review, Verification, workspace-authority,
   continuity, stream routing, execution-mode, Agent Overview, and remote
   authentication tests;
 - static compile, architecture-boundary, Markdown-link, diff-hygiene, and

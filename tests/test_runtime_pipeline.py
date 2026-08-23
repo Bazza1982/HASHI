@@ -80,7 +80,14 @@ class _BackendManager:
         self.calls = []
 
     async def generate_response(
-        self, final_prompt, request_id, *, is_retry, silent, on_stream_event
+        self,
+        final_prompt,
+        request_id,
+        *,
+        is_retry,
+        silent,
+        on_stream_event,
+        request_content=None,
     ):
         import asyncio
 
@@ -91,6 +98,7 @@ class _BackendManager:
                 "is_retry": is_retry,
                 "silent": silent,
                 "on_stream_event": on_stream_event,
+                "request_content": request_content,
             }
         )
         if self.delay_s:
@@ -413,14 +421,43 @@ def test_begin_queue_item_preserves_multimodal_request_metadata():
         "media_count": 5,
         "attachment_receipts": [{"receipt_id": f"photo-{index}"} for index in range(5)],
     }
+    request_content = {
+        "version": 1,
+        "parts": [
+            {"type": "text", "item_index": 1, "text": "Compare all."},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": "photo-1",
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/jpeg",
+                "filename": "one.jpg",
+                "caption": "",
+                "local_ref": "/tmp/one.jpg",
+                "size_bytes": 5,
+                "sha256": "1" * 64,
+                "transport": {"message_id": 1},
+            },
+        ],
+    }
+    manifest = tuple(request_content["parts"][1:])
     runtime = _runtime()
-    item = _item(request_metadata=metadata)
+    item = _item(
+        request_metadata=metadata,
+        request_content=request_content,
+        attachment_manifest=manifest,
+    )
 
     runtime_pipeline.begin_queue_item(runtime, item)
 
     assert runtime.current_request_meta["request_metadata"] == metadata
     assert runtime._request_meta_by_id[item.request_id]["request_metadata"] == metadata
     assert runtime.current_request_meta["request_metadata"] is not metadata
+    assert runtime.current_request_meta["request_content"] == request_content
+    assert runtime.current_request_meta["request_content"] is not request_content
+    assert runtime.current_request_meta["attachment_manifest"] == list(manifest)
+    assert runtime.current_request_meta["attachment_manifest"][0] is not manifest[0]
 
 
 def test_begin_queue_item_uses_monotonic_queue_age(monkeypatch):

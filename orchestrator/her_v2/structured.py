@@ -711,7 +711,7 @@ def validate_review_response(response: StageResponse) -> ReviewFinding:
 
 
 _METHOD_TOOLS: Mapping[str, frozenset[str]] = {
-    "isolated_test": frozenset({"verification_run"}),
+    "workspace_test": frozenset({"verification_run"}),
     "workspace_snapshot": frozenset({"workspace_inspect"}),
     "workspace_status": frozenset({"workspace_inspect"}),
     "workspace_diff": frozenset({"workspace_inspect"}),
@@ -724,6 +724,43 @@ _METHOD_TOOLS: Mapping[str, frozenset[str]] = {
         {"media_read", "vision_inspect", "browser_screenshot", "desktop_screenshot"}
     ),
 }
+
+
+def _successful_workspace_test_receipt(receipt: ToolEvidenceReceipt) -> bool:
+    details = receipt.details
+    timeout_policy = details.get("timeout_policy")
+    workspace_access = details.get("workspace_access")
+    if not isinstance(timeout_policy, Mapping) or not isinstance(
+        workspace_access, Mapping
+    ):
+        return False
+    try:
+        exit_code = int(details.get("exit_code", 1))
+        effective_timeout_s = float(timeout_policy.get("effective_timeout_s", 0))
+        execution_floor_s = float(timeout_policy.get("execution_floor_s", 0))
+        receipt_timeout_s = float(details.get("timeout_s", 0))
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        receipt.tool_name == "verification_run"
+        and details.get("operation") == "run"
+        and exit_code == 0
+        and details.get("execution_scope") == "workspace"
+        and details.get("workspace_copied") is False
+        and details.get("process_isolated") is False
+        and details.get("process_authority") == "inherited"
+        and details.get("identity_policy") == "inherited"
+        and details.get("filesystem_policy") == "inherited"
+        and details.get("environment_policy") == "inherited"
+        and details.get("network_policy") == "inherited"
+        and details.get("home_policy") == "inherited"
+        and workspace_access.get("read") is True
+        and workspace_access.get("write") is True
+        and workspace_access.get("execute") is True
+        and effective_timeout_s > 0
+        and receipt_timeout_s == effective_timeout_s
+        and effective_timeout_s >= execution_floor_s
+    )
 
 
 def _validate_verification_check(
@@ -762,14 +799,13 @@ def _validate_verification_check(
             raise StructuredOutputError(
                 f"verification method {check.method!r} lacks a matching tool receipt"
             )
-        if check.method == "isolated_test" and not any(
-            receipt.tool_name == "verification_run"
-            and receipt.details.get("operation") == "run"
-            and int(receipt.details.get("exit_code", 1)) == 0
-            for receipt in receipts
+        if check.method == "workspace_test" and not any(
+            _successful_workspace_test_receipt(receipt) for receipt in receipts
         ):
             raise StructuredOutputError(
-                "isolated_test verification requires a successful verification_run receipt"
+                "workspace_test verification requires a successful direct-workspace "
+                "verification_run receipt with inherited authority and a runtime-derived "
+                "timeout"
             )
     elif check.result is VerificationOutcome.FAILED:
         if check.verifiability not in {

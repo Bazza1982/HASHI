@@ -788,6 +788,7 @@ async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
                 "retry",
                 f"Recovery retry: {prompt_snapshot.summary}",
                 is_retry=True,
+                request_content=prompt_snapshot.request_content,
             )
         except Exception as exc:
             runtime.logger.exception("Could not requeue the prompt for /retry: %s", exc)

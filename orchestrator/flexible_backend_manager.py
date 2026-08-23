@@ -1,3 +1,4 @@
+import inspect
 import json
 import logging
 from dataclasses import replace
@@ -1214,8 +1215,9 @@ class FlexibleBackendManager:
             configured_mode = "tool" if "vision_inspect" in merged_allowed else "none"
         if configured_mode not in {"none", "native", "tool"}:
             raise ValueError("image_input must be one of: none, native, tool")
-        if configured_mode != "tool" and "*" not in merged_allowed:
-            merged_allowed = [name for name in merged_allowed if name != "vision_inspect"]
+        # Native support is preferred per attachment at invocation time.  Keep
+        # explicitly configured media fallbacks available for other modalities
+        # and for one typed capability-drift recovery.
 
         if not merged_allowed:
             return None
@@ -1372,16 +1374,112 @@ class FlexibleBackendManager:
         is_retry: bool = False,
         silent: bool = False,
         on_stream_event=None,
+        request_content: dict[str, Any] | None = None,
     ):
         if not self.current_backend:
             raise RuntimeError("No active backend initialized.")
         self._refresh_tool_runtime_context(request_id)
+        kwargs = {
+            "is_retry": is_retry,
+            "silent": silent,
+            "on_stream_event": on_stream_event,
+        }
+        if request_content is not None:
+            from adapters.base import BackendResponse
+            from orchestrator.multimodal_contract import (
+                MultimodalContractError,
+                route_request_content,
+                validate_authorized_media_references,
+            )
+
+            roots_resolver = getattr(
+                self.current_backend,
+                "authorized_media_roots",
+                None,
+            )
+            try:
+                if callable(roots_resolver):
+                    validate_authorized_media_references(
+                        request_content,
+                        authorized_roots=roots_resolver(),
+                    )
+            except MultimodalContractError as exc:
+                return BackendResponse(
+                    text="",
+                    duration_ms=0,
+                    error=str(exc),
+                    is_success=False,
+                    error_code=exc.code,
+                    error_retryable=False,
+                    stream_metadata={"attachment_id": exc.attachment_id or None},
+                )
+
+            parameters = inspect.signature(
+                self.current_backend.generate_response
+            ).parameters
+            accepts_structured_content = "request_content" in parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            if accepts_structured_content:
+                kwargs["request_content"] = request_content
+            else:
+                capability_resolver = getattr(
+                    self.current_backend,
+                    "resolve_input_capability",
+                    None,
+                )
+                try:
+                    capability = (
+                        capability_resolver()
+                        if callable(capability_resolver)
+                        else None
+                    )
+                    if capability is not None:
+                        decisions = route_request_content(
+                            request_content,
+                            capability,
+                        )
+                    else:
+                        decisions = ()
+                except MultimodalContractError as exc:
+                    return BackendResponse(
+                        text="",
+                        duration_ms=0,
+                        error=str(exc),
+                        is_success=False,
+                        error_code=exc.code,
+                        error_retryable=False,
+                        stream_metadata={
+                            "attachment_id": exc.attachment_id or None
+                        },
+                    )
+                if capability is not None:
+                    native = [item for item in decisions if item.route == "native"]
+                    if native:
+                        first = native[0]
+                        return BackendResponse(
+                            text="",
+                            duration_ms=0,
+                            error=(
+                                "Backend declared native media capability but its "
+                                "generate_response boundary cannot accept canonical "
+                                f"content for attachment {first.attachment_id!r}"
+                            ),
+                            is_success=False,
+                            error_code="MEDIA_TRANSPORT_UNSUPPORTED",
+                            error_retryable=False,
+                            stream_metadata={
+                                "attachment_id": first.attachment_id,
+                                "multimodal_routing": [
+                                    item.as_dict() for item in decisions
+                                ],
+                            },
+                        )
         return await self.current_backend.generate_response(
             prompt,
             request_id,
-            is_retry=is_retry,
-            silent=silent,
-            on_stream_event=on_stream_event,
+            **kwargs,
         )
 
     def _refresh_tool_runtime_context(self, request_id: str) -> None:

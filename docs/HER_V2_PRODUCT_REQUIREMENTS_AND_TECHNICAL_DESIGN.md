@@ -68,7 +68,7 @@ including:
 - provider and model names;
 - model role profiles;
 - provider reasoning settings;
-- target-model context capacity and the independent Auto Compact route;
+- target-model context capacity and Auto Compact maintenance policy;
 - the meaningful-progress idle window;
 - replanning triggers and limits;
 - review limits;
@@ -283,10 +283,12 @@ Verification findings are advisory evidence. A reviewer or verifier cannot:
 - publish a user-facing final answer;
 - independently authorise additional side effects.
 
-Review and Verification may use tools, but every delegated tool must be marked
-read-only by the HASHI Tool Registry. Those stages never receive side-effect
-authority. Their findings may cause Runtime to ask the Primary Agent to
-remediate; they cannot perform that remediation themselves.
+Review may use only tools marked read-only by the HASHI Tool Registry.
+Verification uses the same inspection set plus the explicitly non-read-only
+`verification_run` capability for validation in the authoritative workspace.
+That exception is runtime-delegated, validation-only, and cannot be widened by
+the verifier. Findings may cause Runtime to ask the Primary Agent to remediate;
+the verifier cannot perform that remediation itself.
 
 ### 4.5 `/steer` authority
 
@@ -346,16 +348,16 @@ model names.
 
 ### 5.1 Runtime configuration command boundary
 
-HER v2 presents two reusable task model slots, Quick and Pro, plus an independent
-Compact route. `/provider` selects the concrete call-provider engine that
-carries Quick and Pro. `/model` defines those two models, independently assigns
-a model slot and provider reasoning to each effective task route, and exposes
-the Compact provider, model, reasoning, and Tier 2/Tier 3 timeout policy.
-Compact may visibly inherit Pro for migration or use an explicitly granted
-provider/model, including a future local route. It must never default to Quick
-or Fast merely because that route is expected to be cheap or fast. Execution is
-split into Simple, Complex, and High-volume routes because classification
-changes the actual profile. Structure repair may follow its source model.
+HER v2 presents two reusable task model slots, Quick and Pro. `/provider`
+selects the concrete call-provider engine that carries them. `/model` defines
+those two models, independently assigns a model slot and provider reasoning to
+each effective task route, and exposes Compact enablement plus its Tier 2/Tier
+3 timeout policy. Compact always follows the initiating Agent's active
+Quick/Light provider and model at fixed high HER effort; it has no third
+provider/model path and never silently falls back to Pro or a global default.
+Execution is split into Simple, Complex, and High-volume routes because
+classification changes the actual profile. Structure repair may follow its
+source model.
 `/backend` selects `her-v2` without exposing the internal `role-configured`
 sentinel.
 
@@ -363,10 +365,11 @@ sentinel.
 are accepted aliases and persist as canonical `xhigh` and `max`; the other
 descriptive names are accepted in the same way. Changing the mode must not read,
 infer, normalize, or persist a provider reasoning value. Conversely, changing a
-provider, model slot, Compact route, or provider reasoning setting must not
-change HER execution mode. An explicit Compact route is preserved when `/provider`
-changes Quick and Pro; an inherited Compact route follows Pro. Non-HER backends
-retain their established `/model` behaviour.
+provider, model slot, Compact enablement, timeout tier, or provider reasoning
+setting must not change HER execution mode. Compact follows changes to the
+active Quick/Light route at invocation time. Legacy `inherit_pro` and explicit
+Compact records migrate to that policy without preserving a third route.
+Non-HER backends retain their established `/model` behaviour.
 
 ### 5.2 Scheduled-job execution policy
 
@@ -746,16 +749,31 @@ Comprehensive Verification applies only to Assured (`max`) work turns after
 Review and any resulting remediation. It evaluates the latest Execution result
 and current workspace state, not an earlier candidate.
 
-Verification has Tool Gateway access but no side-effect authority. It uses:
+Verification has Tool Gateway access with validation-only side-effect authority.
+It cannot remediate, contact the user, or widen its own tool set. It uses:
 
 - `workspace_inspect` for bounded status, diff, search, hash, artifact, and
   before/after snapshot evidence;
-- `verification_run` only for predefined recipes. A recipe runs in an
-  ephemeral writable workspace copy with network disabled, environment
-  credentials cleared, common credential files and host configuration excluded,
-  a temporary empty `HOME`, and no shell-text input. If the required isolation facility is
-  unavailable, the tool returns unavailable and never falls back to host
-  execution.
+- `verification_run` for a configured recipe or direct process `argv`. Commands
+  run in the authoritative current workspace without copying or sandboxing it.
+  They inherit the HASHI process identity, filesystem access, environment,
+  `HOME`, and network access. `argv` is executed without an implicit shell.
+
+The runtime records cumulative wall-clock time across all authoritative
+Execution attempts, including high-volume sub-agents and remediation. The
+default effective verification timeout is:
+
+`max(configured, requested, 300s, execution elapsed × 1.5 + 300s)`
+
+The verifier may request more time but cannot reduce that result. The minimum
+timeout is five minutes; configuration cannot reduce the execution multiplier
+below 1.0 or the grace below 60 seconds. Thus a one-hour Execution receives a
+5,700-second default verification budget, not a fixed short deadline.
+
+Direct validation may create ordinary caches or test artifacts. Opening and
+closing snapshots still detect unexpected candidate drift. Receipts record the
+workspace scope, command source and argv hash, inherited authority and access
+checks, timeout inputs/effective value, exit code, elapsed time, and cleanup.
 
 Each required check records its claim, verifiability, method, observed result,
 and exact current-invocation evidence receipts. A start without completion is
@@ -1151,11 +1169,25 @@ bound it.
 ### 19.4 Auto Compact maintenance-call exception
 
 Auto Compact is HASHI-owned context capacity maintenance, not a principal HER
-lifecycle stage. It may invoke only an explicitly configured, tool-free Compact
-route exposed through `/model`. Quick/Fast is never hard-coded as the compactor;
-the route may inherit Pro or use a separately granted provider/model. Gemini
-remains stateless, and the initial implementation does not split, cap, or
-replace the existing OpenRouter or DeepSeek request-local tool loops.
+lifecycle stage. It invokes the initiating Agent's active HER v2 Quick/Light
+provider and model at fixed high HER effort through an isolated, tool-free
+maintenance boundary. It has no independent provider/model route and cannot
+fall back to Pro, a global default, or a different provider. Gemini remains
+stateless, and this maintenance path does not split, cap, or replace the
+existing OpenRouter or DeepSeek request-local tool loops.
+
+Declared target capacity uses configured high/low watermark ratios. When
+target capacity is unknown, HASHI still performs automatic maintenance through
+a named absolute 64,000→48,000 estimated-token threshold; this threshold is product
+policy, not invented provider metadata. Unknown compactor capacity uses
+conservative 32,000 estimated-token source partitions. Automatic compaction is
+never a prerequisite for the current model call. Protected-set overflow,
+Compact unavailability, timeout, validation failure, or retry exhaustion keeps
+the best safely assembled context, emits a mandatory user-visible warning, and
+continues the selected model request. This remains true at 120,000 estimated
+tokens or above. The provider's own capacity rejection remains truthful, but
+HASHI does not pre-emptively turn a maintenance threshold into an execution
+stop.
 
 Each individual semantic compactor model call may use the expressly authorised
 absolute watchdog defined by a dedicated Tier 2 or Tier 3 Compact policy. Tier
@@ -1311,9 +1343,10 @@ HER v2 is ready for production rollout only when:
 - passing assurance claims require completed receipts from the exact current
   stage invocation and stable before/after snapshots; fabricated, stale,
   cross-stage, incomplete, and failed passing evidence is rejected;
-- Assured Verification runs only predefined recipes in an ephemeral,
-  no-network, credential-cleared workspace copy and fails closed when isolation
-  is unavailable;
+- Assured Verification runs configured recipes or direct argv checks in the
+  authoritative workspace with inherited execution authority; its enforced
+  timeout grows from cumulative Execution time and cannot be shortened by the
+  verifier;
 - eligible provider failures receive no more and no less than one safe
   fresh-connection recovery; typed exclusions, invariant hashes, and
   process-restart non-resumption are enforced without an attempt deadline;
@@ -1326,12 +1359,13 @@ HER v2 is ready for production rollout only when:
 - all available reasoning traces are logged and correlated to the turn;
 - tools and permissions remain HASHI-owned;
 - provider model names are configurable rather than hard-coded in HER core;
-- `/model` exposes an independent Compact route, never assumes Quick/Fast can
-  read the source, supports capability-selected Tier 2/Tier 3, keeps Gemini
-  stateless, and leaves initial OpenRouter/DeepSeek long tool loops unchanged;
+- Compact resolves the initiating Agent's active HER v2 provider and
+  Quick/Light model at high HER effort, supports Tier 2/Tier 3 watchdog
+  isolation, keeps Gemini stateless, and leaves ordinary provider tool loops
+  unchanged;
 - Auto Compact preserves protected authority and open tool truth verbatim,
   retains raw source, atomically commits only validated capsules, and otherwise
-  continues unchanged or returns a stable truthful capacity failure;
+  continues with the best safely assembled context plus a mandatory warning;
 - reporting failure preserves completed execution evidence;
 - stop terminates primary and sub-agent activity;
 - the retired HER implementation is unreachable through backend switching,
@@ -1363,7 +1397,8 @@ The following decisions are authoritative for HER v2:
    separate tool-free Compact request follows the narrow Tier 2/Tier 3 exception
    in section 19.4.
 7. Immediate Response becomes the sole final user-facing answer for `DIRECT_RESPONSE`.
-8. Review and Verification are read-only, advisory, and never user-facing.
+8. Review is read-only; Verification has validation-only workspace authority;
+   both are advisory and never user-facing.
 9. The Primary Agent owns execution and reporting.
 10. The Ledger is minimal operational state; HASHI logs are audit truth.
 11. All available reasoning traces must be logged.

@@ -128,6 +128,54 @@ def test_multimodal_batch_preserves_item_order_and_requests_one_response():
     assert "Read or inspect every referenced file before replying" not in submission.prompt
 
 
+def test_multimodal_batch_builds_persistent_safe_canonical_attachment_manifest(
+    tmp_path,
+):
+    runtime = _runtime()
+    runtime_long.begin_batch(runtime, 123)
+    runtime_long.collect_text(runtime, 123, "Compare both images.")
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first = first_dir / "same.jpg"
+    second = second_dir / "same.jpg"
+    first.write_bytes(b"\xff\xd8\xfffirst")
+    second.write_bytes(b"\xff\xd8\xffsecond")
+
+    for message_id, path in ((10, first), (11, second)):
+        assert runtime_long.collect_media(
+            runtime,
+            123,
+            f"User sent a photo (saved at {path}). View it.",
+            "photo",
+            path.name,
+            local_path=path,
+            transport_metadata={
+                "filename": path.name,
+                "mime_type": "image/jpeg",
+                "message_id": message_id,
+            },
+        )
+
+    submission = runtime_long.consume_batch(runtime, 123)
+
+    assert submission is not None
+    assert submission.request_content["version"] == 1
+    media_parts = [
+        part
+        for part in submission.request_content["parts"]
+        if part["type"] == "media"
+    ]
+    assert [part["item_index"] for part in media_parts] == [2, 3]
+    assert [part["transport"]["message_id"] for part in media_parts] == [10, 11]
+    assert len({part["attachment_id"] for part in media_parts}) == 2
+    assert len({part["local_ref"] for part in media_parts}) == 2
+    assert len({part["sha256"] for part in media_parts}) == 2
+    assert all(isinstance(part["local_ref"], str) for part in media_parts)
+    assert all("base64," not in repr(part) for part in media_parts)
+
+
 @pytest.mark.asyncio
 async def test_cmd_end_enqueues_media_batch_once():
     runtime = _runtime()

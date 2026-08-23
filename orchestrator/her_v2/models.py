@@ -233,6 +233,9 @@ class StageRequest:
     effort: Effort
     plan_id: str | None = None
     context: Mapping[str, Any] = field(default_factory=dict)
+    request_content: Mapping[str, Any] | None = None
+    attachment_manifest: tuple[Mapping[str, Any], ...] = ()
+    force_local_media_fallback: bool = False
     allow_tools: bool = False
     allow_side_effects: bool = False
     invocation_id: str = ""
@@ -256,6 +259,7 @@ class StageResponse:
     evidence_refs: tuple[str, ...] = ()
     provider_attempt: int = 1
     tool_receipts: tuple[ToolEvidenceReceipt, ...] = ()
+    media_routing: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -344,6 +348,7 @@ class SubAgentAssignment:
     profile: str
     tools: tuple[str, ...] = ()
     allow_side_effects: bool = False
+    attachment_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -353,6 +358,7 @@ class SubAgentResult:
     summary: str
     evidence_refs: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
+    attachment_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

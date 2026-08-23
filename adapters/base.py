@@ -6,9 +6,9 @@ import time
 import asyncio
 import subprocess
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from adapters.stream_events import StreamCallback
 from adapters.timeout_policy import (
@@ -44,6 +44,12 @@ class BackendCapabilities:
     # True when the selected model receives images directly from its provider.
     # Text-only models can instead opt into HASHI's vision_inspect tool.
     supports_native_vision: bool = False
+    # Provider/model/modality-specific native input contract.  The legacy
+    # booleans above remain compatibility signals, never final routing proof.
+    input_modalities: frozenset[str] = frozenset({"text"})
+    input_transports: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    input_limits: Mapping[str, int] = field(default_factory=dict)
+    input_capability_source: str = "unknown_fail_closed"
 
 
 @dataclass
@@ -93,13 +99,23 @@ class BaseBackend(ABC):
         self.api_key = api_key
         self._validate_timeout_configuration()
         self.capabilities = self._define_capabilities()
-        image_input = str(
-            (getattr(self.config, "extra", {}) or {}).get("image_input") or "none"
-        ).strip().casefold()
+        extra = dict(getattr(self.config, "extra", {}) or {})
+        configured_image_input = extra.get("image_input")
+        image_input = str(configured_image_input or "none").strip().casefold()
         if image_input not in {"none", "native", "tool"}:
             raise ValueError("image_input must be one of: none, native, tool")
-        self.image_input_mode = image_input
-        self.capabilities.supports_native_vision = image_input == "native"
+        capability = self.resolve_input_capability()
+        self.input_capability = capability
+        self.capabilities.input_modalities = capability.input_modalities
+        self.capabilities.input_transports = dict(capability.input_transports)
+        self.capabilities.input_limits = dict(capability.limits)
+        self.capabilities.input_capability_source = capability.source
+        self.capabilities.supports_native_vision = capability.supports("image")
+        self.image_input_mode = (
+            image_input
+            if configured_image_input is not None
+            else ("native" if capability.supports("image") else "none")
+        )
         self._console_write_warned = False
         # epoch-seconds; updated by adapter whenever backend produces output.
         # Used by the runtime escalation loop to detect stalled sub-processes.
@@ -109,6 +125,48 @@ class BaseBackend(ABC):
         # cumulative count of output events (stdout lines for CLI, 1 for HTTP).
         # Codex increments this per stdout line; others increment once on start.
         self.output_line_count: int = 0
+
+    def resolve_input_capability(self):
+        """Resolve the current exact model on demand.
+
+        HER stage profile options are installed after an ephemeral backend is
+        constructed, so adapters must not rely only on the startup snapshot.
+        """
+
+        from orchestrator.multimodal_contract import resolve_input_capability
+
+        engine = str(getattr(self.config, "engine", "") or "").strip()
+        if not engine:
+            engine = {
+                "OpenRouterAdapter": "openrouter-api",
+                "HashiApiAdapter": "hashi-api",
+                "CodexCLIAdapter": "codex-cli",
+                "HERv2Adapter": "her-v2",
+            }.get(type(self).__name__, "")
+        return resolve_input_capability(
+            engine,
+            getattr(self.config, "model", ""),
+            config=dict(getattr(self.config, "extra", {}) or {}),
+        )
+
+    def authorized_media_roots(self) -> tuple[Path, ...]:
+        candidates: list[Any] = [getattr(self.config, "workspace_dir", None)]
+        try:
+            candidates.append(self.effective_add_dir)
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+        candidates.append(getattr(self.global_config, "base_media_dir", None))
+        roots: list[Path] = []
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                path = Path(candidate).expanduser().resolve()
+            except (OSError, TypeError, ValueError):
+                continue
+            if path not in roots:
+                roots.append(path)
+        return tuple(roots)
 
     @property
     def PROCESS_TIMEOUT_SEC(self) -> int:
@@ -381,8 +439,9 @@ class BaseBackend(ABC):
     async def generate_response(
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
         on_stream_event: StreamCallback = None,
+        request_content: Mapping[str, Any] | None = None,
     ) -> BackendResponse:
-        """Generate response from the backend engine."""
+        """Generate a response, optionally with canonical structured input."""
         pass
 
     @abstractmethod

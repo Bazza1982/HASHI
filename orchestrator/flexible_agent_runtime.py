@@ -638,6 +638,8 @@ class FlexibleAgentRuntime:
                 is_retry=True,
                 habit_learning_eligible=item.habit_learning_eligible,
                 scheduler_context=item.scheduler_context,
+                request_metadata=item.request_metadata,
+                request_content=item.request_content,
             )
             if retry_request_id:
                 self.logger.warning(
@@ -687,10 +689,21 @@ class FlexibleAgentRuntime:
         skill_id: str | None = None,
         scheduler_context: Mapping[str, str] | None = None,
         request_metadata: Mapping[str, Any] | None = None,
+        request_content: Mapping[str, Any] | None = None,
     ):
         if not prompt or not prompt.strip():
             self.error_logger.error(f"Rejected empty prompt from {source} (summary={summary!r})")
             return None
+        normalized_request_content = None
+        manifest = ()
+        if request_content is not None:
+            from orchestrator.multimodal_contract import (
+                attachment_manifest,
+                normalize_request_content,
+            )
+
+            normalized_request_content = normalize_request_content(request_content)
+            manifest = attachment_manifest(normalized_request_content)
         item = runtime_common.QueuedRequest(
             request_id=self.next_request_id(),
             chat_id=chat_id,
@@ -710,6 +723,8 @@ class FlexibleAgentRuntime:
             request_metadata=(
                 dict(request_metadata) if request_metadata else None
             ),
+            request_content=normalized_request_content,
+            attachment_manifest=manifest,
         )
         usage_recorder = getattr(
             getattr(self, "skill_manager", None), "record_skill_usage", None
@@ -7925,6 +7940,9 @@ class FlexibleAgentRuntime:
                         "error": "background_task_cancelled",
                         "source": item.source,
                         "summary": item.summary,
+                        **runtime_pipeline.request_context_warning_fields(
+                            self, item.request_id
+                        ),
                     },
                 )
                 _elapsed, chunk_count = await self.send_long_message(
@@ -7958,6 +7976,9 @@ class FlexibleAgentRuntime:
                         "error": str(exc),
                         "source": item.source,
                         "summary": item.summary,
+                        **runtime_pipeline.request_context_warning_fields(
+                            self, item.request_id
+                        ),
                     },
                 )
                 _elapsed, chunk_count = await self.send_long_message(
@@ -8003,6 +8024,9 @@ class FlexibleAgentRuntime:
                         "error": None,
                         "source": item.source,
                         "summary": item.summary,
+                        **runtime_pipeline.request_context_warning_fields(
+                            self, item.request_id
+                        ),
                         **self._wrapper_listener_fields(safe_core_raw, visible_text, wrapper_result),
                     },
                 )
@@ -8149,6 +8173,10 @@ class FlexibleAgentRuntime:
                                         prompt_tokens
                                         + estimate_tokens(memory_assistant_text)
                                     ),
+                                    chat_id=item.chat_id,
+                                    deliver_to_telegram=bool(
+                                        item.deliver_to_telegram
+                                    ),
                                 )
                         except Exception as exc:
                             self.logger.warning(
@@ -8220,6 +8248,9 @@ class FlexibleAgentRuntime:
                         "error": err_msg,
                         "source": item.source,
                         "summary": item.summary,
+                        **runtime_pipeline.request_context_warning_fields(
+                            self, item.request_id
+                        ),
                     },
                 )
                 if self._should_buffer_during_transfer(item.request_id):

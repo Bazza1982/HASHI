@@ -1772,9 +1772,12 @@ TOOL_SCHEMAS.extend(
             "function": {
                 "name": "verification_run",
                 "description": (
-                    "List or run a pre-registered verification recipe. Run creates an "
-                    "ephemeral writable workspace copy, clears credentials, disables network "
-                    "access, and destroys the copy afterward. It never accepts shell text."
+                    "List configured recipes or run a recipe/direct argv validation command "
+                    "in the authoritative current workspace. The process inherits HASHI's "
+                    "filesystem, identity, environment, HOME, and network authority; the "
+                    "workspace is not copied or sandboxed. argv is executed without an "
+                    "implicit shell. The effective timeout automatically grows with the "
+                    "turn's cumulative Execution duration, and timeout_s can only raise it."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1783,6 +1786,23 @@ TOOL_SCHEMAS.extend(
                         "recipe": {
                             "type": "string",
                             "description": "Registered recipe id returned by the list operation.",
+                        },
+                        "argv": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "description": (
+                                "Direct process argv for a validation command. Use either argv "
+                                "or recipe. {python} resolves to HASHI's current Python."
+                            ),
+                        },
+                        "timeout_s": {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "description": (
+                                "Optional requested timeout. It may increase but never reduce "
+                                "the runtime-derived effective timeout."
+                            ),
                         },
                     },
                     "required": ["operation"],

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import html
 import re
 import time
@@ -26,6 +27,17 @@ class QueuedRequest:
     skill_usage_event_id: str | None = None
     scheduler_context: dict[str, str] | None = None
     request_metadata: dict[str, Any] | None = None
+    request_content: dict[str, Any] | None = None
+    attachment_manifest: tuple[dict[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        # A queued turn owns its attachment identity.  Callers may safely reuse
+        # or mutate their source dictionaries after enqueueing.
+        self.request_metadata = copy.deepcopy(self.request_metadata)
+        self.request_content = copy.deepcopy(self.request_content)
+        self.attachment_manifest = tuple(
+            copy.deepcopy(item) for item in self.attachment_manifest
+        )
 
 
 def _safe_excerpt(text: str, limit: int = 160) -> str:

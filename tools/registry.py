@@ -83,7 +83,6 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "windows_screenshot",
         "windows_window_list",
         "workspace_inspect",
-        "verification_run",
     }
 )
 

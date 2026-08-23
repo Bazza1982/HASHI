@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import NetworkError, TimedOut
 
 from orchestrator import runtime_long
 from orchestrator.media_utils import is_image_file
+from orchestrator.multimodal_contract import (
+    attachment_manifest,
+    canonical_request_content,
+    infer_mime_type,
+    modality_for_attachment,
+)
 from orchestrator.runtime_common import _print_user_message
 
 
@@ -98,21 +106,51 @@ def _is_her_backend(runtime: Any, backend: Any) -> bool:
 
 def _backend_accepts_media_bridge(backend: Any, media_kind: str, filename: str) -> bool:
     capabilities = getattr(backend, "capabilities", None)
-    if bool(getattr(capabilities, "supports_files", False)):
+    modality = modality_for_attachment(
+        media_kind,
+        filename=filename,
+        mime_type=infer_mime_type(filename),
+    )
+    resolver = getattr(backend, "resolve_input_capability", None)
+    if callable(resolver):
+        try:
+            if resolver().supports(modality):
+                return True
+        except (TypeError, ValueError):
+            pass
+    if modality in set(getattr(capabilities, "input_modalities", ()) or ()):
         return True
+
+    ingress_resolver = getattr(backend, "accepts_media_input", None)
+    if callable(ingress_resolver):
+        try:
+            if ingress_resolver(modality):
+                return True
+        except (TypeError, ValueError):
+            pass
 
     registry = getattr(backend, "tool_registry", None)
     is_allowed = getattr(registry, "is_allowed", None)
-    if not callable(is_allowed):
-        return False
+    supports_files = bool(getattr(capabilities, "supports_files", False))
 
     kind = str(media_kind or "").strip().casefold()
     if kind == "photo" or (kind == "document" and is_image_file(filename)):
-        return bool(is_allowed("vision_inspect") or is_allowed("media_read"))
+        return bool(
+            callable(is_allowed)
+            and (is_allowed("vision_inspect") or is_allowed("media_read"))
+        )
     if kind in {"audio", "video", "voice"}:
-        return bool(is_allowed("media_read"))
+        return bool(callable(is_allowed) and is_allowed("media_read"))
     if kind == "document":
-        return bool(is_allowed("file_read") or is_allowed("media_read"))
+        # The legacy supports_files flag is meaningful only for ordinary
+        # documents.  It is never proof of image/audio/video understanding.
+        return bool(
+            supports_files
+            or (
+                callable(is_allowed)
+                and (is_allowed("file_read") or is_allowed("media_read"))
+            )
+        )
     return False
 
 
@@ -135,11 +173,84 @@ def _available_media_path(media_dir: Path, filename: str) -> Path:
 
 def _transport_metadata(update: Any, filename: str) -> dict[str, Any]:
     message = getattr(update, "message", None)
+    caption = str(getattr(message, "caption", "") or "")
+    mime_type = ""
+    for attribute in ("document", "audio", "video", "voice"):
+        media = getattr(message, attribute, None)
+        candidate = str(getattr(media, "mime_type", "") or "").strip()
+        if candidate:
+            mime_type = candidate
+            break
+    if not mime_type and getattr(message, "photo", None):
+        mime_type = "image/jpeg"
     return {
         "filename": str(filename or ""),
+        "caption": caption,
+        "mime_type": mime_type or infer_mime_type(filename),
         "update_id": getattr(update, "update_id", None),
         "message_id": getattr(message, "message_id", None),
         "media_group_id": getattr(message, "media_group_id", None),
+    }
+
+
+def _single_attachment_request(
+    prompt: str,
+    *,
+    media_kind: str,
+    filename: str,
+    local_path: Path,
+    transport: dict[str, Any],
+    attachment_id: str | None = None,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+    digest = hashlib.sha256()
+    size_bytes = 0
+    with local_path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            size_bytes += len(chunk)
+            digest.update(chunk)
+    modality = modality_for_attachment(
+        media_kind,
+        mime_type=str(transport.get("mime_type") or ""),
+        filename=filename,
+    )
+    content = canonical_request_content(
+        [
+            {"type": "text", "item_index": 1, "text": str(prompt)},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": attachment_id or f"attachment-{uuid4().hex}",
+                "modality": modality,
+                "kind": str(media_kind or modality).strip().casefold(),
+                "mime_type": str(
+                    transport.get("mime_type")
+                    or infer_mime_type(filename, modality=modality)
+                ),
+                "filename": filename,
+                "caption": str(transport.get("caption") or ""),
+                "local_ref": str(local_path),
+                "size_bytes": size_bytes,
+                "sha256": digest.hexdigest(),
+                "transport": {
+                    key: transport[key]
+                    for key in ("update_id", "message_id", "media_group_id")
+                    if transport.get(key) not in (None, "")
+                },
+            },
+        ]
+    )
+    return content, attachment_manifest(content)
+
+
+def _single_attachment_metadata(
+    content: dict[str, Any], manifest: tuple[dict[str, Any], ...]
+) -> dict[str, Any]:
+    return {
+        "canonical_content_version": content["version"],
+        "attachment_manifest": [dict(item) for item in manifest],
     }
 
 
@@ -207,7 +318,25 @@ async def handle_media_message(
             local_path=local_path,
         ):
             return
-        await runtime.enqueue_request(chat_id, rendered_prompt, media_kind.lower(), summary)
+        transport = _transport_metadata(update, filename)
+        request_content, manifest = _single_attachment_request(
+            rendered_prompt,
+            media_kind=media_kind,
+            filename=filename,
+            local_path=local_path,
+            transport=transport,
+            attachment_id=reservation_id,
+        )
+        await runtime.enqueue_request(
+            chat_id,
+            rendered_prompt,
+            media_kind.lower(),
+            summary,
+            request_metadata=_single_attachment_metadata(
+                request_content, manifest
+            ),
+            request_content=request_content,
+        )
     except Exception as e:
         if reservation_id is not None:
             runtime_long.discard_media_reservation(runtime, reservation_id)
@@ -284,8 +413,12 @@ async def handle_voice_or_audio(
             backend = getattr(runtime.backend_manager, "current_backend", None)
             if (
                 backend
-                and backend.capabilities.supports_files
                 and _is_her_backend(runtime, backend)
+                and _backend_accepts_media_bridge(
+                    backend,
+                    media_kind,
+                    filename,
+                )
             ):
                 prompt = (
                     f"User sent a voice message (saved at {local_path}). "
@@ -298,9 +431,27 @@ async def handle_voice_or_audio(
                     prompt,
                     media_kind.lower(),
                     filename,
+                    local_path=local_path,
+                    transport_metadata=_transport_metadata(update, filename),
                 ):
                     return
-                await runtime.enqueue_request(update.effective_chat.id, prompt, media_kind.lower(), filename)
+                request_content, manifest = _single_attachment_request(
+                    prompt,
+                    media_kind=media_kind,
+                    filename=filename,
+                    local_path=local_path,
+                    transport=_transport_metadata(update, filename),
+                )
+                await runtime.enqueue_request(
+                    update.effective_chat.id,
+                    prompt,
+                    media_kind.lower(),
+                    filename,
+                    request_metadata=_single_attachment_metadata(
+                        request_content, manifest
+                    ),
+                    request_content=request_content,
+                )
             else:
                 await runtime._reply_text(update, f"Failed to transcribe {media_kind.lower()} message.")
             return

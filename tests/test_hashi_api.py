@@ -1,6 +1,8 @@
+import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from adapters.hashi_api import HashiApiAdapter
@@ -10,6 +12,19 @@ from orchestrator.flexible_backend_registry import (
     get_available_efforts,
     get_available_models,
 )
+from orchestrator.multimodal_contract import canonical_request_content
+
+
+class _MediaFallbackRegistry:
+    def is_allowed(self, name):
+        return name == "media_read"
+
+    def get_tool_definitions(self, tiers=None):
+        del tiers
+        return [{"type": "function", "function": {"name": "media_read"}}]
+
+    async def execute(self, *_args, **_kwargs):
+        raise AssertionError("the mocked fallback response should not call a tool")
 
 
 def _adapter(
@@ -131,8 +146,181 @@ async def test_hashi_api_reports_usage_and_never_adds_openrouter_headers(tmp_pat
     assert response.usage.output_tokens == 30
     assert response.usage.thinking_tokens == 10
     assert response.cost_usd == pytest.approx(0.0025)
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_preserves_multipart_messages_and_reasoning_effort(tmp_path):
+    image = tmp_path / "photo.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nhashi-api")
+    payload = image.read_bytes()
+    content = canonical_request_content(
+        [
+            {"type": "text", "item_index": 1, "text": "Describe it."},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": "attachment-1",
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/png",
+                "filename": image.name,
+                "caption": "",
+                "local_ref": str(image),
+                "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "transport": {},
+            },
+        ]
+    )
+    adapter = _adapter(tmp_path, provider_reasoning="high")
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult("done", None, "stop", 12, 3)
+    )
+
+    response = await adapter.generate_response(
+        "Describe it.", "request-multimodal", request_content=content
+    )
+
+    assert response.is_success is True
+    request_payload = adapter._call_api_once.call_args.args[0]
+    assert request_payload["reasoning_effort"] == "high"
+    assert "reasoning" not in request_payload
+    assert [
+        part["type"] for part in request_payload["messages"][1]["content"]
+    ] == ["text", "image_url"]
     _payload, headers, _callback = adapter._call_api_once.await_args.args
     assert headers == {"Content-Type": "application/json"}
     assert "Authorization" not in headers
 
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_typed_modality_drift_replays_once_without_media(tmp_path):
+    image = tmp_path / "photo.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nhashi-api")
+    image_payload = image.read_bytes()
+    content = canonical_request_content(
+        [
+            {"type": "text", "item_index": 1, "text": "Describe it."},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": "attachment-1",
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/png",
+                "filename": image.name,
+                "caption": "",
+                "local_ref": str(image),
+                "size_bytes": len(image_payload),
+                "sha256": hashlib.sha256(image_payload).hexdigest(),
+                "transport": {},
+            },
+        ]
+    )
+    adapter = _adapter(tmp_path, provider_reasoning="high")
+    adapter.tool_registry = _MediaFallbackRegistry()
+    request = httpx.Request("POST", adapter.hashi_url)
+    rejected = httpx.Response(
+        400,
+        request=request,
+        json={"error": {"code": "unsupported_modality"}},
+    )
+    adapter._call_api_once = AsyncMock(
+        side_effect=[
+            httpx.HTTPStatusError(
+                "unsupported modality",
+                request=request,
+                response=rejected,
+            ),
+            _APIResult("done", None, "stop", 12, 3),
+        ]
+    )
+
+    response = await adapter.generate_response(
+        "Use media_read on the received path.",
+        "request-drift",
+        request_content=content,
+    )
+
+    assert response.is_success is True
+    assert adapter._call_api_once.call_count == 2
+    replay_payload = adapter._call_api_once.call_args_list[1].args[0]
+    replay_content = replay_payload["messages"][1]["content"]
+    assert replay_content[0] == {
+        "type": "text",
+        "text": "Use media_read on the received path.",
+    }
+    assert replay_content[1] == {"type": "text", "text": "Describe it."}
+    assert "attachment-1" in replay_content[2]["text"]
+    assert str(image) in replay_content[2]["text"]
+    assert replay_payload["reasoning_effort"] == "high"
+    assert {
+        item["route"] for item in response.stream_metadata["multimodal_routing"]
+    } == {"local_fallback"}
+
+
+@pytest.mark.asyncio
+async def test_hashi_stream_does_not_replay_after_partial_provider_output(tmp_path):
+    image = tmp_path / "partial.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\npartial")
+    image_payload = image.read_bytes()
+    content = canonical_request_content(
+        [
+            {"type": "text", "item_index": 1, "text": "Describe it."},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": "attachment-partial",
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/png",
+                "filename": image.name,
+                "caption": "",
+                "local_ref": str(image),
+                "size_bytes": len(image_payload),
+                "sha256": hashlib.sha256(image_payload).hexdigest(),
+                "transport": {},
+            },
+        ]
+    )
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = _MediaFallbackRegistry()
+    attempts = 0
+
+    async def handler(_request):
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"choices":[{"delta":{"content":"partial"},'
+                '"finish_reason":null}]}\n\n'
+                'data: {"error":{"message":"unsupported image",'
+                '"code":"provider_modality_unsupported","status":400}}\n\n'
+                'data: [DONE]\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    adapter.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    events = []
+
+    async def on_event(event):
+        events.append(event)
+
+    response = await adapter.generate_response(
+        "Use media_read on the received path.",
+        "request-partial-stream-drift",
+        request_content=content,
+        on_stream_event=on_event,
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_MODALITY_UNSUPPORTED"
+    assert attempts == 1
+    assert [event.summary for event in events] == ["partial"]
+    assert response.stream_metadata["provider_activity_observed"] is True
+    assert response.stream_metadata["multimodal_fallback_attempted"] is False
     await adapter.shutdown()

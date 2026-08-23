@@ -25,6 +25,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from aiohttp import web
 
@@ -46,6 +47,12 @@ from orchestrator.model_catalog import (
 from orchestrator.api_gateway_config import load_api_gateway_config
 from orchestrator.api_gateway_preflight import check_gateway_engines
 from orchestrator.flexible_backend_registry import get_available_efforts
+from orchestrator.multimodal_contract import (
+    MultimodalContractError,
+    contains_persistent_inline_media,
+    resolve_input_capability,
+    validate_inline_image_data_url,
+)
 from adapters.stream_events import StreamEvent, KIND_TEXT_DELTA
 
 logger = logging.getLogger("BridgeU.APIGateway")
@@ -55,6 +62,7 @@ logger = logging.getLogger("BridgeU.APIGateway")
 SESSION_TTL_SEC = 1800  # 30 minutes
 MAX_EXTERNAL_TOOLS = 128
 MAX_EXTERNAL_TOOL_BYTES = 1024 * 1024
+MAX_INLINE_MEDIA_BYTES = 50 * 1024 * 1024
 API_GATEWAY_DRAIN_TIMEOUT_SEC = 10.0
 API_GATEWAY_CANCEL_TIMEOUT_SEC = 2.0
 _EXTERNAL_TOOL_ENGINES = frozenset({"codex-cli", "xai-api"})
@@ -163,6 +171,190 @@ def _uses_external_tool_protocol(body: dict[str, Any], messages: list[dict]) -> 
     )
 
 
+def _uses_structured_conversation(messages: list[dict]) -> bool:
+    """Multipart conversation routing is independent from caller-owned tools."""
+
+    return any(isinstance(message.get("content"), list) for message in messages)
+
+
+def _contains_inline_media(messages: list[dict]) -> bool:
+    """Return whether a conversation contains raw inline media payloads.
+
+    Gateway sessions are transcript-like state.  They may retain HTTPS media
+    references, but never bytes or a data URL anywhere in caller content.
+    """
+
+    return contains_persistent_inline_media(messages)
+
+
+def _image_part_url(part: dict[str, Any]) -> tuple[str, str]:
+    image = part.get("image_url")
+    detail = part.get("detail")
+    if isinstance(image, dict):
+        detail = image.get("detail", detail)
+        image = image.get("url")
+    return str(image or "").strip(), str(detail or "").strip().casefold()
+
+
+def _validate_inline_image_url(
+    url: str,
+    *,
+    param: str,
+) -> tuple[web.Response | None, int]:
+    if url.casefold().startswith("data:"):
+        try:
+            _mime_type, decoded_bytes = validate_inline_image_data_url(
+                url,
+                max_bytes=MAX_INLINE_MEDIA_BYTES,
+            )
+        except MultimodalContractError as exc:
+            error_code = (
+                "media_too_large"
+                if exc.code == "MEDIA_LIMIT_EXCEEDED"
+                else (
+                    "unsupported_media"
+                    if exc.code == "MEDIA_SIGNATURE_UNVERIFIED"
+                    else "invalid_media"
+                )
+            )
+            return (
+                _external_tool_error(
+                    f"{param} is invalid: {exc}",
+                    code=error_code,
+                    param=param,
+                ),
+                0,
+            )
+        return None, decoded_bytes
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return (
+            _external_tool_error(
+                f"{param} must be an HTTPS URL or image data URL",
+                code="invalid_media",
+                param=param,
+            ),
+            0,
+        )
+    return None, 0
+
+
+def _validate_structured_conversation(
+    messages: list[dict],
+    *,
+    engine: str,
+    model: str,
+) -> web.Response | None:
+    capability = resolve_input_capability(engine, model)
+    image_count = 0
+    inline_total_bytes = 0
+    for message_index, message in enumerate(messages):
+        role = str(message.get("role") or "").strip().casefold()
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part_index, part in enumerate(content):
+            param = f"messages[{message_index}].content[{part_index}]"
+            if not isinstance(part, dict):
+                return _external_tool_error(
+                    f"{param} must be an object",
+                    code="invalid_media",
+                    param=param,
+                )
+            part_type = str(part.get("type") or "").strip().casefold()
+            if part_type in {"text", "input_text", "output_text"}:
+                if not isinstance(part.get("text"), str):
+                    return _external_tool_error(
+                        f"{param}.text must be a string",
+                        code="invalid_messages",
+                        param=f"{param}.text",
+                    )
+                continue
+            if part_type not in {"image_url", "input_image"}:
+                return _external_tool_error(
+                    f"{param}.type {part_type!r} is unsupported",
+                    code="unsupported_media",
+                    param=f"{param}.type",
+                )
+            if role in {"system", "developer"}:
+                return _external_tool_error(
+                    f"{param} cannot contain media for role {role!r}",
+                    code="unsupported_media_role",
+                    param=param,
+                )
+            url, detail = _image_part_url(part)
+            image_count += 1
+            if not url:
+                return _external_tool_error(
+                    f"{param}.image_url is required",
+                    code="invalid_media",
+                    param=f"{param}.image_url",
+                )
+            if detail and detail not in {"auto", "low", "high", "original"}:
+                return _external_tool_error(
+                    f"{param}.detail is invalid",
+                    code="invalid_media",
+                    param=f"{param}.detail",
+                )
+            transport = (
+                "data_url" if url.casefold().startswith("data:") else "remote_url"
+            )
+            if not capability.supports("image", transport):
+                return _external_tool_error(
+                    f"model {model!r} does not support image input via {transport}",
+                    code="unsupported_media",
+                    param=param,
+                )
+            error, decoded_bytes = _validate_inline_image_url(
+                url,
+                param=f"{param}.image_url",
+            )
+            if error is not None:
+                return error
+            if url.casefold().startswith("data:"):
+                item_limit = int(capability.limits.get("item_bytes") or 0)
+                if item_limit and decoded_bytes > item_limit:
+                    return _external_tool_error(
+                        f"{param} exceeds the model item-size limit",
+                        code="media_too_large",
+                        param=param,
+                    )
+                inline_total_bytes += decoded_bytes
+    item_count_limit = int(capability.limits.get("item_count") or 0)
+    if item_count_limit and image_count > item_count_limit:
+        return _external_tool_error(
+            "multimodal item count exceeds the model limit",
+            code="too_many_media_items",
+            param="messages",
+        )
+    total_limit = int(capability.limits.get("total_bytes") or 0)
+    if total_limit and inline_total_bytes > total_limit:
+        return _external_tool_error(
+            "multimodal input exceeds the model total-size limit",
+            code="media_too_large",
+            param="messages",
+        )
+    return None
+
+
+def _message_text_preview(messages: list[dict]) -> str:
+    for message in reversed(messages):
+        if str(message.get("role") or "").casefold() != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content[:120]
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and str(part.get("type") or "") in {
+                    "text",
+                    "input_text",
+                }:
+                    return str(part.get("text") or "")[:120]
+            return "[multimodal user input]"
+    return ""
+
+
 def _external_tool_error(
     message: str,
     *,
@@ -181,6 +373,57 @@ def _external_tool_error(
         },
         status=status,
     )
+
+
+def _backend_stream_error_payload(
+    message: str,
+    *,
+    code: str,
+    status: int,
+    response: Any = None,
+    streamed_text: bool = False,
+) -> dict[str, Any]:
+    """Build an SSE error without discarding stable backend failure metadata."""
+
+    try:
+        normalized_status = int(status)
+    except (TypeError, ValueError):
+        normalized_status = 502
+    if normalized_status < 400 or normalized_status > 599:
+        normalized_status = 502
+    stream_metadata = getattr(response, "stream_metadata", None) or {}
+    if not isinstance(stream_metadata, dict):
+        stream_metadata = {}
+    provider_activity = bool(
+        streamed_text
+        or getattr(response, "text", "")
+        or getattr(response, "tool_calls", None)
+        or getattr(response, "tool_call_count", 0)
+        or getattr(response, "side_effects_possible", False)
+        or stream_metadata.get("provider_activity")
+        or stream_metadata.get("provider_activity_observed")
+    )
+    error: dict[str, Any] = {
+        "message": message,
+        "type": (
+            "invalid_request_error"
+            if normalized_status < 500
+            else "server_error"
+        ),
+        "code": code,
+        "status": normalized_status,
+    }
+    if provider_activity:
+        error["metadata"] = {"provider_activity": True}
+    return {"error": error}
+
+
+def _backend_http_error_status(response: Any, *, default: int = 502) -> int:
+    try:
+        status = int(getattr(response, "http_status", None) or default)
+    except (TypeError, ValueError):
+        return default
+    return status if 400 <= status <= 599 else default
 
 
 def _validate_reasoning_effort(
@@ -421,13 +664,17 @@ class _SessionCache:
             return None
         return entry["messages"]
 
-    def set(self, session_id: str, messages: list[dict]):
+    def set(self, session_id: str, messages: list[dict]) -> bool:
+        if _contains_inline_media(messages):
+            self._store.pop(session_id, None)
+            return False
         self._store[session_id] = {"messages": list(messages), "ts": time.time()}
+        return True
 
-    def append(self, session_id: str, role: str, content: str):
+    def append(self, session_id: str, role: str, content: str) -> bool:
         messages = self.get(session_id) or []
         messages.append({"role": role, "content": content})
-        self.set(session_id, messages)
+        return self.set(session_id, messages)
 
     def purge_expired(self):
         now = time.time()
@@ -804,6 +1051,15 @@ class APIGatewayServer:
 
         stream: bool = bool(body.get("stream", False))
         external_tool_mode = _uses_external_tool_protocol(body, messages)
+        structured_conversation_mode = _uses_structured_conversation(messages)
+        if structured_conversation_mode:
+            structured_error = _validate_structured_conversation(
+                messages,
+                engine=engine,
+                model=model,
+            )
+            if structured_error is not None:
+                return structured_error
 
         reasoning_effort, reasoning_error = _validate_reasoning_effort(
             body,
@@ -855,6 +1111,15 @@ class APIGatewayServer:
                 param="session_id",
             )
 
+        if session_id and _contains_inline_media(messages):
+            return _external_tool_error(
+                "session_id cannot be combined with inline media data URLs; "
+                "send the complete multimodal conversation without server-side "
+                "session caching, or use HTTPS media references",
+                code="inline_media_session_unsupported",
+                param="session_id",
+            )
+
         if session_id:
             cached = self._sessions.get(session_id)
             if cached:
@@ -868,17 +1133,27 @@ class APIGatewayServer:
                     ):
                         combined.append(msg)
                 messages = combined
+            structured_conversation_mode = _uses_structured_conversation(messages)
+            if structured_conversation_mode:
+                structured_error = _validate_structured_conversation(
+                    messages,
+                    engine=engine,
+                    model=model,
+                )
+                if structured_error is not None:
+                    return structured_error
 
         prompt = ""
-        if not external_tool_mode:
+        if not external_tool_mode and not structured_conversation_mode:
             prompt = _messages_to_prompt(messages)
             if not prompt.strip():
                 return web.json_response({"error": "empty prompt after assembly"}, status=400)
 
         # Terminal: show incoming
-        user_preview = next(
-            (str(m.get("content") or "")[:120] for m in reversed(messages) if m.get("role") == "user"),
-            prompt[:120] or "[external tool request]",
+        user_preview = _message_text_preview(messages) or prompt[:120] or (
+            "[structured conversation]"
+            if structured_conversation_mode
+            else "[external tool request]"
         )
         _print_api_in(model, user_preview)
 
@@ -920,6 +1195,37 @@ class APIGatewayServer:
                 body,
                 request_id,
                 model,
+                t_start,
+            )
+
+        if structured_conversation_mode:
+            supports_structured = getattr(
+                adapter, "supports_structured_conversation", None
+            )
+            if not callable(supports_structured) or not supports_structured(model):
+                return _external_tool_error(
+                    f"model {model!r} cannot accept structured conversation input",
+                    code="structured_conversation_unsupported",
+                    param="model",
+                )
+            if stream:
+                return await self._handle_structured_streaming(
+                    adapter,
+                    messages,
+                    body,
+                    request_id,
+                    model,
+                    session_id,
+                    t_start,
+                    request,
+                )
+            return await self._handle_structured_sync(
+                adapter,
+                messages,
+                body,
+                request_id,
+                model,
+                session_id,
                 t_start,
             )
 
@@ -1142,8 +1448,8 @@ class APIGatewayServer:
             logger.error("External tool backend failure %s: %s", request_id, error)
             return _external_tool_error(
                 error,
-                code="external_tool_backend_error",
-                status=502,
+                code=response.error_code or "external_tool_backend_error",
+                status=_backend_http_error_status(response),
             )
 
         text = response.text or ""
@@ -1245,18 +1551,22 @@ class APIGatewayServer:
             logger.error("External tool streaming backend error for %s: %s", request_id, exc)
             response = None
             error = str(exc)
+            error_code = "external_tool_backend_error"
+            error_status = 500
         else:
             error = response.error if not response.is_success else None
+            error_code = response.error_code or "external_tool_backend_error"
+            error_status = _backend_http_error_status(response)
 
         if error:
             try:
-                payload = {
-                    "error": {
-                        "message": error,
-                        "type": "server_error",
-                        "code": "external_tool_backend_error",
-                    }
-                }
+                payload = _backend_stream_error_payload(
+                    error,
+                    code=error_code,
+                    status=error_status,
+                    response=response,
+                    streamed_text=bool(collected_text),
+                )
                 await resp.write(f"data: {json.dumps(payload)}\n\n".encode())
                 await resp.write(b"data: [DONE]\n\n")
                 await resp.write_eof()
@@ -1296,6 +1606,178 @@ class APIGatewayServer:
             {},
             self._external_finish_reason(response),
             usage=self._external_usage(response),
+        )
+        try:
+            await resp.write(b"data: [DONE]\n\n")
+            await resp.write_eof()
+        except Exception:
+            pass
+        return resp
+
+    async def _handle_structured_sync(
+        self,
+        adapter,
+        messages: list[dict],
+        body: dict[str, Any],
+        request_id: str,
+        model: str,
+        session_id: str | None,
+        t_start: float,
+    ) -> web.Response:
+        try:
+            response = await adapter.generate_structured_response(
+                messages,
+                request_id,
+                use_streaming=False,
+                request_options=body,
+                model=model,
+            )
+        except Exception as exc:
+            logger.error("Structured conversation backend error for %s: %s", request_id, exc)
+            return _external_tool_error(
+                str(exc),
+                code="structured_conversation_backend_error",
+                status=500,
+            )
+        if not response.is_success:
+            return _external_tool_error(
+                response.error or "backend error",
+                code=response.error_code or "structured_conversation_backend_error",
+                status=_backend_http_error_status(response),
+            )
+        if response.tool_calls:
+            return _external_tool_error(
+                "tool-free structured conversation returned unexpected tool calls",
+                code="structured_conversation_protocol_error",
+                status=502,
+            )
+        text = response.text or ""
+        elapsed = time.time() - t_start
+        _print_api_out(model, elapsed, len(text), stream=False)
+        if session_id:
+            self._sessions.set(
+                session_id,
+                list(messages) + [{"role": "assistant", "content": text}],
+            )
+        prompt = _messages_to_prompt(messages)
+        return web.json_response(
+            {
+                "id": f"chatcmpl-{uuid.uuid4().hex}",
+                "object": "chat.completion",
+                "created": int(t_start),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": text},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": self._text_usage(response, prompt, text),
+            }
+        )
+
+    async def _handle_structured_streaming(
+        self,
+        adapter,
+        messages: list[dict],
+        body: dict[str, Any],
+        request_id: str,
+        model: str,
+        session_id: str | None,
+        t_start: float,
+        request: web.Request,
+    ) -> web.StreamResponse:
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        try:
+            await resp.prepare(request)
+        except Exception:
+            return resp
+        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+        collected_text: list[str] = []
+
+        async def write_chunk(delta: dict[str, Any], finish_reason: str | None = None, **extra):
+            chunk: dict[str, Any] = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": int(t_start),
+                "model": model,
+                "choices": [
+                    {"index": 0, "delta": delta, "finish_reason": finish_reason}
+                ],
+            }
+            chunk.update(extra)
+            try:
+                await resp.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            except Exception:
+                pass
+
+        await write_chunk({"role": "assistant"})
+
+        async def on_event(event: StreamEvent):
+            if event.kind == KIND_TEXT_DELTA and event.summary:
+                collected_text.append(event.summary)
+                await write_chunk({"content": event.summary})
+
+        try:
+            response = await adapter.generate_structured_response(
+                messages,
+                request_id,
+                use_streaming=True,
+                request_options=body,
+                on_stream_event=on_event,
+                model=model,
+            )
+        except Exception as exc:
+            response = None
+            error = str(exc)
+            error_code = "structured_conversation_backend_error"
+            error_status = 500
+        else:
+            error = response.error if not response.is_success else None
+            error_code = (
+                response.error_code or "structured_conversation_backend_error"
+            )
+            error_status = _backend_http_error_status(response)
+        if error:
+            try:
+                payload = _backend_stream_error_payload(
+                    error,
+                    code=error_code,
+                    status=error_status,
+                    response=response,
+                    streamed_text=bool(collected_text),
+                )
+                await resp.write(
+                    f"data: {json.dumps(payload)}\n\n".encode()
+                )
+                await resp.write(b"data: [DONE]\n\n")
+                await resp.write_eof()
+            except Exception:
+                pass
+            return resp
+        full_text = response.text or ""
+        if full_text and not collected_text:
+            collected_text.append(full_text)
+            await write_chunk({"content": full_text})
+        final_text = full_text or "".join(collected_text)
+        if session_id and final_text:
+            self._sessions.set(
+                session_id,
+                list(messages) + [{"role": "assistant", "content": final_text}],
+            )
+        _print_api_out(model, time.time() - t_start, len(final_text), stream=True)
+        await write_chunk(
+            {},
+            "stop",
+            usage=self._text_usage(response, _messages_to_prompt(messages), final_text),
         )
         try:
             await resp.write(b"data: [DONE]\n\n")

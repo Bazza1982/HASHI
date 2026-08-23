@@ -151,7 +151,7 @@ def her_v2_model_keyboard(runtime) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    "Compact · independent history route",
+                    "Compact · Quick/Light history maintenance",
                     callback_data="her_model_compact",
                 )
             ],
@@ -199,55 +199,38 @@ def her_v2_compact_keyboard(runtime) -> InlineKeyboardMarkup:
     from orchestrator.context_compaction import load_route_config
 
     current = load_route_config(runtime)
-    buttons: list[list[InlineKeyboardButton]] = [
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                selected_label("Follow Pro", current.mode == "inherit_pro"),
-                callback_data="her_model_compact_mode:inherit_pro",
-            ),
-            InlineKeyboardButton(
-                selected_label("Off", current.mode == "off"),
-                callback_data="her_model_compact_mode:off",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                selected_label("Choose provider + model", current.mode == "explicit"),
-                callback_data="her_model_compact_providers",
-            )
-        ],
-    ]
-    if current.mode == "explicit":
-        buttons.append(
             [
                 InlineKeyboardButton(
-                    selected_label("Reasoning · high", current.reasoning == "high"),
-                    callback_data="her_model_compact_reasoning:high",
+                    selected_label(
+                        "Follow Quick/Light",
+                        current.mode == "inherit_quick",
+                    ),
+                    callback_data="her_model_compact_mode:inherit_quick",
                 ),
                 InlineKeyboardButton(
-                    selected_label("Reasoning · max", current.reasoning == "max"),
-                    callback_data="her_model_compact_reasoning:max",
+                    selected_label("Off", current.mode == "off"),
+                    callback_data="her_model_compact_mode:off",
                 ),
-            ]
-        )
-    buttons.append(
-        [
-            InlineKeyboardButton(
-                selected_label("Tier · auto", current.timeout_tier == "auto"),
-                callback_data="her_model_compact_tier:auto",
-            ),
-            InlineKeyboardButton(
-                selected_label("Tier 2", current.timeout_tier == "tier_2"),
-                callback_data="her_model_compact_tier:tier_2",
-            ),
-            InlineKeyboardButton(
-                selected_label("Tier 3", current.timeout_tier == "tier_3"),
-                callback_data="her_model_compact_tier:tier_3",
-            ),
+            ],
+            [
+                InlineKeyboardButton(
+                    selected_label("Tier · auto", current.timeout_tier == "auto"),
+                    callback_data="her_model_compact_tier:auto",
+                ),
+                InlineKeyboardButton(
+                    selected_label("Tier 2", current.timeout_tier == "tier_2"),
+                    callback_data="her_model_compact_tier:tier_2",
+                ),
+                InlineKeyboardButton(
+                    selected_label("Tier 3", current.timeout_tier == "tier_3"),
+                    callback_data="her_model_compact_tier:tier_3",
+                ),
+            ],
+            [InlineKeyboardButton(BACK_LABEL, callback_data="model_menu")],
         ]
     )
-    buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="model_menu")])
-    return InlineKeyboardMarkup(buttons)
 
 
 def her_v2_compact_provider_keyboard(runtime) -> InlineKeyboardMarkup:
@@ -807,76 +790,27 @@ async def _cmd_her_v2_compact(runtime, update, args: list[str]) -> None:
     action = args[0].strip().lower().replace("-", "_")
     try:
         current = load_route_config(runtime)
-        if action in {"inherit", "inherit_pro", "pro"}:
+        if action in {"inherit", "inherit_pro", "pro", "quick", "inherit_quick"}:
             tier = args[1] if len(args) == 2 else current.timeout_tier
             if len(args) > 2:
-                raise ValueError("inherit_pro accepts only an optional timeout tier")
-            configure_route(runtime, mode="inherit_pro", timeout_tier=tier)
+                raise ValueError("inherit_quick accepts only an optional timeout tier")
+            configure_route(runtime, mode="inherit_quick", timeout_tier=tier)
         elif action == "off":
             tier = args[1] if len(args) == 2 else current.timeout_tier
             if len(args) > 2:
                 raise ValueError("off accepts only an optional timeout tier")
             configure_route(runtime, mode="off", timeout_tier=tier)
         elif action in {"tier", "timeout"} and len(args) == 2:
-            if current.mode == "explicit":
-                configure_route(
-                    runtime,
-                    mode="explicit",
-                    provider=current.provider,
-                    model=current.model,
-                    reasoning=current.reasoning,
-                    timeout_tier=args[1],
-                    confirmed_cross_provider=current.cross_provider_confirmed,
-                )
-            else:
-                configure_route(
-                    runtime,
-                    mode=current.mode,
-                    timeout_tier=args[1],
-                )
-        elif action == "reasoning" and len(args) == 2:
-            if current.mode != "explicit":
-                raise ValueError("reasoning can be changed only for an explicit Compact route")
-            configure_route(
-                runtime,
-                mode="explicit",
-                provider=current.provider,
-                model=current.model,
-                reasoning=args[1],
-                timeout_tier=current.timeout_tier,
-                confirmed_cross_provider=current.cross_provider_confirmed,
-            )
-        elif action == "explicit" and len(args) in {4, 5, 6}:
-            provider, model, reasoning = args[1:4]
-            tier = "auto"
-            confirmed = False
-            for value in args[4:]:
-                normalized = value.strip().lower().replace("-", "_")
-                if normalized in {"confirm", "confirmed", "yes"}:
-                    confirmed = True
-                elif normalized in {"auto", "tier_2", "tier_3"}:
-                    tier = normalized
-                else:
-                    raise ValueError(f"unknown explicit Compact option: {value}")
-            configure_route(
-                runtime,
-                mode="explicit",
-                provider=provider,
-                model=model,
-                reasoning=reasoning,
-                timeout_tier=tier,
-                confirmed_cross_provider=confirmed,
-            )
+            configure_route(runtime, mode=current.mode, timeout_tier=args[1])
         else:
             raise ValueError(
-                "Usage: /model compact [status|inherit_pro [tier]|off [tier]|"
-                "explicit <provider> <model> <reasoning> [tier] [confirm]|"
-                "reasoning <value>|tier <auto|tier_2|tier_3>]"
+                "Usage: /model compact [status|inherit_quick [tier]|off [tier]|"
+                "tier <auto|tier_2|tier_3>]"
             )
     except (OSError, TypeError, ValueError) as exc:
         await runtime._reply_text(
             update,
-            f"Compact route was not changed: {html.escape(str(exc))}",
+            f"Compact policy was not changed: {html.escape(str(exc))}",
             parse_mode="HTML",
         )
         return
@@ -1271,14 +1205,20 @@ async def callback_model(runtime, update, context: Any) -> None:
                 parse_mode="HTML",
                 reply_markup=her_v2_model_keyboard(runtime),
             )
-        elif data == "her_model_compact_providers":
-            await query.edit_message_text(
-                "🗜️ <b>Select the independent Compact provider</b>\n\n"
-                "Only already-granted providers and models are shown. A provider "
-                "different from the main HER v2 provider requires a separate confirmation.",
-                parse_mode="HTML",
-                reply_markup=her_v2_compact_provider_keyboard(runtime),
+        elif data == "her_model_compact_providers" or data.startswith(
+            (
+                "her_model_compact_provider:",
+                "her_model_compact_model:",
+                "her_model_compact_reasoning:",
+                "her_model_compact_select:",
+                "her_model_compact_confirm:",
             )
+        ):
+            await query.answer(
+                "Compact now follows the active HER v2 Quick/Light model at high effort.",
+                show_alert=True,
+            )
+            return
         elif data.startswith("her_model_compact_mode:"):
             from orchestrator.context_compaction import (
                 configure_route,
@@ -1320,164 +1260,6 @@ async def callback_model(runtime, update, context: Any) -> None:
                     confirmed_cross_provider=current.cross_provider_confirmed,
                 )
             except (OSError, TypeError, ValueError) as exc:
-                await query.answer(str(exc), show_alert=True)
-                return
-            await query.edit_message_text(
-                her_v2_compact_text(runtime),
-                parse_mode="HTML",
-                reply_markup=her_v2_compact_keyboard(runtime),
-            )
-        elif data.startswith("her_model_compact_reasoning:"):
-            from orchestrator.context_compaction import (
-                configure_route,
-                load_route_config,
-            )
-
-            reasoning = data.split(":", 1)[1]
-            try:
-                current = load_route_config(runtime)
-                if current.mode != "explicit":
-                    raise ValueError("Select an explicit Compact route first")
-                configure_route(
-                    runtime,
-                    mode="explicit",
-                    provider=current.provider,
-                    model=current.model,
-                    reasoning=reasoning,
-                    timeout_tier=current.timeout_tier,
-                    confirmed_cross_provider=current.cross_provider_confirmed,
-                )
-            except (OSError, TypeError, ValueError) as exc:
-                await query.answer(str(exc), show_alert=True)
-                return
-            await query.edit_message_text(
-                her_v2_compact_text(runtime),
-                parse_mode="HTML",
-                reply_markup=her_v2_compact_keyboard(runtime),
-            )
-        elif data.startswith("her_model_compact_provider:"):
-            try:
-                _, raw_index, token = data.rsplit(":", 2)
-                provider_index, option = _her_v2_indexed_choice(
-                    runtime.backend_manager.get_her_v2_provider_options(),
-                    raw_index,
-                )
-                provider = str(option["engine"])
-                if (
-                    token != _her_v2_callback_token(provider)
-                    or not option.get("available")
-                    or not option.get("models")
-                ):
-                    raise ValueError("This Compact provider menu is stale")
-            except (IndexError, TypeError, ValueError) as exc:
-                await query.answer(str(exc), show_alert=True)
-                return
-            await query.edit_message_text(
-                "🗜️ <b>Select the Compact model</b>\n\n"
-                f"<b>Provider</b> · <code>{html.escape(provider)}</code>",
-                parse_mode="HTML",
-                reply_markup=her_v2_compact_model_keyboard(runtime, provider_index),
-            )
-        elif data.startswith("her_model_compact_model:"):
-            try:
-                (
-                    _,
-                    raw_provider_index,
-                    provider_token,
-                    raw_model_index,
-                    model_token,
-                ) = data.split(":", 4)
-                provider_index, provider, model_index, model = (
-                    _her_v2_compact_callback_selection(
-                        runtime,
-                        raw_provider_index,
-                        provider_token,
-                        raw_model_index,
-                        model_token,
-                    )
-                )
-            except (IndexError, TypeError, ValueError) as exc:
-                await query.answer(str(exc), show_alert=True)
-                return
-            await query.edit_message_text(
-                "🧠 <b>Select provider-specific Compact reasoning</b>\n\n"
-                f"<b>Route</b> · <code>{html.escape(provider)} / {html.escape(model)}</code>\n"
-                "The selected adapter validates and maps this provider-specific value.",
-                parse_mode="HTML",
-                reply_markup=her_v2_compact_reasoning_keyboard(
-                    runtime,
-                    provider_index,
-                    model_index,
-                ),
-            )
-        elif data.startswith(("her_model_compact_select:", "her_model_compact_confirm:")):
-            from orchestrator.context_compaction import configure_route
-
-            confirmed = data.startswith("her_model_compact_confirm:")
-            try:
-                (
-                    _,
-                    raw_provider_index,
-                    provider_token,
-                    raw_model_index,
-                    model_token,
-                    reasoning,
-                ) = data.split(":", 5)
-                provider_index, provider, model_index, model = (
-                    _her_v2_compact_callback_selection(
-                        runtime,
-                        raw_provider_index,
-                        provider_token,
-                        raw_model_index,
-                        model_token,
-                    )
-                )
-                selected = runtime.backend_manager.get_her_v2_configuration()
-                crosses_provider = provider != getattr(
-                    selected,
-                    "pro_provider",
-                    selected.provider,
-                )
-                if crosses_provider and not confirmed:
-                    confirm_data = (
-                        f"her_model_compact_confirm:{provider_index}:{provider_token}:"
-                        f"{model_index}:{model_token}:{reasoning}"
-                    )
-                    await query.edit_message_text(
-                        "⚠️ <b>Confirm cross-provider Compact</b>\n\n"
-                        "Eligible quoted historical context will be sent to the separately "
-                        f"granted provider <code>{html.escape(provider)}</code>. Secret-like "
-                        "records remain blocked by HASHI privacy validation.",
-                        parse_mode="HTML",
-                        reply_markup=InlineKeyboardMarkup(
-                            [
-                                [
-                                    InlineKeyboardButton(
-                                        "Confirm cross-provider route",
-                                        callback_data=confirm_data,
-                                    )
-                                ],
-                                [
-                                    InlineKeyboardButton(
-                                        BACK_LABEL,
-                                        callback_data="her_model_compact_providers",
-                                    )
-                                ],
-                            ]
-                        ),
-                    )
-                    await query.answer()
-                    return
-                configure_route(
-                    runtime,
-                    mode="explicit",
-                    provider=provider,
-                    model=model,
-                    reasoning=reasoning,
-                    timeout_tier="auto",
-                    confirmed_cross_provider=confirmed,
-                )
-            except (IndexError, OSError, TypeError, ValueError) as exc:
                 await query.answer(str(exc), show_alert=True)
                 return
             await query.edit_message_text(

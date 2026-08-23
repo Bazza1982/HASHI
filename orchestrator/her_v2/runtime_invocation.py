@@ -23,6 +23,11 @@ from .models import Stage, StageRequest, StageResponse, ToolEvidenceReceipt
 from .progress import ProviderActivityTracker
 from .runtime_support import _payload_hash
 from .structured import resolve_stage_response
+from orchestrator.multimodal_contract import (
+    attachment_manifest,
+    canonical_request_content,
+    subset_request_content,
+)
 
 if TYPE_CHECKING:
     from .runtime import _TurnState
@@ -45,6 +50,17 @@ def _tool_receipt_payload(receipt: ToolEvidenceReceipt) -> dict[str, Any]:
         "output_sha256": receipt.output_sha256,
         "details": dict(receipt.details),
     }
+
+
+def _used_typed_media_fallback(value: Any) -> bool:
+    if not isinstance(value, (list, tuple)):
+        return False
+    return any(
+        isinstance(item, Mapping)
+        and str(item.get("reason") or "")
+        == "provider_typed_modality_unsupported"
+        for item in value
+    )
 
 
 class RuntimeInvocationMixin:
@@ -70,6 +86,74 @@ class RuntimeInvocationMixin:
             else self.config.stage_roles.get(stage, selected.name)
         )
         base_context = copy.deepcopy(dict(context or {}))
+        stage_request_content = copy.deepcopy(state.request_content)
+        authorised_attachment_ids = base_context.get("authorized_attachment_ids")
+        if isinstance(authorised_attachment_ids, list):
+            stage_request_content = subset_request_content(
+                stage_request_content,
+                authorised_attachment_ids,
+            )
+        elif role.startswith("sub_agent:"):
+            # Missing or malformed assignment scope must fail closed instead
+            # of inheriting every attachment from the parent turn.
+            stage_request_content = subset_request_content(
+                stage_request_content,
+                (),
+            )
+        stage_attachment_manifest = attachment_manifest(stage_request_content)
+        stage_goal = state.goal
+        if role.startswith("sub_agent:"):
+            # A bounded sub-agent receives user-authored text plus only its
+            # assignment-scoped manifest.  The aggregate /long prompt contains
+            # transport receipts for every attachment, so forwarding that goal
+            # verbatim would leak paths outside the assignment.
+            text_parts = [
+                str(part.get("text") or "")
+                for part in (
+                    state.request_content.get("parts", [])
+                    if isinstance(state.request_content, Mapping)
+                    else []
+                )
+                if isinstance(part, Mapping) and part.get("type") == "text"
+            ]
+            stage_goal = "\n".join(item for item in text_parts if item.strip())
+            for item in state.attachment_manifest:
+                local_ref = str(item.get("local_ref") or "")
+                if local_ref:
+                    stage_goal = stage_goal.replace(
+                        local_ref, "[attachment path available only through assignment manifest]"
+                    )
+            authorised_ids = {
+                str(item.get("attachment_id") or "")
+                for item in stage_attachment_manifest
+            }
+            unauthorized_refs = tuple(
+                str(item.get("local_ref") or "")
+                for item in state.attachment_manifest
+                if str(item.get("attachment_id") or "") not in authorised_ids
+                and str(item.get("local_ref") or "")
+            )
+            if isinstance(stage_request_content, Mapping) and unauthorized_refs:
+                scrubbed_parts = copy.deepcopy(
+                    list(stage_request_content.get("parts") or [])
+                )
+                for part in scrubbed_parts:
+                    if not isinstance(part, Mapping) or part.get("type") != "text":
+                        continue
+                    scrubbed_text = str(part.get("text") or "")
+                    for local_ref in unauthorized_refs:
+                        scrubbed_text = scrubbed_text.replace(
+                            local_ref,
+                            "[attachment path not authorized for this assignment]",
+                        )
+                    part["text"] = scrubbed_text
+                stage_request_content = canonical_request_content(scrubbed_parts)
+            if not stage_goal.strip():
+                stage_goal = str(base_context.get("assigned_task") or state.goal)
+            if state.attachment_manifest:
+                base_context["authorized_attachment_manifest"] = [
+                    copy.deepcopy(item) for item in stage_attachment_manifest
+                ]
         invariant_payload = {
             "provider": selected.engine,
             "model": selected.model,
@@ -86,6 +170,16 @@ class RuntimeInvocationMixin:
             "delegated_tools": base_context.get("delegated_tools"),
             "workzone": self.workzone_ref or None,
             "plan_id": state.ledger.plan_id,
+            "attachments": [
+                {
+                    "attachment_id": item.get("attachment_id"),
+                    "item_index": item.get("item_index"),
+                    "modality": item.get("modality"),
+                    "size_bytes": item.get("size_bytes"),
+                    "sha256": item.get("sha256"),
+                }
+                for item in stage_attachment_manifest
+            ],
         }
         retry_invariant_hash = _payload_hash(invariant_payload)
         last_error: StageInvocationError | None = None
@@ -98,6 +192,7 @@ class RuntimeInvocationMixin:
         if stage is Stage.EXECUTION and not role.startswith("sub_agent:"):
             state.last_execution_invocation_id = invocation_id
         provider_retry_count = 0
+        media_fallback_consumed = False
         attempt = 0
         while True:
             attempt += 1
@@ -119,11 +214,16 @@ class RuntimeInvocationMixin:
                 stage=stage,
                 role=role,
                 attempt=attempt,
-                goal=state.goal,
+                goal=stage_goal,
                 classification=state.ledger.classification,
                 effort=state.effort,
                 plan_id=state.ledger.plan_id,
                 context=attempt_context,
+                request_content=copy.deepcopy(stage_request_content),
+                attachment_manifest=tuple(
+                    copy.deepcopy(item) for item in stage_attachment_manifest
+                ),
+                force_local_media_fallback=media_fallback_consumed,
                 allow_tools=allow_tools,
                 allow_side_effects=allow_side_effects,
                 invocation_id=invocation_id,
@@ -176,6 +276,8 @@ class RuntimeInvocationMixin:
                 response = await state.control.run_cancellable(
                     self.provider.invoke(selected, request)
                 )
+                if _used_typed_media_fallback(response.media_routing):
+                    media_fallback_consumed = True
                 response_ref = self._audit(
                     state,
                     stage=stage.value,
@@ -193,6 +295,9 @@ class RuntimeInvocationMixin:
                         "tool_receipts": [
                             _tool_receipt_payload(item)
                             for item in response.tool_receipts
+                        ],
+                        "media_routing": [
+                            dict(item) for item in response.media_routing
                         ],
                         "reasoning_available": bool(
                             response.reasoning_trace
@@ -288,6 +393,9 @@ class RuntimeInvocationMixin:
                             _tool_receipt_payload(item)
                             for item in effective_response.tool_receipts
                         ],
+                        "media_routing": [
+                            dict(item) for item in effective_response.media_routing
+                        ],
                         "reasoning_available": bool(effective_response.reasoning_trace),
                         "validation_source": validation_source,
                         "retry_invariant_hash": retry_invariant_hash,
@@ -298,6 +406,18 @@ class RuntimeInvocationMixin:
                 self.ledger_store.save(state.ledger)
                 for receipt in effective_response.tool_receipts:
                     state.tool_receipts[receipt.evidence_ref] = receipt
+                if effective_response.media_routing:
+                    state.media_routing_by_stage.setdefault(stage.value, []).append(
+                        {
+                            "role": role,
+                            "invocation_id": invocation_id,
+                            "attempt": attempt,
+                            "decisions": [
+                                dict(item)
+                                for item in effective_response.media_routing
+                            ],
+                        }
+                    )
                 if publish_commentary and validation_source not in {
                     "reasoning_recovery",
                     "deferred_to_finalisation",
@@ -320,6 +440,10 @@ class RuntimeInvocationMixin:
                 raise
             except (StructuredOutputError, StageInvocationError) as exc:
                 last_error = exc
+                if isinstance(exc, StageInvocationError) and _used_typed_media_fallback(
+                    exc.details.get("media_routing")
+                ):
+                    media_fallback_consumed = True
                 if isinstance(exc, StructuredOutputError):
                     structure_retry_feedback = {
                         "attempt": attempt,

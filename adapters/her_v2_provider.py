@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import re
 import ssl
+from pathlib import Path
 from typing import Any, Mapping
 
 import httpx
@@ -25,6 +27,7 @@ from adapters.stream_events import (
     KIND_TEXT_DELTA,
     KIND_THINKING,
     KIND_TOOL_END,
+    KIND_TOOL_START,
     StreamCallback,
     StreamEvent,
     legacy_delivery_class,
@@ -70,9 +73,21 @@ from orchestrator.her_v2.retry import (
     DEFAULT_PROVIDER_RETRY_POLICY,
     ProviderRetryPolicy,
 )
+from orchestrator.multimodal_contract import (
+    MultimodalContractError,
+    attachment_manifest,
+    native_attachment_reference_aliases,
+    route_request_content,
+    routing_decisions_payload,
+    subset_request_content,
+    validate_authorized_media_references,
+)
 
 from tools.meter_cost import PerCallUsageLineItem
 from tools.token_tracker import resolve_cost_source
+
+
+_HASHI_VERIFICATION_POLICY_ARGUMENT = "_hashi_verification_policy"
 
 
 def _backend_tool_control(backend: Any) -> tuple[bool, bool]:
@@ -82,6 +97,81 @@ def _backend_tool_control(backend: Any) -> tuple[bool, bool]:
     supports_tools = bool(getattr(capabilities, "supports_tool_use", False))
     controls_tools = hasattr(backend, "tool_registry")
     return supports_tools, controls_tools
+
+
+def _media_fallback_modalities(registry: Any) -> frozenset[str]:
+    is_allowed = getattr(registry, "is_allowed", None)
+    if not callable(is_allowed):
+        return frozenset()
+    modalities: set[str] = set()
+    if is_allowed("media_read"):
+        modalities.update({"image", "audio", "video", "document"})
+    if is_allowed("vision_inspect"):
+        modalities.add("image")
+    if is_allowed("file_read"):
+        modalities.add("document")
+    return frozenset(modalities)
+
+
+def _argument_reference_values(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, Mapping):
+        values: set[str] = set()
+        for item in value.values():
+            values.update(_argument_reference_values(item))
+        return values
+    if isinstance(value, (list, tuple, set, frozenset)):
+        values = set()
+        for item in value:
+            values.update(_argument_reference_values(item))
+        return values
+    return set()
+
+
+def _reference_matches_attachment(
+    value: str,
+    *,
+    attachment_id: str,
+    local_ref: str,
+) -> bool:
+    normalized = str(value or "").strip()
+    return bool(
+        (local_ref and normalized == local_ref)
+        or (attachment_id and normalized == attachment_id)
+        or (attachment_id and normalized.endswith(f":{attachment_id}"))
+    )
+
+
+def _matched_attachment_ids(
+    arguments: Mapping[str, Any],
+    manifest: tuple[Mapping[str, Any], ...],
+) -> tuple[str, ...]:
+    values = {
+        item
+        for item in _argument_reference_values(arguments)
+        if not item.strip().casefold().startswith("data:")
+    }
+    matched: list[str] = []
+    for attachment in manifest:
+        attachment_id = str(attachment.get("attachment_id") or "")
+        local_ref = str(attachment.get("local_ref") or "")
+        aliases = native_attachment_reference_aliases(
+            manifest,
+            {attachment_id},
+        )
+        if any(
+            _reference_matches_attachment(
+                value,
+                attachment_id=attachment_id,
+                local_ref=local_ref,
+            )
+            or value in aliases
+            or Path(value).name in aliases
+            for value in values
+        ):
+            matched.append(attachment_id)
+    return tuple(dict.fromkeys(matched))
 
 
 def _install_system_prompt(backend: Any, prompt: str) -> bool:
@@ -163,6 +253,8 @@ def _backend_response_error(
             "stop_reason": response.stop_reason,
             "tool_call_count": int(response.tool_call_count or 0),
             "tool_loop_count": int(response.tool_loop_count or 0),
+            "attachment_id": metadata.get("attachment_id"),
+            "media_routing": list(metadata.get("multimodal_routing") or []),
         },
     )
 
@@ -518,6 +610,7 @@ class _DelegatedToolRegistry:
         delegated_tools: list[str],
         *,
         read_only: bool = False,
+        verification_policy: Mapping[str, Any] | None = None,
     ):
         self._base = base
         requested = {str(item) for item in delegated_tools if str(item).strip()}
@@ -532,11 +625,22 @@ class _DelegatedToolRegistry:
         # retired shared-registry tool-round ceiling.
         self.max_loops = None
         self.audit_context = dict(getattr(base, "audit_context", {}) or {})
+        self._verification_policy = dict(verification_policy or {})
         if read_only:
             self.audit_context.update(
                 {
                     "safety_mode": "read_only",
                     "authority_mode": "her_v2_shadow",
+                }
+            )
+        elif self._verification_policy:
+            self.audit_context.update(
+                {
+                    "safety_mode": "workspace_verification",
+                    "authority_mode": "her_v2_assured_verification",
+                    "verification_execution_elapsed_s": self._verification_policy.get(
+                        "execution_elapsed_s"
+                    ),
                 }
             )
 
@@ -562,15 +666,25 @@ class _DelegatedToolRegistry:
 
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
         if self.is_allowed(tool_name):
+            effective_arguments = dict(arguments or {})
+            if tool_name == "verification_run" and self._verification_policy:
+                # The model cannot select or reduce the runtime timeout basis.  This
+                # request-local value is added after schema validation and never
+                # mutates the shared ToolRegistry used by concurrent turns.
+                effective_arguments[_HASHI_VERIFICATION_POLICY_ARGUMENT] = dict(
+                    self._verification_policy
+                )
             scoped_execute = getattr(self._base, "execute_with_audit_context", None)
             if callable(scoped_execute):
                 return await scoped_execute(
                     tool_name,
-                    arguments,
+                    effective_arguments,
                     tool_call_id,
                     audit_context=self.audit_context,
                 )
-            return await self._base.execute(tool_name, arguments, tool_call_id)
+            return await self._base.execute(
+                tool_name, effective_arguments, tool_call_id
+            )
         from tools.registry import ToolResult
 
         result = ToolResult(
@@ -625,6 +739,7 @@ class _EvidenceRecordingToolRegistry:
         result: Any | None,
         completed: bool,
         status: ToolReceiptStatus,
+        attachment_ids: tuple[str, ...] = (),
     ) -> ToolEvidenceReceipt:
         self._serial += 1
         effective_call_id = str(tool_call_id or f"call-{self._serial}")
@@ -651,6 +766,8 @@ class _EvidenceRecordingToolRegistry:
         output = str(getattr(result, "output", "") or "")
         details = dict(getattr(result, "details", None) or {})
         details.setdefault("receipt_serial", self._serial)
+        if attachment_ids:
+            details["attachment_ids"] = list(attachment_ids)
         return ToolEvidenceReceipt(
             evidence_ref=evidence_ref,
             stage=self._request.stage,
@@ -666,6 +783,9 @@ class _EvidenceRecordingToolRegistry:
         )
 
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
+        matched_attachment_ids = _matched_attachment_ids(
+            dict(arguments or {}), self._request.attachment_manifest
+        )
         try:
             result = await self._base.execute(tool_name, arguments, tool_call_id)
         except asyncio.CancelledError:
@@ -676,6 +796,7 @@ class _EvidenceRecordingToolRegistry:
                     result=None,
                     completed=False,
                     status=ToolReceiptStatus.CANCELLED,
+                    attachment_ids=matched_attachment_ids,
                 )
             )
             raise
@@ -687,6 +808,7 @@ class _EvidenceRecordingToolRegistry:
                     result=None,
                     completed=False,
                     status=ToolReceiptStatus.FAILED,
+                    attachment_ids=matched_attachment_ids,
                 )
             )
             raise
@@ -701,6 +823,7 @@ class _EvidenceRecordingToolRegistry:
                 if bool(getattr(result, "is_error", False))
                 else ToolReceiptStatus.SUCCESS
             ),
+            attachment_ids=matched_attachment_ids,
         )
         self._receipts.append(receipt)
 
@@ -741,6 +864,92 @@ class _UnboundedToolRegistry:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._base, name)
+
+
+class _MediaRoutingToolRegistry:
+    """Prevent one attachment from taking native and fallback routes together."""
+
+    _MEDIA_FALLBACK_TOOLS = frozenset({"media_read", "vision_inspect"})
+
+    def __init__(
+        self,
+        base: Any,
+        *,
+        native_attachment_ids: set[str],
+        native_local_refs: set[str],
+        all_media_native: bool,
+    ) -> None:
+        self._base = base
+        self.native_attachment_ids = set(native_attachment_ids)
+        self.native_local_refs = set(native_local_refs)
+        self.all_media_native = bool(all_media_native)
+        self.max_loops = None
+
+    @property
+    def base(self) -> Any:
+        return getattr(self._base, "base", self._base)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+    def is_allowed(self, tool_name: str) -> bool:
+        if self.all_media_native and tool_name in self._MEDIA_FALLBACK_TOOLS:
+            return False
+        return bool(getattr(self._base, "is_allowed")(tool_name))
+
+    def get_tool_definitions(self, *args, **kwargs):
+        definitions = list(self._base.get_tool_definitions(*args, **kwargs))
+        if not self.all_media_native:
+            return definitions
+        return [
+            definition
+            for definition in definitions
+            if str((definition.get("function") or {}).get("name") or "")
+            not in self._MEDIA_FALLBACK_TOOLS
+        ]
+
+    def enable_local_media_fallback(self, attachment_ids: set[str]) -> None:
+        """Release only attachments covered by one typed provider fallback."""
+
+        released = {str(item) for item in attachment_ids if str(item).strip()}
+        if not released.issubset(self.native_attachment_ids):
+            raise ValueError("cannot release an attachment outside the native route")
+        self.native_attachment_ids.difference_update(released)
+        if not self.native_attachment_ids:
+            self.native_local_refs.clear()
+        self.all_media_native = False
+
+    async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
+        if tool_name in self._MEDIA_FALLBACK_TOOLS:
+            values = _argument_reference_values(dict(arguments or {}))
+            references_native = any(
+                any(
+                    _reference_matches_attachment(
+                        value,
+                        attachment_id=attachment_id,
+                        local_ref="",
+                    )
+                    for attachment_id in self.native_attachment_ids
+                )
+                or value in self.native_local_refs
+                or Path(value).name in self.native_local_refs
+                for value in values
+            )
+            if self.all_media_native or references_native:
+                from tools.registry import ToolResult
+
+                return ToolResult(
+                    tool_call_id=tool_call_id,
+                    output=(
+                        "Error: this attachment was already supplied through the "
+                        "native media route; duplicate fallback processing is blocked."
+                    ),
+                    is_error=True,
+                    details={
+                        "routing_guard": "native_media_duplicate_fallback_blocked"
+                    },
+                )
+        return await self._base.execute(tool_name, arguments, tool_call_id)
 
 
 class _AdapterDelivery(DeliveryPort):
@@ -1080,10 +1289,16 @@ class HashiStageProvider(StageProvider):
                 ),
             )
         selected_registry = self.tool_registry if request.allow_tools else None
+        delegated = (
+            request.context.get("delegated_tools")
+            if selected_registry is not None
+            else None
+        )
         if selected_registry is not None and (
-            request.role.startswith("sub_agent:") or not request.allow_side_effects
+            request.role.startswith("sub_agent:")
+            or not request.allow_side_effects
+            or delegated is not None
         ):
-            delegated = request.context.get("delegated_tools")
             if delegated is None:
                 delegated = sorted(
                     name
@@ -1103,6 +1318,24 @@ class HashiStageProvider(StageProvider):
                 selected_registry,
                 delegated,
                 read_only=not request.allow_side_effects,
+                verification_policy=(
+                    {
+                        **dict(
+                            request.context.get("verification_run_policy")
+                            if isinstance(
+                                request.context.get("verification_run_policy"),
+                                Mapping,
+                            )
+                            else {}
+                        ),
+                        "execution_elapsed_s": request.context.get(
+                            "execution_elapsed_s", 0.0
+                        ),
+                    }
+                    if request.stage is Stage.VERIFICATION
+                    and request.allow_side_effects
+                    else None
+                ),
             )
         evidence_registry: _EvidenceRecordingToolRegistry | None = None
         if selected_registry is not None:
@@ -1116,13 +1349,208 @@ class HashiStageProvider(StageProvider):
             selected_registry = _UnboundedToolRegistry(selected_registry)
         if controls_tools:
             backend.tool_registry = selected_registry
+        fallback_registry = selected_registry
         backend.privacy_level = self.backend_manager.privacy_level
+        media_routing: tuple[dict[str, Any], ...] = ()
+        provider_request_content = request.request_content
+        media_preflight_error: StageInvocationError | None = None
+        local_fallback_modalities = (
+            _media_fallback_modalities(selected_registry)
+            if request.allow_tools
+            else frozenset()
+        )
+        if request.attachment_manifest:
+            try:
+                canonical_manifest = attachment_manifest(request.request_content)
+            except MultimodalContractError as exc:
+                media_preflight_error = StageInvocationError(
+                    str(exc),
+                    retryable=False,
+                    code=exc.code,
+                    human_description=(
+                        "The stage received invalid canonical attachment metadata."
+                    ),
+                    details={"attachment_id": exc.attachment_id or None},
+                )
+                canonical_manifest = ()
+            if (
+                media_preflight_error is None
+                and tuple(request.attachment_manifest) != canonical_manifest
+            ):
+                media_preflight_error = StageInvocationError(
+                    "stage attachment manifest does not match canonical request content",
+                    retryable=False,
+                    code=ProviderFailureCode.INVALID_MULTIMODAL_CONTENT,
+                    human_description=(
+                        "Attachment identity changed before the provider stage."
+                    ),
+                )
+            roots_resolver = getattr(backend, "authorized_media_roots", None)
+            if media_preflight_error is None and callable(roots_resolver):
+                try:
+                    validate_authorized_media_references(
+                        request.request_content,
+                        authorized_roots=roots_resolver(),
+                    )
+                except MultimodalContractError as exc:
+                    media_preflight_error = StageInvocationError(
+                        str(exc),
+                        retryable=False,
+                        code=exc.code,
+                        human_description=(
+                            "A required attachment failed integrity or access "
+                            "validation before stage routing."
+                        ),
+                        details={"attachment_id": exc.attachment_id or None},
+                    )
+            capability = None
+            if media_preflight_error is None:
+                capability_resolver = getattr(
+                    backend, "resolve_input_capability", None
+                )
+                capability = (
+                    capability_resolver()
+                    if callable(capability_resolver)
+                    else getattr(backend, "input_capability", None)
+                )
+            if media_preflight_error is None and capability is None:
+                media_preflight_error = StageInvocationError(
+                    "stage backend exposes no model-specific media capability",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                    human_description=(
+                        "The selected stage backend cannot prove its media input capability."
+                    ),
+                )
+            elif media_preflight_error is None:
+                decisions = route_request_content(
+                    request.request_content,
+                    capability,
+                    fallback_modalities=local_fallback_modalities,
+                )
+                media_routing = routing_decisions_payload(decisions)
+                force_local_unavailable = False
+                if request.force_local_media_fallback:
+                    can_force_local = (
+                        request.allow_tools
+                        and fallback_registry is not None
+                        and bool(local_fallback_modalities)
+                        and all(
+                            item.modality in local_fallback_modalities
+                            for item in decisions
+                        )
+                    )
+                    if can_force_local:
+                        media_routing = tuple(
+                            {
+                                **dict(item.as_dict()),
+                                "route": "local_fallback",
+                                "reason": "provider_typed_modality_unsupported",
+                                "transport": None,
+                            }
+                            for item in decisions
+                        )
+                        native_ids: set[str] = set()
+                    else:
+                        native_ids = set()
+                        force_local_unavailable = True
+                else:
+                    native_ids = {
+                        item.attachment_id
+                        for item in decisions
+                        if item.route == "native"
+                    }
+                if request.allow_tools and selected_registry is not None and native_ids:
+                    native_local_refs = native_attachment_reference_aliases(
+                        request.attachment_manifest,
+                        native_ids,
+                    )
+                    selected_registry = _MediaRoutingToolRegistry(
+                        selected_registry,
+                        native_attachment_ids=native_ids,
+                        native_local_refs=native_local_refs,
+                        all_media_native=bool(decisions)
+                        and all(item.route == "native" for item in decisions),
+                    )
+                    if controls_tools:
+                        backend.tool_registry = selected_registry
+                non_native = (
+                    list(decisions)
+                    if request.force_local_media_fallback
+                    and not force_local_unavailable
+                    else [item for item in decisions if item.route != "native"]
+                )
+                if non_native:
+                    # Per-part routing is authoritative: an adapter must never
+                    # receive media that its exact provider/model capability
+                    # does not support.  Tool-enabled stages keep those parts
+                    # on the existing local fallback path while sending only
+                    # the native subset over the provider wire.
+                    provider_request_content = (
+                        subset_request_content(request.request_content, native_ids)
+                        if native_ids
+                        else None
+                    )
+                unsupported = (
+                    []
+                    if request.force_local_media_fallback
+                    and not force_local_unavailable
+                    else [item for item in decisions if item.route == "unsupported"]
+                )
+                if force_local_unavailable:
+                    first = decisions[0]
+                    media_preflight_error = StageInvocationError(
+                        "A previous typed media fallback cannot be safely resumed for "
+                        f"attachment {first.attachment_id}",
+                        retryable=False,
+                        code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                        human_description=(
+                            "The sole automatic media fallback was already consumed, "
+                            "and the selected stage no longer exposes the required "
+                            "authorized local media route."
+                        ),
+                        details={"media_routing": list(media_routing)},
+                    )
+                elif request.stage is Stage.IMMEDIATE_RESPONSE and non_native:
+                    first = non_native[0]
+                    media_preflight_error = StageInvocationError(
+                        "Immediate Response cannot consume every required attachment: "
+                        f"{first.attachment_id}",
+                        retryable=False,
+                        code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                        human_description=(
+                            "The Immediate Response model cannot consume every required "
+                            "attachment; the turn must use the local media work path."
+                        ),
+                        details={"media_routing": list(media_routing)},
+                    )
+                elif unsupported:
+                    first = unsupported[0]
+                    media_preflight_error = StageInvocationError(
+                        "Stage cannot consume or locally interpret required attachment: "
+                        f"{first.attachment_id}",
+                        retryable=False,
+                        code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                        human_description=(
+                            "The selected stage model has no verified native input "
+                            "route, and this stage has no authorized local media "
+                            "fallback for a required attachment."
+                        ),
+                        details={"media_routing": list(media_routing)},
+                    )
         reasoning_chunks: list[str] = []
+        provider_tool_activity = False
+        provider_replay_activity = False
 
         async def _capture(event: StreamEvent) -> None:
+            nonlocal provider_replay_activity, provider_tool_activity
+            content = str(event.raw_delta or event.summary or "")
+            if content or event.tool_name:
+                provider_replay_activity = True
+            if event.kind in {KIND_TOOL_START, KIND_TOOL_END} or event.tool_name:
+                provider_tool_activity = True
             owner = str(event.delivery_class or "") or legacy_delivery_class(event.kind)
             if request.provider_activity_callback is not None:
-                content = str(event.raw_delta or event.summary or "")
                 event_metadata = (
                     event.metadata if isinstance(event.metadata, Mapping) else {}
                 )
@@ -1168,6 +1596,8 @@ class HashiStageProvider(StageProvider):
             await self.on_stream_event(event)
 
         try:
+            if media_preflight_error is not None:
+                raise media_preflight_error
             initialized = await backend.initialize()
             if not initialized:
                 raise StageInvocationError(
@@ -1223,13 +1653,164 @@ class HashiStageProvider(StageProvider):
                         )
                     if not installed:
                         stage_prompt = f"{internal_prompt}\n\n{stage_prompt}"
+            generation_kwargs: dict[str, Any] = {
+                "is_retry": request.attempt > 1,
+                "silent": self.silent,
+                "on_stream_event": _capture,
+            }
+            if provider_request_content is not None:
+                parameters = inspect.signature(backend.generate_response).parameters
+                if "request_content" not in parameters and not any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                ):
+                    raise StageInvocationError(
+                        f"{profile.engine}/{profile.model} cannot accept structured request content",
+                        retryable=False,
+                        code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                        human_description=(
+                            "The selected stage adapter cannot serialize its declared media capability."
+                        ),
+                        details={"media_routing": list(media_routing)},
+                    )
+                generation_kwargs["request_content"] = provider_request_content
             response = await backend.generate_response(
                 stage_prompt,
                 f"{request.turn_id}:{request.stage.value}:{request.attempt}",
-                is_retry=request.attempt > 1,
-                silent=self.silent,
-                on_stream_event=_capture,
+                **generation_kwargs,
             )
+            response_metadata = (
+                dict(response.stream_metadata)
+                if isinstance(response.stream_metadata, Mapping)
+                else {}
+            )
+            response_media_routing = response_metadata.get("multimodal_routing")
+            if isinstance(response_media_routing, (list, tuple)):
+                normalized_response_routing = tuple(
+                    dict(item)
+                    for item in response_media_routing
+                    if isinstance(item, Mapping)
+                )
+                expected_ids = tuple(
+                    str(item.get("attachment_id") or "") for item in media_routing
+                )
+                response_ids = tuple(
+                    str(item.get("attachment_id") or "")
+                    for item in normalized_response_routing
+                )
+                if response_ids == expected_ids:
+                    media_routing = normalized_response_routing
+                elif (
+                    response_ids
+                    and len(response_ids) == len(set(response_ids))
+                    and all(
+                        attachment_id in expected_ids
+                        for attachment_id in response_ids
+                    )
+                    and response_ids
+                    == tuple(
+                        attachment_id
+                        for attachment_id in expected_ids
+                        if attachment_id in set(response_ids)
+                    )
+                ):
+                    # Mixed-modality preflight sends only the native subset to
+                    # the adapter.  Merge that subset's runtime result (notably
+                    # a typed modality fallback) without allowing it to rewrite
+                    # the identity or ordering of locally routed attachments.
+                    response_by_id = {
+                        str(item.get("attachment_id") or ""): item
+                        for item in normalized_response_routing
+                    }
+                    merged_routing: list[dict[str, Any]] = []
+                    merge_valid = True
+                    for expected in media_routing:
+                        expected_item = dict(expected)
+                        attachment_id = str(
+                            expected_item.get("attachment_id") or ""
+                        )
+                        replacement = response_by_id.get(attachment_id)
+                        if replacement is None:
+                            merged_routing.append(expected_item)
+                            continue
+                        if (
+                            str(replacement.get("modality") or "")
+                            != str(expected_item.get("modality") or "")
+                            or replacement.get("item_index")
+                            != expected_item.get("item_index")
+                            or str(replacement.get("route") or "")
+                            not in {"native", "local_fallback", "unsupported"}
+                        ):
+                            merge_valid = False
+                            break
+                        merged_routing.append(
+                            {
+                                **expected_item,
+                                "route": replacement.get("route"),
+                                "reason": replacement.get("reason"),
+                                "transport": replacement.get("transport"),
+                            }
+                        )
+                    if merge_valid:
+                        media_routing = tuple(merged_routing)
+            adapter_media_fallback_attempted = bool(
+                response_metadata.get("multimodal_fallback_attempted")
+            ) or any(
+                str(item.get("reason") or "")
+                == "provider_typed_modality_unsupported"
+                for item in media_routing
+            )
+            her_media_fallback_attempted = False
+            if (
+                not response.is_success
+                and response.error_code
+                == ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED.value
+                and request.stage is not Stage.IMMEDIATE_RESPONSE
+                and not response.side_effects_possible
+                and not response.tool_call_count
+                and not provider_tool_activity
+                and not provider_replay_activity
+                and not response_metadata.get("provider_activity_observed")
+                and not str(response.text or "").strip()
+                and not response.structured_data
+                and provider_request_content is not None
+                and not adapter_media_fallback_attempted
+                and request.allow_tools
+                and fallback_registry is not None
+                and bool(local_fallback_modalities)
+                and all(
+                    str(item.get("modality") or "")
+                    in local_fallback_modalities
+                    for item in media_routing
+                )
+            ):
+                # Capability drift is the sole automatic media fallback.  The
+                # first request was rejected before tools/side effects, and this
+                # one text-only replay is the complete fallback allowance.
+                media_routing = tuple(
+                    {
+                        **dict(item),
+                        "route": "local_fallback",
+                        "reason": "provider_typed_modality_unsupported",
+                        "transport": None,
+                    }
+                    for item in media_routing
+                )
+                her_media_fallback_attempted = True
+                if controls_tools:
+                    backend.tool_registry = fallback_registry
+                response = await backend.generate_response(
+                    stage_prompt,
+                    f"{request.turn_id}:{request.stage.value}:{request.attempt}:media-fallback",
+                    is_retry=True,
+                    silent=self.silent,
+                    on_stream_event=_capture,
+                )
+            if her_media_fallback_attempted:
+                fallback_metadata = dict(response.stream_metadata or {})
+                fallback_metadata["multimodal_routing"] = list(media_routing)
+                fallback_metadata["multimodal_fallback_attempted"] = True
+                response.stream_metadata = fallback_metadata
             if not response.is_success:
                 raise _backend_response_error(
                     response,
@@ -1290,6 +1871,7 @@ class HashiStageProvider(StageProvider):
                 evidence_refs=tuple(item.evidence_ref for item in tool_receipts),
                 provider_attempt=request.attempt,
                 tool_receipts=tool_receipts,
+                media_routing=media_routing,
             )
         except StageInvocationError:
             raise
