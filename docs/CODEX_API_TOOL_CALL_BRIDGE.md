@@ -12,7 +12,8 @@ HASHI translates between two protocols:
 1. The API client sends OpenAI Chat Completions `tools` and structured
    `messages`.
 2. HASHI starts one isolated Codex `app-server` process and maps those schemas
-   to experimental `dynamicTools`.
+   to experimental `dynamicTools` under a deterministic, reserved-name-safe
+   internal namespace.
 3. Codex emits an `item/tool/call` request.
 4. HASHI stops that model turn and returns an OpenAI `assistant.tool_calls`
    message. HASHI does not execute the function.
@@ -72,6 +73,14 @@ with tool results, HASHI supplies a neutral continuation input after injecting
 the complete history. Call IDs and JSON argument strings remain stable across
 the OpenAI → Codex → OpenAI boundary.
 
+Public function names also remain stable. Internally, HASHI deterministically
+aliases every caller name (including names such as `web_search`, `bash`, and
+`apply_patch`) before sending it to Codex, because Codex dynamic tools must not
+collide with built-in tool names or namespaces. The same mapping is applied to
+structured call history and named `tool_choice`, then reversed before the
+OpenAI response leaves the Gateway. HASHI preserves the caller's exact name in
+all returned API tool-call objects.
+
 ## Isolation And Ownership
 
 Caller tools are capabilities owned entirely by the API client. The bridge
@@ -85,7 +94,8 @@ enforces the following invariants for every Codex tool request:
 - project instructions, persistent history, and Codex memories disabled;
 - configured MCP servers re-inventoried for every request and replaced on the
   command line with complete disabled inert transports;
-- only names declared in the current request accepted from `item/tool/call`;
+- only internal aliases derived from names declared in the current request are
+  accepted from `item/tool/call`, then mapped back to the caller's exact name;
 - duplicate/missing call IDs, undeclared tools, local tool items, unknown host
   callbacks, and policy violations interrupt the turn and fail closed;
 - active app-server and MCP-inventory subprocesses tracked and killed during

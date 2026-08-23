@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 import pytest
 
 from adapters.codex_app_server import (
     CodexAppServerToolBridge,
+    codex_dynamic_tool_name,
     openai_messages_to_codex_conversation,
     openai_tools_to_codex_dynamic_tools,
 )
 from adapters.stream_events import KIND_TEXT_DELTA
-
+from tools.schemas import TOOL_SCHEMA_MAP
 
 WEATHER_TOOL = {
     "type": "function",
@@ -39,6 +41,11 @@ TIMEZONE_TOOL = {
         },
     },
 }
+WEB_SEARCH_TOOL = TOOL_SCHEMA_MAP["web_search"]
+
+WEATHER_CODEX_TOOL = codex_dynamic_tool_name("get_weather")
+TIMEZONE_CODEX_TOOL = codex_dynamic_tool_name("get_timezone")
+WEB_SEARCH_CODEX_TOOL = codex_dynamic_tool_name("web_search")
 
 
 class _QueueStdout:
@@ -60,7 +67,7 @@ class _EmptyStderr:
 
 
 class _FakeStdin:
-    def __init__(self, proc: "_FakeAppServerProcess"):
+    def __init__(self, proc: _FakeAppServerProcess):
         self.proc = proc
         self.buffer = b""
 
@@ -320,8 +327,11 @@ def test_codex_tool_conversion_preserves_schema_and_structured_history():
     assert dynamic == [
         {
             "type": "function",
-            "name": "get_weather",
-            "description": "Get weather for one city",
+            "name": WEATHER_CODEX_TOOL,
+            "description": (
+                "Caller-visible function name: get_weather. "
+                "Get weather for one city"
+            ),
             "inputSchema": WEATHER_TOOL["function"]["parameters"],
         }
     ]
@@ -334,7 +344,7 @@ def test_codex_tool_conversion_preserves_schema_and_structured_history():
         {
             "type": "function_call",
             "call_id": "call-weather",
-            "name": "get_weather",
+            "name": WEATHER_CODEX_TOOL,
             "arguments": '{"city":"Sydney"}',
         },
         {
@@ -345,7 +355,80 @@ def test_codex_tool_conversion_preserves_schema_and_structured_history():
     ]
     assert conversation.turn_input[0]["text"].startswith("Continue the conversation")
     assert "CALLER SYSTEM MESSAGE:\nBe concise." in conversation.developer_instructions
+    assert (
+        f"'get_weather' -> '{WEATHER_CODEX_TOOL}'"
+        in conversation.developer_instructions
+    )
     assert "Make at most one dynamic function call" in conversation.developer_instructions
+
+
+def test_all_hashi_tools_receive_unique_codex_safe_aliases():
+    tools = list(TOOL_SCHEMA_MAP.values())
+    dynamic = openai_tools_to_codex_dynamic_tools(tools)
+    aliases = [item["name"] for item in dynamic]
+
+    assert len(aliases) == len(set(aliases)) == len(tools)
+    assert all(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) for name in aliases)
+    assert all(name.startswith("hashi_ext_") for name in aliases)
+    public_to_alias = {
+        tool["function"]["name"]: alias
+        for tool, alias in zip(tools, aliases, strict=True)
+    }
+    for reserved_name in ("web_search", "bash", "apply_patch", "browser_screenshot"):
+        assert public_to_alias[reserved_name] != reserved_name
+        assert reserved_name in public_to_alias[reserved_name]
+        assert public_to_alias[reserved_name] == codex_dynamic_tool_name(reserved_name)
+
+
+def test_codex_alias_is_deterministic_and_bounded_for_long_names():
+    first_name = "a" * 64
+    second_name = "a" * 63 + "b"
+
+    first_alias = codex_dynamic_tool_name(first_name)
+    second_alias = codex_dynamic_tool_name(second_name)
+
+    assert first_alias == codex_dynamic_tool_name(first_name)
+    assert first_alias != second_alias
+    assert len(first_alias) == len(second_alias) == 64
+
+
+@pytest.mark.asyncio
+async def test_reserved_codex_tool_name_round_trips_as_public_name(monkeypatch):
+    fake = _FakeAppServerProcess(
+        tool_calls=[
+            {
+                "callId": "exec-search",
+                "tool": WEB_SEARCH_CODEX_TOOL,
+                "arguments": {"query": "HASHI alias regression"},
+            }
+        ]
+    )
+
+    async def create_subprocess(*_args, **_kwargs):
+        return fake
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    bridge = CodexAppServerToolBridge(
+        command="codex",
+        model="gpt-5.6-luna",
+        effort="medium",
+        idle_timeout_sec=5,
+    )
+
+    response = await bridge.run(
+        [{"role": "user", "content": "Search for HASHI alias regression"}],
+        [WEB_SEARCH_TOOL],
+        "req-reserved-name",
+        tool_choice="auto",
+    )
+
+    assert response.is_success is True
+    assert fake.thread_params["dynamicTools"][0]["name"] == WEB_SEARCH_CODEX_TOOL
+    assert (
+        "'web_search' -> 'hashi_ext_web_search'"
+        in fake.thread_params["developerInstructions"]
+    )
+    assert response.tool_calls[0]["function"]["name"] == "web_search"
 
 
 @pytest.mark.asyncio
@@ -354,12 +437,12 @@ async def test_codex_app_server_captures_all_calls_without_executing_them(monkey
         tool_calls=[
             {
                 "callId": "exec-weather",
-                "tool": "get_weather",
+                "tool": WEATHER_CODEX_TOOL,
                 "arguments": {"city": "Sydney"},
             },
             {
                 "callId": "exec-timezone",
-                "tool": "get_timezone",
+                "tool": TIMEZONE_CODEX_TOOL,
                 "arguments": '{"city":"Sydney"}',
             },
         ]
@@ -405,8 +488,8 @@ async def test_codex_app_server_captures_all_calls_without_executing_them(monkey
         },
     ]
     assert [item["name"] for item in fake.thread_params["dynamicTools"]] == [
-        "get_weather",
-        "get_timezone",
+        WEATHER_CODEX_TOOL,
+        TIMEZONE_CODEX_TOOL,
     ]
     deferred = [
         message
@@ -432,12 +515,12 @@ async def test_codex_app_server_enforces_parallel_calls_false(monkeypatch):
         tool_calls=[
             {
                 "callId": "exec-weather",
-                "tool": "get_weather",
+                "tool": WEATHER_CODEX_TOOL,
                 "arguments": {"city": "Sydney"},
             },
             {
                 "callId": "exec-timezone",
-                "tool": "get_timezone",
+                "tool": TIMEZONE_CODEX_TOOL,
                 "arguments": {"city": "Sydney"},
             },
         ]
@@ -471,7 +554,7 @@ async def test_codex_app_server_does_not_authorize_calls_from_failed_turn(monkey
         tool_calls=[
             {
                 "callId": "exec-weather",
-                "tool": "get_weather",
+                "tool": WEATHER_CODEX_TOOL,
                 "arguments": {"city": "Sydney"},
             }
         ],
@@ -547,7 +630,7 @@ async def test_named_tool_choice_exposes_only_the_selected_function(monkeypatch)
         tool_calls=[
             {
                 "callId": "exec-timezone",
-                "tool": "get_timezone",
+                "tool": TIMEZONE_CODEX_TOOL,
                 "arguments": {"city": "Sydney"},
             }
         ]
@@ -575,9 +658,47 @@ async def test_named_tool_choice_exposes_only_the_selected_function(monkeypatch)
 
     assert response.is_success is True
     assert [item["name"] for item in fake.thread_params["dynamicTools"]] == [
-        "get_timezone"
+        TIMEZONE_CODEX_TOOL
     ]
+    assert repr(TIMEZONE_CODEX_TOOL) in fake.thread_params["developerInstructions"]
+    assert response.tool_calls[0]["function"]["name"] == "get_timezone"
     assert response.tool_calls[0]["function"]["arguments"] == '{"city":"Sydney"}'
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_rejects_public_name_instead_of_internal_alias(
+    monkeypatch,
+):
+    fake = _FakeAppServerProcess(
+        tool_calls=[
+            {
+                "callId": "exec-weather",
+                "tool": "get_weather",
+                "arguments": {"city": "Sydney"},
+            }
+        ]
+    )
+
+    async def create_subprocess(*_args, **_kwargs):
+        return fake
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    bridge = CodexAppServerToolBridge(
+        command="codex",
+        model="gpt-5.6-luna",
+        effort="medium",
+        idle_timeout_sec=5,
+    )
+
+    response = await bridge.run(
+        [{"role": "user", "content": "Check Sydney"}],
+        [WEATHER_TOOL],
+        "req-public-name",
+    )
+
+    assert response.is_success is False
+    assert response.tool_calls is None
+    assert "undeclared caller-owned dynamic tool" in response.error
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Codex caller-tool name collisions** — caller-owned function names are now
+  deterministically aliased into a HASHI-only `dynamicTools` namespace and
+  mapped back at the OpenAI API boundary. Reserved Codex names such as
+  `web_search`, `bash`, `apply_patch`, and browser tools work with automatic
+  selection, named choices, structured history, and parallel calls without
+  changing caller-visible names in API tool-call objects.
 - **Target-scoped hot reboot adoption** — removed the loaded-class interface
   gate that promoted or rejected `/reboot min` and numbered reboots when valid
   Python interfaces changed. Target scope is now resolved once before source

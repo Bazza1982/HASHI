@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import re
 import tempfile
 import time
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from adapters.base import BackendResponse, TokenUsage
 from adapters.stream_events import KIND_TEXT_DELTA, StreamCallback, StreamEvent
-
 
 _APP_SERVER_READ_LIMIT = 8 * 1024 * 1024
 _STDERR_LIMIT = 64 * 1024
@@ -24,9 +25,11 @@ _DEFERRED_TOOL_RESULT = (
 )
 _BASE_INSTRUCTIONS = """You are serving one OpenAI-compatible Chat Completions turn.
 Answer from the supplied conversation. The host may provide client-executed dynamic
-function tools. Never execute those functions yourself and never substitute local
-shell, filesystem, web, app, MCP, skill, or multi-agent tools for them. If a dynamic
-function is needed, invoke it with valid JSON arguments and wait for its result."""
+function tools. Their internal names are aliases; each description identifies the
+caller-visible function name that user messages may reference. Never execute those
+functions yourself and never substitute local shell, filesystem, web, app, MCP,
+skill, or multi-agent tools for them. If a dynamic function is needed, invoke it
+with valid JSON arguments and wait for its result."""
 _CONTINUE_AFTER_TOOL_RESULTS = (
     "Continue the conversation using the supplied function-call results."
 )
@@ -41,6 +44,10 @@ _LOCAL_TOOL_ITEM_TYPES = frozenset(
     }
 )
 _TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_CODEX_DYNAMIC_TOOL_PREFIX = "hashi_ext_"
+_CODEX_DYNAMIC_TOOL_MAX_LENGTH = 64
+_CODEX_DYNAMIC_TOOL_DIGEST_LENGTH = 16
+_CODEX_DYNAMIC_TOOL_STEM_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 
 class CodexAppServerError(RuntimeError):
@@ -154,17 +161,73 @@ def _tool_output(content: Any) -> str | list[dict[str, Any]]:
     return converted
 
 
+def codex_dynamic_tool_name(name: str) -> str:
+    """Return a deterministic caller-tool alias outside Codex's built-in names."""
+    original = str(name)
+    stem = _CODEX_DYNAMIC_TOOL_STEM_RE.sub("_", original) or "tool"
+    direct_name = f"{_CODEX_DYNAMIC_TOOL_PREFIX}{stem}"
+    if stem == original and len(direct_name) <= _CODEX_DYNAMIC_TOOL_MAX_LENGTH:
+        return direct_name
+    digest = hashlib.sha256(original.encode("utf-8")).hexdigest()[
+        :_CODEX_DYNAMIC_TOOL_DIGEST_LENGTH
+    ]
+    stem_length = (
+        _CODEX_DYNAMIC_TOOL_MAX_LENGTH
+        - len(_CODEX_DYNAMIC_TOOL_PREFIX)
+        - len(digest)
+        - 1
+    )
+    return f"{_CODEX_DYNAMIC_TOOL_PREFIX}{stem[:stem_length]}_{digest}"
+
+
+def _codex_tool_name_maps(
+    tools: list[dict[str, Any]],
+) -> tuple[dict[str, str], dict[str, str]]:
+    original_to_codex: dict[str, str] = {}
+    codex_to_original: dict[str, str] = {}
+    for tool in tools:
+        function = tool.get("function") or {}
+        original_name = str(function.get("name") or "")
+        if not original_name:
+            raise CodexAppServerError("caller-owned tool is missing a function name")
+        if original_name in original_to_codex:
+            raise CodexAppServerError(
+                f"duplicate caller-owned tool name {original_name!r}"
+            )
+        codex_name = codex_dynamic_tool_name(original_name)
+        colliding_name = codex_to_original.get(codex_name)
+        if colliding_name is not None:
+            raise CodexAppServerError(
+                "caller-owned tool aliases collided for "
+                f"{colliding_name!r} and {original_name!r}"
+            )
+        original_to_codex[original_name] = codex_name
+        codex_to_original[codex_name] = original_name
+    return original_to_codex, codex_to_original
+
+
 def openai_tools_to_codex_dynamic_tools(
     tools: list[dict[str, Any]],
+    *,
+    tool_name_map: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
+    if tool_name_map is None:
+        tool_name_map, _ = _codex_tool_name_maps(tools)
     converted: list[dict[str, Any]] = []
     for tool in tools:
         function = tool.get("function") or {}
+        original_name = str(function.get("name") or "")
+        description = str(function.get("description") or "")
+        caller_name_note = f"Caller-visible function name: {original_name}."
+        if description:
+            description = f"{caller_name_note} {description}"
+        else:
+            description = caller_name_note
         converted.append(
             {
                 "type": "function",
-                "name": str(function.get("name") or ""),
-                "description": str(function.get("description") or ""),
+                "name": tool_name_map[original_name],
+                "description": description,
                 "inputSchema": function.get("parameters")
                 or {"type": "object", "properties": {}},
             }
@@ -186,20 +249,36 @@ def _tool_policy_instructions(
     *,
     tool_choice: Any,
     parallel_tool_calls: bool | None,
+    tool_name_map: Mapping[str, str],
 ) -> str:
     lines = [
         "HOST TOOL BOUNDARY: Only the dynamic functions supplied by the host are "
         "callable for this API turn. Never call or emulate any other tool.",
+        "Dynamic function names are internal aliases. Match caller-visible names "
+        "in messages to the 'Caller-visible function name' in each description.",
         "When a dynamic function returns HASHI_EXTERNAL_TOOL_DEFERRED, do not "
         "retry it or produce a final answer; the host will end this turn and the "
         "API caller will resume with the real tool result.",
     ]
+    if tools:
+        lines.append(
+            "CALLER TOOL NAME MAP (caller-visible name -> dynamic function alias):"
+        )
+        for tool in tools:
+            function = tool.get("function") or {}
+            original_name = str(function.get("name") or "")
+            lines.append(
+                f"- {original_name!r} -> {tool_name_map[original_name]!r}"
+            )
     if not tools or tool_choice == "none":
         lines.append("No dynamic function may be called on this turn.")
     elif tool_choice == "required":
         lines.append("You must call at least one supplied dynamic function before answering.")
     elif (name := _tool_choice_name(tool_choice)) is not None:
-        lines.append(f"You must call the dynamic function named {name!r} before answering.")
+        codex_name = tool_name_map.get(name, codex_dynamic_tool_name(name))
+        lines.append(
+            f"You must call the dynamic function named {codex_name!r} before answering."
+        )
     if parallel_tool_calls is False:
         lines.append("Make at most one dynamic function call in this turn.")
     elif parallel_tool_calls is True:
@@ -213,7 +292,10 @@ def openai_messages_to_codex_conversation(
     tools: list[dict[str, Any]],
     tool_choice: Any = None,
     parallel_tool_calls: bool | None = None,
+    tool_name_map: Mapping[str, str] | None = None,
 ) -> CodexConversation:
+    if tool_name_map is None:
+        tool_name_map, _ = _codex_tool_name_maps(tools)
     developer_parts: list[str] = []
     history_items: list[dict[str, Any]] = []
 
@@ -246,6 +328,7 @@ def openai_messages_to_codex_conversation(
                 )
             for tool_call in message.get("tool_calls") or []:
                 function = tool_call.get("function") or {}
+                original_name = str(function.get("name") or "")
                 arguments = function.get("arguments", "{}")
                 if not isinstance(arguments, str):
                     arguments = json.dumps(
@@ -255,7 +338,10 @@ def openai_messages_to_codex_conversation(
                     {
                         "type": "function_call",
                         "call_id": str(tool_call.get("id") or ""),
-                        "name": str(function.get("name") or ""),
+                        "name": tool_name_map.get(
+                            original_name,
+                            codex_dynamic_tool_name(original_name),
+                        ),
                         "arguments": arguments,
                     }
                 )
@@ -283,6 +369,7 @@ def openai_messages_to_codex_conversation(
             tools,
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
+            tool_name_map=tool_name_map,
         )
     )
     return CodexConversation(
@@ -515,13 +602,20 @@ class CodexAppServerToolBridge:
     ) -> BackendResponse:
         started = time.perf_counter()
         selected_tools = _selected_tools(tools, tool_choice)
+        original_to_codex, codex_to_original = _codex_tool_name_maps(
+            selected_tools
+        )
         conversation = openai_messages_to_codex_conversation(
             messages,
             tools=selected_tools,
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
+            tool_name_map=original_to_codex,
         )
-        dynamic_tools = openai_tools_to_codex_dynamic_tools(selected_tools)
+        dynamic_tools = openai_tools_to_codex_dynamic_tools(
+            selected_tools,
+            tool_name_map=original_to_codex,
+        )
 
         proc = None
         temp_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -635,16 +729,13 @@ class CodexAppServerToolBridge:
 
                     if method == "item/tool/call":
                         call_id = str(params.get("callId") or "")
-                        tool_name = str(params.get("tool") or "")
-                        allowed_names = {
-                            str((item.get("function") or {}).get("name") or "")
-                            for item in selected_tools
-                        }
+                        codex_tool_name = str(params.get("tool") or "")
+                        original_tool_name = codex_to_original.get(codex_tool_name)
                         if not call_id or call_id in external_call_ids:
                             protocol_error = "Codex returned a missing or duplicate tool call id"
-                        elif tool_name not in allowed_names:
+                        elif original_tool_name is None:
                             protocol_error = (
-                                f"Codex attempted undeclared external tool {tool_name!r}"
+                                "Codex attempted an undeclared caller-owned dynamic tool"
                             )
                         else:
                             arguments = params.get("arguments", {})
@@ -660,7 +751,8 @@ class CodexAppServerToolBridge:
                                     )
                             except (TypeError, ValueError, json.JSONDecodeError):
                                 protocol_error = (
-                                    f"Codex returned invalid JSON arguments for {tool_name!r}"
+                                    "Codex returned invalid JSON arguments for "
+                                    f"{original_tool_name!r}"
                                 )
                             else:
                                 external_calls.append(
@@ -668,7 +760,7 @@ class CodexAppServerToolBridge:
                                         "id": call_id,
                                         "type": "function",
                                         "function": {
-                                            "name": tool_name,
+                                            "name": original_tool_name,
                                             "arguments": encoded_arguments,
                                         },
                                     }
