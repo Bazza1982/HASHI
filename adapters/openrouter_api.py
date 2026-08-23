@@ -971,6 +971,15 @@ class OpenRouterAdapter(BaseBackend):
             headers=headers,
         ) as response:
             response.raise_for_status()
+            try:
+                stream_request = response.request
+            except (AttributeError, RuntimeError):
+                # Minimal OpenAI-compatible clients and deterministic test
+                # doubles may omit httpx's response.request metadata.  Error
+                # events still need a concrete request for HTTPStatusError.
+                stream_request = httpx.Request(
+                    "POST", self.global_config.openrouter_url
+                )
 
             async for line in response.aiter_lines():
                 self._touch_activity()
@@ -991,7 +1000,7 @@ class OpenRouterAdapter(BaseBackend):
 
                 stream_error = _stream_error_exception(
                     data,
-                    request=response.request,
+                    request=stream_request,
                     provider_activity_observed=provider_activity_observed,
                 )
                 if stream_error is not None:

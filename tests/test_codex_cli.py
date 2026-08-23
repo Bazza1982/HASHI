@@ -36,11 +36,26 @@ class _FakeStderr:
         return b""
 
 
+class _FakeStdin:
+    def __init__(self):
+        self.data = bytearray()
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.data.extend(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _HangingProc:
     def __init__(self, lines: list[str], pid: int = 12345):
         self.pid = pid
         self.returncode = None
-        self.stdin = None
+        self.stdin = _FakeStdin()
         self._exit_event = asyncio.Event()
         self.stdout = _FakeStdout(self, lines)
         self.stderr = _FakeStderr(self)
@@ -188,10 +203,12 @@ async def test_codex_document_keeps_established_local_file_fallback(
 
     assert response.is_success is True
     assert "--image" not in captured_command
-    prompt_argument = captured_command[captured_command.index("--") + 1]
-    assert "attachment-document" in prompt_argument
-    assert str(document) in prompt_argument
-    assert "media bytes were not sent natively" in prompt_argument
+    assert captured_command[captured_command.index("--") + 1] == "-"
+    stdin_prompt = proc.stdin.data.decode("utf-8")
+    assert proc.stdin.closed is True
+    assert "attachment-document" in stdin_prompt
+    assert str(document) in stdin_prompt
+    assert "media bytes were not sent natively" in stdin_prompt
     assert response.stream_metadata["multimodal_routing"][0]["route"] == (
         "local_fallback"
     )
