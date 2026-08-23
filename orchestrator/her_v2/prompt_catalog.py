@@ -57,6 +57,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
     "system_planning": frozenset(),
     "system_replanning": frozenset(),
     "system_review": frozenset(),
+    "system_verification": frozenset(),
     "system_sub_agent": frozenset(),
     "system_triage": frozenset(),
     "triage_request": frozenset({"goal", "schema"}),

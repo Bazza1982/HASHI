@@ -87,9 +87,10 @@ History, and Find views; default cards never mix archived prompts into the
 current work card. The status card describes open-item and carryover counts as
 background, never as automatically queued work.
 
-The main `/status` card always shows the active backend, model, and model effort
-in its summary. Use `n/a` when the active model does not support a selectable
-effort level.
+The main `/status` card always shows the active backend and model. For HER v2 it
+shows **HER execution mode** with the descriptive name and canonical value,
+such as `Assured (max)`. Other backends continue to show **Effort**. Use `n/a`
+when the active non-HER model does not support a selectable effort level.
 
 Every dangerous operation shows:
 

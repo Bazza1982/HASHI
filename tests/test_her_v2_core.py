@@ -24,6 +24,8 @@ from orchestrator.her_v2.models import (
     StageRequest,
     TerminalState,
     TriageClassification,
+    effort_display_label,
+    parse_effort,
 )
 from orchestrator.her_v2.policy import resolve_policy, terminal_for_execution
 from orchestrator.her_v2.progress import ProgressTracker
@@ -152,21 +154,66 @@ def test_legacy_terminal_ledgers_load_into_current_plan_b_states(legacy, current
 
 def test_effort_is_orchestration_policy_not_provider_reasoning():
     cases = [
-        (Effort.LOW, False, False, False, 0, 0),
-        (Effort.MEDIUM, True, False, False, 0, 0),
-        (Effort.HIGH, True, True, False, 50, 0),
-        (Effort.XHIGH, True, True, True, 100, 1),
-        (Effort.MAX, True, True, True, 200, 3),
+        (Effort.LOW, False, False, False, False, 0, 0, 0),
+        (Effort.MEDIUM, True, False, False, False, 0, 0, 0),
+        (Effort.HIGH, True, True, False, False, 50, 0, 0),
+        (Effort.XHIGH, True, True, True, False, 100, 1, 0),
+        (Effort.MAX, True, True, True, True, 200, 1, 3),
     ]
-    for effort, planning, replanning, review, replans, reviews in cases:
-        policy = resolve_policy(effort, replan_limit=replans, review_limit=reviews)
-        assert (policy.planning, policy.replanning, policy.review) == (
+    for (
+        effort,
+        planning,
+        replanning,
+        review,
+        assurance,
+        replans,
+        reviews,
+        verifications,
+    ) in cases:
+        policy = resolve_policy(
+            effort,
+            replan_limit=replans,
+            review_limit=reviews,
+            verification_limit=verifications,
+        )
+        assert (
+            policy.planning,
+            policy.replanning,
+            policy.review,
+            policy.assurance,
+        ) == (
             planning,
             replanning,
             review,
+            assurance,
         ), effort
         assert policy.max_replans == replans, effort
         assert policy.max_reviews == reviews, effort
+        assert policy.max_verifications == verifications, effort
+
+
+def test_her_execution_mode_labels_and_aliases_keep_canonical_wire_values():
+    assert [effort_display_label(item) for item in Effort] == [
+        "Fast path (low)",
+        "Planned (medium)",
+        "Adaptive (high)",
+        "Reviewed (xhigh)",
+        "Assured (max)",
+    ]
+    assert parse_effort("reviewed") is Effort.XHIGH
+    assert parse_effort("assured") is Effort.MAX
+    assert parse_effort("Fast path") is Effort.LOW
+
+
+def test_assurance_verification_limit_is_hard_capped_at_three():
+    policy = resolve_policy(
+        Effort.MAX,
+        replan_limit=100,
+        review_limit=10,
+        verification_limit=99,
+    )
+
+    assert policy.max_verifications == 3
 
 
 def test_terminal_truth_table():

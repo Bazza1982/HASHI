@@ -103,7 +103,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - Backend and model changes continue to an optional effort picker when the
   selected model supports effort. Keeping the current value leaves it unchanged;
   models without selectable effort finish with `n/a`.
-- `/effort [level]`: available when the active backend supports effort levels. Grok CLI offers `low`, `medium`, and `high` with a HASHI default of `medium`. Codex choices follow the active model. HER v2 effort controls orchestration depth, Replanning, Review, and sub-agent availability; it never changes provider reasoning configured through `/model`.
+- `/effort [level]`: available when the active backend supports effort levels. Grok CLI offers `low`, `medium`, and `high` with a HASHI default of `medium`. Codex choices follow the active model. HER v2 instead shows **HER execution mode**: Fast path (`low`), Planned (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`). Descriptive aliases normalize to the canonical wire values. Reviewed adds tool-backed read-only Review and closure; Assured adds latest-state Verification with at most three attempts. Neither changes provider reasoning configured through `/model`.
 - Grok CLI `0.2.93` offers `grok-4.5` as the default model and
   `grok-composer-2.5-fast` as an alternate. An agent explicitly configured for
   Composer keeps that choice until `/model grok-4.5` is selected. `/effort`

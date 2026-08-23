@@ -83,7 +83,7 @@ Five execution modes:
 - `/provider [name|hybrid]` — HER v2-only routing-mode picker. A named provider keeps the immediate Single-provider flow; `hybrid` opens a draft with independent Quick and Pro provider/model targets.
 - `/model` — for HER v2, edit complete Quick/Pro targets and let each effective task route follow Quick, follow Pro, or use a Custom provider/model target. Use `/model quick|pro [provider] <model>`, `/model route <route> <quick|pro>`, `/model route <route> custom <provider> <model>`, `/model reasoning <route> <value|inherit>`, and `/model apply|discard`. Other backends retain their existing single-model `/model [name]` behaviour.
 - Non-HER backend/model selection continues to the existing optional effort step when supported. HER v2 keeps backend, provider, models/reasoning, and effort as independent controls.
-- `/effort [level]` — HER v2 effort controls orchestration depth, Planning, Replanning, Review, and sub-agent availability. It never reads or writes provider reasoning. Other backends retain their model-aware effort behaviour.
+- `/effort [level]` — HER v2 opens the **HER execution mode** control: Fast path (`low`), Planned (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`). Descriptive aliases are accepted and persisted as their canonical wire values. Reviewed adds independent read-only Review and closure; Assured adds latest-state Verification with at most three attempts. It never reads or writes provider reasoning. Other backends retain their model-aware effort behaviour.
 
 ### HER v2 provider and model configuration
 
@@ -138,6 +138,8 @@ selection. API-key values stay in `secrets.json`.
           "model": "role-configured",
           "effort": "high",
           "her_v2": {
+            "review_limits": {"xhigh": 1, "max": 1},
+            "verification_limits": {"max": 3},
             "profiles": {
               "lightweight": {
                 "engine": "deepseek-api",
@@ -181,6 +183,17 @@ Replanning, Review, and Finalisation follow Pro. Any task route may instead use
 a Custom target. This phase adds no automatic cross-provider failover and no
 picture/media-specific routing.
 
+Assured Verification also follows the reviewer/Pro route by default. Review and
+Verification receive tools but no side-effect authority. `workspace_inspect`
+provides read-only snapshots, status, diff, search, and artifact hashes.
+`verification_run` accepts only registered recipes and runs them in a temporary
+writable copy with network disabled, environment credentials cleared, common
+credential files and host configuration excluded, and a temporary `HOME`. If
+process isolation is not available, it reports unavailable and does not run on
+the host as a fallback.
+Passing claims require exact completed receipts from the current stage
+invocation and matching before/after snapshots.
+
 Runtime selections persist in the agent workspace as a dedicated
 `her_v2_configuration` block. It contains `routing_mode`, full Quick/Pro
 `targets`, per-route target selection, optional Custom `route_targets`, and
@@ -206,7 +219,7 @@ sentinel only and is never presented as a user choice.
 Wrapper model picker buttons currently group recommended choices by provider: Claude Haiku/Sonnet, Gemini Flash/Lite, DeepSeek Flash/Pro, and OpenRouter DeepSeek Flash/Gemini. Claude Opus is intentionally omitted from the picker because it is too expensive for routine wrapping.
 
 **Backend-specific (fixed):**
-- `/effort` — Claude, Codex, Grok CLI, Claw
+- `/effort` — Claude, Codex, and Grok CLI
 - `/credit` — OpenRouter
 
 Memory+ stores a bounded today card, a short cross-day carryover, and archive
@@ -378,8 +391,9 @@ Tools listed in `agents.json` → `global.default_tools.allowed` are automatical
   it does not lower provider reasoning and does not change the Agent's saved
   `/effort` value.
 - Add optional `"her_v2_effort": "medium"` to a cron or heartbeat definition
-  to override that one job. Allowed values are `low`, `medium`, `high`, `xhigh`,
-  and `max`. Invalid values are rejected before prompt work is queued.
+  to override that one job. Canonical values are `low`, `medium`, `high`,
+  `xhigh`, and `max`; the matching descriptive aliases are accepted and
+  normalized. Invalid values are rejected before prompt work is queued.
 - Nudge continuations keep the Agent's configured effort. Built-in automation,
   transcript export, and HER Dream actions bypass this prompt-only policy.
 

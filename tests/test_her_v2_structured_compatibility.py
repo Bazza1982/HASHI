@@ -5,8 +5,13 @@ import pytest
 from orchestrator.her_v2.interfaces import StructuredOutputError
 from orchestrator.her_v2.models import (
     ExecutionDisposition,
+    ReviewOutcome,
+    Stage,
     StageResponse,
+    ToolEvidenceReceipt,
+    ToolReceiptStatus,
     TriageClassification,
+    VerificationOutcome,
 )
 from orchestrator.her_v2.structured import (
     parse_execution,
@@ -15,7 +20,44 @@ from orchestrator.her_v2.structured import (
     parse_plan,
     parse_triage,
     resolve_stage_response,
+    validate_review_response,
+    validate_verification_response,
 )
+
+
+def _receipt(
+    evidence_ref,
+    *,
+    stage,
+    invocation="invocation-1",
+    attempt=1,
+    tool_name="workspace_inspect",
+    status=ToolReceiptStatus.SUCCESS,
+    completed=True,
+    details=None,
+):
+    return ToolEvidenceReceipt(
+        evidence_ref=evidence_ref,
+        stage=stage,
+        invocation_id=invocation,
+        attempt=attempt,
+        tool_call_id=evidence_ref,
+        tool_name=tool_name,
+        status=status,
+        read_only=True,
+        completed=completed,
+        output_sha256=f"sha256-{evidence_ref}",
+        details=details or {},
+    )
+
+
+def _snapshot(ref, *, stage, digest="stable", **kwargs):
+    return _receipt(
+        ref,
+        stage=stage,
+        details={"operation": "snapshot", "snapshot_sha256": digest},
+        **kwargs,
+    )
 
 
 @pytest.mark.parametrize(
@@ -225,3 +267,274 @@ def test_reasoning_is_not_used_when_a_formal_carrier_is_valid():
 def test_unstructured_triage_prose_is_not_guessed_into_authority():
     with pytest.raises(StructuredOutputError, match="no valid JSON"):
         parse_triage(StageResponse(text="This looks like a simple task."))
+
+
+def test_review_pass_requires_exact_completed_current_tool_receipts():
+    receipts = (
+        _snapshot("before", stage=Stage.REVIEW),
+        _receipt(
+            "inspection",
+            stage=Stage.REVIEW,
+            details={"operation": "diff", "exit_code": 0},
+        ),
+        _snapshot("after", stage=Stage.REVIEW),
+    )
+    finding = validate_review_response(
+        StageResponse(
+            data={
+                "outcome": "PASS",
+                "summary": "The current diff satisfies the plan.",
+                "evidence_refs": ["inspection"],
+            },
+            provider_attempt=1,
+            tool_receipts=receipts,
+        )
+    )
+
+    assert finding.outcome is ReviewOutcome.PASS
+    assert finding.evidence_refs == ("inspection",)
+
+
+@pytest.mark.parametrize(
+    ("data", "receipts", "error"),
+    [
+        (
+            {
+                "outcome": "PASS",
+                "summary": "Paper-only pass.",
+                "evidence_refs": [],
+            },
+            (),
+            "requires current tool evidence",
+        ),
+        (
+            {
+                "outcome": "PASS",
+                "summary": "Fabricated reference.",
+                "evidence_refs": ["fabricated"],
+            },
+            (
+                _snapshot("before", stage=Stage.REVIEW),
+                _snapshot("after", stage=Stage.REVIEW),
+            ),
+            "unknown or stale",
+        ),
+        (
+            {
+                "outcome": "PASS",
+                "summary": "A failed call was misreported as proof.",
+                "evidence_refs": ["inspection"],
+            },
+            (
+                _snapshot("before", stage=Stage.REVIEW),
+                _receipt(
+                    "inspection",
+                    stage=Stage.REVIEW,
+                    status=ToolReceiptStatus.FAILED,
+                ),
+                _snapshot("after", stage=Stage.REVIEW),
+            ),
+            "cannot support a passing Review",
+        ),
+        (
+            {
+                "outcome": "FAIL",
+                "summary": "An incomplete start was called evidence.",
+                "evidence_refs": ["inspection"],
+            },
+            (
+                _snapshot("before", stage=Stage.REVIEW),
+                _receipt(
+                    "inspection",
+                    stage=Stage.REVIEW,
+                    status=ToolReceiptStatus.FAILED,
+                    completed=False,
+                ),
+                _snapshot("after", stage=Stage.REVIEW),
+            ),
+            "did not complete",
+        ),
+        (
+            {
+                "outcome": "PASS",
+                "summary": "One receipt was counted twice.",
+                "evidence_refs": ["inspection", "inspection"],
+            },
+            (
+                _snapshot("before", stage=Stage.REVIEW),
+                _receipt("inspection", stage=Stage.REVIEW),
+                _snapshot("after", stage=Stage.REVIEW),
+            ),
+            "duplicate tool evidence",
+        ),
+        (
+            {
+                "outcome": "PASS",
+                "summary": "Only the boundary snapshots were cited.",
+                "evidence_refs": ["before", "after"],
+            },
+            (
+                _snapshot("before", stage=Stage.REVIEW),
+                _snapshot("after", stage=Stage.REVIEW),
+            ),
+            "substantive evidence",
+        ),
+    ],
+)
+def test_review_rejects_paper_fabricated_failed_or_incomplete_pass_evidence(
+    data, receipts, error
+):
+    with pytest.raises(StructuredOutputError, match=error):
+        validate_review_response(
+            StageResponse(data=data, provider_attempt=1, tool_receipts=receipts)
+        )
+
+
+def test_review_rejects_stale_invocation_and_workspace_drift():
+    mixed = (
+        _snapshot("before", stage=Stage.REVIEW, invocation="old"),
+        _receipt("inspection", stage=Stage.REVIEW, invocation="current"),
+        _snapshot("after", stage=Stage.REVIEW, invocation="current"),
+    )
+    data = {
+        "outcome": "FAIL",
+        "summary": "A concrete issue was observed.",
+        "evidence_refs": ["inspection"],
+    }
+    with pytest.raises(StructuredOutputError, match="multiple invocations"):
+        validate_review_response(
+            StageResponse(data=data, provider_attempt=1, tool_receipts=mixed)
+        )
+
+    drifted = (
+        _snapshot("before", stage=Stage.REVIEW, digest="one"),
+        _receipt("inspection", stage=Stage.REVIEW),
+        _snapshot("after", stage=Stage.REVIEW, digest="two"),
+    )
+    with pytest.raises(StructuredOutputError, match="drifted"):
+        validate_review_response(
+            StageResponse(data=data, provider_attempt=1, tool_receipts=drifted)
+        )
+
+
+def test_review_technical_unavailability_is_not_a_conditional_pass():
+    finding = validate_review_response(
+        StageResponse(
+            data={
+                "outcome": "UNAVAILABLE",
+                "summary": "The isolated inspector could not start.",
+            }
+        )
+    )
+
+    assert finding.outcome is ReviewOutcome.UNAVAILABLE
+
+
+def _isolated_verification_response(*, result="VERIFIED", status=None, exit_code=0):
+    receipt_status = status or (
+        ToolReceiptStatus.SUCCESS
+        if exit_code == 0
+        else ToolReceiptStatus.FAILED
+    )
+    return StageResponse(
+        data={
+            "outcome": result,
+            "summary": "The isolated core recipe was assessed.",
+            "checks": [
+                {
+                    "claim": "The core recipe passes",
+                    "verifiability": "VERIFIABLE",
+                    "result": result,
+                    "method": "isolated_test",
+                    "evidence_refs": ["test-run"],
+                    "observed": f"exit code {exit_code}",
+                }
+            ],
+            "evidence_refs": ["test-run"],
+        },
+        provider_attempt=1,
+        tool_receipts=(
+            _snapshot("before", stage=Stage.VERIFICATION),
+            _receipt(
+                "test-run",
+                stage=Stage.VERIFICATION,
+                tool_name="verification_run",
+                status=receipt_status,
+                details={
+                    "operation": "run",
+                    "recipe": "pytest_core",
+                    "exit_code": exit_code,
+                    "isolated": True,
+                },
+            ),
+            _snapshot("after", stage=Stage.VERIFICATION),
+        ),
+    )
+
+
+def test_assured_verification_binds_success_and_failure_to_real_run_receipts():
+    verified = validate_verification_response(_isolated_verification_response())
+    failed = validate_verification_response(
+        _isolated_verification_response(result="FAILED", exit_code=1)
+    )
+
+    assert verified.outcome is VerificationOutcome.VERIFIED
+    assert failed.outcome is VerificationOutcome.FAILED
+
+
+def test_assured_verification_rejects_false_success_and_cross_stage_receipts():
+    with pytest.raises(StructuredOutputError, match="successful current receipts"):
+        validate_verification_response(
+            _isolated_verification_response(result="VERIFIED", exit_code=1)
+        )
+
+    response = _isolated_verification_response()
+    stale = tuple(
+        ToolEvidenceReceipt(
+            **{
+                **receipt.__dict__,
+                "stage": Stage.REVIEW if receipt.evidence_ref == "test-run" else receipt.stage,
+            }
+        )
+        for receipt in response.tool_receipts
+    )
+    with pytest.raises(StructuredOutputError, match="another stage"):
+        validate_verification_response(
+            StageResponse(**{**response.__dict__, "tool_receipts": stale})
+        )
+
+
+def test_assured_verification_rejects_an_invented_verification_method():
+    response = _isolated_verification_response()
+    data = dict(response.data)
+    data["checks"] = [
+        {**dict(response.data["checks"][0]), "method": "trust_the_model"}
+    ]
+
+    with pytest.raises(StructuredOutputError, match="unsupported verification method"):
+        validate_verification_response(
+            StageResponse(**{**response.__dict__, "data": data})
+        )
+
+
+def test_not_ai_verifiable_is_reported_without_invented_tool_evidence():
+    finding = validate_verification_response(
+        StageResponse(
+            data={
+                "outcome": "NOT_AI_VERIFIABLE",
+                "summary": "A human must judge the physical result.",
+                "checks": [
+                    {
+                        "claim": "The physical installation is comfortable",
+                        "verifiability": "NOT_AI_VERIFIABLE",
+                        "result": "NOT_AI_VERIFIABLE",
+                        "method": "visual_inspection",
+                        "evidence_refs": [],
+                        "observed": "No physical sensor is available.",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert finding.outcome is VerificationOutcome.NOT_AI_VERIFIABLE

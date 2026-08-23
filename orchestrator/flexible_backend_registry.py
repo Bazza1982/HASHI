@@ -354,6 +354,22 @@ def get_default_effort(engine: str, model: str | None = None) -> str | None:
 def normalize_effort(engine: str, effort: str | None, model: str | None = None) -> str | None:
     if effort in ("extra", "extra_high"):
         effort = "xhigh"
+    if canonical_backend_engine(engine) == HER_V2_ENGINE:
+        effort = {
+            "fast": "low",
+            "fast_path": "low",
+            "planned": "medium",
+            "adaptive": "high",
+            "reviewed": "xhigh",
+            "assured": "max",
+        }.get(
+            str(effort or "")
+            .strip()
+            .casefold()
+            .replace("-", "_")
+            .replace(" ", "_"),
+            effort,
+        )
     efforts = get_available_efforts(engine, model)
     if not efforts:
         return None

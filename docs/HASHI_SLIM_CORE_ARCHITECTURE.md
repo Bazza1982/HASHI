@@ -145,6 +145,27 @@ self.kernel.runtimes[:] = [
 ]
 ```
 
+## HER v2 Assurance Hot-Reload Boundary
+
+HER v2 Reviewed and Assured execution is implemented in hot-reloadable adapter,
+runtime, prompt, policy, and Tool Registry modules. Reviewed (`xhigh`) performs
+one read-only independent Review, optional Primary-Agent remediation, and one
+closure Review. Assured (`max`) adds a `VERIFYING` lifecycle state and at most
+three latest-state Verification attempts.
+
+Reviewer and verifier calls receive tools but never side-effect authority.
+Their claims are accepted only when they cite exact completed receipts bound to
+the current stage, provider attempt, invocation, and tool call. Predefined test
+recipes run in an ephemeral credential-cleared, no-network workspace copy; if
+the isolation facility is unavailable, the stage reports that limitation and
+does not fall back to host execution.
+
+These modules and schemas are adopted through the ordinary targeted reboot
+flow. Adding lifecycle states, routes, response fields, or public helper
+interfaces does not authorize widening `/reboot min` or `/reboot N`; only the
+selected Agent lifecycle is interrupted while shared Python modules and warm
+services reload.
+
 ## Startup And Shutdown
 
 `StartupManager` owns cold-start orchestration. It starts initial agents and then starts runtime services. It is rebuilt during hot reboot for consistency, but the initial startup path only runs during cold start.

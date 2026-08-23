@@ -19,7 +19,7 @@ from .interfaces import (
     StructuredOutputError,
     TurnStopped,
 )
-from .models import Stage, StageRequest, StageResponse
+from .models import Stage, StageRequest, StageResponse, ToolEvidenceReceipt
 from .progress import ProviderActivityTracker
 from .runtime_support import _payload_hash
 from .structured import resolve_stage_response
@@ -29,6 +29,22 @@ if TYPE_CHECKING:
 
 
 Validator = Callable[[StageResponse], Any]
+
+
+def _tool_receipt_payload(receipt: ToolEvidenceReceipt) -> dict[str, Any]:
+    return {
+        "evidence_ref": receipt.evidence_ref,
+        "stage": receipt.stage.value,
+        "invocation_id": receipt.invocation_id,
+        "attempt": receipt.attempt,
+        "tool_call_id": receipt.tool_call_id,
+        "tool_name": receipt.tool_name,
+        "status": receipt.status.value,
+        "read_only": receipt.read_only,
+        "completed": receipt.completed,
+        "output_sha256": receipt.output_sha256,
+        "details": dict(receipt.details),
+    }
 
 
 class RuntimeInvocationMixin:
@@ -174,6 +190,10 @@ class RuntimeInvocationMixin:
                         "data": dict(response.data),
                         "usage": dict(response.usage),
                         "evidence_refs": list(response.evidence_refs),
+                        "tool_receipts": [
+                            _tool_receipt_payload(item)
+                            for item in response.tool_receipts
+                        ],
                         "reasoning_available": bool(
                             response.reasoning_trace
                             and str(response.reasoning_trace).strip()
@@ -264,6 +284,10 @@ class RuntimeInvocationMixin:
                             else effective_response.text
                         ),
                         "evidence_refs": list(effective_response.evidence_refs),
+                        "tool_receipts": [
+                            _tool_receipt_payload(item)
+                            for item in effective_response.tool_receipts
+                        ],
                         "reasoning_available": bool(effective_response.reasoning_trace),
                         "validation_source": validation_source,
                         "retry_invariant_hash": retry_invariant_hash,
@@ -272,6 +296,8 @@ class RuntimeInvocationMixin:
                 )
                 state.ledger.add_log_ref(complete_ref)
                 self.ledger_store.save(state.ledger)
+                for receipt in effective_response.tool_receipts:
+                    state.tool_receipts[receipt.evidence_ref] = receipt
                 if publish_commentary and validation_source not in {
                     "reasoning_recovery",
                     "deferred_to_finalisation",

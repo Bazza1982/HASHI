@@ -2,7 +2,7 @@ Current user request and supplied context:
 
 $goal
 
-Execution and review inputs:
+Execution, review, and assurance inputs:
 $context
 
 Return exactly one JSON object matching this shape. execution_result may be null only when the raw Execution output has no usable meaning:

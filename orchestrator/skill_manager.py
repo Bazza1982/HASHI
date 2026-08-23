@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import yaml
 
+from orchestrator.her_v2.models import effort_display_label
 from orchestrator.her_v2.request_policy import (
     HER_V2_JOB_EFFORT_FIELD,
     job_effort_policy,
@@ -1086,11 +1087,12 @@ class SkillManager:
                 try:
                     effort_policy = job_effort_policy(job)
                     lines.append(
-                        "  HER v2 effort: "
-                        f"{effort_policy['effective']} ({effort_policy['source']})"
+                        "  HER execution mode: "
+                        f"{effort_display_label(effort_policy['effective'])} "
+                        f"({effort_policy['source']})"
                     )
                 except ValueError as exc:
-                    lines.append(f"  HER v2 effort: INVALID ({exc})")
+                    lines.append(f"  HER execution mode: INVALID ({exc})")
             if note:
                 lines.append(f"  {note}")
         return "\n".join(lines)
@@ -1313,7 +1315,7 @@ class SkillManager:
             return (
                 f"Active mode: OFF\n"
                 f"Interval: {default_minutes} min (default)\n"
-                "HER v2 effort: low (scheduled job default)\n"
+                "HER execution mode: Fast path (low) (scheduled job default)\n"
                 f"Usage: /active on [{default_minutes}] | /active off"
             )
         interval_minutes = max(
@@ -1332,14 +1334,17 @@ class SkillManager:
                 if effort_policy["source"] == "job_override"
                 else "scheduled job default"
             )
-            effort_label = f"{effort_policy['effective']} ({effort_source})"
+            effort_label = (
+                f"{effort_display_label(effort_policy['effective'])} "
+                f"({effort_source})"
+            )
         except ValueError as exc:
             effort_label = f"INVALID ({exc})"
         return (
             f"Active mode: {state}\n"
             f"Interval: {interval_minutes} min{reset_note}\n"
             f"Job: {job.get('id')}\n"
-            f"HER v2 effort: {effort_label}\n"
+            f"HER execution mode: {effort_label}\n"
             f"Usage: /active on [{default_minutes}] | /active off"
         )
 

@@ -60,9 +60,49 @@ _SCHEMAS = {
         ),
     },
     Stage.REVIEW: {
-        "outcome": "PASS | CONDITIONAL_PASS | FAIL",
+        "outcome": "PASS | CONDITIONAL_PASS | FAIL | INCONCLUSIVE | UNAVAILABLE",
         "summary": "independent evidence-based review",
         "findings": [],
+        "evidence_refs": [
+            "exact HASHI_EVIDENCE_RECEIPT values from this Review invocation"
+        ],
+        "commentary": (
+            "optional concise neutral user-facing update based only on this "
+            "completed stage result; omit when no useful update exists"
+        ),
+    },
+    Stage.VERIFICATION: {
+        "outcome": (
+            "VERIFIED | PARTIALLY_VERIFIED | FAILED | NOT_AI_VERIFIABLE | "
+            "UNAVAILABLE | INCONCLUSIVE"
+        ),
+        "summary": "comprehensive assurance result without changing Execution status",
+        "checks": [
+            {
+                "claim": "one concrete result claim or success criterion",
+                "verifiability": (
+                    "VERIFIABLE | PARTIALLY_VERIFIABLE | NOT_AI_VERIFIABLE | "
+                    "UNAVAILABLE"
+                ),
+                "result": (
+                    "VERIFIED | PARTIALLY_VERIFIED | FAILED | "
+                    "NOT_AI_VERIFIABLE | UNAVAILABLE | INCONCLUSIVE"
+                ),
+                "method": (
+                    "isolated_test | workspace_snapshot | workspace_status | "
+                    "workspace_diff | workspace_search | file_hash | "
+                    "artifact_inspection | process_health | read_only_api | "
+                    "visual_inspection"
+                ),
+                "evidence_refs": [
+                    "exact HASHI_EVIDENCE_RECEIPT values from this Verification invocation"
+                ],
+                "observed": "what the current evidence actually established",
+                "required": True,
+            }
+        ],
+        "evidence_refs": [],
+        "limitations": [],
         "commentary": (
             "optional concise neutral user-facing update based only on this "
             "completed stage result; omit when no useful update exists"
@@ -216,13 +256,20 @@ def render_stage_prompt(request: StageRequest) -> str:
         "external_side_effects_authorised_for_this_stage": request.allow_side_effects,
         "stage_context": dict(request.context),
     }
-    reviewer_rule = (
-        "You are an independent advisory reviewer. Do not contact the user, call tools, "
-        "change the goal or classification, activate a plan, authorise side effects, or "
-        "write the final answer."
-        if request.stage is Stage.REVIEW
-        else ""
-    )
+    reviewer_rule = ""
+    if request.stage in {Stage.REVIEW, Stage.VERIFICATION}:
+        reviewer_rule = (
+            "You are an independent read-only assessor. You may call only the delegated "
+            "read-only tools. Begin and end every evidence-backed assessment with "
+            "workspace_inspect operation=snapshot. Cite only exact "
+            "HASHI_EVIDENCE_RECEIPT values returned during this invocation. A tool start "
+            "without a completed receipt is not evidence; a failed receipt can support "
+            "only a failing (FAIL/FAILED) or INCONCLUSIVE outcome. If the before/after "
+            "snapshot digests differ, "
+            "return INCONCLUSIVE. Never contact the user, change the goal or "
+            "classification, activate a plan, authorise side effects, mutate state, or "
+            "write the final answer."
+        )
     sub_agent_rule = (
         "You are a bounded sub-agent. Execute only the assigned task. You may not change "
         "the user goal, classification, or active plan; request Replanning; contact the "
@@ -247,6 +294,7 @@ _SYSTEM_PROMPT_ASSETS = {
     Stage.EXECUTION: "system_execution",
     Stage.REPLANNING: "system_replanning",
     Stage.REVIEW: "system_review",
+    Stage.VERIFICATION: "system_verification",
     Stage.MEDITATION: "system_meditation",
     Stage.DREAM: "system_dream",
 }

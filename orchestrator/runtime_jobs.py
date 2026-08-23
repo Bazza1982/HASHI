@@ -11,6 +11,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator.command_ui import BACK_LABEL, card_title
 from orchestrator.her_v2.request_policy import job_effort_policy
+from orchestrator.her_v2.models import effort_display_label
 from orchestrator.job_ownership import ownership_mismatch_label
 
 CALLBACK_DATA_LIMIT = 64
@@ -24,7 +25,7 @@ def _her_v2_job_effort_label(job: dict) -> str:
     except ValueError as exc:
         return f"INVALID: {exc}"
     source = "job override" if policy["source"] == "job_override" else "job default"
-    return f"{policy['effective']} ({source})"
+    return f"{effort_display_label(policy['effective'])} · {source}"
 
 
 def _runtime_logger(runtime):
@@ -164,7 +165,7 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
                 f"{icon} <b>{status}</b> · <code>{html.escape(jid)}</code>",
                 f"<b>Schedule</b> · <code>{html.escape(schedule)}</code>",
                 f"<b>Owner</b> · <code>{html.escape(owner)}</code>",
-                "<b>HER V2 effort</b> · "
+                "<b>HER execution mode</b> · "
                 f"<code>{html.escape(_her_v2_job_effort_label(job))}</code>",
             ]
         )
@@ -260,7 +261,7 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
             if action != "enqueue_prompt":
                 lines.append(f"      action · <code>{html.escape(str(action))}</code>")
             lines.append(
-                "      HER V2 effort · "
+                "      HER execution mode · "
                 f"<code>{html.escape(_her_v2_job_effort_label(h))}</code>"
             )
             if note and note != job_id:
@@ -283,7 +284,7 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
             if action != "enqueue_prompt":
                 lines.append(f"      action · <code>{html.escape(str(action))}</code>")
             lines.append(
-                "      HER V2 effort · "
+                "      HER execution mode · "
                 f"<code>{html.escape(_her_v2_job_effort_label(c))}</code>"
             )
             if note and note != job_id:

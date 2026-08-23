@@ -69,7 +69,7 @@ class RuntimeSupportMixin:
             event="transition",
             event_id=(
                 f"{state.ledger.turn_id}:lifecycle:{previous.value}:{requested.value}:"
-                f"{state.replan_count}:{state.review_count}"
+                f"{state.replan_count}:{state.review_count}:{state.verification_count}"
             ),
             payload={
                 "from": previous.value,
@@ -561,6 +561,12 @@ class RuntimeSupportMixin:
             delivery_kind=state.delivery_kind,
             delivery_event_id=state.delivery_event_id,
             review_count=state.review_count,
+            verification_count=state.verification_count,
+            assurance_status=(
+                state.last_verification.outcome.value
+                if state.last_verification is not None
+                else ""
+            ),
             replan_count=state.replan_count,
         )
 

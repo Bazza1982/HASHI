@@ -24,6 +24,7 @@ TOOL_TIERS: dict[str, list[str]] = {
     "core": ["bash", "file_read", "file_write", "file_list"],
     "vision": ["vision_inspect"],
     "system": ["process_list", "process_kill", "apply_patch"],
+    "verification": ["workspace_inspect", "verification_run"],
     "background": [
         "background_job_start", "background_job_status", "background_job_tail",
         "background_job_cancel", "background_job_list",
@@ -81,6 +82,8 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "windows_info",
         "windows_screenshot",
         "windows_window_list",
+        "workspace_inspect",
+        "verification_run",
     }
 )
 
@@ -648,6 +651,23 @@ class ToolRegistry:
                 arguments,
                 access_root=self.access_root,
                 workspace_dir=self.workspace_dir,
+            )
+
+        if tool_name == "workspace_inspect":
+            from tools.her_verification import execute_workspace_inspect
+
+            return await execute_workspace_inspect(
+                arguments,
+                workspace_dir=self.workspace_dir,
+            )
+
+        if tool_name == "verification_run":
+            from tools.her_verification import execute_verification_run
+
+            return await execute_verification_run(
+                arguments,
+                workspace_dir=self.workspace_dir,
+                options=opts.get("verification_run", {}),
             )
 
         if tool_name == "process_list":

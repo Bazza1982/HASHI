@@ -10,6 +10,7 @@ from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
 from orchestrator.command_ui import card_title
 from orchestrator.memory_plus_mode import get_memory_plus_status
 from orchestrator.wrapper_mode import load_wrapper_config, visible_wrapper_slots
+from orchestrator.her_v2.models import effort_display_label
 
 
 def compute_status_string(runtime) -> str:
@@ -196,6 +197,13 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         state_snapshot = {}
     memory_plus = get_memory_plus_status(runtime.workspace_dir)
     current_effort = runtime._get_current_effort() or "n/a"
+    her_backend = str(runtime.config.active_backend) == "her-v2"
+    if her_backend and current_effort != "n/a":
+        try:
+            current_effort = effort_display_label(current_effort)
+        except ValueError:
+            pass
+    effort_heading = "HER execution mode" if her_backend else "Effort"
     session_id_short = "none"
     if mode_str == "fixed" and getattr(runtime.backend_manager, "current_backend", None):
         sid = getattr(runtime.backend_manager.current_backend, "_session_id", None) or "none"
@@ -226,7 +234,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
     lines.extend(
         [
             f"<b>Model</b> · <code>{html.escape(str(runtime.get_current_model()))}</code>",
-            f"<b>Effort</b> · <code>{html.escape(str(current_effort))}</code>",
+            f"<b>{effort_heading}</b> · <code>{html.escape(str(current_effort))}</code>",
             (
                 f"<b>Memory+</b> · <code>{'ON' if memory_plus['enabled'] else 'OFF'}</code>"
                 f" · <code>{memory_plus['open_items']}</code> open"

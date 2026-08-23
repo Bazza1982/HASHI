@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HER Reviewed and Assured execution modes** — renamed the five HER v2
+  orchestration choices in the UI while preserving `low` through `max` wire
+  compatibility and command aliases. Reviewed (`xhigh`) now performs a
+  tool-backed, read-only independent Review, one Primary-Agent remediation when
+  needed, and one closure Review. Assured (`max`) adds comprehensive
+  latest-state Verification with at most three attempts and remediation between
+  failed checks. Exact stage/invocation/tool-call receipts, stable workspace
+  snapshots, honest unavailable/not-verifiable outcomes, and isolated
+  predefined no-network test recipes prevent paper-only or stale PASS claims.
 - **Codex API caller-owned function tools** — the OpenAI-compatible Gateway now
   maps function schemas to isolated Codex app-server `dynamicTools`, returns
   standard sync/streaming `tool_calls`, and reconstructs structured assistant

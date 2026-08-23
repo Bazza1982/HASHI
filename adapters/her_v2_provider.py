@@ -44,7 +44,13 @@ from orchestrator.her_v2.interfaces import (
     StageInvocationError,
     StageProvider,
 )
-from orchestrator.her_v2.models import Stage, StageRequest, StageResponse
+from orchestrator.her_v2.models import (
+    Stage,
+    StageRequest,
+    StageResponse,
+    ToolEvidenceReceipt,
+    ToolReceiptStatus,
+)
 from orchestrator.her_v2.presentation import (
     MAX_RENDERED_REQUIRED_MESSAGE_CHARS,
     RenderedRequiredMessage,
@@ -534,6 +540,10 @@ class _DelegatedToolRegistry:
                 }
             )
 
+    @property
+    def base(self) -> Any:
+        return self._base
+
     def is_allowed(self, tool_name: str) -> bool:
         return str(tool_name) in self._allowed
 
@@ -581,6 +591,140 @@ class _DelegatedToolRegistry:
         return result
 
 
+def _evidence_ref_segment(value: Any, *, fallback: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip())
+    return normalized.strip("-") or fallback
+
+
+class _EvidenceRecordingToolRegistry:
+    """Attach exact, current-invocation receipts to completed tool calls."""
+
+    def __init__(self, base: Any, request: StageRequest):
+        self._base = base
+        self._request = request
+        self._receipts: list[ToolEvidenceReceipt] = []
+        self._serial = 0
+        self.max_loops = None
+
+    @property
+    def receipts(self) -> tuple[ToolEvidenceReceipt, ...]:
+        return tuple(self._receipts)
+
+    @property
+    def base(self) -> Any:
+        return getattr(self._base, "base", self._base)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+    def _receipt(
+        self,
+        *,
+        tool_name: str,
+        tool_call_id: str,
+        result: Any | None,
+        completed: bool,
+        status: ToolReceiptStatus,
+    ) -> ToolEvidenceReceipt:
+        self._serial += 1
+        effective_call_id = str(tool_call_id or f"call-{self._serial}")
+        invocation = str(
+            self._request.invocation_id
+            or (
+                f"{self._request.turn_id}:{self._request.stage.value}:"
+                f"{self._request.attempt}"
+            )
+        )
+        evidence_ref = ":".join(
+            (
+                "hashi-tool",
+                _evidence_ref_segment(self._request.turn_id, fallback="turn"),
+                self._request.stage.value,
+                "invocation",
+                _evidence_ref_segment(invocation, fallback="unknown"),
+                "call",
+                _evidence_ref_segment(effective_call_id, fallback=f"call-{self._serial}"),
+                "receipt",
+                str(self._serial),
+            )
+        )
+        output = str(getattr(result, "output", "") or "")
+        details = dict(getattr(result, "details", None) or {})
+        details.setdefault("receipt_serial", self._serial)
+        return ToolEvidenceReceipt(
+            evidence_ref=evidence_ref,
+            stage=self._request.stage,
+            invocation_id=invocation,
+            attempt=self._request.attempt,
+            tool_call_id=effective_call_id,
+            tool_name=str(tool_name),
+            status=status,
+            read_only=_registry_is_read_only(self._base, tool_name),
+            completed=completed,
+            output_sha256=hashlib.sha256(output.encode("utf-8")).hexdigest(),
+            details=details,
+        )
+
+    async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
+        try:
+            result = await self._base.execute(tool_name, arguments, tool_call_id)
+        except asyncio.CancelledError:
+            self._receipts.append(
+                self._receipt(
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    result=None,
+                    completed=False,
+                    status=ToolReceiptStatus.CANCELLED,
+                )
+            )
+            raise
+        except Exception:
+            self._receipts.append(
+                self._receipt(
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    result=None,
+                    completed=False,
+                    status=ToolReceiptStatus.FAILED,
+                )
+            )
+            raise
+
+        receipt = self._receipt(
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            result=result,
+            completed=True,
+            status=(
+                ToolReceiptStatus.FAILED
+                if bool(getattr(result, "is_error", False))
+                else ToolReceiptStatus.SUCCESS
+            ),
+        )
+        self._receipts.append(receipt)
+
+        from tools.registry import ToolResult
+
+        output = str(getattr(result, "output", "") or "")
+        output += f"\n\nHASHI_EVIDENCE_RECEIPT: {receipt.evidence_ref}"
+        details = dict(getattr(result, "details", None) or {})
+        details.update(
+            {
+                "evidence_ref": receipt.evidence_ref,
+                "receipt_status": receipt.status.value,
+                "receipt_completed": receipt.completed,
+            }
+        )
+        return ToolResult(
+            tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
+            output=output,
+            is_error=bool(getattr(result, "is_error", False)),
+            content=getattr(result, "content", None),
+            details=details,
+        )
+
+
 class _UnboundedToolRegistry:
     """Request-local registry view without a tool round ceiling."""
 
@@ -593,7 +737,7 @@ class _UnboundedToolRegistry:
 
     @property
     def base(self) -> Any:
-        return self._base
+        return getattr(self._base, "base", self._base)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._base, name)
@@ -960,10 +1104,15 @@ class HashiStageProvider(StageProvider):
                 delegated,
                 read_only=not request.allow_side_effects,
             )
+        evidence_registry: _EvidenceRecordingToolRegistry | None = None
         if selected_registry is not None:
             # The Agent-level registry owns permissions, not HER v2 execution
             # length.  HER tool-enabled stages continue until the model
             # finishes, fails, or the request is cancelled.
+            evidence_registry = _EvidenceRecordingToolRegistry(
+                selected_registry, request
+            )
+            selected_registry = evidence_registry
             selected_registry = _UnboundedToolRegistry(selected_registry)
         if controls_tools:
             backend.tool_registry = selected_registry
@@ -1118,10 +1267,8 @@ class HashiStageProvider(StageProvider):
                 model=profile.model,
                 response=response,
             )
-            evidence_refs = (
-                (f"hashi-tools:{request.turn_id}:{request.attempt}",)
-                if response.tool_call_count
-                else ()
+            tool_receipts = (
+                evidence_registry.receipts if evidence_registry is not None else ()
             )
             return StageResponse(
                 text=_normalise_backend_text(response.text),
@@ -1140,8 +1287,9 @@ class HashiStageProvider(StageProvider):
                         getattr(response.usage, "thinking_tokens", 0) or 0
                     ),
                 },
-                evidence_refs=evidence_refs,
+                evidence_refs=tuple(item.evidence_ref for item in tool_receipts),
                 provider_attempt=request.attempt,
+                tool_receipts=tool_receipts,
             )
         except StageInvocationError:
             raise

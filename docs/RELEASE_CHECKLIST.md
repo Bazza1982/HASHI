@@ -52,6 +52,17 @@
     Wrapper, Audit, and Dual Brain preserve their full-context contracts
   - HER v2 remains the active Habit/Meditation owner and request-scoped
     eligibility prevents internal or ephemeral work from entering `/habit`
+  - HER UI and status show Fast path, Planned, Adaptive, Reviewed, and Assured
+    while persisted/API values remain `low`, `medium`, `high`, `xhigh`, and
+    `max`; `/effort reviewed` and `/effort assured` normalize correctly
+  - Reviewed and Assured regressions prove read-only tool delegation, exact
+    current-invocation receipts, stable before/after snapshots, one Reviewed
+    closure check, and the three-attempt Assured Verification ceiling
+  - `verification_run` accepts only registered recipes, excludes workspace and
+    environment credentials, uses a temporary `HOME`, disables network, cleans
+    the temporary copy, and refuses host fallback when isolation is unavailable
+  - Review/Verification unavailable, partly verified, and not-AI-verifiable
+    results are reported honestly without replacing Execution disposition
   - `/rebuild` is a side-effect-free one-version retirement notice and no
     native HER manager/source/package is initialized at startup
   - At least one live `her-v2` canary after `/reboot min` validates

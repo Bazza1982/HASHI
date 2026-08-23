@@ -42,6 +42,7 @@ from orchestrator.her_v2.models import (
     Stage,
     StageRequest,
     StageResponse,
+    ToolReceiptStatus,
     TriageClassification,
 )
 from orchestrator.her_v2.presentation import (
@@ -344,7 +345,24 @@ class _EffortPolicyProvider:
                 "summary": "Completed.",
                 "evidence_refs": ["receipt:effort-policy"],
             },
-            Stage.REVIEW: {"outcome": "PASS", "summary": "Verified."},
+            Stage.REVIEW: {
+                "outcome": "UNAVAILABLE",
+                "summary": "Tool-backed Review is unavailable in this policy stub.",
+            },
+            Stage.VERIFICATION: {
+                "outcome": "NOT_AI_VERIFIABLE",
+                "summary": "This policy stub has no verification tools.",
+                "checks": [
+                    {
+                        "claim": "The external result is correct",
+                        "verifiability": "NOT_AI_VERIFIABLE",
+                        "result": "NOT_AI_VERIFIABLE",
+                        "method": "artifact_inspection",
+                        "evidence_refs": [],
+                        "observed": "No external artifact is attached to the stub.",
+                    }
+                ],
+            },
             Stage.FINALISATION: {
                 "execution_result": {
                     "disposition": "COMPLETED",
@@ -581,6 +599,7 @@ async def test_scheduler_effort_is_request_scoped_and_provider_reasoning_is_unch
     ordinary_stages = [request.stage for _profile, request in provider.requests]
     assert Stage.PLANNING in ordinary_stages
     assert Stage.REVIEW in ordinary_stages
+    assert Stage.VERIFICATION in ordinary_stages
     assert ordinary.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
         "effective": "max",
@@ -1671,7 +1690,9 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     assert "her_effort" not in backend.prompt
     assert "provider-high" not in backend.prompt
     assert result.reasoning_trace == "provider trace"
-    assert result.evidence_refs == ("hashi-tools:turn-1:1",)
+    # Provider telemetry alone is not evidence; no registry call completed.
+    assert result.evidence_refs == ()
+    assert result.tool_receipts == ()
     assert provider.usage.input_tokens == 3
     assert provider.tool_call_count == 1
     assert backend.shutdown_called is True
@@ -1686,7 +1707,7 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     assert reviewer_backend.sys_prompt.startswith(
         "You are the independent strict HER v2 Reviewer"
     )
-    assert "independent advisory reviewer" in reviewer_backend.prompt
+    assert "independent read-only assessor" in reviewer_backend.prompt
     assert '"tools_authorised_for_this_stage": false' in reviewer_backend.prompt
 
     for stage in (Stage.PLANNING, Stage.REPLANNING):
@@ -1721,6 +1742,80 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     assert "configured agent persona" not in finalisation_backend.sys_prompt
     assert '"execution_result"' in finalisation_backend.prompt
     assert '"final_message"' in finalisation_backend.prompt
+
+
+@pytest.mark.asyncio
+async def test_hashi_stage_provider_records_exact_completed_tool_evidence_receipts():
+    class CallingToolBackend(_FakeBackend):
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+        ):
+            del request_id, is_retry, silent, on_stream_event
+            self.prompt = prompt
+            self.tool_result = await self.tool_registry.execute(
+                "file_read", {"path": "evidence.txt"}, "provider-call-42"
+            )
+            return BackendResponse(
+                text='{"outcome":"UNAVAILABLE","summary":"receipt captured"}',
+                duration_ms=1,
+                tool_call_count=1,
+                tool_loop_count=1,
+            )
+
+    class CallingToolManager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert (engine, target_model) == (
+                "openrouter-api",
+                "configured/model",
+            )
+            backend = CallingToolBackend(self.system_md)
+            self.backends.append(backend)
+            return backend
+
+    manager = CallingToolManager()
+    registry = _BaseToolRegistry()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=registry,
+    )
+    request = _stage_request(
+        Stage.REVIEW,
+        allow_tools=True,
+        allow_side_effects=False,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "invocation_id": "turn-1:review:invocation:7",
+            "context": {"delegated_tools": ["file_read"]},
+        }
+    )
+
+    response = await provider.invoke(
+        ProviderProfile("reviewer", "openrouter-api", "configured/model"),
+        request,
+    )
+
+    assert len(response.tool_receipts) == 1
+    receipt = response.tool_receipts[0]
+    assert receipt.stage is Stage.REVIEW
+    assert receipt.invocation_id == "turn-1:review:invocation:7"
+    assert receipt.attempt == 1
+    assert receipt.tool_call_id == "provider-call-42"
+    assert receipt.tool_name == "file_read"
+    assert receipt.status is ToolReceiptStatus.SUCCESS
+    assert receipt.read_only is True
+    assert receipt.completed is True
+    assert receipt.output_sha256
+    assert response.evidence_refs == (receipt.evidence_ref,)
+    assert receipt.evidence_ref in manager.backends[0].tool_result.output
+    assert "HASHI_EVIDENCE_RECEIPT" in manager.backends[0].tool_result.output
+    assert registry.execution_contexts[-1]["safety_mode"] == "read_only"
 
 
 @pytest.mark.asyncio

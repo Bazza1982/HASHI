@@ -173,11 +173,17 @@ profiles and bootstrap state.
 
 HER v2 is the sole supported HER execution backend:
 
-- **Provider-neutral orchestration** — Triage, Planning, Execution, Review, and
-  Finalisation are explicit, independently testable stages.
-- **Execution effort** — effort controls orchestration depth without changing
-  provider reasoning settings or limiting tool-call count. Scheduled cron and
-  heartbeat work defaults to low execution effort unless the job overrides it.
+- **Provider-neutral orchestration** — Triage, Planning, Execution, Review,
+  Verification, and Finalisation are explicit, independently testable stages.
+- **HER execution modes** — Fast path (`low`), Planned (`medium`), Adaptive
+  (`high`), Reviewed (`xhigh`), and Assured (`max`) control orchestration depth
+  without changing provider reasoning settings or limiting ordinary tool-call
+  count. Scheduled cron and heartbeat work defaults to Fast path unless the job
+  overrides it.
+- **Evidence-backed assurance** — Reviewed performs an independent read-only
+  Review and one closure check after remediation. Assured adds latest-state
+  Verification with exact tool receipts and up to three attempts. Predefined
+  tests run only in a temporary, credential-cleared, no-network workspace copy.
 - **Conversation and delivery correctness** — stable event and delivery IDs,
   isolated scheduled turns, audited terminal states, and final safety checks
   prevent internal control payloads from becoming user-visible completion.
@@ -681,7 +687,7 @@ examples, timing semantics, persistence, and cancellation, see
 | `/wrap` | View/change wrapper-mode persona wrapper backend/model/context |
 | `/wrapper` | View/edit wrapper-mode persona/style slots |
 | `/anatta [status\|off\|shadow\|on]` | Inspect or switch Anatta live self-assembly mode for the current agent |
-| `/effort` | View/change reasoning effort (Claude, Codex, or Grok CLI; choices follow the active model) |
+| `/effort` | Change HER execution mode, or model reasoning effort on supported non-HER backends |
 | `/fyi [prompt]` | Refresh bridge environment awareness |
 | `/bg <task>` | Queue a background-capable task; the agent receives `/bg` instructions and should use managed background jobs for long OS work |
 | `/bg status\|tail\|cancel\|list` | Inspect or manage recorded background jobs |
@@ -708,6 +714,13 @@ model that does not support it safely resets effort to `medium`.
 For Grok CLI, `/effort` offers `low`, `medium`, and `high`. HASHI defaults
 Grok sessions to `medium`, passes the selection to the CLI explicitly, and
 persists the chosen level for that backend across agent reloads.
+
+For HER v2, `/effort` opens the **HER execution mode** menu. It displays Fast
+path (`low`), Planned (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and
+Assured (`max`). The descriptive names are accepted as command aliases; saved
+configuration and wire values remain canonical, so `/effort reviewed` stores
+`xhigh` and `/effort assured` stores `max`. Other backends keep their existing
+reasoning-effort menus and labels.
 
 The `/backend` and `/model` menus finish as one configuration flow. For HER v2,
 `/provider` selects either a Single provider or Hybrid routing. Hybrid Quick,
@@ -1509,9 +1522,15 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 ### v4.0.0-alpha.2 *(release candidate)* — HER v2 Runtime (August 2026)
 
 - **Provider-neutral orchestration** — HER v2 owns explicit Triage, Planning,
-  Execution, Review, and Finalisation stages without a native Claw runtime
-- **Task-matched execution effort** — orchestration depth remains independent
-  from provider reasoning and tool-call count
+  Execution, Review, Verification, and Finalisation stages without a native
+  Claw runtime
+- **Task-matched execution modes** — Fast path, Planned, Adaptive, Reviewed,
+  and Assured remain independent from provider reasoning and ordinary
+  tool-call count
+- **Hard-evidence assurance** — read-only Review and Verification accept only
+  exact completed current-invocation receipts; Assured runs predefined checks
+  in a temporary no-network workspace copy and re-verifies remediated state up
+  to three times
 - **Reliable conversation delivery** — direct-message continuity, scheduler
   isolation, explicit stream ownership, stable event IDs, and request-scoped
   idempotency

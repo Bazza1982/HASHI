@@ -97,7 +97,7 @@ def _reject_removed_limits(
         f"{location} contains removed execution limit field(s): "
         f"{', '.join(sorted(found))}. HER v2 permits the meaningful-progress "
         "liveness detector, one typed fresh-connection provider recovery, and the "
-        "explicitly designed Replan and Review limits; legacy generic ceilings "
+        "explicitly designed Replan, Review, and Verification limits; legacy generic ceilings "
         "must not be applied."
     )
 
@@ -149,6 +149,7 @@ DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
     Stage.EXECUTION: "premium",
     Stage.REPLANNING: "premium",
     Stage.REVIEW: "reviewer",
+    Stage.VERIFICATION: "reviewer",
     Stage.FINALISATION: "premium",
     Stage.MEDITATION: "lightweight",
     Stage.DREAM: "lightweight",
@@ -182,6 +183,15 @@ class HERv2Config:
             Effort.MEDIUM: 0,
             Effort.HIGH: 0,
             Effort.XHIGH: 1,
+            Effort.MAX: 1,
+        }
+    )
+    verification_limits: Mapping[Effort, int] = field(
+        default_factory=lambda: {
+            Effort.LOW: 0,
+            Effort.MEDIUM: 0,
+            Effort.HIGH: 0,
+            Effort.XHIGH: 0,
             Effort.MAX: 3,
         }
     )
@@ -465,7 +475,11 @@ class HERv2Config:
         )
         review_limits = _effort_int_map(
             raw.get("review_limits"),
-            {Effort.LOW: 0, Effort.MEDIUM: 0, Effort.HIGH: 0, Effort.XHIGH: 1, Effort.MAX: 3},
+            {Effort.LOW: 0, Effort.MEDIUM: 0, Effort.HIGH: 0, Effort.XHIGH: 1, Effort.MAX: 1},
+        )
+        verification_limits = _effort_int_map(
+            raw.get("verification_limits"),
+            {Effort.LOW: 0, Effort.MEDIUM: 0, Effort.HIGH: 0, Effort.XHIGH: 0, Effort.MAX: 3},
         )
         return cls(
             profiles=profiles,
@@ -480,6 +494,7 @@ class HERv2Config:
             route_reasoning=route_reasoning,
             replan_limits=replan_limits,
             review_limits=review_limits,
+            verification_limits=verification_limits,
             user_idle_timeout_s=float(raw.get("user_idle_timeout_s", 1800.0)),
             audit_failure_terminal=_audit_failure_terminal(
                 raw.get("audit_failure_terminal", "ERROR")

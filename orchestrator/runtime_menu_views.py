@@ -310,14 +310,23 @@ def thinking_output_text(
 def her_commentary_text(*, enabled: bool, effort: str) -> str:
     """Render the HER-only Persona commentary ownership contract."""
 
+    from orchestrator.her_v2.models import effort_display_label
+
+    try:
+        effort = effort_display_label(effort)
+    except ValueError:
+        pass
+
     return setting_card(
         "🌿",
         "HER commentary",
         current=f"<b>{status_label(enabled)}</b>",
         facts=[
-            f"<b>HER effort</b> · <code>{html.escape(effort)}</code>",
-            "<b>Medium</b> · may emit the model-authored Persona acknowledgement",
-            "<b>High+</b> · may also emit model-authored material progress/Replan reports",
+            f"<b>HER execution mode</b> · <code>{html.escape(effort)}</code>",
+            "<b>Planned</b> · <code>medium</code> · may emit the model-authored "
+            "Persona acknowledgement",
+            "<b>Adaptive+</b> · <code>high+</code> · may also emit model-authored "
+            "material progress/Replan reports",
             "<b>Delivery</b> · one durable message per stable event identity",
             "<b>Neutral runtime leases</b> · technical /verbose only",
             "<b>Independent</b> · does not change /think or /verbose",

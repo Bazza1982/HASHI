@@ -56,9 +56,9 @@ rejected rather than retained as an alias.
 
 ### 3.1 Separation of concerns
 
-HER effort levels are orchestration policies. They are not provider reasoning levels.
+HER execution modes are orchestration policies. They are not provider reasoning levels.
 
-Provider reasoning controls remain provider-specific. HER selects the appropriate model profile and provider reasoning setting for each stage without redefining those provider controls as HER effort levels.
+Provider reasoning controls remain provider-specific. HER selects the appropriate model profile and provider reasoning setting for each stage without redefining those provider controls as HER execution modes.
 
 ### 3.2 Provider neutrality
 
@@ -80,7 +80,7 @@ HER v2 has no turn-count, elapsed-time, wall-clock, stage, provider-attempt,
 tool-round, sub-agent-count, call-count, step-count, cumulative-token, or
 output-token execution ceiling at any stage. This rule applies equally to
 Immediate Response, Triage, Planning, Execution, Replanning, Review,
-Finalisation, Persona packaging, Meditation, Dream, delegated sub-agents,
+Verification, Finalisation, Persona packaging, Meditation, Dream, delegated sub-agents,
 provider adapters, and tool-enabled provider loops. A provider operation must
 never be defined so broadly that a transport timeout silently becomes a clock
 around model generation, foreground tool execution, and subsequent model
@@ -89,21 +89,21 @@ continuation.
 The only already-authorised controls that may stop or bound work are:
 
 - an explicit user `/stop`, `/steer`, cancellation, or process-lifecycle stop;
-- the configured meaningful-progress idle detector in section 18;
+- the configured meaningful-progress idle detector in section 19;
 - a connection, read-inactivity, or protocol-safety guard scoped inside the
   relevant transport/parser operation, which resets on qualifying activity and
   never encloses a complete HER stage or tool loop;
 - a timeout explicitly supplied for one tool invocation by its authorised
   caller, where omitting the timeout means no default tool deadline;
 - the isolated, tool-free Auto Compact model-call watchdog explicitly defined
-  in section 18.4 and the
+  in section 19.4 and the
   [Auto Compact design](HER_V2_AUTO_COMPACTION_DESIGN.md); this exception cannot
   enclose a HER stage, target provider call, tool execution, or provider tool
   loop;
-- the Replanning and Review/remediation iteration ceilings explicitly defined
-  by HER effort policy; and
+- the Replanning, Reviewed closure, and Assured Verification/remediation
+  iteration ceilings explicitly defined by HER execution-mode policy; and
 - exactly one safe fresh-connection recovery after an eligible provider
-  failure, as defined in section 17. This is a recovery allowance after a typed
+  failure, as defined in section 18. This is a recovery allowance after a typed
   failure, not permission to time-limit a healthy attempt.
 
 No implementation, adapter option, compatibility field, test fixture, or audit
@@ -149,7 +149,7 @@ No stage may intentionally substitute a different objective. If intent is unclea
 HER prefers useful progress over perfection of intermediate artefacts:
 
 - give an eligible transient provider failure one fresh-connection recovery
-  attempt, subject to the side-effect replay rules in section 17;
+  attempt, subject to the side-effect replay rules in section 18;
 - treat structured-envelope correction as a separate semantic repair path,
   bounded by the user meaningful-progress idle boundary;
 - replan when execution evidence invalidates the current approach;
@@ -271,17 +271,22 @@ There is one active plan version at a time.
 - Only the Replanning stage may replace the active plan.
 - Sub-agents may not change or replace the plan.
 
-### 4.4 Execution and Review authority
+### 4.4 Execution, Review, and Verification authority
 
 Execution owns the substantive work and its disposition. Finalisation renders
-the user-facing outcome without replacing a valid disposition. Review findings
-are advisory evidence. A reviewer cannot:
+the user-facing outcome without replacing a valid disposition. Review and
+Verification findings are advisory evidence. A reviewer or verifier cannot:
 
 - change the user's goal;
 - change the Triage classification;
 - request clarification directly from the user;
 - publish a user-facing final answer;
 - independently authorise additional side effects.
+
+Review and Verification may use tools, but every delegated tool must be marked
+read-only by the HASHI Tool Registry. Those stages never receive side-effect
+authority. Their findings may cause Runtime to ask the Primary Agent to
+remediate; they cannot perform that remediation themselves.
 
 ### 4.5 `/steer` authority
 
@@ -306,17 +311,24 @@ A custom or newly added tool may enter a read-only stage only when the Registry
 explicitly reports it as read-only; an unknown tool fails closed. HER must not
 maintain a separate tool-name safety list.
 
-## 5. HER Effort Levels
+Every tool result used as assurance evidence receives an exact receipt bound to
+the current stage, provider attempt, invocation, tool call, and output digest.
+Only completed receipts from that exact invocation may be cited. A model-authored
+reference, generic tool-use marker, stale receipt, or start event is not evidence.
 
-HER effort controls orchestration behaviour, not provider reasoning.
+## 5. HER Execution Modes
 
-| HER effort | Required orchestration behaviour |
-|---|---|
-| `low` | Fast execution with minimal orchestration; no formal Planning stage |
-| `medium` | Formal planning followed by execution |
-| `high` | Planning, execution, and configurable periodic or evidence-triggered replanning |
-| `xhigh` | High behaviour plus independent review and at most one remediation cycle |
-| `max` | High behaviour plus independent review and at most three review/remediation cycles |
+HER execution mode controls orchestration behaviour, not provider reasoning.
+The canonical wire values remain unchanged for configuration and API
+compatibility. User interfaces show the descriptive names below.
+
+| Display name | Wire value | Required orchestration behaviour |
+|---|---|---|
+| Fast path | `low` | Fast execution with minimal orchestration; no formal Planning stage |
+| Planned | `medium` | Formal Planning followed by Execution |
+| Adaptive | `high` | Planning, Execution, and configurable periodic or evidence-triggered Replanning |
+| Reviewed | `xhigh` | Adaptive behaviour plus one tool-backed independent Review; a failed Review permits one Primary-Agent remediation and one read-only closure Review |
+| Assured | `max` | Adaptive behaviour plus one tool-backed Review and a comprehensive Verification loop against the latest state, with at most three Verification attempts |
 
 HER v2 does not impose a tool-call round or turn ceiling on tool-enabled
 Execution or delegated sub-agent invocations. Once tools are authorised for a
@@ -325,7 +337,7 @@ fails, or the request is cancelled. Agent-level Tool Registry permissions and
 safety policy still apply, but a generic registry `max_loops` value is not a
 HER v2 termination condition. Effort never changes this rule.
 
-Effort determines the maximum orchestration path available. Triage classifications `DIRECT_RESPONSE` and `CONFIRMATION_REQUIRED` terminate through their dedicated paths without unnecessary planning, regardless of the selected effort.
+Execution mode determines the maximum orchestration path available. Triage classifications `DIRECT_RESPONSE` and `CONFIRMATION_REQUIRED` terminate through their dedicated paths without unnecessary planning, regardless of the selected mode.
 
 Each effective task route derives its base capability from configurable role
 profiles such as `lightweight`, `premium`, and `reviewer`, then independently
@@ -347,10 +359,12 @@ changes the actual profile. Structure repair may follow its source model.
 `/backend` selects `her-v2` without exposing the internal `role-configured`
 sentinel.
 
-`/effort` is a separate orchestration-policy command. Changing it must not read,
+`/effort` is a separate orchestration-policy command. `reviewed` and `assured`
+are accepted aliases and persist as canonical `xhigh` and `max`; the other
+descriptive names are accepted in the same way. Changing the mode must not read,
 infer, normalize, or persist a provider reasoning value. Conversely, changing a
 provider, model slot, Compact route, or provider reasoning setting must not
-change HER effort. An explicit Compact route is preserved when `/provider`
+change HER execution mode. An explicit Compact route is preserved when `/provider`
 changes Quick and Pro; an inherited Compact route follows Pro. Non-HER backends
 retain their established `/model` behaviour.
 
@@ -487,7 +501,7 @@ Planning uses a premium model with a high provider reasoning setting and conside
 - recovery and meaningful-progress strategy;
 - testing and verification strategy;
 - parallelisation opportunities;
-- review requirements implied by HER effort.
+- Review and Verification requirements implied by HER execution mode.
 
 The completed plan becomes binding. Only Replanning may replace it.
 
@@ -527,7 +541,7 @@ The result also records a truthful summary, work performed, verification,
 evidence references, limitations, remaining work, and a clarification question
 when required. Technical `ERROR` belongs to HER v2 Runtime and is not available
 for Execution to select. Execution cannot request Replanning; HER v2 imposes
-Replanning only through the configured effort/review policy.
+Replanning only through the configured execution-mode assurance policy.
 
 ### 8.1 Simple tasks
 
@@ -552,7 +566,7 @@ Replanning only through the configured effort/review policy.
 
 Execution may return `USER_INPUT_REQUIRED` only with a concrete clarification
 question and truthful evidence explaining why progress cannot safely continue.
-HER skips Review, passes the result through the single combined Finalisation
+HER skips Review and Verification, passes the result through the single combined Finalisation
 call, delivers its Persona-rendered clarification, and then reaches
 `PENDING_USER_INPUT`. Bounded sub-agents may not use this disposition to contact
 the user; they return the missing-information finding to the Primary Agent as
@@ -577,7 +591,8 @@ Replanning considers:
 - completed and remaining work;
 - tool and execution evidence;
 - failures and newly discovered constraints;
-- reviewer findings when remediation follows review.
+- reviewer findings or failed Verification checks when remediation follows an
+  assurance stage.
 
 Replanning does not consult Habits again. Current execution evidence takes precedence over historical advice.
 
@@ -613,7 +628,7 @@ the title and compact metadata, is bounded by the configured retrieval limit,
 and uses only the current authoritative request after the final Bridge
 current-request marker. Bridge conversation background is not retrieval input.
 The selected Habit bodies may be disclosed to initial Planning only; Execution,
-Replanning, Review, and Finalisation do not receive or re-read them. Because
+Replanning, Review, Verification, and Finalisation do not receive or re-read them. Because
 `low` effort omits Planning, it omits Habit retrieval while retaining eligible
 post-execution Meditation.
 
@@ -661,7 +676,11 @@ Dream is outside the critical live-execution path.
 
 Independent Review applies to `xhigh` and `max` after execution has produced candidate deliverables.
 
-The reviewer uses a premium model with the maximum appropriate provider reasoning setting and a strict reviewer persona. Review independence is achieved through prompt, role, and context separation; a different model provider is not mandatory.
+The reviewer uses a premium model with the maximum appropriate provider
+reasoning setting and a strict reviewer persona. Review independence is
+achieved through prompt, role, and context separation; a different model
+provider is not mandatory. The invocation has Tool Gateway access but is
+strictly read-only.
 
 The reviewer receives:
 
@@ -670,6 +689,13 @@ The reviewer receives:
 - active and historical plan references;
 - execution evidence and deliverables;
 - relevant limitations and permission boundaries.
+
+The reviewer must begin and end an evidence-backed assessment with
+`workspace_inspect` snapshots. Passing, conditional, and failing claims must
+cite exact completed receipts from the current Review invocation, and the two
+snapshot digests must match. Workspace drift makes the result
+`INCONCLUSIVE`. Review cannot pass from prose, boundary snapshots alone, or a
+duplicated receipt.
 
 The reviewer returns one outcome:
 
@@ -683,7 +709,20 @@ The work is substantially complete but contains disclosed limitations, caveats, 
 
 ### 11.3 `FAIL`
 
-The work is incomplete or below the required quality. If the remediation limit permits, perform Replanning and remediation before returning to Review.
+The work is incomplete or below the required quality and is supported by
+current tool evidence. If the remediation limit permits, the Primary Agent
+performs Replanning and remediation.
+
+### 11.4 `INCONCLUSIVE`
+
+The available completed evidence cannot support a stable conclusion, including
+when the workspace changes during the assessment.
+
+### 11.5 `UNAVAILABLE`
+
+The Review stage itself could not run or produce a valid tool-backed result.
+Technical failure is reported as `UNAVAILABLE`; it must not be converted into
+`CONDITIONAL_PASS`.
 
 Review findings are advisory. They may trigger HER-controlled Replanning and
 remediation, but they cannot replace a valid Execution disposition. Execution
@@ -692,16 +731,60 @@ user-facing report.
 
 Review limits are strict:
 
-- `xhigh`: one review and at most one remediation cycle;
-- `max`: at most three review/remediation cycles.
+- Reviewed (`xhigh`): one independent Review; on `FAIL`, at most one
+  Primary-Agent remediation followed by exactly one read-only closure Review;
+- Assured (`max`): one independent Review; on `FAIL`, at most one immediate
+  Primary-Agent remediation before comprehensive Verification.
 
-After the limit is reached, HER proceeds to Finalisation regardless of the last review outcome and clearly reports unresolved findings.
+After the applicable limit is reached, HER continues with the mode's next stage
+and clearly preserves unresolved findings. Review never overwrites the valid
+Execution disposition.
 
-## 12. Stage 6: Finalisation and Reporting
+## 12. Stage 6: Assured Verification
+
+Comprehensive Verification applies only to Assured (`max`) work turns after
+Review and any resulting remediation. It evaluates the latest Execution result
+and current workspace state, not an earlier candidate.
+
+Verification has Tool Gateway access but no side-effect authority. It uses:
+
+- `workspace_inspect` for bounded status, diff, search, hash, artifact, and
+  before/after snapshot evidence;
+- `verification_run` only for predefined recipes. A recipe runs in an
+  ephemeral writable workspace copy with network disabled, environment
+  credentials cleared, common credential files and host configuration excluded,
+  a temporary empty `HOME`, and no shell-text input. If the required isolation facility is
+  unavailable, the tool returns unavailable and never falls back to host
+  execution.
+
+Each required check records its claim, verifiability, method, observed result,
+and exact current-invocation evidence receipts. A start without completion is
+not evidence. A failed tool may support only `FAILED` or `INCONCLUSIVE`; it
+cannot support a passing or unavailable claim. `VERIFIED`,
+`PARTIALLY_VERIFIED`, and `FAILED` assessments require stable opening and
+closing workspace snapshots.
+
+The overall Verification outcome is one of:
+
+- `VERIFIED`;
+- `PARTIALLY_VERIFIED`;
+- `FAILED`;
+- `NOT_AI_VERIFIABLE`;
+- `UNAVAILABLE`;
+- `INCONCLUSIVE`.
+
+A failed required check may trigger Primary-Agent Replanning and remediation,
+followed by a fresh Verification of the resulting latest state. An
+`INCONCLUSIVE` result may retry while attempts remain. The hard ceiling is
+three Verification attempts, including configured values greater than three.
+`PARTIALLY_VERIFIED` without a failed required check,
+`NOT_AI_VERIFIABLE`, and `UNAVAILABLE` proceed with explicit limitations.
+
+## 13. Stage 7: Finalisation and Reporting
 
 Finalisation applies to every turn, although `DIRECT_RESPONSE` reuses the Immediate Response and sends no additional final message.
 
-### 12.1 Exit assessment
+### 13.1 Exit assessment
 
 Execution assesses whether the requested outcome was achieved and records one
 of its four dispositions. Runtime deterministically maps that disposition to
@@ -715,11 +798,12 @@ Finalisation considers:
 - the parsed Execution result when valid;
 - execution and tool evidence references;
 - reviewer findings and unresolved limitations;
+- Verification checks, receipts, outcome, and limitations when present;
 - the marked Persona guidance used to render `final_message`.
 
-Reviewer findings must be considered critically rather than accepted blindly.
+Review and Verification findings must be considered critically rather than accepted blindly.
 
-### 12.2 User-facing reporting
+### 13.2 User-facing reporting
 
 The report communicates, as applicable:
 
@@ -729,6 +813,8 @@ The report communicates, as applicable:
 - known issues and risks;
 - assumptions;
 - relevant review findings;
+- whether the result is verified, partly verified, not AI-verifiable, or
+  unavailable;
 - the final task state.
 
 Reporting must be honest and must not claim unverified work as complete.
@@ -737,7 +823,7 @@ Finalisation is one combined model stage. Its ordinary path is one provider
 call; an eligible transient provider failure permits one fresh-connection
 recovery call. Both attempts receive the current request, the same complete raw
 Execution output, the same parsed Execution result when that envelope was
-valid, the same optional Review findings, and only the explicit `[persona]`
+valid, the same optional Review and Verification findings, and only the explicit `[persona]`
 block from the configured Agent system file. It never receives the rest of that
 file and has no Tool Gateway.
 
@@ -756,7 +842,7 @@ renderer. A retry is another attempt at the same combined Finalisation
 operation, not a new reporting workflow. A Direct Response remains
 Persona-authored by Immediate Response.
 
-### 12.3 Reporting failure
+### 13.3 Reporting failure
 
 For one transient provider-failure sequence, Finalisation may make at most two
 attempts: the initial attempt and one eligible fresh-connection recovery.
@@ -766,16 +852,16 @@ idle-progress boundary; it does not replenish the one provider-recovery
 allowance. Neither attempt has an HER elapsed-time deadline. Runtime freezes
 and hashes the Finalisation input before the first attempt; every recovery or
 structure-correction attempt must reuse the same Execution invocation identity,
-raw output, parsed result, evidence references, Review findings, goal,
+raw output, parsed result, evidence references, Review and Verification findings, goal,
 classification, permissions, provider, model, and workzone. Execution is never
 called again. If recovery is unavailable or the applicable repair paths are
 exhausted, Runtime preserves Execution evidence, selects technical `ERROR`, and
 sends a deterministic local fallback report containing the typed error code and
 human-readable description.
 
-## 13. Lifecycle State Machine
+## 14. Lifecycle State Machine
 
-### 13.1 States
+### 14.1 States
 
 The canonical lifecycle states are:
 
@@ -786,10 +872,11 @@ The canonical lifecycle states are:
 - `REPLANNING`
 - `EXECUTION_COMPLETED`
 - `REVIEWING`
+- `VERIFYING`
 - `FINALISING`
-- terminal states defined in Section 14
+- terminal states defined in Section 15
 
-### 13.2 Valid principal transitions
+### 14.2 Valid principal transitions
 
 ```text
 RECEIVED
@@ -824,7 +911,16 @@ REVIEWING [FAIL with remediation available]
   -> EXECUTION_COMPLETED
   -> REVIEWING
 
-EXECUTION_COMPLETED or REVIEWING
+REVIEWING [ASSURED]
+  -> VERIFYING
+
+VERIFYING [failed required check with remediation available]
+  -> REPLANNING
+  -> EXECUTING
+  -> EXECUTION_COMPLETED
+  -> VERIFYING
+
+EXECUTION_COMPLETED, REVIEWING, or VERIFYING
   -> FINALISING
   -> TERMINAL
 
@@ -832,19 +928,20 @@ FINALISING [Execution requires user input]
   -> PENDING_USER_INPUT
 ```
 
-### 13.3 Strict ordering
+### 14.3 Strict ordering
 
 Lifecycle transitions must follow an explicitly allowed edge. Examples of invalid events include:
 
 - execution completion without execution start;
 - review completion before an execution candidate exists;
+- verification completion before an execution candidate exists;
 - replanning before an active plan exists;
 - plan replacement outside Replanning;
 - classification replacement after `TRIAGED`.
 
 An invalid transition is a technical `ERROR`. The turn terminates immediately. Content fields may be repaired or omitted according to stage policy, but lifecycle ordering may not be fabricated.
 
-## 14. Terminal States
+## 15. Terminal States
 
 HER v2 uses the following unified terminal states:
 
@@ -866,9 +963,9 @@ HER v2 uses the following unified terminal states:
 
 Reaching a terminal state concludes the turn. It does not guarantee perfect completion or user satisfaction.
 
-## 15. Execution Ledger
+## 16. Execution Ledger
 
-### 15.1 Purpose
+### 16.1 Purpose
 
 Each request has a lightweight Execution Ledger. The Ledger is the authoritative operational record of the turn's current lifecycle state. It supports:
 
@@ -879,7 +976,7 @@ Each request has a lightweight Execution Ledger. The Ledger is the authoritative
 
 The Ledger is not the complete audit record.
 
-### 15.2 Minimal record
+### 16.2 Minimal record
 
 A representative current snapshot is:
 
@@ -898,20 +995,20 @@ A representative current snapshot is:
 The Ledger must not store:
 
 - full reasoning traces;
-- full planning or review output;
+- full planning, review, or verification output;
 - complete tool request and response payloads;
 - duplicated conversation history;
 - a second complete audit trail.
 
 Those records belong in HASHI orchestration logs. The Ledger stores only current control state and references.
 
-### 15.3 Append-only truth
+### 16.3 Append-only truth
 
 Historical facts are never silently rewritten. If later evidence corrects an earlier interpretation, HASHI appends a correction record and advances the current Ledger snapshot. Detailed history remains reconstructable from logs.
 
 An incomplete Ledger is valid evidence that the turn did not reach a conclusion.
 
-## 16. HASHI Logging and Audit
+## 17. HASHI Logging and Audit
 
 HASHI orchestration logs are the authoritative audit source. They must preserve all audit information available to HASHI and HER, including:
 
@@ -925,6 +1022,9 @@ HASHI orchestration logs are the authoritative audit source. They must preserve 
 - sub-agent assignments and responses;
 - replanning prompts, reasoning traces, and plan versions;
 - reviewer prompts, reasoning traces, findings, and outcomes;
+- verifier prompts, reasoning traces, check results, and outcomes;
+- exact tool-evidence receipts with stage, attempt, invocation, call identity,
+  completion status, safety classification, and output digest;
 - finalisation reasoning traces and user-facing reports;
 - lifecycle transitions, retries, timeouts, and errors;
 - model, provider, effort, and request correlation metadata.
@@ -946,9 +1046,9 @@ final lane is not proof of delivery.
 
 Logs must apply existing HASHI secret-redaction, access-control, retention, and workspace-isolation policies.
 
-## 17. Failure, Retry, and Recovery
+## 18. Failure, Retry, and Recovery
 
-### 17.1 Stage-local provider recovery
+### 18.1 Stage-local provider recovery
 
 HER permits exactly one fresh-connection provider recovery within the active
 process and current logical stage. Recovery eligibility is selected by typed
@@ -993,7 +1093,7 @@ the same single provider recovery. Finalisation receives at most one recovery
 and reuses immutable Execution evidence; the Execution invocation count remains
 one.
 
-### 17.2 No process-restart resumption
+### 18.2 No process-restart resumption
 
 HER does not reconstruct or resume an in-flight execution stack after process restart.
 
@@ -1001,15 +1101,15 @@ If the process stops unexpectedly:
 
 - the old turn becomes `ERROR` during reconciliation;
 - its incomplete Ledger and HASHI logs are preserved;
-- no old planner, executor, reviewer, or sub-agent continuation is restarted automatically.
+- no old planner, executor, reviewer, verifier, or sub-agent continuation is restarted automatically.
 
 A later user request such as “continue” starts a new turn. Its Triage stage may inspect conversation history, the previous Ledger, and HASHI logs to determine remaining work.
 
 Recovery is conversational, not transactional.
 
-## 18. Timeout Model
+## 19. Timeout Model
 
-### 18.1 User timeout
+### 19.1 User timeout
 
 The user timeout represents the maximum permitted period without measurable progress. It is not a total wall-clock runtime limit.
 
@@ -1023,7 +1123,7 @@ Measurable progress includes:
 
 No-op retries, heartbeat-only Ledger writes, idle waiting, and unlogged internal loops are not progress.
 
-### 18.2 Scoped inactivity and explicit operation timeouts
+### 19.2 Scoped inactivity and explicit operation timeouts
 
 Transport operations may retain connection-inactivity, read-inactivity, and
 protocol-safety guards. Each guard must live inside the narrow transport or
@@ -1037,7 +1137,7 @@ one for that individual invocation. Omission means that no default tool timeout
 is applied. An explicit tool timeout does not create or imply a turn, stage,
 provider, or later-tool budget.
 
-### 18.3 Prohibited execution limits at every stage
+### 19.3 Prohibited execution limits at every stage
 
 There is no stage timeout, provider-attempt timeout, whole-turn hard timeout,
 elapsed-time budget, turn-count budget, tool-round budget, call/step budget,
@@ -1048,7 +1148,7 @@ for arbitrarily long elapsed time and across arbitrarily many tool/model rounds.
 Only the expressly authorised controls listed in section 3.2.1 may stop or
 bound it.
 
-### 18.4 Auto Compact maintenance-call exception
+### 19.4 Auto Compact maintenance-call exception
 
 Auto Compact is HASHI-owned context capacity maintenance, not a principal HER
 lifecycle stage. It may invoke only an explicitly configured, tool-free Compact
@@ -1074,7 +1174,7 @@ The complete configuration, hierarchy, validation, persistence, provider
 boundary, failure, and test contract is authoritative in the
 [Auto Compact design](HER_V2_AUTO_COMPACTION_DESIGN.md).
 
-## 19. Sub-Agent Governance
+## 20. Sub-Agent Governance
 
 Authority is ordered as:
 
@@ -1102,9 +1202,9 @@ Sub-agents may not:
 
 Only the primary HER workflow may enter `REPLANNING`.
 
-## 20. Architectural Boundaries
+## 21. Architectural Boundaries
 
-### 20.1 HASHI-owned responsibilities
+### 21.1 HASHI-owned responsibilities
 
 HASHI remains responsible for:
 
@@ -1122,18 +1222,18 @@ HASHI remains responsible for:
 - Workbench and operational status;
 - hot restart and process lifecycle.
 
-### 20.2 HER-owned responsibilities
+### 21.2 HER-owned responsibilities
 
 HER v2 owns:
 
 - Triage;
-- effort-policy resolution;
+- execution-mode policy resolution;
 - lifecycle-state validation;
 - stage orchestration;
 - lightweight Ledger management;
 - plan version selection;
 - Replanning triggers;
-- review/remediation limits;
+- Review, closure, Verification, and remediation limits;
 - deterministic mapping from the canonical Execution disposition to terminal
   state, plus technical runtime terminal states.
 
@@ -1151,11 +1251,11 @@ asset inventory plus each template's exact placeholder set before a prompt may
 be rendered. Missing, empty, unknown, or drifted templates fail closed during
 import or hot reload.
 
-### 20.3 Optional supporting systems
+### 21.3 Optional supporting systems
 
 Habits, Meditation, Dream, and optional native executors connect through explicit interfaces. They cannot become mandatory hidden dependencies of the core state machine.
 
-### 20.4 Compatibility facade
+### 21.4 Compatibility facade
 
 HER v2 remains registered through a thin HASHI compatibility facade. Internally
 it behaves as an orchestration policy over provider and tool interfaces rather
@@ -1170,7 +1270,7 @@ lifecycle/delivery/audit support live in the dedicated HER v2 runtime modules.
 `HERv2Adapter`, `HashiStageProvider`, and the established test-facing bridge
 exports remain available from the compatibility facade.
 
-## 21. Migration Strategy
+## 22. Migration Strategy
 
 Implementation starts from HASHI `origin/main` commit `604b826ed0dbb8cb748a617cbcf4c7d0dd7406f4` in a clean, dedicated branch and worktree.
 
@@ -1182,7 +1282,8 @@ The migration sequence is:
 4. deliver `low` Direct Response and Simple Task paths;
 5. add `medium` Planning;
 6. add `high` Replanning;
-7. add `xhigh` and `max` Review and remediation;
+7. add Reviewed (`xhigh`) Review/remediation/closure and Assured (`max`)
+   Review/Verification/remediation;
 8. integrate sub-agents;
 9. integrate Habits, Meditation, and Dream last;
 10. certify normal-mode execution with HASHI permissions restricting canary
@@ -1194,7 +1295,7 @@ The migration sequence is:
 
 Existing HER code, local experimental commits, and uncommitted Task Control work are reference material. They are not the implementation foundation of HER v2 and must be ported only when a v2 requirement and test justify them.
 
-## 22. Acceptance Criteria
+## 23. Acceptance Criteria
 
 HER v2 is ready for production rollout only when:
 
@@ -1206,7 +1307,13 @@ HER v2 is ready for production rollout only when:
 - cron and heartbeat prompt work defaults to request-local `low` effort across
   scheduled, manual, and recovery triggers; valid job overrides win without
   changing provider reasoning or leaking into later ordinary turns;
-- Replanning and Review loops cannot violate lifecycle order;
+- Replanning, Review, and Verification loops cannot violate lifecycle order;
+- passing assurance claims require completed receipts from the exact current
+  stage invocation and stable before/after snapshots; fabricated, stale,
+  cross-stage, incomplete, and failed passing evidence is rejected;
+- Assured Verification runs only predefined recipes in an ephemeral,
+  no-network, credential-cleared workspace copy and fails closed when isolation
+  is unavailable;
 - eligible provider failures receive no more and no less than one safe
   fresh-connection recovery; typed exclusions, invariant hashes, and
   process-restart non-resumption are enforced without an attempt deadline;
@@ -1214,7 +1321,7 @@ HER v2 is ready for production rollout only when:
   tool-enabled provider loop is free of unauthorised turn-, time-, token-,
   call-, step-, tool-round-, and sub-agent-count ceilings; the isolated
   tool-free Compact call is the only provider-attempt watchdog exception and
-  remains scoped exactly as sections 3.2.1 and 18.4 require;
+  remains scoped exactly as sections 3.2.1 and 19.4 require;
 - Ledger records remain minimal and auditable through log references;
 - all available reasoning traces are logged and correlated to the turn;
 - tools and permissions remain HASHI-owned;
@@ -1240,7 +1347,7 @@ HER v2 is ready for production rollout only when:
 - failed HER v2 initialization fails closed or uses an explicitly selected
   non-HER backend; it never rolls back to retired HER.
 
-## 23. Locked Runtime Invariants
+## 24. Locked Runtime Invariants
 
 The following decisions are authoritative for HER v2:
 
@@ -1254,9 +1361,9 @@ The following decisions are authoritative for HER v2:
    elapsed-time, turn-count, token, call, step, tool-round, or sub-agent-count
    ceiling beyond the expressly authorised controls in section 3.2.1. The
    separate tool-free Compact request follows the narrow Tier 2/Tier 3 exception
-   in section 18.4.
+   in section 19.4.
 7. Immediate Response becomes the sole final user-facing answer for `DIRECT_RESPONSE`.
-8. Review is advisory and never user-facing.
+8. Review and Verification are read-only, advisory, and never user-facing.
 9. The Primary Agent owns execution and reporting.
 10. The Ledger is minimal operational state; HASHI logs are audit truth.
 11. All available reasoning traces must be logged.
@@ -1273,10 +1380,16 @@ The following decisions are authoritative for HER v2:
 18. Reporting failure does not discard completed work.
 19. Recovery is conversational, not transactional.
 20. HER core is provider-neutral and modular.
-21. Auto Compact is HASHI-owned, tool-free, atomically reversible capacity
+21. A model-authored assurance claim is never evidence: only exact, completed,
+    current-invocation Tool Registry receipts may support it, and a failed tool
+    can support only a failed or inconclusive assessment.
+22. Review and Verification never replace Execution's disposition; Finalisation
+    reports verified, partly verified, not AI-verifiable, and unavailable work
+    distinctly.
+23. Auto Compact is HASHI-owned, tool-free, atomically reversible capacity
     maintenance; its dedicated Tier 2/Tier 3 call watchdog never becomes an
     ordinary HER stage, provider, tool-loop, or execution deadline.
 
-## 24. Golden Rule
+## 25. Golden Rule
 
 > Less blocking, more progress — while preserving immutable Triage authority, strict lifecycle order, complete available reasoning audit, and fidelity to the user's active goal.

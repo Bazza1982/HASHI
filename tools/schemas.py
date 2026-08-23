@@ -1720,6 +1720,80 @@ for _tool_name in [
         fn["parameters"]["properties"].update(_BROWSER_EXTRA_FIELDS)
 
 # Map tool name -> schema for quick lookup
+TOOL_SCHEMAS.extend(
+    [
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_inspect",
+                "description": (
+                    "Read-only HER review tool for workspace snapshots, git status/diff, "
+                    "bounded search, and file or artifact hashes. It cannot write files. "
+                    "Evidence-backed Review and Verification must call snapshot first and last."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": [
+                                "snapshot",
+                                "status",
+                                "diff",
+                                "search",
+                                "hash",
+                                "artifact",
+                            ],
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Workspace-relative target; defaults to the workspace root.",
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Required only for search.",
+                        },
+                        "regex": {
+                            "type": "boolean",
+                            "description": "Treat search query as a regular expression; defaults to false.",
+                        },
+                        "cached": {
+                            "type": "boolean",
+                            "description": "Inspect the staged diff instead of the worktree diff.",
+                        },
+                    },
+                    "required": ["operation"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "verification_run",
+                "description": (
+                    "List or run a pre-registered verification recipe. Run creates an "
+                    "ephemeral writable workspace copy, clears credentials, disables network "
+                    "access, and destroys the copy afterward. It never accepts shell text."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {"type": "string", "enum": ["list", "run"]},
+                        "recipe": {
+                            "type": "string",
+                            "description": "Registered recipe id returned by the list operation.",
+                        },
+                    },
+                    "required": ["operation"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    ]
+)
+
+
 TOOL_SCHEMA_MAP = {s["function"]["name"]: s for s in TOOL_SCHEMAS}
 
 ALL_TOOL_NAMES = list(TOOL_SCHEMA_MAP.keys())

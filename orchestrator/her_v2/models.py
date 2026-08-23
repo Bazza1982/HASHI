@@ -42,6 +42,46 @@ class Effort(StrEnum):
     MAX = "max"
 
 
+EFFORT_DISPLAY_LABELS: Mapping[Effort, str] = {
+    Effort.LOW: "Fast path",
+    Effort.MEDIUM: "Planned",
+    Effort.HIGH: "Adaptive",
+    Effort.XHIGH: "Reviewed",
+    Effort.MAX: "Assured",
+}
+
+_EFFORT_ALIASES: Mapping[str, Effort] = {
+    "fast": Effort.LOW,
+    "fast_path": Effort.LOW,
+    "planned": Effort.MEDIUM,
+    "adaptive": Effort.HIGH,
+    "reviewed": Effort.XHIGH,
+    "assured": Effort.MAX,
+}
+
+
+def parse_effort(value: Effort | str) -> Effort:
+    """Accept stable wire values plus user-facing HER execution-mode aliases."""
+
+    if isinstance(value, Effort):
+        return value
+    normalized = (
+        str(value or "")
+        .strip()
+        .casefold()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+    aliased = _EFFORT_ALIASES.get(normalized)
+    return aliased if aliased is not None else Effort(normalized)
+
+
+def effort_display_label(value: Effort | str, *, include_value: bool = True) -> str:
+    effort = parse_effort(value)
+    label = EFFORT_DISPLAY_LABELS[effort]
+    return f"{label} ({effort.value})" if include_value else label
+
+
 class LifecycleState(StrEnum):
     RECEIVED = "RECEIVED"
     TRIAGED = "TRIAGED"
@@ -50,6 +90,7 @@ class LifecycleState(StrEnum):
     REPLANNING = "REPLANNING"
     EXECUTION_COMPLETED = "EXECUTION_COMPLETED"
     REVIEWING = "REVIEWING"
+    VERIFYING = "VERIFYING"
     FINALISING = "FINALISING"
     COMPLETED = "COMPLETED"
     COMPLETED_WITH_LIMITATIONS = "COMPLETED_WITH_LIMITATIONS"
@@ -78,6 +119,7 @@ class Stage(StrEnum):
     EXECUTION = "execution"
     REPLANNING = "replanning"
     REVIEW = "review"
+    VERIFICATION = "verification"
     FINALISATION = "finalisation"
     MEDITATION = "meditation"
     DREAM = "dream"
@@ -99,6 +141,7 @@ class Route(StrEnum):
     EXECUTION_HIGH_VOLUME = "execution_high_volume"
     REPLANNING = "replanning"
     REVIEW = "review"
+    VERIFICATION = "verification"
     FINALISATION = "finalisation"
     MEDITATION = "meditation"
     DREAM = "dream"
@@ -113,6 +156,7 @@ ROUTE_STAGES: Mapping[Route, Stage] = {
     Route.EXECUTION_HIGH_VOLUME: Stage.EXECUTION,
     Route.REPLANNING: Stage.REPLANNING,
     Route.REVIEW: Stage.REVIEW,
+    Route.VERIFICATION: Stage.VERIFICATION,
     Route.FINALISATION: Stage.FINALISATION,
     Route.MEDITATION: Stage.MEDITATION,
     Route.DREAM: Stage.DREAM,
@@ -126,6 +170,7 @@ DEFAULT_ROUTES_BY_STAGE: Mapping[Stage, Route] = {
     Stage.EXECUTION: Route.EXECUTION_COMPLEX,
     Stage.REPLANNING: Route.REPLANNING,
     Stage.REVIEW: Route.REVIEW,
+    Stage.VERIFICATION: Route.VERIFICATION,
     Stage.FINALISATION: Route.FINALISATION,
     Stage.MEDITATION: Route.MEDITATION,
     Stage.DREAM: Route.DREAM,
@@ -143,6 +188,30 @@ class ReviewOutcome(StrEnum):
     PASS = "PASS"
     CONDITIONAL_PASS = "CONDITIONAL_PASS"
     FAIL = "FAIL"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class VerificationOutcome(StrEnum):
+    VERIFIED = "VERIFIED"
+    PARTIALLY_VERIFIED = "PARTIALLY_VERIFIED"
+    FAILED = "FAILED"
+    NOT_AI_VERIFIABLE = "NOT_AI_VERIFIABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class Verifiability(StrEnum):
+    VERIFIABLE = "VERIFIABLE"
+    PARTIALLY_VERIFIABLE = "PARTIALLY_VERIFIABLE"
+    NOT_AI_VERIFIABLE = "NOT_AI_VERIFIABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class ToolReceiptStatus(StrEnum):
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class ExecutionDisposition(StrEnum):
@@ -186,6 +255,7 @@ class StageResponse:
     usage: Mapping[str, int] = field(default_factory=dict)
     evidence_refs: tuple[str, ...] = ()
     provider_attempt: int = 1
+    tool_receipts: tuple[ToolEvidenceReceipt, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -225,6 +295,46 @@ class ReviewFinding:
     outcome: ReviewOutcome
     summary: str
     findings: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class VerificationCheck:
+    claim: str
+    verifiability: Verifiability
+    result: VerificationOutcome
+    method: str
+    evidence_refs: tuple[str, ...] = ()
+    observed: str = ""
+    required: bool = True
+
+
+@dataclass(frozen=True)
+class VerificationFinding:
+    outcome: VerificationOutcome
+    summary: str
+    checks: tuple[VerificationCheck, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ToolEvidenceReceipt:
+    evidence_ref: str
+    stage: Stage
+    invocation_id: str
+    attempt: int
+    tool_call_id: str
+    tool_name: str
+    status: ToolReceiptStatus
+    read_only: bool
+    completed: bool
+    output_sha256: str
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def successful(self) -> bool:
+        return self.completed and self.status is ToolReceiptStatus.SUCCESS
 
 
 @dataclass(frozen=True)
@@ -273,6 +383,8 @@ class TurnResult:
     delivery_event_id: str = ""
     review_count: int = 0
     replan_count: int = 0
+    verification_count: int = 0
+    assurance_status: str = ""
 
 
 def terminal_lifecycle(state: TerminalState) -> LifecycleState:

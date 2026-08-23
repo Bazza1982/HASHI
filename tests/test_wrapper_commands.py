@@ -605,6 +605,19 @@ def test_status_text_shows_wrapper_model_configuration():
     assert "<b>Slots</b> · <code>3</code> configured" in text
 
 
+def test_status_text_names_her_execution_mode_without_renaming_other_backends():
+    runtime = _make_status_runtime("flex", {})
+    runtime.config.active_backend = "her-v2"
+    runtime._get_current_effort = lambda: "max"
+    runtime.get_current_model = lambda: "role-configured"
+    runtime.get_current_provider = lambda: "openrouter"
+
+    text = runtime._build_status_text(detailed=False)
+
+    assert "<b>HER execution mode</b> · <code>Assured (max)</code>" in text
+    assert "<b>Effort</b>" not in text
+
+
 def test_status_text_moves_display_settings_into_summary_for_compact_and_full(tmp_path):
     runtime = _make_status_runtime("flex", {})
     runtime.workspace_dir = tmp_path / "xishi"
@@ -1795,6 +1808,48 @@ async def test_her_v2_effort_change_does_not_mutate_provider_reasoning(tmp_path)
     after = manager.get_her_v2_configuration().to_dict()
     assert after == before
     assert manager.current_backend.effort == "max"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("alias", "canonical", "label"),
+    [
+        ("reviewed", "xhigh", "Reviewed (xhigh)"),
+        ("assured", "max", "Assured (max)"),
+    ],
+)
+async def test_her_v2_effort_aliases_persist_canonical_execution_modes(
+    tmp_path, alias, canonical, label
+):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    update, context = _update([alias])
+
+    await FlexibleAgentRuntime.cmd_effort(runtime, update, context)
+
+    assert manager.current_backend.effort == canonical
+    assert label in messages[-1]
+    assert _read_state(tmp_path / "agent")["backend_efforts"]["her-v2"] == canonical
+
+
+@pytest.mark.asyncio
+async def test_her_v2_effort_menu_uses_execution_mode_names(tmp_path):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    update, context = _update([])
+
+    await FlexibleAgentRuntime.cmd_effort(runtime, update, context)
+
+    assert "HER EXECUTION MODE" in messages[-1]
+    markup = str(runtime._reply_payloads[-1]["reply_markup"])
+    for label in (
+        "Fast path (low)",
+        "Planned (medium)",
+        "Adaptive (high)",
+        "Reviewed (xhigh)",
+        "Assured (max)",
+    ):
+        assert label in markup
 
 
 @pytest.mark.asyncio

@@ -228,7 +228,8 @@ HER v2 adds one request policy at this boundary for Agent-backed prompt work:
   effort because their persisted job definition already supplies the routine
   execution specification;
 - an optional per-job `her_v2_effort` value may select `low`, `medium`, `high`,
-  `xhigh`, or `max`;
+  `xhigh`, or `max`; matching Fast path, Planned, Adaptive, Reviewed, and
+  Assured aliases normalize to those canonical values;
 - scheduled occurrences, recovery replays, and manual Run actions use the same
   job policy;
 - the scheduler passes explicit nested request metadata instead of changing

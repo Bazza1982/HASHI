@@ -450,14 +450,14 @@ def test_active_heartbeat_describes_low_default_before_and_after_creation(
 ):
     manager = SkillManager(tmp_path, tmp_path / "tasks.json")
 
-    assert "HER v2 effort: low (scheduled job default)" in (
+    assert "HER execution mode: Fast path (low) (scheduled job default)" in (
         manager.describe_active_heartbeat("momo")
     )
 
     ok, _message = manager.set_active_heartbeat("momo", enabled=True, minutes=15)
 
     assert ok is True
-    assert "HER v2 effort: low (scheduled job default)" in (
+    assert "HER execution mode: Fast path (low) (scheduled job default)" in (
         manager.describe_active_heartbeat("momo")
     )
 

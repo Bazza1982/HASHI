@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .models import Effort
+from .models import Effort, parse_effort
 
 
 HER_V2_JOB_EFFORT_FIELD = "her_v2_effort"
@@ -29,9 +29,8 @@ def normalize_job_effort(value: Any) -> Effort | None:
 
     if value is None or not str(value).strip():
         return None
-    normalized = str(value).strip().lower()
     try:
-        return Effort(normalized)
+        return parse_effort(str(value))
     except ValueError as exc:
         allowed = ", ".join(item.value for item in Effort)
         raise ValueError(
@@ -143,7 +142,7 @@ def resolve_request_effort(
     configured = (
         configured_effort
         if isinstance(configured_effort, Effort)
-        else Effort(str(configured_effort).strip().lower())
+        else parse_effort(str(configured_effort))
     )
     meta = request_meta if isinstance(request_meta, Mapping) else {}
     raw_context = meta.get("scheduler_context")

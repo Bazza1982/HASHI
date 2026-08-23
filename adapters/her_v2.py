@@ -218,7 +218,9 @@ class HERv2Adapter(BaseBackend):
                 .strip()
                 .lower()
             )
-            self.effort = Effort(requested_effort).value
+            from orchestrator.her_v2.models import parse_effort
+
+            self.effort = parse_effort(requested_effort).value
             injected = getattr(self.config, "_her_v2_stage_provider", None)
             if injected is None and self._backend_manager() is None:
                 raise HERv2ConfigurationError(

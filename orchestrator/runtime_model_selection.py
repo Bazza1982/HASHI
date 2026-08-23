@@ -29,6 +29,7 @@ HER_V2_ROUTE_LABELS = {
     Route.EXECUTION_HIGH_VOLUME: "High-volume execution",
     Route.REPLANNING: "Replanning",
     Route.REVIEW: "Review",
+    Route.VERIFICATION: "Assured verification",
     Route.FINALISATION: "Finalisation",
     Route.MEDITATION: "Meditation",
     Route.DREAM: "Dream",
@@ -2020,8 +2021,17 @@ async def callback_model(runtime, update, context: Any) -> None:
                         parse_mode="HTML",
                     )
                 else:
+                    if runtime.config.active_backend == HER_V2_ENGINE:
+                        from orchestrator.her_v2.models import effort_display_label
+
+                        switched_text = (
+                            "HER execution mode switched to: "
+                            f"{effort_display_label(requested)}"
+                        )
+                    else:
+                        switched_text = f"Effort switched to: {requested}"
                     await query.edit_message_text(
-                        f"Effort switched to: {requested}",
+                        switched_text,
                         reply_markup=runtime._effort_keyboard(requested),
                     )
     except Exception as exc:

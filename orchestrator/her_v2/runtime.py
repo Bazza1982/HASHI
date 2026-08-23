@@ -47,7 +47,11 @@ from .models import (
     TerminalState,
     TriageClassification,
     TriageDecision,
+    ToolEvidenceReceipt,
     TurnResult,
+    VerificationFinding,
+    VerificationOutcome,
+    parse_effort,
     terminal_lifecycle,
 )
 from .policy import resolve_policy, terminal_for_execution
@@ -69,8 +73,9 @@ from .structured import (
     parse_finalisation,
     parse_immediate,
     parse_plan,
-    parse_review,
     parse_triage,
+    validate_review_response,
+    validate_verification_response,
 )
 
 Validator = Callable[[StageResponse], Any]
@@ -87,13 +92,17 @@ class _TurnState:
     progress: ProgressTracker = field(default_factory=ProgressTracker)
     deliveries: list[DeliveryRecord] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
+    tool_receipts: dict[str, ToolEvidenceReceipt] = field(default_factory=dict)
     limitations: list[str] = field(default_factory=list)
     active_plan: Mapping[str, Any] | None = None
     plan_version: int = 0
     replan_count: int = 0
     review_count: int = 0
+    verification_count: int = 0
     stage_invocation_serial: int = 0
     last_review: ReviewFinding | None = None
+    review_remediated: bool = False
+    last_verification: VerificationFinding | None = None
     delivery_id: str = ""
     delivery_kind: str = ""
     delivery_event_id: str = ""
@@ -160,9 +169,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         prompt = str(request or "").strip()
         if not prompt:
             raise ValueError("HER v2 requires a non-empty authoritative request")
-        effort_value = (
-            effort if isinstance(effort, Effort) else Effort(str(effort).lower())
-        )
+        effort_value = parse_effort(effort)
         identity = turn_id or f"{request_id}-{uuid.uuid4().hex[:12]}"
         request_ref = f"hashi-request:{request_id}"
         goal_ref = "sha256:" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -648,6 +655,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             state.effort,
             replan_limit=self.config.replan_limits[state.effort],
             review_limit=self.config.review_limits[state.effort],
+            verification_limit=self.config.verification_limits[state.effort],
         )
         if policy.planning:
             planning_context: dict[str, Any] = {
@@ -692,6 +700,19 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 state, classification, execution, policy.max_reviews, policy.max_replans
             )
 
+        if (
+            policy.assurance
+            and execution is not None
+            and execution.disposition is not ExecutionDisposition.USER_INPUT_REQUIRED
+        ):
+            execution, _verification_outcome = await self._verify_and_remediate(
+                state,
+                classification,
+                execution,
+                policy.max_verifications,
+                policy.max_replans,
+            )
+
         await self._transition(state, LifecycleState.FINALISING)
         raw_execution = state.last_execution_response
         finalisation: FinalisationOutcome | None = None
@@ -723,10 +744,51 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     "outcome": state.last_review.outcome.value,
                     "summary": state.last_review.summary,
                     "findings": list(state.last_review.findings),
+                    "evidence_refs": list(state.last_review.evidence_refs),
+                    "remediation_applied": state.review_remediated,
                 }
                 if state.last_review
                 else None
             ),
+            "assurance": (
+                {
+                    "outcome": state.last_verification.outcome.value,
+                    "summary": state.last_verification.summary,
+                    "checks": [
+                        {
+                            "claim": check.claim,
+                            "verifiability": check.verifiability.value,
+                            "result": check.result.value,
+                            "method": check.method,
+                            "evidence_refs": list(check.evidence_refs),
+                            "observed": check.observed,
+                            "required": check.required,
+                        }
+                        for check in state.last_verification.checks
+                    ],
+                    "evidence_refs": list(state.last_verification.evidence_refs),
+                    "limitations": list(state.last_verification.limitations),
+                    "attempts": state.verification_count,
+                }
+                if state.last_verification
+                else None
+            ),
+            "evidence_receipts": [
+                {
+                    "evidence_ref": receipt.evidence_ref,
+                    "stage": receipt.stage.value,
+                    "invocation_id": receipt.invocation_id,
+                    "attempt": receipt.attempt,
+                    "tool_call_id": receipt.tool_call_id,
+                    "tool_name": receipt.tool_name,
+                    "status": receipt.status.value,
+                    "read_only": receipt.read_only,
+                    "completed": receipt.completed,
+                    "output_sha256": receipt.output_sha256,
+                    "details": dict(receipt.details),
+                }
+                for receipt in state.tool_receipts.values()
+            ],
         }
         execution_evidence_hash = _payload_hash(execution_evidence)
         finalisation_context = {
@@ -1199,64 +1261,258 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         max_reviews: int,
         max_replans: int,
     ) -> tuple[ExecutionOutcome | None, ReviewOutcome | None]:
-        last_outcome: ReviewOutcome | None = None
-        remediation_count = 0
-        while state.review_count < max_reviews:
-            await self._transition(state, LifecycleState.REVIEWING)
-            state.review_count += 1
-            try:
-                _response, finding = await self._invoke_stage(
-                    state,
-                    Stage.REVIEW,
-                    parse_review,
-                    allow_tools=False,
-                    allow_side_effects=False,
-                    context={
-                        "classification": classification.value,
-                        "active_plan": state.active_plan,
-                        "execution_summary": execution.summary,
-                        "evidence_refs": list(state.evidence_refs),
-                        "reviewer_authority": "advisory_only",
-                        "habits_included": False,
-                    },
-                )
-                assert isinstance(finding, ReviewFinding)
-            except StageInvocationError as exc:
-                state.limitations.append(f"Independent Review unavailable: {exc}")
-                return execution, ReviewOutcome.CONDITIONAL_PASS
-            state.last_review = finding
+        if max_reviews <= 0:
+            return execution, None
+
+        finding = await self._review_once(
+            state,
+            classification,
+            execution,
+            review_kind="independent",
+        )
+        if finding.outcome is ReviewOutcome.PASS:
+            return execution, finding.outcome
+        if finding.outcome in {
+            ReviewOutcome.CONDITIONAL_PASS,
+            ReviewOutcome.INCONCLUSIVE,
+            ReviewOutcome.UNAVAILABLE,
+        }:
+            self._merge_assurance_limitations(
+                state, finding.findings or (finding.summary,)
+            )
+            return execution, finding.outcome
+
+        initial_findings = finding.findings or (finding.summary,)
+        can_remediate = (
+            state.active_plan is not None and state.replan_count < max_replans
+        )
+        if not can_remediate:
+            self._merge_assurance_limitations(state, initial_findings)
+            return execution, finding.outcome
+
+        await self._perform_replan(
+            state,
+            classification,
+            reason="independent_review_failed",
+            reviewer_findings=initial_findings,
+        )
+        await self._transition(state, LifecycleState.EXECUTING)
+        execution = await self._execute_once(state, classification)
+        await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
+        if execution is None:
+            self._merge_assurance_limitations(state, initial_findings)
+            return None, finding.outcome
+        self._merge_execution_evidence(state, execution)
+        state.review_remediated = True
+        if execution.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
+            return execution, finding.outcome
+
+        # Reviewed always closes a remediated finding once. Assured proceeds
+        # from remediation into its stronger Verification stage instead.
+        if state.effort is Effort.MAX:
+            return execution, finding.outcome
+
+        closure = await self._review_once(
+            state,
+            classification,
+            execution,
+            review_kind="closure",
+            findings_to_close=initial_findings,
+        )
+        if closure.outcome is not ReviewOutcome.PASS:
+            self._merge_assurance_limitations(
+                state, closure.findings or (closure.summary,)
+            )
+        return execution, closure.outcome
+
+    async def _review_once(
+        self,
+        state: _TurnState,
+        classification: TriageClassification,
+        execution: ExecutionOutcome,
+        *,
+        review_kind: str,
+        findings_to_close: Sequence[str] = (),
+    ) -> ReviewFinding:
+        await self._transition(state, LifecycleState.REVIEWING)
+        state.review_count += 1
+        try:
+            _response, finding = await self._invoke_stage(
+                state,
+                Stage.REVIEW,
+                validate_review_response,
+                allow_tools=True,
+                allow_side_effects=False,
+                context={
+                    "classification": classification.value,
+                    "active_plan": state.active_plan,
+                    "execution": _execution_payload(execution),
+                    "evidence_refs": list(state.evidence_refs),
+                    "review_kind": review_kind,
+                    "findings_to_close": list(findings_to_close),
+                    "reviewer_authority": "advisory_read_only",
+                    "delegated_tools": [
+                        "workspace_inspect",
+                        "verification_run",
+                        "file_read",
+                        "file_list",
+                        "process_list",
+                        "media_read",
+                    ],
+                    "habits_included": False,
+                },
+            )
+            assert isinstance(finding, ReviewFinding)
+        except StageInvocationError as exc:
+            finding = ReviewFinding(
+                outcome=ReviewOutcome.UNAVAILABLE,
+                summary=f"Independent Review unavailable: {exc.human_description}",
+            )
+        state.last_review = finding
+        return finding
+
+    async def _verify_and_remediate(
+        self,
+        state: _TurnState,
+        classification: TriageClassification,
+        execution: ExecutionOutcome,
+        max_verifications: int,
+        max_replans: int,
+    ) -> tuple[ExecutionOutcome | None, VerificationOutcome | None]:
+        last_outcome: VerificationOutcome | None = None
+        while state.verification_count < max_verifications:
+            finding = await self._verification_once(
+                state, classification, execution
+            )
             last_outcome = finding.outcome
-            if finding.outcome is ReviewOutcome.PASS:
+            if finding.outcome is VerificationOutcome.VERIFIED:
                 return execution, last_outcome
-            if finding.outcome is ReviewOutcome.CONDITIONAL_PASS:
-                state.limitations.extend(finding.findings or (finding.summary,))
+            if finding.outcome in {
+                VerificationOutcome.NOT_AI_VERIFIABLE,
+                VerificationOutcome.UNAVAILABLE,
+            }:
+                self._merge_assurance_limitations(
+                    state, finding.limitations or (finding.summary,)
+                )
+                return execution, last_outcome
+            if finding.outcome is VerificationOutcome.INCONCLUSIVE:
+                if state.verification_count < max_verifications:
+                    continue
+                self._merge_assurance_limitations(
+                    state, finding.limitations or (finding.summary,)
+                )
                 return execution, last_outcome
 
-            state.limitations.extend(finding.findings or (finding.summary,))
+            failed_checks = tuple(
+                check
+                for check in finding.checks
+                if check.required and check.result is VerificationOutcome.FAILED
+            )
+            if not failed_checks:
+                self._merge_assurance_limitations(
+                    state, finding.limitations or (finding.summary,)
+                )
+                return execution, last_outcome
+
             can_remediate = (
-                state.active_plan is not None
-                and remediation_count < max_reviews
+                state.verification_count < max_verifications
+                and state.active_plan is not None
                 and state.replan_count < max_replans
             )
             if not can_remediate:
+                self._merge_assurance_limitations(
+                    state,
+                    finding.limitations
+                    or tuple(
+                        check.observed or check.claim for check in failed_checks
+                    ),
+                )
                 return execution, last_outcome
+
             await self._perform_replan(
                 state,
                 classification,
-                reason="independent_review_failed",
-                reviewer_findings=finding.findings or (finding.summary,),
+                reason="assurance_verification_failed",
+                reviewer_findings=tuple(
+                    check.observed or check.claim for check in failed_checks
+                ),
             )
-            remediation_count += 1
             await self._transition(state, LifecycleState.EXECUTING)
             execution = await self._execute_once(state, classification)
+            await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
             if execution is None:
-                await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
+                self._merge_assurance_limitations(state, (finding.summary,))
                 return None, last_outcome
             self._merge_execution_evidence(state, execution)
             if execution.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
                 return execution, last_outcome
-            await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
-            if state.effort is Effort.XHIGH:
-                return execution, last_outcome
-            # MAX may perform another independent Review, bounded above.
+            # The next loop is a fresh Verification invocation against the
+            # remediated, latest workspace state.
         return execution, last_outcome
+
+    async def _verification_once(
+        self,
+        state: _TurnState,
+        classification: TriageClassification,
+        execution: ExecutionOutcome,
+    ) -> VerificationFinding:
+        if state.ledger.status is not LifecycleState.VERIFYING:
+            await self._transition(state, LifecycleState.VERIFYING)
+        state.verification_count += 1
+        try:
+            _response, finding = await self._invoke_stage(
+                state,
+                Stage.VERIFICATION,
+                validate_verification_response,
+                allow_tools=True,
+                allow_side_effects=False,
+                context={
+                    "classification": classification.value,
+                    "active_plan": state.active_plan,
+                    "execution": _execution_payload(execution),
+                    "review": (
+                        {
+                            "outcome": state.last_review.outcome.value,
+                            "summary": state.last_review.summary,
+                            "findings": list(state.last_review.findings),
+                            "evidence_refs": list(state.last_review.evidence_refs),
+                            "remediation_applied": state.review_remediated,
+                        }
+                        if state.last_review is not None
+                        else None
+                    ),
+                    "verification_attempt": state.verification_count,
+                    "maximum_verification_attempts": min(
+                        3, self.config.verification_limits[state.effort]
+                    ),
+                    "evidence_refs": list(state.evidence_refs),
+                    "delegated_tools": [
+                        "workspace_inspect",
+                        "verification_run",
+                        "file_read",
+                        "file_list",
+                        "process_list",
+                        "media_read",
+                    ],
+                    "verifier_authority": "advisory_read_only",
+                    "habits_included": False,
+                },
+            )
+            assert isinstance(finding, VerificationFinding)
+        except StageInvocationError as exc:
+            finding = VerificationFinding(
+                outcome=VerificationOutcome.UNAVAILABLE,
+                summary=f"Assurance Verification unavailable: {exc.human_description}",
+                limitations=("No current tool-backed Verification result is available.",),
+            )
+        state.last_verification = finding
+        return finding
+
+    @staticmethod
+    def _merge_assurance_limitations(
+        state: _TurnState, limitations: Sequence[str]
+    ) -> None:
+        for limitation in limitations:
+            value = str(limitation or "").strip()
+            if value and value not in state.limitations:
+                state.limitations.append(value)

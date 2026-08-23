@@ -4815,7 +4815,13 @@ class FlexibleAgentRuntime:
         active = current_effort or self._get_current_effort()
         buttons = []
         for effort in self._get_available_efforts():
-            label = selected_label(effort, effort == active)
+            if self.config.active_backend == HER_V2_ENGINE:
+                from orchestrator.her_v2.models import effort_display_label
+
+                visible_effort = effort_display_label(effort)
+            else:
+                visible_effort = effort
+            label = selected_label(visible_effort, effort == active)
             callback_data = f"effort:{source}:{effort}" if source else f"effort:{effort}"
             buttons.append([InlineKeyboardButton(label, callback_data=callback_data)])
         if source in {"backend", "model"}:
@@ -4836,8 +4842,8 @@ class FlexibleAgentRuntime:
         current = self._get_current_effort() or (available[0] if available else "n/a")
         if self.config.active_backend == HER_V2_ENGINE:
             consequence = (
-                "HER v2 effort controls Planning, Replanning, Review, and sub-agent "
-                "availability. It never changes provider reasoning."
+                "HER execution mode controls Planning, Replanning, independent Review, "
+                "and Assured Verification. It never changes provider reasoning."
             )
         else:
             consequence = (
@@ -4860,13 +4866,23 @@ class FlexibleAgentRuntime:
             )
         else:
             facts.append(f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>")
+        if self.config.active_backend == HER_V2_ENGINE:
+            from orchestrator.her_v2.models import effort_display_label
+
+            current_display = effort_display_label(current)
+            title = "HER execution mode"
+            action = "Choose an execution mode, or keep the current value."
+        else:
+            current_display = current
+            title = "Choose effort"
+            action = "Choose an effort level, or keep the current value."
         return setting_card(
             "🎛️",
-            "Choose effort",
-            current=f"<code>{html.escape(current)}</code>",
+            title,
+            current=f"<code>{html.escape(current_display)}</code>",
             facts=facts,
             consequence=consequence,
-            action="Choose an effort level, or keep the current value.",
+            action=action,
         )
 
     def _build_model_configuration_summary(self) -> str:
@@ -5027,18 +5043,31 @@ class FlexibleAgentRuntime:
             requested = args[0].strip().lower()
             if requested == "extra":
                 requested = "extra_high"
+            if self.config.active_backend == HER_V2_ENGINE:
+                from orchestrator.her_v2.models import parse_effort
+
+                try:
+                    requested = parse_effort(requested).value
+                except ValueError:
+                    pass
             if requested not in available:
                 await self._reply_text(update, f"Unknown effort level: {requested}\nAvailable: {', '.join(available)}")
                 return
             self._set_active_effort(requested)
-            await self._reply_text(update, f"Effort switched to: {requested}")
+            if self.config.active_backend == HER_V2_ENGINE:
+                from orchestrator.her_v2.models import effort_display_label
+
+                switched = f"HER execution mode switched to: {effort_display_label(requested)}"
+            else:
+                switched = f"Effort switched to: {requested}"
+            await self._reply_text(update, switched)
             return
 
         current_effort = self._get_current_effort() or available[0]
         if self.config.active_backend == HER_V2_ENGINE:
             consequence = (
-                "HER v2 effort controls Planning, Replanning, Review, and sub-agent "
-                "availability. It does not change provider reasoning."
+                "HER execution mode controls Planning, Replanning, independent Review, "
+                "and Assured Verification. It does not change provider reasoning."
             )
         else:
             consequence = (
@@ -5054,12 +5083,20 @@ class FlexibleAgentRuntime:
             effort_facts = [
                 f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>"
             ]
+        if self.config.active_backend == HER_V2_ENGINE:
+            from orchestrator.her_v2.models import effort_display_label
+
+            effort_title = "HER execution mode"
+            current_display = effort_display_label(current_effort)
+        else:
+            effort_title = "Model effort"
+            current_display = current_effort
         await self._reply_text(
             update,
             setting_card(
                 "🎛️",
-                "Model effort",
-                current=f"<code>{html.escape(current_effort)}</code>",
+                effort_title,
+                current=f"<code>{html.escape(current_display)}</code>",
                 facts=effort_facts,
                 consequence=consequence,
                 action="The selection applies immediately and persists.",

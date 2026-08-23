@@ -109,3 +109,28 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
         persona_block_begin="[persona]",
         persona_block_end="[persona_end]",
     )
+
+
+def test_review_and_verification_prompts_enforce_tool_backed_read_only_evidence() -> None:
+    review_system = render_internal_stage_system_prompt(_request(Stage.REVIEW))
+    verification_system = render_internal_stage_system_prompt(
+        _request(Stage.VERIFICATION)
+    )
+    review_request = render_stage_prompt(_request(Stage.REVIEW))
+    verification_request = render_stage_prompt(_request(Stage.VERIFICATION))
+
+    assert "delegated read-only" in review_system
+    assert "workspace_inspect operation=snapshot" in review_system
+    assert "UNAVAILABLE, never CONDITIONAL_PASS" in review_system
+    assert "HASHI_EVIDENCE_RECEIPT" in review_request
+    assert "PASS | CONDITIONAL_PASS | FAIL | INCONCLUSIVE | UNAVAILABLE" in (
+        review_request
+    )
+
+    assert "Assured Verifier" in verification_system
+    assert "Fabricated, stale, or prior-invocation references are forbidden" in (
+        verification_system
+    )
+    assert "verification_run operation=run" in verification_system
+    assert "PARTIALLY_VERIFIED" in verification_request
+    assert "NOT_AI_VERIFIABLE" in verification_request

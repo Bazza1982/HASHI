@@ -126,6 +126,10 @@ const BACKEND_CATALOG = {
     models: ['gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.2', 'gpt-5.1-codex-max', 'gpt-5.1-codex-mini'],
     efforts: ['low', 'medium', 'high', 'extra_high'],
   },
+  'her-v2': {
+    models: [],
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  },
   'deepseek-api': {
     models: ['deepseek-v4-pro', 'deepseek-v4-flash'],
     efforts: [],
@@ -862,15 +866,23 @@ function AgentPanel({ agent, session, state, onSend, onSaveIdentity, onRunComman
 
             {supportsEffort && (
               <div className="runtime-control effort-control">
-                <label>{ui.effort}</label>
+                <label>{activeBackendKey === 'her-v2' ? 'HER execution mode' : ui.effort}</label>
                 <div className="effort-buttons">
                   {effortOptions.map((effort) => {
-                    const effortLabels = {
-                      low: ui.effortLow,
-                      medium: ui.effortMedium,
-                      high: ui.effortHigh,
-                      extra_high: ui.effortExtraHigh,
-                    };
+                    const effortLabels = activeBackendKey === 'her-v2'
+                      ? {
+                          low: 'Fast path',
+                          medium: 'Planned',
+                          high: 'Adaptive',
+                          xhigh: 'Reviewed',
+                          max: 'Assured',
+                        }
+                      : {
+                          low: ui.effortLow,
+                          medium: ui.effortMedium,
+                          high: ui.effortHigh,
+                          extra_high: ui.effortExtraHigh,
+                        };
                     return (
                       <button
                         key={effort}

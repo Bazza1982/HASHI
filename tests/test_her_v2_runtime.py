@@ -22,6 +22,8 @@ from orchestrator.her_v2.models import (
     Stage,
     StageResponse,
     TerminalState,
+    ToolEvidenceReceipt,
+    ToolReceiptStatus,
     TriageClassification,
 )
 from orchestrator.her_v2.presentation import (
@@ -48,6 +50,99 @@ def _config(**overrides):
     }
     raw.update(overrides)
     return HERv2Config.from_mapping(raw)
+
+
+def _scripted_verification_response(profile, request, value):
+    data = dict(value)
+    prefix = request.invocation_id or (
+        f"{request.turn_id}:{request.stage.value}:{request.attempt}"
+    )
+    before_ref = f"test-tool:{prefix}:snapshot-before"
+    after_ref = f"test-tool:{prefix}:snapshot-after"
+    receipts = [
+        ToolEvidenceReceipt(
+            before_ref,
+            Stage.VERIFICATION,
+            prefix,
+            request.attempt,
+            "snapshot-before",
+            "workspace_inspect",
+            ToolReceiptStatus.SUCCESS,
+            True,
+            True,
+            "before-output",
+            {"operation": "snapshot", "snapshot_sha256": "stable"},
+        )
+    ]
+    checks = []
+    for index, raw_check in enumerate(data.get("checks") or [], start=1):
+        check = dict(raw_check)
+        result = str(check.get("result") or check.get("status") or "").upper()
+        method = str(check.get("method") or "workspace_diff")
+        if result in {"VERIFIED", "PARTIALLY_VERIFIED", "FAILED"}:
+            evidence_ref = f"test-tool:{prefix}:check-{index}"
+            check.setdefault("evidence_refs", [evidence_ref])
+            isolated = method == "isolated_test"
+            failed = result == "FAILED" and isolated
+            receipts.append(
+                ToolEvidenceReceipt(
+                    evidence_ref,
+                    Stage.VERIFICATION,
+                    prefix,
+                    request.attempt,
+                    f"check-{index}",
+                    "verification_run" if isolated else "workspace_inspect",
+                    ToolReceiptStatus.FAILED if failed else ToolReceiptStatus.SUCCESS,
+                    True,
+                    True,
+                    f"check-{index}-output",
+                    (
+                        {
+                            "operation": "run",
+                            "recipe": "pytest_core",
+                            "exit_code": 1 if failed else 0,
+                            "isolated": True,
+                        }
+                        if isolated
+                        else {"operation": "diff", "exit_code": 0}
+                    ),
+                )
+            )
+        checks.append(check)
+    data["checks"] = checks
+    receipts.append(
+        ToolEvidenceReceipt(
+            after_ref,
+            Stage.VERIFICATION,
+            prefix,
+            request.attempt,
+            "snapshot-after",
+            "workspace_inspect",
+            ToolReceiptStatus.SUCCESS,
+            True,
+            True,
+            "after-output",
+            {"operation": "snapshot", "snapshot_sha256": "stable"},
+        )
+    )
+    data.setdefault(
+        "evidence_refs",
+        [
+            receipt.evidence_ref
+            for receipt in receipts[1:-1]
+            if receipt.completed
+        ],
+    )
+    return StageResponse(
+        text="",
+        data=data,
+        reasoning_trace=f"trace:{request.stage.value}",
+        provider=profile.engine,
+        model=profile.model,
+        provider_attempt=request.attempt,
+        evidence_refs=tuple(item.evidence_ref for item in receipts),
+        tool_receipts=tuple(receipts),
+    )
 
 
 class ScriptedProvider:
@@ -79,6 +174,68 @@ class ScriptedProvider:
             raise value
         if isinstance(value, StageResponse):
             return value
+        if request.stage is Stage.VERIFICATION and isinstance(value, dict):
+            return _scripted_verification_response(profile, request, value)
+        if request.stage is Stage.REVIEW and isinstance(value, dict):
+            value = dict(value)
+            prefix = request.invocation_id or (
+                f"{request.turn_id}:{request.stage.value}:{request.attempt}"
+            )
+            before_ref = f"test-tool:{prefix}:snapshot-before"
+            inspection_ref = f"test-tool:{prefix}:inspection"
+            after_ref = f"test-tool:{prefix}:snapshot-after"
+            value.setdefault("evidence_refs", [inspection_ref])
+            receipts = (
+                ToolEvidenceReceipt(
+                    before_ref,
+                    Stage.REVIEW,
+                    prefix,
+                    request.attempt,
+                    "snapshot-before",
+                    "workspace_inspect",
+                    ToolReceiptStatus.SUCCESS,
+                    True,
+                    True,
+                    "before-output",
+                    {"operation": "snapshot", "snapshot_sha256": "stable"},
+                ),
+                ToolEvidenceReceipt(
+                    inspection_ref,
+                    Stage.REVIEW,
+                    prefix,
+                    request.attempt,
+                    "inspection",
+                    "workspace_inspect",
+                    ToolReceiptStatus.SUCCESS,
+                    True,
+                    True,
+                    "inspection-output",
+                    {"operation": "diff", "exit_code": 0},
+                ),
+                ToolEvidenceReceipt(
+                    after_ref,
+                    Stage.REVIEW,
+                    prefix,
+                    request.attempt,
+                    "snapshot-after",
+                    "workspace_inspect",
+                    ToolReceiptStatus.SUCCESS,
+                    True,
+                    True,
+                    "after-output",
+                    {"operation": "snapshot", "snapshot_sha256": "stable"},
+                ),
+            )
+            return StageResponse(
+                text="",
+                data=value,
+                reasoning_trace=f"trace:{request.stage.value}",
+                provider=profile.engine,
+                model=profile.model,
+                provider_attempt=request.attempt,
+                evidence_refs=tuple(item.evidence_ref for item in receipts),
+                tool_receipts=receipts,
+            )
         return StageResponse(
             text="",
             data=value,
@@ -936,7 +1093,11 @@ async def test_review_imposed_replanning_does_not_reconsult_habits(tmp_path):
                     "outcome": "FAIL",
                     "summary": "The old API is unavailable.",
                     "findings": ["Use the supported API."],
-                }
+                },
+                {
+                    "outcome": "PASS",
+                    "summary": "The supported API remediation is closed.",
+                },
             ],
             Stage.REPLANNING: [{"plan": ["supported approach"]}],
             Stage.FINALISATION: [{"report": "Completed with the supported API."}],
@@ -1046,7 +1207,7 @@ async def test_review_failure_cannot_change_valid_execution_disposition(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_xhigh_review_fail_performs_one_remediation_and_no_second_review(tmp_path):
+async def test_xhigh_review_fail_performs_remediation_and_one_closure_review(tmp_path):
     scripts = _initial("COMPLEX_TASK")
     scripts.update(
         {
@@ -1060,7 +1221,8 @@ async def test_xhigh_review_fail_performs_one_remediation_and_no_second_review(t
                     "outcome": "FAIL",
                     "summary": "A required check is missing.",
                     "findings": ["Add the missing check."],
-                }
+                },
+                {"outcome": "PASS", "summary": "The missing check is now present."},
             ],
             Stage.REPLANNING: [{"plan": ["add check"]}],
             Stage.FINALISATION: [{"report": "Remediated and reported."}],
@@ -1072,16 +1234,22 @@ async def test_xhigh_review_fail_performs_one_remediation_and_no_second_review(t
         "Build and review", "request-xhigh", effort=Effort.XHIGH
     )
 
-    assert result.review_count == 1
+    assert result.review_count == 2
     assert result.replan_count == 1
-    assert sum(call.stage is Stage.REVIEW for _profile, call in provider.requests) == 1
-    review = next(call for _profile, call in provider.requests if call.stage is Stage.REVIEW)
-    assert review.allow_tools is False
-    assert review.allow_side_effects is False
+    reviews = [
+        call for _profile, call in provider.requests if call.stage is Stage.REVIEW
+    ]
+    assert len(reviews) == 2
+    assert all(review.allow_tools is True for review in reviews)
+    assert all(review.allow_side_effects is False for review in reviews)
+    assert [review.context["review_kind"] for review in reviews] == [
+        "independent",
+        "closure",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_max_review_and_remediation_are_bounded_at_three(tmp_path):
+async def test_max_assurance_remediation_and_verification_are_bounded_at_three(tmp_path):
     scripts = _initial("HIGH_VOLUME_TASK")
     scripts.update(
         {
@@ -1090,14 +1258,27 @@ async def test_max_review_and_remediation_are_bounded_at_three(tmp_path):
                 {"disposition": "COMPLETED", "summary": f"Candidate {index}."}
                 for index in range(4)
             ],
-            Stage.REVIEW: [
-                {"outcome": "FAIL", "summary": f"Finding {index}."}
-                for index in range(3)
+            Stage.REVIEW: [{"outcome": "PASS", "summary": "Review passed."}],
+            Stage.VERIFICATION: [
+                {
+                    "outcome": "FAILED",
+                    "summary": f"Verification {index} failed.",
+                    "checks": [
+                        {
+                            "claim": "Core tests pass",
+                            "verifiability": "VERIFIABLE",
+                            "result": "FAILED",
+                            "method": "isolated_test",
+                            "observed": f"Core tests failed on attempt {index}.",
+                        }
+                    ],
+                }
+                for index in range(1, 4)
             ],
             Stage.REPLANNING: [
-                {"plan": [f"remediation {index}"]} for index in range(3)
+                {"plan": [f"remediation {index}"]} for index in range(1, 3)
             ],
-            Stage.FINALISATION: [{"report": "Review limit reached honestly."}],
+            Stage.FINALISATION: [{"report": "Assurance limit reached honestly."}],
         }
     )
     provider = ScriptedProvider(scripts)
@@ -1106,10 +1287,205 @@ async def test_max_review_and_remediation_are_bounded_at_three(tmp_path):
         "Process the large batch", "request-max", effort=Effort.MAX
     )
 
-    assert result.review_count == 3
-    assert result.replan_count == 3
-    assert sum(call.stage is Stage.REVIEW for _profile, call in provider.requests) == 3
+    assert result.review_count == 1
+    assert result.verification_count == 3
+    assert result.assurance_status == "FAILED"
+    assert result.replan_count == 2
+    assert sum(call.stage is Stage.REVIEW for _profile, call in provider.requests) == 1
+    assert (
+        sum(
+            call.stage is Stage.VERIFICATION
+            for _profile, call in provider.requests
+        )
+        == 3
+    )
     assert result.terminal_state is TerminalState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_max_runs_review_then_comprehensive_assured_verification(tmp_path):
+    def finalisation(request):
+        assurance = request.context["assurance"]
+        assert assurance["outcome"] == "VERIFIED"
+        assert assurance["attempts"] == 1
+        assert assurance["checks"][0]["result"] == "VERIFIED"
+        return {"report": "Completed and independently verified."}
+
+    scripts = _initial("COMPLEX_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["implement", "verify"],
+                    "success_criteria": ["Core tests pass"],
+                }
+            ],
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Implementation completed."}
+            ],
+            Stage.REVIEW: [{"outcome": "PASS", "summary": "Review passed."}],
+            Stage.VERIFICATION: [
+                {
+                    "outcome": "VERIFIED",
+                    "summary": "Every required claim is verified.",
+                    "checks": [
+                        {
+                            "claim": "Core tests pass",
+                            "verifiability": "VERIFIABLE",
+                            "result": "VERIFIED",
+                            "method": "isolated_test",
+                            "observed": "The isolated core recipe exited 0.",
+                        }
+                    ],
+                }
+            ],
+            Stage.FINALISATION: [finalisation],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Implement with assurance", "request-assured-pass", effort="assured"
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.review_count == 1
+    assert result.verification_count == 1
+    assert result.assurance_status == "VERIFIED"
+    stages = [
+        request.stage
+        for _profile, request in provider.requests
+        if request.stage
+        in {
+            Stage.PLANNING,
+            Stage.EXECUTION,
+            Stage.REVIEW,
+            Stage.VERIFICATION,
+            Stage.FINALISATION,
+        }
+    ]
+    assert stages == [
+        Stage.PLANNING,
+        Stage.EXECUTION,
+        Stage.REVIEW,
+        Stage.VERIFICATION,
+        Stage.FINALISATION,
+    ]
+    verification_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.VERIFICATION
+    )
+    assert verification_request.allow_tools is True
+    assert verification_request.allow_side_effects is False
+    assert "verification_run" in verification_request.context["delegated_tools"]
+
+
+@pytest.mark.asyncio
+async def test_max_failed_verification_remediates_then_checks_latest_execution(tmp_path):
+    scripts = _initial("COMPLEX_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [{"plan": ["implement"]}],
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Initial implementation."},
+                {"disposition": "COMPLETED", "summary": "Remediated implementation."},
+            ],
+            Stage.REVIEW: [{"outcome": "PASS", "summary": "Review passed."}],
+            Stage.VERIFICATION: [
+                {
+                    "outcome": "FAILED",
+                    "summary": "The isolated recipe failed.",
+                    "checks": [
+                        {
+                            "claim": "Core tests pass",
+                            "verifiability": "VERIFIABLE",
+                            "result": "FAILED",
+                            "method": "isolated_test",
+                            "observed": "The isolated recipe exited 1.",
+                        }
+                    ],
+                },
+                {
+                    "outcome": "VERIFIED",
+                    "summary": "The remediated state passed.",
+                    "checks": [
+                        {
+                            "claim": "Core tests pass",
+                            "verifiability": "VERIFIABLE",
+                            "result": "VERIFIED",
+                            "method": "isolated_test",
+                            "observed": "The isolated recipe exited 0.",
+                        }
+                    ],
+                },
+            ],
+            Stage.REPLANNING: [{"plan": ["repair failing core test"]}],
+            Stage.FINALISATION: [{"report": "Remediated and verified."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Implement and prove it", "request-assured-remediation", effort=Effort.MAX
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.review_count == 1
+    assert result.verification_count == 2
+    assert result.replan_count == 1
+    assert result.assurance_status == "VERIFIED"
+    verification_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.VERIFICATION
+    ]
+    assert [item.context["verification_attempt"] for item in verification_requests] == [
+        1,
+        2,
+    ]
+    assert (
+        verification_requests[1].context["execution"]["summary"]
+        == "Remediated implementation."
+    )
+    assert (
+        sum(
+            request.stage is Stage.REVIEW
+            for _profile, request in provider.requests
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_verification_technical_failure_is_unavailable_not_execution_failure(
+    tmp_path,
+):
+    scripts = _initial("COMPLEX_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [{"plan": ["complete"]}],
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Execution completed."}
+            ],
+            Stage.REVIEW: [{"outcome": "PASS", "summary": "Review passed."}],
+            Stage.VERIFICATION: [
+                StageInvocationError("verifier offline", retryable=False)
+            ],
+            Stage.FINALISATION: [
+                {"report": "Execution completed; Verification was unavailable."}
+            ],
+        }
+    )
+
+    result = await _runtime(tmp_path, ScriptedProvider(scripts)).run_turn(
+        "Complete with assurance", "request-verification-unavailable", effort="max"
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.assurance_status == "UNAVAILABLE"
+    assert result.verification_count == 1
+    assert any("No current tool-backed Verification" in item for item in result.limitations)
 
 
 @pytest.mark.asyncio
@@ -1451,7 +1827,11 @@ async def test_only_successful_stage_results_publish_neutral_commentary(
                     "summary": "The original route is no longer supported.",
                     "findings": ["Use the supported replacement route."],
                     "commentary": "Independent review required a replacement route.",
-                }
+                },
+                {
+                    "outcome": "PASS",
+                    "summary": "The replacement route closed the finding.",
+                },
             ],
             Stage.FINALISATION: [
                 {
@@ -1616,11 +1996,18 @@ async def test_reviewer_technical_failure_does_not_discard_execution(tmp_path):
             Stage.FINALISATION: [{"report": "Completed; reviewer was unavailable."}],
         }
     )
-    result = await _runtime(tmp_path, ScriptedProvider(scripts)).run_turn(
+    provider = ScriptedProvider(scripts)
+    result = await _runtime(tmp_path, provider).run_turn(
         "Complete robustly", "request-review-error", effort=Effort.XHIGH
     )
     assert result.terminal_state is TerminalState.COMPLETED
     assert any("Review unavailable" in item for item in result.limitations)
+    finalisation_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.FINALISATION
+    )
+    assert finalisation_request.context["review"]["outcome"] == "UNAVAILABLE"
 
 
 @pytest.mark.asyncio
@@ -2401,7 +2788,8 @@ async def test_simple_classification_can_escalate_execution_capability_without_m
                     "outcome": "FAIL",
                     "summary": "Premium capability is required for verification.",
                     "findings": ["Verify with the capable route."],
-                }
+                },
+                {"outcome": "PASS", "summary": "The capable route is verified."},
             ],
             Stage.REPLANNING: [{"plan": ["use the capable verification route"]}],
             Stage.FINALISATION: [{"report": "Verified and completed."}],
