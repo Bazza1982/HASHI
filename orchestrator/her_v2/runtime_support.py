@@ -15,6 +15,7 @@ from .interfaces import (
 )
 from .lifecycle import LifecycleViolation
 from .models import (
+    CheckpointPolicy,
     DeliveryRecord,
     ExecutionOutcome,
     LifecycleState,
@@ -35,7 +36,11 @@ if TYPE_CHECKING:
 
 class RuntimeSupportMixin:
     def _record_triage(
-        self, state: _TurnState, classification: TriageClassification
+        self,
+        state: _TurnState,
+        classification: TriageClassification,
+        checkpoint_policy: CheckpointPolicy | None,
+        checkpoint_reason: str,
     ) -> None:
         ref = self._audit(
             state,
@@ -43,10 +48,21 @@ class RuntimeSupportMixin:
             role=self.config.stage_roles[Stage.TRIAGE],
             event="classification_recorded",
             event_id=f"{state.ledger.turn_id}:classification",
-            payload={"classification": classification.value},
+            payload={
+                "classification": classification.value,
+                "checkpoint_policy": (
+                    checkpoint_policy.value if checkpoint_policy else None
+                ),
+                "checkpoint_reason": checkpoint_reason or None,
+                "checkpoint_policy_immutable": True,
+            },
         )
         state.ledger.add_log_ref(ref)
-        state.ledger.record_triage(classification)
+        state.ledger.record_triage(
+            classification,
+            checkpoint_policy=checkpoint_policy,
+            checkpoint_reason=checkpoint_reason,
+        )
         self.ledger_store.save(state.ledger)
 
     async def _transition(
@@ -562,6 +578,7 @@ class RuntimeSupportMixin:
             delivery_event_id=state.delivery_event_id,
             review_count=state.review_count,
             verification_count=state.verification_count,
+            checkpoint_count=state.checkpoint_count,
             assurance_status=(
                 state.last_verification.outcome.value
                 if state.last_verification is not None

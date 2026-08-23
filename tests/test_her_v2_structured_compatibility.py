@@ -65,7 +65,10 @@ def _snapshot(ref, *, stage, digest="stable", **kwargs):
     [
         (
             StageResponse(
-                text='{"classification":"SIMPLE_TASK"}',
+                text=(
+                    '{"classification":"SIMPLE_TASK",'
+                    '"checkpoint_policy":"STANDARD"}'
+                ),
                 data={"provider_note": "formal field was incomplete"},
             ),
             "provider_text",
@@ -76,7 +79,8 @@ def _snapshot(ref, *, stage, digest="stable", **kwargs):
                 text="",
                 reasoning_trace=(
                     "classification follows "
-                    '{"classification":"COMPLEX_TASK","goal":"inspect"}'
+                    '{"classification":"COMPLEX_TASK","goal":"inspect",'
+                    '"checkpoint_policy":"STANDARD"}'
                 ),
             ),
             "reasoning_recovery",
@@ -84,7 +88,10 @@ def _snapshot(ref, *, stage, digest="stable", **kwargs):
         ),
         (
             StageResponse(
-                text='{"response":{"classification":"HIGH_VOLUME_TASK"}}'
+                text=(
+                    '{"response":{"classification":"HIGH_VOLUME_TASK",'
+                    '"checkpoint_policy":"STANDARD"}}'
+                )
             ),
             "provider_text",
             TriageClassification.HIGH_VOLUME_TASK,
@@ -228,8 +235,11 @@ def test_registered_wrapper_does_not_turn_a_nested_object_into_display_text():
 
 def test_conflicting_valid_carriers_remain_a_hard_error():
     response = StageResponse(
-        data={"classification": "SIMPLE_TASK"},
-        text='{"classification":"COMPLEX_TASK"}',
+        data={"classification": "SIMPLE_TASK", "checkpoint_policy": "STANDARD"},
+        text=(
+            '{"classification":"COMPLEX_TASK",'
+            '"checkpoint_policy":"STANDARD"}'
+        ),
     )
 
     with pytest.raises(StructuredOutputError, match="conflicting valid"):
@@ -239,10 +249,15 @@ def test_conflicting_valid_carriers_remain_a_hard_error():
 def test_non_authoritative_triage_interpretations_do_not_create_false_conflict():
     resolution = resolve_stage_response(
         StageResponse(
-            data={"classification": "SIMPLE_TASK", "goal": "short wording"},
+            data={
+                "classification": "SIMPLE_TASK",
+                "goal": "short wording",
+                "checkpoint_policy": "STANDARD",
+            },
             text=(
                 '{"classification":"SIMPLE_TASK",'
-                '"goal":"a different but non-authoritative wording"}'
+                '"goal":"a different but non-authoritative wording",'
+                '"checkpoint_policy":"STANDARD"}'
             ),
         ),
         parse_triage,
@@ -254,7 +269,7 @@ def test_non_authoritative_triage_interpretations_do_not_create_false_conflict()
 def test_reasoning_is_not_used_when_a_formal_carrier_is_valid():
     response = StageResponse(
         text="",
-        data={"classification": "SIMPLE_TASK"},
+        data={"classification": "SIMPLE_TASK", "checkpoint_policy": "STANDARD"},
         reasoning_trace='{"classification":"COMPLEX_TASK"}',
     )
 

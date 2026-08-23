@@ -161,6 +161,15 @@ call. Configured recipes or direct argv checks inherit the HASHI process's
 filesystem, environment, `HOME`, and network authority. Their timeout grows
 from cumulative Execution duration and cannot be shortened by the verifier.
 
+Triage also records an immutable checkpoint policy for each work turn. A
+`HIGH_RISK` Execution cycle installs a request-local, provider-neutral
+coordinator shared by its Primary Agent and bounded sub-agents. It schedules a
+tool-free checkpoint at the next safe boundary after 10 completed Tool Gateway
+receipts or 300 monotonic seconds. This internal substage has no lifecycle
+state, tools, side-effect authority, Persona, or commentary; it never cancels
+an active tool, limits total work, replaces Review/Verification, or fabricates
+provider resume state.
+
 These modules and schemas are adopted through the ordinary targeted reboot
 flow. Adding lifecycle states, routes, response fields, or public helper
 interfaces does not authorize widening `/reboot min` or `/reboot N`; only the

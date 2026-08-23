@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Design complete; ready for implementation |
+| Status | Implemented and offline-verified on the isolated feature branch |
 | Date | 2026-08-23 |
 | Scope | HER v2 work turns explicitly classified for high-risk checkpointing |
 | Fixed cadence | 10 completed Execution tool results or 300 monotonic seconds, whichever becomes due first |
@@ -398,3 +398,22 @@ Coding is complete only when:
 - completed side effects and tool results are never replayed or lost; and
 - focused plus broad regressions pass without disturbing unrelated uncommitted
   work or activating the live runtime.
+
+## 12. Implementation and verification record
+
+Implemented on 2026-08-23 in the isolated
+`feature/her-v2-high-risk-checkpoints` branch. The implementation includes the
+explicit Triage/Ledger risk contract, strict tool-free checkpoint schema,
+request-local coordinator, exact Tool Gateway receipt hook, provider-neutral
+typed interruption, Runtime outcomes and audit records, Verification
+commentary consistency fix, and the documentation updates in this plan.
+
+Final offline gates on the isolated worktree:
+
+- HER v2 focused inventory: 317 passed, 1 skipped;
+- curated repository core gate: 215 passed;
+- explicit offline product suite: 2525 passed, 4 skipped, 40 deselected;
+- Ruff, Python compilation, prompt-asset coverage, and diff/whitespace checks:
+  passed.
+
+No live runtime was reloaded, restarted, or otherwise activated.

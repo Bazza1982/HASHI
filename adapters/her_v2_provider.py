@@ -664,6 +664,38 @@ class _DelegatedToolRegistry:
             if str((item.get("function") or {}).get("name") or "") in self._allowed
         ]
 
+    def evaluate_admission(
+        self, tool_name: str, arguments: dict, tool_call_id: str = ""
+    ):
+        """Evaluate delegated and shared policy without dispatching a tool."""
+
+        if not self.is_allowed(tool_name):
+            from tools.registry import ToolResult
+
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output=(
+                    f"Error: tool {tool_name!r} is outside this sub-agent's "
+                    "delegated authority"
+                ),
+                is_error=True,
+                details={"control_disposition": "denied"},
+            )
+        scoped_evaluator = getattr(
+            self._base, "evaluate_admission_with_audit_context", None
+        )
+        if callable(scoped_evaluator):
+            return scoped_evaluator(
+                tool_name,
+                arguments,
+                tool_call_id,
+                audit_context=self.audit_context,
+            )
+        evaluator = getattr(self._base, "evaluate_admission", None)
+        if callable(evaluator):
+            return evaluator(tool_name, arguments, tool_call_id)
+        return None
+
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
         if self.is_allowed(tool_name):
             effective_arguments = dict(arguments or {})
@@ -693,8 +725,9 @@ class _DelegatedToolRegistry:
                 f"Error: tool {tool_name!r} is outside this sub-agent's delegated authority"
             ),
             is_error=True,
+            details={"control_disposition": "denied"},
         )
-        denial_recorder = getattr(self._base, "record_delegated_denial", None)
+        denial_recorder = getattr(self.base, "record_delegated_denial", None)
         if callable(denial_recorder):
             denial_recorder(
                 tool_name,
@@ -757,6 +790,8 @@ class _EvidenceRecordingToolRegistry:
                 self._request.stage.value,
                 "invocation",
                 _evidence_ref_segment(invocation, fallback="unknown"),
+                "attempt",
+                str(self._request.attempt),
                 "call",
                 _evidence_ref_segment(effective_call_id, fallback=f"call-{self._serial}"),
                 "receipt",
@@ -826,7 +861,84 @@ class _EvidenceRecordingToolRegistry:
             attachment_ids=matched_attachment_ids,
         )
         self._receipts.append(receipt)
+        return self._attach_receipt(result, receipt, fallback_call_id=tool_call_id)
 
+    async def record_policy_denial(
+        self,
+        tool_name: str,
+        arguments: dict,
+        tool_call_id: str,
+        *,
+        output: str,
+        decision: str,
+    ):
+        """Record a provider-front-door policy denial as a completed receipt."""
+
+        from tools.registry import ToolResult
+
+        result = ToolResult(
+            tool_call_id=tool_call_id,
+            output=str(output),
+            is_error=True,
+            details={"control_disposition": str(decision or "denied")},
+        )
+        return self._record_denial_result(
+            tool_name,
+            arguments,
+            tool_call_id,
+            result,
+        )
+
+    def record_immediate_denial_if_any(
+        self,
+        tool_name: str,
+        arguments: dict,
+        tool_call_id: str,
+    ):
+        """Record a policy-only denial before periodic admission gating."""
+
+        evaluator = getattr(self._base, "evaluate_admission", None)
+        if not callable(evaluator):
+            return None
+        result = evaluator(tool_name, arguments, tool_call_id)
+        if result is None:
+            return None
+        return self._record_denial_result(
+            tool_name,
+            arguments,
+            tool_call_id,
+            result,
+        )
+
+    def _record_denial_result(
+        self,
+        tool_name: str,
+        arguments: dict,
+        tool_call_id: str,
+        result: Any,
+    ):
+        denial_recorder = getattr(self.base, "record_delegated_denial", None)
+        if callable(denial_recorder):
+            denial_recorder(
+                tool_name,
+                arguments,
+                result,
+                audit_context=dict(
+                    getattr(self._base, "audit_context", {}) or {}
+                ),
+            )
+        receipt = self._receipt(
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            result=result,
+            completed=True,
+            status=ToolReceiptStatus.FAILED,
+        )
+        self._receipts.append(receipt)
+        return self._attach_receipt(result, receipt, fallback_call_id=tool_call_id)
+
+    @staticmethod
+    def _attach_receipt(result: Any, receipt: ToolEvidenceReceipt, *, fallback_call_id: str):
         from tools.registry import ToolResult
 
         output = str(getattr(result, "output", "") or "")
@@ -840,12 +952,92 @@ class _EvidenceRecordingToolRegistry:
             }
         )
         return ToolResult(
-            tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
+            tool_call_id=str(
+                getattr(result, "tool_call_id", "") or fallback_call_id
+            ),
             output=output,
             is_error=bool(getattr(result, "is_error", False)),
             content=getattr(result, "content", None),
             details=details,
         )
+
+    def receipt_for_result(self, result: Any) -> ToolEvidenceReceipt:
+        details = dict(getattr(result, "details", None) or {})
+        evidence_ref = str(details.get("evidence_ref") or "")
+        for receipt in reversed(self._receipts):
+            if receipt.evidence_ref == evidence_ref:
+                return receipt
+        raise RuntimeError("completed tool result has no matching evidence receipt")
+
+
+class _HighRiskCheckpointToolRegistry:
+    """Gate new high-risk tools at exact post-receipt safe boundaries."""
+
+    def __init__(self, base: _EvidenceRecordingToolRegistry, coordinator: Any):
+        self._base = base
+        self._coordinator = coordinator
+        self.max_loops = None
+
+    @property
+    def base(self) -> Any:
+        return self._base.base
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+    async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
+        immediate_denial = self._base.record_immediate_denial_if_any(
+            tool_name,
+            arguments,
+            tool_call_id,
+        )
+        if immediate_denial is not None:
+            await self._coordinator.record_immediate_result(
+                self._base.receipt_for_result(immediate_denial)
+            )
+            return immediate_denial
+        admission = await self._coordinator.before_tool(
+            tool_name=tool_name,
+            arguments=arguments,
+            tool_call_id=tool_call_id,
+        )
+        try:
+            result = await self._base.execute(tool_name, arguments, tool_call_id)
+            receipt = self._base.receipt_for_result(result)
+            details = dict(getattr(result, "details", None) or {})
+            await self._coordinator.after_tool(
+                admission,
+                receipt,
+                immediate_safety_result=(
+                    str(details.get("control_disposition") or "")
+                    in {"approval_required", "denied", "user_input_required"}
+                ),
+            )
+        except BaseException:
+            await self._coordinator.abandon_tool(admission)
+            raise
+        return result
+
+    async def record_policy_denial(
+        self,
+        tool_name: str,
+        arguments: dict,
+        tool_call_id: str,
+        *,
+        output: str,
+        decision: str,
+    ):
+        result = await self._base.record_policy_denial(
+            tool_name,
+            arguments,
+            tool_call_id,
+            output=output,
+            decision=decision,
+        )
+        await self._coordinator.record_immediate_result(
+            self._base.receipt_for_result(result)
+        )
+        return result
 
 
 class _UnboundedToolRegistry:
@@ -1346,6 +1538,18 @@ class HashiStageProvider(StageProvider):
                 selected_registry, request
             )
             selected_registry = evidence_registry
+            if request.checkpoint_coordinator is not None:
+                if request.stage is not Stage.EXECUTION:
+                    await backend.shutdown()
+                    raise StageInvocationError(
+                        "checkpoint coordinator may be installed only for Execution",
+                        retryable=False,
+                        code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                    )
+                selected_registry = _HighRiskCheckpointToolRegistry(
+                    evidence_registry,
+                    request.checkpoint_coordinator,
+                )
             selected_registry = _UnboundedToolRegistry(selected_registry)
         if controls_tools:
             backend.tool_registry = selected_registry

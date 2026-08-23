@@ -9,6 +9,10 @@ from typing import Any, Callable, Mapping, TypeVar
 
 from .interfaces import StructuredOutputError
 from .models import (
+    WORK_CLASSIFICATIONS,
+    CheckpointDecision,
+    CheckpointFinding,
+    CheckpointPolicy,
     ExecutionDisposition,
     ExecutionOutcome,
     FinalisationOutcome,
@@ -76,6 +80,10 @@ def _semantic_key(value: Any) -> str:
         value = {
             "classification": value.classification.value,
             "clarification": value.clarification,
+            "checkpoint_policy": (
+                value.checkpoint_policy.value if value.checkpoint_policy else None
+            ),
+            "checkpoint_reason": value.checkpoint_reason,
         }
     elif isinstance(value, Mapping):
         # Planning commentary and provider transport metadata do not alter the
@@ -398,7 +406,60 @@ def parse_triage(data: Mapping[str, Any]) -> TriageDecision:
         raise StructuredOutputError(
             "CONFIRMATION_REQUIRED requires a clarification question"
         )
-    return TriageDecision(classification, goal, clarification)
+    raw_checkpoint_policy = data.get("checkpoint_policy")
+    checkpoint_reason = _text_value(data.get("checkpoint_reason"))
+    if classification in WORK_CLASSIFICATIONS:
+        if raw_checkpoint_policy is None or not str(raw_checkpoint_policy).strip():
+            raise StructuredOutputError(
+                "work Triage requires an explicit checkpoint_policy"
+            )
+        checkpoint_policy = _enum_value(
+            CheckpointPolicy,
+            raw_checkpoint_policy,
+        )
+        if checkpoint_policy is CheckpointPolicy.HIGH_RISK and not checkpoint_reason:
+            raise StructuredOutputError(
+                "HIGH_RISK checkpoint_policy requires a checkpoint_reason"
+            )
+        if checkpoint_policy is CheckpointPolicy.STANDARD and checkpoint_reason:
+            raise StructuredOutputError(
+                "STANDARD checkpoint_policy must not provide a checkpoint_reason"
+            )
+    else:
+        if raw_checkpoint_policy is not None and str(raw_checkpoint_policy).strip():
+            raise StructuredOutputError(
+                "non-work Triage must set checkpoint_policy to null"
+            )
+        if checkpoint_reason:
+            raise StructuredOutputError(
+                "non-work Triage must not provide a checkpoint_reason"
+            )
+        checkpoint_policy = None
+    return TriageDecision(
+        classification,
+        goal,
+        clarification,
+        checkpoint_policy,
+        checkpoint_reason,
+    )
+
+
+@_stage_parser()
+def parse_checkpoint(data: Mapping[str, Any]) -> CheckpointFinding:
+    decision = _enum_value(CheckpointDecision, data.get("decision"))
+    summary = _text_value(data.get("summary"), data.get("reason"))
+    if not summary:
+        raise StructuredOutputError("Checkpoint assessment requires a summary")
+    question = _text_value(data.get("question"), data.get("clarification"))
+    if decision is CheckpointDecision.USER_INPUT_REQUIRED and not question:
+        raise StructuredOutputError(
+            "Checkpoint USER_INPUT_REQUIRED requires a concrete question"
+        )
+    if decision is not CheckpointDecision.USER_INPUT_REQUIRED and question:
+        raise StructuredOutputError(
+            "Only Checkpoint USER_INPUT_REQUIRED may provide a question"
+        )
+    return CheckpointFinding(decision, summary, question)
 
 
 @_stage_parser()

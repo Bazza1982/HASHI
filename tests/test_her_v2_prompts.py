@@ -140,3 +140,30 @@ def test_review_and_verification_prompts_enforce_tool_backed_bounded_evidence() 
     assert "verification_run operation=run" in verification_system
     assert "PARTIALLY_VERIFIED" in verification_request
     assert "NOT_AI_VERIFIABLE" in verification_request
+
+
+def test_checkpoint_prompt_is_tool_free_non_user_facing_control_only() -> None:
+    system_prompt = render_internal_stage_system_prompt(_request(Stage.CHECKPOINT))
+    stage_prompt = render_stage_prompt(
+        _request(
+            Stage.CHECKPOINT,
+            trigger_reasons=["completed_result_count"],
+            completed_result_count=10,
+        )
+    )
+
+    assert "internal, tool-free control role" in system_prompt
+    assert "Do not execute, call tools, contact the user" in system_prompt
+    assert "replan" in system_prompt
+    assert "CONTINUE | USER_INPUT_REQUIRED | HALT" in stage_prompt
+    assert '"commentary":' not in stage_prompt
+
+
+def test_triage_prompt_requires_independent_checkpoint_risk_selection() -> None:
+    system_prompt = render_internal_stage_system_prompt(_request(Stage.TRIAGE))
+    stage_prompt = render_stage_prompt(_request(Stage.TRIAGE))
+
+    assert "select its independent Execution checkpoint risk policy" in system_prompt
+    assert "Complexity, volume, and HER execution mode do not decide" in system_prompt
+    assert "checkpoint_policy" in stage_prompt
+    assert "STANDARD | HIGH_RISK" in stage_prompt

@@ -799,8 +799,23 @@ class OpenRouterAdapter(BaseBackend):
             policy = self._evaluate_tool_policy(tool_name, arguments)
             if not policy.allowed:
                 result_text = self._blocked_tool_result_text(tool_name, policy)
+                denial_recorder = getattr(
+                    self.tool_registry, "record_policy_denial", None
+                )
+                denial_details = {}
+                if callable(denial_recorder):
+                    denial_result = await denial_recorder(
+                        tool_name,
+                        arguments,
+                        tc_id,
+                        output=result_text,
+                        decision=policy.decision.value,
+                    )
+                    result_text = denial_result.output
+                    denial_details = dict(denial_result.details or {})
                 await self._emit(on_stream_event, KIND_TOOL_END,
-                                 f"{tool_name}: blocked by policy", tool_name=tool_name)
+                                 f"{tool_name}: blocked by policy", tool_name=tool_name,
+                                 metadata={"tool_result_details": denial_details})
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,

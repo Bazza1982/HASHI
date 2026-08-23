@@ -22,6 +22,9 @@ from .models import (
     DEFAULT_ROUTES_BY_STAGE,
     EXECUTION_ROUTES,
     ROUTE_STAGES,
+    CheckpointDecision,
+    CheckpointFinding,
+    CheckpointPolicy,
     Effort,
     EFFORT_DISPLAY_LABELS,
     ExecutionDisposition,
@@ -37,6 +40,11 @@ from .models import (
     effort_display_label,
     parse_effort,
 )
+from .checkpoint import (
+    CHECKPOINT_ELAPSED_THRESHOLD_S,
+    CHECKPOINT_RESULT_THRESHOLD,
+    HighRiskCheckpointCoordinator,
+)
 from .presentation import (
     RenderedRequiredMessage,
     RequiredPersonaRenderer,
@@ -49,6 +57,11 @@ __all__ = [
     "EXECUTION_ROUTES",
     "ROUTE_STAGES",
     "AuditPersistenceError",
+    "CHECKPOINT_ELAPSED_THRESHOLD_S",
+    "CHECKPOINT_RESULT_THRESHOLD",
+    "CheckpointDecision",
+    "CheckpointFinding",
+    "CheckpointPolicy",
     "CommentaryPort",
     "DreamMaintainer",
     "DurableAuditLog",
@@ -60,6 +73,7 @@ __all__ = [
     "HERv2Learning",
     "HERv2Runtime",
     "HERv2TurnLearning",
+    "HighRiskCheckpointCoordinator",
     "HabitAdvisor",
     "LearningRecovery",
     "LedgerInvariantError",

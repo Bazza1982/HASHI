@@ -17,6 +17,7 @@ class _DummyToolRegistry:
 
     def __init__(self):
         self.calls = []
+        self.policy_denials = []
 
     def get_tool_definitions(self, tiers=None):
         if tiers == []:
@@ -39,6 +40,25 @@ class _DummyToolRegistry:
     async def execute(self, tool_name, arguments, tool_call_id=""):
         self.calls.append((tool_name, arguments, tool_call_id))
         return ToolResult(tool_call_id=tool_call_id, output="tool output")
+
+    async def record_policy_denial(
+        self,
+        tool_name,
+        arguments,
+        tool_call_id,
+        *,
+        output,
+        decision,
+    ):
+        self.policy_denials.append(
+            (tool_name, arguments, tool_call_id, decision)
+        )
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output=output,
+            is_error=True,
+            details={"control_disposition": decision},
+        )
 
 
 def _adapter(tmp_path, *, global_config=None):
@@ -378,6 +398,9 @@ async def test_openrouter_tool_execution_blocks_shell_policy(tmp_path):
     await adapter._run_tool_calls(tool_calls, messages, on_stream_event=None)
 
     assert adapter.tool_registry.calls == []
+    assert adapter.tool_registry.policy_denials == [
+        ("bash", {"command": "rm -rf /tmp/example"}, "call_1", "deny")
+    ]
     assert messages == [
         {
             "role": "tool",
@@ -405,6 +428,14 @@ async def test_openrouter_tool_execution_blocks_file_write_approval_required(tmp
     await adapter._run_tool_calls(tool_calls, messages, on_stream_event=None)
 
     assert adapter.tool_registry.calls == []
+    assert adapter.tool_registry.policy_denials == [
+        (
+            "file_write",
+            {"path": "/tmp/report.md", "content": "x"},
+            "call_1",
+            "approval_required",
+        )
+    ]
     assert messages[0]["content"] == "Error: tool call requires approval by enterprise policy: file_write"
 
 

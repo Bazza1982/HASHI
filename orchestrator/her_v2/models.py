@@ -9,7 +9,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .checkpoint import HighRiskCheckpointCoordinator
 
 
 class StrEnum(str, Enum):
@@ -23,6 +26,13 @@ class TriageClassification(StrEnum):
     COMPLEX_TASK = "COMPLEX_TASK"
     HIGH_VOLUME_TASK = "HIGH_VOLUME_TASK"
     CONFIRMATION_REQUIRED = "CONFIRMATION_REQUIRED"
+
+
+class CheckpointPolicy(StrEnum):
+    """Periodic Execution-checkpoint policy selected by authoritative Triage."""
+
+    STANDARD = "STANDARD"
+    HIGH_RISK = "HIGH_RISK"
 
 
 WORK_CLASSIFICATIONS = frozenset(
@@ -117,6 +127,7 @@ class Stage(StrEnum):
     TRIAGE = "triage"
     PLANNING = "planning"
     EXECUTION = "execution"
+    CHECKPOINT = "checkpoint"
     REPLANNING = "replanning"
     REVIEW = "review"
     VERIFICATION = "verification"
@@ -168,6 +179,9 @@ DEFAULT_ROUTES_BY_STAGE: Mapping[Stage, Route] = {
     Stage.TRIAGE: Route.TRIAGE,
     Stage.PLANNING: Route.PLANNING,
     Stage.EXECUTION: Route.EXECUTION_COMPLEX,
+    # Checkpoint is an internal substage and follows the configured Review
+    # route rather than creating another user-facing model route.
+    Stage.CHECKPOINT: Route.REVIEW,
     Stage.REPLANNING: Route.REPLANNING,
     Stage.REVIEW: Route.REVIEW,
     Stage.VERIFICATION: Route.VERIFICATION,
@@ -199,6 +213,12 @@ class VerificationOutcome(StrEnum):
     NOT_AI_VERIFIABLE = "NOT_AI_VERIFIABLE"
     UNAVAILABLE = "UNAVAILABLE"
     INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class CheckpointDecision(StrEnum):
+    CONTINUE = "CONTINUE"
+    USER_INPUT_REQUIRED = "USER_INPUT_REQUIRED"
+    HALT = "HALT"
 
 
 class Verifiability(StrEnum):
@@ -246,6 +266,9 @@ class StageRequest:
     provider_activity_callback: Callable[[Mapping[str, Any]], None] | None = field(
         default=None, compare=False, repr=False
     )
+    checkpoint_coordinator: HighRiskCheckpointCoordinator | None = field(
+        default=None, compare=False, repr=False
+    )
 
 
 @dataclass(frozen=True)
@@ -267,6 +290,15 @@ class TriageDecision:
     classification: TriageClassification
     goal: str
     clarification: str = ""
+    checkpoint_policy: CheckpointPolicy | None = None
+    checkpoint_reason: str = ""
+
+
+@dataclass(frozen=True)
+class CheckpointFinding:
+    decision: CheckpointDecision
+    summary: str
+    question: str = ""
 
 
 @dataclass(frozen=True)
@@ -390,6 +422,7 @@ class TurnResult:
     review_count: int = 0
     replan_count: int = 0
     verification_count: int = 0
+    checkpoint_count: int = 0
     assurance_status: str = ""
 
 

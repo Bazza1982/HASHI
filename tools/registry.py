@@ -234,6 +234,24 @@ class ToolRegistry:
         finally:
             self._audit_context_override.reset(token)
 
+    def evaluate_admission_with_audit_context(
+        self,
+        tool_name: str,
+        arguments: dict,
+        tool_call_id: str = "",
+        *,
+        audit_context: dict | None = None,
+    ) -> ToolResult | None:
+        """Evaluate request-local tool policy without dispatching the tool."""
+
+        scoped_context = dict(self._effective_audit_context())
+        scoped_context.update(dict(audit_context or {}))
+        token = self._audit_context_override.set(scoped_context)
+        try:
+            return self.evaluate_admission(tool_name, arguments, tool_call_id)
+        finally:
+            self._audit_context_override.reset(token)
+
     def record_delegated_denial(
         self,
         tool_name: str,
@@ -266,6 +284,40 @@ class ToolRegistry:
                     if name in subset]
         return [TOOL_SCHEMA_MAP[name] for name in ALL_TOOL_NAMES if name in self._allowed]
 
+    def evaluate_admission(
+        self, tool_name: str, arguments: dict, tool_call_id: str = ""
+    ) -> ToolResult | None:
+        """Return an immediate policy denial without executing or auditing."""
+
+        if not self.is_allowed(tool_name):
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output=f"Error: tool '{tool_name}' is not in your allowed tools list",
+                is_error=True,
+                details={"control_disposition": "denied"},
+            )
+        denial = self._check_enterprise_path_gate(
+            tool_name, arguments, tool_call_id=tool_call_id
+        )
+        if denial is not None:
+            return denial
+        denial = self._check_enterprise_shell_gate(
+            tool_name, tool_call_id=tool_call_id
+        )
+        if denial is not None:
+            return denial
+        denial = self._check_enterprise_network_gate(
+            tool_name, arguments, tool_call_id=tool_call_id
+        )
+        if denial is not None:
+            return denial
+        denial = self._check_enterprise_browser_gate(
+            tool_name, tool_call_id=tool_call_id
+        )
+        if denial is not None:
+            return denial
+        return None
+
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = "") -> ToolResult:
         """
         Execute a tool call with permission checking.
@@ -273,34 +325,12 @@ class ToolRegistry:
         audited after local cleanup and then deliberately propagated.
         """
         started = time.monotonic()
-        if not self.is_allowed(tool_name):
-            result = ToolResult(
-                tool_call_id=tool_call_id,
-                output=f"Error: tool '{tool_name}' is not in your allowed tools list",
-                is_error=True,
-            )
-            self._record_tool_audit(tool_name, arguments, result, started)
-            return result
-
-        enterprise_denial = self._check_enterprise_path_gate(tool_name, arguments, tool_call_id=tool_call_id)
-        if enterprise_denial is not None:
-            self._record_tool_audit(tool_name, arguments, enterprise_denial, started)
-            return enterprise_denial
-
-        enterprise_denial = self._check_enterprise_shell_gate(tool_name, tool_call_id=tool_call_id)
-        if enterprise_denial is not None:
-            self._record_tool_audit(tool_name, arguments, enterprise_denial, started)
-            return enterprise_denial
-
-        enterprise_denial = self._check_enterprise_network_gate(tool_name, arguments, tool_call_id=tool_call_id)
-        if enterprise_denial is not None:
-            self._record_tool_audit(tool_name, arguments, enterprise_denial, started)
-            return enterprise_denial
-
-        enterprise_denial = self._check_enterprise_browser_gate(tool_name, tool_call_id=tool_call_id)
-        if enterprise_denial is not None:
-            self._record_tool_audit(tool_name, arguments, enterprise_denial, started)
-            return enterprise_denial
+        admission_denial = self.evaluate_admission(
+            tool_name, arguments, tool_call_id
+        )
+        if admission_denial is not None:
+            self._record_tool_audit(tool_name, arguments, admission_denial, started)
+            return admission_denial
 
         try:
             dispatched = await self._dispatch(tool_name, arguments)
@@ -394,6 +424,7 @@ class ToolRegistry:
                 tool_call_id=tool_call_id,
                 output=f"Error: enterprise execution scope check failed: {exc}",
                 is_error=True,
+                details={"control_disposition": "denied"},
             )
         if decision.allowed:
             return None
@@ -404,6 +435,7 @@ class ToolRegistry:
                 f"path={raw_path!r}; root={decision.root}"
             ),
             is_error=True,
+            details={"control_disposition": "denied"},
         )
 
     def _check_enterprise_shell_gate(self, tool_name: str, *, tool_call_id: str) -> ToolResult | None:
@@ -422,6 +454,7 @@ class ToolRegistry:
             tool_call_id=tool_call_id,
             output="Error: enterprise execution denied: shell_disabled",
             is_error=True,
+            details={"control_disposition": "denied"},
         )
 
     def _check_enterprise_network_gate(
@@ -451,6 +484,7 @@ class ToolRegistry:
                 f"host={host!r}"
             ),
             is_error=True,
+            details={"control_disposition": "denied"},
         )
 
     def _network_tool_host(self, tool_name: str, arguments: dict) -> str:
@@ -490,6 +524,7 @@ class ToolRegistry:
             tool_call_id=tool_call_id,
             output="Error: enterprise execution denied: browser_disabled",
             is_error=True,
+            details={"control_disposition": "denied"},
         )
 
     def _record_tool_audit(

@@ -7,6 +7,8 @@ import copy
 import hashlib
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
+from .checkpoint import HighRiskCheckpointCoordinator
+
 from .audit import AuditPersistenceError
 from .commentary import (
     CommentaryValidationError,
@@ -78,7 +80,12 @@ class RuntimeInvocationMixin:
         publish_commentary: bool = True,
         defer_structured_error: bool = False,
         retry_on_failure: bool = True,
+        checkpoint_coordinator: HighRiskCheckpointCoordinator | None = None,
     ) -> tuple[StageResponse, Any]:
+        if checkpoint_coordinator is not None and stage is not Stage.EXECUTION:
+            raise ValueError(
+                "a high-risk checkpoint coordinator may be attached only to Execution"
+            )
         selected = profile or self.config.profile_for(stage)
         role = role_override or (
             selected.name
@@ -180,6 +187,11 @@ class RuntimeInvocationMixin:
                 }
                 for item in stage_attachment_manifest
             ],
+            "checkpoint_cycle_id": (
+                checkpoint_coordinator.cycle_id
+                if checkpoint_coordinator is not None
+                else None
+            ),
         }
         retry_invariant_hash = _payload_hash(invariant_payload)
         last_error: StageInvocationError | None = None
@@ -232,6 +244,7 @@ class RuntimeInvocationMixin:
                 provider_activity_callback=self._provider_activity_callback(
                     state, provider_activity
                 ),
+                checkpoint_coordinator=checkpoint_coordinator,
             )
             attempt_prefix = (
                 f"{state.ledger.turn_id}:{stage.value}:invocation:"
@@ -432,6 +445,7 @@ class RuntimeInvocationMixin:
                 state.progress.record(
                     stage.value,
                     str(effective_response.data or effective_response.text),
+                    meaningful=stage is not Stage.CHECKPOINT,
                 )
                 return effective_response, parsed
             except TurnStopped:

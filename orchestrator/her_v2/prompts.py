@@ -24,6 +24,13 @@ _SCHEMAS = {
             "a concrete question required only for CONFIRMATION_REQUIRED; otherwise "
             "null"
         ),
+        "checkpoint_policy": (
+            "STANDARD | HIGH_RISK for SIMPLE_TASK, COMPLEX_TASK, or "
+            "HIGH_VOLUME_TASK; null otherwise"
+        ),
+        "checkpoint_reason": (
+            "required non-empty risk reason for HIGH_RISK; null otherwise"
+        ),
     },
     Stage.PLANNING: {
         "plan": ["ordered, concrete action"],
@@ -69,6 +76,14 @@ _SCHEMAS = {
         "commentary": (
             "optional concise neutral user-facing update based only on this "
             "completed stage result; omit when no useful update exists"
+        ),
+    },
+    Stage.CHECKPOINT: {
+        "decision": "CONTINUE | USER_INPUT_REQUIRED | HALT",
+        "summary": "concise evidence-based checkpoint assessment",
+        "question": (
+            "one concrete question required only for USER_INPUT_REQUIRED; "
+            "null otherwise"
         ),
     },
     Stage.REVIEW: {
@@ -328,6 +343,7 @@ _SYSTEM_PROMPT_ASSETS = {
     Stage.TRIAGE: "system_triage",
     Stage.PLANNING: "system_planning",
     Stage.EXECUTION: "system_execution",
+    Stage.CHECKPOINT: "system_checkpoint",
     Stage.REPLANNING: "system_replanning",
     Stage.REVIEW: "system_review",
     Stage.VERIFICATION: "system_verification",
