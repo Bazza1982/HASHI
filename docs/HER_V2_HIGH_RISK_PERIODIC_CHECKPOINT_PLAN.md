@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Status | Implemented and offline-verified on the isolated feature branch |
-| Date | 2026-08-23 |
+| Status | Implemented, merged into `main`, and offline-verified; live `HIGH_RISK` trigger acceptance remains pending |
+| Date | 2026-08-24 |
 | Scope | HER v2 work turns explicitly classified for high-risk checkpointing |
 | Fixed cadence | 10 completed Execution tool results or 300 monotonic seconds, whichever becomes due first |
-| Runtime activation | No reload, restart, or rollout is part of this plan |
+| Runtime activation | Integrated `main` passed hot-reload adoption; production rollout remains operator-controlled |
 
 ## 1. Objective
 
@@ -408,7 +408,7 @@ request-local coordinator, exact Tool Gateway receipt hook, provider-neutral
 typed interruption, Runtime outcomes and audit records, Verification
 commentary consistency fix, and the documentation updates in this plan.
 
-Final offline gates on the isolated worktree:
+Initial offline gates on the isolated worktree:
 
 - HER v2 focused inventory: 317 passed, 1 skipped;
 - curated repository core gate: 215 passed;
@@ -416,4 +416,11 @@ Final offline gates on the isolated worktree:
 - Ruff, Python compilation, prompt-asset coverage, and diff/whitespace checks:
   passed.
 
-No live runtime was reloaded, restarted, or otherwise activated.
+The branch was subsequently merged into `main`. The integrated baseline
+`cc010d11d69b4eb24c62c134dc57ac62ea42c277` recorded `2,663 passed`, `2
+skipped`, and `40 deselected` in the offline product suite, plus `232 passed` in
+the core publication gate. Focused Ruff correctness rules, Python compilation,
+and both `/reboot min` and `/reboot max` adoption also passed.
+The real HER v2 canary exercised the `STANDARD` policy; a live cycle that
+actually reaches a `HIGH_RISK` 10-result or 300-second checkpoint remains a
+separate acceptance gate.

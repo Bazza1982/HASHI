@@ -2,12 +2,13 @@
 
 > **Status:** HASHI AAI Enterprise `v0.1.0-alpha.1` is the current enterprise
 > alpha artifact-freeze line. HASHI `v4.0.0-alpha.2` is the current broader
-> platform release candidate, centred on the substantially upgraded HASHI
-> Engine Runtime (HER) and its integrated Rust development workflow.
+> platform release candidate, centred on the provider-neutral, HASHI-native
+> Python Engine Runtime (HER v2), evidence-backed assurance, and multimodal
+> provider routing.
 > Enterprise `0.1.0a1` resets the enterprise-grade package version line for
 > alpha testing; it is not a production-certified deployment claim.
 >
-> **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
+> **Current integration checkpoint:** see [`docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md`](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md) · **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
 ## About
 
@@ -140,9 +141,11 @@ and binary packages are no longer part of the active program.
   alpha operator review. Production enterprise-server validation remains
   pending.
 - **v4.0.0-alpha.2** *(current v4 release candidate)* — HER v2 orchestration,
-  stronger session and delivery continuity, Habit/Media/Tool Gateway
-  integration, and a Flex-only runtime architecture. This is the broader
-  platform line, not the enterprise package version line.
+  evidence-backed Reviewed/Assured modes, high-risk safe-boundary checkpoints,
+  provider-aware multimodal input, Hybrid routing, automatic context
+  maintenance, stronger session and delivery continuity, and a Flex-only
+  runtime architecture. This is the broader platform line, not the enterprise
+  package version line.
 - **v3.2.1** — Workbench API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
 - **v3.2.0** — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
@@ -182,8 +185,19 @@ HER v2 is the sole supported HER execution backend:
   overrides it.
 - **Evidence-backed assurance** — Reviewed performs an independent read-only
   Review and one closure check after remediation. Assured adds latest-state
-  Verification with exact tool receipts and up to three attempts. Predefined
-  tests run only in a temporary, credential-cleared, no-network workspace copy.
+  Verification with exact tool receipts and up to three attempts. Configured
+  recipes or direct argv checks run in the authoritative workspace with the
+  HASHI process's existing authority and an execution-derived timeout floor.
+- **High-risk safe-boundary checkpoints** — Triage records a separate
+  `STANDARD` or `HIGH_RISK` policy. High-risk Execution reassesses accumulated
+  evidence before the next tool boundary after 10 completed results or 300
+  seconds, without interrupting active tools or imposing a completion ceiling.
+- **Provider-aware multimodal routing** — images and other supported media keep
+  stable identity and order, travel natively to capable provider/models, and
+  fall back only through authorised local media inspection when needed.
+- **Hybrid routing and context maintenance** — Quick and Pro model slots can use
+  Single or Hybrid provider routes. Automatic Compact follows the active
+  Quick/Light route and cannot block the selected model when maintenance fails.
 - **Conversation and delivery correctness** — stable event and delivery IDs,
   isolated scheduled turns, audited terminal states, and final safety checks
   prevent internal control payloads from becoming user-visible completion.
@@ -194,7 +208,9 @@ HER v2 is the sole supported HER execution backend:
   `her-v2`. The unrelated historical ID `claw-cli` is rejected.
 
 See [the HER v2 design](docs/HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md)
-and [HER v2 testing plan](docs/HER_V2_TESTING_PLAN.md).
+and [HER v2 testing plan](docs/HER_V2_TESTING_PLAN.md). The exact integrated
+baseline and GitHub publication boundary are recorded in the
+[2026-08-24 checkpoint](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md).
 
 HASHI 2.x proved that local agents could execute tools, browse, switch backends, run from a TUI, and orchestrate Nagare workflows. HASHI 3.2 turns that foundation into a much broader local agent platform:
 
@@ -1527,15 +1543,19 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **Task-matched execution modes** — Fast path, Planned, Adaptive, Reviewed,
   and Assured remain independent from provider reasoning and ordinary
   tool-call count
-- **Hard-evidence assurance** — read-only Review and Verification accept only
-  exact completed current-invocation receipts; Assured runs predefined checks
-  in a temporary no-network workspace copy and re-verifies remediated state up
-  to three times
+- **Hard-evidence assurance** — read-only Review and validation-only
+  Verification accept only exact completed current-invocation receipts;
+  Assured runs configured recipes or direct argv checks in the authoritative
+  workspace and re-verifies remediated state up to three times
+- **High-risk execution checkpoints** — an independently classified high-risk
+  cycle performs a tool-free safe-boundary assessment after 10 completed tool
+  results or 300 seconds without becoming a tool, time, or completion ceiling
 - **Reliable conversation delivery** — direct-message continuity, scheduler
   isolation, explicit stream ownership, stable event IDs, and request-scoped
   idempotency
-- **Integrated operations** — HASHI tools, secure multimedia,
-  Habit/Meditation, provider/model routing, and Flex Fixed mode
+- **Integrated operations** — HASHI tools, provider-aware multimodal input,
+  Habit/Meditation, Single/Hybrid task routing, automatic context maintenance,
+  caller-owned Gateway tools, and Flex Fixed mode
 - **Lean runtime** — HER v1, its Rust source/binaries, `/rebuild` machinery,
   `claw-cli`, and the OpenClaw importer are retired; `her` resolves to HER v2
 - **Operator visibility and remote access** — canonical Workbench Agent

@@ -17,6 +17,8 @@ HER v2 is HASHI-owned orchestration over provider, tool, delivery, and audit
 interfaces. Its release contract includes:
 
 - five task-matched execution modes with stable `low` through `max` wire values;
+- a separate immutable high-risk checkpoint policy with fixed 10-result or
+  300-second safe-boundary reassessment;
 - adaptive Planning and Replanning, tool-backed independent Review, and
   comprehensive latest-state Verification;
 - hard evidence receipts that reject paper-only, fabricated, stale,
@@ -25,6 +27,8 @@ interfaces. Its release contract includes:
   inherited authority and execution-derived timeouts;
 - provider-neutral Quick and Pro routing, with Compact following the active
   Quick/Light target at fixed high HER effort;
+- Single or Hybrid stage routing, including the HASHI API provider;
+- provider/model-specific multimodal routing with authorised local fallback;
 - explicit stream-channel ownership and idempotent user delivery;
 - isolated scheduler execution with one authoritative user conversation;
 - HASHI Tool Gateway access, secure multimedia, and agent-local Habits.
@@ -80,6 +84,19 @@ and still calls the selected model. This continuation rule remains in force at
 120,000 estimated tokens or above; only the provider can truthfully reject the
 actual submitted request for its own context limit.
 
+## High-risk Execution Checkpoints
+
+Triage records `STANDARD` or `HIGH_RISK` independently from execution mode. A
+high-risk cycle shares one request-local coordinator across the Primary Agent
+and bounded sub-agents. After 10 completed Execution tool results or 300
+monotonic seconds, the next safe tool boundary performs one tool-free
+assessment before admitting more side effects.
+
+Immediate permission denial, approval requirements, user stop/steer, and audit
+failure never wait for the periodic cadence. The checkpoint does not cancel an
+active tool, cap total work, replace Review or Verification, replay side
+effects, or synthesize user commentary.
+
 
 ## Conversation and Message Delivery
 
@@ -113,7 +130,12 @@ restart.
   ownership, recoverable state, silent no-change outcomes, and isolated
   low-effort reflection.
 - **Secure multimedia** — bounded image, PDF, audio, and compatible tool-result
-  media flows through the same HER authority boundary.
+  media flows through one provider-aware contract. Capable models receive
+  native ordered content; unsupported modalities use only authorised local
+  inspection paths and otherwise fail explicitly.
+- **Provider and model routing** — Quick and Pro slots support Single or Hybrid
+  stage routing, including another HASHI OpenAI-compatible Gateway through the
+  HASHI API provider.
 - **Workbench Agent Overview** — one canonical, read-only, no-store API view of
   Agent status, workzone, usage, system-prompt slots, and safe parked-topic
   summaries.
@@ -147,4 +169,6 @@ The release gate requires:
 - an approved live HER canary before any production adoption claim.
 
 Exact results are recorded during final release preparation; no tag or GitHub
-push is implied by this release-candidate document.
+push is implied by this release-candidate document. The latest integrated
+results and outbound boundary are recorded in the
+[2026-08-24 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md).

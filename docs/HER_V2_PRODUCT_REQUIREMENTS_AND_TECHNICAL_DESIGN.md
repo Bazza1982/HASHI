@@ -5,10 +5,10 @@
 | Field | Value |
 |---|---|
 | Status | Approved design baseline |
-| Version | 1.2 |
-| Date | 2026-08-22 |
+| Version | 1.3 |
+| Date | 2026-08-24 |
 | Product | Hashi Engine Runtime (HER) |
-| Implementation baseline | HASHI `her-v2` at `6f5747503f478de912553d3e2a92926a5755c41c` |
+| Implementation baseline | HASHI `her-v2` at `cc010d11d69b4eb24c62c134dc57ac62ea42c277` |
 
 ## 1. Purpose
 

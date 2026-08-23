@@ -19,6 +19,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   audit-failure paths preserve exact receipts without replaying side effects,
   cancelling active tools, adding a tool-loop cap, replacing assurance stages,
   or synthesising commentary.
+- **Provider-neutral multimodal requests** — introduced one validated media
+  contract across Telegram intake, `/long`, HER stages, the OpenAI-compatible
+  Gateway, Codex, OpenRouter, and the HASHI API backend. Each selected
+  provider/model now declares support per modality, preserves attachment order
+  and identity, sends supported media natively, and uses an authorised local
+  inspection path only when native input is unavailable. Typed failures prevent
+  silent image loss, path-only claims, or unapproved media access.
+- **HER v2 hybrid provider and task routing** — added configurable Quick and Pro
+  model slots, per-stage task routes, and Single or Hybrid provider selection.
+  The new HASHI API provider lets HER use models served by another HASHI
+  OpenAI-compatible Gateway while preserving request-scoped reasoning, usage,
+  media, tool, and failure metadata.
+- **HER v2 automatic context compaction** — added protected, atomic context
+  maintenance through the initiating Agent's active Quick/Light route. Compact
+  failure, timeout, unavailable routing, invalid output, or insufficient
+  shrinkage now preserves the best safe context, emits a required warning, and
+  continues to the selected model instead of turning maintenance into an
+  execution gate.
 - **HER Reviewed and Assured execution modes** — renamed the five HER v2
   orchestration choices in the UI while preserving `low` through `max` wire
   compatibility and command aliases. Reviewed (`xhigh`) now performs a
@@ -26,8 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   needed, and one closure Review. Assured (`max`) adds comprehensive
   latest-state Verification with at most three attempts and remediation between
   failed checks. Exact stage/invocation/tool-call receipts, stable workspace
-  snapshots, honest unavailable/not-verifiable outcomes, and isolated
-  predefined no-network test recipes prevent paper-only or stale PASS claims.
+  snapshots, honest unavailable/not-verifiable outcomes, and validation
+  receipts from configured recipes or direct argv in the authoritative
+  workspace prevent paper-only or stale PASS claims.
 - **Codex API caller-owned function tools** — the OpenAI-compatible Gateway now
   maps function schemas to isolated Codex app-server `dynamicTools`, returns
   standard sync/streaming `tool_calls`, and reconstructs structured assistant
@@ -53,6 +72,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gates for global-impact mutations, refresh-on-request visibility, and a
   prompt-free global mutation audit accompany the new layer.
 
+### Changed
+
+- **HER v2 execution continuity** — removed legacy turn, tool, provider-attempt,
+  and wall-clock ceilings from the HER path. Meaningful-progress idle detection,
+  explicit user control, immediate policy/approval denial, scoped transport
+  guards, explicitly requested single-tool timeouts, and bounded policy stages
+  remain the only authorised stop or pause boundaries. Scheduled HER work now
+  defaults to Fast path unless the job explicitly selects another mode.
+- **Context-aware verification authority** — Reviewed remains read-only, while
+  Assured Verification may run validation-only commands in the authoritative
+  workspace. Verification inherits the HASHI process filesystem, environment,
+  `HOME`, and network authority; its timeout floor grows from cumulative
+  Execution time and cannot be reduced by the verifier.
+
 ### Removed
 
 - **HER v1 and legacy fixed runtime** — retired the Claw-derived native HER
@@ -68,6 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Streaming error and Codex stdin fallbacks** — OpenRouter-compatible SSE
+  errors now retain typed failure handling even when a minimal client omits
+  response request metadata. Codex document/media fallback prompts continue
+  through stdin rather than reverting to an oversized command-line argument.
 - **HER read-only search portability** — `workspace_inspect search` now uses
   the system `grep` binary when `rg` is absent from the service process PATH,
   preserving bounded, workzone-scoped Review and Verification evidence instead
@@ -102,6 +139,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   side effects. Public API changes can be loaded while restarting only the
   selected Agent, and the fix itself remains adoptable by legacy targeted
   reboot code without presenting a new manager-class interface.
+- **Remote supervisor identity lifecycle** — made supervisor identity creation,
+  persistence, replacement, and cleanup explicit so stale or mismatched sidecar
+  state cannot silently claim ownership after lifecycle transitions.
 - **HER Habit / TaskFrame authority pollution** — foreground Habit records now
   travel through a bounded request-scoped system advisory channel shared by the
   planner and primary executor, while the Bridge prompt and persisted user

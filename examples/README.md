@@ -164,4 +164,4 @@ python main.py
 
 - [Installation Guide](../INSTALL.md)
 - [Main Documentation](../README.md)
-- [Skills System](../docs/SKILLS_SYSTEM_DESIGN.md)
+- [Skills System](../skills/README.md)

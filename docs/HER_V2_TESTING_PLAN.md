@@ -5,12 +5,12 @@
 | Field | Value |
 |---|---|
 | Status | Approved testing baseline |
-| Version | 1.1 |
-| Date | 2026-08-22 |
+| Version | 1.2 |
+| Date | 2026-08-24 |
 | System | Hashi Engine Runtime (HER) v2 |
 | Testing approach | Intent-based, risk-focused, and scenario-driven |
 | Governing design | [HER v2 Product Requirements and Technical Design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) |
-| Implementation baseline | HASHI `her-v2` at `6f5747503f478de912553d3e2a92926a5755c41c` |
+| Implementation baseline | HASHI `her-v2` at `cc010d11d69b4eb24c62c134dc57ac62ea42c277` |
 
 ## 1. Purpose
 

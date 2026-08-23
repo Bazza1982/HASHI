@@ -30,7 +30,8 @@ Current version-line interpretation:
 - **Enterprise AAI `v0.1.0-alpha.1` / package `0.1.0a1`** is the current
   enterprise alpha artifact-freeze line.
 - **HASHI `v4.0.0-alpha.2`** is the current broader platform release candidate,
-  led by the advanced HER backend and source-integrated Rust workflow.
+  led by the provider-neutral HASHI-native Python HER v2 runtime and its
+  evidence-backed execution contracts.
 
 ---
 
@@ -59,6 +60,13 @@ consolidated as the `v4.0.0-alpha.2` release candidate:
   reply-target snapshots, explicit stream ownership, and idempotent delivery;
 - explicit staged orchestration, Tool Gateway/MCP, secure multimedia, and
   optional agent-local Habit/Meditation;
+- evidence-backed Reviewed and Assured modes, plus separately classified
+  high-risk safe-boundary checkpoints;
+- provider-aware native/fallback multimodal routing, configurable Single/Hybrid
+  Quick and Pro routes, and the HASHI API provider;
+- automatic context maintenance that continues selected-model execution when
+  compaction is unavailable or insufficient;
+- caller-owned OpenAI function tools through the Codex app-server bridge;
 - retirement of HER v1, native Rust source/packages, `/rebuild` machinery,
   `claw-cli`, the legacy fixed runtime, and the OpenClaw importer;
 - canonical Workbench Agent Overview and shared-token-authenticated remote
@@ -73,8 +81,10 @@ deployment action, not an unfinished `.22` certification gate.
 
 See [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md) for the delivered scope
 and alpha boundaries. The
+[2026-08-24 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md) records the
+current integrated implementation and publication boundary. The
 [2026-08-13 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) remains a
-historical record of the earlier `.13` integration state.
+historical record of the earlier native `.13` integration state.
 
 ---
 

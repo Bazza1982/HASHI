@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| Status | Implemented in source; runtime reload and live-agent acceptance pending |
-| Revised | 2026-08-23 |
+| Status | Implemented, merged, and offline-verified; live threshold-trigger acceptance pending |
+| Revised | 2026-08-24 |
 | Scope | HASHI-owned context capacity management for HER v2 |
 | Decision | Compact follows the initiating Agent's active provider and Quick/Light model at high HER effort |
 
@@ -192,5 +192,6 @@ Release verification must cover:
 - audit fields; and
 - the user-visible `/compact` command path.
 
-Source changes must not be described as live until the relevant Agent runtime
-has reloaded them and the real user-visible path has passed.
+The integrated source has passed general Agent runtime reload adoption. Auto
+Compact must not be described as live threshold-trigger accepted until a real
+user-visible threshold cycle has also passed.

@@ -4,13 +4,13 @@
 
 | 字段 | 内容 |
 |---|---|
-| 状态 | 实现已完成；待用户负责重启与测试验收 |
+| 状态 | 已合并并通过离线验证；通用热重载已验收，真实多图专项验收仍待执行 |
 | 批准日期 | 2026-08-23 |
 | 适用范围 | HASHI Agent Runtime、HER v2、API Gateway、Provider Adapters、Telegram /long |
 | 首要验收对象 | Momo 多图读取 |
 | 代表性原生 Provider | OpenRouter Gemini、HASHI API 所服务的 Codex/GPT 模型 |
 | 兼容对象 | 不具备原生多模态能力的现有 backend/model |
-| 发布要求 | 功能变更完成后，须另行取得明确授权才能执行 /reboot |
+| 发布要求 | 在宣称具体 Provider 多模态生产可用前，须完成真实媒体专项 canary |
 
 ## 1. 批准结论
 
@@ -566,12 +566,16 @@ docs/her_multimedia_multimodal_plan.md 记录的是现有 HER 媒体工具结果
 
 ## 15. 当前状态
 
-截至 2026-08-23：
+截至 2026-08-24：
 
 - 设计已获批准；
 - Assertions、测试矩阵及旧测试处置已完成；
 - Provider 无关 canonical content、精确能力解析、逐附件路由、Gateway、Adapters、
   HER v2、重试与 Sub-agent 传播实现已完成；
-- 对应单元与 Fake HTTP/IPC 覆盖已新增或更新，但依用户指示尚未执行；
-- 未修改或重载运行中服务，未执行 /reboot 或 /restart；
-- 下一步由用户负责重启并按第 10、11 节执行测试与真实 Provider 验收。
+- 实现已合并至 `main` 的
+  `cc010d11d69b4eb24c62c134dc57ac62ea42c277`，相关自动化覆盖已纳入通过的
+  2,663 项离线产品测试和 232 项核心发布门禁；
+- 集成主线已通过 `/reboot min` 与 `/reboot max` 通用代码加载验收；
+- 尚未完成真实 Momo Telegram 多图和各代表性 Provider 的专项 canary，因此不得把
+  通用热重载结果写成所有 Provider 多模态生产验收；
+- 下一步按第 10、11 节执行真实媒体专项验收，再决定是否扩大能力声明或部署范围。
