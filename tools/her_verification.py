@@ -18,7 +18,6 @@ from typing import Any
 
 from tools.builtins import BuiltinExecutionResult
 
-
 _IGNORED_COPY_DIRS = frozenset(
     {
         ".git",
@@ -276,9 +275,35 @@ async def execute_workspace_inspect(
         regex = arguments.get("regex", False)
         if not isinstance(regex, bool):
             return _result("Error: regex must be a boolean", operation=operation)
-        argv = ["rg", "--line-number", "--no-heading", "--color", "never"]
-        if not regex:
-            argv.append("--fixed-strings")
+        search_backend = "rg"
+        executable = shutil.which("rg")
+        if executable:
+            argv = [
+                executable,
+                "--line-number",
+                "--no-heading",
+                "--color",
+                "never",
+            ]
+            if not regex:
+                argv.append("--fixed-strings")
+        else:
+            search_backend = "grep"
+            executable = shutil.which("grep")
+            if not executable:
+                return _result(
+                    "Error: workspace search is unavailable: neither rg nor grep "
+                    "is installed",
+                    operation=operation,
+                    unavailable=True,
+                )
+            argv = [
+                executable,
+                "--recursive",
+                "--line-number",
+                "--binary-files=without-match",
+                "--extended-regexp" if regex else "--fixed-strings",
+            ]
         argv.extend(["--", query, str(target)])
         completed = await asyncio.to_thread(_run_read_only, argv, cwd=root)
         if completed.returncode not in {0, 1}:
@@ -293,6 +318,7 @@ async def execute_workspace_inspect(
             operation=operation,
             exit_code=completed.returncode,
             matches=0 if completed.returncode == 1 else len(output.splitlines()),
+            search_backend=search_backend,
         )
 
     if operation in {"hash", "artifact"}:

@@ -60,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **HER read-only search portability** — `workspace_inspect search` now uses
+  the system `grep` binary when `rg` is absent from the service process PATH,
+  preserving bounded, workzone-scoped Review and Verification evidence instead
+  of returning an unexpected tool failure.
 - **API Gateway hot-reload process-group crash** — isolated Codex MCP inventory
   subprocesses from HASHI's POSIX process group and made process-tree cleanup
   refuse any group kill that could target HASHI itself. Gateway shutdown now

@@ -68,6 +68,47 @@ async def test_workspace_inspection_rejects_paths_outside_the_workzone(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_workspace_search_falls_back_to_grep_when_rg_is_unavailable(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "sample.txt"
+    target.write_text("alpha\nbeta\n", encoding="utf-8")
+    real_which = her_verification.shutil.which
+
+    def without_rg(name):
+        return None if name == "rg" else real_which(name)
+
+    monkeypatch.setattr(her_verification.shutil, "which", without_rg)
+    result = await her_verification.execute_workspace_inspect(
+        {"operation": "search", "query": "beta", "path": "sample.txt"},
+        workspace_dir=tmp_path,
+    )
+
+    assert result.output == "2:beta\n"
+    assert result.details == {
+        "operation": "search",
+        "exit_code": 0,
+        "matches": 1,
+        "search_backend": "grep",
+    }
+
+
+@pytest.mark.asyncio
+async def test_workspace_search_reports_unavailable_without_a_search_binary(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(her_verification.shutil, "which", lambda _name: None)
+
+    result = await her_verification.execute_workspace_inspect(
+        {"operation": "search", "query": "alpha", "path": "."},
+        workspace_dir=tmp_path,
+    )
+
+    assert result.output.startswith("Error: workspace search is unavailable")
+    assert result.details["unavailable"] is True
+
+
+@pytest.mark.asyncio
 async def test_verification_run_lists_only_registered_recipes_and_rejects_shell_text(
     tmp_path,
 ):

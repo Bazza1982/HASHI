@@ -186,6 +186,9 @@ picture/media-specific routing.
 Assured Verification also follows the reviewer/Pro route by default. Review and
 Verification receive tools but no side-effect authority. `workspace_inspect`
 provides read-only snapshots, status, diff, search, and artifact hashes.
+Its search operation uses ripgrep when available and falls back to the system
+grep binary, so it does not depend on the service inheriting a developer-shell
+PATH.
 `verification_run` accepts only registered recipes and runs them in a temporary
 writable copy with network disabled, environment credentials cleared, common
 credential files and host configuration excluded, and a temporary `HOME`. If
