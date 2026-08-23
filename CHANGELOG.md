@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HER v2 high-risk periodic checkpoints** — Triage now records an immutable
+  `STANDARD` or `HIGH_RISK` Execution policy. High-risk cycles share a
+  request-local safe-boundary coordinator across the Primary Agent and bounded
+  sub-agents, with one tool-free assessment after 10 completed Tool Gateway
+  results or 300 monotonic seconds. Typed continue, user-input, halt, stop, and
+  audit-failure paths preserve exact receipts without replaying side effects,
+  cancelling active tools, adding a tool-loop cap, replacing assurance stages,
+  or synthesising commentary.
 - **HER Reviewed and Assured execution modes** — renamed the five HER v2
   orchestration choices in the UI while preserving `low` through `max` wire
   compatibility and command aliases. Reviewed (`xhigh`) now performs a

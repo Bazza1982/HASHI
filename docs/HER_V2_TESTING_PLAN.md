@@ -158,7 +158,12 @@ Prohibited behaviour includes:
 Tests must prove:
 
 - Triage records exactly one valid classification;
+- every work classification records exactly one explicit `STANDARD` or
+  `HIGH_RISK` checkpoint policy, and `HIGH_RISK` records a non-empty reason;
+- missing work policy is repaired or fails truthfully and never silently
+  defaults to `STANDARD`;
 - the classification is immutable once recorded;
+- the checkpoint policy and reason are immutable once recorded;
 - Planning, Execution, Replanning, Review, Verification, and sub-agents cannot reclassify;
 - later evidence suggesting a classification error does not mutate the current turn;
 - a future turn may use prior evidence, but receives a new Triage decision.
@@ -513,6 +518,44 @@ only registered argv recipes can run; arbitrary shell text is rejected; the
 workspace copy is temporary and size-bounded; common credential files and the
 host environment are absent; `HOME` is temporary; network is disabled; and a
 missing isolation facility returns `UNAVAILABLE` without a host fallback.
+
+### 7.9.2 High-risk periodic safe-boundary checkpoints
+
+The complete oracle is the
+[High-Risk Periodic Checkpoint Plan](HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md).
+Deterministic tests use an injected monotonic clock and exact Tool Gateway
+receipts to prove:
+
+- `STANDARD` installs no coordinator, while `HIGH_RISK` is not due at nine
+  results and `299.999` seconds and is due inclusively at result 10 or exactly
+  `300.0` seconds;
+- count and time becoming due together coalesce into one assessment, completed
+  receipt errors and denials count once, and starts, incomplete calls,
+  cancellations, or duplicate receipt identities do not count;
+- result 10 is retained before assessment and no 11th action begins first;
+- a tool active at minute five is never cancelled by cadence; already-admitted
+  parallel calls settle, new admission waits, and one single-flight leader
+  evaluates the boundary;
+- `CONTINUE` resets the current window once without catch-up, while provider
+  recovery and structured repair in the same Execution cycle do not reset it;
+- Primary-Agent and bounded-sub-agent results share one window, and each later
+  remediation Execution cycle receives a fresh window;
+- short or tool-free completion creates no synthetic checkpoint, while normal
+  Review, Verification, and Finalisation still occur;
+- `USER_INPUT_REQUIRED`, `HALT`, unavailable evaluation, explicit stop/steer,
+  and audit failure preserve completed evidence, stop new admission, and never
+  replay side effects;
+- immediate denial, approval, missing authority, permission, and workzone
+  safeguards retain precedence over cadence;
+- checkpoint evaluation is tool-free, side-effect-free, excluded from Persona
+  and commentary, and does not increment Review/Verification counters or reset
+  meaningful-progress idle state;
+- each tool-capable provider family propagates typed interruption without
+  flattening it into tool output, splitting the conversation, fabricating
+  resume state, or changing the unbounded tool loop; and
+- audit events `checkpoint_due`, `checkpoint_started`,
+  `checkpoint_completed`, and `checkpoint_interrupted_execution` use stable
+  identities and bounded redacted summaries.
 
 ### 7.10 Tool, permission, and workzone authority
 
@@ -916,6 +959,13 @@ that tool only. Removed legacy generic limit fields remain rejected rather than
 silently restored. No test may encode, bless, or preserve an unauthorised limit
 merely because the current implementation exposes one.
 
+The fixed 10-result/300-second high-risk cadence is tested as a safe-boundary
+scheduler, not as a limit. Regressions must prove that it never cancels a
+healthy provider or active tool, never caps total results or runtime, never
+forces completion, and never manufactures a checkpoint when no continuing tool
+boundary exists. Controlled 601-second and more-than-10-result journeys remain
+unbounded.
+
 ### 10.4 Auto Compact capacity and timeout isolation
 
 The complete oracle is the
@@ -1011,6 +1061,8 @@ Tests must prove:
   optional neutral commentary field;
 - lifecycle transitions, stage-start events, failures, retries, tool telemetry,
   and finalisation do not synthesise commentary;
+- checkpoint due/start/completion/interruption events and checkpoint model
+  output never enter commentary or generic user delivery;
 - missing, empty, malformed, or oversized optional commentary does not affect
   stage validation or workflow outcome;
 - runtime passes neutral commentary through a commentary port, sends combined
@@ -1089,7 +1141,7 @@ Use table-driven tests for:
 - lifecycle edges;
 - terminal-state decisions;
 - effort-policy selection;
-- Replan, Review, and Verification counters;
+- Replan, Review, Verification, and periodic-checkpoint counters;
 - retry/no-progress behaviour;
 - structured normalisation rules;
 - compatible response-carrier selection and ambiguity rejection;
@@ -1354,6 +1406,9 @@ Before HER v2 is accepted, the suite must contain logically complete coverage of
     source coverage, immutable raw retention, atomic commit/concurrency,
     truthful failure, compactor-only deadline isolation, Gemini statelessness,
     and unchanged initial OpenRouter/DeepSeek tool loops.
+22. high-risk periodic checkpoints: immutable Triage policy, exact 10/300
+    cadence, safe-boundary concurrency, immediate-safety precedence, typed
+    interruption, receipt preservation, audit, and no new execution ceiling.
 
 This is a list of required coverage areas, not an instruction to multiply each area into hundreds of tests.
 

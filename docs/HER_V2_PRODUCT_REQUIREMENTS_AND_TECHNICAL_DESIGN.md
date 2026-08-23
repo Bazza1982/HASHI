@@ -100,6 +100,10 @@ The only already-authorised controls that may stop or bound work are:
   [Auto Compact design](HER_V2_AUTO_COMPACTION_DESIGN.md); this exception cannot
   enclose a HER stage, target provider call, tool execution, or provider tool
   loop;
+- the fixed high-risk periodic checkpoint in section 8.5, which gates only the
+  next safe Execution tool boundary after 10 completed results or 300
+  monotonic seconds and never caps results, elapsed runtime, provider attempts,
+  active tools, or completion;
 - the Replanning, Reviewed closure, and Assured Verification/remediation
   iteration ceilings explicitly defined by HER execution-mode policy; and
 - exactly one safe fresh-connection recovery after an eligible provider
@@ -194,8 +198,9 @@ receive the same immutable Execution evidence.
 
 HER v2 keeps five boundaries distinct:
 
-1. A reasoning stage performs its assigned work and may include one optional
-   neutral `commentary` string in its successful structured result.
+1. Planning, Execution, Replanning, Review, and Verification may include one
+   optional neutral `commentary` string in a successful structured result.
+   Internal checkpoint assessment cannot produce commentary.
 2. The commentary lane validates and forwards that string. Lifecycle events,
    state transitions, retries, failures, and tool telemetry never synthesise
    Persona messages.
@@ -253,6 +258,8 @@ The authoritative request is the user's current instruction together with the ap
 Triage is the sole authority for classifying a turn. Once the Triage result has been validated and recorded in the Ledger:
 
 - the classification is immutable for that turn;
+- every work classification has an immutable `STANDARD` or `HIGH_RISK`
+  checkpoint policy, with a required reason for `HIGH_RISK`;
 - planning may not redefine complexity;
 - execution may not silently change the classification;
 - replanning may change the approach but not the classification;
@@ -260,6 +267,11 @@ Triage is the sole authority for classifying a turn. Once the Triage result has 
 - a suspected misclassification is recorded as evidence but corrected only through a future turn.
 
 This immutability is intentional. Triage quality is improved through prompt refinement, tests, and operational evidence rather than by allowing downstream stages to overrule it.
+
+Checkpoint risk is independent of task complexity and execution effort. It
+does not grant tool or side-effect authority. A malformed work Triage response
+that omits the policy is repaired through the normal structured-output path or
+fails truthfully; Runtime never silently substitutes `STANDARD`.
 
 ### 4.3 Plan authority
 
@@ -287,6 +299,12 @@ Review and Verification may use tools, but every delegated tool must be marked
 read-only by the HASHI Tool Registry. Those stages never receive side-effect
 authority. Their findings may cause Runtime to ask the Primary Agent to
 remediate; they cannot perform that remediation themselves.
+
+The periodic checkpoint is a separate internal control, not Review or
+Verification. It is tool-free and may only continue Execution, require one
+concrete user question, or halt further admission while retaining completed
+evidence. It cannot reclassify, widen scope, mutate a plan, authorise a denied
+tool, finalise, or contact the user directly.
 
 ### 4.5 `/steer` authority
 
@@ -460,6 +478,13 @@ Triage uses a lightweight model with a high provider reasoning setting. It produ
 - HER requests clarification or confirmation.
 - The turn becomes terminal state `PENDING_USER_INPUT`.
 
+For `SIMPLE_TASK`, `COMPLEX_TASK`, and `HIGH_VOLUME_TASK`, Triage also returns
+exactly one `checkpoint_policy`: `STANDARD` or `HIGH_RISK`. `HIGH_RISK` is used
+when continuing Execution can materially and irreversibly affect data,
+production, security or access, credentials, money, external communications,
+or another high-consequence target, and it requires a concise
+`checkpoint_reason`. Non-work classifications carry neither field.
+
 ### 6.3 Immediate Response and Triage race handling
 
 The Immediate Response and Triage may finish in either order. HER must enforce the following rules:
@@ -571,6 +596,37 @@ call, delivers its Persona-rendered clarification, and then reaches
 `PENDING_USER_INPUT`. Bounded sub-agents may not use this disposition to contact
 the user; they return the missing-information finding to the Primary Agent as
 evidence.
+
+### 8.5 High-risk periodic safe-boundary checkpoint
+
+Only Execution cycles whose immutable Triage policy is `HIGH_RISK` install a
+request-local checkpoint coordinator. A checkpoint becomes due at the first
+observed inclusive threshold of 10 newly completed Tool Gateway receipts or
+300 monotonic seconds in that Execution cycle. Successes, completed tool
+errors, and policy denials count once by exact receipt identity; starts,
+incomplete calls, duplicates, and non-Execution activity do not.
+
+Due state is checked before admitting a new tool and after recording a
+completed result. The coordinator closes new admission, lets already-active
+tools settle, and runs exactly one tool-free assessment. The result that made
+the checkpoint due is preserved before assessment, and the 11th action cannot
+start first. Crossing 300 seconds never cancels an active tool or provider
+operation. If Execution completes without another safe tool boundary, HER does
+not invent a catch-up or final checkpoint.
+
+`CONTINUE` begins one fresh count/time window. `USER_INPUT_REQUIRED` and `HALT`
+use typed control paths that preserve all completed receipts and never replay a
+side effect. An unavailable or invalid evaluator fails closed as `HALT`, with
+the technical limitation reported truthfully. Immediate Tool Gateway denial,
+approval, missing authority, `/stop`, `/steer`, audit failure, and cancellation
+retain precedence over the cadence.
+
+The Primary Agent and bounded sub-agents share one coordinator within an
+authoritative Execution cycle. A later Review or Verification remediation
+starts a fresh cycle. Checkpoints do not increment Review or Verification
+counters, reset meaningful-progress idle state, enter Persona/commentary, or
+replace the ordinary assurance and Finalisation stages. The normative detailed
+contract is [HER v2 High-Risk Periodic Checkpoint Plan](HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md).
 
 ## 9. Stage 4: Replanning
 

@@ -147,6 +147,7 @@ DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
     Stage.TRIAGE: "triage",
     Stage.PLANNING: "premium",
     Stage.EXECUTION: "premium",
+    Stage.CHECKPOINT: "reviewer",
     Stage.REPLANNING: "premium",
     Stage.REVIEW: "reviewer",
     Stage.VERIFICATION: "reviewer",
@@ -606,10 +607,16 @@ class HERv2Config:
             raise HERv2ConfigurationError(
                 f"no configured provider profile for stage {stage.value}"
             )
-        return self._configured_route_profile(
+        configured = self._configured_route_profile(
             self.profiles[role],
             DEFAULT_ROUTES_BY_STAGE[stage],
         )
+        if stage is Stage.CHECKPOINT and stage in self.stage_reasoning:
+            configured = replace(
+                configured,
+                reasoning=self.stage_reasoning[stage],
+            )
+        return configured
 
     def execution_profile_for(
         self, classification: TriageClassification

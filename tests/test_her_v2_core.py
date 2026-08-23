@@ -17,6 +17,7 @@ from orchestrator.her_v2.ledger import (
 )
 from orchestrator.her_v2.lifecycle import LifecycleMachine, LifecycleViolation
 from orchestrator.her_v2.models import (
+    CheckpointPolicy,
     Effort,
     ExecutionDisposition,
     LifecycleState,
@@ -72,9 +73,15 @@ def test_lifecycle_violation_is_not_silently_repaired():
 
 def test_triage_classification_is_immutable_and_plan_replacement_is_replan_only():
     ledger = ExecutionLedger("turn-1", "request:1", "goal:1")
-    ledger.record_triage(TriageClassification.COMPLEX_TASK)
+    ledger.record_triage(
+        TriageClassification.COMPLEX_TASK,
+        checkpoint_policy=CheckpointPolicy.STANDARD,
+    )
     with pytest.raises(LedgerInvariantError, match="immutable"):
-        ledger.record_triage(TriageClassification.SIMPLE_TASK)
+        ledger.record_triage(
+            TriageClassification.SIMPLE_TASK,
+            checkpoint_policy=CheckpointPolicy.STANDARD,
+        )
 
     ledger.transition(LifecycleState.PLANNED)
     ledger.activate_plan("plan-v1")
@@ -98,6 +105,8 @@ def test_ledger_snapshot_is_minimal_and_caps_log_references():
         "goal_ref",
         "status",
         "classification",
+        "checkpoint_policy",
+        "checkpoint_reason",
         "plan_id",
         "last_update",
         "log_refs",
@@ -111,10 +120,16 @@ def test_ledger_snapshot_is_minimal_and_caps_log_references():
 def test_restart_reconciliation_marks_incomplete_turn_error_without_resuming(tmp_path):
     store = LedgerStore(tmp_path / "ledgers")
     incomplete = ExecutionLedger("old", "request:old", "goal:old")
-    incomplete.record_triage(TriageClassification.SIMPLE_TASK)
+    incomplete.record_triage(
+        TriageClassification.SIMPLE_TASK,
+        checkpoint_policy=CheckpointPolicy.STANDARD,
+    )
     incomplete.transition(LifecycleState.EXECUTING)
     complete = ExecutionLedger("done", "request:done", "goal:done")
-    complete.record_triage(TriageClassification.DIRECT_RESPONSE)
+    complete.record_triage(
+        TriageClassification.DIRECT_RESPONSE,
+        checkpoint_policy=None,
+    )
     complete.transition(LifecycleState.FINALISING)
     complete.transition(LifecycleState.COMPLETED)
     store.save(incomplete)
@@ -126,6 +141,32 @@ def test_restart_reconciliation_marks_incomplete_turn_error_without_resuming(tmp
     assert store.load("old").status is LifecycleState.ERROR
     assert store.load("old").terminal_reason == "unexpected_process_interruption"
     assert store.load("done").status is LifecycleState.COMPLETED
+
+
+def test_restart_reconciliation_fails_closed_for_legacy_work_without_checkpoint_policy(
+    tmp_path,
+):
+    store = LedgerStore(tmp_path / "ledgers")
+    legacy = ExecutionLedger.from_dict(
+        {
+            "format": "her-v2-ledger-v1",
+            "turn_id": "legacy-work",
+            "request_ref": "request:legacy-work",
+            "goal_ref": "goal:legacy-work",
+            "status": "EXECUTING",
+            "classification": "COMPLEX_TASK",
+        }
+    )
+    assert legacy.checkpoint_policy is None
+    store.save(legacy)
+
+    reconciled = store.reconcile_interrupted()
+
+    assert [item.turn_id for item in reconciled] == ["legacy-work"]
+    persisted = store.load("legacy-work")
+    assert persisted.status is LifecycleState.ERROR
+    assert persisted.checkpoint_policy is None
+    assert persisted.terminal_reason == "unexpected_process_interruption"
 
 
 @pytest.mark.parametrize(
@@ -284,6 +325,7 @@ def test_stage_reasoning_override_is_provider_configuration_not_effort():
             "stage_reasoning": {
                 "triage": "low",
                 "execution": "xhigh",
+                "checkpoint": "high",
             },
         }
     )
@@ -294,6 +336,9 @@ def test_stage_reasoning_override_is_provider_configuration_not_effort():
         == "xhigh"
     )
     assert config.profile_for(Stage.REVIEW).reasoning == "max"
+    checkpoint = config.profile_for(Stage.CHECKPOINT)
+    assert checkpoint.name == "reviewer"
+    assert checkpoint.reasoning == "high"
     assert Effort.HIGH.value == "high"
 
 

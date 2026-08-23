@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -12,6 +13,12 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .audit import AuditPersistenceError, DurableAuditLog
 from .commentary import CommentaryPort, NullCommentaryPort
+from .checkpoint import (
+    CheckpointInfrastructureInterruption,
+    CheckpointInterruption,
+    CheckpointSnapshot,
+    HighRiskCheckpointCoordinator,
+)
 from .config import HERv2Config
 from .interfaces import (
     DeliveryPort,
@@ -32,6 +39,9 @@ from .ledger import ExecutionLedger, LedgerInvariantError, LedgerStore
 from .lifecycle import LifecycleViolation
 from .models import (
     WORK_CLASSIFICATIONS,
+    CheckpointDecision,
+    CheckpointFinding,
+    CheckpointPolicy,
     DeliveryRecord,
     Effort,
     ExecutionDisposition,
@@ -69,6 +79,7 @@ from .runtime_support import (
     _terminal_reason,
 )
 from .structured import (
+    parse_checkpoint,
     parse_execution,
     parse_finalisation,
     parse_immediate,
@@ -99,6 +110,8 @@ class _TurnState:
     replan_count: int = 0
     review_count: int = 0
     verification_count: int = 0
+    checkpoint_count: int = 0
+    execution_cycle_serial: int = 0
     stage_invocation_serial: int = 0
     last_review: ReviewFinding | None = None
     review_remediated: bool = False
@@ -137,6 +150,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         logger: logging.Logger | None = None,
         retry_policy: ProviderRetryPolicy | None = None,
         workzone_ref: str = "",
+        checkpoint_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -154,6 +168,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         self.logger = logger or logging.getLogger("HASHI.HERv2")
         self.retry_policy = retry_policy or DEFAULT_PROVIDER_RETRY_POLICY
         self.workzone_ref = str(workzone_ref or "")
+        self.checkpoint_clock = checkpoint_clock
         self._controls: dict[str, TurnControl] = {}
         self._turn_tasks: dict[str, asyncio.Task] = {}
         self._background_tasks: set[asyncio.Task] = set()
@@ -366,7 +381,12 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     "authority_changed": False,
                 },
             )
-        self._record_triage(state, triage.classification)
+        self._record_triage(
+            state,
+            triage.classification,
+            triage.checkpoint_policy,
+            triage.checkpoint_reason,
+        )
         state.progress.record("classification", triage.classification.value)
 
         # Triage is authoritative, but winning this race does not cancel a
@@ -949,26 +969,207 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             error=error,
         )
 
+    def _checkpoint_observer(
+        self, state: _TurnState, event: str, payload: Mapping[str, Any]
+    ) -> None:
+        checkpoint_index = int(payload.get("checkpoint_index") or 0)
+        cycle_id = str(payload.get("cycle_id") or "checkpoint-cycle")
+        ref = self._audit(
+            state,
+            stage=Stage.CHECKPOINT.value,
+            role="checkpoint_evaluator",
+            event=event,
+            event_id=f"{cycle_id}:checkpoint:{checkpoint_index}:{event}",
+            payload=dict(payload),
+        )
+        try:
+            state.ledger.add_log_ref(ref)
+            self.ledger_store.save(state.ledger)
+        except AuditPersistenceError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - control persistence is required
+            raise AuditPersistenceError(
+                "checkpoint control ledger persistence failed"
+            ) from exc
+        if event == "checkpoint_completed":
+            state.checkpoint_count += 1
+
+    async def _evaluate_checkpoint(
+        self,
+        state: _TurnState,
+        classification: TriageClassification,
+        snapshot: CheckpointSnapshot,
+    ) -> CheckpointFinding:
+        state.ledger.assert_classification(classification)
+        state.ledger.assert_checkpoint_policy(
+            CheckpointPolicy.HIGH_RISK,
+            state.ledger.checkpoint_reason,
+        )
+        _response, finding = await self._invoke_stage(
+            state,
+            Stage.CHECKPOINT,
+            parse_checkpoint,
+            profile=self.config.profile_for(Stage.CHECKPOINT),
+            allow_tools=False,
+            allow_side_effects=False,
+            role_override="checkpoint_evaluator",
+            publish_commentary=False,
+            context={
+                "classification": classification.value,
+                "goal_ref": state.ledger.goal_ref,
+                "checkpoint_policy": CheckpointPolicy.HIGH_RISK.value,
+                "checkpoint_reason": state.ledger.checkpoint_reason,
+                "active_plan": state.active_plan,
+                "execution_cycle_id": snapshot.cycle_id,
+                "checkpoint_index": snapshot.checkpoint_index,
+                "trigger_reasons": list(snapshot.trigger_reasons),
+                "completed_result_count": snapshot.completed_result_count,
+                "elapsed_s": snapshot.elapsed_s,
+                "completed_receipts": [
+                    dict(item) for item in snapshot.receipt_summaries
+                ],
+                "receipt_set_sha256": snapshot.receipt_set_sha256,
+                "prospective_action": (
+                    dict(snapshot.prospective_action)
+                    if snapshot.prospective_action is not None
+                    else None
+                ),
+                "current_limitations": list(state.limitations),
+                "authority": "advisory_tool_free_checkpoint_only",
+                "may_replan": False,
+                "may_contact_user": False,
+                "may_finalise": False,
+                "may_authorise_tools": False,
+                "habits_included": False,
+            },
+        )
+        assert isinstance(finding, CheckpointFinding)
+        return finding
+
+    def _new_checkpoint_coordinator(
+        self, state: _TurnState, classification: TriageClassification
+    ) -> HighRiskCheckpointCoordinator | None:
+        state.execution_cycle_serial += 1
+        if state.ledger.checkpoint_policy is not CheckpointPolicy.HIGH_RISK:
+            return None
+        cycle_id = (
+            f"{state.ledger.turn_id}:execution-cycle:{state.execution_cycle_serial}"
+        )
+        return HighRiskCheckpointCoordinator(
+            cycle_id=cycle_id,
+            evaluator=lambda snapshot: self._evaluate_checkpoint(
+                state, classification, snapshot
+            ),
+            observer=lambda event, payload: self._checkpoint_observer(
+                state, event, payload
+            ),
+            clock=self.checkpoint_clock,
+        )
+
+    def _execution_from_checkpoint_interruption(
+        self, state: _TurnState, interruption: CheckpointInterruption
+    ) -> ExecutionOutcome:
+        self._merge_checkpoint_receipts(state, interruption.receipts)
+        state.checkpoint_count = max(
+            state.checkpoint_count, interruption.snapshot.checkpoint_index
+        )
+        finding = interruption.finding
+        limitations: list[str] = []
+        if finding.decision is CheckpointDecision.HALT:
+            limitations.append(finding.summary)
+        if interruption.evaluator_failure is not None:
+            limitations.append(
+                "Checkpoint evaluator unavailable: "
+                f"[{interruption.evaluator_failure.error_code}] "
+                f"{interruption.evaluator_failure.human_description}"
+            )
+        evidence_refs = tuple(
+            receipt.evidence_ref
+            for receipt in interruption.receipts
+            if receipt.completed
+        )
+        outcome = ExecutionOutcome(
+            disposition=(
+                ExecutionDisposition.USER_INPUT_REQUIRED
+                if finding.decision is CheckpointDecision.USER_INPUT_REQUIRED
+                else ExecutionDisposition.FAILED
+            ),
+            summary=finding.summary,
+            evidence_refs=evidence_refs,
+            limitations=tuple(dict.fromkeys(limitations)),
+            clarification=finding.question,
+            remaining_work=(
+                "Further high-risk tool execution was not admitted after the checkpoint.",
+            ),
+        )
+        self._audit(
+            state,
+            stage=Stage.CHECKPOINT.value,
+            role="runtime",
+            event="checkpoint_interrupted_execution",
+            event_id=(
+                f"{interruption.snapshot.cycle_id}:checkpoint:"
+                f"{interruption.snapshot.checkpoint_index}:execution-interrupted"
+            ),
+            payload={
+                "decision": finding.decision.value,
+                "summary": finding.summary,
+                "question_present": bool(finding.question),
+                "evidence_refs": list(evidence_refs),
+                "evaluator_failure": (
+                    interruption.evaluator_failure.audit_payload()
+                    if interruption.evaluator_failure is not None
+                    else None
+                ),
+                "execution_replayed": False,
+                "further_tool_admission": False,
+            },
+        )
+        state.last_execution_response = StageResponse(
+            data=_execution_payload(outcome),
+            provider="hashi-runtime",
+            model="checkpoint-control",
+            evidence_refs=evidence_refs,
+            tool_receipts=tuple(interruption.receipts),
+        )
+        state.last_execution_structure_valid = True
+        state.last_execution_error = ""
+        state.last_execution_failure = None
+        return outcome
+
+    @staticmethod
+    def _merge_checkpoint_receipts(
+        state: _TurnState, receipts: Sequence[ToolEvidenceReceipt]
+    ) -> None:
+        for receipt in receipts:
+            state.tool_receipts[receipt.evidence_ref] = receipt
+            if receipt.completed and receipt.evidence_ref not in state.evidence_refs:
+                state.evidence_refs.append(receipt.evidence_ref)
+            cleanup = receipt.details.get("foreground_cleanup")
+            if isinstance(cleanup, Mapping):
+                state.last_foreground_cleanup = dict(cleanup)
+
     async def _execute_once(
         self, state: _TurnState, classification: TriageClassification
     ) -> ExecutionOutcome | None:
+        checkpoint = self._new_checkpoint_coordinator(state, classification)
         sub_agent_results: tuple[SubAgentResult, ...] = ()
-        if classification is TriageClassification.HIGH_VOLUME_TASK:
-            sub_agent_results = await self._run_subagents(state)
-            for result in sub_agent_results:
-                for ref in result.evidence_refs:
-                    if ref not in state.evidence_refs:
-                        state.evidence_refs.append(ref)
-        profile = (
-            self.config.profile_for(Stage.EXECUTION)
-            if state.execution_capability_escalated
-            else self.config.execution_profile_for(classification)
-        )
         state.last_execution_response = None
         state.last_execution_structure_valid = False
         state.last_execution_error = ""
         state.last_execution_failure = None
         try:
+            if classification is TriageClassification.HIGH_VOLUME_TASK:
+                sub_agent_results = await self._run_subagents(state, checkpoint)
+                for result in sub_agent_results:
+                    for ref in result.evidence_refs:
+                        if ref not in state.evidence_refs:
+                            state.evidence_refs.append(ref)
+            profile = (
+                self.config.profile_for(Stage.EXECUTION)
+                if state.execution_capability_escalated
+                else self.config.execution_profile_for(classification)
+            )
             _response, execution = await self._invoke_stage(
                 state,
                 Stage.EXECUTION,
@@ -990,7 +1191,23 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     ],
                 },
                 defer_structured_error=True,
+                checkpoint_coordinator=checkpoint,
             )
+        except CheckpointInterruption as exc:
+            return self._execution_from_checkpoint_interruption(state, exc)
+        except CheckpointInfrastructureInterruption as exc:
+            if isinstance(exc.cause, (TurnStopped, AuditPersistenceError)):
+                raise exc.cause
+            raise StageInvocationError(
+                "high-risk checkpoint infrastructure failed: "
+                f"{type(exc.cause).__name__}: {exc.cause}",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_UNKNOWN,
+                human_description=(
+                    "The high-risk checkpoint control boundary failed "
+                    "unexpectedly, so execution stopped."
+                ),
+            ) from exc.cause
         except (TurnStopped, AuditPersistenceError):
             raise
         except StageInvocationError as exc:
@@ -998,6 +1215,13 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             state.terminal_failure = exc
             state.last_execution_error = f"[{exc.error_code}] {exc.human_description}"
             return None
+        finally:
+            if checkpoint is not None:
+                self._merge_checkpoint_receipts(state, checkpoint.receipts)
+                state.checkpoint_count = max(
+                    state.checkpoint_count, checkpoint.checkpoint_count
+                )
+                await checkpoint.close()
 
         state.last_execution_response = _response
         state.last_execution_structure_valid = isinstance(execution, ExecutionOutcome)
@@ -1016,7 +1240,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             )
         return execution
 
-    async def _run_subagents(self, state: _TurnState) -> tuple[SubAgentResult, ...]:
+    async def _run_subagents(
+        self,
+        state: _TurnState,
+        checkpoint: HighRiskCheckpointCoordinator | None,
+    ) -> tuple[SubAgentResult, ...]:
         raw_assignments = (
             state.active_plan.get("sub_agents", [])
             if isinstance(state.active_plan, Mapping)
@@ -1074,7 +1302,9 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             )
             seen.add(assignment_id)
         tasks = [
-            asyncio.create_task(self._invoke_subagent(state, assignment))
+            asyncio.create_task(
+                self._invoke_subagent(state, assignment, checkpoint)
+            )
             for assignment in assignments
         ]
         try:
@@ -1087,7 +1317,10 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         return results
 
     async def _invoke_subagent(
-        self, state: _TurnState, assignment: SubAgentAssignment
+        self,
+        state: _TurnState,
+        assignment: SubAgentAssignment,
+        checkpoint: HighRiskCheckpointCoordinator | None,
     ) -> SubAgentResult:
         profile = self.config.profile_for_name(assignment.profile)
         role = f"sub_agent:{assignment.assignment_id}"
@@ -1141,6 +1374,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 role_override=role,
                 publish_commentary=False,
                 retry_on_failure=not side_effects_authorised,
+                checkpoint_coordinator=checkpoint,
             )
             assert isinstance(outcome, ExecutionOutcome)
             if outcome.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:

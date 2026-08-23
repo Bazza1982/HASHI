@@ -46,8 +46,11 @@ Implementation and tests must not weaken these rules:
 - The existing authorised controls are limited to explicit stop/cancellation,
   the configured meaningful-progress idle detector, narrowly scoped transport
   inactivity/protocol guards, an explicitly requested single-tool timeout, the
-  effort-defined Replanning and Review/remediation counts, and one safe
-  fresh-connection recovery after an eligible typed provider failure.
+  effort-defined Replanning and Review/remediation counts, the fixed high-risk
+  10-result/300-second safe-boundary checkpoint scheduler, and one safe
+  fresh-connection recovery after an eligible typed provider failure. The
+  checkpoint cadence gates only continuing tool admission and never caps or
+  cancels healthy work.
 - Omitting a `bash` timeout means no timeout. No implicit `30`-second default or
   implicit `120`-second cap may be applied.
 - `allow_side_effects=true` and the Agent's ordinary Tool Registry authority are

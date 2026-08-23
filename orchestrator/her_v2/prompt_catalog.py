@@ -35,6 +35,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
     ),
     "system_dream": frozenset(),
     "system_execution": frozenset(),
+    "system_checkpoint": frozenset(),
     "system_finalisation": frozenset(
         {"persona_block_begin", "persona_block_end", "persona_guidance"}
     ),

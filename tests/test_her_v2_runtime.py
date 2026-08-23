@@ -357,6 +357,12 @@ def _runtime(
 
 
 def _initial(classification, *, triage_goal="interpreted goal", clarification=""):
+    checkpoint_policy = (
+        "STANDARD"
+        if classification
+        in {"SIMPLE_TASK", "COMPLEX_TASK", "HIGH_VOLUME_TASK"}
+        else None
+    )
     return {
         Stage.IMMEDIATE_RESPONSE: [{"message": "I have it."}],
         Stage.TRIAGE: [
@@ -364,6 +370,8 @@ def _initial(classification, *, triage_goal="interpreted goal", clarification=""
                 "classification": classification,
                 "goal": triage_goal,
                 "clarification": clarification,
+                "checkpoint_policy": checkpoint_policy,
+                "checkpoint_reason": None,
             }
         ],
     }
@@ -493,7 +501,9 @@ async def test_triage_first_work_starts_without_waiting_and_repairs_late_immedia
 
     scripts = {
         Stage.IMMEDIATE_RESPONSE: [delayed_immediate],
-        Stage.TRIAGE: [{"classification": "SIMPLE_TASK"}],
+        Stage.TRIAGE: [
+            {"classification": "SIMPLE_TASK", "checkpoint_policy": "STANDARD"}
+        ],
         Stage.EXECUTION: [blocked_execution],
         Stage.FINALISATION: [{"report": "Checked and complete."}],
     }
@@ -553,7 +563,9 @@ async def test_unrepairable_immediate_text_remains_visible_for_work(tmp_path):
                 model="model-lightweight",
             )
         ],
-        Stage.TRIAGE: [{"classification": "SIMPLE_TASK"}],
+        Stage.TRIAGE: [
+            {"classification": "SIMPLE_TASK", "checkpoint_policy": "STANDARD"}
+        ],
         Stage.EXECUTION: [{"disposition": "COMPLETED", "summary": "Done."}],
         Stage.FINALISATION: [{"report": "Done."}],
     }
@@ -594,7 +606,9 @@ async def test_final_completion_supersedes_a_still_pending_immediate_response(tm
 
     scripts = {
         Stage.IMMEDIATE_RESPONSE: [blocked_immediate],
-        Stage.TRIAGE: [{"classification": "SIMPLE_TASK"}],
+        Stage.TRIAGE: [
+            {"classification": "SIMPLE_TASK", "checkpoint_policy": "STANDARD"}
+        ],
         Stage.EXECUTION: [{"disposition": "COMPLETED", "summary": "Done."}],
         Stage.FINALISATION: [{"report": "Done."}],
     }
@@ -709,6 +723,9 @@ async def test_optional_immediate_failure_does_not_block_authoritative_triage(
             {
                 "classification": classification,
                 "clarification": clarification,
+                "checkpoint_policy": (
+                    "STANDARD" if classification == "SIMPLE_TASK" else None
+                ),
             }
         ],
     }
@@ -2647,7 +2664,9 @@ async def test_triage_recovers_unambiguous_control_json_from_reasoning(tmp_path)
                 text="",
                 reasoning_trace=(
                     "The task requires work.\n"
-                    '{"classification":"COMPLEX_TASK","goal":"Diagnose the fault"}'
+                    '{"classification":"COMPLEX_TASK",'
+                    '"goal":"Diagnose the fault",'
+                    '"checkpoint_policy":"STANDARD"}'
                 ),
                 provider="fake-api",
                 model="model-triage",
@@ -3026,7 +3045,10 @@ async def test_structured_output_repair_has_no_attempt_cap_and_preserves_classif
         StageResponse(text="not json on the third attempt"),
         StageResponse(text="not json on the fourth attempt"),
         StageResponse(
-            text='prefix {"classification":"simple-task","goal":"Do it"} suffix',
+            text=(
+                'prefix {"classification":"simple-task","goal":"Do it",'
+                '"checkpoint_policy":"STANDARD"} suffix'
+            ),
             reasoning_trace=None,
             provider="fake-api",
             model="model-triage",
@@ -3175,7 +3197,11 @@ async def test_steer_stops_old_turn_and_new_turn_gets_fresh_triage(tmp_path):
             {"message": "New answer."},
         ],
         Stage.TRIAGE: [
-            {"classification": "COMPLEX_TASK", "goal": "old"},
+            {
+                "classification": "COMPLEX_TASK",
+                "goal": "old",
+                "checkpoint_policy": "STANDARD",
+            },
             {"classification": "DIRECT_RESPONSE", "goal": "new"},
         ],
         Stage.EXECUTION: [blocking_execution],

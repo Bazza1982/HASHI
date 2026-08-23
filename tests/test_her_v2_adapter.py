@@ -15,6 +15,10 @@ from adapters.her_v2 import (
     HashiStageProvider,
     _backend_response_error,
 )
+from adapters.deepseek_api import DeepSeekAdapter
+from adapters.hashi_api import HashiApiAdapter
+from adapters.ollama_api import OllamaAdapter
+from adapters.openrouter_api import OpenRouterAdapter, _APIResult
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
     DELIVERY_FINAL,
@@ -26,17 +30,26 @@ from adapters.stream_events import (
     KIND_TOOL_START,
     StreamEvent,
 )
+from adapters.xai_api import XaiApiAdapter
 from orchestrator.config import AgentConfig, GlobalConfig
 from orchestrator.flexible_backend_registry import (
     BACKEND_REGISTRY,
     canonical_backend_engine,
 )
 from orchestrator.her_v2.config import ProviderProfile
+from orchestrator.her_v2.checkpoint import (
+    CheckpointInterruption,
+    CheckpointSnapshot,
+    HighRiskCheckpointCoordinator,
+)
 from orchestrator.her_v2.commentary import PackagedCommentary
 from orchestrator.her_v2.interfaces import ProviderFailureCode, StageInvocationError
 from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.ledger import ExecutionLedger, LedgerStore
 from orchestrator.her_v2.models import (
+    CheckpointDecision,
+    CheckpointFinding,
+    CheckpointPolicy,
     Effort,
     LifecycleState,
     Stage,
@@ -213,6 +226,7 @@ class _WorkAndMeditationProvider(_DirectProvider):
             Stage.TRIAGE: {
                 "classification": "SIMPLE_TASK",
                 "goal": request.goal,
+                "checkpoint_policy": "STANDARD",
             },
             Stage.EXECUTION: {
                 "disposition": "COMPLETED",
@@ -264,7 +278,11 @@ class _SideEffectFailureProvider(_DirectProvider):
         if request.stage is Stage.IMMEDIATE_RESPONSE:
             payload = {"message": "I have it."}
         elif request.stage is Stage.TRIAGE:
-            payload = {"classification": "SIMPLE_TASK", "goal": request.goal}
+            payload = {
+                "classification": "SIMPLE_TASK",
+                "goal": request.goal,
+                "checkpoint_policy": "STANDARD",
+            }
         elif request.stage is Stage.EXECUTION:
             request.provider_activity_callback(
                 {
@@ -338,6 +356,7 @@ class _EffortPolicyProvider:
             Stage.TRIAGE: {
                 "classification": "SIMPLE_TASK",
                 "goal": request.goal,
+                "checkpoint_policy": "STANDARD",
             },
             Stage.PLANNING: {"plan": ["Execute the scheduled specification"]},
             Stage.EXECUTION: {
@@ -680,7 +699,11 @@ async def test_adapter_finalises_unusable_execution_as_runtime_error(tmp_path):
             if request.stage is Stage.IMMEDIATE_RESPONSE:
                 payload = {"message": "I have it."}
             elif request.stage is Stage.TRIAGE:
-                payload = {"classification": "SIMPLE_TASK", "goal": request.goal}
+                payload = {
+                    "classification": "SIMPLE_TASK",
+                    "goal": request.goal,
+                    "checkpoint_policy": "STANDARD",
+                }
             elif request.stage is Stage.EXECUTION:
                 return StageResponse(
                     text="execution reply without valid JSON",
@@ -1229,7 +1252,10 @@ async def test_adapter_reconciles_old_inflight_ledger_without_resuming_it(tmp_pa
     setattr(config, "_her_v2_stage_provider", provider)
     store = LedgerStore(config.workspace_dir / "backend_state" / "her_v2" / "ledgers")
     ledger = ExecutionLedger("interrupted", "request:old", "goal:old")
-    ledger.record_triage(TriageClassification.COMPLEX_TASK)
+    ledger.record_triage(
+        TriageClassification.COMPLEX_TASK,
+        checkpoint_policy=CheckpointPolicy.STANDARD,
+    )
     ledger.transition(LifecycleState.EXECUTING)
     store.save(ledger)
     adapter = HERv2Adapter(config, _global_config(tmp_path))
@@ -1594,7 +1620,9 @@ Return exactly one JSON object matching this shape:
 {
   "classification": "DIRECT_RESPONSE | SIMPLE_TASK | COMPLEX_TASK | HIGH_VOLUME_TASK | CONFIRMATION_REQUIRED",
   "goal": "optional concise interpretation of the current request, or null when unnecessary",
-  "clarification": "a concrete question required only for CONFIRMATION_REQUIRED; otherwise null"
+  "clarification": "a concrete question required only for CONFIRMATION_REQUIRED; otherwise null",
+  "checkpoint_policy": "STANDARD | HIGH_RISK for SIMPLE_TASK, COMPLEX_TASK, or HIGH_VOLUME_TASK; null otherwise",
+  "checkpoint_reason": "required non-empty risk reason for HIGH_RISK; null otherwise"
 }"""
     assert "For Planning, Execution, Replanning, and Review" not in backend.prompt
     assert "her_effort" not in backend.prompt
@@ -1843,9 +1871,443 @@ async def test_hashi_stage_provider_makes_every_effort_tool_loop_unbounded():
         request_registry = manager.backends[-1].tool_registry
         assert request_registry.base is registry
         assert request_registry.max_loops is None
-
     assert registry.max_loops == 8
 
+
+@pytest.mark.asyncio
+async def test_hashi_stage_provider_checkpoints_exact_receipts_without_capping_loop():
+    snapshots = []
+
+    async def evaluator(snapshot):
+        snapshots.append(snapshot)
+        return CheckpointFinding(CheckpointDecision.CONTINUE, "Continue.")
+
+    coordinator = HighRiskCheckpointCoordinator(
+        cycle_id="turn-1:execution-cycle:1",
+        evaluator=evaluator,
+        clock=lambda: 0.0,
+    )
+
+    class ElevenToolBackend(_FakeBackend):
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+        ):
+            del request_id, is_retry, silent, on_stream_event
+            self.prompt = prompt
+            self.results = []
+            for index in range(1, 12):
+                self.results.append(
+                    await self.tool_registry.execute(
+                        "file_read",
+                        {"path": f"evidence-{index}.txt"},
+                        f"provider-call-{index}",
+                    )
+                )
+            return BackendResponse(
+                text='{"disposition":"COMPLETED","summary":"done"}',
+                duration_ms=1,
+                tool_call_count=11,
+                tool_loop_count=11,
+            )
+
+    class ElevenToolManager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert (engine, target_model) == (
+                "openrouter-api",
+                "configured/model",
+            )
+            backend = ElevenToolBackend(self.system_md)
+            self.backends.append(backend)
+            return backend
+
+    manager = ElevenToolManager()
+    registry = _BaseToolRegistry()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=registry,
+    )
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=True,
+        allow_side_effects=True,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "invocation_id": "turn-1:execution:invocation:1",
+            "checkpoint_coordinator": coordinator,
+        }
+    )
+
+    response = await provider.invoke(
+        ProviderProfile("premium", "openrouter-api", "configured/model"),
+        request,
+    )
+    await coordinator.close()
+
+    assert len(snapshots) == 1
+    assert snapshots[0].completed_result_count == 10
+    assert len(response.tool_receipts) == 11
+    assert len(registry.executed) == 11
+    assert manager.backends[0].tool_registry.max_loops is None
+    assert all(
+        "HASHI_EVIDENCE_RECEIPT" in result.output
+        for result in manager.backends[0].results
+    )
+
+
+@pytest.mark.asyncio
+async def test_hashi_stage_provider_preserves_typed_checkpoint_interruption():
+    async def evaluator(_snapshot):
+        return CheckpointFinding(
+            CheckpointDecision.USER_INPUT_REQUIRED,
+            "Production authority is missing.",
+            "May this production action continue?",
+        )
+
+    coordinator = HighRiskCheckpointCoordinator(
+        cycle_id="turn-1:execution-cycle:1",
+        evaluator=evaluator,
+        clock=lambda: 0.0,
+    )
+
+    class InterruptingBackend(_FakeBackend):
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+        ):
+            del prompt, request_id, is_retry, silent, on_stream_event
+            for index in range(1, 12):
+                await self.tool_registry.execute(
+                    "file_write",
+                    {"path": f"record-{index}"},
+                    f"provider-call-{index}",
+                )
+            raise AssertionError("an eleventh tool must not start")
+
+    class InterruptingManager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert (engine, target_model) == (
+                "openrouter-api",
+                "configured/model",
+            )
+            backend = InterruptingBackend(self.system_md)
+            self.backends.append(backend)
+            return backend
+
+    manager = InterruptingManager()
+    registry = _BaseToolRegistry()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=registry,
+    )
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=True,
+        allow_side_effects=True,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "invocation_id": "turn-1:execution:invocation:1",
+            "checkpoint_coordinator": coordinator,
+        }
+    )
+
+    with pytest.raises(CheckpointInterruption) as raised:
+        await provider.invoke(
+            ProviderProfile("premium", "openrouter-api", "configured/model"),
+            request,
+        )
+    await coordinator.close()
+
+    assert raised.value.finding.decision is CheckpointDecision.USER_INPUT_REQUIRED
+    assert len(registry.executed) == 10
+    assert manager.backends[0].shutdown_called is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "adapter_type",
+    [
+        OpenRouterAdapter,
+        DeepSeekAdapter,
+        OllamaAdapter,
+        XaiApiAdapter,
+        HashiApiAdapter,
+    ],
+)
+async def test_tool_capable_api_families_do_not_flatten_checkpoint_control(
+    adapter_type,
+):
+    finding = CheckpointFinding(CheckpointDecision.HALT, "Unsafe to continue.")
+    snapshot = CheckpointSnapshot(
+        cycle_id="turn-1:execution-cycle:1",
+        checkpoint_index=1,
+        trigger_reasons=("completed_result_count",),
+        completed_result_count=10,
+        elapsed_s=1.0,
+        receipt_summaries=(),
+        receipt_set_sha256="sha256",
+    )
+    interruption = CheckpointInterruption(finding, snapshot, ())
+    adapter = object.__new__(adapter_type)
+    adapter.sys_prompt = ""
+    adapter.api_key = "test-key"
+    adapter.tool_registry = object()
+    adapter.config = SimpleNamespace(model="test-model", name="test-agent")
+    adapter.global_config = SimpleNamespace(openrouter_url="https://invalid.test")
+    adapter.logger = SimpleNamespace(
+        debug=lambda *_args, **_kwargs: None,
+        warning=lambda *_args, **_kwargs: None,
+    )
+    adapter._ensure_client = lambda: None
+    adapter._touch_activity = lambda: None
+    adapter._build_payload = lambda *_args, **_kwargs: {}
+    adapter._deepseek_headers = lambda: {}
+    adapter._ollama_headers = lambda: {}
+    adapter._xai_headers = lambda: {}
+    adapter._hashi_headers = lambda: {}
+    adapter._use_responses_api = lambda: False
+
+    async def resolve_bearer(*_args, **_kwargs):
+        return None
+
+    async def call_api_once(*_args, **_kwargs):
+        return _APIResult(
+            text="",
+            tool_calls=[
+                {
+                    "id": "call-10",
+                    "type": "function",
+                    "function": {"name": "file_write", "arguments": "{}"},
+                }
+            ],
+            finish_reason="tool_calls",
+        )
+
+    async def interrupt_tool_boundary(*_args, **_kwargs):
+        raise interruption
+
+    adapter._resolve_bearer = resolve_bearer
+    adapter._call_api_once = call_api_once
+    adapter._run_tool_calls = interrupt_tool_boundary
+
+    with pytest.raises(CheckpointInterruption) as raised:
+        await adapter_type.generate_response(adapter, "continue", "request-1")
+    assert raised.value is interruption
+
+
+@pytest.mark.asyncio
+async def test_policy_denial_returns_before_due_checkpoint_gates_next_admission():
+    timeline = []
+    snapshots = []
+
+    async def evaluator(snapshot):
+        snapshots.append(snapshot)
+        assert timeline[-1] == "denial_returned"
+        timeline.append("checkpoint")
+        return CheckpointFinding(CheckpointDecision.CONTINUE, "Continue.")
+
+    coordinator = HighRiskCheckpointCoordinator(
+        cycle_id="turn-1:execution-cycle:1",
+        evaluator=evaluator,
+        clock=lambda: 0.0,
+    )
+
+    class DenyingRegistry(_BaseToolRegistry):
+        async def execute(self, name, arguments, tool_call_id=""):
+            self.executed.append((name, arguments, tool_call_id))
+            if len(self.executed) == 10:
+                return SimpleNamespace(
+                    tool_call_id=tool_call_id,
+                    output="Error: approval required",
+                    is_error=True,
+                    details={"control_disposition": "approval_required"},
+                )
+            return SimpleNamespace(
+                tool_call_id=tool_call_id,
+                output="allowed",
+                is_error=False,
+            )
+
+    class DenialBackend(_FakeBackend):
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+        ):
+            del prompt, request_id, is_retry, silent, on_stream_event
+            for index in range(1, 10):
+                await self.tool_registry.execute(
+                    "file_read", {}, f"provider-call-{index}"
+                )
+            denied = await self.tool_registry.execute(
+                "file_write", {}, "provider-call-10"
+            )
+            assert denied.is_error is True
+            timeline.append("denial_returned")
+            await self.tool_registry.execute(
+                "file_read", {}, "provider-call-11"
+            )
+            timeline.append("next_tool_completed")
+            return BackendResponse(
+                text='{"disposition":"COMPLETED","summary":"done"}',
+                duration_ms=1,
+                tool_call_count=11,
+                tool_loop_count=11,
+            )
+
+    class DenialManager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert (engine, target_model) == (
+                "openrouter-api",
+                "configured/model",
+            )
+            backend = DenialBackend(self.system_md)
+            self.backends.append(backend)
+            return backend
+
+    provider = HashiStageProvider(
+        backend_manager=DenialManager(),
+        tool_registry=DenyingRegistry(),
+    )
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=True,
+        allow_side_effects=True,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "checkpoint_coordinator": coordinator,
+        }
+    )
+
+    response = await provider.invoke(
+        ProviderProfile("premium", "openrouter-api", "configured/model"),
+        request,
+    )
+    await coordinator.close()
+
+    assert timeline == [
+        "denial_returned",
+        "checkpoint",
+        "next_tool_completed",
+    ]
+    assert snapshots[0].completed_result_count == 10
+    assert snapshots[0].receipt_summaries[-1]["status"] == "FAILED"
+    assert len(response.tool_receipts) == 11
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_denial_precedes_time_due_checkpoint():
+    from tools.registry import ToolResult
+
+    now = [0.0]
+    timeline = []
+
+    async def evaluator(_snapshot):
+        timeline.append("checkpoint")
+        return CheckpointFinding(CheckpointDecision.CONTINUE, "Continue.")
+
+    coordinator = HighRiskCheckpointCoordinator(
+        cycle_id="turn-1:execution-cycle:1",
+        evaluator=evaluator,
+        clock=lambda: now[0],
+    )
+
+    class PreflightRegistry(_BaseToolRegistry):
+        def evaluate_admission(self, name, arguments, tool_call_id=""):
+            del arguments
+            if name == "file_write":
+                return ToolResult(
+                    tool_call_id=tool_call_id,
+                    output="Error: path is outside the authorised workzone",
+                    is_error=True,
+                    details={"control_disposition": "denied"},
+                )
+            return None
+
+    class PreflightBackend(_FakeBackend):
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+        ):
+            del prompt, request_id, is_retry, silent, on_stream_event
+            now[0] = 300.0
+            denied = await self.tool_registry.execute(
+                "file_write", {"path": "outside"}, "provider-denied"
+            )
+            assert denied.is_error is True
+            timeline.append("denial_returned")
+            allowed = await self.tool_registry.execute(
+                "file_read", {"path": "inside"}, "provider-allowed"
+            )
+            assert allowed.is_error is False
+            timeline.append("allowed_returned")
+            return BackendResponse(
+                text='{"disposition":"COMPLETED","summary":"done"}',
+                duration_ms=1,
+                tool_call_count=2,
+                tool_loop_count=2,
+            )
+
+    class PreflightManager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert (engine, target_model) == (
+                "openrouter-api",
+                "configured/model",
+            )
+            backend = PreflightBackend(self.system_md)
+            self.backends.append(backend)
+            return backend
+
+    registry = PreflightRegistry()
+    provider = HashiStageProvider(
+        backend_manager=PreflightManager(),
+        tool_registry=registry,
+    )
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=True,
+        allow_side_effects=True,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "checkpoint_coordinator": coordinator,
+        }
+    )
+
+    response = await provider.invoke(
+        ProviderProfile("premium", "openrouter-api", "configured/model"),
+        request,
+    )
+    await coordinator.close()
+
+    assert timeline == ["denial_returned", "checkpoint", "allowed_returned"]
+    assert registry.executed == [
+        ("file_read", {"path": "inside"}, "provider-allowed")
+    ]
+    assert len(registry.denials) == 1
+    assert len(response.tool_receipts) == 2
 
 @pytest.mark.asyncio
 async def test_persona_presentation_lanes_receive_only_block_and_minimal_inputs(

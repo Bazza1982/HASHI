@@ -22,7 +22,13 @@ MAX_PACKAGED_COMMENTARY_CHARS = 8_000
 # Immediate Response and Finalisation already own dedicated user-facing lanes.
 # Triage is classification authority, while sub-agents are not user-facing.
 COMMENTARY_STAGES = frozenset(
-    {Stage.PLANNING, Stage.EXECUTION, Stage.REPLANNING, Stage.REVIEW}
+    {
+        Stage.PLANNING,
+        Stage.EXECUTION,
+        Stage.REPLANNING,
+        Stage.REVIEW,
+        Stage.VERIFICATION,
+    }
 )
 
 

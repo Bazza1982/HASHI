@@ -113,6 +113,25 @@ def test_optional_commentary_extraction_is_bounded_and_stage_scoped():
     assert commentary is not None
     assert commentary.text == "A neutral update."
     assert commentary.event_id == "turn:commentary:execution:2:1"
+    verification_commentary = commentary_from_stage_response(
+        response,
+        turn_id="turn",
+        stage=Stage.VERIFICATION,
+        invocation=3,
+        attempt=1,
+    )
+    assert verification_commentary is not None
+    assert verification_commentary.stage is Stage.VERIFICATION
+    assert (
+        commentary_from_stage_response(
+            response,
+            turn_id="turn",
+            stage=Stage.CHECKPOINT,
+            invocation=4,
+            attempt=1,
+        )
+        is None
+    )
     assert (
         commentary_from_stage_response(
             response,
