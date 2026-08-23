@@ -109,6 +109,32 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   Composer keeps that choice until `/model grok-4.5` is selected. `/effort`
   changes Grok CLI reasoning effort and persists that backend choice.
 
+## HASHI API Caller-Owned Tools
+
+- The OpenAI-compatible `POST /v1/chat/completions` route supports
+  caller-owned function tools on Codex CLI models and compatible xAI Chat
+  Completions models. Other CLI engines and xAI Responses API models fail
+  explicitly instead of losing tool schemas.
+- HASHI returns standard assistant `tool_calls`; it never executes these API
+  client functions. The calling Agent/application owns name allow-listing,
+  argument validation, authorization, execution, and result serialization.
+- Preserve the complete assistant tool-call object and append each result as a
+  `role: "tool"` message whose `tool_call_id` exactly matches the returned call
+  ID. Send the complete structured conversation on the next request and repeat
+  until no calls remain.
+- Send tool schemas again on every round if the model may call another tool.
+  Do not flatten tool calls/results into prose and do not use Gateway
+  `session_id` for a tool loop.
+- `tool_choice` supports `auto`, `none`, `required`, and one named function.
+  `parallel_tool_calls` is supported; clients must be ready to execute every
+  returned call or explicitly set it to `false`.
+- Codex tool turns use isolated ephemeral app-server threads with local Codex
+  tools and configured MCP servers disabled. Treat any Gateway backend error as
+  a failed turn; never infer that a requested side effect happened.
+- Full request loop, limits, safety contract, and architecture:
+  [API_GUIDE.md](API_GUIDE.md#external-tool-call-passthrough) and
+  [CODEX_API_TOOL_CALL_BRIDGE.md](CODEX_API_TOOL_CALL_BRIDGE.md).
+
 ## Flex Backend Behavior
 - Non-HER backend/model switching retains its existing atomic flow.
 - HER v2 `/backend` switches only the backend; `/provider`, `/model`, and

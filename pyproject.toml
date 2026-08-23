@@ -132,7 +132,9 @@ include = ["flow*", "nagare*"]
 addopts = ["--strict-markers"]
 testpaths = [
     "tests/test_api_gateway_preflight.py",
+    "tests/test_api_gateway_tool_passthrough.py",
     "tests/test_architecture_boundaries.py",
+    "tests/test_codex_api_tool_bridge.py",
     "tests/test_command_registry.py",
     "tests/test_her_v2_adapter.py",
     "tests/test_her_v2_core.py",

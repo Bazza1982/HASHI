@@ -416,6 +416,13 @@ Agents can be started and stopped without restarting the bridge process.
 - Enable: press `[A]` in `bridge-u.bat` menu, or run `python main.py --api-gateway`.
 - Endpoints: `GET /health`, `GET /v1/models`, `POST /v1/chat/completions` (sync or streaming).
 - Session cache: pass `session_id` in `extra_body`; sessions expire after 30 min inactivity.
+- Caller-owned OpenAI function tools are supported by Codex CLI models and
+  compatible xAI Chat Completions models. HASHI returns `tool_calls` but never
+  executes them; the client must append matching `role: "tool"` results and
+  resend the complete structured history without `session_id`.
+- Codex uses an isolated ephemeral app-server turn with local/MCP tools
+  disabled. See `docs/CODEX_API_TOOL_CALL_BRIDGE.md` for the Agent contract,
+  supported choices, limits, and failure semantics.
 - Smoke test: `python test_api_gateway.py`.
 
 ## Bridge Runtime Control

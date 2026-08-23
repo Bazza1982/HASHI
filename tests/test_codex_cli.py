@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from adapters.base import BackendResponse
 from adapters.codex_cli import CodexCLIAdapter
 from adapters.stream_events import KIND_COMMENTARY, KIND_THINKING
 from tests.mocks.mock_adapters import SimpleGlobalConfig, SimpleTestConfig
@@ -272,3 +273,40 @@ def test_codex_resume_is_used_only_in_explicit_session_mode(tmp_path):
 
     adapter.set_session_mode(False)
     assert adapter._session_id is None
+
+
+@pytest.mark.asyncio
+async def test_codex_external_tools_refresh_mcp_inventory_each_request(
+    tmp_path, monkeypatch
+):
+    adapter = _build_adapter(tmp_path)
+    inventories = [("first",), ("first", "second")]
+    discovered = []
+    bridge_inventories = []
+
+    async def discover():
+        value = inventories[len(discovered)]
+        discovered.append(value)
+        return value
+
+    class _Bridge:
+        def __init__(self, **kwargs):
+            bridge_inventories.append(kwargs["disabled_mcp_servers"])
+
+        async def run(self, *_args, **_kwargs):
+            return BackendResponse(text="done", duration_ms=1)
+
+    monkeypatch.setattr(adapter, "_discover_mcp_servers", discover)
+    monkeypatch.setattr("adapters.codex_cli.CodexAppServerToolBridge", _Bridge)
+
+    for request_id in ("req-one", "req-two"):
+        response = await adapter.generate_external_tool_response(
+            [{"role": "user", "content": "hello"}],
+            [],
+            request_id,
+            model="gpt-5.6-luna",
+        )
+        assert response.is_success is True
+
+    assert discovered == inventories
+    assert bridge_inventories == inventories

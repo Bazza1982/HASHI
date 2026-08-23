@@ -120,6 +120,7 @@ def _server(tmp_path: Path, adapter: _ExternalAdapter) -> APIGatewayServer:
     )
     server = APIGatewayServer(config, secrets={}, workspace_root=tmp_path)
     server._engine_status["xai-api"] = {"available": True, "reason": "test"}
+    server._engine_status["codex-cli"] = {"available": True, "reason": "test"}
     server._pool = _Pool(adapter)
     return server
 
@@ -197,7 +198,7 @@ async def test_sync_external_tools_preserve_full_protocol_and_return_tool_calls(
 
 
 @pytest.mark.asyncio
-async def test_external_tools_reject_cli_models_without_starting_adapter(tmp_path):
+async def test_external_tools_route_codex_models_through_adapter_contract(tmp_path):
     adapter = _ExternalAdapter()
     server = _server(tmp_path, adapter)
     response = await server.handle_chat_completions(
@@ -211,8 +212,67 @@ async def test_external_tools_reject_cli_models_without_starting_adapter(tmp_pat
     )
     payload = json.loads(response.text)
 
+    assert response.status == 200
+    assert payload["choices"][0]["message"]["tool_calls"] == [TOOL_CALL]
+    assert payload["choices"][0]["finish_reason"] == "tool_calls"
+    assert server._pool.calls[0] == ("codex-cli", "gpt-5.5")
+    assert adapter.calls[0]["model"] == "gpt-5.5"
+
+
+@pytest.mark.asyncio
+async def test_external_tools_still_reject_unsupported_cli_models_before_init(tmp_path):
+    adapter = _ExternalAdapter()
+    server = _server(tmp_path, adapter)
+    response = await server.handle_chat_completions(
+        _Request(
+            {
+                "model": "gemini-2.5-flash",
+                "messages": [{"role": "user", "content": "Use the tool"}],
+                "tools": [TOOL_SCHEMA],
+            }
+        )
+    )
+    payload = json.loads(response.text)
+
     assert response.status == 400
     assert payload["error"]["code"] == "external_tool_passthrough_unsupported"
+    assert server._pool.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body_patch", "error_code"),
+    [
+        (
+            {
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "invalid.tool.name"},
+                    }
+                ]
+            },
+            "invalid_tool_schema",
+        ),
+        ({"tools": [], "tool_choice": "required"}, "invalid_tool_choice"),
+    ],
+)
+async def test_external_tools_reject_invalid_contract_before_adapter_init(
+    tmp_path, body_patch, error_code
+):
+    adapter = _ExternalAdapter()
+    server = _server(tmp_path, adapter)
+    body = {
+        "model": "gpt-5.6-luna",
+        "messages": [{"role": "user", "content": "Use a tool"}],
+        **body_patch,
+    }
+
+    response = await server.handle_chat_completions(_Request(body))
+    payload = json.loads(response.text)
+
+    assert response.status == 400
+    assert payload["error"]["code"] == error_code
     assert server._pool.calls == []
 
 

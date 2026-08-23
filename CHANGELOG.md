@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Codex API caller-owned function tools** — the OpenAI-compatible Gateway now
+  maps function schemas to isolated Codex app-server `dynamicTools`, returns
+  standard sync/streaming `tool_calls`, and reconstructs structured assistant
+  calls plus tool results on later stateless requests. Per-request MCP
+  inventory, disabled inert MCP overrides, local-tool failure closure, tool
+  choice/parallel-call enforcement, process cleanup, regression coverage, and
+  an Agent-facing usage/design contract keep execution owned by the API client.
 - **Layered Python dependency profiles** — kept the normal source-checkout
   runtime intact while moving tests and heavyweight integrations into explicit
   extras. Minimal, standard, feature-specific, development, and complete

@@ -19,6 +19,7 @@ import asyncio
 from datetime import datetime
 import json
 import logging
+import re
 import socket
 import time
 import uuid
@@ -53,6 +54,8 @@ logger = logging.getLogger("BridgeU.APIGateway")
 SESSION_TTL_SEC = 1800  # 30 minutes
 MAX_EXTERNAL_TOOLS = 128
 MAX_EXTERNAL_TOOL_BYTES = 1024 * 1024
+_EXTERNAL_TOOL_ENGINES = frozenset({"codex-cli", "xai-api"})
+_EXTERNAL_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 _ENGINE_FOR_MODEL = {
     model: engine
@@ -189,6 +192,12 @@ def _validate_external_tool_request(
                 code="invalid_messages",
                 param=f"messages[{index}].role",
             )
+        if role not in {"system", "developer", "user", "assistant", "tool"}:
+            return None, _external_tool_error(
+                f"messages[{index}].role '{role}' is not supported",
+                code="invalid_messages",
+                param=f"messages[{index}].role",
+            )
         if role == "tool" and not str(message.get("tool_call_id") or "").strip():
             return None, _external_tool_error(
                 f"messages[{index}].tool_call_id is required for tool messages",
@@ -201,6 +210,27 @@ def _validate_external_tool_request(
                 code="invalid_tool_calls",
                 param=f"messages[{index}].tool_calls",
             )
+        for call_index, tool_call in enumerate(message.get("tool_calls") or []):
+            param = f"messages[{index}].tool_calls[{call_index}]"
+            if not isinstance(tool_call, dict) or tool_call.get("type") != "function":
+                return None, _external_tool_error(
+                    f"{param} must be an OpenAI function tool call",
+                    code="invalid_tool_calls",
+                    param=param,
+                )
+            if not str(tool_call.get("id") or "").strip():
+                return None, _external_tool_error(
+                    f"{param}.id is required",
+                    code="invalid_tool_calls",
+                    param=f"{param}.id",
+                )
+            function = tool_call.get("function")
+            if not isinstance(function, dict) or not str(function.get("name") or "").strip():
+                return None, _external_tool_error(
+                    f"{param}.function.name is required",
+                    code="invalid_tool_calls",
+                    param=f"{param}.function.name",
+                )
 
     raw_tools = body.get("tools", [])
     if raw_tools is None:
@@ -254,6 +284,12 @@ def _validate_external_tool_request(
                 code="invalid_tool_schema",
                 param=f"tools[{index}].function.name",
             )
+        if not _EXTERNAL_TOOL_NAME_RE.fullmatch(name):
+            return None, _external_tool_error(
+                f"tools[{index}].function.name must match [A-Za-z0-9_-] and be at most 64 characters",
+                code="invalid_tool_schema",
+                param=f"tools[{index}].function.name",
+            )
         if name in tool_names:
             return None, _external_tool_error(
                 f"duplicate tool name '{name}'",
@@ -303,6 +339,12 @@ def _validate_external_tool_request(
                 code="invalid_tool_choice",
                 param="tool_choice",
             )
+    if tool_choice == "required" and not tool_names:
+        return None, _external_tool_error(
+            "tool_choice=required needs at least one declared function",
+            code="invalid_tool_choice",
+            param="tool_choice",
+        )
 
     if (
         body.get("parallel_tool_calls") is not None
@@ -601,10 +643,10 @@ class APIGatewayServer:
 
         external_tools: list[dict] = []
         if external_tool_mode:
-            if engine != "xai-api":
+            if engine not in _EXTERNAL_TOOL_ENGINES:
                 return _external_tool_error(
                     f"model '{model}' does not support external tool passthrough; "
-                    "only xAI /chat/completions models are enabled",
+                    "Codex CLI and compatible xAI /chat/completions models are enabled",
                     code="external_tool_passthrough_unsupported",
                     param="model",
                 )
@@ -680,7 +722,7 @@ class APIGatewayServer:
             supports_passthrough = getattr(adapter, "supports_external_tool_passthrough", None)
             if not callable(supports_passthrough) or not supports_passthrough(model):
                 return _external_tool_error(
-                    f"model '{model}' does not use xAI /chat/completions",
+                    f"model '{model}' does not support caller-owned function tools",
                     code="external_tool_passthrough_unsupported",
                     param="model",
                 )
@@ -833,7 +875,7 @@ class APIGatewayServer:
         payload.setdefault("object", "video.generation")
         return web.json_response(payload)
 
-    # ── External xAI tool-call passthrough ────────────────────────────────────
+    # ── External caller-owned tool-call passthrough ──────────────────────────
 
     @staticmethod
     def _external_finish_reason(response) -> str:

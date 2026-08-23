@@ -269,11 +269,19 @@ for chunk in stream:
 
 ### External Tool-Call Passthrough
 
-The gateway preserves caller-owned OpenAI function tools for xAI models that use
-the native `/chat/completions` route. The gateway forwards `messages`, `tools`,
-`tool_choice`, and `parallel_tool_calls`, then returns `message.tool_calls` with
-`finish_reason: "tool_calls"`. In streaming mode it emits a complete
-`delta.tool_calls` before the terminal `tool_calls` finish reason.
+The gateway preserves caller-owned OpenAI function tools for Codex CLI models
+and xAI models that use the native `/chat/completions` route. For Codex, HASHI
+maps each OpenAI function schema to an app-server `dynamicTool`, captures the
+model's `item/tool/call`, and maps it back to `message.tool_calls` with
+`finish_reason: "tool_calls"`.
+
+HASHI accepts and preserves `messages`, `tools`, `tool_choice`, and
+`parallel_tool_calls`. Supported `tool_choice` values are `auto`, `none`,
+`required`, and a named OpenAI function choice. When
+`parallel_tool_calls: false`, HASHI fails closed if a backend nevertheless
+returns more than one call. In streaming mode, the gateway emits each complete
+tool call in `delta.tool_calls` before the terminal `tool_calls` finish reason;
+it does not currently stream partial JSON argument fragments.
 
 The gateway never executes these caller-owned tools. The client is responsible
 for executing each function and sending the next request with the assistant
@@ -281,9 +289,12 @@ for executing each function and sending the next request with the assistant
 
 Current boundaries:
 
-- Supported only by `xai-api` models using `/chat/completions`, such as
+- Supported by every Codex model advertised by `GET /v1/models`, including the
+  smoke-tested `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` variants.
+- Also supported by `xai-api` models using `/chat/completions`, such as
   `grok-4.3`.
-- CLI-backed models are rejected instead of silently dropping tools.
+- Gemini CLI, Claude CLI, and Grok CLI models are rejected instead of silently
+  dropping tools.
 - xAI Responses API models, including `grok-4.5` and `grok-build-*`, are rejected
   until their separate function-call protocol is implemented.
 - Gateway `session_id` caching is disabled for external tool turns; clients must
@@ -291,6 +302,92 @@ Current boundaries:
 - Empty `tools: []` does not change the legacy text-only route.
 - A request may declare at most 128 tools, with a combined serialized tool
   payload of at most 1 MiB.
+- Function names must match `[A-Za-z0-9_-]{1,64}` and names must be unique.
+- External tool passthrough currently supports `n: 1` only.
+
+Each Codex request runs in an ephemeral app-server thread and temporary working
+directory. HASHI disables Codex shell, filesystem mutation, Web, app, plugin,
+image, computer-use, multi-agent, and configured MCP access for that thread.
+Configured MCP servers are inventoried again for every request and replaced by
+disabled inert transports, so a server added after adapter startup cannot leak
+into this path. If isolation cannot be proven, an undeclared/local tool appears,
+or the experimental app-server protocol is unavailable, the request fails
+closed with an `external_tool_backend_error` rather than running a tool.
+
+The installed Codex CLI must support the experimental app-server
+`dynamicTools`, `item/tool/call`, and `thread/inject_items` protocol. HASHI does
+not persist Codex threads for API tool loops: structured assistant calls and
+tool results are re-injected from the caller's complete `messages` array on each
+request. This keeps concurrent clients isolated and avoids hidden session state.
+
+#### Complete Python tool loop
+
+```python
+import json
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:18801/v1",
+    api_key="EMPTY",
+)
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Return the current weather for one city",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+                "additionalProperties": False,
+            },
+        },
+    }
+]
+
+
+def get_weather(city: str) -> dict:
+    # Replace this example with the caller's real implementation.
+    return {"city": city, "temperature_c": 23, "condition": "sunny"}
+
+
+messages = [{"role": "user", "content": "What is Sydney's weather?"}]
+
+while True:
+    response = client.chat.completions.create(
+        model="gpt-5.6-luna",
+        messages=messages,
+        tools=tools,
+        tool_choice="auto",
+        parallel_tool_calls=True,
+    )
+    assistant = response.choices[0].message
+    messages.append(assistant.model_dump(exclude_none=True))
+
+    if not assistant.tool_calls:
+        print(assistant.content)
+        break
+
+    for call in assistant.tool_calls:
+        if call.function.name != "get_weather":
+            raise RuntimeError(f"unapproved tool: {call.function.name}")
+        arguments = json.loads(call.function.arguments)
+        result = get_weather(**arguments)
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": json.dumps(result),
+            }
+        )
+```
+
+Do not execute an unrecognized function name, and validate arguments against
+the caller's own authorization rules before invoking a side-effecting tool.
+The detailed design and Agent contract are in
+[CODEX_API_TOOL_CALL_BRIDGE.md](CODEX_API_TOOL_CALL_BRIDGE.md).
 
 Hot deployment requires only `/reboot`. An enabled in-process API Gateway is
 stopped and recreated from the reloaded modules as part of the normal reboot
@@ -505,11 +602,12 @@ OpenClaw sends the model `id` as-is to the API — it does not strip any prefix.
 
 Use `"openai-completions"` — despite the name, this maps to `/v1/chat/completions` in OpenClaw (not the legacy completions endpoint).
 
-For caller-owned tool use, select `vllm/grok-4.3`. The current Gateway rejects
-tools for CLI-backed models and xAI Responses API models instead of silently
-discarding them. OpenClaw must execute each returned tool locally and include
-the assistant `tool_calls` plus matching `role: "tool"` result in its next
-request.
+For caller-owned tool use, select a supported Codex model such as
+`vllm/gpt-5.6-luna`, or an xAI Chat Completions model such as
+`vllm/grok-4.3`. The Gateway rejects unsupported CLI and xAI Responses API
+models instead of silently discarding tools. OpenClaw must execute each returned
+tool locally and include the assistant `tool_calls` plus matching
+`role: "tool"` result in its next request.
 
 ---
 

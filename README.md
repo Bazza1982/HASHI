@@ -97,7 +97,9 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
   summarize or continue the workflow
 - **HER Habit–Meditation** — Optional agent-local learning, independent from orchestration skills and Dream
 - **HChat** — Cross-instance agent-to-agent messaging
-- **API Gateway** — Optional OpenAI-compatible localhost gateway with per-instance ports and Grok/xAI chat, image, and video routes
+- **API Gateway** — Optional OpenAI-compatible localhost gateway with
+  per-instance ports, caller-owned function tools for Codex and compatible xAI
+  chat models, plus xAI image and video routes
 
 **What makes HASHI different:**
 1. **No Token Storage** — Uses CLI backends with local authentication, not stored tokens
@@ -596,6 +598,11 @@ HASHI supports multiple communication channels:
   from the persisted enabled-on-restart choice.
 - The gateway exposes OpenAI-compatible `/v1/chat/completions`, `/v1/models`,
   `/v1/images/generations`, and `/v1/videos/generations` endpoints.
+- Codex CLI models and compatible xAI Chat Completions models accept
+  caller-owned OpenAI function schemas. HASHI returns standard `tool_calls`,
+  never executes the caller's functions, and requires the client to resend the
+  complete assistant-call/tool-result history. See
+  [`docs/CODEX_API_TOOL_CALL_BRIDGE.md`](docs/CODEX_API_TOOL_CALL_BRIDGE.md).
 - Grok/xAI models are available through the `xai-api` backend, including
   `grok-4.5`, `grok-4.3`, `grok-build-0.1`, `grok-imagine-image`, and
   `grok-imagine-video`.

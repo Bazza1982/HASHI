@@ -8,6 +8,7 @@ from pathlib import Path
 
 import adapters.stream_events as stream_event_types
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
+from adapters.codex_app_server import CodexAppServerToolBridge
 from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
@@ -39,6 +40,8 @@ class CodexCLIAdapter(BaseBackend):
         self.logger = logging.getLogger(f"Backend.Codex.{self.config.name}")
         self.current_proc = None
         self._active_read_tasks: list[asyncio.Task] = []
+        self._external_tool_processes: set[object] = set()
+        self._external_mcp_server_names: tuple[str, ...] | None = None
         self.effort = ((self.config.extra or {}).get("effort") or "medium").lower()
         self.cmd_base = self.global_config.codex_cmd
         if os.name == "nt" and Path(self.cmd_base).suffix.lower() not in {".cmd", ".exe", ".bat", ".ps1"}:
@@ -88,6 +91,115 @@ class CodexCLIAdapter(BaseBackend):
         except Exception as e:
             self.logger.error(f"Codex CLI not accessible: {e}")
             return False
+
+    async def _discover_mcp_servers(self) -> tuple[str, ...]:
+        """List configured MCP servers so the API bridge can disable all of them."""
+        proc = await asyncio.create_subprocess_exec(
+            self.cmd_base,
+            "mcp",
+            "list",
+            "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        self._external_tool_processes.add(proc)
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        except asyncio.TimeoutError:
+            await self.force_kill_process_tree(
+                proc,
+                logger=self.logger,
+                reason="codex-mcp-isolation-preflight-timeout",
+            )
+            raise RuntimeError("codex mcp list timed out")
+        except asyncio.CancelledError:
+            await self.force_kill_process_tree(
+                proc,
+                logger=self.logger,
+                reason="codex-mcp-isolation-preflight-cancelled",
+            )
+            raise
+        finally:
+            self._external_tool_processes.discard(proc)
+        if proc.returncode != 0:
+            detail = stderr.decode(errors="replace").strip()
+            raise RuntimeError(detail or "codex mcp list failed")
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("codex mcp list returned invalid JSON") from exc
+        if not isinstance(payload, list):
+            raise RuntimeError("codex mcp list returned an unexpected payload")
+        names = {
+            str(item.get("name") or "").strip()
+            for item in payload
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        }
+        return tuple(sorted(names))
+
+    def supports_external_tool_passthrough(self, model: str | None = None) -> bool:
+        """Codex app-server dynamic tools back caller-owned function calls."""
+        return bool(str(model or self.config.model or "").strip())
+
+    async def generate_external_tool_response(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        request_id: str,
+        *,
+        tool_choice=None,
+        parallel_tool_calls: bool | None = None,
+        use_streaming: bool = False,
+        request_options: dict | None = None,
+        on_stream_event=None,
+        model: str | None = None,
+    ) -> BackendResponse:
+        """Capture one Codex dynamic-tool batch without executing caller tools."""
+        del request_options
+        try:
+            # Refresh on every request so an MCP server added after adapter
+            # initialization can never escape the isolated tool-call boundary.
+            self._external_mcp_server_names = await self._discover_mcp_servers()
+        except Exception as exc:
+            return BackendResponse(
+                text="",
+                duration_ms=0,
+                error=(
+                    "Codex API tool-call isolation is unavailable because "
+                    f"configured MCP servers could not be inventoried: {exc}"
+                ),
+                is_success=False,
+            )
+
+        selected_model = str(model or self.config.model or "").strip()
+
+        async def force_kill(proc, reason: str) -> None:
+            await self.force_kill_process_tree(
+                proc,
+                logger=self.logger,
+                reason=reason,
+            )
+
+        bridge = CodexAppServerToolBridge(
+            command=self.cmd_base,
+            model=selected_model,
+            effort=self.effort,
+            idle_timeout_sec=self.IDLE_TIMEOUT_SEC,
+            disabled_mcp_servers=self._external_mcp_server_names,
+            logger=self.logger,
+            on_process_started=self._external_tool_processes.add,
+            on_process_stopped=self._external_tool_processes.discard,
+            force_kill=force_kill,
+        )
+        return await bridge.run(
+            messages,
+            tools,
+            request_id,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            use_streaming=use_streaming,
+            on_stream_event=on_stream_event,
+        )
 
     async def handle_new_session(self) -> bool:
         """Clear session ID so the next request starts a fresh codex session."""
@@ -554,6 +666,13 @@ class CodexCLIAdapter(BaseBackend):
                 reason="backend_shutdown",
             )
             self.current_proc = None
+        for proc in list(self._external_tool_processes):
+            await self.force_kill_process_tree(
+                proc,
+                logger=self.logger,
+                reason="backend_shutdown_external_tool_bridge",
+            )
+            self._external_tool_processes.discard(proc)
         for task in self._active_read_tasks:
             if not task.done():
                 task.cancel()
