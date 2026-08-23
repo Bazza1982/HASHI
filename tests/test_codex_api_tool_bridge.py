@@ -359,6 +359,9 @@ def test_codex_tool_conversion_preserves_schema_and_structured_history():
         f"'get_weather' -> '{WEATHER_CODEX_TOOL}'"
         in conversation.developer_instructions
     )
+    assert "Make at most one dynamic function call" in (
+        conversation.developer_instructions
+    )
 
 
 def test_final_user_multiple_images_preserve_turn_input_order_and_detail():
@@ -490,7 +493,6 @@ def test_structured_tool_image_result_preserves_function_output_shape():
             },
         ],
     }
-    assert "Make at most one dynamic function call" in conversation.developer_instructions
 
 
 def test_all_hashi_tools_receive_unique_codex_safe_aliases():
