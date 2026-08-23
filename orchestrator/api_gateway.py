@@ -55,8 +55,11 @@ logger = logging.getLogger("BridgeU.APIGateway")
 SESSION_TTL_SEC = 1800  # 30 minutes
 MAX_EXTERNAL_TOOLS = 128
 MAX_EXTERNAL_TOOL_BYTES = 1024 * 1024
+API_GATEWAY_DRAIN_TIMEOUT_SEC = 10.0
+API_GATEWAY_CANCEL_TIMEOUT_SEC = 2.0
 _EXTERNAL_TOOL_ENGINES = frozenset({"codex-cli", "xai-api"})
 _EXTERNAL_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_GATEWAY_SERVER_APP_KEY = web.AppKey("hashi-api-gateway-server", object)
 
 _ENGINE_FOR_MODEL = {
     model: engine
@@ -79,6 +82,12 @@ def available_gateway_models() -> list[str]:
 
 def default_gateway_model() -> str:
     return DEFAULT_API_MODEL
+
+
+@web.middleware
+async def _gateway_request_lifecycle_middleware(request, handler):
+    server = request.app[_GATEWAY_SERVER_APP_KEY]
+    return await server._run_tracked_request(request, handler)
 
 # ── Terminal colours ──────────────────────────────────────────────────────────
 
@@ -517,9 +526,22 @@ class APIGatewayServer:
         self._engine_status: dict[str, dict] = {}
         self._runner = None
         self._site = None
+        self._accepting_requests = True
+        self._draining = False
+        self._transport_closed = False
+        self._adapter_pool_closed = False
+        self._active_requests: dict[
+            asyncio.Future[None], asyncio.Task[Any] | None
+        ] = {}
+        self._stop_lock = asyncio.Lock()
+        self.shutdown_budget_sec = 30.0
         self.refresh_engine_status()
 
-        self.app = web.Application(client_max_size=8 * 1024 * 1024)
+        self.app = web.Application(
+            client_max_size=8 * 1024 * 1024,
+            middlewares=[_gateway_request_lifecycle_middleware],
+        )
+        self.app[_GATEWAY_SERVER_APP_KEY] = self
         self.app.router.add_get("/v1/models", self.handle_models)
         self.app.router.add_post("/v1/chat/completions", self.handle_chat_completions)
         self.app.router.add_post("/v1/images/generations", self.handle_image_generations)
@@ -550,13 +572,21 @@ class APIGatewayServer:
         return bool(status.get("available", True)), str(status.get("reason") or "")
 
     async def start(self):
+        self._accepting_requests = False
+        self._draining = False
+        self._transport_closed = False
+        self._adapter_pool_closed = False
         self.refresh_engine_status()
-        self._runner = web.AppRunner(self.app)
+        self._runner = web.AppRunner(
+            self.app,
+            shutdown_timeout=API_GATEWAY_CANCEL_TIMEOUT_SEC,
+        )
         await self._runner.setup()
         self.bind_host = self._select_bind_host()
         self._site = web.TCPSite(self._runner, self.bind_host, self.port)
         await self._site.start()
         self.enabled = True
+        self._accepting_requests = True
         available = [e for e, s in self._engine_status.items() if s.get("available")]
         unavailable = [e for e, s in self._engine_status.items() if not s.get("available")]
         logger.info(
@@ -565,15 +595,114 @@ class APIGatewayServer:
             unavailable,
         )
 
-    async def stop(self):
+    async def _run_tracked_request(self, request, handler):
+        if not self._accepting_requests:
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "API Gateway is restarting; retry shortly",
+                        "type": "server_error",
+                        "code": "gateway_draining",
+                    }
+                },
+                status=503,
+                headers={"Retry-After": "1", "Connection": "close"},
+            )
+
+        loop = asyncio.get_running_loop()
+        completion: asyncio.Future[None] = loop.create_future()
+        self._active_requests[completion] = asyncio.current_task()
         try:
-            await self._pool.shutdown()
-            if self._runner:
-                await self._runner.cleanup()
+            return await handler(request)
         finally:
-            self.enabled = False
+            self._active_requests.pop(completion, None)
+            if not completion.done():
+                completion.set_result(None)
+
+    async def _drain_active_requests(self) -> None:
+        completions = tuple(self._active_requests)
+        if not completions:
+            return
+
+        logger.info(
+            "API Gateway draining %s active request(s)",
+            len(completions),
+        )
+        _done, pending = await asyncio.wait(
+            completions,
+            timeout=API_GATEWAY_DRAIN_TIMEOUT_SEC,
+        )
+        if not pending:
+            return
+
+        active_tasks = {
+            task
+            for completion in pending
+            if (task := self._active_requests.get(completion)) is not None
+            and task is not asyncio.current_task()
+            and not task.done()
+        }
+        logger.warning(
+            "API Gateway drain timed out; cancelling %s active request task(s)",
+            len(active_tasks),
+        )
+        for task in active_tasks:
+            task.cancel()
+        if active_tasks:
+            _done_tasks, pending_tasks = await asyncio.wait(
+                active_tasks,
+                timeout=API_GATEWAY_CANCEL_TIMEOUT_SEC,
+            )
+            if pending_tasks:
+                logger.error(
+                    "API Gateway has %s request task(s) still pending after cancellation",
+                    len(pending_tasks),
+                )
+        still_active = [completion for completion in pending if not completion.done()]
+        if still_active:
+            raise TimeoutError(
+                "API Gateway could not quiesce "
+                f"{len(still_active)} active request(s)"
+            )
+
+    async def begin_shutdown(self) -> None:
+        """Stop admission and drain handlers before any adapter is shut down."""
+        if self._transport_closed:
+            return
+
+        self._accepting_requests = False
+        self._draining = True
+        self.enabled = False
+
+        site = self._site
+        if site is not None:
+            await site.stop()
             self._site = None
+
+        await self._drain_active_requests()
+
+        runner = self._runner
+        if runner is not None:
+            await runner.cleanup()
             self._runner = None
+        self._transport_closed = True
+
+    async def stop(self):
+        async with self._stop_lock:
+            await self.begin_shutdown()
+            try:
+                if not self._adapter_pool_closed:
+                    await self._pool.shutdown()
+                    self._adapter_pool_closed = True
+            finally:
+                # Adapter shutdown may terminate backend process groups.  It
+                # must run only after all HTTP handlers have completed or been
+                # cancelled by the transport drain above.
+                self.enabled = False
+                self._accepting_requests = False
+                self._draining = False
+                self._site = None
+                self._runner = None
 
     def set_default_model(self, model: str) -> None:
         normalized = str(model or "").strip()
@@ -630,6 +759,9 @@ class APIGatewayServer:
                 "status": overall,
                 "enabled": self.enabled,
                 "running": self._site is not None,
+                "accepting_requests": self._accepting_requests,
+                "draining": self._draining,
+                "active_requests": len(self._active_requests),
                 "configured_enabled": configured_enabled,
                 "engines": initialized,
                 "engine_status": self._engine_status,

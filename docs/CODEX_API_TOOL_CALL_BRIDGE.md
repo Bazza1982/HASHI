@@ -104,6 +104,21 @@ enforces the following invariants for every Codex tool request:
 - active app-server and MCP-inventory subprocesses tracked and killed during
   cancellation or adapter shutdown.
 
+On POSIX systems, both the app-server and MCP-inventory subprocess start in
+their own sessions and process groups. The shared backend cleanup helper refuses
+to call `killpg` when the target group is HASHI's own group or when the target
+process is not the group leader; it falls back to terminating only that child.
+This is a hard safety boundary, not merely a best-effort cleanup convention.
+
+Gateway hot reload first stops admitting requests, returns a retriable 503 to
+any request that reaches an already accepted connection during the drain, and
+allows active handlers up to ten seconds to finish. Remaining handlers are
+cancelled before the adapter pool is shut down; if cancellation cannot quiesce
+them, Adapter shutdown and replacement fail closed. The service manager applies
+the same transport-first ordering to a live legacy Gateway generation when this
+code is adopted for the first time, and hands the new process-group kill guard
+to that generation's already-live adapter instances before draining them.
+
 The inert MCP replacement is intentional. Codex CLI config overrides replace an
 MCP table rather than deep-merging it, so an `enabled=false` leaf alone produces
 an invalid transport. HASHI supplies a complete disabled loopback transport and
@@ -165,8 +180,9 @@ OpenAI SDK example.
 
 The focused regression suite covers schema conversion, structured history,
 single and parallel calls, named choice filtering, streaming output, local-tool
-failure closure, Gateway Codex routing, unsupported-engine rejection, and the
-existing Codex adapter behavior.
+failure closure, Gateway Codex routing, unsupported-engine rejection, isolated
+MCP inventory, self-process-group kill refusal, and `/reboot min` while a tool
+request is active.
 
 A live protocol smoke test must prove both halves after a Codex CLI upgrade:
 

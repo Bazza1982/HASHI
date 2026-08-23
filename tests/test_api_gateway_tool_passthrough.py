@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from adapters.base import BackendResponse, TokenUsage
 from adapters.stream_events import KIND_TEXT_DELTA, StreamEvent
 from orchestrator.api_gateway import APIGatewayServer, _AdapterPool, _uses_external_tool_protocol
+from orchestrator.service_manager import ServiceManager
 
 
 TOOL_SCHEMA = {
@@ -155,6 +157,141 @@ async def test_gateway_pool_passes_xai_static_and_refresh_credentials(tmp_path, 
         "xai_api_key": "static-secret",
         "xai_oauth_refresh_token": "refresh-secret",
     }
+
+
+@pytest.mark.asyncio
+async def test_reboot_min_drains_active_tool_request_before_adapter_shutdown(
+    tmp_path, monkeypatch
+):
+    events = []
+    request_started = asyncio.Event()
+    release_request = asyncio.Event()
+
+    class _BlockingAdapter(_ExternalAdapter):
+        async def generate_external_tool_response(self, *args, **kwargs):
+            events.append("request_started")
+            request_started.set()
+            await release_request.wait()
+            response = await super().generate_external_tool_response(*args, **kwargs)
+            events.append("request_finished")
+            return response
+
+    class _DrainingPool(_Pool):
+        async def shutdown(self):
+            events.append("adapter_pool_shutdown")
+
+    adapter = _BlockingAdapter()
+    server = _server(tmp_path, adapter)
+    server._pool = _DrainingPool(adapter)
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(
+            bridge_home=tmp_path,
+            workspaces_root=tmp_path / "workspaces",
+        ),
+        global_cfg=server.global_config,
+        secrets={},
+        api_gateway=server,
+        enable_api_gateway=True,
+    )
+    manager = ServiceManager(kernel)
+    monkeypatch.setattr(
+        manager,
+        "_load_api_gateway_state",
+        lambda: {"enabled": True, "default_model": "gpt-5.5"},
+    )
+
+    async def start_reloaded_gateway(_global_cfg, _secrets):
+        events.append("reloaded_gateway_started")
+        kernel.api_gateway = SimpleNamespace(bind_host="127.0.0.1")
+
+    monkeypatch.setattr(manager, "start_api_gateway", start_reloaded_gateway)
+
+    body = {
+        "model": "gpt-5.5",
+        "messages": [{"role": "user", "content": "Use the tool"}],
+        "tools": [TOOL_SCHEMA],
+    }
+
+    async def wait_until_draining():
+        while not server._draining:
+            await asyncio.sleep(0)
+
+    async with TestClient(TestServer(server.app)) as client:
+        active_request = asyncio.create_task(
+            client.post("/v1/chat/completions", json=body)
+        )
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+
+        reboot_refresh = asyncio.create_task(manager.restart_api_gateway())
+        await asyncio.wait_for(wait_until_draining(), timeout=1)
+
+        rejected = await client.post("/v1/chat/completions", json=body)
+        rejected_payload = await rejected.json()
+        assert rejected.status == 503
+        assert rejected.headers["Retry-After"] == "1"
+        assert rejected_payload["error"]["code"] == "gateway_draining"
+        assert "adapter_pool_shutdown" not in events
+
+        release_request.set()
+        completed = await active_request
+        assert completed.status == 200
+        await reboot_refresh
+
+    assert events == [
+        "request_started",
+        "request_finished",
+        "adapter_pool_shutdown",
+        "reloaded_gateway_started",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gateway_does_not_shutdown_adapters_when_transport_drain_fails(
+    tmp_path, monkeypatch
+):
+    events = []
+    server = _server(tmp_path, _ExternalAdapter())
+    release_cancelled_handler = asyncio.Event()
+    handler_started = asyncio.Event()
+
+    class _ObservedPool:
+        async def shutdown(self):
+            events.append("adapter_pool_shutdown")
+
+    server._pool = _ObservedPool()
+    monkeypatch.setattr(
+        "orchestrator.api_gateway.API_GATEWAY_DRAIN_TIMEOUT_SEC",
+        0.01,
+    )
+    monkeypatch.setattr(
+        "orchestrator.api_gateway.API_GATEWAY_CANCEL_TIMEOUT_SEC",
+        0.01,
+    )
+
+    loop = asyncio.get_running_loop()
+    completion = loop.create_future()
+
+    async def cancellation_resistant_handler():
+        handler_started.set()
+        try:
+            await loop.create_future()
+        except asyncio.CancelledError:
+            await release_cancelled_handler.wait()
+        finally:
+            server._active_requests.pop(completion, None)
+            if not completion.done():
+                completion.set_result(None)
+
+    handler_task = asyncio.create_task(cancellation_resistant_handler())
+    server._active_requests[completion] = handler_task
+    await handler_started.wait()
+
+    with pytest.raises(TimeoutError, match="could not quiesce 1 active request"):
+        await server.stop()
+
+    assert events == []
+    release_cancelled_handler.set()
+    await handler_task
 
 
 @pytest.mark.asyncio

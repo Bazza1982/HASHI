@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,21 @@ def _build_adapter(tmp_path: Path) -> CodexCLIAdapter:
     return CodexCLIAdapter(cfg, global_cfg)
 
 
+class _CompletedProc:
+    def __init__(self, *, pid: int = 12345, stdout: bytes = b"[]"):
+        self.pid = pid
+        self.returncode = 0
+        self._stdout = stdout
+        self.killed = False
+
+    async def communicate(self):
+        return self._stdout, b""
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
 @pytest.mark.asyncio
 async def test_codex_intermediate_agent_message_is_full_commentary_not_reasoning(tmp_path):
     adapter = _build_adapter(tmp_path)
@@ -75,6 +91,57 @@ async def test_codex_intermediate_agent_message_is_full_commentary_not_reasoning
     assert [event.kind for event in events] == [KIND_COMMENTARY]
     assert events[0].summary == commentary.strip()
     assert all(event.kind != KIND_THINKING for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group isolation only")
+async def test_codex_mcp_inventory_starts_in_an_isolated_session(
+    tmp_path, monkeypatch
+):
+    adapter = _build_adapter(tmp_path)
+    proc = _CompletedProc(stdout=b'[{"name":"github"}]')
+    captured_kwargs = {}
+
+    async def create_subprocess(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    discovered = await adapter._discover_mcp_servers()
+
+    assert discovered == ("github",)
+    assert captured_kwargs["start_new_session"] is True
+    assert adapter._external_tool_processes == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group isolation only")
+async def test_force_kill_refuses_hashi_own_process_group(
+    tmp_path, monkeypatch, caplog
+):
+    adapter = _build_adapter(tmp_path)
+    proc = _CompletedProc(pid=4242)
+    proc.returncode = None
+    killpg_calls = []
+
+    monkeypatch.setattr("adapters.base.os.getpgid", lambda _pid: 9000)
+    monkeypatch.setattr("adapters.base.os.getpgrp", lambda: 9000)
+    monkeypatch.setattr(
+        "adapters.base.os.killpg",
+        lambda pgid, sig: killpg_calls.append((pgid, sig)),
+    )
+
+    killed = await adapter.force_kill_process_tree(
+        proc,
+        logger=adapter.logger,
+        reason="gateway-hot-reload",
+    )
+
+    assert killed is True
+    assert proc.killed is True
+    assert killpg_calls == []
+    assert "Refused unsafe killpg" in caplog.text
 
 
 @pytest.mark.asyncio

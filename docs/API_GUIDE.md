@@ -85,6 +85,9 @@ The Gateway's own `/health` payload keeps runtime and persisted state separate:
 | --- | --- |
 | `enabled` | Live server flag; set after the listener starts and cleared when it stops |
 | `running` | Whether the Gateway currently owns an active aiohttp site |
+| `accepting_requests` | Whether the Gateway currently admits new HTTP requests |
+| `draining` | Whether shutdown is waiting for active handlers to finish |
+| `active_requests` | Number of currently tracked HTTP request handlers |
 | `configured_enabled` | Persisted choice controlling whether the Gateway should return after restart |
 
 This distinction makes a temporary command-line start visible without silently
@@ -400,9 +403,13 @@ the caller's own authorization rules before invoking a side-effecting tool.
 The detailed design and Agent contract are in
 [CODEX_API_TOOL_CALL_BRIDGE.md](CODEX_API_TOOL_CALL_BRIDGE.md).
 
-Hot deployment requires only `/reboot`. An enabled in-process API Gateway is
-stopped and recreated from the reloaded modules as part of the normal reboot
-service refresh.
+Hot deployment requires only `/reboot`. An enabled in-process API Gateway first
+stops accepting requests, drains active handlers, then shuts down its adapters
+and is recreated from the reloaded modules. A request reaching an accepted
+connection during the drain receives a retriable `503` with
+`code: gateway_draining` and `Retry-After: 1`; HASHI itself remains online. If
+an active handler cannot be cancelled safely, Adapter shutdown and Gateway
+replacement are aborted instead of racing that handler.
 
 #### Verified Claw Code tool loop
 

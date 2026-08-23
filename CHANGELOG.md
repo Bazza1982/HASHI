@@ -51,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **API Gateway hot-reload process-group crash** — isolated Codex MCP inventory
+  subprocesses from HASHI's POSIX process group and made process-tree cleanup
+  refuse any group kill that could target HASHI itself. Gateway shutdown now
+  closes admission, drains or safely cancels active HTTP handlers, and only
+  then shuts down backend adapters. The service manager also quiesces a live
+  pre-fix Gateway generation before its first hot adoption, installs the safe
+  kill guard on its already-live adapters before cancellation can occur, and
+  concurrency regressions cover `/reboot min` during a caller-tool request.
 - **HASHI provider pricing and Codex reasoning propagation** — added the
   OpenRouter Luna/Sol base and over-272K prompt pricing tiers used by `/token`,
   declared the provider's live-probed effort levels, and now translates HER

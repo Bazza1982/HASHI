@@ -99,6 +99,11 @@ class CodexCLIAdapter(BaseBackend):
 
     async def _discover_mcp_servers(self) -> tuple[str, ...]:
         """List configured MCP servers so the API bridge can disable all of them."""
+        extra_kwargs: dict[str, object] = {}
+        if os.name != "nt":
+            # force_kill_process_tree() terminates subprocess groups.  The MCP
+            # inventory process must never inherit HASHI's own process group.
+            extra_kwargs["start_new_session"] = True
         proc = await asyncio.create_subprocess_exec(
             self.cmd_base,
             "mcp",
@@ -106,6 +111,7 @@ class CodexCLIAdapter(BaseBackend):
             "--json",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **extra_kwargs,
         )
         self._external_tool_processes.add(proc)
         try:

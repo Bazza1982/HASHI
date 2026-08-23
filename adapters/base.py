@@ -302,6 +302,13 @@ class BaseBackend(ABC):
         returncode = getattr(proc, "returncode", None)
         if returncode is not None:
             return False
+        if not isinstance(pid, int) or pid <= 0:
+            if logger:
+                logger.error(
+                    "Refusing to terminate a process tree without a valid pid "
+                    f"reason={reason!r}"
+                )
+            return False
 
         try:
             if os.name == "nt" and pid:
@@ -323,12 +330,28 @@ class BaseBackend(ABC):
                     )
             else:
                 # On Linux/Mac: kill the entire process group to catch child processes
-                # that may be holding stdout/stderr pipes open.
+                # that may be holding stdout/stderr pipes open.  Only a process
+                # that leads its own group is eligible for group termination.
+                # An unisolated child inherits HASHI's group; killpg() against
+                # that group would kill the Bridge and its launcher as well.
                 try:
                     pgid = os.getpgid(pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                    if logger:
-                        logger.warning(f"Forced killpg(pgid={pgid}) for pid={pid} reason={reason!r}")
+                    own_pgid = os.getpgrp()
+                    if pgid == own_pgid or pgid != pid:
+                        proc.kill()
+                        if logger:
+                            logger.error(
+                                "Refused unsafe killpg and killed only the child "
+                                f"pid={pid} pgid={pgid} own_pgid={own_pgid} "
+                                f"reason={reason!r}"
+                            )
+                    else:
+                        os.killpg(pgid, signal.SIGKILL)
+                        if logger:
+                            logger.warning(
+                                f"Forced killpg(pgid={pgid}) for pid={pid} "
+                                f"reason={reason!r}"
+                            )
                 except (ProcessLookupError, PermissionError):
                     # Fallback if process group kill fails
                     proc.kill()

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from adapters.base import BaseBackend
 from orchestrator.enterprise import EnterpriseLeaseStore, IdentityService, KubernetesApiLeaseClient
 from orchestrator.service_manager import ServiceManager
 
@@ -200,6 +201,136 @@ async def test_restart_api_gateway_recreates_enabled_gateway_from_reloaded_modul
             "grok-4.3",
         ),
         "new_start",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_restart_api_gateway_aborts_replacement_when_old_gateway_cannot_stop(
+    tmp_path, monkeypatch
+):
+    events = []
+
+    class _OldGateway:
+        async def stop(self):
+            events.append("old_stop_failed")
+            raise RuntimeError("unsafe to continue")
+
+    old_gateway = _OldGateway()
+    kernel = SimpleNamespace(
+        paths=SimpleNamespace(
+            bridge_home=tmp_path,
+            workspaces_root=tmp_path / "workspaces",
+        ),
+        global_cfg=SimpleNamespace(api_gateway_port=18803),
+        secrets={},
+        api_gateway=old_gateway,
+        enable_api_gateway=True,
+    )
+    manager = ServiceManager(kernel)
+    monkeypatch.setattr(
+        manager,
+        "_load_api_gateway_state",
+        lambda: {"enabled": True, "default_model": "gpt-5.5"},
+    )
+
+    async def unexpected_start(*_args, **_kwargs):
+        events.append("replacement_started")
+
+    monkeypatch.setattr(manager, "start_api_gateway", unexpected_start)
+
+    await manager.restart_api_gateway()
+
+    assert kernel.api_gateway is old_gateway
+    assert events == ["old_stop_failed"]
+
+
+@pytest.mark.asyncio
+async def test_api_gateway_first_adoption_drains_legacy_transport_before_old_stop(
+    tmp_path,
+):
+    events = []
+
+    class _LegacySite:
+        async def stop(self):
+            events.append("legacy_site_stopped")
+
+    class _LegacyRunner:
+        def __init__(self):
+            self._shutdown_timeout = 60.0
+
+        async def cleanup(self):
+            events.append(("legacy_runner_drained", self._shutdown_timeout))
+
+    class _LegacyGateway:
+        def __init__(self):
+            self._site = _LegacySite()
+            self._runner = _LegacyRunner()
+
+        async def stop(self):
+            assert self._site is None
+            assert self._runner is None
+            events.append("legacy_adapter_pool_stopped")
+
+    gateway = _LegacyGateway()
+    kernel = SimpleNamespace(api_gateway=gateway)
+    manager = ServiceManager(kernel)
+
+    await manager.stop_api_gateway()
+
+    assert kernel.api_gateway is None
+    assert events == [
+        "legacy_site_stopped",
+        ("legacy_runner_drained", 10.0),
+        "legacy_adapter_pool_stopped",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_api_gateway_first_adoption_installs_kill_guard_before_legacy_drain(
+    tmp_path,
+):
+    events = []
+
+    class _LegacyAdapter:
+        async def force_kill_process_tree(self, *_args, **_kwargs):
+            events.append("unsafe_legacy_kill")
+
+    adapter = _LegacyAdapter()
+
+    class _LegacySite:
+        async def stop(self):
+            events.append("legacy_site_stopped")
+
+    class _LegacyRunner:
+        def __init__(self):
+            self._shutdown_timeout = 60.0
+
+        async def cleanup(self):
+            assert (
+                adapter.force_kill_process_tree.__func__
+                is BaseBackend.force_kill_process_tree
+            )
+            events.append("legacy_runner_drained_with_guard")
+
+    class _LegacyGateway:
+        def __init__(self):
+            self._site = _LegacySite()
+            self._runner = _LegacyRunner()
+            self._pool = SimpleNamespace(_adapters={"codex-cli": adapter})
+
+        async def stop(self):
+            events.append("legacy_adapter_pool_stopped")
+
+    kernel = SimpleNamespace(api_gateway=_LegacyGateway())
+    manager = ServiceManager(kernel)
+
+    await manager.stop_api_gateway()
+
+    assert kernel.api_gateway is None
+    assert events == [
+        "legacy_site_stopped",
+        "legacy_runner_drained_with_guard",
+        "legacy_adapter_pool_stopped",
     ]
 
 

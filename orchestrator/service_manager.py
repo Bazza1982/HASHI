@@ -10,7 +10,9 @@ import sys
 import traceback
 from contextlib import suppress
 from pathlib import Path
+from types import MethodType
 
+from adapters.base import BaseBackend
 from orchestrator.agent_directory import AgentDirectory
 from orchestrator.api_gateway import available_gateway_models
 from orchestrator.api_gateway_config import config_path_for, load_api_gateway_config, save_api_gateway_config
@@ -20,6 +22,8 @@ from orchestrator.telegram_delivery_failover import delivery_health_watcher
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 bridge_logger = logging.getLogger("BridgeU.Bridge")
+_LEGACY_API_GATEWAY_SHUTDOWN_BUDGET_SEC = 30.0
+_LEGACY_API_GATEWAY_DRAIN_TIMEOUT_SEC = 10.0
 
 
 class ServiceManager:
@@ -185,7 +189,8 @@ class ServiceManager:
         self._save_api_gateway_state(enabled=False)
         if self.kernel.api_gateway is None:
             return True, "API Gateway is already stopped."
-        await self.stop_api_gateway(timeout=timeout)
+        if not await self.stop_api_gateway(timeout=timeout):
+            return False, "API Gateway could not be stopped safely; inspect the runtime log."
         return True, "API Gateway stopped."
 
     def set_api_gateway_default_model(self, model: str) -> tuple[bool, str]:
@@ -454,7 +459,12 @@ class ServiceManager:
             return
 
         self.kernel.enable_api_gateway = True
-        await self.stop_api_gateway(timeout=2.0)
+        if not await self.stop_api_gateway():
+            bridge_logger.error(
+                "Hot restart: API Gateway replacement aborted because the old "
+                "generation did not stop safely"
+            )
+            return
         await self.start_api_gateway(self.kernel.global_cfg, self.kernel.secrets)
         if self.kernel.api_gateway is not None:
             bridge_logger.info("Hot restart: API Gateway recreated with reloaded code")
@@ -510,17 +520,80 @@ class ServiceManager:
         finally:
             self.kernel.workbench_api = None
 
-    async def stop_api_gateway(self, timeout: float = 5.0):
-        if self.kernel.api_gateway is None:
+    async def _quiesce_legacy_api_gateway(self, gateway) -> None:
+        """Drain a pre-reload Gateway before invoking its legacy pool-first stop."""
+        if callable(getattr(gateway, "begin_shutdown", None)):
             return
+
+        pool = getattr(gateway, "_pool", None)
+        adapters = getattr(pool, "_adapters", {})
+        guarded_adapters = 0
+        for adapter in tuple(getattr(adapters, "values", lambda: ())()):
+            if not callable(getattr(adapter, "force_kill_process_tree", None)):
+                continue
+            # The live Gateway belongs to the pre-reload class generation.
+            # Its active adapter objects likewise retain the old, unsafe base
+            # method. Hand the new kill guard to those instances *before*
+            # runner.cleanup() can cancel an in-flight MCP discovery.
+            adapter.force_kill_process_tree = MethodType(
+                BaseBackend.force_kill_process_tree,
+                adapter,
+            )
+            guarded_adapters += 1
+        if guarded_adapters:
+            bridge_logger.info(
+                "Hot restart: installed process-group guard on %s legacy API adapter(s)",
+                guarded_adapters,
+            )
+
+        site = getattr(gateway, "_site", None)
+        if site is not None:
+            await site.stop()
+            gateway._site = None
+
+        runner = getattr(gateway, "_runner", None)
+        if runner is not None:
+            # Older Gateway generations used aiohttp's 60-second default and
+            # shut adapters down before the runner.  Bound and complete the
+            # transport drain here so the legacy stop cannot kill an in-flight
+            # tool subprocess while adopting this fix for the first time.
+            if hasattr(runner, "_shutdown_timeout"):
+                runner._shutdown_timeout = _LEGACY_API_GATEWAY_DRAIN_TIMEOUT_SEC
+            await runner.cleanup()
+            gateway._runner = None
+
+    async def stop_api_gateway(
+        self,
+        timeout: float = _LEGACY_API_GATEWAY_SHUTDOWN_BUDGET_SEC,
+    ) -> bool:
+        if self.kernel.api_gateway is None:
+            return True
         bridge_logger.info("Stopping API Gateway")
+        gateway = self.kernel.api_gateway
+        shutdown_budget = max(
+            float(timeout),
+            float(
+                getattr(
+                    gateway,
+                    "shutdown_budget_sec",
+                    _LEGACY_API_GATEWAY_SHUTDOWN_BUDGET_SEC,
+                )
+            ),
+        )
+
+        async def _stop_safely():
+            await self._quiesce_legacy_api_gateway(gateway)
+            await gateway.stop()
+
         try:
-            await asyncio.wait_for(self.kernel.api_gateway.stop(), timeout=timeout)
+            await asyncio.wait_for(_stop_safely(), timeout=shutdown_budget)
         except (asyncio.TimeoutError, Exception) as e:
             main_logger.warning("API Gateway shutdown warning: %s", e)
             bridge_logger.warning("API Gateway shutdown warning: %s: %s", type(e).__name__, e)
-        finally:
+            return False
+        else:
             self.kernel.api_gateway = None
+            return True
 
     async def stop_runtime_services(self):
         await self.stop_scheduler()
