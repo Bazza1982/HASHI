@@ -265,6 +265,156 @@ def test_recent_history_deduplicates_matching_receipt_and_limits_combined_timeli
     assert recent.count("IMMEDIATE PREVIOUS") == 1
 
 
+def test_durable_primary_timeline_is_used_when_working_turns_are_empty(tmp_path):
+    runtime = _Runtime(tmp_path)
+    _write_turns(runtime, 0, chars=1)
+    health_epoch = datetime.fromisoformat(
+        "2026-08-24T14:36:00+10:00"
+    ).timestamp()
+    correction_epoch = datetime.fromisoformat(
+        "2026-08-24T16:42:00+10:00"
+    ).timestamp()
+    canonical = [
+        {
+            "kind": "primary_exchange",
+            "exchange_id": 8,
+            "turn_ids": (),
+            "sequence": 8,
+            "completed_at": correction_epoch,
+            "source": "text",
+            "user_text": "Where did we just get to?",
+            "assistant_text": "I answered from the wrong older topic.",
+            "rows": (
+                {
+                    "id": 0,
+                    "ts": "2026-08-24T16:41:00+10:00",
+                    "role": "user",
+                    "source": "text",
+                    "text": "Where did we just get to?",
+                },
+                {
+                    "id": 0,
+                    "ts": "2026-08-24T16:42:00+10:00",
+                    "role": "assistant",
+                    "source": "her-v2",
+                    "text": "I answered from the wrong older topic.",
+                },
+            ),
+            "receipt_entries": [],
+        },
+        {
+            "kind": "primary_exchange",
+            "exchange_id": 7,
+            "turn_ids": (),
+            "sequence": 7,
+            "completed_at": health_epoch,
+            "source": "text",
+            "user_text": "Tell me what is in the Health folder",
+            "assistant_text": "The Health folder contains five Excel files.",
+            "rows": (
+                {
+                    "id": 0,
+                    "ts": "2026-08-24T14:35:00+10:00",
+                    "role": "user",
+                    "source": "text",
+                    "text": "Tell me what is in the Health folder",
+                },
+                {
+                    "id": 0,
+                    "ts": "2026-08-24T14:36:00+10:00",
+                    "role": "assistant",
+                    "source": "her-v2",
+                    "text": "The Health folder contains five Excel files.",
+                },
+            ),
+            "receipt_entries": [],
+        },
+    ]
+    runtime.memory_store.get_completed_exchanges = lambda *, limit: canonical[
+        -limit:
+    ]
+    old_receipt_epoch = datetime.fromisoformat(
+        "2026-08-22T18:00:00+10:00"
+    ).timestamp()
+
+    sections, snapshot = install_history_section(
+        runtime,
+        [],
+        cross_session_entries=[
+            {
+                "kind": "cross_session_receipt",
+                "receipt_id": "old-receipt",
+                "sequence": 99,
+                "completed_at": old_receipt_epoch,
+                "source": "scheduler",
+                "status": "completed",
+                "task_status": "completed",
+                "delivered": True,
+                "user_text": "old scheduled task",
+                "assistant_text": "old scheduled result",
+            }
+        ],
+    )
+
+    assert snapshot is not None
+    assert snapshot.all_turns == ()
+    rendered = sections[0][1]
+    assert rendered.index("old scheduled task") < rendered.index("Health folder")
+    assert rendered.index("Health folder") < rendered.index("wrong older topic")
+    immediate_header = next(
+        line for line in rendered.splitlines() if "IMMEDIATE PREVIOUS" in line
+    )
+    assert "primary exchange id=8" in immediate_header
+    assert "primary exchange id=7" in rendered
+    assert "exchange:7/user" in rendered
+
+
+def test_durable_timeline_replaces_core_turn_copy_by_shared_turn_ids(tmp_path):
+    runtime = _Runtime(tmp_path)
+    _write_turns(runtime, 1, chars=1)
+    snapshot = ContextCompactionCoordinator(runtime).snapshot()
+    completed_at = datetime.fromisoformat(
+        "2026-08-22T00:00:02+10:00"
+    ).timestamp()
+
+    rendered = render_history(
+        snapshot,
+        primary_timeline_entries=[
+            {
+                "kind": "primary_exchange",
+                "exchange_id": 1,
+                "turn_ids": (1, 2),
+                "sequence": 1,
+                "completed_at": completed_at,
+                "source": "text",
+                "user_text": "user-0:u",
+                "assistant_text": "user-visible wrapped answer",
+                "rows": (
+                    {
+                        "id": 1,
+                        "ts": "2026-08-22T00:00:00+10:00",
+                        "role": "user",
+                        "source": "text",
+                        "text": "user-0:u",
+                    },
+                    {
+                        "id": 2,
+                        "ts": "2026-08-22T00:00:02+10:00",
+                        "role": "assistant",
+                        "source": "her-v2",
+                        "text": "user-visible wrapped answer",
+                    },
+                ),
+                "receipt_entries": [],
+            }
+        ],
+    )
+
+    assert rendered.count("user-0:u") == 1
+    assert "user-visible wrapped answer" in rendered
+    assert "assistant-0:a" not in rendered
+
+
 def test_default_route_uses_active_quick_model_high_effort_and_tier_2(tmp_path):
     runtime = _Runtime(tmp_path)
 

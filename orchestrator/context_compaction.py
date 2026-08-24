@@ -1070,6 +1070,34 @@ def _normalise_exchange_text(value: Any) -> str:
     return str(value or "").replace("\r\n", "\n").strip()
 
 
+def _same_exchange(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> bool:
+    left_turn_ids = {
+        int(value) for value in left.get("turn_ids") or [] if int(value or 0)
+    }
+    right_turn_ids = {
+        int(value) for value in right.get("turn_ids") or [] if int(value or 0)
+    }
+    if left_turn_ids and right_turn_ids and left_turn_ids & right_turn_ids:
+        return True
+    left_user = _normalise_exchange_text(left.get("user_text"))
+    left_assistant = _normalise_exchange_text(left.get("assistant_text"))
+    same_content = bool(left_user and left_assistant) and (
+        left_user == _normalise_exchange_text(right.get("user_text"))
+        and left_assistant
+        == _normalise_exchange_text(right.get("assistant_text"))
+    )
+    if not same_content:
+        return False
+    left_completed = _timeline_epoch(left.get("completed_at"))
+    right_completed = _timeline_epoch(right.get("completed_at"))
+    if left_completed > 0 and right_completed > 0:
+        return abs(left_completed - right_completed) <= 30
+    return True
+
+
 def _turn_exchange_entries(
     rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1165,13 +1193,16 @@ def _render_timeline_entry(entry: Mapping[str, Any], *, immediate: bool) -> str:
     marker = " | IMMEDIATE PREVIOUS" if immediate else ""
     if str(entry.get("kind") or "") == "primary_exchange":
         turn_ids = [int(item) for item in entry.get("turn_ids") or []]
-        turn_label = (
-            str(turn_ids[0])
-            if len(turn_ids) == 1
-            else f"{turn_ids[0]}-{turn_ids[-1]}"
-            if turn_ids
-            else "unknown"
-        )
+        exchange_id = int(entry.get("exchange_id") or 0)
+        if turn_ids:
+            turn_label = (
+                str(turn_ids[0])
+                if len(turn_ids) == 1
+                else f"{turn_ids[0]}-{turn_ids[-1]}"
+            )
+            primary_identity = f"primary exchange turns={turn_label}"
+        else:
+            primary_identity = f"primary exchange id={exchange_id or 'recovered'}"
         attached = list(entry.get("receipt_entries") or [])
         receipt_label = ""
         if attached:
@@ -1180,13 +1211,23 @@ def _render_timeline_entry(entry: Mapping[str, Any], *, immediate: bool) -> str:
             )
             receipt_label = f" | merged receipts={receipt_ids}"
         identity = (
-            f"primary exchange turns={turn_label} | source={entry.get('source') or 'unknown'}"
+            f"{primary_identity} | source={entry.get('source') or 'unknown'}"
             f"{receipt_label}"
         )
         rows = list(entry.get("rows") or [])
+
+        def row_identity(row: Mapping[str, Any]) -> str:
+            turn_id = int(row.get("id") or 0)
+            if turn_id:
+                return f"turn:{turn_id}"
+            return (
+                f"exchange:{exchange_id or 'recovered'}"
+                f"/{str(row.get('role') or 'history').lower()}"
+            )
+
         user_text = "\n\n".join(
             (
-                f"[turn:{int(row.get('id') or 0)} | "
+                f"[{row_identity(row)} | "
                 f"recorded_at={_format_timeline_timestamp(_timeline_epoch(row.get('ts')))} | "
                 f"source={row.get('source') or 'unknown'}]\n"
                 f"{str(row.get('text') or '')}"
@@ -1196,7 +1237,7 @@ def _render_timeline_entry(entry: Mapping[str, Any], *, immediate: bool) -> str:
         ).strip()
         assistant_text = "\n\n".join(
             (
-                f"[turn:{int(row.get('id') or 0)} | "
+                f"[{row_identity(row)} | "
                 f"recorded_at={_format_timeline_timestamp(_timeline_epoch(row.get('ts')))} | "
                 f"source={row.get('source') or 'unknown'}]\n"
                 f"{str(row.get('text') or '')}"
@@ -1226,9 +1267,28 @@ def render_history(
     *,
     protected_only: bool = False,
     cross_session_entries: Sequence[Mapping[str, Any]] = (),
+    primary_timeline_entries: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     uncovered_turns = tuple(snapshot.eligible_turns) + tuple(snapshot.recent_turns)
-    primary_entries = _turn_exchange_entries(uncovered_turns)
+    snapshot_primary_entries = _turn_exchange_entries(uncovered_turns)
+    canonical_primary_entries = [
+        dict(entry) for entry in primary_timeline_entries
+    ]
+    if canonical_primary_entries:
+        # The durable completed-exchange ledger is authoritative for recent
+        # conversation history.  Retain any older working-turn exchange that
+        # has not yet been represented there, but never render the same
+        # exchange twice merely because it exists in both stores.
+        primary_entries = [
+            entry
+            for entry in snapshot_primary_entries
+            if not any(
+                _same_exchange(entry, canonical)
+                for canonical in canonical_primary_entries
+            )
+        ] + canonical_primary_entries
+    else:
+        primary_entries = snapshot_primary_entries
     merged_entries = _merge_timeline_entries(primary_entries, cross_session_entries)
     recent_limit = max(0, int(snapshot.recent_exchanges))
     recent_entries = merged_entries[-recent_limit:] if recent_limit else []
@@ -1238,12 +1298,21 @@ def render_history(
         if str(entry.get("kind") or "") == "primary_exchange"
         for turn_id in entry.get("turn_ids") or []
     }
+    recent_primary_entries = [
+        entry
+        for entry in recent_entries
+        if str(entry.get("kind") or "") == "primary_exchange"
+    ]
     older_primary_entries = [
         entry
-        for entry in primary_entries
+        for entry in snapshot_primary_entries
         if not any(
             int(turn_id) in recent_primary_turn_ids
             for turn_id in entry.get("turn_ids") or []
+        )
+        and not any(
+            _same_exchange(entry, recent_entry)
+            for recent_entry in recent_primary_entries
         )
     ]
 
@@ -1291,6 +1360,7 @@ def install_history_section(
     *,
     protected_only: bool = False,
     cross_session_entries: Sequence[Mapping[str, Any]] = (),
+    primary_timeline_entries: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[list[tuple[str, str]], HistorySnapshot | None]:
     if str(getattr(getattr(runtime, "config", None), "active_backend", "")) != HER_V2_ENGINE:
         return list(extra_sections), None
@@ -1310,8 +1380,30 @@ def install_history_section(
             getattr(runtime, "memory_store", None),
             load_policy(runtime),
         )
+    if primary_timeline_entries is None:
+        primary_timeline_entries = ()
+        get_completed_exchanges = getattr(
+            getattr(runtime, "memory_store", None),
+            "get_completed_exchanges",
+            None,
+        )
+        if callable(get_completed_exchanges):
+            try:
+                primary_timeline_entries = get_completed_exchanges(
+                    limit=snapshot.recent_exchanges
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Completed-exchange timeline unavailable; using working turns: %s",
+                    type(exc).__name__,
+                )
     result = [(title, body) for title, body in extra_sections if title != MANAGED_HISTORY_TITLE]
-    if snapshot.all_turns or snapshot.active_capsule is not None or cross_session_entries:
+    if (
+        snapshot.all_turns
+        or snapshot.active_capsule is not None
+        or cross_session_entries
+        or primary_timeline_entries
+    ):
         result.append(
             (
                 MANAGED_HISTORY_TITLE,
@@ -1319,6 +1411,7 @@ def install_history_section(
                     snapshot,
                     protected_only=protected_only,
                     cross_session_entries=cross_session_entries,
+                    primary_timeline_entries=primary_timeline_entries,
                 ),
             )
         )

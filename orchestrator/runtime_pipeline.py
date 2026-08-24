@@ -2052,8 +2052,33 @@ def persist_success_memory(
             visible_text,
             wrapper_result,
         )
-        runtime.memory_store.record_turn("user", item.source, memory_user_text)
-        runtime.memory_store.record_turn("assistant", runtime.config.active_backend, memory_assistant_text)
+        user_turn_id = runtime.memory_store.record_turn(
+            "user", item.source, memory_user_text
+        )
+        assistant_turn_id = runtime.memory_store.record_turn(
+            "assistant", runtime.config.active_backend, memory_assistant_text
+        )
+        record_completed_exchange = getattr(
+            runtime.memory_store,
+            "record_completed_exchange",
+            None,
+        )
+        if callable(record_completed_exchange):
+            session_ref = str(getattr(runtime, "session_id_dt", "") or "")
+            record_completed_exchange(
+                item.prompt,
+                visible_text,
+                item.source,
+                assistant_source=runtime.config.active_backend,
+                user_turn_id=user_turn_id,
+                assistant_turn_id=assistant_turn_id,
+                user_ts=str(getattr(item, "created_at", "") or ""),
+                origin="primary",
+                origin_ref=(
+                    f"{session_ref}:{item.request_id}:"
+                    f"{_hashlib.sha256((item.prompt + chr(0) + visible_text).encode('utf-8')).hexdigest()[:16]}"
+                ),
+            )
         runtime.memory_store.record_exchange(memory_user_text, memory_assistant_text, item.source)
         runtime._schedule_post_turn_observers(
             item,

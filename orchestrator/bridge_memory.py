@@ -18,6 +18,7 @@ from tools.token_tracker import estimate_tokens as _estimate_tokens
 CURRENT_REQUEST_SEPARATOR = "\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n"
 
 sys_prompt_logger = logging.getLogger("BridgeU.SysPrompt")
+memory_logger = logging.getLogger("BridgeU.Memory")
 _SYS_PROMPT_LOCKS_GUARD = globals().get("_SYS_PROMPT_LOCKS_GUARD", threading.Lock())
 _SYS_PROMPT_LOCKS: dict[str, threading.RLock] = globals().get("_SYS_PROMPT_LOCKS", {})
 
@@ -211,6 +212,20 @@ class BridgeMemoryStore:
         self._vec_dim: int | None = None
         self._vec_reason: str | None = None
         self._init_db()
+        # ``transcript.jsonl`` is the durable delivery record.  Older HASHI
+        # builds could clear the working ``turns`` table while leaving that
+        # transcript intact, so seed the canonical completed-exchange ledger
+        # from the bounded recent transcript during migration/startup.
+        try:
+            self.reconcile_recent_transcript()
+        except Exception as exc:
+            # Recovery must never prevent the Agent from starting.  New
+            # exchanges will still enter the canonical ledger directly.
+            memory_logger.warning(
+                "Recent transcript reconciliation failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -296,6 +311,31 @@ class BridgeMemoryStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS conversation_exchanges (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_turn_id INTEGER,
+                    assistant_turn_id INTEGER,
+                    user_ts TEXT NOT NULL,
+                    assistant_ts TEXT NOT NULL,
+                    completed_at REAL NOT NULL,
+                    user_source TEXT NOT NULL,
+                    assistant_source TEXT NOT NULL,
+                    user_text TEXT NOT NULL,
+                    assistant_text TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    origin_ref TEXT NOT NULL,
+                    UNIQUE(origin, origin_ref)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS conversation_exchanges_time
+                ON conversation_exchanges(completed_at, id)
+                """
+            )
+            conn.execute(
+                """
                 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
                     content,
                     memory_id UNINDEXED,
@@ -350,6 +390,19 @@ class BridgeMemoryStore:
     def _now(self) -> str:
         return datetime.now().isoformat()
 
+    @staticmethod
+    def _timestamp_epoch(value: Any) -> float:
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.astimezone()
+            return parsed.timestamp()
+        except (TypeError, ValueError, OSError, OverflowError):
+            return 0.0
+
     def _safe_query(self, query: str) -> str:
         q = (query or "").replace('"', '""').strip()
         if not q:
@@ -364,10 +417,10 @@ class BridgeMemoryStore:
             return ""
         return " OR ".join(f'"{p}"' for p in parts[:16])
 
-    def record_turn(self, role: str, source: str, text: str):
+    def record_turn(self, role: str, source: str, text: str) -> int | None:
         clean = (text or "").strip()
         if not clean:
-            return
+            return None
         embedding = self.encoder.encode(clean)
         emb = json.dumps(embedding)
         with self._connect() as conn:
@@ -378,6 +431,276 @@ class BridgeMemoryStore:
             if cur.lastrowid is not None:
                 self._upsert_vec(conn, "turns_vec", "turn_id", int(cur.lastrowid), embedding)
             conn.commit()
+            return int(cur.lastrowid) if cur.lastrowid is not None else None
+
+    def record_completed_exchange(
+        self,
+        user_text: str,
+        assistant_text: str,
+        source: str,
+        *,
+        assistant_source: str = "",
+        user_turn_id: int | None = None,
+        assistant_turn_id: int | None = None,
+        user_ts: str = "",
+        assistant_ts: str = "",
+        origin: str = "primary",
+        origin_ref: str = "",
+    ) -> int | None:
+        user_clean = (user_text or "").strip()
+        assistant_clean = (assistant_text or "").strip()
+        if not user_clean or not assistant_clean:
+            return None
+        now = self._now()
+        with self._connect() as conn:
+            if user_turn_id and not user_ts:
+                row = conn.execute(
+                    "SELECT ts FROM turns WHERE id = ?", (int(user_turn_id),)
+                ).fetchone()
+                user_ts = str(row["ts"] or "") if row is not None else ""
+            if assistant_turn_id and not assistant_ts:
+                row = conn.execute(
+                    "SELECT ts FROM turns WHERE id = ?", (int(assistant_turn_id),)
+                ).fetchone()
+                assistant_ts = str(row["ts"] or "") if row is not None else ""
+            user_ts = str(user_ts or now)
+            assistant_ts = str(assistant_ts or now)
+            completed_at = self._timestamp_epoch(assistant_ts)
+            if completed_at <= 0:
+                completed_at = self._timestamp_epoch(now)
+            if not origin_ref:
+                origin_ref = hashlib.sha256(
+                    (
+                        f"{user_ts}\0{assistant_ts}\0{user_clean}\0{assistant_clean}"
+                    ).encode("utf-8")
+                ).hexdigest()
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO conversation_exchanges(
+                    user_turn_id, assistant_turn_id,
+                    user_ts, assistant_ts, completed_at,
+                    user_source, assistant_source,
+                    user_text, assistant_text, origin, origin_ref
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(user_turn_id) if user_turn_id else None,
+                    int(assistant_turn_id) if assistant_turn_id else None,
+                    user_ts,
+                    assistant_ts,
+                    completed_at,
+                    str(source or "unknown"),
+                    str(assistant_source or source or "unknown"),
+                    user_clean,
+                    assistant_clean,
+                    str(origin or "primary"),
+                    str(origin_ref),
+                ),
+            )
+            if cur.rowcount:
+                exchange_id = int(cur.lastrowid)
+            else:
+                row = conn.execute(
+                    """
+                    SELECT id FROM conversation_exchanges
+                    WHERE origin = ? AND origin_ref = ?
+                    """,
+                    (str(origin or "primary"), str(origin_ref)),
+                ).fetchone()
+                exchange_id = int(row["id"]) if row is not None else None
+            conn.commit()
+        return exchange_id
+
+    def get_completed_exchanges(self, limit: int = 10) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, user_turn_id, assistant_turn_id,
+                       user_ts, assistant_ts, completed_at,
+                       user_source, assistant_source,
+                       user_text, assistant_text, origin, origin_ref
+                FROM conversation_exchanges
+                ORDER BY completed_at DESC, id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit or 10)),),
+            ).fetchall()
+        ordered_rows = list(reversed(rows))
+        result: list[dict[str, Any]] = []
+        for row in ordered_rows:
+            item = dict(row)
+            turn_ids = [
+                int(value)
+                for value in (item.get("user_turn_id"), item.get("assistant_turn_id"))
+                if value
+            ]
+            item.update(
+                {
+                    "kind": "primary_exchange",
+                    "exchange_id": int(item["id"]),
+                    "turn_ids": tuple(turn_ids),
+                    "completed_at": float(item.get("completed_at") or 0),
+                    "sequence": int(item["id"]),
+                    "source": str(item.get("user_source") or "unknown"),
+                    "rows": tuple(
+                        row_value
+                        for row_value in (
+                            {
+                                "id": item.get("user_turn_id") or 0,
+                                "ts": item.get("user_ts") or "",
+                                "role": "user",
+                                "source": item.get("user_source") or "unknown",
+                                "text": item.get("user_text") or "",
+                            },
+                            {
+                                "id": item.get("assistant_turn_id") or 0,
+                                "ts": item.get("assistant_ts") or "",
+                                "role": "assistant",
+                                "source": item.get("assistant_source") or "unknown",
+                                "text": item.get("assistant_text") or "",
+                            },
+                        )
+                    ),
+                    "receipt_entries": [],
+                }
+            )
+            result.append(item)
+        return result
+
+    def reconcile_recent_transcript(self, max_exchanges: int = 15) -> int:
+        """Backfill the canonical timeline from bounded delivered transcript rows.
+
+        This is a migration/recovery path, not a second prompt source.  The
+        ledger is intentionally independent from the mutable ``turns`` cache.
+        Clearing that cache must not erase the immediate conversation timeline
+        supplied to the next backend request.
+        """
+
+        candidates = [
+            path
+            for path in (
+                self.workspace_dir / "recent_context.jsonl",
+                self.workspace_dir / "transcript.jsonl",
+            )
+            if path.is_file()
+        ]
+        if not candidates:
+            return 0
+        candidates.sort(
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        raw_entries: list[dict[str, str]] = []
+        for transcript_path in candidates:
+            try:
+                lines = transcript_path.read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                ).splitlines()
+            except OSError:
+                continue
+            candidate_entries: list[dict[str, str]] = []
+            for line in lines:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                role = str(entry.get("role") or "").lower()
+                source = str(entry.get("source") or "")
+                text = str(entry.get("text") or "").strip()
+                if role not in {"user", "assistant"} or not text:
+                    continue
+                if source in {"startup", "system", "think", "handoff"}:
+                    continue
+                candidate_entries.append(
+                    {
+                        "role": role,
+                        "source": source or "unknown",
+                        "text": text,
+                        "ts": str(entry.get("ts") or ""),
+                    }
+                )
+            if candidate_entries:
+                raw_entries = candidate_entries
+                break
+        if not raw_entries:
+            return 0
+
+        rounds: list[list[dict[str, str]]] = []
+        current: list[dict[str, str]] = []
+        for entry in raw_entries:
+            if entry["role"] == "user" and current:
+                rounds.append(current)
+                current = [entry]
+            else:
+                current.append(entry)
+        if current:
+            rounds.append(current)
+        rounds = rounds[-max(1, int(max_exchanges or 15)) :]
+
+        imported = 0
+        for round_entries in rounds:
+            users = [entry for entry in round_entries if entry["role"] == "user"]
+            assistants = [entry for entry in round_entries if entry["role"] == "assistant"]
+            if not users or not assistants:
+                continue
+            user = users[-1]
+            assistant = assistants[-1]
+            origin_ref = hashlib.sha256(
+                (
+                    f"{user.get('ts', '')}\0{assistant.get('ts', '')}\0"
+                    f"{user['text']}\0{assistant['text']}"
+                ).encode("utf-8")
+            ).hexdigest()
+            completed_at = self._timestamp_epoch(assistant.get("ts"))
+            with self._connect() as conn:
+                duplicate_rows = conn.execute(
+                    """
+                    SELECT assistant_ts FROM conversation_exchanges
+                    WHERE user_text = ? AND assistant_text = ?
+                    ORDER BY completed_at DESC, id DESC
+                    LIMIT 4
+                    """,
+                    (user["text"], assistant["text"]),
+                ).fetchall()
+                already_recorded = any(
+                    abs(
+                        self._timestamp_epoch(row["assistant_ts"])
+                        - completed_at
+                    )
+                    <= 30
+                    for row in duplicate_rows
+                    if completed_at > 0
+                    and self._timestamp_epoch(row["assistant_ts"]) > 0
+                )
+                if not already_recorded:
+                    already_recorded = (
+                        conn.execute(
+                            """
+                            SELECT 1 FROM conversation_exchanges
+                            WHERE origin = 'transcript' AND origin_ref = ?
+                            """,
+                            (origin_ref,),
+                        ).fetchone()
+                        is not None
+                    )
+            if already_recorded:
+                continue
+            before = self.record_completed_exchange(
+                user["text"],
+                assistant["text"],
+                user["source"],
+                assistant_source=assistant["source"],
+                user_ts=user.get("ts", ""),
+                assistant_ts=assistant.get("ts", ""),
+                origin="transcript",
+                origin_ref=origin_ref,
+            )
+            if before is not None:
+                imported += 1
+        return imported
 
     def record_memory(self, memory_type: str, source: str, content: str, importance: float = 1.0) -> int | None:
         clean = (content or "").strip()
@@ -518,7 +841,7 @@ class BridgeMemoryStore:
         return {"turns": int(turns), "memories": int(memories)}
 
     def clear_turns(self) -> int:
-        """Delete all stored conversation turns, keeping memories intact."""
+        """Delete working turns without destroying completed exchange history."""
         with self._connect() as conn:
             deleted = conn.execute("DELETE FROM turns").rowcount
             try:
@@ -534,6 +857,7 @@ class BridgeMemoryStore:
             deleted_turns = conn.execute("DELETE FROM turns").rowcount
             deleted_memories = conn.execute("DELETE FROM memories").rowcount
             conn.execute("DELETE FROM memory_fts")
+            conn.execute("DELETE FROM conversation_exchanges")
             try:
                 conn.execute("DELETE FROM memory_vec")
                 conn.execute("DELETE FROM turns_vec")

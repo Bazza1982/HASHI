@@ -110,9 +110,17 @@ class _MemoryStore:
     def __init__(self):
         self.turns = []
         self.exchanges = []
+        self.completed_exchanges = []
 
     def record_turn(self, role, source, text):
         self.turns.append((role, source, text))
+        return len(self.turns)
+
+    def record_completed_exchange(self, user_text, assistant_text, source, **kwargs):
+        self.completed_exchanges.append(
+            (user_text, assistant_text, source, dict(kwargs))
+        )
+        return len(self.completed_exchanges)
 
     def record_exchange(self, user_text, assistant_text, source):
         self.exchanges.append((user_text, assistant_text, source))
@@ -2399,6 +2407,24 @@ def test_persist_success_memory_records_human_exchange_and_handoff():
     assert runtime.memory_store.exchanges == [
         ("user text", "memory:visible text", "text")
     ]
+    completed = runtime.memory_store.completed_exchanges
+    assert len(completed) == 1
+    assert completed[0][:3] == (
+        "user text",
+        "visible text",
+        "text",
+    )
+    assert completed[0][3] | {"origin_ref": "ignored"} == {
+        "assistant_source": "codex-cli",
+        "user_turn_id": 1,
+        "assistant_turn_id": 2,
+        "user_ts": item.created_at,
+        "origin": "primary",
+        "origin_ref": "ignored",
+    }
+    assert completed[0][3]["origin_ref"].startswith(
+        "session-1:req-1:"
+    )
     assert runtime.post_turn_calls == [("user text", "memory:visible text", False)]
     assert runtime.handoff_builder.transcript == [
         ("user", "user text", "text"),
