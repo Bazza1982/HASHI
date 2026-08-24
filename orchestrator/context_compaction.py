@@ -32,10 +32,6 @@ from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
     canonical_backend_engine,
 )
-from orchestrator.privacy_levels import (
-    require_backend_compatibility,
-    require_level_available,
-)
 
 STATE_KEY = "context_compaction"
 MANAGED_HISTORY_TITLE = "HASHI MANAGED CONVERSATION HISTORY"
@@ -242,7 +238,7 @@ class ResolvedCompactRoute:
     her_effort: str = "high"
     timeout_tier: str = ""
     capacity: CapacityProfile | None = None
-    eligible: bool = False
+    eligible: bool = True
     lock_reason: str = ""
     crosses_provider: bool = False
     capabilities: Mapping[str, Any] = field(default_factory=dict)
@@ -539,11 +535,11 @@ def _workspace_state(runtime: Any) -> dict[str, Any]:
 
 def _route_from_mapping(raw: Mapping[str, Any] | None) -> CompactRouteConfig:
     value = dict(raw or {})
-    legacy_mode = str(value.get("mode") or "inherit_quick").strip().lower()
     # Compact now follows the active HER v2 Quick/Light target.  Old persisted
-    # inherit_pro/explicit routes are read as the new default without rewriting
-    # state during a status/read operation.
-    mode = "off" if legacy_mode == "off" else "inherit_quick"
+    # inherit_pro/explicit/off routes are read as the single runtime policy
+    # without rewriting state during a status/read operation.  Compact
+    # execution itself has no independent route switch or eligibility gate.
+    mode = "inherit_quick"
     provider = None
     model = None
     reasoning = "high"
@@ -630,19 +626,9 @@ def load_policy(runtime: Any) -> CompactionPolicy:
     )
 
 
-def _granted_models(row: Mapping[str, Any]) -> set[str]:
-    result = {
-        str(row.get(key) or "").strip()
-        for key in ("model", "default_model", "her_v2_fast_model", "her_v2_pro_model")
-        if str(row.get(key) or "").strip()
-    }
-    raw_models = row.get("models")
-    if isinstance(raw_models, Sequence) and not isinstance(raw_models, (str, bytes)):
-        result.update(str(item).strip() for item in raw_models if str(item).strip())
-    return result
+def _agent_backend_profile(runtime: Any, provider: str) -> Mapping[str, Any] | None:
+    """Return optional capacity metadata, never provider authorisation."""
 
-
-def _exact_grant(runtime: Any, provider: str, model: str) -> Mapping[str, Any] | None:
     manager = getattr(runtime, "backend_manager", None)
     config = getattr(manager, "config", None)
     for raw in getattr(config, "allowed_backends", ()) or ():
@@ -650,25 +636,20 @@ def _exact_grant(runtime: Any, provider: str, model: str) -> Mapping[str, Any] |
             continue
         if canonical_backend_engine(str(raw.get("engine") or "").strip()) != provider:
             continue
-        if model in _granted_models(raw):
-            return raw
+        return raw
     return None
 
 
-def _adapter_declarations(provider: str) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+def _adapter_capacity_declarations(provider: str) -> Mapping[str, Any]:
     try:
         from adapters.registry import get_backend_class
 
         backend_class = get_backend_class(provider)
         module = importlib.import_module(backend_class.__module__)
     except Exception:
-        return {}, {}
-    capabilities = getattr(module, "HASHI_COMPACTION_CAPABILITIES", {})
+        return {}
     capacities = getattr(module, "HASHI_MODEL_CAPACITY_PROFILES", {})
-    return (
-        dict(capabilities) if isinstance(capabilities, Mapping) else {},
-        dict(capacities) if isinstance(capacities, Mapping) else {},
-    )
+    return dict(capacities) if isinstance(capacities, Mapping) else {}
 
 
 def _capacity_candidate(container: Mapping[str, Any], model: str) -> Mapping[str, Any] | None:
@@ -694,9 +675,9 @@ def resolve_capacity_profile(
     sources: list[tuple[str, Mapping[str, Any]]] = []
     if isinstance(profile_options, Mapping):
         sources.append(("her_v2_profile", profile_options))
-    grant = _exact_grant(runtime, provider, model)
-    if isinstance(grant, Mapping):
-        sources.append(("agent_exact_grant", grant))
+    agent_profile = _agent_backend_profile(runtime, provider)
+    if isinstance(agent_profile, Mapping):
+        sources.append(("agent_backend_profile", agent_profile))
     providers = getattr(getattr(runtime, "global_config", None), "her_providers", None)
     provider_rows = providers.get("providers") if isinstance(providers, Mapping) else None
     if isinstance(provider_rows, Mapping):
@@ -709,7 +690,7 @@ def resolve_capacity_profile(
                 raw_engine = canonical_backend_engine(name if name.endswith("-api") else f"{name}-api")
             if raw_engine == provider:
                 sources.append(("global_provider_profile", raw))
-    _caps, model_capacities = _adapter_declarations(provider)
+    model_capacities = _adapter_capacity_declarations(provider)
     if isinstance(model_capacities.get(model), Mapping):
         sources.append(("provider_adapter", model_capacities[model]))
 
@@ -846,63 +827,22 @@ def _compact_provider_reasoning(provider: str, model: str) -> str:
 
 
 def resolve_compact_route(runtime: Any) -> ResolvedCompactRoute:
+    """Use the Agent's active HER v2 Fast/Quick target directly.
+
+    The selected HER configuration is already the authoritative runtime route.
+    Compact does not maintain a second provider grant or capability gate.
+    """
+
     config = load_route_config(runtime)
-    if config.mode == "off":
-        return ResolvedCompactRoute(config=config, lock_reason="Compact route is off")
-    manager = getattr(runtime, "backend_manager", None)
-    if manager is None:
-        return ResolvedCompactRoute(
-            config=config,
-            lock_reason="HER v2 backend manager is unavailable",
-        )
-    try:
-        selected = manager.get_her_v2_configuration()
-    except Exception as exc:
-        return ResolvedCompactRoute(
-            config=config,
-            lock_reason=(
-                "HER v2 active provider/Quick configuration is unavailable: "
-                f"{type(exc).__name__}"
-            ),
-        )
+    selected = runtime.backend_manager.get_her_v2_configuration()
 
     provider = canonical_backend_engine(
-        str(getattr(selected, "fast_provider", getattr(selected, "provider", "")))
+        str(getattr(selected, "fast_provider", None) or getattr(selected, "provider", ""))
     )
     model = str(getattr(selected, "fast_model", "") or "").strip()
     reasoning = _compact_provider_reasoning(provider, model)
-    if not provider or not model:
-        return ResolvedCompactRoute(
-            config=config,
-            provider=provider,
-            model=model,
-            reasoning=reasoning,
-            lock_reason="HER v2 active provider or Quick/Light model is missing",
-        )
-    grant = _exact_grant(runtime, provider, model)
-    if grant is None:
-        return ResolvedCompactRoute(
-            config=config,
-            provider=provider,
-            model=model,
-            reasoning=reasoning,
-            lock_reason="active HER v2 Quick/Light provider/model grant is absent",
-        )
-
-    capabilities, _capacities = _adapter_declarations(provider)
-    capabilities = dict(capabilities)
-    if isinstance(grant.get("semantic_reasoning"), bool):
-        capabilities["semantic_reasoning"] = grant["semantic_reasoning"]
     capacity = resolve_capacity_profile(runtime, provider, model)
-    requested_tier = config.timeout_tier
-    timeout_tier = (
-        "tier_3"
-        if requested_tier == "auto" and capabilities.get("local_or_slow") is True
-        else "tier_2" if requested_tier == "auto" else requested_tier
-    )
-    missing = []
-    if timeout_tier not in {"tier_2", "tier_3"}:
-        missing.append("Compact timeout tier must be tier_2 or tier_3")
+    timeout_tier = "tier_2" if config.timeout_tier == "auto" else config.timeout_tier
     return ResolvedCompactRoute(
         config=config,
         provider=provider,
@@ -911,10 +851,8 @@ def resolve_compact_route(runtime: Any) -> ResolvedCompactRoute:
         her_effort="high",
         timeout_tier=timeout_tier,
         capacity=capacity,
-        eligible=not missing,
-        lock_reason="; ".join(missing),
+        eligible=True,
         crosses_provider=False,
-        capabilities=capabilities,
     )
 
 
@@ -931,8 +869,9 @@ def configure_route(
     """Persist only the simplified Quick/Light Compact policy.
 
     Legacy callers may still say ``inherit_pro``; it is migrated forward to
-    ``inherit_quick``. Independent provider/model/reasoning routes are no
-    longer accepted because Compact follows the Agent's active HER v2 setup.
+    ``inherit_quick``. Independent provider/model/reasoning routes and an
+    execution-off route are no longer accepted because Compact always follows
+    the Agent's active HER v2 setup.
     """
 
     manager = getattr(runtime, "backend_manager", None)
@@ -944,9 +883,9 @@ def configure_route(
     normalized_mode = str(mode or "").strip().lower()
     if normalized_mode in {"inherit", "inherit_pro", "pro", "quick", "inherit_quick"}:
         normalized_mode = "inherit_quick"
-    if normalized_mode not in {"inherit_quick", "off"}:
+    if normalized_mode != "inherit_quick":
         raise ValueError(
-            "Compact follows the active HER v2 Quick/Light model; only inherit_quick or off is supported"
+            "Compact always follows the active HER v2 Quick/Light model"
         )
     timeout_tier = str(timeout_tier or "auto").strip().lower().replace("-", "_")
     if timeout_tier not in {"auto", "tier_2", "tier_3"}:
@@ -1527,22 +1466,8 @@ class ContextCompactionCoordinator:
         system_prompt: str,
         user_prompt: str,
     ) -> Any:
-        manager = getattr(self.runtime, "backend_manager", None)
-        if manager is None:
-            raise CompactionFailure("COMPACTION_PROVIDER_UNAVAILABLE", "backend manager is unavailable")
-        require_level_available(getattr(manager, "privacy_level", 1))
-        require_backend_compatibility(route.provider, getattr(manager, "privacy_level", 1))
+        manager = self.runtime.backend_manager
         backend = manager.create_ephemeral_backend(route.provider, target_model=route.model)
-        supports_tools = bool(
-            getattr(getattr(backend, "capabilities", None), "supports_tool_use", False)
-        )
-        if supports_tools and not hasattr(backend, "tool_registry"):
-            with contextlib.suppress(Exception):
-                await backend.shutdown()
-            raise CompactionFailure(
-                "COMPACTION_TOOL_ISOLATION_UNAVAILABLE",
-                "Compact backend cannot prove tool-registry disablement",
-            )
         if hasattr(backend, "tool_registry"):
             backend.tool_registry = None
         extra = dict(getattr(backend.config, "extra", None) or {})
@@ -1565,11 +1490,6 @@ class ContextCompactionCoordinator:
                 not in {"", "off", "none", "false", "0", "disabled"}
             )
         setter = getattr(backend, "set_system_prompt", None)
-        can_isolate_prompt = callable(setter) or hasattr(backend, "sys_prompt")
-        if not can_isolate_prompt:
-            with contextlib.suppress(Exception):
-                await backend.shutdown()
-            raise CompactionFailure("COMPACTION_PROMPT_ISOLATION_UNAVAILABLE", "Compact backend cannot isolate its system prompt")
         try:
             initialized = await backend.initialize()
             if not initialized:
@@ -1581,18 +1501,8 @@ class ContextCompactionCoordinator:
                 setter(system_prompt)
             else:
                 backend.sys_prompt = system_prompt
-            if hasattr(backend, "sys_prompt") and backend.sys_prompt != system_prompt:
-                raise CompactionFailure(
-                    "COMPACTION_PROMPT_ISOLATION_UNAVAILABLE",
-                    "Compact backend did not retain the isolated system prompt",
-                )
             if hasattr(backend, "tool_registry"):
                 backend.tool_registry = None
-                if backend.tool_registry is not None:
-                    raise CompactionFailure(
-                        "COMPACTION_TOOL_ISOLATION_UNAVAILABLE",
-                        "Compact backend retained a tool registry",
-                    )
             response = await asyncio.wait_for(
                 backend.generate_response(
                     user_prompt,
@@ -1891,41 +1801,6 @@ class ContextCompactionCoordinator:
             self._active_task = task
             compaction_id = f"cmp-{uuid.uuid4().hex}"
             route = resolve_compact_route(self.runtime)
-            if not route.eligible:
-                with contextlib.suppress(Exception):
-                    self.store.append_audit(
-                        "route_rejected",
-                        compaction_id=compaction_id,
-                        payload={
-                            "request_ref": request_ref,
-                            "trigger": trigger,
-                            "code": "COMPACTION_ROUTE_LOCKED",
-                            "reason": route.lock_reason,
-                            "compact_provider": route.provider,
-                            "compact_model": route.model,
-                            "provider_reasoning": route.reasoning,
-                            "her_effort": route.her_effort,
-                            "original_context_unchanged": True,
-                            "will_continue": bool(continue_request_on_failure),
-                            "continuation_decision": (
-                                "continue_original_request_with_warning"
-                                if continue_request_on_failure
-                                else "caller_decides"
-                            ),
-                        },
-                    )
-                self._active_task = None
-                return CompactionOutcome(
-                    status="locked",
-                    trigger=trigger,
-                    compaction_id=compaction_id,
-                    code="COMPACTION_ROUTE_LOCKED",
-                    message=route.lock_reason,
-                    route_provider=route.provider,
-                    route_model=route.model,
-                    route_reasoning=route.reasoning,
-                    her_effort=route.her_effort,
-                )
             policy = load_policy(self.runtime)
             try:
                 snapshot = self.snapshot()
@@ -2535,12 +2410,11 @@ def compact_status_text(runtime: Any) -> str:
             f"{trigger_budget.low_input_tokens:,} tokens"
         )
     )
-    eligibility = "READY" if route.eligible and not status["state_error"] else "LOCKED"
+    eligibility = "READY" if not status["state_error"] else "ERROR"
     reason = html.escape(
         str(
             status["state_error"]
-            or route.lock_reason
-            or "all deterministic eligibility checks passed"
+            or "uses the active HER v2 Quick/Light target directly"
         )
     )
     return (

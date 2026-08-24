@@ -1562,9 +1562,9 @@ async def test_her_v2_compact_typed_and_button_controls_are_independent(tmp_path
     update, edits, answers = _callback_update("her_model_compact_mode:off")
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
 
-    assert not any(answer.get("show_alert") for answer in answers)
-    assert "<code>off</code>" in edits[-1]["text"]
-    assert "LOCKED" in edits[-1]["text"]
+    assert any(answer.get("show_alert") for answer in answers)
+    assert "Quick/Light model at high effort" in answers[-1]["text"]
+    assert edits == []
     assert manager.get_her_v2_configuration().to_dict() == before
 
 

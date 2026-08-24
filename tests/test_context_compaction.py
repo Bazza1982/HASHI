@@ -237,6 +237,28 @@ def test_legacy_route_state_migrates_in_memory_to_active_quick_without_rewrite(t
     assert runtime.state_store.value["context_compaction"] == legacy
 
 
+def test_legacy_off_route_cannot_block_active_quick_compaction(tmp_path):
+    runtime = _Runtime(tmp_path)
+    legacy = {
+        "version": 2,
+        "route": {
+            "mode": "off",
+            "timeout_tier": "auto",
+        },
+    }
+    runtime.state_store.value = {"context_compaction": deepcopy(legacy)}
+
+    configured = load_route_config(runtime)
+    route = resolve_compact_route(runtime)
+
+    assert configured.mode == "inherit_quick"
+    assert route.eligible is True
+    assert route.provider == "deepseek-api"
+    assert route.model == "deepseek-v4-flash"
+    assert route.lock_reason == ""
+    assert runtime.state_store.value["context_compaction"] == legacy
+
+
 def test_explicit_compact_route_is_rejected_and_cannot_create_third_model_path(tmp_path):
     runtime = _Runtime(tmp_path)
 
@@ -272,7 +294,7 @@ def test_active_quick_provider_change_is_followed_without_compact_reconfiguratio
     assert route.her_effort == "high"
 
 
-def test_missing_active_quick_grant_locks_without_fallback(tmp_path):
+def test_active_quick_model_does_not_require_an_agent_local_model_grant(tmp_path):
     runtime = _Runtime(tmp_path)
     runtime.backend_manager._selected = SimpleNamespace(
         provider="deepseek-api",
@@ -282,26 +304,18 @@ def test_missing_active_quick_grant_locks_without_fallback(tmp_path):
         pro_model="deepseek-v4-pro",
     )
 
-    locked = resolve_compact_route(runtime)
+    route = resolve_compact_route(runtime)
 
-    assert locked.eligible is False
-    assert locked.model == "not-granted"
-    assert "Quick/Light provider/model grant is absent" in locked.lock_reason
+    assert route.eligible is True
+    assert route.provider == "deepseek-api"
+    assert route.model == "not-granted"
+    assert route.lock_reason == ""
 
 
 def test_hashi_api_quick_route_is_ready_without_compaction_declarations_or_capacity(
     tmp_path,
 ):
     runtime = _Runtime(tmp_path)
-    runtime.backend_manager.config.allowed_backends.append(
-        {
-            "engine": "hashi-api",
-            "models": ["gpt-5.6-luna", "gpt-5.6-sol"],
-            "default_model": "gpt-5.6-luna",
-            "fast_model": "gpt-5.6-luna",
-            "pro_model": "gpt-5.6-sol",
-        }
-    )
     runtime.backend_manager._selected = SimpleNamespace(
         provider="hashi-api",
         fast_provider="hashi-api",
@@ -320,6 +334,10 @@ def test_hashi_api_quick_route_is_ready_without_compaction_declarations_or_capac
     assert route.capacity is None
     assert route.lock_reason == ""
     assert route.capabilities == {}
+    assert all(
+        row["engine"] != "hashi-api"
+        for row in runtime.backend_manager.config.allowed_backends
+    )
 
 
 @pytest.mark.asyncio
@@ -665,6 +683,57 @@ async def test_compactor_deadline_isolated_prompt_tool_free_and_backend_reaped(t
     assert backend.config.extra["tools_authorised_for_this_stage"] is False
     assert backend.config.extra["external_side_effects_authorised_for_this_stage"] is False
     assert backend.config.extra["sub_agents_authorised_for_this_stage"] is False
+    assert backend.shutdown_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_compactor_does_not_require_capability_or_prompt_isolation_declarations(
+    tmp_path,
+):
+    runtime = _Runtime(tmp_path)
+
+    class Backend:
+        def __init__(self):
+            self.config = SimpleNamespace(extra={})
+            self.shutdown_calls = 0
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(self, *_args, **_kwargs):
+            return BackendResponse(text="ok", duration_ms=1)
+
+        async def shutdown(self):
+            self.shutdown_calls += 1
+
+    backend = Backend()
+    runtime.backend_manager.create_ephemeral_backend = lambda *_args, **_kwargs: backend
+    route = resolve_compact_route(runtime)
+    request = CompactionRequest(
+        compaction_id="cmp-direct-fast",
+        request_ref="req-direct-fast",
+        trigger="test",
+        provider=route.provider,
+        model=route.model,
+        reasoning=route.reasoning,
+        her_effort=route.her_effort,
+        timeout_tier=route.timeout_tier,
+        deadline_s=1,
+        attempt=1,
+        source_digest="sha256:test",
+        source_segment_ids=("turn:1",),
+    )
+
+    response = await ContextCompactionCoordinator(runtime)._invoke_model(
+        route,
+        request,
+        "direct compact system",
+        "quoted source",
+    )
+
+    assert response.text == "ok"
+    assert backend.sys_prompt == "direct compact system"
+    assert backend.config.extra["tools_authorised_for_this_stage"] is False
     assert backend.shutdown_calls == 1
 
 

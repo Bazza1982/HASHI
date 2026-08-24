@@ -203,19 +203,6 @@ def her_v2_compact_keyboard(runtime) -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    selected_label(
-                        "Follow Quick/Light",
-                        current.mode == "inherit_quick",
-                    ),
-                    callback_data="her_model_compact_mode:inherit_quick",
-                ),
-                InlineKeyboardButton(
-                    selected_label("Off", current.mode == "off"),
-                    callback_data="her_model_compact_mode:off",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
                     selected_label("Tier · auto", current.timeout_tier == "auto"),
                     callback_data="her_model_compact_tier:auto",
                 ),
@@ -795,16 +782,11 @@ async def _cmd_her_v2_compact(runtime, update, args: list[str]) -> None:
             if len(args) > 2:
                 raise ValueError("inherit_quick accepts only an optional timeout tier")
             configure_route(runtime, mode="inherit_quick", timeout_tier=tier)
-        elif action == "off":
-            tier = args[1] if len(args) == 2 else current.timeout_tier
-            if len(args) > 2:
-                raise ValueError("off accepts only an optional timeout tier")
-            configure_route(runtime, mode="off", timeout_tier=tier)
         elif action in {"tier", "timeout"} and len(args) == 2:
             configure_route(runtime, mode=current.mode, timeout_tier=args[1])
         else:
             raise ValueError(
-                "Usage: /model compact [status|inherit_quick [tier]|off [tier]|"
+                "Usage: /model compact [status|inherit_quick [tier]|"
                 "tier <auto|tier_2|tier_3>]"
             )
     except (OSError, TypeError, ValueError) as exc:
@@ -1207,6 +1189,7 @@ async def callback_model(runtime, update, context: Any) -> None:
             )
         elif data == "her_model_compact_providers" or data.startswith(
             (
+                "her_model_compact_mode:",
                 "her_model_compact_provider:",
                 "her_model_compact_model:",
                 "her_model_compact_reasoning:",
@@ -1219,28 +1202,6 @@ async def callback_model(runtime, update, context: Any) -> None:
                 show_alert=True,
             )
             return
-        elif data.startswith("her_model_compact_mode:"):
-            from orchestrator.context_compaction import (
-                configure_route,
-                load_route_config,
-            )
-
-            mode = data.split(":", 1)[1]
-            try:
-                current = load_route_config(runtime)
-                configure_route(
-                    runtime,
-                    mode=mode,
-                    timeout_tier=current.timeout_tier,
-                )
-            except (OSError, TypeError, ValueError) as exc:
-                await query.answer(str(exc), show_alert=True)
-                return
-            await query.edit_message_text(
-                her_v2_compact_text(runtime),
-                parse_mode="HTML",
-                reply_markup=her_v2_compact_keyboard(runtime),
-            )
         elif data.startswith("her_model_compact_tier:"):
             from orchestrator.context_compaction import (
                 configure_route,
