@@ -91,14 +91,17 @@ The compulsory-Replanning corrective working tree completed these local gates:
 
 | Gate | Result |
 | --- | --- |
-| Complete offline product suite | `2677 passed`, `2 skipped`, `40 deselected` |
+| Complete offline product suite | `2685 passed`, `2 skipped`, `40 deselected` after integration with the retained Auto Compact commits |
 | Core deterministic gate | `237 passed` |
 | All HER v2 test modules | `346 passed`, `1 skipped` |
+| Combined Auto Compact and HER v2 focused suite | `403 passed`, `1 skipped` |
 | Focused Ruff correctness rules | passed |
 | Python compilation | passed |
 | Git diff/whitespace check | passed |
 | Internal Markdown targets | `207` checked; `0` missing |
-| Runtime reload/reboot/canary | not performed; separate authority required |
+| Runtime code adoption | authorised Arale `/reboot min` passed; target set was exactly `('arale',)` and the current HER runtime contract was verified |
+| Runtime health after adoption | Arale online on HER v2; all 20 configured Agents online; Workbench and API Gateway recreated with reloaded code |
+| Capability-level canary | not performed; real threshold Replan, Auto Compact, and provider multi-image canaries remain separate |
 
 The already-published integrated implementation baseline had completed these
 historical gates before its documentation pass:
@@ -146,8 +149,9 @@ was added to the publication range.
 - The deterministic guard preventing an Immediate Response from claiming
   unperformed action remains a separate open design item. Prompt instruction
   alone is not treated as proof that this case is impossible.
-- No running instance has been reloaded for this corrective working-tree
-  update. A real Adaptive-or-above 10-result/300-second compulsory Replan, a
+- Arale has loaded the corrective source through an authorised targeted
+  `/reboot min`; no other Agent was selected for restart. A real
+  Adaptive-or-above 10-result/300-second compulsory Replan, a
   threshold-triggered Auto Compact cycle, and provider-specific multi-image
   canaries remain separate capability-level rollout evidence.
 - A broad full-repository Ruff sweep still reports `1696` pre-existing style
@@ -164,6 +168,8 @@ at `2e3a3f0`; no force push, tag, or Release was used. The credential, private
 state, binary, size, link, and unintended-file checks above apply to that
 historical publication range.
 
-The later compulsory-Replanning correction is a new working-tree change and is
-outside that reviewed range. Its local verification is recorded above; commit,
-push, reload, deployment, and live canary still require separate authority.
+The later compulsory-Replanning correction is outside that reviewed publication
+range. It is committed on local `main` as `7f2c1ac`, directly after the retained
+Auto Compact commits `3950cc0` and `81f5d76`, and its targeted Arale code
+adoption is recorded above. These local commits have not been pushed; wider
+rollout and capability-level live canaries still require separate authority.

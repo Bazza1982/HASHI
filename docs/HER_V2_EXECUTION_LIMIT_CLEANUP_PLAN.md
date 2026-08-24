@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Status | Implemented and verified in source; runtime activation awaits separately authorised `/reboot` |
+| Status | Implemented, verified in source, and loaded by an authorised Arale `/reboot min` on 2026-08-24 |
 | Date | 2026-08-22 |
 | Authority | `HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md` section 3.2.1 |
 | Regression source | `839b10a5` (`Add tiered provider retry recovery to HER v2`) |
-| Runtime activation | Requires a separately authorised `/reboot`; no restart is part of this plan |
+| Runtime activation | Targeted Arale hot reload passed on 2026-08-24; the original implementation did not restart a runtime |
 
 > Scope note (2026-08-22): the later approved
 > [Auto Compact design](HER_V2_AUTO_COMPACTION_DESIGN.md) authorises one narrow
@@ -254,5 +254,7 @@ checkpoints:
 The focused and broad deterministic suites passed. The explicitly enabled
 real-wall-clock canary completed one uninterrupted Execution in 601.44 seconds,
 crossing the largest former 600-second attempt boundary before successful
-Finalisation. No `/reboot` or `/restart` was performed as part of implementation
-or verification.
+Finalisation. No `/reboot` or `/restart` was performed as part of the original
+implementation or verification. The later operator-authorised Arale
+`/reboot min` on 2026-08-24 loaded this source together with the compulsory
+Replanning correction.

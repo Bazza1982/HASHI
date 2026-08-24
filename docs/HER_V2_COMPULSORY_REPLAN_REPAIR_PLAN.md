@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | Implemented and verified in the working tree; runtime activation pending separate authority |
+| Status | Implemented, merged to local `main`, and loaded by an authorised Arale `/reboot min` |
 | Date | 2026-08-24 |
 | Authority | Current user-approved HER v2 Replanning contract |
 | Scope | HER v2 work turns at Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) execution modes |
 | Fixed cadence | 300 monotonic seconds or 10 newly completed Execution tool results, whichever is observed first |
-| Runtime activation | Source changes only; reload/reboot requires separate authority |
+| Runtime activation | Targeted Arale hot reload passed on 2026-08-24; capability-level threshold canaries remain separate |
 
 ## 1. Repair objective
 
@@ -372,10 +372,20 @@ Completed on 2026-08-24 in the HASHI1 working tree:
   legacy `max_replans`, `replan_limit`, and `replan_limits` fields;
 - proved 205 consecutive cadence cycles, provider time crossing historical
   timeout values, unbounded tool loops, and assurance-limit independence;
-- passed the complete offline product suite (`2677 passed`, `2 skipped`,
-  `40 deselected`) and
-  the deterministic core gate (`237 passed`), with the explicit HER v2 suite at
-  `346 passed`, `1 skipped`;
+- passed the complete pre-integration offline product suite (`2677 passed`,
+  `2 skipped`, `40 deselected`) and the deterministic core gate (`237 passed`),
+  with the explicit HER v2 suite at `346 passed`, `1 skipped`;
+- after integration with the two preceding Auto Compact commits, passed the
+  combined focused suite (`403 passed`, `1 skipped`), the core gate
+  (`237 passed`), and the complete offline product suite (`2685 passed`,
+  `2 skipped`, `40 deselected`);
 - passed focused Ruff correctness rules, Python compilation, whitespace/diff
   checks, and 207 internal Markdown target checks with no missing target; and
-- did not reload, reboot, deploy, commit, push, tag, or create a Release.
+- committed the repair to local `main` as `7f2c1ac`, directly after the two
+  retained Auto Compact commits `3950cc0` and `81f5d76`;
+- completed the separately authorised targeted `/reboot min` with
+  `requester=arale` and `targets=('arale',)`, verified the current HER runtime
+  contract, returned Arale online, and recreated the Workbench API and API
+  Gateway with reloaded code; and
+- did not push, tag, create a Release, or claim a real threshold-triggered
+  compulsory-Replan canary.
