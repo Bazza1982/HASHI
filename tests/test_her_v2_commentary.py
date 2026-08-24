@@ -126,16 +126,6 @@ def test_optional_commentary_extraction_is_bounded_and_stage_scoped():
         commentary_from_stage_response(
             response,
             turn_id="turn",
-            stage=Stage.CHECKPOINT,
-            invocation=4,
-            attempt=1,
-        )
-        is None
-    )
-    assert (
-        commentary_from_stage_response(
-            response,
-            turn_id="turn",
             stage=Stage.FINALISATION,
             invocation=3,
             attempt=1,
@@ -171,10 +161,10 @@ class _PackagingProvider:
         return f"Captain, rendered {kwargs['message_kind']}: {kwargs['neutral_message']}"
 
 
-def _packaging_source(*, usable=True, reason=None):
+def _packaging_source(*, usable=True, reason=None, display_name="Navigator"):
     return HERPersonaPackagingSource(
         guidance="Address the user as Captain.",
-        display_name="Navigator",
+        display_name=display_name,
         usable=usable,
         unavailable_reason=reason,
         content_sha256="digest" if usable else None,
@@ -235,6 +225,87 @@ async def test_missing_block_or_packaging_failure_uses_deterministic_minimal_fal
     assert packaged.text.startswith("Navigator 向您汇报：")
     assert packaged.text.endswith(_neutral().text)
     assert len(provider.calls) == (0 if not source.usable else 1)
+
+
+@pytest.mark.asyncio
+async def test_replan_persona_fact_loss_uses_display_name_fallback():
+    provider = _PackagingProvider()
+
+    async def refusal(profile, **kwargs):
+        provider.calls.append((profile, kwargs))
+        return "Sorry, I cannot rewrite that update."
+
+    provider.package_persona_commentary = refusal
+    packager = _ConfiguredPersonaPackager(
+        provider=provider,
+        profile=ProviderProfile(
+            "lightweight", "openrouter-api", "configured/model"
+        ),
+        source=_packaging_source(),
+        request_id="request",
+        logger=logging.getLogger("test.her-v2-replan-persona-fact-fallback"),
+    )
+    commentary = NeutralCommentary(
+        event_id="turn:execution-cycle:1:checkpoint:1:commentary",
+        turn_id="turn",
+        stage=Stage.REPLANNING,
+        attempt=1,
+        text=(
+            "Progress is 60%. The plan is unchanged. "
+            "Next: continue the current plan from verified evidence."
+        ),
+        required_facts=("60%", "PLAN IS UNCHANGED", "Next:"),
+    )
+
+    packaged = await packager.package(commentary)
+
+    assert packaged.fallback is True
+    assert packaged.provenance == "minimal_persona_fallback"
+    assert packaged.error_type == "persona_fact_preservation_failed"
+    assert packaged.source_event_id == commentary.event_id
+    assert packaged.text.startswith("Navigator 向您汇报：")
+    assert "60%" in packaged.text
+    assert "plan is unchanged" in packaged.text.casefold()
+    assert "Next:" in packaged.text
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_model_commentary_fallback_uses_display_name_without_persona_call():
+    provider = _PackagingProvider()
+    resolved_display_name = "Public Navigator"
+    packager = _ConfiguredPersonaPackager(
+        provider=provider,
+        profile=ProviderProfile(
+            "lightweight", "openrouter-api", "configured/model"
+        ),
+        # Deliberately unlike the internal ``agent`` ID used by adapter tests.
+        source=_packaging_source(display_name=resolved_display_name),
+        request_id="request",
+        logger=logging.getLogger("test.her-v2-replan-model-commentary-fallback"),
+    )
+    commentary = NeutralCommentary(
+        event_id="turn:execution-cycle:1:checkpoint:1:commentary",
+        turn_id="turn",
+        stage=Stage.REPLANNING,
+        attempt=1,
+        text=(
+            "Progress is 60%. The plan is unchanged. "
+            "Next: continue from verified evidence."
+        ),
+        required_facts=("60%", "plan is unchanged", "Next:"),
+        minimal_persona_fallback_reason="replan_model_commentary_fallback",
+    )
+
+    packaged = await packager.package(commentary)
+
+    assert packaged.fallback is True
+    assert packaged.provenance == "minimal_persona_fallback"
+    assert packaged.error_type == "replan_model_commentary_fallback"
+    assert packaged.text.startswith(f"{resolved_display_name} 向您汇报：")
+    assert not packaged.text.startswith("agent 向您汇报：")
+    assert all(fact in packaged.text for fact in commentary.required_facts)
+    assert provider.calls == []
 
 
 @pytest.mark.asyncio

@@ -141,7 +141,8 @@ and binary packages are no longer part of the active program.
   alpha operator review. Production enterprise-server validation remains
   pending.
 - **v4.0.0-alpha.2** *(current v4 release candidate)* — HER v2 orchestration,
-  evidence-backed Reviewed/Assured modes, high-risk safe-boundary checkpoints,
+  evidence-backed Reviewed/Assured modes, compulsory Adaptive-or-above
+  safe-boundary Replanning,
   provider-aware multimodal input, Hybrid routing, automatic context
   maintenance, stronger session and delivery continuity, and a Flex-only
   runtime architecture. This is the broader platform line, not the enterprise
@@ -188,10 +189,12 @@ HER v2 is the sole supported HER execution backend:
   Verification with exact tool receipts and up to three attempts. Configured
   recipes or direct argv checks run in the authoritative workspace with the
   HASHI process's existing authority and an execution-derived timeout floor.
-- **High-risk safe-boundary checkpoints** — Triage records a separate
-  `STANDARD` or `HIGH_RISK` policy. High-risk Execution reassesses accumulated
-  evidence before the next tool boundary after 10 completed results or 300
-  seconds, without interrupting active tools or imposing a completion ceiling.
+- **Compulsory safe-boundary Replanning** — Adaptive (`high`), Reviewed
+  (`xhigh`), and Assured (`max`) Execution unconditionally Replan after 10
+  completed tool results or 300 seconds at the next safe boundary. Each cycle
+  reassesses completion and plan suitability, activates a plan version, and
+  sends one Persona-rendered progress update without interrupting active tools,
+  replaying side effects, or imposing a workflow ceiling.
 - **Provider-aware multimodal routing** — images and other supported media keep
   stable identity and order, travel natively to capable provider/models, and
   fall back only through authorised local media inspection when needed.
@@ -1547,9 +1550,10 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
   Verification accept only exact completed current-invocation receipts;
   Assured runs configured recipes or direct argv checks in the authoritative
   workspace and re-verifies remediated state up to three times
-- **High-risk execution checkpoints** — an independently classified high-risk
-  cycle performs a tool-free safe-boundary assessment after 10 completed tool
-  results or 300 seconds without becoming a tool, time, or completion ceiling
+- **Compulsory execution Replanning** — every Adaptive-or-above cycle performs
+  a tool-free Replan at the safe boundary after 10 completed tool results or
+  300 seconds, with mandatory progress commentary and no Replan, tool, time,
+  token, turn, or completion ceiling
 - **Reliable conversation delivery** — direct-message continuity, scheduler
   isolation, explicit stream ownership, stable event IDs, and request-scoped
   idempotency

@@ -137,6 +137,31 @@ async def test_required_control_bypasses_all_optional_toggles():
 
 
 @pytest.mark.asyncio
+async def test_required_replan_commentary_bypasses_commentary_toggle():
+    presented = []
+    router = HERMessageRouter(
+        request_id="req-replan-commentary",
+        logger=SimpleNamespace(
+            info=lambda _message: None, warning=lambda _message: None
+        ),
+        commentary_presenter=lambda event: presented.append(event.event_id),
+        commentary_enabled=lambda: False,
+    )
+    event = _event(
+        DELIVERY_USER_COMMENTARY,
+        "req-replan-commentary:execution-cycle:1:checkpoint:1:commentary",
+        kind=KIND_COMMENTARY,
+        summary="Agent progress update",
+        required=True,
+    )
+
+    await router.route(event)
+    await router.route(event)
+
+    assert presented == [event.event_id]
+
+
+@pytest.mark.asyncio
 async def test_direct_response_is_deferred_to_mandatory_final_lane():
     presented = []
     router = HERMessageRouter(

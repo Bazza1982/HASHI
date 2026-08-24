@@ -194,7 +194,9 @@ class HERMessageRouter:
                     presenter=self.reasoning_presenter,
                 )
             return False
-        if delivery_class == DELIVERY_USER_COMMENTARY and self.commentary_enabled():
+        if delivery_class == DELIVERY_USER_COMMENTARY and (
+            bool(getattr(event, "required", False)) or self.commentary_enabled()
+        ):
             return await self._dispatch(
                 event,
                 purpose="task_commentary",

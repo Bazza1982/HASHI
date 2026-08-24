@@ -1,8 +1,8 @@
-"""Request-local high-risk Execution checkpoint coordination.
+"""Request-local compulsory HER v2 Replanning cadence coordination.
 
-The coordinator observes safe Tool Gateway boundaries only.  It never applies
-an elapsed deadline to a provider or tool operation and never caps the number
-of tool results an Execution cycle may produce.
+The coordinator observes safe Tool Gateway boundaries only.  The 300-second
+and 10-result values are intervals that require Replanning; they are never
+provider/tool deadlines and never cap total Execution work or Replan count.
 """
 
 from __future__ import annotations
@@ -16,11 +16,7 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from .audit import AuditPersistenceError
 from .interfaces import StageInvocationError, TurnStopped
-from .models import (
-    CheckpointDecision,
-    CheckpointFinding,
-    ToolEvidenceReceipt,
-)
+from .models import ReplanningOutcome, ToolEvidenceReceipt
 
 
 CHECKPOINT_RESULT_THRESHOLD = 10
@@ -28,9 +24,10 @@ CHECKPOINT_ELAPSED_THRESHOLD_S = 300.0
 MAX_CHECKPOINT_RECEIPT_SUMMARIES = 64
 MAX_CHECKPOINT_ARGUMENT_KEYS = 32
 MAX_CHECKPOINT_METADATA_CHARS = 256
+MAX_REPLAN_RESULT_EXCERPT_CHARS = 4_000
 
 MonotonicClock = Callable[[], float]
-CheckpointEvaluator = Callable[["CheckpointSnapshot"], Awaitable[CheckpointFinding]]
+ReplanEvaluator = Callable[["CheckpointSnapshot"], Awaitable["ReplanDirective"]]
 CheckpointObserver = Callable[[str, Mapping[str, Any]], None]
 
 
@@ -52,91 +49,166 @@ def _bounded_text(value: Any) -> str:
     return str("" if value is None else value)[:MAX_CHECKPOINT_METADATA_CHARS]
 
 
+def _bounded_result_excerpt(value: Any) -> str:
+    return str("" if value is None else value)[:MAX_REPLAN_RESULT_EXCERPT_CHARS]
+
+
+@dataclass(frozen=True)
+class ReplanDirective:
+    """One validated Replanning result returned to the active Execution loop."""
+
+    checkpoint_id: str
+    outcome: ReplanningOutcome
+    active_plan_id: str
+
+    def __post_init__(self) -> None:
+        if not str(self.checkpoint_id or "").strip():
+            raise ValueError("replan checkpoint_id is required")
+        if not str(self.active_plan_id or "").strip():
+            raise ValueError("replan active_plan_id is required")
+        if not isinstance(self.outcome, ReplanningOutcome):
+            raise TypeError("replan directive requires a typed ReplanningOutcome")
+
+    @property
+    def complete(self) -> bool:
+        return self.outcome.completion_percent == 100
+
+    def execution_control_message(self, *, requested_tool_executed: bool) -> str:
+        boundary = (
+            "The tool result above completed before this Replan."
+            if requested_tool_executed
+            else (
+                "The requested tool was not executed because compulsory Replanning "
+                "became due before admission."
+            )
+        )
+        change = (
+            f"changed because {self.outcome.change_reason}"
+            if self.outcome.plan_changed
+            else "did not change"
+        )
+        plan_json = json.dumps(
+            dict(self.outcome.plan),
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        return (
+            "HASHI_COMPULSORY_REPLAN\n"
+            f"checkpoint_id: {self.checkpoint_id}\n"
+            f"completion: {self.outcome.completion_percent}%\n"
+            f"completion_basis: {self.outcome.completion_basis}\n"
+            f"plan: {change}\n"
+            f"active_plan_id: {self.active_plan_id}\n"
+            f"active_plan: {plan_json}\n"
+            f"next_step: {self.outcome.next_step}\n"
+            f"{boundary} Continue from current workspace and evidence. Do not repeat "
+            "a completed side effect merely because Replanning occurred."
+        )
+
+
 @dataclass(frozen=True)
 class ToolAdmission:
-    """One already-admitted tool call in the current Execution cycle."""
+    """One admitted tool call or one Replan control response replacing admission."""
 
     token: str
     prospective_action: Mapping[str, Any]
+    admitted: bool = True
+    directive: ReplanDirective | None = None
 
 
 @dataclass(frozen=True)
 class CheckpointSnapshot:
-    """Bounded cadence and receipt facts supplied to one assessment."""
+    """Cadence and evidence facts supplied to one compulsory Replanning call."""
 
     cycle_id: str
+    checkpoint_id: str
     checkpoint_index: int
     trigger_reasons: tuple[str, ...]
     completed_result_count: int
     elapsed_s: float
     receipt_summaries: tuple[Mapping[str, Any], ...]
     receipt_set_sha256: str
+    boundary_kind: str
     prospective_action: Mapping[str, Any] | None = None
+    execution_candidate: Mapping[str, Any] | None = None
 
-    def as_payload(self) -> dict[str, Any]:
-        return {
+    def as_payload(self, *, include_result_excerpts: bool = False) -> dict[str, Any]:
+        summaries: list[dict[str, Any]] = []
+        for item in self.receipt_summaries:
+            summary = dict(item)
+            if not include_result_excerpts:
+                summary.pop("result_excerpt", None)
+            summaries.append(summary)
+        payload = {
             "cycle_id": self.cycle_id,
+            "checkpoint_id": self.checkpoint_id,
             "checkpoint_index": self.checkpoint_index,
             "trigger_reasons": list(self.trigger_reasons),
             "completed_result_count": self.completed_result_count,
             "elapsed_s": self.elapsed_s,
-            "receipt_summaries": [dict(item) for item in self.receipt_summaries],
+            "receipt_summaries": summaries,
             "receipt_set_sha256": self.receipt_set_sha256,
+            "boundary_kind": self.boundary_kind,
             "prospective_action": (
                 dict(self.prospective_action)
                 if self.prospective_action is not None
                 else None
             ),
         }
+        if include_result_excerpts:
+            payload["execution_candidate"] = (
+                dict(self.execution_candidate)
+                if self.execution_candidate is not None
+                else None
+            )
+        else:
+            payload["execution_candidate_present"] = self.execution_candidate is not None
+        return payload
+
+    def replan_payload(self) -> dict[str, Any]:
+        return self.as_payload(include_result_excerpts=True)
 
 
-class CheckpointInterruption(BaseException):
-    """Typed control path that generic provider error wrappers must not flatten."""
+class ReplanCompletionInterruption(BaseException):
+    """Stop adding Execution work after compulsory Replanning establishes 100%."""
 
     def __init__(
         self,
-        finding: CheckpointFinding,
+        directive: ReplanDirective,
         snapshot: CheckpointSnapshot,
         receipts: Sequence[ToolEvidenceReceipt],
-        *,
-        evaluator_failure: StageInvocationError | None = None,
     ) -> None:
-        if finding.decision is CheckpointDecision.CONTINUE:
-            raise ValueError("CONTINUE cannot interrupt Execution")
-        super().__init__(f"checkpoint {finding.decision.value}: {finding.summary}")
-        self.finding = finding
+        if not directive.complete:
+            raise ValueError("only a 100% Replan may complete Execution")
+        super().__init__(f"compulsory Replan completed work: {snapshot.checkpoint_id}")
+        self.directive = directive
         self.snapshot = snapshot
         self.receipts = tuple(receipts)
-        self.evaluator_failure = evaluator_failure
 
 
 class CheckpointInfrastructureInterruption(BaseException):
-    """Carry stop/audit control through generic backend ``except Exception`` code."""
+    """Carry stop/audit/Replan failures through generic backend error wrappers."""
 
     def __init__(self, cause: BaseException) -> None:
         super().__init__(str(cause))
         self.cause = cause
 
 
-class HighRiskCheckpointCoordinator:
-    """Coordinate one HIGH_RISK authoritative Execution cycle.
-
-    A checkpoint is observed at the next safe boundary once either fixed
-    cadence threshold is due.  Existing active calls may settle, while new
-    admission remains closed behind a single shared evaluator task.
-    """
+class CompulsoryReplanCoordinator:
+    """Coordinate compulsory Replanning within one authoritative Execution cycle."""
 
     def __init__(
         self,
         *,
         cycle_id: str,
-        evaluator: CheckpointEvaluator,
+        evaluator: ReplanEvaluator,
         observer: CheckpointObserver | None = None,
         clock: MonotonicClock = time.monotonic,
     ) -> None:
         value = str(cycle_id or "").strip()
         if not value:
-            raise ValueError("checkpoint cycle_id is required")
+            raise ValueError("replan cycle_id is required")
         self.cycle_id = value
         self._evaluator = evaluator
         self._observer = observer
@@ -150,8 +222,8 @@ class HighRiskCheckpointCoordinator:
         self._active_admissions: dict[str, ToolAdmission] = {}
         self._admission_serial = 0
         self._checkpoint_count = 0
-        self._checkpoint_task: asyncio.Task[CheckpointFinding] | None = None
-        self._terminal_interruption: CheckpointInterruption | None = None
+        self._checkpoint_task: asyncio.Task[ReplanDirective] | None = None
+        self._terminal_interruption: ReplanCompletionInterruption | None = None
         self._closed = False
 
     @property
@@ -189,24 +261,34 @@ class HighRiskCheckpointCoordinator:
             arguments=arguments,
             tool_call_id=tool_call_id,
         )
-        while True:
-            task: asyncio.Task[CheckpointFinding] | None = None
-            async with self._condition:
-                self._raise_if_unavailable_locked()
-                if self._checkpoint_task is not None:
-                    task = self._checkpoint_task
-                elif self.due_reasons():
-                    task = self._start_checkpoint_locked(prospective)
-                else:
-                    self._admission_serial += 1
-                    token = f"{self.cycle_id}:tool:{self._admission_serial}"
-                    admission = ToolAdmission(token, prospective)
-                    self._active_admissions[token] = admission
-                    return admission
-            assert task is not None
-            await asyncio.shield(task)
+        task: asyncio.Task[ReplanDirective] | None = None
+        async with self._condition:
+            self._raise_if_unavailable_locked()
+            if self._checkpoint_task is not None:
+                task = self._checkpoint_task
+            elif self.due_reasons():
+                task = self._start_replan_locked(
+                    prospective,
+                    boundary_kind="before_tool_admission",
+                )
+            else:
+                self._admission_serial += 1
+                token = f"{self.cycle_id}:tool:{self._admission_serial}"
+                admission = ToolAdmission(token, prospective)
+                self._active_admissions[token] = admission
+                return admission
+        assert task is not None
+        directive = await asyncio.shield(task)
+        return ToolAdmission(
+            token="",
+            prospective_action=prospective,
+            admitted=False,
+            directive=directive,
+        )
 
     async def abandon_tool(self, admission: ToolAdmission) -> None:
+        if not admission.admitted:
+            return
         async with self._condition:
             self._active_admissions.pop(admission.token, None)
             self._condition.notify_all()
@@ -216,37 +298,68 @@ class HighRiskCheckpointCoordinator:
         admission: ToolAdmission,
         receipt: ToolEvidenceReceipt,
         *,
+        result_summary: str = "",
         immediate_safety_result: bool = False,
-    ) -> None:
-        task: asyncio.Task[CheckpointFinding] | None = None
+    ) -> ReplanDirective | None:
+        if not admission.admitted:
+            raise RuntimeError("a non-admitted tool cannot produce a tool receipt")
+        task: asyncio.Task[ReplanDirective] | None = None
         async with self._condition:
             if admission.token not in self._active_admissions:
-                raise RuntimeError("checkpoint tool admission was already settled")
+                raise RuntimeError("replan tool admission was already settled")
             self._active_admissions.pop(admission.token, None)
-            self._record_receipt_locked(receipt)
+            self._record_receipt_locked(receipt, result_summary=result_summary)
             self._condition.notify_all()
             if not immediate_safety_result:
                 if self._checkpoint_task is not None:
                     task = self._checkpoint_task
                 elif self.due_reasons():
-                    task = self._start_checkpoint_locked(None)
-        if task is not None:
-            await asyncio.shield(task)
+                    task = self._start_replan_locked(
+                        None,
+                        boundary_kind="completed_tool_result",
+                    )
+        if task is None:
+            return None
+        directive = await asyncio.shield(task)
+        return directive
 
-    async def record_immediate_result(self, receipt: ToolEvidenceReceipt) -> None:
-        """Count a denial immediately without delaying its return to the model."""
+    async def record_immediate_result(
+        self,
+        receipt: ToolEvidenceReceipt,
+        *,
+        result_summary: str = "",
+    ) -> None:
+        """Count a denial immediately without delaying its return to Execution."""
 
         async with self._condition:
-            self._record_receipt_locked(receipt)
-            # A due denial is released now.  If Execution continues, the next
-            # admission observes the due state and runs the checkpoint first.
+            self._record_receipt_locked(receipt, result_summary=result_summary)
             self._condition.notify_all()
-            # Preserve the completed denial receipt even when a concurrent
-            # checkpoint has already selected a terminal control outcome.
             self._raise_if_unavailable_locked()
 
+    async def at_execution_completion(
+        self,
+        *,
+        execution_candidate: Mapping[str, Any] | None,
+    ) -> ReplanDirective | None:
+        """Take a time/result-due Replan at the provider-completion safe boundary."""
+
+        task: asyncio.Task[ReplanDirective] | None = None
+        async with self._condition:
+            self._raise_if_unavailable_locked()
+            if self._checkpoint_task is not None:
+                task = self._checkpoint_task
+            elif self.due_reasons():
+                task = self._start_replan_locked(
+                    None,
+                    boundary_kind="execution_completion",
+                    execution_candidate=execution_candidate,
+                )
+        if task is None:
+            return None
+        return await asyncio.shield(task)
+
     async def close(self) -> None:
-        task: asyncio.Task[CheckpointFinding] | None = None
+        task: asyncio.Task[ReplanDirective] | None = None
         async with self._condition:
             if self._closed:
                 return
@@ -262,108 +375,117 @@ class HighRiskCheckpointCoordinator:
         if self._terminal_interruption is not None:
             raise self._terminal_interruption
         if self._closed:
-            raise asyncio.CancelledError("checkpoint coordinator is closed")
+            raise asyncio.CancelledError("replan coordinator is closed")
 
-    def _start_checkpoint_locked(
-        self, prospective: Mapping[str, Any] | None
-    ) -> asyncio.Task[CheckpointFinding]:
+    def _start_replan_locked(
+        self,
+        prospective: Mapping[str, Any] | None,
+        *,
+        boundary_kind: str,
+        execution_candidate: Mapping[str, Any] | None = None,
+    ) -> asyncio.Task[ReplanDirective]:
         if self._checkpoint_task is not None:
             return self._checkpoint_task
         task = asyncio.create_task(
-            self._run_checkpoint(prospective),
-            name=f"her-v2-checkpoint:{self.cycle_id}:{self._checkpoint_count + 1}",
+            self._run_replan(
+                prospective,
+                boundary_kind=boundary_kind,
+                execution_candidate=execution_candidate,
+            ),
+            name=f"her-v2-replan:{self.cycle_id}:{self._checkpoint_count + 1}",
         )
         self._checkpoint_task = task
         return task
 
-    async def _run_checkpoint(
-        self, prospective: Mapping[str, Any] | None
-    ) -> CheckpointFinding:
+    async def _run_replan(
+        self,
+        prospective: Mapping[str, Any] | None,
+        *,
+        boundary_kind: str,
+        execution_candidate: Mapping[str, Any] | None,
+    ) -> ReplanDirective:
         try:
             async with self._condition:
                 while self._active_admissions and not self._closed:
                     await self._condition.wait()
                 self._raise_if_unavailable_locked()
                 self._checkpoint_count += 1
-                snapshot = self._snapshot_locked(prospective)
+                snapshot = self._snapshot_locked(
+                    prospective,
+                    boundary_kind=boundary_kind,
+                    execution_candidate=execution_candidate,
+                )
 
-            self._observe("checkpoint_due", snapshot.as_payload())
-            self._observe("checkpoint_started", snapshot.as_payload())
-            evaluator_failure: StageInvocationError | None = None
+            audit_payload = snapshot.as_payload()
+            self._observe("replan_due", audit_payload)
+            self._observe("replan_started", audit_payload)
             try:
-                finding = await self._evaluator(snapshot)
-                if not isinstance(finding, CheckpointFinding):
-                    raise TypeError("checkpoint evaluator returned an untyped finding")
+                directive = await self._evaluator(snapshot)
+                if not isinstance(directive, ReplanDirective):
+                    raise TypeError("replan evaluator returned an untyped directive")
+                if directive.checkpoint_id != snapshot.checkpoint_id:
+                    raise ValueError("Replanning changed the checkpoint identity")
             except asyncio.CancelledError:
                 raise
             except (TurnStopped, AuditPersistenceError) as exc:
                 raise CheckpointInfrastructureInterruption(exc) from exc
+            except CheckpointInfrastructureInterruption:
+                raise
             except StageInvocationError as exc:
-                evaluator_failure = exc
-                finding = CheckpointFinding(
-                    CheckpointDecision.HALT,
-                    "The high-risk checkpoint evaluator was unavailable after its "
-                    "normal recovery path; further tool admission stopped.",
-                )
-            except Exception as exc:  # noqa: BLE001 - fail closed at control boundary
-                evaluator_failure = StageInvocationError(
-                    f"checkpoint evaluator failed: {type(exc).__name__}: {exc}",
+                raise CheckpointInfrastructureInterruption(exc) from exc
+            except Exception as exc:  # noqa: BLE001 - typed control boundary
+                failure = StageInvocationError(
+                    f"compulsory Replanning failed: {type(exc).__name__}: {exc}",
                     retryable=False,
                     human_description=(
-                        "The high-risk checkpoint evaluator failed unexpectedly."
+                        "The compulsory Replanning control failed unexpectedly."
                     ),
                 )
-                finding = CheckpointFinding(
-                    CheckpointDecision.HALT,
-                    "The high-risk checkpoint evaluator failed unexpectedly; "
-                    "further tool admission stopped.",
-                )
+                raise CheckpointInfrastructureInterruption(failure) from exc
 
             completed_payload = snapshot.as_payload()
             completed_payload.update(
                 {
-                    "decision": finding.decision.value,
-                    "summary": finding.summary,
-                    "question_present": bool(finding.question),
-                    "evaluator_failure": (
-                        evaluator_failure.audit_payload()
-                        if evaluator_failure is not None
-                        else None
-                    ),
+                    "completion_percent": directive.outcome.completion_percent,
+                    "plan_changed": directive.outcome.plan_changed,
+                    "change_reason_present": bool(directive.outcome.change_reason),
+                    "next_step": directive.outcome.next_step,
+                    "active_plan_id": directive.active_plan_id,
+                    "commentary_required": True,
                 }
             )
-            self._observe("checkpoint_completed", completed_payload)
+            self._observe("replan_completed", completed_payload)
 
-            if finding.decision is CheckpointDecision.CONTINUE:
+            if directive.complete:
+                interruption = ReplanCompletionInterruption(
+                    directive,
+                    snapshot,
+                    self.receipts,
+                )
                 async with self._condition:
-                    # Provider-front-door denials remain immediately
-                    # reportable while assessment is running.  They were not
-                    # part of this snapshot, so carry them into the fresh
-                    # cadence window instead of clearing their count.
-                    assessed_count = snapshot.completed_result_count
-                    carried_summaries = self._window_receipt_summaries[assessed_count:]
-                    self._window_started_at = float(self._clock())
-                    self._window_result_count = len(carried_summaries)
-                    self._window_receipt_summaries = list(carried_summaries)
+                    self._terminal_interruption = interruption
                     self._checkpoint_task = None
                     self._condition.notify_all()
-                return finding
+                raise interruption
 
-            interruption = CheckpointInterruption(
-                finding,
-                snapshot,
-                self.receipts,
-                evaluator_failure=evaluator_failure,
-            )
             async with self._condition:
-                self._terminal_interruption = interruption
+                # Immediate denials can be returned while Replanning is in
+                # progress. They were not part of this snapshot and begin the
+                # fresh cadence window instead of being lost.
+                assessed_count = snapshot.completed_result_count
+                carried_summaries = self._window_receipt_summaries[assessed_count:]
+                self._window_started_at = float(self._clock())
+                self._window_result_count = len(carried_summaries)
+                self._window_receipt_summaries = list(carried_summaries)
                 self._checkpoint_task = None
                 self._condition.notify_all()
-            raise interruption
-        except (CheckpointInterruption, CheckpointInfrastructureInterruption):
+            return directive
+        except (ReplanCompletionInterruption, CheckpointInfrastructureInterruption):
             raise
         except AuditPersistenceError as exc:
             raise CheckpointInfrastructureInterruption(exc) from exc
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001 - never flatten control failures
             raise CheckpointInfrastructureInterruption(exc) from exc
 
@@ -372,14 +494,20 @@ class HighRiskCheckpointCoordinator:
             self._observer(event, payload)
 
     def _snapshot_locked(
-        self, prospective: Mapping[str, Any] | None
+        self,
+        prospective: Mapping[str, Any] | None,
+        *,
+        boundary_kind: str,
+        execution_candidate: Mapping[str, Any] | None,
     ) -> CheckpointSnapshot:
         identities = sorted(self._seen_receipt_ids)
         receipt_set_sha256 = hashlib.sha256(
             "\n".join(identities).encode("utf-8")
         ).hexdigest()
+        checkpoint_id = f"{self.cycle_id}:checkpoint:{self._checkpoint_count}"
         return CheckpointSnapshot(
             cycle_id=self.cycle_id,
+            checkpoint_id=checkpoint_id,
             checkpoint_index=self._checkpoint_count,
             trigger_reasons=self.due_reasons(),
             completed_result_count=self._window_result_count,
@@ -388,19 +516,28 @@ class HighRiskCheckpointCoordinator:
                 self._window_receipt_summaries[-MAX_CHECKPOINT_RECEIPT_SUMMARIES:]
             ),
             receipt_set_sha256=receipt_set_sha256,
+            boundary_kind=boundary_kind,
             prospective_action=(dict(prospective) if prospective is not None else None),
+            execution_candidate=(
+                dict(execution_candidate)
+                if execution_candidate is not None
+                else None
+            ),
         )
 
-    def _record_receipt_locked(self, receipt: ToolEvidenceReceipt) -> None:
+    def _record_receipt_locked(
+        self,
+        receipt: ToolEvidenceReceipt,
+        *,
+        result_summary: str,
+    ) -> None:
         identity = self._receipt_identity(receipt)
-        if identity in self._seen_receipt_ids:
-            return
-        if not receipt.completed:
+        if identity in self._seen_receipt_ids or not receipt.completed:
             return
         self._seen_receipt_ids.add(identity)
         self._receipts[identity] = receipt
         self._window_result_count += 1
-        summary = {
+        summary: dict[str, Any] = {
             "evidence_ref": _bounded_text(receipt.evidence_ref),
             "invocation_id": _bounded_text(receipt.invocation_id),
             "attempt": receipt.attempt,
@@ -410,20 +547,13 @@ class HighRiskCheckpointCoordinator:
             "read_only": receipt.read_only,
             "completed": receipt.completed,
             "output_sha256": _bounded_text(receipt.output_sha256),
-            "summary": _bounded_text(
-                f"{receipt.tool_name} completed with {receipt.status.value}"
-            ),
+            "result_excerpt": _bounded_result_excerpt(result_summary),
         }
         control_disposition = str(
             receipt.details.get("control_disposition") or ""
         ).strip()
-        if control_disposition in {
-            "approval_required",
-            "denied",
-            "deny",
-            "user_input_required",
-        }:
-            summary["control_disposition"] = control_disposition
+        if control_disposition:
+            summary["control_disposition"] = _bounded_text(control_disposition)
         self._window_receipt_summaries.append(summary)
 
     @staticmethod

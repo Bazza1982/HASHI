@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
-from .checkpoint import HighRiskCheckpointCoordinator
+from .checkpoint import CompulsoryReplanCoordinator
 
 from .audit import AuditPersistenceError
 from .commentary import (
@@ -80,11 +81,11 @@ class RuntimeInvocationMixin:
         publish_commentary: bool = True,
         defer_structured_error: bool = False,
         retry_on_failure: bool = True,
-        checkpoint_coordinator: HighRiskCheckpointCoordinator | None = None,
+        checkpoint_coordinator: CompulsoryReplanCoordinator | None = None,
     ) -> tuple[StageResponse, Any]:
         if checkpoint_coordinator is not None and stage is not Stage.EXECUTION:
             raise ValueError(
-                "a high-risk checkpoint coordinator may be attached only to Execution"
+                "a compulsory Replan coordinator may be attached only to Execution"
             )
         selected = profile or self.config.profile_for(stage)
         role = role_override or (
@@ -386,6 +387,11 @@ class RuntimeInvocationMixin:
                         },
                     )
 
+                effective_response = replace(
+                    effective_response,
+                    validation_source=validation_source,
+                )
+
                 complete_ref = self._audit(
                     state,
                     stage=stage.value,
@@ -445,7 +451,7 @@ class RuntimeInvocationMixin:
                 state.progress.record(
                     stage.value,
                     str(effective_response.data or effective_response.text),
-                    meaningful=stage is not Stage.CHECKPOINT,
+                    meaningful=True,
                 )
                 return effective_response, parsed
             except TurnStopped:

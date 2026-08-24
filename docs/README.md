@@ -101,7 +101,8 @@ deployment validation continues.
 - [her_multimedia_multimodal_plan.md](her_multimedia_multimodal_plan.md) — implemented HER media bridge, security limits, compatibility paths, and remaining live rollout matrix
 - [HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) — authoritative HER v2 lifecycle, provider, delivery, and compatibility contract
 - [HER_V2_TESTING_PLAN.md](HER_V2_TESTING_PLAN.md) — consolidated HER v2 behavioral and integration test contract
-- [HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md](HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md) — implemented fixed 10-result/5-minute high-risk safe-boundary checkpoint and regression contract
+- [HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md) — authoritative fixed 10-result/5-minute compulsory Adaptive-or-above Replanning contract, tests, and limit audit
+- [HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md](HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md) — retired incorrect optional-checkpoint design retained only as a migration pointer
 - [HER_V2_AUTO_COMPACTION_DESIGN.md](HER_V2_AUTO_COMPACTION_DESIGN.md) — HER v2 Quick/Light high-effort compaction policy, protected context, atomic commit, and Tier 2/Tier 3 isolation
 
 ### Nagare Flow System (v2.1)

@@ -17,8 +17,8 @@ HER v2 is HASHI-owned orchestration over provider, tool, delivery, and audit
 interfaces. Its release contract includes:
 
 - five task-matched execution modes with stable `low` through `max` wire values;
-- a separate immutable high-risk checkpoint policy with fixed 10-result or
-  300-second safe-boundary reassessment;
+- compulsory Adaptive-or-above Replanning at each 10-result or 300-second safe
+  boundary, independent of immutable Triage risk metadata;
 - adaptive Planning and Replanning, tool-backed independent Review, and
   comprehensive latest-state Verification;
 - hard evidence receipts that reject paper-only, fabricated, stale,
@@ -44,7 +44,7 @@ compatible.
 | --- | --- | --- |
 | Fast path | `low` | Direct Execution without formal Planning |
 | Planned | `medium` | Planning followed by Execution |
-| Adaptive | `high` | Planning, Execution, and evidence-triggered Replanning |
+| Adaptive | `high` | Planning and Execution with compulsory Replanning every 10 completed results or 300 seconds at a safe boundary |
 | Reviewed | `xhigh` | Adaptive path plus one independent read-only Review; a failed Review permits one Primary-Agent remediation and one closure Review |
 | Assured | `max` | Reviewed path plus comprehensive Verification of the latest state, with at most three Verification attempts and remediation between failed checks |
 
@@ -84,18 +84,24 @@ and still calls the selected model. This continuation rule remains in force at
 120,000 estimated tokens or above; only the provider can truthfully reject the
 actual submitted request for its own context limit.
 
-## High-risk Execution Checkpoints
+## Compulsory Execution Replanning
 
-Triage records `STANDARD` or `HIGH_RISK` independently from execution mode. A
-high-risk cycle shares one request-local coordinator across the Primary Agent
-and bounded sub-agents. After 10 completed Execution tool results or 300
-monotonic seconds, the next safe tool boundary performs one tool-free
-assessment before admitting more side effects.
+Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) cycles share one
+request-local cadence coordinator across the Primary Agent and bounded
+sub-agents. After 10 completed Execution tool results or 300 monotonic seconds,
+the next safe boundary unconditionally enters tool-free Replanning before more
+work is admitted or a completion candidate is accepted. Triage's compatibility-
+named `STANDARD`/`HIGH_RISK` field remains immutable risk metadata but is not an
+eligibility gate.
 
-Immediate permission denial, approval requirements, user stop/steer, and audit
-failure never wait for the periodic cadence. The checkpoint does not cancel an
-active tool, cap total work, replace Review or Verification, replay side
-effects, or synthesize user commentary.
+Each Replan estimates completion against the original goal, checks whether the
+active plan remains suitable, activates the next plan version, and sends one
+Persona-rendered progress commentary with deterministic fact-preserving
+fallback. Work resumes below 100%; at 100%, no extra work is added. Immediate
+permission denial, approval requirements, user stop/steer, and audit failure
+retain their authority. The cadence never cancels an active tool, caps total
+work or Replans, consumes Review/Verification allowances, or replays a side
+effect.
 
 
 ## Conversation and Message Delivery

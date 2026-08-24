@@ -37,6 +37,7 @@ REMOVED_HER_V2_LIMIT_FIELDS = frozenset(
         "max_loops",
         "max_new_tokens",
         "max_output_tokens",
+        "max_replans",
         "max_retries",
         "max_rounds",
         "max_steps",
@@ -48,6 +49,8 @@ REMOVED_HER_V2_LIMIT_FIELDS = frozenset(
         "process_timeout",
         "reporting_attempts",
         "request_timeout_s",
+        "replan_limit",
+        "replan_limits",
         "retries",
         "retry_attempts",
         "retry_limit",
@@ -97,7 +100,7 @@ def _reject_removed_limits(
         f"{location} contains removed execution limit field(s): "
         f"{', '.join(sorted(found))}. HER v2 permits the meaningful-progress "
         "liveness detector, one typed fresh-connection provider recovery, and the "
-        "explicitly designed Replan, Review, and Verification limits; legacy generic ceilings "
+        "explicitly designed Review and Verification limits; legacy generic ceilings "
         "must not be applied."
     )
 
@@ -147,7 +150,6 @@ DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
     Stage.TRIAGE: "triage",
     Stage.PLANNING: "premium",
     Stage.EXECUTION: "premium",
-    Stage.CHECKPOINT: "reviewer",
     Stage.REPLANNING: "premium",
     Stage.REVIEW: "reviewer",
     Stage.VERIFICATION: "reviewer",
@@ -169,15 +171,6 @@ class HERv2Config:
     route_model_slots: Mapping[Route, str] = field(default_factory=dict)
     route_targets: Mapping[Route, ProviderTarget] = field(default_factory=dict)
     route_reasoning: Mapping[Route, str] = field(default_factory=dict)
-    replan_limits: Mapping[Effort, int] = field(
-        default_factory=lambda: {
-            Effort.LOW: 0,
-            Effort.MEDIUM: 0,
-            Effort.HIGH: 50,
-            Effort.XHIGH: 100,
-            Effort.MAX: 200,
-        }
-    )
     review_limits: Mapping[Effort, int] = field(
         default_factory=lambda: {
             Effort.LOW: 0,
@@ -470,10 +463,6 @@ class HERv2Config:
                 configured_engines = {profile.engine for profile in profiles.values()}
             routing_mode = "hybrid" if len(configured_engines) > 1 else "single"
 
-        replan_limits = _effort_int_map(
-            raw.get("replan_limits"),
-            {Effort.LOW: 0, Effort.MEDIUM: 0, Effort.HIGH: 50, Effort.XHIGH: 100, Effort.MAX: 200},
-        )
         review_limits = _effort_int_map(
             raw.get("review_limits"),
             {Effort.LOW: 0, Effort.MEDIUM: 0, Effort.HIGH: 0, Effort.XHIGH: 1, Effort.MAX: 1},
@@ -493,7 +482,6 @@ class HERv2Config:
             route_model_slots=route_model_slots,
             route_targets=route_targets,
             route_reasoning=route_reasoning,
-            replan_limits=replan_limits,
             review_limits=review_limits,
             verification_limits=verification_limits,
             user_idle_timeout_s=float(raw.get("user_idle_timeout_s", 1800.0)),
@@ -611,11 +599,6 @@ class HERv2Config:
             self.profiles[role],
             DEFAULT_ROUTES_BY_STAGE[stage],
         )
-        if stage is Stage.CHECKPOINT and stage in self.stage_reasoning:
-            configured = replace(
-                configured,
-                reasoning=self.stage_reasoning[stage],
-            )
         return configured
 
     def execution_profile_for(

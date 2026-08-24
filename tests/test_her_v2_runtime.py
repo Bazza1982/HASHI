@@ -1412,7 +1412,17 @@ async def test_review_imposed_replanning_does_not_reconsult_habits(tmp_path):
                     "summary": "The supported API remediation is closed.",
                 },
             ],
-            Stage.REPLANNING: [{"plan": ["supported approach"]}],
+            Stage.REPLANNING: [
+                {
+                    "plan": ["supported approach"],
+                    "success_criteria": ["The supported API result is verified"],
+                    "completion_percent": 50,
+                    "completion_basis": "Review proved the old API route is incomplete.",
+                    "plan_changed": True,
+                    "change_reason": "The old API is unavailable.",
+                    "next_step": "Execute and verify the supported API route.",
+                }
+            ],
             Stage.FINALISATION: [{"report": "Completed with the supported API."}],
         }
     )
@@ -1485,41 +1495,6 @@ async def test_review_never_receives_habits_or_retrieves_them_again(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_review_failure_cannot_change_valid_execution_disposition(tmp_path):
-    scripts = _initial("COMPLEX_TASK")
-    scripts.update(
-        {
-            Stage.PLANNING: [{"plan": ["attempt the constrained approach"]}],
-            Stage.EXECUTION: [
-                {
-                    "disposition": "COMPLETED",
-                    "summary": "The constrained candidate was produced.",
-                }
-            ],
-            Stage.REVIEW: [
-                {
-                    "outcome": "FAIL",
-                    "summary": "A required route is unavailable.",
-                    "findings": ["The required verification route is unavailable."],
-                }
-            ],
-            Stage.FINALISATION: [
-                {"report": "Work completed with an unresolved verification limitation."}
-            ],
-        }
-    )
-    config = _config(replan_limits={"xhigh": 0})
-
-    result = await _runtime(
-        tmp_path, ScriptedProvider(scripts), config=config
-    ).run_turn("Complete the constrained task", "request-no-replan", effort="xhigh")
-
-    assert result.terminal_state is TerminalState.COMPLETED
-    assert result.replan_count == 0
-    assert "verification route" in result.limitations[0]
-
-
-@pytest.mark.asyncio
 async def test_xhigh_review_fail_performs_remediation_and_one_closure_review(tmp_path):
     scripts = _initial("COMPLEX_TASK")
     scripts.update(
@@ -1537,7 +1512,17 @@ async def test_xhigh_review_fail_performs_remediation_and_one_closure_review(tmp
                 },
                 {"outcome": "PASS", "summary": "The missing check is now present."},
             ],
-            Stage.REPLANNING: [{"plan": ["add check"]}],
+            Stage.REPLANNING: [
+                {
+                    "plan": ["add check"],
+                    "success_criteria": ["The missing check is present and passes"],
+                    "completion_percent": 60,
+                    "completion_basis": "Review found one required check still missing.",
+                    "plan_changed": True,
+                    "change_reason": "Independent Review found a missing check.",
+                    "next_step": "Add the check and rerun the candidate.",
+                }
+            ],
             Stage.FINALISATION: [{"report": "Remediated and reported."}],
         }
     )
@@ -1559,6 +1544,65 @@ async def test_xhigh_review_fail_performs_remediation_and_one_closure_review(tmp
         "independent",
         "closure",
     ]
+
+
+@pytest.mark.asyncio
+async def test_review_replan_at_100_stops_substantive_remediation_work(tmp_path):
+    scripts = _initial("COMPLEX_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["build"],
+                    "success_criteria": ["The requested build is complete"],
+                }
+            ],
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Candidate complete."}
+            ],
+            Stage.REVIEW: [
+                {
+                    "outcome": "FAIL",
+                    "summary": "Review requested a completion calibration.",
+                    "findings": ["Reassess completion before adding work."],
+                },
+                {
+                    "outcome": "PASS",
+                    "summary": "Closure confirms no further work is required.",
+                },
+            ],
+            Stage.REPLANNING: [
+                {
+                    "plan": ["build"],
+                    "success_criteria": ["The requested build is complete"],
+                    "completion_percent": 100,
+                    "completion_basis": (
+                        "Current evidence already satisfies the original goal."
+                    ),
+                    "plan_changed": False,
+                    "change_reason": None,
+                    "next_step": "Proceed to closure Review without more work.",
+                }
+            ],
+            Stage.FINALISATION: [{"report": "Completed without over-execution."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Build and stop when complete", "request-replan-100", effort=Effort.XHIGH
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.replan_count == 1
+    assert result.review_count == 2
+    assert (
+        sum(
+            request.stage is Stage.EXECUTION
+            for _profile, request in provider.requests
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -1589,7 +1633,22 @@ async def test_max_assurance_remediation_and_verification_are_bounded_at_three(t
                 for index in range(1, 4)
             ],
             Stage.REPLANNING: [
-                {"plan": [f"remediation {index}"]} for index in range(1, 3)
+                {
+                    "plan": [f"remediation {index}"],
+                    "success_criteria": [
+                        f"Verification failure {index} is remediated"
+                    ],
+                    "completion_percent": 60 + index * 10,
+                    "completion_basis": (
+                        f"Verification attempt {index} found a required failure."
+                    ),
+                    "plan_changed": True,
+                    "change_reason": (
+                        f"Verification attempt {index} failed a required check."
+                    ),
+                    "next_step": f"Apply remediation {index} and verify again.",
+                }
+                for index in range(1, 3)
             ],
             Stage.FINALISATION: [{"report": "Assurance limit reached honestly."}],
         }
@@ -1745,7 +1804,17 @@ async def test_max_failed_verification_remediates_then_checks_latest_execution(t
                     ],
                 },
             ],
-            Stage.REPLANNING: [{"plan": ["repair failing core test"]}],
+            Stage.REPLANNING: [
+                {
+                    "plan": ["repair failing core test"],
+                    "success_criteria": ["The core test passes on the latest state"],
+                    "completion_percent": 70,
+                    "completion_basis": "Verification found one failing core test.",
+                    "plan_changed": True,
+                    "change_reason": "The workspace recipe exited 1.",
+                    "next_step": "Repair the core test and verify the latest state.",
+                }
+            ],
             Stage.FINALISATION: [{"report": "Remediated and verified."}],
         }
     )
@@ -2138,12 +2207,22 @@ async def test_only_successful_stage_results_publish_neutral_commentary(
                     "commentary": "The replacement route completed successfully.",
                 },
             ],
-            Stage.REPLANNING: [
-                {
-                    "plan": ["Use the supported replacement route", "Verify the result"],
-                    "success_criteria": ["Replacement receipt is present"],
-                    "changed_because": "The original API was permanently removed.",
-                    "commentary": "A supported replacement route is now planned.",
+                Stage.REPLANNING: [
+                    {
+                        "plan": ["Use the supported replacement route", "Verify the result"],
+                        "success_criteria": ["Replacement receipt is present"],
+                        "completion_percent": 50,
+                        "completion_basis": (
+                            "The original candidate exists but its API is unsupported."
+                        ),
+                        "plan_changed": True,
+                        "change_reason": "The original API was permanently removed.",
+                        "next_step": "Use the supported replacement route and verify it.",
+                        "commentary": (
+                            "Progress is 50%. The plan changed because the original API "
+                            "was permanently removed. Next: Use the supported replacement "
+                            "route and verify it."
+                        ),
                 }
             ],
             Stage.REVIEW: [
@@ -2180,7 +2259,12 @@ async def test_only_successful_stage_results_publish_neutral_commentary(
         (Stage.PLANNING, "The plan is ready for execution."),
         (Stage.EXECUTION, "The original route produced a candidate."),
         (Stage.REVIEW, "Independent review required a replacement route."),
-        (Stage.REPLANNING, "A supported replacement route is now planned."),
+        (
+            Stage.REPLANNING,
+            "Progress is 50%. The plan changed because the original API was "
+            "permanently removed. Next: Use the supported replacement route and "
+            "verify it.",
+        ),
         (
             Stage.EXECUTION,
             "The replacement route completed successfully.",
@@ -3118,7 +3202,17 @@ async def test_simple_classification_can_escalate_execution_capability_without_m
                 },
                 {"outcome": "PASS", "summary": "The capable route is verified."},
             ],
-            Stage.REPLANNING: [{"plan": ["use the capable verification route"]}],
+            Stage.REPLANNING: [
+                {
+                    "plan": ["use the capable verification route"],
+                    "success_criteria": ["The capable route verifies the result"],
+                    "completion_percent": 60,
+                    "completion_basis": "Review found the lightweight route insufficient.",
+                    "plan_changed": True,
+                    "change_reason": "Premium capability is required for verification.",
+                    "next_step": "Use the capable route and verify the result.",
+                }
+            ],
             Stage.FINALISATION: [{"report": "Verified and completed."}],
         }
     )
@@ -3142,7 +3236,15 @@ async def test_simple_classification_can_escalate_execution_capability_without_m
         if request.stage is Stage.EXECUTION
     ][1]
     assert second_execution.classification is TriageClassification.SIMPLE_TASK
-    assert set(second_execution.context) == {"active_plan", "sub_agent_results"}
+    assert set(second_execution.context) == {
+        "active_plan",
+        "continuation_rules",
+        "replan_continuation",
+        "sub_agent_results",
+    }
+    assert second_execution.context["continuation_rules"][
+        "never_repeat_completed_side_effects_because_of_replanning"
+    ] is True
 
 
 @pytest.mark.asyncio

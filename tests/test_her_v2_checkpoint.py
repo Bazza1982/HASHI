@@ -2,43 +2,40 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
 
 import pytest
 
+from orchestrator.her_v2.audit import AuditPersistenceError, DurableAuditLog
 from orchestrator.her_v2.checkpoint import (
     CHECKPOINT_ELAPSED_THRESHOLD_S,
     CHECKPOINT_RESULT_THRESHOLD,
-    CheckpointInterruption,
     CheckpointInfrastructureInterruption,
-    HighRiskCheckpointCoordinator,
+    CompulsoryReplanCoordinator,
+    ReplanCompletionInterruption,
+    ReplanDirective,
 )
-from orchestrator.her_v2.audit import DurableAuditLog
-from orchestrator.her_v2.audit import AuditPersistenceError
-from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.commentary import RecordingCommentaryPort
-from orchestrator.her_v2.interfaces import (
-    ProviderFailureCode,
-    RecordingDelivery,
-    StageInvocationError,
-    StructuredOutputError,
-)
-from orchestrator.her_v2.ledger import (
-    ExecutionLedger,
-    LedgerInvariantError,
-    LedgerStore,
-)
+from orchestrator.her_v2.config import HERv2Config, HERv2ConfigurationError
+from orchestrator.her_v2.interfaces import RecordingDelivery, StructuredOutputError
+from orchestrator.her_v2.ledger import ExecutionLedger, LedgerInvariantError, LedgerStore
 from orchestrator.her_v2.models import (
-    CheckpointDecision,
-    CheckpointFinding,
     CheckpointPolicy,
+    ReplanningOutcome,
     Stage,
+    StageRequest,
     StageResponse,
     ToolEvidenceReceipt,
     ToolReceiptStatus,
     TriageClassification,
 )
 from orchestrator.her_v2.runtime import HERv2Runtime
-from orchestrator.her_v2.structured import parse_checkpoint, parse_triage
+from orchestrator.her_v2.structured import parse_replanning, parse_triage
+
+
+def test_optional_checkpoint_assessor_stage_is_removed():
+    with pytest.raises(ValueError, match="checkpoint"):
+        Stage("checkpoint")
 
 
 class ControlledClock:
@@ -54,352 +51,273 @@ def _receipt(
     *,
     status: ToolReceiptStatus = ToolReceiptStatus.SUCCESS,
     completed: bool = True,
+    read_only: bool = False,
     details: dict | None = None,
+    invocation_id: str = "turn:execution:1",
 ) -> ToolEvidenceReceipt:
     return ToolEvidenceReceipt(
         evidence_ref=f"receipt:{index}",
         stage=Stage.EXECUTION,
-        invocation_id="turn:execution:1",
+        invocation_id=invocation_id,
         attempt=1,
         tool_call_id=f"call-{index}",
         tool_name="test_tool",
         status=status,
-        read_only=False,
+        read_only=read_only,
         completed=completed,
         output_sha256=f"sha256-{index}",
         details=details or {},
     )
 
 
-async def _continue(_snapshot):
-    return CheckpointFinding(CheckpointDecision.CONTINUE, "Safe to continue.")
+def _replan_outcome(
+    *,
+    percent: int = 50,
+    changed: bool = False,
+    commentary: str = "",
+) -> ReplanningOutcome:
+    return ReplanningOutcome(
+        plan={
+            "plan": ["Inspect", "Implement", "Verify"],
+            "success_criteria": ["The authorised result is verified"],
+        },
+        completion_percent=percent,
+        completion_basis="Current receipts show bounded progress against the goal.",
+        plan_changed=changed,
+        change_reason=("New evidence invalidated the old route." if changed else ""),
+        next_step=(
+            "Enter Review or Finalisation."
+            if percent == 100
+            else "Continue the remaining authorised work."
+        ),
+        commentary=commentary,
+    )
 
 
-def test_work_triage_requires_explicit_checkpoint_policy_and_high_risk_reason():
+def _directive(snapshot, *, percent: int = 50) -> ReplanDirective:
+    return ReplanDirective(
+        checkpoint_id=snapshot.checkpoint_id,
+        outcome=_replan_outcome(percent=percent),
+        active_plan_id=f"{snapshot.cycle_id}:plan:next",
+    )
+
+
+async def _continue_replan(snapshot):
+    return _directive(snapshot)
+
+
+def _valid_replan_data(**overrides):
+    data = {
+        "plan": ["Inspect", "Implement", "Verify"],
+        "success_criteria": ["The authorised result is verified"],
+        "completion_percent": 60,
+        "completion_basis": "Six of ten acceptance facts are established.",
+        "plan_changed": False,
+        "change_reason": None,
+        "next_step": "Continue the remaining authorised work.",
+        "commentary": (
+            "Progress is 60%. The plan is unchanged. "
+            "Next: Continue the remaining authorised work."
+        ),
+    }
+    data.update(overrides)
+    return data
+
+
+def test_work_triage_risk_metadata_remains_strict_but_is_not_replan_eligibility():
     with pytest.raises(StructuredOutputError, match="checkpoint_policy"):
         parse_triage(StageResponse(data={"classification": "COMPLEX_TASK"}))
-
-    with pytest.raises(StructuredOutputError, match="checkpoint_reason"):
-        parse_triage(
-            StageResponse(
-                data={
-                    "classification": "SIMPLE_TASK",
-                    "checkpoint_policy": "HIGH_RISK",
-                }
-            )
-        )
 
     decision = parse_triage(
         StageResponse(
             data={
-                "classification": "HIGH_VOLUME_TASK",
+                "classification": "COMPLEX_TASK",
                 "checkpoint_policy": "HIGH_RISK",
-                "checkpoint_reason": "Production data may be irreversibly changed.",
+                "checkpoint_reason": "Production data may be changed.",
             }
         )
     )
     assert decision.checkpoint_policy is CheckpointPolicy.HIGH_RISK
-    assert decision.checkpoint_reason.startswith("Production data")
 
-
-def test_non_work_triage_cannot_install_execution_checkpoint_policy():
-    with pytest.raises(StructuredOutputError, match="non-work"):
-        parse_triage(
-            StageResponse(
-                data={
-                    "classification": "DIRECT_RESPONSE",
-                    "checkpoint_policy": "HIGH_RISK",
-                    "checkpoint_reason": "not executable",
-                }
-            )
-        )
-
-    decision = parse_triage(
-        StageResponse(
-            data={
-                "classification": "DIRECT_RESPONSE",
-                "checkpoint_policy": None,
-                "checkpoint_reason": None,
-            }
-        )
-    )
-    assert decision.checkpoint_policy is None
-
-
-def test_checkpoint_response_contract_is_strict():
-    finding = parse_checkpoint(
-        StageResponse(
-            data={
-                "decision": "USER_INPUT_REQUIRED",
-                "summary": "Authority is missing.",
-                "question": "May the production record be deleted?",
-            }
-        )
-    )
-    assert finding.decision is CheckpointDecision.USER_INPUT_REQUIRED
-
-    with pytest.raises(StructuredOutputError, match="concrete question"):
-        parse_checkpoint(
-            StageResponse(
-                data={
-                    "decision": "USER_INPUT_REQUIRED",
-                    "summary": "Authority is missing.",
-                }
-            )
-        )
-
-    with pytest.raises(StructuredOutputError, match="Only Checkpoint"):
-        parse_checkpoint(
-            StageResponse(
-                data={
-                    "decision": "CONTINUE",
-                    "summary": "Safe.",
-                    "question": "Should not be present?",
-                }
-            )
-        )
-
-
-def test_ledger_records_checkpoint_policy_atomically_and_immutably():
     ledger = ExecutionLedger("turn", "request", "goal")
     ledger.record_triage(
         TriageClassification.COMPLEX_TASK,
         checkpoint_policy=CheckpointPolicy.HIGH_RISK,
-        checkpoint_reason="Production access controls may change.",
-    )
-    assert ledger.to_dict()["checkpoint_policy"] == "HIGH_RISK"
-    assert ledger.to_dict()["checkpoint_reason"] == (
-        "Production access controls may change."
-    )
-    ledger.assert_checkpoint_policy(
-        CheckpointPolicy.HIGH_RISK,
-        "Production access controls may change.",
+        checkpoint_reason="Production data may be changed.",
     )
     with pytest.raises(LedgerInvariantError, match="immutable checkpoint"):
         ledger.assert_checkpoint_policy(CheckpointPolicy.STANDARD, "")
 
-    with pytest.raises(LedgerInvariantError, match="unsupported HER v2 ledger format"):
-        ExecutionLedger.from_dict(
-            {
-                "format": "her-v2-ledger-unknown",
-                "turn_id": "turn",
-                "request_ref": "request",
-                "goal_ref": "goal",
-                "status": "EXECUTING",
-                "classification": "COMPLEX_TASK",
-            }
-        )
+
+def test_replanning_three_question_contract_is_strict_and_commentary_can_fallback():
+    result = parse_replanning(StageResponse(data=_valid_replan_data()))
+    assert result.completion_percent == 60
+    assert result.plan_changed is False
+
+    fallback = parse_replanning(
+        StageResponse(data=_valid_replan_data(commentary=None))
+    )
+    assert fallback.commentary == ""
+
+    invalid_cases = [
+        ({"completion_percent": True}, "integer"),
+        ({"completion_percent": -1}, "0 through 100"),
+        ({"completion_percent": 101}, "0 through 100"),
+        ({"completion_basis": ""}, "completion_basis"),
+        ({"plan_changed": "false"}, "boolean"),
+        ({"plan_changed": True, "change_reason": None}, "change_reason"),
+        ({"plan_changed": False, "change_reason": "invented"}, "must not"),
+        ({"next_step": ""}, "next_step"),
+        ({"success_criteria": []}, "success_criteria"),
+        ({"goal": "replacement goal"}, "cannot replace"),
+    ]
+    for override, message in invalid_cases:
+        with pytest.raises(StructuredOutputError, match=message):
+            parse_replanning(
+                StageResponse(data=_valid_replan_data(**override))
+            )
+
+
+def test_legacy_replan_count_limits_are_rejected_configuration():
+    raw = _runtime_mapping()
+    raw["replan_limits"] = {"high": 1}
+    with pytest.raises(HERv2ConfigurationError, match="replan_limits"):
+        HERv2Config.from_mapping(raw)
 
 
 @pytest.mark.asyncio
 async def test_not_due_at_nine_results_and_299_999_seconds():
     clock = ControlledClock()
-    snapshots = []
+    calls = 0
 
     async def evaluator(snapshot):
-        snapshots.append(snapshot)
-        return await _continue(snapshot)
+        nonlocal calls
+        calls += 1
+        return _directive(snapshot)
 
-    coordinator = HighRiskCheckpointCoordinator(
-        cycle_id="cycle-1", evaluator=evaluator, clock=clock
-    )
-    for index in range(1, CHECKPOINT_RESULT_THRESHOLD):
-        admission = await coordinator.before_tool(
-            tool_name="test_tool", arguments={"index": index}, tool_call_id=str(index)
-        )
-        await coordinator.after_tool(admission, _receipt(index))
-
-    clock.value = CHECKPOINT_ELAPSED_THRESHOLD_S - 0.001
-    admission = await coordinator.before_tool(
-        tool_name="test_tool", arguments={}, tool_call_id="pending"
-    )
-    assert snapshots == []
-    await coordinator.abandon_tool(admission)
-    await coordinator.close()
-
-
-@pytest.mark.asyncio
-async def test_tenth_result_runs_one_checkpoint_before_result_boundary_releases():
-    clock = ControlledClock()
-    snapshots = []
-    release = asyncio.Event()
-    evaluator_started = asyncio.Event()
-
-    async def evaluator(snapshot):
-        snapshots.append(snapshot)
-        evaluator_started.set()
-        await release.wait()
-        return CheckpointFinding(CheckpointDecision.CONTINUE, "Continue.")
-
-    coordinator = HighRiskCheckpointCoordinator(
-        cycle_id="cycle-count", evaluator=evaluator, clock=clock
+    coordinator = CompulsoryReplanCoordinator(
+        cycle_id="cycle-not-due", evaluator=evaluator, clock=clock
     )
     for index in range(1, CHECKPOINT_RESULT_THRESHOLD):
         admission = await coordinator.before_tool(
             tool_name="test_tool", arguments={}, tool_call_id=str(index)
         )
-        await coordinator.after_tool(admission, _receipt(index))
+        assert admission.admitted
+        assert await coordinator.after_tool(admission, _receipt(index)) is None
 
-    tenth = await coordinator.before_tool(
-        tool_name="test_tool", arguments={}, tool_call_id="10"
-    )
-    boundary = asyncio.create_task(coordinator.after_tool(tenth, _receipt(10)))
-    await evaluator_started.wait()
-    assert not boundary.done()
-    assert snapshots[0].trigger_reasons == ("completed_result_count",)
-    assert snapshots[0].completed_result_count == 10
-    release.set()
-    await boundary
-    assert coordinator.checkpoint_count == 1
-    assert coordinator.completed_result_count == 0
-    await coordinator.close()
-
-
-@pytest.mark.asyncio
-async def test_exact_300_seconds_runs_checkpoint_before_new_tool_admission():
-    clock = ControlledClock()
-    snapshots = []
-
-    async def evaluator(snapshot):
-        snapshots.append(snapshot)
-        return await _continue(snapshot)
-
-    coordinator = HighRiskCheckpointCoordinator(
-        cycle_id="cycle-time", evaluator=evaluator, clock=clock
-    )
-    clock.value = CHECKPOINT_ELAPSED_THRESHOLD_S
+    clock.value = CHECKPOINT_ELAPSED_THRESHOLD_S - 0.001
     admission = await coordinator.before_tool(
-        tool_name="file_write", arguments={"path": "secret"}, tool_call_id="next"
+        tool_name="test_tool", arguments={}, tool_call_id="pending"
     )
-    assert len(snapshots) == 1
-    assert snapshots[0].trigger_reasons == ("elapsed_time",)
-    assert snapshots[0].prospective_action == {
-        "tool_name": "file_write",
-        "tool_call_id": "next",
-        "argument_keys": ["path"],
-        "arguments_sha256": snapshots[0].prospective_action["arguments_sha256"],
-    }
-    assert "secret" not in repr(snapshots[0].prospective_action)
+    assert admission.admitted
+    assert calls == 0
     await coordinator.abandon_tool(admission)
     await coordinator.close()
 
 
 @pytest.mark.asyncio
-async def test_count_and_time_due_coalesce_and_continue_does_not_catch_up():
+async def test_tenth_result_forces_one_replan_and_resets_the_window():
+    snapshots = []
+
+    async def evaluator(snapshot):
+        snapshots.append(snapshot)
+        return _directive(snapshot)
+
+    coordinator = CompulsoryReplanCoordinator(
+        cycle_id="cycle-count", evaluator=evaluator, clock=ControlledClock()
+    )
+    directive = None
+    for index in range(1, 11):
+        admission = await coordinator.before_tool(
+            tool_name="test_tool", arguments={}, tool_call_id=str(index)
+        )
+        directive = await coordinator.after_tool(
+            admission,
+            _receipt(index),
+            result_summary=f"result-{index}",
+        )
+
+    assert isinstance(directive, ReplanDirective)
+    assert len(snapshots) == 1
+    assert snapshots[0].trigger_reasons == ("completed_result_count",)
+    assert snapshots[0].completed_result_count == 10
+    assert snapshots[0].boundary_kind == "completed_tool_result"
+    assert coordinator.completed_result_count == 0
+
+    eleventh = await coordinator.before_tool(
+        tool_name="test_tool", arguments={}, tool_call_id="11"
+    )
+    assert eleventh.admitted
+    await coordinator.abandon_tool(eleventh)
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_300_seconds_forces_replan_before_tool_admission():
     clock = ControlledClock()
     snapshots = []
 
     async def evaluator(snapshot):
         snapshots.append(snapshot)
-        return await _continue(snapshot)
+        return _directive(snapshot)
 
-    coordinator = HighRiskCheckpointCoordinator(
+    coordinator = CompulsoryReplanCoordinator(
+        cycle_id="cycle-time", evaluator=evaluator, clock=clock
+    )
+    clock.value = CHECKPOINT_ELAPSED_THRESHOLD_S
+    admission = await coordinator.before_tool(
+        tool_name="file_write",
+        arguments={"path": "secret"},
+        tool_call_id="next",
+    )
+
+    assert admission.admitted is False
+    assert admission.directive is not None
+    assert snapshots[0].trigger_reasons == ("elapsed_time",)
+    assert snapshots[0].prospective_action["tool_name"] == "file_write"
+    assert "secret" not in repr(snapshots[0].prospective_action)
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_count_and_time_due_coalesce_without_catch_up():
+    clock = ControlledClock()
+    snapshots = []
+
+    async def evaluator(snapshot):
+        snapshots.append(snapshot)
+        return _directive(snapshot)
+
+    coordinator = CompulsoryReplanCoordinator(
         cycle_id="cycle-coalesce", evaluator=evaluator, clock=clock
     )
     for index in range(1, 11):
         await coordinator.record_immediate_result(_receipt(index))
     clock.value = 900.0
-    admission = await coordinator.before_tool(
-        tool_name="test_tool", arguments={}, tool_call_id="next"
+    first = await coordinator.before_tool(
+        tool_name="test_tool", arguments={}, tool_call_id="first"
     )
+    assert first.admitted is False
     assert snapshots[0].trigger_reasons == (
         "completed_result_count",
         "elapsed_time",
     )
-    await coordinator.abandon_tool(admission)
 
     second = await coordinator.before_tool(
-        tool_name="test_tool", arguments={}, tool_call_id="same-time"
+        tool_name="test_tool", arguments={}, tool_call_id="second"
     )
+    assert second.admitted
     assert len(snapshots) == 1
     await coordinator.abandon_tool(second)
     await coordinator.close()
 
 
 @pytest.mark.asyncio
-async def test_immediate_denial_during_assessment_carries_into_fresh_window():
-    snapshots = []
-    evaluator_started = asyncio.Event()
-    release_first = asyncio.Event()
-
-    async def evaluator(snapshot):
-        snapshots.append(snapshot)
-        if len(snapshots) == 1:
-            evaluator_started.set()
-            await release_first.wait()
-        return await _continue(snapshot)
-
-    coordinator = HighRiskCheckpointCoordinator(
-        cycle_id="cycle-concurrent-denial",
-        evaluator=evaluator,
-        clock=ControlledClock(),
-    )
-    for index in range(1, 10):
-        await coordinator.record_immediate_result(_receipt(index))
-
-    tenth = await coordinator.before_tool(
-        tool_name="test_tool", arguments={}, tool_call_id="10"
-    )
-    boundary = asyncio.create_task(coordinator.after_tool(tenth, _receipt(10)))
-    await evaluator_started.wait()
-    await coordinator.record_immediate_result(
-        _receipt(
-            11,
-            status=ToolReceiptStatus.FAILED,
-            details={"control_disposition": "approval_required"},
-        )
-    )
-    release_first.set()
-    await boundary
-
-    assert coordinator.completed_result_count == 1
-    for index in range(12, 21):
-        admission = await coordinator.before_tool(
-            tool_name="test_tool", arguments={}, tool_call_id=str(index)
-        )
-        await coordinator.after_tool(admission, _receipt(index))
-
-    assert len(snapshots) == 2
-    assert snapshots[1].completed_result_count == 10
-    assert snapshots[1].receipt_summaries[0]["evidence_ref"] == "receipt:11"
-    assert (
-        snapshots[1].receipt_summaries[0]["control_disposition"] == "approval_required"
-    )
-    await coordinator.close()
-
-
-@pytest.mark.asyncio
-async def test_terminal_checkpoint_still_retains_concurrent_immediate_denial_receipt():
-    async def evaluator(_snapshot):
-        return CheckpointFinding(CheckpointDecision.HALT, "Unsafe to continue.")
-
-    clock = ControlledClock()
-    coordinator = HighRiskCheckpointCoordinator(
-        cycle_id="cycle-terminal-denial",
-        evaluator=evaluator,
-        clock=clock,
-    )
-    clock.value = CHECKPOINT_ELAPSED_THRESHOLD_S
-    with pytest.raises(CheckpointInterruption):
-        await coordinator.before_tool(
-            tool_name="file_write", arguments={}, tool_call_id="blocked"
-        )
-
-    late_denial = _receipt(
-        1,
-        status=ToolReceiptStatus.FAILED,
-        details={"control_disposition": "denied"},
-    )
-    with pytest.raises(CheckpointInterruption):
-        await coordinator.record_immediate_result(late_denial)
-    assert late_denial in coordinator.receipts
-    await coordinator.close()
-
-
-@pytest.mark.asyncio
 async def test_completed_errors_and_denials_count_but_incomplete_and_duplicates_do_not():
-    coordinator = HighRiskCheckpointCoordinator(
-        cycle_id="cycle-status", evaluator=_continue, clock=ControlledClock()
+    coordinator = CompulsoryReplanCoordinator(
+        cycle_id="cycle-status",
+        evaluator=_continue_replan,
+        clock=ControlledClock(),
     )
     await coordinator.record_immediate_result(
         _receipt(1, status=ToolReceiptStatus.FAILED)
@@ -415,92 +333,76 @@ async def test_completed_errors_and_denials_count_but_incomplete_and_duplicates_
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_snapshot_metadata_is_bounded_and_excludes_raw_details():
+async def test_replan_gets_bounded_latest_evidence_but_audit_payload_excludes_raw_output():
     snapshots = []
+    audit_payloads = []
 
     async def evaluator(snapshot):
         snapshots.append(snapshot)
-        return await _continue(snapshot)
+        return _directive(snapshot)
 
-    coordinator = HighRiskCheckpointCoordinator(
-        cycle_id="cycle-bounded",
+    coordinator = CompulsoryReplanCoordinator(
+        cycle_id="cycle-evidence",
         evaluator=evaluator,
+        observer=lambda _event, payload: audit_payloads.append(dict(payload)),
         clock=ControlledClock(),
     )
     for index in range(1, 11):
         await coordinator.record_immediate_result(
-            _receipt(
-                index,
-                details={"raw_output": "TOP_SECRET_VALUE"} if index == 1 else {},
-            )
+            _receipt(index),
+            result_summary=("TOP_SECRET_VALUE" if index == 10 else f"result-{index}"),
         )
     admission = await coordinator.before_tool(
-        tool_name="x" * 1_000,
-        arguments={"k" * 1_000: "TOP_SECRET_ARGUMENT"},
-        tool_call_id="c" * 1_000,
+        tool_name="next", arguments={}, tool_call_id="next"
     )
-
-    snapshot = snapshots[0]
-    assert "TOP_SECRET" not in repr(snapshot.as_payload())
-    assert len(snapshot.prospective_action["tool_name"]) == 256
-    assert len(snapshot.prospective_action["tool_call_id"]) == 256
-    assert len(snapshot.prospective_action["argument_keys"][0]) == 256
-    assert all(
-        len(str(value)) <= 256
-        for summary in snapshot.receipt_summaries
-        for value in summary.values()
-        if isinstance(value, str)
-    )
-    await coordinator.abandon_tool(admission)
+    assert admission.admitted is False
+    assert "TOP_SECRET_VALUE" in repr(snapshots[0].replan_payload())
+    assert "TOP_SECRET_VALUE" not in repr(audit_payloads)
     await coordinator.close()
 
 
 @pytest.mark.asyncio
-async def test_active_tool_crossing_five_minutes_is_not_cancelled_before_safe_boundary():
+async def test_active_tool_crossing_five_minutes_finishes_before_replan():
     clock = ControlledClock()
-    snapshots = []
+    evaluator_started = asyncio.Event()
 
     async def evaluator(snapshot):
-        snapshots.append(snapshot)
-        return await _continue(snapshot)
+        evaluator_started.set()
+        assert snapshot.completed_result_count == 1
+        return _directive(snapshot)
 
-    coordinator = HighRiskCheckpointCoordinator(
+    coordinator = CompulsoryReplanCoordinator(
         cycle_id="cycle-active", evaluator=evaluator, clock=clock
     )
     admission = await coordinator.before_tool(
         tool_name="long_tool", arguments={}, tool_call_id="long"
     )
+    assert admission.admitted
     clock.value = 301.0
-    await coordinator.after_tool(admission, _receipt(1))
-    assert len(snapshots) == 1
-    assert snapshots[0].trigger_reasons == ("elapsed_time",)
-    assert snapshots[0].completed_result_count == 1
+    directive = await coordinator.after_tool(admission, _receipt(1))
+    assert evaluator_started.is_set()
+    assert directive is not None
     await coordinator.close()
 
 
 @pytest.mark.asyncio
-async def test_parallel_results_elect_exactly_one_checkpoint_leader():
-    clock = ControlledClock()
+async def test_parallel_results_elect_one_replan_and_all_waiters_receive_directive():
     calls = 0
     release = asyncio.Event()
-    evaluator_started = asyncio.Event()
+    started = asyncio.Event()
 
     async def evaluator(snapshot):
         nonlocal calls
         calls += 1
-        evaluator_started.set()
+        started.set()
         await release.wait()
-        return await _continue(snapshot)
+        return _directive(snapshot)
 
-    coordinator = HighRiskCheckpointCoordinator(
-        cycle_id="cycle-parallel", evaluator=evaluator, clock=clock
+    coordinator = CompulsoryReplanCoordinator(
+        cycle_id="cycle-parallel", evaluator=evaluator, clock=ControlledClock()
     )
     for index in range(1, 9):
-        admission = await coordinator.before_tool(
-            tool_name="test_tool", arguments={}, tool_call_id=str(index)
-        )
-        await coordinator.after_tool(admission, _receipt(index))
-
+        await coordinator.record_immediate_result(_receipt(index))
     ninth = await coordinator.before_tool(
         tool_name="test_tool", arguments={}, tool_call_id="9"
     )
@@ -509,50 +411,47 @@ async def test_parallel_results_elect_exactly_one_checkpoint_leader():
     )
     first = asyncio.create_task(coordinator.after_tool(ninth, _receipt(9)))
     second = asyncio.create_task(coordinator.after_tool(tenth, _receipt(10)))
-    await evaluator_started.wait()
+    await started.wait()
     assert calls == 1
-    assert not first.done() or not second.done()
     release.set()
-    await asyncio.gather(first, second)
+    directives = await asyncio.gather(first, second)
+    assert sum(item is not None for item in directives) >= 1
     assert calls == 1
     await coordinator.close()
 
 
 @pytest.mark.asyncio
-async def test_user_input_checkpoint_uses_typed_non_exception_control_path():
-    async def evaluator(_snapshot):
-        return CheckpointFinding(
-            CheckpointDecision.USER_INPUT_REQUIRED,
-            "Production authority is missing.",
-            "May the production record be deleted?",
-        )
+async def test_completion_percent_100_uses_typed_execution_stop():
+    async def evaluator(snapshot):
+        return _directive(snapshot, percent=100)
 
     clock = ControlledClock()
-    coordinator = HighRiskCheckpointCoordinator(
-        cycle_id="cycle-input", evaluator=evaluator, clock=clock
+    coordinator = CompulsoryReplanCoordinator(
+        cycle_id="cycle-complete", evaluator=evaluator, clock=clock
     )
     clock.value = 300.0
-    with pytest.raises(CheckpointInterruption) as raised:
+    with pytest.raises(ReplanCompletionInterruption) as raised:
         await coordinator.before_tool(
-            tool_name="delete", arguments={}, tool_call_id="pending"
+            tool_name="unneeded", arguments={}, tool_call_id="blocked"
         )
-    assert raised.value.finding.decision is CheckpointDecision.USER_INPUT_REQUIRED
-    assert raised.value.receipts == ()
+    assert raised.value.directive.outcome.completion_percent == 100
     await coordinator.close()
 
 
 @pytest.mark.asyncio
-async def test_close_cancels_checkpoint_evaluator_and_all_waiters_without_release():
-    clock = ControlledClock()
-    evaluator_started = asyncio.Event()
+async def test_close_cancels_replanner_and_waiters_without_late_release():
+    started = asyncio.Event()
 
     async def evaluator(_snapshot):
-        evaluator_started.set()
+        started.set()
         await asyncio.Event().wait()
-        raise AssertionError("cancelled evaluator must not release admission")
+        raise AssertionError("closed Replanner must not complete")
 
-    coordinator = HighRiskCheckpointCoordinator(
-        cycle_id="cycle-cancel", evaluator=evaluator, clock=clock
+    clock = ControlledClock()
+    coordinator = CompulsoryReplanCoordinator(
+        cycle_id="cycle-close",
+        evaluator=evaluator,
+        clock=clock,
     )
     clock.value = 300.0
     waiter = asyncio.create_task(
@@ -560,23 +459,21 @@ async def test_close_cancels_checkpoint_evaluator_and_all_waiters_without_releas
             tool_name="test_tool", arguments={}, tool_call_id="waiting"
         )
     )
-    await evaluator_started.wait()
+    await started.wait()
     await coordinator.close()
-
     with pytest.raises(asyncio.CancelledError):
         await waiter
 
 
 @pytest.mark.asyncio
-async def test_audit_persistence_failure_preempts_checkpoint_wait():
-    clock = ControlledClock()
-
+async def test_audit_persistence_failure_preempts_replan_wait():
     def failing_observer(_event, _payload):
-        raise AuditPersistenceError("checkpoint audit unavailable")
+        raise AuditPersistenceError("replan audit unavailable")
 
-    coordinator = HighRiskCheckpointCoordinator(
-        cycle_id="cycle-audit-failure",
-        evaluator=_continue,
+    clock = ControlledClock()
+    coordinator = CompulsoryReplanCoordinator(
+        cycle_id="cycle-audit",
+        evaluator=_continue_replan,
         observer=failing_observer,
         clock=clock,
     )
@@ -589,496 +486,53 @@ async def test_audit_persistence_failure_preempts_checkpoint_wait():
     await coordinator.close()
 
 
-def _runtime_config() -> HERv2Config:
-    return HERv2Config.from_mapping(
-        {
-            "profiles": {
-                name: {
-                    "engine": "fake-api",
-                    "model": f"model-{name}",
-                    "reasoning": f"reasoning-{name}",
-                }
-                for name in (
-                    "lightweight",
-                    "triage",
-                    "premium",
-                    "reviewer",
-                    "orchestrator",
-                )
-            },
-            "user_idle_timeout_s": 10,
-        }
-    )
-
-
-class CheckpointJourneyProvider:
-    def __init__(
-        self,
-        *,
-        checkpoint_policy: str,
-        tool_results: int = 0,
-        checkpoint_decision: str = "CONTINUE",
-        checkpoint_question: str = "",
-        checkpoint_failure: StageInvocationError | None = None,
-        clock: ControlledClock | None = None,
-        advance_tool_free_to: float | None = None,
-    ) -> None:
-        self.checkpoint_policy = checkpoint_policy
-        self.tool_results = tool_results
-        self.checkpoint_decision = checkpoint_decision
-        self.checkpoint_question = checkpoint_question
-        self.checkpoint_failure = checkpoint_failure
-        self.clock = clock
-        self.advance_tool_free_to = advance_tool_free_to
-        self.requests = []
-
-    async def invoke(self, profile, request):
-        del profile
-        self.requests.append(request)
-        if request.stage is Stage.IMMEDIATE_RESPONSE:
-            return StageResponse(data={"message": "Working."})
-        if request.stage is Stage.TRIAGE:
-            return StageResponse(
-                data={
-                    "classification": "COMPLEX_TASK",
-                    "checkpoint_policy": self.checkpoint_policy,
-                    "checkpoint_reason": (
-                        "Production data may be irreversibly changed."
-                        if self.checkpoint_policy == "HIGH_RISK"
-                        else None
-                    ),
-                }
-            )
-        if request.stage is Stage.CHECKPOINT:
-            assert request.allow_tools is False
-            assert request.allow_side_effects is False
-            assert request.checkpoint_coordinator is None
-            if self.checkpoint_failure is not None:
-                raise self.checkpoint_failure
-            return StageResponse(
-                data={
-                    "decision": self.checkpoint_decision,
-                    "summary": (
-                        "Existing authority and evidence remain aligned."
-                        if self.checkpoint_decision == "CONTINUE"
-                        else "Further production work needs a control decision."
-                    ),
-                    "question": self.checkpoint_question or None,
-                }
-            )
-        if request.stage is Stage.EXECUTION:
-            if self.advance_tool_free_to is not None and self.clock is not None:
-                self.clock.value = self.advance_tool_free_to
-            receipts = []
-            coordinator = request.checkpoint_coordinator
-            if self.checkpoint_policy == "HIGH_RISK":
-                assert coordinator is not None
-            else:
-                assert coordinator is None
-            for index in range(1, self.tool_results + 1):
-                assert coordinator is not None
-                admission = await coordinator.before_tool(
-                    tool_name="test_tool",
-                    arguments={"index": index},
-                    tool_call_id=f"call-{index}",
-                )
-                receipt = _receipt(index)
-                receipts.append(receipt)
-                await coordinator.after_tool(admission, receipt)
-            return StageResponse(
-                data={
-                    "disposition": "COMPLETED",
-                    "summary": "Execution completed.",
-                },
-                evidence_refs=tuple(item.evidence_ref for item in receipts),
-                tool_receipts=tuple(receipts),
-            )
-        if request.stage is Stage.FINALISATION:
-            execution = request.context.get("parsed_execution_result") or {}
-            return StageResponse(
-                data={
-                    "report": (
-                        execution.get("clarification")
-                        or execution.get("summary")
-                        or "Reported."
-                    )
-                }
-            )
-        raise AssertionError(f"unexpected stage: {request.stage.value}")
-
-
-def _journey_runtime(tmp_path, provider, *, clock=None, commentary=None):
-    root = tmp_path / "checkpoint-runtime"
-    return HERv2Runtime(
-        config=_runtime_config(),
-        provider=provider,
-        ledger_store=LedgerStore(root / "ledgers"),
-        audit_log=DurableAuditLog(root / "audit.jsonl", root / "audit-fallback.jsonl"),
-        delivery=RecordingDelivery(),
-        commentary=commentary,
-        checkpoint_clock=clock or ControlledClock(),
-    )
-
-
 @pytest.mark.asyncio
-async def test_runtime_standard_risk_never_installs_periodic_checkpoint(tmp_path):
-    provider = CheckpointJourneyProvider(
-        checkpoint_policy="STANDARD",
-        tool_results=0,
+async def test_compulsory_replan_has_no_count_ceiling():
+    coordinator = CompulsoryReplanCoordinator(
+        cycle_id="cycle-unbounded",
+        evaluator=_continue_replan,
+        clock=ControlledClock(),
     )
-    result = await _journey_runtime(tmp_path, provider).run_turn(
-        "Inspect the normal workspace", "standard", effort="low"
-    )
-    assert result.terminal_state.value == "COMPLETED"
-    assert result.checkpoint_count == 0
-    assert all(request.stage is not Stage.CHECKPOINT for request in provider.requests)
-    execution_request = next(
-        request for request in provider.requests if request.stage is Stage.EXECUTION
-    )
-    assert execution_request.checkpoint_coordinator is None
-
-
-@pytest.mark.asyncio
-async def test_runtime_repairs_missing_work_risk_policy_without_defaulting(tmp_path):
-    class RepairingTriageProvider(CheckpointJourneyProvider):
-        def __init__(self):
-            super().__init__(checkpoint_policy="STANDARD")
-            self.triage_calls = 0
-
-        async def invoke(self, profile, request):
-            if request.stage is Stage.TRIAGE:
-                self.requests.append(request)
-                self.triage_calls += 1
-                if self.triage_calls == 1:
-                    return StageResponse(data={"classification": "COMPLEX_TASK"})
-                assert "previous_structure_error" in request.context
-                return StageResponse(
-                    data={
-                        "classification": "COMPLEX_TASK",
-                        "checkpoint_policy": "STANDARD",
-                    }
-                )
-            return await super().invoke(profile, request)
-
-    provider = RepairingTriageProvider()
-    result = await _journey_runtime(tmp_path, provider).run_turn(
-        "Inspect the normal workspace", "repair-risk", effort="low"
-    )
-
-    assert result.terminal_state.value == "COMPLETED"
-    assert result.ledger["checkpoint_policy"] == "STANDARD"
-    assert provider.triage_calls == 2
-
-
-@pytest.mark.asyncio
-async def test_runtime_high_risk_short_completion_has_no_synthetic_checkpoint(tmp_path):
-    provider = CheckpointJourneyProvider(
-        checkpoint_policy="HIGH_RISK",
-        tool_results=9,
-    )
-    result = await _journey_runtime(tmp_path, provider).run_turn(
-        "Change production records", "short-high-risk", effort="low"
-    )
-    assert result.terminal_state.value == "COMPLETED"
-    assert result.checkpoint_count == 0
-    assert sum(request.stage is Stage.CHECKPOINT for request in provider.requests) == 0
-
-
-@pytest.mark.asyncio
-async def test_runtime_tenth_result_checkpoints_then_continues_without_loop_cap(
-    tmp_path,
-):
-    provider = CheckpointJourneyProvider(
-        checkpoint_policy="HIGH_RISK",
-        tool_results=10,
-    )
-    runtime = _journey_runtime(tmp_path, provider)
-    original_evaluator = runtime._evaluate_checkpoint
-    progress_boundaries = []
-
-    async def observe_progress(state, classification, snapshot):
-        before = state.progress.last_progress_at
-        finding = await original_evaluator(state, classification, snapshot)
-        progress_boundaries.append((before, state.progress.last_progress_at))
-        return finding
-
-    runtime._evaluate_checkpoint = observe_progress
-    result = await runtime.run_turn(
-        "Change production records", "continue-high-risk", effort="low"
-    )
-    assert result.terminal_state.value == "COMPLETED"
-    assert result.checkpoint_count == 1
-    checkpoint_request = next(
-        request for request in provider.requests if request.stage is Stage.CHECKPOINT
-    )
-    assert checkpoint_request.context["completed_result_count"] == 10
-    assert checkpoint_request.context["trigger_reasons"] == ["completed_result_count"]
-    assert checkpoint_request.role == "checkpoint_evaluator"
-    assert checkpoint_request.allow_tools is False
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "checkpoint-runtime" / "audit.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-    ]
-    checkpoint_control_events = [
-        row["event"]
-        for row in rows
-        if row["event"]
-        in {"checkpoint_due", "checkpoint_started", "checkpoint_completed"}
-    ]
-    assert checkpoint_control_events == [
-        "checkpoint_due",
-        "checkpoint_started",
-        "checkpoint_completed",
-    ]
-    completed = next(row for row in rows if row["event"] == "checkpoint_completed")
-    assert completed["payload"]["decision"] == "CONTINUE"
-    assert completed["payload"]["completed_result_count"] == 10
-    assert len(progress_boundaries) == 1
-    assert progress_boundaries[0][1] == progress_boundaries[0][0]
-    assert all(record.kind != "commentary" for record in result.delivery_records)
-
-
-@pytest.mark.asyncio
-async def test_provider_recovery_keeps_one_live_checkpoint_window(tmp_path):
-    class RecoveringExecutionProvider(CheckpointJourneyProvider):
-        def __init__(self):
-            super().__init__(checkpoint_policy="HIGH_RISK")
-            self.execution_coordinators = []
-
-        async def invoke(self, profile, request):
-            if request.stage is not Stage.EXECUTION:
-                return await super().invoke(profile, request)
-            del profile
-            self.requests.append(request)
-            coordinator = request.checkpoint_coordinator
-            assert coordinator is not None
-            self.execution_coordinators.append(coordinator)
-            start = 1 if request.attempt == 1 else 6
-            receipts = []
-            for index in range(start, start + 5):
-                request.provider_activity_callback(
-                    {
-                        "kind": "file_read",
-                        "content": f"read-{index}",
-                        "tool_name": "file_read",
-                        "tool_read_only": True,
-                    }
-                )
-                admission = await coordinator.before_tool(
-                    tool_name="file_read",
-                    arguments={"path": f"evidence-{index}"},
-                    tool_call_id=f"call-{index}",
-                )
-                receipt = ToolEvidenceReceipt(
-                    evidence_ref=f"retry-receipt:{request.attempt}:{index}",
-                    stage=Stage.EXECUTION,
-                    invocation_id=request.invocation_id,
-                    attempt=request.attempt,
-                    tool_call_id=f"call-{index}",
-                    tool_name="file_read",
-                    status=ToolReceiptStatus.SUCCESS,
-                    read_only=True,
-                    completed=True,
-                    output_sha256=f"sha256-{index}",
-                )
-                receipts.append(receipt)
-                await coordinator.after_tool(admission, receipt)
-                request.provider_activity_callback(
-                    {
-                        "kind": "tool_end",
-                        "content": f"read-{index}-complete",
-                        "tool_name": "file_read",
-                        "tool_read_only": True,
-                    }
-                )
-            if request.attempt == 1:
-                raise StageInvocationError(
-                    "connection reset after completed read-only tools",
-                    code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
-                    retryable=True,
-                    human_description="The provider connection was reset.",
-                )
-            return StageResponse(
-                data={
-                    "disposition": "COMPLETED",
-                    "summary": "Recovered execution completed.",
-                },
-                evidence_refs=tuple(item.evidence_ref for item in receipts),
-                tool_receipts=tuple(receipts),
-            )
-
-    provider = RecoveringExecutionProvider()
-    result = await _journey_runtime(tmp_path, provider).run_turn(
-        "Read high-risk production evidence",
-        "checkpoint-provider-recovery",
-        effort="low",
-    )
-
-    assert result.terminal_state.value == "COMPLETED"
-    assert len(provider.execution_coordinators) == 2
-    assert provider.execution_coordinators[0] is provider.execution_coordinators[1]
-    assert result.checkpoint_count == 1
-    assert len(result.evidence_refs) == 10
-    checkpoint_request = next(
-        request for request in provider.requests if request.stage is Stage.CHECKPOINT
-    )
-    assert checkpoint_request.context["completed_result_count"] == 10
-
-
-@pytest.mark.asyncio
-async def test_runtime_tool_free_execution_beyond_300_seconds_gets_no_final_checkpoint(
-    tmp_path,
-):
-    clock = ControlledClock()
-    provider = CheckpointJourneyProvider(
-        checkpoint_policy="HIGH_RISK",
-        clock=clock,
-        advance_tool_free_to=601.0,
-    )
-    result = await _journey_runtime(tmp_path, provider, clock=clock).run_turn(
-        "Run a long production analysis", "tool-free-long", effort="low"
-    )
-    assert result.terminal_state.value == "COMPLETED"
-    assert result.checkpoint_count == 0
-    assert all(request.stage is not Stage.CHECKPOINT for request in provider.requests)
-
-
-@pytest.mark.asyncio
-async def test_runtime_time_due_checkpoint_runs_before_next_tool_admission(tmp_path):
-    clock = ControlledClock()
-    provider = CheckpointJourneyProvider(
-        checkpoint_policy="HIGH_RISK",
-        tool_results=1,
-        clock=clock,
-        advance_tool_free_to=300.0,
-    )
-    result = await _journey_runtime(tmp_path, provider, clock=clock).run_turn(
-        "Change a production record", "time-due", effort="low"
-    )
-    assert result.terminal_state.value == "COMPLETED"
-    assert result.checkpoint_count == 1
-    checkpoint_request = next(
-        request for request in provider.requests if request.stage is Stage.CHECKPOINT
-    )
-    assert checkpoint_request.context["completed_result_count"] == 0
-    assert checkpoint_request.context["trigger_reasons"] == ["elapsed_time"]
-    assert checkpoint_request.context["prospective_action"]["tool_name"] == (
-        "test_tool"
-    )
-    assert checkpoint_request.context["prospective_action"]["argument_keys"] == [
-        "index"
-    ]
-    assert "arguments" not in checkpoint_request.context["prospective_action"]
-
-
-@pytest.mark.asyncio
-async def test_runtime_checkpoint_user_input_stops_tools_and_delivers_one_question(
-    tmp_path,
-):
-    question = "May the production record be deleted?"
-    provider = CheckpointJourneyProvider(
-        checkpoint_policy="HIGH_RISK",
-        tool_results=11,
-        checkpoint_decision="USER_INPUT_REQUIRED",
-        checkpoint_question=question,
-    )
-    result = await _journey_runtime(tmp_path, provider).run_turn(
-        "Delete production records", "checkpoint-input", effort="low"
-    )
-    assert result.terminal_state.value == "PENDING_USER_INPUT"
-    assert result.checkpoint_count == 1
-    assert result.text == question
-    assert len(result.delivery_records) == 2  # acknowledgement plus clarification
-    assert result.delivery_records[-1].kind == "clarification"
-    assert result.delivery_records[-1].text == question
-    assert result.evidence_refs == tuple(f"receipt:{index}" for index in range(1, 11))
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "checkpoint-runtime" / "audit.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-    ]
-    interrupted = [
-        row for row in rows if row["event"] == "checkpoint_interrupted_execution"
-    ]
-    assert len(interrupted) == 1
-    assert interrupted[0]["payload"]["decision"] == "USER_INPUT_REQUIRED"
-    assert interrupted[0]["payload"]["execution_replayed"] is False
-
-
-@pytest.mark.asyncio
-async def test_runtime_unavailable_checkpoint_fails_closed_with_partial_evidence(
-    tmp_path,
-):
-    provider = CheckpointJourneyProvider(
-        checkpoint_policy="HIGH_RISK",
-        tool_results=11,
-        checkpoint_failure=StageInvocationError(
-            "checkpoint provider unavailable",
-            retryable=False,
-            human_description="Checkpoint provider unavailable.",
-        ),
-    )
-    result = await _journey_runtime(tmp_path, provider).run_turn(
-        "Change production records", "checkpoint-unavailable", effort="low"
-    )
-    assert result.terminal_state.value == "FAILED"
-    assert result.checkpoint_count == 1
-    assert len(result.evidence_refs) == 10
-    assert any(
-        "Checkpoint evaluator unavailable" in item for item in result.limitations
-    )
-    assert "further tool admission stopped" in result.text.lower()
-
-
-@pytest.mark.asyncio
-async def test_runtime_stop_cancels_checkpoint_evaluator_without_late_message(tmp_path):
-    clock = ControlledClock()
-    evaluator_started = asyncio.Event()
-
-    class BlockingCheckpointProvider(CheckpointJourneyProvider):
-        async def invoke(self, profile, request):
-            if request.stage is Stage.CHECKPOINT:
-                self.requests.append(request)
-                evaluator_started.set()
-                await asyncio.Event().wait()
-                raise AssertionError("stopped checkpoint must not complete")
-            if request.stage is Stage.EXECUTION:
-                self.requests.append(request)
-                clock.value = 300.0
-                coordinator = request.checkpoint_coordinator
-                assert coordinator is not None
-                await coordinator.before_tool(
-                    tool_name="test_tool",
-                    arguments={},
-                    tool_call_id="blocked-before-admission",
-                )
-                raise AssertionError("stopped admission must not resume")
-            return await super().invoke(profile, request)
-
-    provider = BlockingCheckpointProvider(checkpoint_policy="HIGH_RISK")
-    runtime = _journey_runtime(tmp_path, provider, clock=clock)
-    turn = asyncio.create_task(
-        runtime.run_turn(
-            "Change production records",
-            "checkpoint-stop",
-            effort="low",
-            turn_id="checkpoint-stop-turn",
+    receipt_index = 0
+    for cycle in range(205):
+        for _ in range(10):
+            receipt_index += 1
+            await coordinator.record_immediate_result(_receipt(receipt_index))
+        admission = await coordinator.before_tool(
+            tool_name="control_boundary",
+            arguments={"cycle": cycle},
+            tool_call_id=f"boundary-{cycle}",
         )
-    )
-    await asyncio.wait_for(evaluator_started.wait(), timeout=1)
-    assert await runtime.stop_turn("checkpoint-stop-turn", reason="USER_STOP") is True
-    result = await asyncio.wait_for(turn, timeout=1)
-
-    assert result.terminal_state.value == "STOPPED"
-    assert all(record.kind != "clarification" for record in result.delivery_records)
-    await asyncio.sleep(0)
-    assert sum(request.stage is Stage.CHECKPOINT for request in provider.requests) == 1
+        assert admission.admitted is False
+    assert coordinator.checkpoint_count == 205
+    await coordinator.close()
 
 
-def _review_response(request, outcome: str) -> StageResponse:
+def _runtime_mapping():
+    return {
+        "profiles": {
+            name: {
+                "engine": "fake-api",
+                "model": f"model-{name}",
+                "reasoning": f"reasoning-{name}",
+            }
+            for name in (
+                "lightweight",
+                "triage",
+                "premium",
+                "reviewer",
+                "orchestrator",
+            )
+        },
+        "user_idle_timeout_s": 10,
+    }
+
+
+def _runtime_config() -> HERv2Config:
+    return HERv2Config.from_mapping(_runtime_mapping())
+
+
+def _review_pass(request) -> StageResponse:
     prefix = request.invocation_id
     receipts = (
         ToolEvidenceReceipt(
@@ -1095,16 +549,16 @@ def _review_response(request, outcome: str) -> StageResponse:
             {"operation": "snapshot", "snapshot_sha256": "stable"},
         ),
         ToolEvidenceReceipt(
-            f"{prefix}:inspection",
+            f"{prefix}:check",
             Stage.REVIEW,
             prefix,
             request.attempt,
-            "inspection",
+            "check",
             "workspace_inspect",
             ToolReceiptStatus.SUCCESS,
             True,
             True,
-            "inspection",
+            "check",
             {"operation": "diff", "exit_code": 0},
         ),
         ToolEvidenceReceipt(
@@ -1123,11 +577,9 @@ def _review_response(request, outcome: str) -> StageResponse:
     )
     return StageResponse(
         data={
-            "outcome": outcome,
-            "summary": "Review result.",
-            "findings": ["Remediate the production approach."]
-            if outcome == "FAIL"
-            else [],
+            "outcome": "PASS",
+            "summary": "The latest result passes independent Review.",
+            "findings": [],
             "evidence_refs": [receipts[1].evidence_ref],
         },
         provider_attempt=request.attempt,
@@ -1136,158 +588,464 @@ def _review_response(request, outcome: str) -> StageResponse:
     )
 
 
-def _verification_response(request, *, commentary: str = "") -> StageResponse:
-    prefix = request.invocation_id
-    receipts = (
-        ToolEvidenceReceipt(
-            f"{prefix}:before",
-            Stage.VERIFICATION,
-            prefix,
-            request.attempt,
-            "before",
-            "workspace_inspect",
-            ToolReceiptStatus.SUCCESS,
-            True,
-            True,
-            "before",
-            {"operation": "snapshot", "snapshot_sha256": "stable"},
-        ),
-        ToolEvidenceReceipt(
-            f"{prefix}:check",
-            Stage.VERIFICATION,
-            prefix,
-            request.attempt,
-            "check",
-            "workspace_inspect",
-            ToolReceiptStatus.SUCCESS,
-            True,
-            True,
-            "check",
-            {"operation": "diff", "exit_code": 0},
-        ),
-        ToolEvidenceReceipt(
-            f"{prefix}:after",
-            Stage.VERIFICATION,
-            prefix,
-            request.attempt,
-            "after",
-            "workspace_inspect",
-            ToolReceiptStatus.SUCCESS,
-            True,
-            True,
-            "after",
-            {"operation": "snapshot", "snapshot_sha256": "stable"},
-        ),
-    )
-    data = {
-        "outcome": "VERIFIED",
-        "summary": "The latest state is verified.",
-        "checks": [
-            {
-                "claim": "The latest state is correct",
-                "verifiability": "VERIFIABLE",
-                "result": "VERIFIED",
-                "method": "workspace_diff",
-                "evidence_refs": [receipts[1].evidence_ref],
-                "observed": "The current workspace evidence passed.",
-            }
-        ],
-        "evidence_refs": [receipts[1].evidence_ref],
-    }
-    if commentary:
-        data["commentary"] = commentary
-    return StageResponse(
-        data=data,
-        provider_attempt=request.attempt,
-        evidence_refs=tuple(item.evidence_ref for item in receipts),
-        tool_receipts=receipts,
-    )
+class ReplanJourneyProvider:
+    def __init__(
+        self,
+        *,
+        checkpoint_policy: str = "STANDARD",
+        tool_results: int = 0,
+        replans: list[dict] | None = None,
+        clock: ControlledClock | None = None,
+        advance_before_first_tool_to: float | None = None,
+        advance_at_completion: list[float | None] | None = None,
+        review: bool = False,
+    ) -> None:
+        self.checkpoint_policy = checkpoint_policy
+        self.tool_results = tool_results
+        self.replans = deque(replans or [])
+        self.clock = clock
+        self.advance_before_first_tool_to = advance_before_first_tool_to
+        self.advance_at_completion = deque(advance_at_completion or [])
+        self.review = review
+        self.requests = []
+        self.execution_calls = 0
+        self.executed_tools = 0
+        self.control_directives = []
+        self._receipt_serial = 0
+        self._advanced_before_tool = False
 
-
-@pytest.mark.asyncio
-async def test_review_remediation_starts_fresh_checkpoint_cycle_and_totals_both(
-    tmp_path,
-):
-    class RemediationProvider(CheckpointJourneyProvider):
-        def __init__(self):
-            super().__init__(checkpoint_policy="HIGH_RISK", tool_results=10)
-            self.review_calls = 0
-
-        async def invoke(self, profile, request):
-            if request.stage is Stage.PLANNING:
-                self.requests.append(request)
-                return StageResponse(data={"plan": ["Initial production approach"]})
-            if request.stage is Stage.REVIEW:
-                self.requests.append(request)
-                self.review_calls += 1
-                return _review_response(
-                    request, "FAIL" if self.review_calls == 1 else "PASS"
+    async def invoke(self, profile, request):
+        del profile
+        self.requests.append(request)
+        if request.stage is Stage.IMMEDIATE_RESPONSE:
+            return StageResponse(data={"message": "Working."})
+        if request.stage is Stage.TRIAGE:
+            return StageResponse(
+                data={
+                    "classification": "COMPLEX_TASK",
+                    "checkpoint_policy": self.checkpoint_policy,
+                    "checkpoint_reason": (
+                        "Production data may be changed."
+                        if self.checkpoint_policy == "HIGH_RISK"
+                        else None
+                    ),
+                }
+            )
+        if request.stage is Stage.PLANNING:
+            return StageResponse(
+                data={
+                    "plan": ["Inspect", "Implement", "Verify"],
+                    "success_criteria": ["The authorised result is verified"],
+                }
+            )
+        if request.stage is Stage.REPLANNING:
+            if not self.replans:
+                raise AssertionError("unexpected compulsory Replanning invocation")
+            return StageResponse(data=self.replans.popleft())
+        if request.stage is Stage.EXECUTION:
+            self.execution_calls += 1
+            coordinator = request.checkpoint_coordinator
+            eligible = request.effort.value in {"high", "xhigh", "max"}
+            assert (coordinator is not None) is eligible
+            receipts = []
+            completed_this_call = 0
+            while completed_this_call < self.tool_results:
+                if (
+                    coordinator is not None
+                    and self.clock is not None
+                    and self.advance_before_first_tool_to is not None
+                    and not self._advanced_before_tool
+                ):
+                    self.clock.value = self.advance_before_first_tool_to
+                    self._advanced_before_tool = True
+                if coordinator is None:
+                    admission = None
+                else:
+                    admission = await coordinator.before_tool(
+                        tool_name="test_tool",
+                        arguments={"index": self._receipt_serial + 1},
+                        tool_call_id=f"call-{self._receipt_serial + 1}",
+                    )
+                    if not admission.admitted:
+                        self.control_directives.append(admission.directive)
+                        continue
+                self._receipt_serial += 1
+                self.executed_tools += 1
+                completed_this_call += 1
+                receipt = _receipt(
+                    self._receipt_serial,
+                    invocation_id=request.invocation_id,
                 )
-            if request.stage is Stage.REPLANNING:
-                self.requests.append(request)
-                return StageResponse(data={"plan": ["Remediated production approach"]})
-            return await super().invoke(profile, request)
+                receipts.append(receipt)
+                if coordinator is not None:
+                    directive = await coordinator.after_tool(
+                        admission,
+                        receipt,
+                        result_summary=f"result-{self._receipt_serial}",
+                    )
+                    if directive is not None:
+                        self.control_directives.append(directive)
+            if self.advance_at_completion:
+                target = self.advance_at_completion.popleft()
+                if target is not None and self.clock is not None:
+                    self.clock.value = target
+            return StageResponse(
+                data={
+                    "disposition": "COMPLETED",
+                    "summary": "Execution candidate completed.",
+                    "work_performed": ["Completed the authorised execution work."],
+                    "verification": ["Checked the execution candidate."],
+                },
+                evidence_refs=tuple(item.evidence_ref for item in receipts),
+                tool_receipts=tuple(receipts),
+            )
+        if request.stage is Stage.REVIEW and self.review:
+            return _review_pass(request)
+        if request.stage is Stage.FINALISATION:
+            execution = request.context.get("parsed_execution_result") or {}
+            return StageResponse(
+                data={
+                    "execution_result": execution or None,
+                    "final_message": execution.get("summary") or "Reported.",
+                }
+            )
+        raise AssertionError(f"unexpected stage: {request.stage.value}")
 
-    provider = RemediationProvider()
-    result = await _journey_runtime(tmp_path, provider).run_turn(
-        "Change production records and review the result",
-        "fresh-remediation-cycle",
-        effort="xhigh",
+
+def _journey_runtime(tmp_path, provider, *, clock=None, commentary=None):
+    root = tmp_path / "replan-runtime"
+    return HERv2Runtime(
+        config=_runtime_config(),
+        provider=provider,
+        ledger_store=LedgerStore(root / "ledgers"),
+        audit_log=DurableAuditLog(root / "audit.jsonl", root / "audit-fallback.jsonl"),
+        delivery=RecordingDelivery(),
+        commentary=commentary,
+        checkpoint_clock=clock or ControlledClock(),
     )
-
-    assert result.terminal_state.value == "COMPLETED"
-    assert result.review_count == 2
-    assert result.replan_count == 1
-    assert result.checkpoint_count == 2
-    checkpoint_requests = [
-        request for request in provider.requests if request.stage is Stage.CHECKPOINT
-    ]
-    assert len(checkpoint_requests) == 2
-    assert [
-        request.context["completed_result_count"] for request in checkpoint_requests
-    ] == [10, 10]
-    assert {
-        request.context["execution_cycle_id"] for request in checkpoint_requests
-    } == {
-        f"{result.turn_id}:execution-cycle:1",
-        f"{result.turn_id}:execution-cycle:2",
-    }
 
 
 @pytest.mark.asyncio
-async def test_short_assured_high_risk_work_keeps_review_verification_and_commentary(
-    tmp_path,
+@pytest.mark.parametrize("effort", ["low", "medium"])
+async def test_low_and_medium_never_install_compulsory_replan_even_for_high_risk(
+    tmp_path, effort
 ):
-    verification_update = "The current production state is independently verified."
+    provider = ReplanJourneyProvider(
+        checkpoint_policy="HIGH_RISK",
+        tool_results=10,
+    )
+    result = await _journey_runtime(tmp_path, provider).run_turn(
+        "Complete the authorised task", f"ineligible-{effort}", effort=effort
+    )
+    assert result.terminal_state.value == "COMPLETED"
+    assert result.replan_count == 0
+    assert result.checkpoint_count == 0
+    execution = next(item for item in provider.requests if item.stage is Stage.EXECUTION)
+    assert execution.checkpoint_coordinator is None
 
-    class AssuredProvider(CheckpointJourneyProvider):
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effort", ["high", "xhigh", "max"])
+async def test_high_and_above_install_by_effort_even_for_standard_risk(
+    tmp_path, effort
+):
+    class AssuranceProvider(ReplanJourneyProvider):
         async def invoke(self, profile, request):
-            if request.stage is Stage.PLANNING:
-                self.requests.append(request)
-                return StageResponse(data={"plan": ["Complete the short change"]})
             if request.stage is Stage.REVIEW:
-                self.requests.append(request)
-                return _review_response(request, "PASS")
+                return _review_pass(request)
             if request.stage is Stage.VERIFICATION:
-                self.requests.append(request)
-                return _verification_response(request, commentary=verification_update)
+                prefix = request.invocation_id
+                receipts = (
+                    ToolEvidenceReceipt(
+                        f"{prefix}:before", Stage.VERIFICATION, prefix, request.attempt,
+                        "before", "workspace_inspect", ToolReceiptStatus.SUCCESS,
+                        True, True, "before", {"operation": "snapshot", "snapshot_sha256": "stable"},
+                    ),
+                    ToolEvidenceReceipt(
+                        f"{prefix}:check", Stage.VERIFICATION, prefix, request.attempt,
+                        "check", "workspace_inspect", ToolReceiptStatus.SUCCESS,
+                        True, True, "check", {"operation": "diff", "exit_code": 0},
+                    ),
+                    ToolEvidenceReceipt(
+                        f"{prefix}:after", Stage.VERIFICATION, prefix, request.attempt,
+                        "after", "workspace_inspect", ToolReceiptStatus.SUCCESS,
+                        True, True, "after", {"operation": "snapshot", "snapshot_sha256": "stable"},
+                    ),
+                )
+                return StageResponse(
+                    data={
+                        "outcome": "VERIFIED",
+                        "summary": "Verified.",
+                        "checks": [{
+                            "claim": "Current result",
+                            "verifiability": "VERIFIABLE",
+                            "result": "VERIFIED",
+                            "method": "workspace_diff",
+                            "evidence_refs": [receipts[1].evidence_ref],
+                            "observed": "Current evidence passed.",
+                            "required": True,
+                        }],
+                        "evidence_refs": [receipts[1].evidence_ref],
+                    },
+                    evidence_refs=tuple(item.evidence_ref for item in receipts),
+                    tool_receipts=receipts,
+                )
             return await super().invoke(profile, request)
 
-    provider = AssuredProvider(
-        checkpoint_policy="HIGH_RISK",
-        tool_results=0,
+    provider = AssuranceProvider(checkpoint_policy="STANDARD", tool_results=0)
+    result = await _journey_runtime(tmp_path, provider).run_turn(
+        "Complete the authorised task", f"eligible-{effort}", effort=effort
+    )
+    assert result.terminal_state.value == "COMPLETED"
+    execution = next(item for item in provider.requests if item.stage is Stage.EXECUTION)
+    assert execution.checkpoint_coordinator is not None
+    assert result.replan_count == 0
+
+
+@pytest.mark.asyncio
+async def test_tenth_result_forces_lifecycle_replan_plan_version_and_commentary(
+    tmp_path,
+):
+    replan = _valid_replan_data()
+    provider = ReplanJourneyProvider(
+        checkpoint_policy="STANDARD",
+        tool_results=10,
+        replans=[replan],
     )
     commentary = RecordingCommentaryPort()
-    result = await _journey_runtime(tmp_path, provider, commentary=commentary).run_turn(
-        "Make and assure one short production change",
-        "short-assured-high-risk",
-        effort="max",
-    )
+    result = await _journey_runtime(
+        tmp_path, provider, commentary=commentary
+    ).run_turn("Complete all acceptance criteria", "count-replan", effort="high")
 
     assert result.terminal_state.value == "COMPLETED"
-    assert result.checkpoint_count == 0
-    assert result.review_count == 1
-    assert result.verification_count == 1
+    assert result.replan_count == 1
+    assert result.checkpoint_count == 1
+    assert result.ledger["plan_id"].endswith(":plan:v2")
+    assert provider.execution_calls == 1
+    assert provider.executed_tools == 10
+    assert len(provider.control_directives) == 1
     assert [(item.stage, item.text) for item in commentary.records] == [
-        (Stage.VERIFICATION, verification_update)
+        (Stage.REPLANNING, replan["commentary"])
     ]
+    replan_request = next(
+        item for item in provider.requests if item.stage is Stage.REPLANNING
+    )
+    forbidden_limits = {
+        "deadline_s",
+        "max_loops",
+        "max_replans",
+        "max_tokens",
+        "max_turns",
+        "replan_limit",
+        "replan_limits",
+        "time_budget_s",
+        "timeout_s",
+        "token_budget",
+    }
+    assert forbidden_limits.isdisjoint(replan_request.context)
+    assert forbidden_limits.isdisjoint(StageRequest.__dataclass_fields__)
+    assert replan_request.context["replan_count_is_unbounded"] is True
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "replan-runtime" / "audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    transitions = [
+        (row["payload"]["from"], row["payload"]["to"])
+        for row in rows
+        if row["event"] == "transition"
+    ]
+    assert ("EXECUTING", "REPLANNING") in transitions
+    assert ("REPLANNING", "EXECUTING") in transitions
+    assert [
+        row["event"]
+        for row in rows
+        if row["event"] in {"replan_due", "replan_started", "replan_completed"}
+    ] == ["replan_due", "replan_started", "replan_completed"]
+
+
+@pytest.mark.asyncio
+async def test_time_due_replan_rejects_pending_tool_then_retries_under_new_window(
+    tmp_path,
+):
+    clock = ControlledClock()
+    provider = ReplanJourneyProvider(
+        tool_results=1,
+        replans=[_valid_replan_data()],
+        clock=clock,
+        advance_before_first_tool_to=300.0,
+    )
+    result = await _journey_runtime(tmp_path, provider, clock=clock).run_turn(
+        "Complete the timed task", "time-replan", effort="high"
+    )
+    assert result.terminal_state.value == "COMPLETED"
+    assert result.replan_count == 1
+    assert provider.executed_tools == 1
+    assert provider.control_directives[0].outcome.completion_percent == 60
+
+
+@pytest.mark.asyncio
+async def test_tool_free_completion_boundary_cannot_bypass_due_replan(tmp_path):
+    clock = ControlledClock()
+    provider = ReplanJourneyProvider(
+        tool_results=0,
+        replans=[_valid_replan_data()],
+        clock=clock,
+        advance_at_completion=[300.0, None],
+    )
+    result = await _journey_runtime(tmp_path, provider, clock=clock).run_turn(
+        "Complete the long analysis", "completion-boundary", effort="high"
+    )
+    assert result.terminal_state.value == "COMPLETED"
+    assert result.replan_count == 1
+    assert result.checkpoint_count == 1
+    assert provider.execution_calls == 2
+    second_execution = [
+        item for item in provider.requests if item.stage is Stage.EXECUTION
+    ][1]
+    continuation = second_execution.context["replan_continuation"]
+    assert continuation["completion_percent"] == 60
+    assert second_execution.context["continuation_rules"][
+        "never_repeat_completed_side_effects_because_of_replanning"
+    ] is True
+
+
+@pytest.mark.asyncio
+async def test_replan_100_stops_more_tools_and_routes_directly_to_review(tmp_path):
+    complete = _valid_replan_data(
+        completion_percent=100,
+        completion_basis="All authorised acceptance criteria are now satisfied.",
+        next_step="Enter Review.",
+        commentary="Progress is 100%. The plan is unchanged. Next: Enter Review.",
+    )
+    provider = ReplanJourneyProvider(
+        tool_results=11,
+        replans=[complete],
+        review=True,
+    )
+    commentary = RecordingCommentaryPort()
+    result = await _journey_runtime(
+        tmp_path, provider, commentary=commentary
+    ).run_turn("Complete and review the task", "complete-replan", effort="xhigh")
+
+    assert result.terminal_state.value == "COMPLETED"
+    assert provider.executed_tools == 10
+    assert provider.execution_calls == 1
+    assert result.replan_count == 1
+    assert result.review_count == 1
+    assert any(item.stage is Stage.REVIEW for item in provider.requests)
+    assert commentary.records[0].text.startswith("Progress is 100%")
+
+
+@pytest.mark.asyncio
+async def test_missing_model_commentary_uses_verified_deterministic_fallback_once(
+    tmp_path,
+):
+    replan = _valid_replan_data(commentary=None)
+    provider = ReplanJourneyProvider(tool_results=10, replans=[replan])
+    commentary = RecordingCommentaryPort()
+    result = await _journey_runtime(
+        tmp_path, provider, commentary=commentary
+    ).run_turn("Complete the task", "commentary-fallback", effort="high")
+
+    assert result.terminal_state.value == "COMPLETED"
+    assert len(commentary.records) == 1
+    message = commentary.records[0]
+    assert "60%" in message.text
+    assert "plan is unchanged" in message.text.lower()
+    assert replan["next_step"] in message.text
+    assert message.required_facts == (
+        "60%",
+        replan["next_step"],
+        "plan is unchanged",
+    )
+    assert message.minimal_persona_fallback_reason == (
+        "replan_model_commentary_fallback"
+    )
+    assert message.event_id.endswith(":checkpoint:1:commentary")
+
+
+@pytest.mark.asyncio
+async def test_commentary_missing_changed_plan_status_uses_fallback_once(tmp_path):
+    replan = _valid_replan_data(
+        plan=["Inspect", "Use the supported route", "Verify"],
+        plan_changed=True,
+        change_reason="The original route is no longer supported.",
+        commentary=(
+            "Progress is 60%. The original route is no longer supported. "
+            "Next: Continue the remaining authorised work."
+        ),
+    )
+    provider = ReplanJourneyProvider(tool_results=10, replans=[replan])
+    commentary = RecordingCommentaryPort()
+
+    result = await _journey_runtime(
+        tmp_path, provider, commentary=commentary
+    ).run_turn("Complete the task", "changed-status-fallback", effort="high")
+
+    assert result.terminal_state.value == "COMPLETED"
+    assert len(commentary.records) == 1
+    message = commentary.records[0]
+    assert "The plan changed because" in message.text
+    assert replan["change_reason"] in message.text
+    assert message.required_facts == (
+        "60%",
+        replan["next_step"],
+        "plan changed",
+        replan["change_reason"],
+    )
+    assert message.minimal_persona_fallback_reason == (
+        "replan_model_commentary_fallback"
+    )
+
+
+@pytest.mark.asyncio
+async def test_oversized_replan_update_uses_bounded_fallback_without_stopping_workflow(
+    tmp_path,
+):
+    replan = _valid_replan_data(
+        next_step="Continue safely from evidence. " * 1_000,
+        commentary="Unbounded presentation text. " * 1_000,
+    )
+    provider = ReplanJourneyProvider(tool_results=10, replans=[replan])
+    commentary = RecordingCommentaryPort()
+
+    result = await _journey_runtime(
+        tmp_path, provider, commentary=commentary
+    ).run_turn("Complete the task", "bounded-replan-update", effort="high")
+
+    assert result.terminal_state.value == "COMPLETED"
+    assert result.replan_count == 1
+    assert len(commentary.records) == 1
+    message = commentary.records[0]
+    assert len(message.text) <= 4_000
+    assert all(fact in message.text for fact in message.required_facts)
+    assert message.minimal_persona_fallback_reason == (
+        "replan_model_commentary_fallback"
+    )
+
+
+@pytest.mark.asyncio
+async def test_replanning_provider_crossing_historical_clock_boundaries_is_not_timed_out(
+    tmp_path,
+):
+    clock = ControlledClock()
+
+    class SlowClockReplanProvider(ReplanJourneyProvider):
+        async def invoke(self, profile, request):
+            if request.stage is Stage.REPLANNING:
+                clock.value = 1_200.0
+            return await super().invoke(profile, request)
+
+    provider = SlowClockReplanProvider(
+        tool_results=10,
+        replans=[_valid_replan_data()],
+        clock=clock,
+    )
+    result = await _journey_runtime(tmp_path, provider, clock=clock).run_turn(
+        "Complete without hidden Replan deadlines", "no-replan-timeout", effort="high"
+    )
+    assert result.terminal_state.value == "COMPLETED"
+    assert result.replan_count == 1

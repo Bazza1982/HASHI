@@ -60,8 +60,8 @@ consolidated as the `v4.0.0-alpha.2` release candidate:
   reply-target snapshots, explicit stream ownership, and idempotent delivery;
 - explicit staged orchestration, Tool Gateway/MCP, secure multimedia, and
   optional agent-local Habit/Meditation;
-- evidence-backed Reviewed and Assured modes, plus separately classified
-  high-risk safe-boundary checkpoints;
+- evidence-backed Reviewed and Assured modes, plus compulsory
+  Adaptive-or-above safe-boundary Replanning every 10 results or 300 seconds;
 - provider-aware native/fallback multimodal routing, configurable Single/Hybrid
   Quick and Pro routes, and the HASHI API provider;
 - automatic context maintenance that continues selected-model execution when

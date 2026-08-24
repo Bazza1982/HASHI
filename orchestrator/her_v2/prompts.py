@@ -54,12 +54,30 @@ _SCHEMAS = {
         ),
     },
     Stage.REPLANNING: {
-        "plan": ["replacement action based on current evidence"],
-        "success_criteria": ["observable criterion"],
-        "changed_because": "material evidence that invalidated the prior approach",
+        "plan": [
+            "complete active plan for the next version; preserve the prior steps "
+            "when current evidence does not require a change"
+        ],
+        "success_criteria": [
+            "observable criterion tied to the authoritative user goal"
+        ],
+        "completion_percent": "integer from 0 through 100",
+        "completion_basis": (
+            "evidence-based comparison with the original goal, authority, and "
+            "success criteria"
+        ),
+        "plan_changed": True,
+        "change_reason": (
+            "concrete new evidence or condition requiring the change; null when "
+            "plan_changed is false"
+        ),
+        "next_step": (
+            "next authorised action, or Review/Finalisation when completion is 100"
+        ),
         "commentary": (
-            "optional concise neutral user-facing update based only on this "
-            "completed stage result; omit when no useful update exists"
+            "required concise neutral update stating completion percentage, whether "
+            "the plan changed, why when changed, and the next step; Runtime creates "
+            "a deterministic fallback from validated fields if omitted"
         ),
     },
     Stage.EXECUTION: {
@@ -76,14 +94,6 @@ _SCHEMAS = {
         "commentary": (
             "optional concise neutral user-facing update based only on this "
             "completed stage result; omit when no useful update exists"
-        ),
-    },
-    Stage.CHECKPOINT: {
-        "decision": "CONTINUE | USER_INPUT_REQUIRED | HALT",
-        "summary": "concise evidence-based checkpoint assessment",
-        "question": (
-            "one concrete question required only for USER_INPUT_REQUIRED; "
-            "null otherwise"
         ),
     },
     Stage.REVIEW: {
@@ -343,7 +353,6 @@ _SYSTEM_PROMPT_ASSETS = {
     Stage.TRIAGE: "system_triage",
     Stage.PLANNING: "system_planning",
     Stage.EXECUTION: "system_execution",
-    Stage.CHECKPOINT: "system_checkpoint",
     Stage.REPLANNING: "system_replanning",
     Stage.REVIEW: "system_review",
     Stage.VERIFICATION: "system_verification",

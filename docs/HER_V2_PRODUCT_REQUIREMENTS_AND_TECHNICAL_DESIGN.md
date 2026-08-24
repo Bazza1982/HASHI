@@ -70,9 +70,12 @@ including:
 - provider reasoning settings;
 - target-model context capacity and Auto Compact maintenance policy;
 - the meaningful-progress idle window;
-- replanning triggers and limits;
 - review limits;
 - tool and permission policies.
+
+The compulsory Adaptive-or-above Replanning cadence is deliberately not a
+deployment-varying parameter: it is fixed at 10 completed results or 300
+seconds and has no count limit.
 
 #### 3.2.1 No unauthorised execution ceilings
 
@@ -100,12 +103,13 @@ The only already-authorised controls that may stop or bound work are:
   [Auto Compact design](HER_V2_AUTO_COMPACTION_DESIGN.md); this exception cannot
   enclose a HER stage, target provider call, tool execution, or provider tool
   loop;
-- the fixed high-risk periodic checkpoint in section 8.5, which gates only the
-  next safe Execution tool boundary after 10 completed results or 300
-  monotonic seconds and never caps results, elapsed runtime, provider attempts,
-  active tools, or completion;
-- the Replanning, Reviewed closure, and Assured Verification/remediation
-  iteration ceilings explicitly defined by HER execution-mode policy; and
+- the compulsory Replanning cadence in section 8.5, which applies to Adaptive
+  (`high`) and above, runs at the next safe Execution boundary after 10
+  completed results or 300 monotonic seconds, and never caps results, elapsed
+  runtime, provider attempts, active tools, Replans, or completion;
+- the Reviewed closure and Assured Verification/remediation iteration ceilings
+  explicitly defined by HER execution-mode policy; compulsory Replanning has no
+  count ceiling; and
 - exactly one safe fresh-connection recovery after an eligible provider
   failure, as defined in section 18. This is a recovery allowance after a typed
   failure, not permission to time-limit a healthy attempt.
@@ -198,9 +202,12 @@ receive the same immutable Execution evidence.
 
 HER v2 keeps five boundaries distinct:
 
-1. Planning, Execution, Replanning, Review, and Verification may include one
-   optional neutral `commentary` string in a successful structured result.
-   Internal checkpoint assessment cannot produce commentary.
+1. Planning, Execution, Review, Verification, and non-cadence Replanning may
+   include one optional neutral `commentary` string in a successful structured
+   result. Every cadence-triggered Replanning must produce one commentary with
+   completion percentage, plan-change status and reason when changed, and the
+   next step. Runtime deterministically reconstructs it from validated fields
+   when the model omits or malforms it.
 2. The commentary lane validates and forwards that string. Lifecycle events,
    state transitions, retries, failures, and tool telemetry never synthesise
    Persona messages.
@@ -268,10 +275,12 @@ Triage is the sole authority for classifying a turn. Once the Triage result has 
 
 This immutability is intentional. Triage quality is improved through prompt refinement, tests, and operational evidence rather than by allowing downstream stages to overrule it.
 
-Checkpoint risk is independent of task complexity and execution effort. It
-does not grant tool or side-effect authority. A malformed work Triage response
-that omits the policy is repaired through the normal structured-output path or
-fails truthfully; Runtime never silently substitutes `STANDARD`.
+The compatibility-named checkpoint risk field is independent of task
+complexity and execution effort. It records risk metadata and does not grant
+tool or side-effect authority, install a model checkpoint assessor, or enable
+or disable compulsory Replanning. A malformed work Triage response that omits
+the policy is repaired through the normal structured-output path or fails
+truthfully; Runtime never silently substitutes `STANDARD`.
 
 ### 4.3 Plan authority
 
@@ -302,11 +311,11 @@ That exception is runtime-delegated, validation-only, and cannot be widened by
 the verifier. Findings may cause Runtime to ask the Primary Agent to remediate;
 the verifier cannot perform that remediation itself.
 
-The periodic checkpoint is a separate internal control, not Review or
-Verification. It is tool-free and may only continue Execution, require one
-concrete user question, or halt further admission while retaining completed
-evidence. It cannot reclassify, widen scope, mutate a plan, authorise a denied
-tool, finalise, or contact the user directly.
+The periodic cadence detector is not a model decision stage. It only observes
+the fixed thresholds and safe boundaries, then unconditionally invokes the
+ordinary tool-free Replanning stage. Replanning cannot reclassify, widen scope,
+authorise a denied tool, or contact the user directly; it may replace the plan
+only within the user's original goal and authority.
 
 ### 4.5 `/steer` authority
 
@@ -346,7 +355,7 @@ compatibility. User interfaces show the descriptive names below.
 |---|---|---|
 | Fast path | `low` | Fast execution with minimal orchestration; no formal Planning stage |
 | Planned | `medium` | Formal Planning followed by Execution |
-| Adaptive | `high` | Planning, Execution, and configurable periodic or evidence-triggered Replanning |
+| Adaptive | `high` | Planning and Execution with compulsory Replanning every 10 completed tool results or 300 seconds at the next safe boundary |
 | Reviewed | `xhigh` | Adaptive behaviour plus one tool-backed independent Review; a failed Review permits one Primary-Agent remediation and one read-only closure Review |
 | Assured | `max` | Adaptive behaviour plus one tool-backed Review and a comprehensive Verification loop against the latest state, with at most three Verification attempts |
 
@@ -600,47 +609,73 @@ call, delivers its Persona-rendered clarification, and then reaches
 the user; they return the missing-information finding to the Primary Agent as
 evidence.
 
-### 8.5 High-risk periodic safe-boundary checkpoint
+### 8.5 Compulsory safe-boundary Replanning cadence
 
-Only Execution cycles whose immutable Triage policy is `HIGH_RISK` install a
-request-local checkpoint coordinator. A checkpoint becomes due at the first
-observed inclusive threshold of 10 newly completed Tool Gateway receipts or
-300 monotonic seconds in that Execution cycle. Successes, completed tool
-errors, and policy denials count once by exact receipt identity; starts,
-incomplete calls, duplicates, and non-Execution activity do not.
+Every Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) Execution cycle
+installs one request-local cadence coordinator after Execution starts. Fast path
+(`low`) and Planned (`medium`) do not. Triage risk metadata cannot enable,
+disable, postpone, or replace this rule.
 
-Due state is checked before admitting a new tool and after recording a
-completed result. The coordinator closes new admission, lets already-active
-tools settle, and runs exactly one tool-free assessment. The result that made
-the checkpoint due is preserved before assessment, and the 11th action cannot
-start first. Crossing 300 seconds never cancels an active tool or provider
-operation. If Execution completes without another safe tool boundary, HER does
-not invent a catch-up or final checkpoint.
+A Replan becomes due at the first inclusive threshold of 10 newly completed
+Tool Gateway receipts or 300 monotonic seconds in the current window.
+Successes, completed tool errors, and policy denials count once by exact receipt
+identity; starts, incomplete calls, cancellations, duplicates, and
+non-Execution activity do not.
 
-`CONTINUE` begins one fresh count/time window. `USER_INPUT_REQUIRED` and `HALT`
-use typed control paths that preserve all completed receipts and never replay a
-side effect. An unavailable or invalid evaluator fails closed as `HALT`, with
-the technical limitation reported truthfully. Immediate Tool Gateway denial,
-approval, missing authority, `/stop`, `/steer`, audit failure, and cancellation
-retain precedence over the cadence.
+Due state is observed before admitting a new tool, after recording a completed
+tool result, and when the provider offers an Execution completion candidate.
+The coordinator closes new admission, lets already-active tools settle, and
+unconditionally enters `EXECUTING -> REPLANNING`. It does not ask a checkpoint
+model whether Replanning should occur. The result that made the cadence due is
+preserved, and the 11th action cannot start first. Crossing 300 seconds never
+cancels an active tool or provider operation. A completion candidate cannot
+bypass a Replan that became due before that safe boundary.
 
-The Primary Agent and bounded sub-agents share one coordinator within an
-authoritative Execution cycle. A later Review or Verification remediation
-starts a fresh cycle. Checkpoints do not increment Review or Verification
-counters, reset meaningful-progress idle state, enter Persona/commentary, or
-replace the ordinary assurance and Finalisation stages. The normative detailed
-contract is [HER v2 High-Risk Periodic Checkpoint Plan](HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md).
+Each Replanning call performs the three-question calibration in section 9,
+activates a new plan version even when the plan content remains unchanged, and
+publishes exactly one Persona-rendered commentary with a stable checkpoint ID.
+If completion is below 100%, HER returns to `EXECUTING`, starts a fresh
+10-result/300-second window, and continues from current evidence without
+replaying completed side effects. If completion is 100%, HER stops adding work
+and routes through Review when the effort requires it, otherwise through
+Finalisation.
+
+Immediate Tool Gateway denial, approval, missing authority, `/stop`, `/steer`,
+audit failure, and cancellation retain their existing authority. The Primary
+Agent and bounded sub-agents share one coordinator within an authoritative
+Execution cycle. A later Review or Verification remediation starts a fresh
+Execution cycle. The cadence does not consume Review or Verification attempt
+allowances, has no Replan-count ceiling, and does not impose a time, token,
+turn, tool-round, provider-attempt, or whole-workflow limit. The normative
+detailed contract is the
+[HER v2 Compulsory Replanning Repair Plan](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md).
 
 ## 9. Stage 4: Replanning
 
 Replanning is available only for `high`, `xhigh`, and `max`. Eligibility is an
-effort policy, not a second classification gate. A `SIMPLE_TASK` remains
-immutably classified as simple but may replan when execution evidence proves
-that the original approach lacks a required capability. After that replan, HER
-may select the configured primary execution profile without changing the
-classification.
+effort policy, not a second classification or risk gate. Once Execution has
+started, every 10-result/300-second threshold unconditionally invokes this
+stage at the next safe boundary. A `SIMPLE_TASK` remains immutably classified
+as simple while Replanning may adjust its approach.
 
 Its purpose is to restore alignment with the immutable user goal and Triage classification when execution evidence shows that the active approach is no longer adequate.
+
+Every compulsory Replanning call answers and validates three questions:
+
+1. **How complete is the original user goal?** Return an evidence-based integer
+   `completion_percent` from 0 through 100 and its basis. Below 100 means
+   authorised work remains. At 100, stop adding work and proceed to Review or
+   Finalisation. Never under-do, over-do, or perform work outside authority.
+2. **Is the current plan still suitable?** Compare the active plan with recent
+   results, failures, constraints, and changed conditions. Return the complete
+   plan, `plan_changed`, and a concrete `change_reason` only when changed. Even
+   an unchanged calibration activates a new plan version. The immutable user
+   goal remains authoritative.
+3. **What should the user be told now?** Return a concise commentary containing
+   the completion percentage, whether the plan changed, why when it changed,
+   and the next step. Persona packaging must preserve protected facts; model or
+   Persona failure uses the existing deterministic Agent display-name fallback
+   under the same stable checkpoint commentary ID.
 
 Replanning considers:
 
@@ -655,21 +690,11 @@ Replanning considers:
 
 Replanning does not consult Habits again. Current execution evidence takes precedence over historical advice.
 
-Triggers are configurable and may include:
-
-- elapsed time since the previous plan decision;
-- meaningful tool-call count;
-- repeated execution failures;
-- material new constraints;
-- failed review requiring remediation.
-
-Replanning limits are configurable. Default ceilings are:
-
-- `high`: 50;
-- `xhigh`: 100;
-- `max`: 200.
-
-These are safety ceilings, not targets.
+The Execution cadence is fixed at 10 completed tool results or 300 monotonic
+seconds, whichever occurs first. Review or Verification findings may also
+invoke Replanning for their separately bounded remediation paths. There is no
+Replanning attempt deadline, token budget, turn/loop ceiling, or total Replan
+count limit, and periodic Replans never exhaust assurance remediation.
 
 ## 10. Habit System
 
@@ -1326,14 +1351,15 @@ HER v2 owns:
 - stage orchestration;
 - lightweight Ledger management;
 - plan version selection;
-- Replanning triggers;
+- compulsory Replanning cadence and plan-version control;
 - Review, closure, Verification, and remediation limits;
 - deterministic mapping from the canonical Execution disposition to terminal
   state, plus technical runtime terminal states.
 
 HER v2 may validate and publish optional neutral commentary returned by a
-successful reasoning stage. HASHI extracts Persona guidance and supplies only
-the explicit marker block to isolated presentation invocations. Combined
+successful reasoning stage. Compulsory Replanning instead requires one update
+and deterministically reconstructs it from validated fields when necessary.
+HASHI extracts Persona guidance and supplies only the explicit marker block to isolated presentation invocations. Combined
 Finalisation consumes that block while producing the canonical Execution
 payload and final message in one call; only a pre-execution Triage clarification
 uses the older required-message presentation interface.
@@ -1398,6 +1424,16 @@ HER v2 is ready for production rollout only when:
 - Direct Response produces exactly one user-facing response;
 - `/steer` terminates the old turn and starts a separately classified new turn;
 - low, medium, high, xhigh, and max policies follow the required stage matrix;
+- high, xhigh, and max unconditionally enter Replanning at each inclusive
+  10-result or 300-second safe boundary after Execution begins, while low and
+  medium never install the cadence;
+- every compulsory Replan validates completion, plan suitability/change, and
+  mandatory commentary fields; activates a new plan version; delivers exactly
+  one Persona-rendered or deterministic fallback update; and resumes or stops
+  additional work according to whether completion is below or equal to 100%;
+- no risk label, checkpoint decision, Replan count, time/token/turn/loop limit,
+  provider option, or test fixture can suppress a due compulsory Replan or cap
+  the whole workflow;
 - cron and heartbeat prompt work defaults to request-local `low` effort across
   scheduled, manual, and recovery triggers; valid job overrides win without
   changing provider reasoning or leaking into later ordinary turns;
@@ -1466,24 +1502,30 @@ The following decisions are authoritative for HER v2:
 11. All available reasoning traces must be logged.
 12. Execution evidence outweighs Habits.
 13. Replanning does not consult Habits again.
-14. Missing optional commentary does not fail execution.
-15. Only successful reasoning-stage output may originate neutral commentary;
+14. Every high-or-above 10-result/300-second boundary forces Replanning; the
+    detector has no `CONTINUE`, ask, or halt decision.
+15. Compulsory Replanning commentary is mandatory and exactly once. Missing or
+    semantically damaged model/Persona prose uses the existing Agent
+    display-name deterministic fallback from validated fields without changing
+    the workflow outcome.
+16. Missing optional commentary in other stages does not fail execution.
+17. Only successful reasoning-stage output may originate neutral commentary;
     workflow events never originate Persona speech.
-16. Commentary and Triage-clarification packaging are presentation-only and
+18. Commentary and Triage-clarification packaging are presentation-only and
     receive one eligible message plus the explicit configured Persona block.
-17. Combined Finalisation receives complete Execution inputs and that Persona
+19. Combined Finalisation receives complete Execution inputs and that Persona
     block, preserves a valid Execution disposition, and produces the final
     required message without a second Persona call.
-18. Reporting failure does not discard completed work.
-19. Recovery is conversational, not transactional.
-20. HER core is provider-neutral and modular.
-21. A model-authored assurance claim is never evidence: only exact, completed,
+20. Reporting failure does not discard completed work.
+21. Recovery is conversational, not transactional.
+22. HER core is provider-neutral and modular.
+23. A model-authored assurance claim is never evidence: only exact, completed,
     current-invocation Tool Registry receipts may support it, and a failed tool
     can support only a failed or inconclusive assessment.
-22. Review and Verification never replace Execution's disposition; Finalisation
+24. Review and Verification never replace Execution's disposition; Finalisation
     reports verified, partly verified, not AI-verifiable, and unavailable work
     distinctly.
-23. Auto Compact is HASHI-owned, tool-free, atomically reversible capacity
+25. Auto Compact is HASHI-owned, tool-free, atomically reversible capacity
     maintenance; its dedicated Tier 2/Tier 3 call watchdog never becomes an
     ordinary HER stage, provider, tool-loop, or execution deadline.
 

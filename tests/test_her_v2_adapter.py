@@ -38,20 +38,20 @@ from orchestrator.flexible_backend_registry import (
 )
 from orchestrator.her_v2.config import ProviderProfile
 from orchestrator.her_v2.checkpoint import (
-    CheckpointInterruption,
     CheckpointSnapshot,
-    HighRiskCheckpointCoordinator,
+    CompulsoryReplanCoordinator,
+    ReplanCompletionInterruption,
+    ReplanDirective,
 )
 from orchestrator.her_v2.commentary import PackagedCommentary
 from orchestrator.her_v2.interfaces import ProviderFailureCode, StageInvocationError
 from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.ledger import ExecutionLedger, LedgerStore
 from orchestrator.her_v2.models import (
-    CheckpointDecision,
-    CheckpointFinding,
     CheckpointPolicy,
     Effort,
     LifecycleState,
+    ReplanningOutcome,
     Stage,
     StageRequest,
     StageResponse,
@@ -1478,6 +1478,33 @@ def _stage_request(stage, *, allow_tools, allow_side_effects=False):
     )
 
 
+def _adapter_replan_outcome(*, completion_percent: int = 50) -> ReplanningOutcome:
+    return ReplanningOutcome(
+        plan={"plan": ["Continue from current evidence."], "success_criteria": ["done"]},
+        completion_percent=completion_percent,
+        completion_basis="Completed tool receipts were compared with the original goal.",
+        plan_changed=False,
+        change_reason="",
+        next_step="Continue the current plan from the next safe boundary.",
+        commentary=(
+            f"Progress is {completion_percent}%. The plan is unchanged. "
+            "Next, continue from the current evidence."
+        ),
+    )
+
+
+def _adapter_replan_directive(
+    snapshot: CheckpointSnapshot,
+    *,
+    completion_percent: int = 50,
+) -> ReplanDirective:
+    return ReplanDirective(
+        checkpoint_id=snapshot.checkpoint_id,
+        outcome=_adapter_replan_outcome(completion_percent=completion_percent),
+        active_plan_id=f"{snapshot.cycle_id}:plan:v{snapshot.checkpoint_index + 1}",
+    )
+
+
 @pytest.mark.asyncio
 async def test_persona_packaging_retries_once_with_a_fresh_backend(tmp_path):
     manager = _FlakyPersonaManager()
@@ -1969,14 +1996,14 @@ async def test_hashi_stage_provider_makes_every_effort_tool_loop_unbounded():
 
 
 @pytest.mark.asyncio
-async def test_hashi_stage_provider_checkpoints_exact_receipts_without_capping_loop():
+async def test_hashi_stage_provider_replans_exact_receipts_without_capping_loop():
     snapshots = []
 
     async def evaluator(snapshot):
         snapshots.append(snapshot)
-        return CheckpointFinding(CheckpointDecision.CONTINUE, "Continue.")
+        return _adapter_replan_directive(snapshot)
 
-    coordinator = HighRiskCheckpointCoordinator(
+    coordinator = CompulsoryReplanCoordinator(
         cycle_id="turn-1:execution-cycle:1",
         evaluator=evaluator,
         clock=lambda: 0.0,
@@ -2048,23 +2075,25 @@ async def test_hashi_stage_provider_checkpoints_exact_receipts_without_capping_l
     assert snapshots[0].completed_result_count == 10
     assert len(response.tool_receipts) == 11
     assert len(registry.executed) == 11
+    assert coordinator.checkpoint_count == 1
     assert manager.backends[0].tool_registry.max_loops is None
     assert all(
         "HASHI_EVIDENCE_RECEIPT" in result.output
         for result in manager.backends[0].results
     )
+    assert "HASHI_COMPULSORY_REPLAN" in manager.backends[0].results[9].output
+    assert "HASHI_COMPULSORY_REPLAN" not in manager.backends[0].results[10].output
 
 
 @pytest.mark.asyncio
-async def test_hashi_stage_provider_preserves_typed_checkpoint_interruption():
-    async def evaluator(_snapshot):
-        return CheckpointFinding(
-            CheckpointDecision.USER_INPUT_REQUIRED,
-            "Production authority is missing.",
-            "May this production action continue?",
+async def test_hashi_stage_provider_preserves_typed_replan_completion():
+    async def evaluator(snapshot):
+        return _adapter_replan_directive(
+            snapshot,
+            completion_percent=100,
         )
 
-    coordinator = HighRiskCheckpointCoordinator(
+    coordinator = CompulsoryReplanCoordinator(
         cycle_id="turn-1:execution-cycle:1",
         evaluator=evaluator,
         clock=lambda: 0.0,
@@ -2117,14 +2146,15 @@ async def test_hashi_stage_provider_preserves_typed_checkpoint_interruption():
         }
     )
 
-    with pytest.raises(CheckpointInterruption) as raised:
+    with pytest.raises(ReplanCompletionInterruption) as raised:
         await provider.invoke(
             ProviderProfile("premium", "openrouter-api", "configured/model"),
             request,
         )
     await coordinator.close()
 
-    assert raised.value.finding.decision is CheckpointDecision.USER_INPUT_REQUIRED
+    assert raised.value.directive.outcome.completion_percent == 100
+    assert raised.value.snapshot.completed_result_count == 10
     assert len(registry.executed) == 10
     assert manager.backends[0].shutdown_called is True
 
@@ -2140,20 +2170,25 @@ async def test_hashi_stage_provider_preserves_typed_checkpoint_interruption():
         HashiApiAdapter,
     ],
 )
-async def test_tool_capable_api_families_do_not_flatten_checkpoint_control(
+async def test_tool_capable_api_families_do_not_flatten_replan_control(
     adapter_type,
 ):
-    finding = CheckpointFinding(CheckpointDecision.HALT, "Unsafe to continue.")
     snapshot = CheckpointSnapshot(
         cycle_id="turn-1:execution-cycle:1",
+        checkpoint_id="turn-1:execution-cycle:1:checkpoint:1",
         checkpoint_index=1,
         trigger_reasons=("completed_result_count",),
         completed_result_count=10,
         elapsed_s=1.0,
         receipt_summaries=(),
         receipt_set_sha256="sha256",
+        boundary_kind="completed_tool_result",
     )
-    interruption = CheckpointInterruption(finding, snapshot, ())
+    interruption = ReplanCompletionInterruption(
+        _adapter_replan_directive(snapshot, completion_percent=100),
+        snapshot,
+        (),
+    )
     adapter = object.__new__(adapter_type)
     adapter.sys_prompt = ""
     adapter.api_key = "test-key"
@@ -2196,13 +2231,13 @@ async def test_tool_capable_api_families_do_not_flatten_checkpoint_control(
     adapter._call_api_once = call_api_once
     adapter._run_tool_calls = interrupt_tool_boundary
 
-    with pytest.raises(CheckpointInterruption) as raised:
+    with pytest.raises(ReplanCompletionInterruption) as raised:
         await adapter_type.generate_response(adapter, "continue", "request-1")
     assert raised.value is interruption
 
 
 @pytest.mark.asyncio
-async def test_policy_denial_returns_before_due_checkpoint_gates_next_admission():
+async def test_policy_denial_returns_before_due_replan_gates_next_admission():
     timeline = []
     snapshots = []
 
@@ -2210,9 +2245,9 @@ async def test_policy_denial_returns_before_due_checkpoint_gates_next_admission(
         snapshots.append(snapshot)
         assert timeline[-1] == "denial_returned"
         timeline.append("checkpoint")
-        return CheckpointFinding(CheckpointDecision.CONTINUE, "Continue.")
+        return _adapter_replan_directive(snapshot)
 
-    coordinator = HighRiskCheckpointCoordinator(
+    coordinator = CompulsoryReplanCoordinator(
         cycle_id="turn-1:execution-cycle:1",
         evaluator=evaluator,
         clock=lambda: 0.0,
@@ -2253,15 +2288,25 @@ async def test_policy_denial_returns_before_due_checkpoint_gates_next_admission(
             )
             assert denied.is_error is True
             timeline.append("denial_returned")
-            await self.tool_registry.execute(
+            replan_control = await self.tool_registry.execute(
                 "file_read", {}, "provider-call-11"
             )
+            assert replan_control.is_error is True
+            assert (
+                replan_control.details["control_disposition"]
+                == "compulsory_replan"
+            )
+            timeline.append("replan_control_returned")
+            allowed = await self.tool_registry.execute(
+                "file_read", {}, "provider-call-12"
+            )
+            assert allowed.is_error is False
             timeline.append("next_tool_completed")
             return BackendResponse(
                 text='{"disposition":"COMPLETED","summary":"done"}',
                 duration_ms=1,
-                tool_call_count=11,
-                tool_loop_count=11,
+                tool_call_count=12,
+                tool_loop_count=12,
             )
 
     class DenialManager(_FakeManager):
@@ -2299,6 +2344,7 @@ async def test_policy_denial_returns_before_due_checkpoint_gates_next_admission(
     assert timeline == [
         "denial_returned",
         "checkpoint",
+        "replan_control_returned",
         "next_tool_completed",
     ]
     assert snapshots[0].completed_result_count == 10
@@ -2307,17 +2353,17 @@ async def test_policy_denial_returns_before_due_checkpoint_gates_next_admission(
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_denial_precedes_time_due_checkpoint():
+async def test_tool_registry_denial_precedes_time_due_replan():
     from tools.registry import ToolResult
 
     now = [0.0]
     timeline = []
 
-    async def evaluator(_snapshot):
+    async def evaluator(snapshot):
         timeline.append("checkpoint")
-        return CheckpointFinding(CheckpointDecision.CONTINUE, "Continue.")
+        return _adapter_replan_directive(snapshot)
 
-    coordinator = HighRiskCheckpointCoordinator(
+    coordinator = CompulsoryReplanCoordinator(
         cycle_id="turn-1:execution-cycle:1",
         evaluator=evaluator,
         clock=lambda: now[0],
@@ -2351,16 +2397,25 @@ async def test_tool_registry_denial_precedes_time_due_checkpoint():
             )
             assert denied.is_error is True
             timeline.append("denial_returned")
-            allowed = await self.tool_registry.execute(
+            replan_control = await self.tool_registry.execute(
                 "file_read", {"path": "inside"}, "provider-allowed"
+            )
+            assert replan_control.is_error is True
+            assert (
+                replan_control.details["control_disposition"]
+                == "compulsory_replan"
+            )
+            timeline.append("replan_control_returned")
+            allowed = await self.tool_registry.execute(
+                "file_read", {"path": "inside"}, "provider-allowed-after-replan"
             )
             assert allowed.is_error is False
             timeline.append("allowed_returned")
             return BackendResponse(
                 text='{"disposition":"COMPLETED","summary":"done"}',
                 duration_ms=1,
-                tool_call_count=2,
-                tool_loop_count=2,
+                tool_call_count=3,
+                tool_loop_count=3,
             )
 
     class PreflightManager(_FakeManager):
@@ -2396,9 +2451,18 @@ async def test_tool_registry_denial_precedes_time_due_checkpoint():
     )
     await coordinator.close()
 
-    assert timeline == ["denial_returned", "checkpoint", "allowed_returned"]
+    assert timeline == [
+        "denial_returned",
+        "checkpoint",
+        "replan_control_returned",
+        "allowed_returned",
+    ]
     assert registry.executed == [
-        ("file_read", {"path": "inside"}, "provider-allowed")
+        (
+            "file_read",
+            {"path": "inside"},
+            "provider-allowed-after-replan",
+        )
     ]
     assert len(registry.denials) == 1
     assert len(response.tool_receipts) == 2

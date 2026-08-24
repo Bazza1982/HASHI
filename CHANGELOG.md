@@ -11,14 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **HER v2 high-risk periodic checkpoints** — Triage now records an immutable
-  `STANDARD` or `HIGH_RISK` Execution policy. High-risk cycles share a
-  request-local safe-boundary coordinator across the Primary Agent and bounded
-  sub-agents, with one tool-free assessment after 10 completed Tool Gateway
-  results or 300 monotonic seconds. Typed continue, user-input, halt, stop, and
-  audit-failure paths preserve exact receipts without replaying side effects,
-  cancelling active tools, adding a tool-loop cap, replacing assurance stages,
-  or synthesising commentary.
+- **HER v2 compulsory periodic Replanning** — corrected the earlier optional
+  high-risk checkpoint implementation. Adaptive (`high`), Reviewed (`xhigh`),
+  and Assured (`max`) Execution now unconditionally enters Replanning at the
+  next safe boundary after 10 completed Tool Gateway results or 300 monotonic
+  seconds, regardless of Triage risk metadata. Every Replan answers completion,
+  plan-suitability, and user-update questions; activates a new plan version even
+  when unchanged; sends exactly one Persona-rendered or deterministic fallback
+  commentary; then resumes below 100% or stops adding work at 100%. Legacy
+  checkpoint decisions and Replan-count ceilings were removed. Exact receipts,
+  active tools, assurance allowances, and unbounded workflow execution remain
+  preserved without side-effect replay.
 - **Provider-neutral multimodal requests** — introduced one validated media
   contract across Telegram intake, `/long`, HER stages, the OpenAI-compatible
   Gateway, Codex, OpenRouter, and the HASHI API backend. Each selected

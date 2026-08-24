@@ -181,16 +181,17 @@ Single mode keeps one provider for Quick and Pro. Hybrid mode stores full
 `provider + model` targets for Quick and Pro. Immediate response, Triage,
 Meditation, Dream, and Simple execution follow Quick by default; Planning,
 Complex execution, High-volume execution (including its sub-agents),
-Replanning, Review, internal high-risk checkpoint assessment, and Finalisation
-follow Pro. Any task route may instead use a Custom target. This phase adds no
+Replanning, Review, and Finalisation follow Pro. Any task route may instead use
+a Custom target. This phase adds no
 automatic cross-provider failover and no picture/media-specific routing.
 
-Triage independently marks each work turn `STANDARD` or `HIGH_RISK`. High-risk
-Execution schedules a tool-free assessment at the next safe boundary after 10
-completed tool results or 300 seconds. This does not cancel active work, cap
-the tool loop, or add a user-facing progress message; ordinary denial,
-approval, permissions, `/stop`, Review, Verification, and Finalisation keep
-their existing authority.
+Triage independently records each work turn as `STANDARD` or `HIGH_RISK` risk
+metadata. Adaptive (`high`) and above Execution, regardless of that label,
+unconditionally enters tool-free Replanning at the next safe boundary after 10
+completed tool results or 300 seconds. Each Replan sends one fact-preserving
+progress message. This does not cancel active work or cap the tool loop,
+Replans, or whole workflow; ordinary denial, approval, permissions, `/stop`,
+Review, Verification, and Finalisation keep their existing authority.
 
 Assured Verification also follows the reviewer/Pro route by default. Review is
 read-only. Verification receives validation-only side-effect authority.

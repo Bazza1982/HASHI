@@ -195,11 +195,11 @@ def test_legacy_terminal_ledgers_load_into_current_plan_b_states(legacy, current
 
 def test_effort_is_orchestration_policy_not_provider_reasoning():
     cases = [
-        (Effort.LOW, False, False, False, False, 0, 0, 0),
-        (Effort.MEDIUM, True, False, False, False, 0, 0, 0),
-        (Effort.HIGH, True, True, False, False, 50, 0, 0),
-        (Effort.XHIGH, True, True, True, False, 100, 1, 0),
-        (Effort.MAX, True, True, True, True, 200, 1, 3),
+        (Effort.LOW, False, False, False, False, 0, 0),
+        (Effort.MEDIUM, True, False, False, False, 0, 0),
+        (Effort.HIGH, True, True, False, False, 0, 0),
+        (Effort.XHIGH, True, True, True, False, 1, 0),
+        (Effort.MAX, True, True, True, True, 1, 3),
     ]
     for (
         effort,
@@ -207,13 +207,11 @@ def test_effort_is_orchestration_policy_not_provider_reasoning():
         replanning,
         review,
         assurance,
-        replans,
         reviews,
         verifications,
     ) in cases:
         policy = resolve_policy(
             effort,
-            replan_limit=replans,
             review_limit=reviews,
             verification_limit=verifications,
         )
@@ -228,7 +226,7 @@ def test_effort_is_orchestration_policy_not_provider_reasoning():
             review,
             assurance,
         ), effort
-        assert policy.max_replans == replans, effort
+        assert not hasattr(policy, "max_replans"), effort
         assert policy.max_reviews == reviews, effort
         assert policy.max_verifications == verifications, effort
 
@@ -249,7 +247,6 @@ def test_her_execution_mode_labels_and_aliases_keep_canonical_wire_values():
 def test_assurance_verification_limit_is_hard_capped_at_three():
     policy = resolve_policy(
         Effort.MAX,
-        replan_limit=100,
         review_limit=10,
         verification_limit=99,
     )
@@ -325,7 +322,7 @@ def test_stage_reasoning_override_is_provider_configuration_not_effort():
             "stage_reasoning": {
                 "triage": "low",
                 "execution": "xhigh",
-                "checkpoint": "high",
+                "replanning": "high",
             },
         }
     )
@@ -336,9 +333,9 @@ def test_stage_reasoning_override_is_provider_configuration_not_effort():
         == "xhigh"
     )
     assert config.profile_for(Stage.REVIEW).reasoning == "max"
-    checkpoint = config.profile_for(Stage.CHECKPOINT)
-    assert checkpoint.name == "reviewer"
-    assert checkpoint.reasoning == "high"
+    replanning = config.profile_for(Stage.REPLANNING)
+    assert replanning.name == "premium"
+    assert replanning.reasoning == "high"
     assert Effort.HIGH.value == "high"
 
 
@@ -430,9 +427,12 @@ def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
         "max_iterations",
         "max_loops",
         "max_output_tokens",
+        "max_replans",
         "max_subagents",
         "max_tokens",
         "reporting_attempts",
+        "replan_limit",
+        "replan_limits",
         "retry_limit",
         "stage_timeout_s",
         "structured_repair_attempts",
@@ -452,7 +452,9 @@ def test_her_v2_rejects_removed_legacy_execution_limits(field):
         "max_completion_tokens",
         "max_loops",
         "max_output_tokens",
+        "max_replans",
         "max_tokens",
+        "replan_limit",
         "timeout_s",
     ],
 )

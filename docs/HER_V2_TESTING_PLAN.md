@@ -75,7 +75,8 @@ This plan covers:
 - Planning and plan versioning;
 - Execution and Tool Gateway coordination;
 - sub-agent orchestration and authority;
-- Replanning triggers and limits;
+- compulsory Replanning cadence, three-question calibration, and absence of a
+  Replan ceiling;
 - Review, closure, Verification, and remediation limits;
 - Finalisation and reporting;
 - lifecycle and terminal-state selection;
@@ -271,7 +272,7 @@ Representative policy combinations must cover:
 | `SIMPLE_TASK` | `high` | Planning, then lightweight-preferred execution; classification unchanged |
 | `COMPLEX_TASK` | `low` | Premium-preferred execution without mandatory Planning |
 | `COMPLEX_TASK` | `medium` | Planning then execution |
-| `COMPLEX_TASK` | `high` | Planning and eligible Replanning |
+| `COMPLEX_TASK` | `high` | Planning and compulsory Replanning at every 10-result/300-second safe boundary |
 | `COMPLEX_TASK` | Reviewed (`xhigh`) | Planning, Replanning, one tool-backed Review, at most one remediation, and one closure Review after remediation |
 | `HIGH_VOLUME_TASK` | Assured (`max`) | Premium orchestration, sub-agents, one tool-backed Review, and up to three latest-state Verification attempts |
 
@@ -433,7 +434,7 @@ Tests must prove:
 - only the primary HER workflow may enter `REPLANNING`;
 - sub-agents, reviewers, and verifiers cannot activate a plan version.
 
-### 7.8 Replanning purpose and limits
+### 7.8 Replanning purpose, compulsory cadence, and no ceiling
 
 Tests must prove that Replanning:
 
@@ -441,22 +442,19 @@ Tests must prove that Replanning:
 - corrects execution drift without redefining the goal;
 - does not consult Habits again;
 - records a new plan version;
-- returns to Execution rather than finalising directly.
+- returns to Execution below 100% completion and stops adding work for
+  assurance/Finalisation at 100%;
 - is controlled by effort policy rather than excluding an immutable
   `SIMPLE_TASK` classification;
-- may escalate execution capability without mutating classification.
+- may escalate execution capability without mutating classification; and
+- runs unconditionally for `high`, `xhigh`, and `max` at each inclusive
+  10-result or 300-second safe boundary, regardless of Triage risk metadata.
 
-Default safety ceilings are:
-
-| Effort | Maximum Replans |
-|---|---:|
-| `high` | 50 |
-| `xhigh` | 100 |
-| `max` | 200 |
-
-These limits must be tested through one parameterised counter/policy test. A real end-to-end loop should use a small configured ceiling such as one or two; the suite must not perform 50, 100, and 200 expensive model Replans merely to prove integer boundaries.
-
-When a ceiling is reached, tests must prove only that no additional Replan begins and the latest valid plan remains intact. Continued execution, Finalisation with limitations, or another truthful terminal result may be valid according to available evidence. A test must not force one model conclusion where the design permits several.
+There is no Replan ceiling. Structural tests reject `max_replans`,
+`replan_limit`, and `replan_limits`; controlled tests must complete more than
+the retired 50/100/200 values without suppressing Replanning, assurance, or
+Finalisation. Review and Verification retain only their separately authorised
+mode-specific limits.
 
 ### 7.9 Review independence, evidence, and limits
 
@@ -525,42 +523,47 @@ of configured, requested, minimum, and cumulative-Execution-derived values,
 including a one-hour Execution case where a 60-second request becomes 5,700
 seconds.
 
-### 7.9.2 High-risk periodic safe-boundary checkpoints
+### 7.9.2 Compulsory safe-boundary Replanning
 
 The complete oracle is the
-[High-Risk Periodic Checkpoint Plan](HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md).
+[Compulsory Replanning Repair Plan](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md).
 Deterministic tests use an injected monotonic clock and exact Tool Gateway
 receipts to prove:
 
-- `STANDARD` installs no coordinator, while `HIGH_RISK` is not due at nine
-  results and `299.999` seconds and is due inclusively at result 10 or exactly
-  `300.0` seconds;
-- count and time becoming due together coalesce into one assessment, completed
-  receipt errors and denials count once, and starts, incomplete calls,
-  cancellations, or duplicate receipt identities do not count;
-- result 10 is retained before assessment and no 11th action begins first;
-- a tool active at minute five is never cancelled by cadence; already-admitted
-  parallel calls settle, new admission waits, and one single-flight leader
-  evaluates the boundary;
-- `CONTINUE` resets the current window once without catch-up, while provider
-  recovery and structured repair in the same Execution cycle do not reset it;
+- `low` and `medium` never install the cadence, while `high`, `xhigh`, and
+  `max` always install it regardless of `STANDARD`/`HIGH_RISK` risk metadata;
+- nine results and `299.999` seconds are not due; result 10 or exactly `300.0`
+  seconds is due inclusively and forces Replanning at the next safe boundary;
+- no checkpoint model chooses `CONTINUE`, ask, or halt; count and time becoming
+  due together coalesce into one compulsory Replan with one stable ID;
+- completed receipt errors and denials count once, while starts, incomplete
+  calls, cancellations, and duplicate receipt identities do not count;
+- result 10 is retained before Replanning and no 11th action begins first;
+- a tool active at minute five is never cancelled; already-admitted parallel
+  calls settle, new admission waits, and one single-flight leader Replans;
+- each Replan validates `completion_percent`, `completion_basis`, the full plan,
+  `plan_changed`, conditional `change_reason`, `next_step`, and commentary;
+- every Replan activates the next plan version even when unchanged, resets its
+  count/time window once without catch-up, and never replays a completed side
+  effect;
+- a due completion candidate cannot bypass Replanning; below 100% starts a
+  continuation Execution from current evidence, while 100% stops new work and
+  routes through Review or Finalisation;
+- missing/malformed Replan commentary and Persona fact loss use the existing
+  Agent display-name deterministic fallback, and stable checkpoint-commentary
+  identity guarantees exactly one delivery;
 - Primary-Agent and bounded-sub-agent results share one window, and each later
   remediation Execution cycle receives a fresh window;
-- short or tool-free completion creates no synthetic checkpoint, while normal
-  Review, Verification, and Finalisation still occur;
-- `USER_INPUT_REQUIRED`, `HALT`, unavailable evaluation, explicit stop/steer,
-  and audit failure preserve completed evidence, stop new admission, and never
-  replay side effects;
-- immediate denial, approval, missing authority, permission, and workzone
-  safeguards retain precedence over cadence;
-- checkpoint evaluation is tool-free, side-effect-free, excluded from Persona
-  and commentary, and does not increment Review/Verification counters or reset
-  meaningful-progress idle state;
-- each tool-capable provider family propagates typed interruption without
-  flattening it into tool output, splitting the conversation, fabricating
-  resume state, or changing the unbounded tool loop; and
-- audit events `checkpoint_due`, `checkpoint_started`,
-  `checkpoint_completed`, and `checkpoint_interrupted_execution` use stable
+- immediate denial, approval, missing authority, permission, workzone, stop,
+  steer, cancellation, and audit safeguards retain their existing authority;
+- each tool-capable provider family preserves typed 100%-completion control and
+  exact receipts without flattening, splitting the conversation, fabricating
+  resume state, or changing the unbounded tool loop;
+- more than every retired 50/100/200 ceiling can complete, a Replanning model
+  operation may cross historical timeout values, and no time, token, turn,
+  loop, provider-attempt, or Replan-count limit can suppress the cadence or
+  whole workflow; and
+- audit events `replan_due`, `replan_started`, and `replan_completed` use stable
   identities and bounded redacted summaries.
 
 ### 7.10 Tool, permission, and workzone authority
@@ -972,12 +975,14 @@ that tool only. Removed legacy generic limit fields remain rejected rather than
 silently restored. No test may encode, bless, or preserve an unauthorised limit
 merely because the current implementation exposes one.
 
-The fixed 10-result/300-second high-risk cadence is tested as a safe-boundary
-scheduler, not as a limit. Regressions must prove that it never cancels a
-healthy provider or active tool, never caps total results or runtime, never
-forces completion, and never manufactures a checkpoint when no continuing tool
-boundary exists. Controlled 601-second and more-than-10-result journeys remain
-unbounded.
+The fixed 10-result/300-second Adaptive-or-above cadence is tested as a
+compulsory safe-boundary Replan interval, not as a limit. Regressions must prove
+that it never cancels a healthy provider or active tool, never caps total
+results, Replans, or runtime, and never invents catch-up cycles. A provider
+completion candidate after the time threshold is itself a safe boundary and
+must not bypass Replanning. A task that completes below both thresholds has no
+synthetic Replan. Controlled 601-second and more-than-10-result journeys remain
+unbounded while taking every due Replan.
 
 ### 10.4 Auto Compact capacity and timeout isolation
 
@@ -1081,14 +1086,20 @@ must prove the following boundaries.
 
 Tests must prove:
 
-- a successful Planning, Execution, Replanning, Review, or Verification result may carry one
-  optional neutral commentary field;
+- a successful Planning, Execution, Review, or Verification result may carry
+  one optional neutral commentary field, while every Replanning invocation
+  produces one required progress commentary;
 - lifecycle transitions, stage-start events, failures, retries, tool telemetry,
-  and finalisation do not synthesise commentary;
-- checkpoint due/start/completion/interruption events and checkpoint model
-  output never enter commentary or generic user delivery;
+  and finalisation do not synthesise ordinary commentary; only a successful
+  validated Replan may invoke its deterministic required-field fallback;
+- cadence due/start/completion events never directly enter commentary or
+  generic user delivery;
 - missing, empty, malformed, or oversized optional commentary does not affect
   stage validation or workflow outcome;
+- missing, empty, malformed, oversized, or fact-damaged compulsory Replan
+  commentary uses a bounded deterministic neutral fallback and the Agent
+  display-name packaging fallback without another Persona model call, under
+  one stable exactly-once event ID;
 - runtime passes neutral commentary through a commentary port, sends combined
   Finalisation output through required delivery, and retains the separate
   required-message presentation interface only for pre-execution Triage
@@ -1165,7 +1176,7 @@ Use table-driven tests for:
 - lifecycle edges;
 - terminal-state decisions;
 - effort-policy selection;
-- Replan, Review, Verification, and periodic-checkpoint counters;
+- compulsory Replan/cadence, Review, and Verification counters;
 - retry/no-progress behaviour;
 - structured normalisation rules;
 - compatible response-carrier selection and ambiguity rejection;
@@ -1214,7 +1225,8 @@ Avoid:
 - tests created only for coverage percentage;
 - tests of third-party behaviour HER does not control;
 - deterministic assertions about subjective Review quality;
-- 50, 100, or 200 real model Replans merely to prove counters;
+- hundreds of expensive real-model Replans when a controlled coordinator and
+  a smaller end-to-end journey already prove the absence of a ceiling;
 - a full Classification × Effort Cartesian suite without a named risk;
 - separate tests for scenarios that differ only in irrelevant wording.
 - assertions that an optional profile must have a particular literal name;
@@ -1289,7 +1301,8 @@ Release must not proceed if any of the following is possible:
 - mandatory Planning is bypassed;
 - a plan changes outside Replanning;
 - Replanning changes goal or classification;
-- Replan, Review, or Verification limits are exceeded;
+- a due compulsory Replan is suppressed, any Replan ceiling exists, or the
+  separately authorised Review/Verification limits are exceeded;
 - Review or Verification contacts the user or becomes workflow authority;
 - sub-agents replan, finalise, or exceed delegated authority;
 - HER bypasses Tool Gateway, permission, or workzone controls;
@@ -1388,7 +1401,8 @@ The release report should state:
 - realistic fault classes exercised;
 - concurrency races exercised;
 - audit paths exercised;
-- Replan, Review, and Verification limits verified;
+- compulsory Replan cadence and lack of a Replan ceiling, plus separate Review
+  and Verification limits, verified;
 - production defects converted into regression scenarios;
 - scenarios where useful work survives non-critical imperfections;
 - scenarios where HER correctly stops at authority, non-retryable, explicit
@@ -1413,7 +1427,8 @@ Before HER v2 is accepted, the suite must contain logically complete coverage of
 10. primary and fallback reasoning-audit persistence;
 11. meaningful-progress and false-progress Timeout behaviour;
 12. unbounded retry with non-retryable and no-progress idle termination;
-13. Replan, Review, and Verification limits;
+13. unbounded compulsory Replanning plus the separately authorised Review and
+    Verification limits;
 14. completed-work preservation;
 15. Habits, Meditation, and Dream authority boundaries;
 16. provider-neutral role configuration;
@@ -1434,9 +1449,11 @@ Before HER v2 is accepted, the suite must contain logically complete coverage of
     source coverage, immutable raw retention, atomic commit/concurrency,
     truthful failure, compactor-only deadline isolation, Gemini statelessness,
     and unchanged initial OpenRouter/DeepSeek tool loops.
-22. high-risk periodic checkpoints: immutable Triage policy, exact 10/300
-    cadence, safe-boundary concurrency, immediate-safety precedence, typed
-    interruption, receipt preservation, audit, and no new execution ceiling.
+22. compulsory Adaptive-or-above Replanning: effort eligibility independent of
+    immutable Triage risk metadata, exact 10/300 cadence, three-question output,
+    plan versioning, mandatory exactly-once Persona/fallback commentary,
+    safe-boundary concurrency, 100% stop, receipt preservation, audit, and no
+    Replan or workflow ceiling.
 
 This is a list of required coverage areas, not an instruction to multiply each area into hundreds of tests.
 

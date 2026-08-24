@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 import uuid
@@ -17,12 +18,19 @@ from orchestrator.multimodal_contract import (
 )
 
 from .audit import AuditPersistenceError, DurableAuditLog
-from .commentary import CommentaryPort, NullCommentaryPort
+from .commentary import (
+    CommentaryPort,
+    CommentaryValidationError,
+    MAX_NEUTRAL_COMMENTARY_CHARS,
+    NeutralCommentary,
+    NullCommentaryPort,
+)
 from .checkpoint import (
     CheckpointInfrastructureInterruption,
-    CheckpointInterruption,
     CheckpointSnapshot,
-    HighRiskCheckpointCoordinator,
+    CompulsoryReplanCoordinator,
+    ReplanCompletionInterruption,
+    ReplanDirective,
 )
 from .config import HERv2Config
 from .interfaces import (
@@ -37,6 +45,7 @@ from .interfaces import (
     RecordingDelivery,
     StageInvocationError,
     StageProvider,
+    StructuredOutputError,
     TurnControl,
     TurnStopped,
 )
@@ -44,8 +53,6 @@ from .ledger import ExecutionLedger, LedgerInvariantError, LedgerStore
 from .lifecycle import LifecycleViolation
 from .models import (
     WORK_CLASSIFICATIONS,
-    CheckpointDecision,
-    CheckpointFinding,
     CheckpointPolicy,
     DeliveryRecord,
     Effort,
@@ -53,6 +60,7 @@ from .models import (
     ExecutionOutcome,
     FinalisationOutcome,
     LifecycleState,
+    ReplanningOutcome,
     ReviewFinding,
     ReviewOutcome,
     Stage,
@@ -84,17 +92,21 @@ from .runtime_support import (
     _terminal_reason,
 )
 from .structured import (
-    parse_checkpoint,
     parse_execution,
     parse_finalisation,
     parse_immediate,
     parse_plan,
+    parse_replanning,
     parse_triage,
     validate_review_response,
     validate_verification_response,
 )
 
 Validator = Callable[[StageResponse], Any]
+
+
+class _ResumeExecutionAfterReplan(BaseException):
+    """A completion-boundary Replan found authorised work still remains."""
 
 
 @dataclass
@@ -138,6 +150,7 @@ class _TurnState:
     last_foreground_cleanup: Mapping[str, Any] = field(default_factory=dict)
     last_execution_invocation_id: str = ""
     execution_elapsed_s: float = 0.0
+    replan_continuation: dict[str, Any] = field(default_factory=dict)
     late_immediate_source_task: asyncio.Task | None = None
     late_immediate_delivery_task: asyncio.Task | None = None
 
@@ -765,7 +778,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         state.ledger.assert_classification(classification)
         policy = resolve_policy(
             state.effort,
-            replan_limit=self.config.replan_limits[state.effort],
             review_limit=self.config.review_limits[state.effort],
             verification_limit=self.config.verification_limits[state.effort],
         )
@@ -809,7 +821,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             and execution.disposition is not ExecutionDisposition.USER_INPUT_REQUIRED
         ):
             execution, _review_outcome = await self._review_and_remediate(
-                state, classification, execution, policy.max_reviews, policy.max_replans
+                state, classification, execution, policy.max_reviews
             )
 
         if (
@@ -822,7 +834,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 classification,
                 execution,
                 policy.max_verifications,
-                policy.max_replans,
             )
 
         await self._transition(state, LifecycleState.FINALISING)
@@ -1068,17 +1079,19 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             error=error,
         )
 
-    def _checkpoint_observer(
+    def _replan_boundary_observer(
         self, state: _TurnState, event: str, payload: Mapping[str, Any]
     ) -> None:
-        checkpoint_index = int(payload.get("checkpoint_index") or 0)
-        cycle_id = str(payload.get("cycle_id") or "checkpoint-cycle")
+        checkpoint_id = str(
+            payload.get("checkpoint_id")
+            or f"{state.ledger.turn_id}:replan-boundary:unknown"
+        )
         ref = self._audit(
             state,
-            stage=Stage.CHECKPOINT.value,
-            role="checkpoint_evaluator",
+            stage=Stage.REPLANNING.value,
+            role="compulsory_replan_cadence",
             event=event,
-            event_id=f"{cycle_id}:checkpoint:{checkpoint_index}:{event}",
+            event_id=f"{checkpoint_id}:{event}",
             payload=dict(payload),
         )
         try:
@@ -1088,100 +1101,87 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             raise
         except Exception as exc:  # noqa: BLE001 - control persistence is required
             raise AuditPersistenceError(
-                "checkpoint control ledger persistence failed"
+                "compulsory Replan control ledger persistence failed"
             ) from exc
-        if event == "checkpoint_completed":
+        if event == "replan_completed":
             state.checkpoint_count += 1
 
-    async def _evaluate_checkpoint(
+    async def _evaluate_compulsory_replan(
         self,
         state: _TurnState,
         classification: TriageClassification,
         snapshot: CheckpointSnapshot,
-    ) -> CheckpointFinding:
+    ) -> ReplanDirective:
         state.ledger.assert_classification(classification)
-        state.ledger.assert_checkpoint_policy(
-            CheckpointPolicy.HIGH_RISK,
-            state.ledger.checkpoint_reason,
-        )
-        _response, finding = await self._invoke_stage(
+        outcome = await self._perform_replan(
             state,
-            Stage.CHECKPOINT,
-            parse_checkpoint,
-            profile=self.config.profile_for(Stage.CHECKPOINT),
-            allow_tools=False,
-            allow_side_effects=False,
-            role_override="checkpoint_evaluator",
-            publish_commentary=False,
-            context={
-                "classification": classification.value,
-                "goal_ref": state.ledger.goal_ref,
-                "checkpoint_policy": CheckpointPolicy.HIGH_RISK.value,
-                "checkpoint_reason": state.ledger.checkpoint_reason,
-                "active_plan": state.active_plan,
-                "execution_cycle_id": snapshot.cycle_id,
-                "checkpoint_index": snapshot.checkpoint_index,
-                "trigger_reasons": list(snapshot.trigger_reasons),
-                "completed_result_count": snapshot.completed_result_count,
-                "elapsed_s": snapshot.elapsed_s,
-                "completed_receipts": [
-                    dict(item) for item in snapshot.receipt_summaries
-                ],
-                "receipt_set_sha256": snapshot.receipt_set_sha256,
-                "prospective_action": (
-                    dict(snapshot.prospective_action)
-                    if snapshot.prospective_action is not None
-                    else None
-                ),
-                "current_limitations": list(state.limitations),
-                "authority": "advisory_tool_free_checkpoint_only",
-                "may_replan": False,
-                "may_contact_user": False,
-                "may_finalise": False,
-                "may_authorise_tools": False,
-                "habits_included": False,
-            },
+            classification,
+            reason="compulsory_execution_cadence",
+            reviewer_findings=(),
+            checkpoint_id=snapshot.checkpoint_id,
+            cadence_context=snapshot.replan_payload(),
         )
-        assert isinstance(finding, CheckpointFinding)
-        return finding
+        state.replan_continuation = {
+            "checkpoint_id": snapshot.checkpoint_id,
+            "trigger_reasons": list(snapshot.trigger_reasons),
+            "completion_percent": outcome.completion_percent,
+            "completion_basis": outcome.completion_basis,
+            "plan_changed": outcome.plan_changed,
+            "change_reason": outcome.change_reason or None,
+            "next_step": outcome.next_step,
+            "completed_receipts": [
+                dict(item) for item in snapshot.receipt_summaries
+            ],
+            "completed_evidence_refs": [
+                str(item.get("evidence_ref") or "")
+                for item in snapshot.receipt_summaries
+                if str(item.get("evidence_ref") or "")
+            ],
+            "completed_side_effects_must_not_be_replayed": [
+                {
+                    "evidence_ref": item.get("evidence_ref"),
+                    "tool_name": item.get("tool_name"),
+                    "status": item.get("status"),
+                    "output_sha256": item.get("output_sha256"),
+                }
+                for item in snapshot.receipt_summaries
+                if item.get("completed") and not item.get("read_only")
+            ],
+        }
+        if outcome.completion_percent < 100:
+            await self._transition(state, LifecycleState.EXECUTING)
+        assert state.ledger.plan_id is not None
+        return ReplanDirective(
+            checkpoint_id=snapshot.checkpoint_id,
+            outcome=outcome,
+            active_plan_id=state.ledger.plan_id,
+        )
 
-    def _new_checkpoint_coordinator(
+    def _new_replan_coordinator(
         self, state: _TurnState, classification: TriageClassification
-    ) -> HighRiskCheckpointCoordinator | None:
+    ) -> CompulsoryReplanCoordinator | None:
         state.execution_cycle_serial += 1
-        if state.ledger.checkpoint_policy is not CheckpointPolicy.HIGH_RISK:
+        if state.effort not in {Effort.HIGH, Effort.XHIGH, Effort.MAX}:
             return None
         cycle_id = (
             f"{state.ledger.turn_id}:execution-cycle:{state.execution_cycle_serial}"
         )
-        return HighRiskCheckpointCoordinator(
+        return CompulsoryReplanCoordinator(
             cycle_id=cycle_id,
-            evaluator=lambda snapshot: self._evaluate_checkpoint(
+            evaluator=lambda snapshot: self._evaluate_compulsory_replan(
                 state, classification, snapshot
             ),
-            observer=lambda event, payload: self._checkpoint_observer(
+            observer=lambda event, payload: self._replan_boundary_observer(
                 state, event, payload
             ),
             clock=self.checkpoint_clock,
         )
 
-    def _execution_from_checkpoint_interruption(
-        self, state: _TurnState, interruption: CheckpointInterruption
+    def _execution_from_replan_completion(
+        self, state: _TurnState, interruption: ReplanCompletionInterruption
     ) -> ExecutionOutcome:
         self._merge_checkpoint_receipts(state, interruption.receipts)
-        state.checkpoint_count = max(
-            state.checkpoint_count, interruption.snapshot.checkpoint_index
-        )
-        finding = interruption.finding
-        limitations: list[str] = []
-        if finding.decision is CheckpointDecision.HALT:
-            limitations.append(finding.summary)
-        if interruption.evaluator_failure is not None:
-            limitations.append(
-                "Checkpoint evaluator unavailable: "
-                f"[{interruption.evaluator_failure.error_code}] "
-                f"{interruption.evaluator_failure.human_description}"
-            )
+        replan = interruption.directive.outcome
         evidence_refs = tuple(
             receipt.evidence_ref
             for receipt in interruption.receipts
@@ -1189,37 +1189,27 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         )
         outcome = ExecutionOutcome(
             disposition=(
-                ExecutionDisposition.USER_INPUT_REQUIRED
-                if finding.decision is CheckpointDecision.USER_INPUT_REQUIRED
-                else ExecutionDisposition.FAILED
+                ExecutionDisposition.COMPLETED_WITH_LIMITATIONS
+                if state.limitations
+                else ExecutionDisposition.COMPLETED
             ),
-            summary=finding.summary,
+            summary=replan.completion_basis,
             evidence_refs=evidence_refs,
-            limitations=tuple(dict.fromkeys(limitations)),
-            clarification=finding.question,
-            remaining_work=(
-                "Further high-risk tool execution was not admitted after the checkpoint.",
-            ),
+            limitations=tuple(dict.fromkeys(state.limitations)),
+            remaining_work=(),
         )
         self._audit(
             state,
-            stage=Stage.CHECKPOINT.value,
+            stage=Stage.REPLANNING.value,
             role="runtime",
-            event="checkpoint_interrupted_execution",
-            event_id=(
-                f"{interruption.snapshot.cycle_id}:checkpoint:"
-                f"{interruption.snapshot.checkpoint_index}:execution-interrupted"
-            ),
+            event="replan_confirmed_execution_complete",
+            event_id=f"{interruption.snapshot.checkpoint_id}:execution-complete",
             payload={
-                "decision": finding.decision.value,
-                "summary": finding.summary,
-                "question_present": bool(finding.question),
+                "completion_percent": replan.completion_percent,
+                "completion_basis": replan.completion_basis,
+                "plan_changed": replan.plan_changed,
+                "next_step": replan.next_step,
                 "evidence_refs": list(evidence_refs),
-                "evaluator_failure": (
-                    interruption.evaluator_failure.audit_payload()
-                    if interruption.evaluator_failure is not None
-                    else None
-                ),
                 "execution_replayed": False,
                 "further_tool_admission": False,
             },
@@ -1227,7 +1217,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         state.last_execution_response = StageResponse(
             data=_execution_payload(outcome),
             provider="hashi-runtime",
-            model="checkpoint-control",
+            model="compulsory-replan-control",
             evidence_refs=evidence_refs,
             tool_receipts=tuple(interruption.receipts),
         )
@@ -1253,7 +1243,15 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
     ) -> ExecutionOutcome | None:
         started_at = time.monotonic()
         try:
-            return await self._execute_once_untracked(state, classification)
+            while True:
+                try:
+                    return await self._execute_once_untracked(state, classification)
+                except _ResumeExecutionAfterReplan:
+                    # A provider-completion safe boundary ran the compulsory
+                    # Replan and found authorised work remains. The previous
+                    # candidate and exact receipts are supplied to this fresh
+                    # Execution invocation; completed side effects are not replayed.
+                    continue
         finally:
             # Verification time is derived from the real wall-clock cost of every
             # authoritative Execution attempt, including high-volume sub-agents and
@@ -1264,7 +1262,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
     async def _execute_once_untracked(
         self, state: _TurnState, classification: TriageClassification
     ) -> ExecutionOutcome | None:
-        checkpoint = self._new_checkpoint_coordinator(state, classification)
+        replan_coordinator = self._new_replan_coordinator(state, classification)
         sub_agent_results: tuple[SubAgentResult, ...] = ()
         state.last_execution_response = None
         state.last_execution_structure_valid = False
@@ -1272,7 +1270,9 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         state.last_execution_failure = None
         try:
             if classification is TriageClassification.HIGH_VOLUME_TASK:
-                sub_agent_results = await self._run_subagents(state, checkpoint)
+                sub_agent_results = await self._run_subagents(
+                    state, replan_coordinator
+                )
                 for result in sub_agent_results:
                     for ref in result.evidence_refs:
                         if ref not in state.evidence_refs:
@@ -1282,6 +1282,36 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 if state.execution_capability_escalated
                 else self.config.execution_profile_for(classification)
             )
+            execution_invocation = state.stage_invocation_serial + 1
+            execution_context: dict[str, Any] = {
+                "active_plan": state.active_plan,
+                "sub_agent_results": [
+                    {
+                        "assignment_id": result.assignment_id,
+                        "disposition": result.disposition.value,
+                        "summary": result.summary,
+                        "evidence_refs": list(result.evidence_refs),
+                        "limitations": list(result.limitations),
+                        "attachment_ids": list(result.attachment_ids),
+                    }
+                    for result in sub_agent_results
+                ],
+            }
+            if replan_coordinator is not None:
+                execution_context.update(
+                    {
+                        "replan_continuation": (
+                            dict(state.replan_continuation)
+                            if state.replan_continuation
+                            else None
+                        ),
+                        "continuation_rules": {
+                            "continue_from_current_workspace": True,
+                            "preserve_completed_evidence": True,
+                            "never_repeat_completed_side_effects_because_of_replanning": True,
+                        },
+                    }
+                )
             _response, execution = await self._invoke_stage(
                 state,
                 Stage.EXECUTION,
@@ -1289,35 +1319,87 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 profile=profile,
                 allow_tools=True,
                 allow_side_effects=not self.config.shadow_mode,
-                context={
-                    "active_plan": state.active_plan,
-                    "sub_agent_results": [
-                        {
-                            "assignment_id": result.assignment_id,
-                            "disposition": result.disposition.value,
-                            "summary": result.summary,
-                            "evidence_refs": list(result.evidence_refs),
-                            "limitations": list(result.limitations),
-                            "attachment_ids": list(result.attachment_ids),
-                        }
-                        for result in sub_agent_results
-                    ],
-                },
+                context=execution_context,
                 defer_structured_error=True,
-                checkpoint_coordinator=checkpoint,
+                publish_commentary=replan_coordinator is None,
+                checkpoint_coordinator=replan_coordinator,
             )
-        except CheckpointInterruption as exc:
-            return self._execution_from_checkpoint_interruption(state, exc)
+            state.last_execution_response = _response
+            state.last_execution_structure_valid = isinstance(
+                execution, ExecutionOutcome
+            )
+            for ref in _response.evidence_refs:
+                if ref not in state.evidence_refs:
+                    state.evidence_refs.append(ref)
+            if isinstance(execution, ExecutionOutcome) and _response.evidence_refs:
+                execution = replace(
+                    execution,
+                    evidence_refs=tuple(
+                        dict.fromkeys(
+                            (*execution.evidence_refs, *_response.evidence_refs)
+                        )
+                    ),
+                )
+
+            if replan_coordinator is not None:
+                candidate_payload: Mapping[str, Any] = (
+                    _execution_payload(execution)
+                    if isinstance(execution, ExecutionOutcome)
+                    else {
+                        "structured": False,
+                        "text": _response.text,
+                        "data": dict(_response.data),
+                        "evidence_refs": list(_response.evidence_refs),
+                    }
+                )
+                directive = await replan_coordinator.at_execution_completion(
+                    execution_candidate=candidate_payload,
+                )
+                if directive is not None:
+                    self._audit(
+                        state,
+                        stage=Stage.EXECUTION.value,
+                        role="runtime",
+                        event="execution_candidate_superseded_by_replan",
+                        event_id=(
+                            f"{directive.checkpoint_id}:execution-candidate-superseded"
+                        ),
+                        payload={
+                            "completion_percent": (
+                                directive.outcome.completion_percent
+                            ),
+                            "plan_changed": directive.outcome.plan_changed,
+                            "execution_replayed": False,
+                            "completed_side_effects_preserved": True,
+                        },
+                    )
+                    raise _ResumeExecutionAfterReplan()
+
+                if _response.validation_source not in {
+                    "reasoning_recovery",
+                    "deferred_to_finalisation",
+                }:
+                    await self._publish_stage_commentary(
+                        state,
+                        response=_response,
+                        stage=Stage.EXECUTION,
+                        invocation=execution_invocation,
+                        attempt=_response.provider_attempt,
+                    )
+        except ReplanCompletionInterruption as exc:
+            return self._execution_from_replan_completion(state, exc)
         except CheckpointInfrastructureInterruption as exc:
             if isinstance(exc.cause, (TurnStopped, AuditPersistenceError)):
                 raise exc.cause
+            if isinstance(exc.cause, StageInvocationError):
+                raise exc.cause
             raise StageInvocationError(
-                "high-risk checkpoint infrastructure failed: "
+                "compulsory Replan infrastructure failed: "
                 f"{type(exc.cause).__name__}: {exc.cause}",
                 retryable=False,
                 code=ProviderFailureCode.PROVIDER_UNKNOWN,
                 human_description=(
-                    "The high-risk checkpoint control boundary failed "
+                    "The compulsory Replanning control boundary failed "
                     "unexpectedly, so execution stopped."
                 ),
             ) from exc.cause
@@ -1329,34 +1411,21 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             state.last_execution_error = f"[{exc.error_code}] {exc.human_description}"
             return None
         finally:
-            if checkpoint is not None:
-                self._merge_checkpoint_receipts(state, checkpoint.receipts)
-                state.checkpoint_count = max(
-                    state.checkpoint_count, checkpoint.checkpoint_count
+            if replan_coordinator is not None:
+                self._merge_checkpoint_receipts(
+                    state, replan_coordinator.receipts
                 )
-                await checkpoint.close()
+                await replan_coordinator.close()
 
-        state.last_execution_response = _response
-        state.last_execution_structure_valid = isinstance(execution, ExecutionOutcome)
-        for ref in _response.evidence_refs:
-            if ref not in state.evidence_refs:
-                state.evidence_refs.append(ref)
         if execution is None:
             return None
         assert isinstance(execution, ExecutionOutcome)
-        if _response.evidence_refs:
-            execution = replace(
-                execution,
-                evidence_refs=tuple(
-                    dict.fromkeys((*execution.evidence_refs, *_response.evidence_refs))
-                ),
-            )
         return execution
 
     async def _run_subagents(
         self,
         state: _TurnState,
-        checkpoint: HighRiskCheckpointCoordinator | None,
+        checkpoint: CompulsoryReplanCoordinator | None,
     ) -> tuple[SubAgentResult, ...]:
         raw_assignments = (
             state.active_plan.get("sub_agents", [])
@@ -1491,7 +1560,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         self,
         state: _TurnState,
         assignment: SubAgentAssignment,
-        checkpoint: HighRiskCheckpointCoordinator | None,
+        checkpoint: CompulsoryReplanCoordinator | None,
     ) -> SubAgentResult:
         profile = self.config.profile_for_name(assignment.profile)
         role = f"sub_agent:{assignment.assignment_id}"
@@ -1619,31 +1688,97 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         *,
         reason: str,
         reviewer_findings: Sequence[str],
-    ) -> None:
+        checkpoint_id: str = "",
+        cadence_context: Mapping[str, Any] | None = None,
+    ) -> ReplanningOutcome:
         if state.active_plan is None or state.ledger.plan_id is None:
             raise StageInvocationError(
                 "Replanning requires an active plan", retryable=False
             )
+        prior_plan = dict(state.active_plan)
+        logical_replan_id = str(checkpoint_id or "").strip() or (
+            f"{state.ledger.turn_id}:replan:{state.replan_count + 1}"
+        )
+
+        def validate_replan(response: StageResponse) -> ReplanningOutcome:
+            outcome = parse_replanning(response)
+            assert isinstance(outcome, ReplanningOutcome)
+            previous_semantics = self._semantic_plan(prior_plan)
+            replacement_semantics = self._semantic_plan(outcome.plan)
+            if not outcome.plan_changed and replacement_semantics != previous_semantics:
+                raise StructuredOutputError(
+                    "plan_changed=false requires the replacement plan to remain "
+                    "semantically unchanged"
+                )
+            if outcome.plan_changed and replacement_semantics == previous_semantics:
+                raise StructuredOutputError(
+                    "plan_changed=true requires a materially changed replacement plan"
+                )
+            return outcome
+
         await self._transition(state, LifecycleState.REPLANNING)
-        _response, plan = await self._invoke_stage(
+        response, outcome = await self._invoke_stage(
             state,
             Stage.REPLANNING,
-            parse_plan,
+            validate_replan,
             allow_tools=False,
+            publish_commentary=False,
             context={
                 "classification": classification.value,
-                "active_plan": state.active_plan,
+                "active_plan": prior_plan,
                 "reason": reason,
+                "checkpoint_id": logical_replan_id,
+                "cadence_triggered": bool(checkpoint_id),
+                "cadence": dict(cadence_context or {}),
                 "reviewer_findings": list(reviewer_findings),
                 "execution_evidence_refs": list(state.evidence_refs),
+                "current_limitations": list(state.limitations),
+                "required_self_questions": [
+                    {
+                        "question": "How complete is the original authorised goal?",
+                        "required_fields": [
+                            "completion_percent",
+                            "completion_basis",
+                        ],
+                    },
+                    {
+                        "question": "Is the active plan still appropriate?",
+                        "required_fields": [
+                            "plan_changed",
+                            "change_reason",
+                            "plan",
+                            "success_criteria",
+                        ],
+                    },
+                    {
+                        "question": "What update should be sent to the user now?",
+                        "required_fields": ["next_step", "commentary"],
+                    },
+                ],
+                "completion_routing": {
+                    "below_100": "resume_execution",
+                    "at_100": "stop_adding_work_then_review_or_finalise",
+                },
+                "goal_is_immutable": True,
+                "classification_is_immutable": True,
+                "authority_may_not_expand": True,
+                "replan_count_is_unbounded": True,
                 "habits_included": False,
             },
         )
+        assert isinstance(outcome, ReplanningOutcome)
         state.replan_count += 1
-        self._activate_plan(state, plan, replacement=True)
+        self._activate_plan(state, outcome.plan, replacement=True)
+        await self._publish_mandatory_replan_commentary(
+            state,
+            outcome=outcome,
+            response=response,
+            checkpoint_id=logical_replan_id,
+        )
         if (
             classification is TriageClassification.SIMPLE_TASK
             and not state.execution_capability_escalated
+            and outcome.completion_percent < 100
         ):
             state.execution_capability_escalated = True
             self._audit(
@@ -1662,6 +1797,170 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     "reason": reason,
                 },
             )
+        return outcome
+
+    @staticmethod
+    def _semantic_plan(plan: Mapping[str, Any]) -> str:
+        semantic = {
+            key: plan.get(key)
+            for key in ("plan", "success_criteria", "parallel_groups", "sub_agents")
+            if key in plan
+        }
+        try:
+            return json.dumps(
+                semantic,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        except (TypeError, ValueError):
+            return repr(semantic)
+
+    async def _publish_mandatory_replan_commentary(
+        self,
+        state: _TurnState,
+        *,
+        outcome: ReplanningOutcome,
+        response: StageResponse,
+        checkpoint_id: str,
+    ) -> None:
+        change_fact = (
+            outcome.change_reason[:1_000].strip()
+            if outcome.plan_changed
+            else "plan is unchanged"
+        )
+        change_sentence = (
+            f"The plan changed because {change_fact}."
+            if outcome.plan_changed
+            else "The plan is unchanged."
+        )
+        deterministic_prefix = (
+            f"Progress is {outcome.completion_percent}%. {change_sentence} Next: "
+        )
+        next_fact = outcome.next_step[
+            : max(1, MAX_NEUTRAL_COMMENTARY_CHARS - len(deterministic_prefix))
+        ].strip()
+        deterministic = f"{deterministic_prefix}{next_fact}"
+        candidate = str(outcome.commentary or "").strip()
+        normalized_candidate = " ".join(candidate.split()).casefold()
+        required_fragments = [
+            f"{outcome.completion_percent}%".casefold(),
+            " ".join(outcome.next_step.split()).casefold(),
+        ]
+        plan_status_fact = (
+            "plan changed" if outcome.plan_changed else "plan is unchanged"
+        )
+        if outcome.plan_changed:
+            required_fragments.append(
+                " ".join(outcome.change_reason.split()).casefold()
+            )
+            has_plan_status_claim = any(
+                marker in normalized_candidate
+                for marker in (
+                    "plan changed",
+                    "plan has changed",
+                    "plan was changed",
+                    "changed the plan",
+                    "adjusted the plan",
+                    "revised the plan",
+                    "计划改变",
+                    "计划已改变",
+                    "计划有变",
+                    "计划已调整",
+                    "调整了计划",
+                )
+            )
+        else:
+            has_plan_status_claim = any(
+                marker in normalized_candidate
+                for marker in (
+                    "unchanged",
+                    "not changed",
+                    "did not change",
+                    "remains the same",
+                    "计划未改变",
+                    "计划没有改变",
+                    "计划不变",
+                    "计划保持不变",
+                )
+            )
+        if not has_plan_status_claim or not candidate or any(
+            fragment not in normalized_candidate for fragment in required_fragments
+        ):
+            candidate = deterministic
+            fallback_used = True
+        else:
+            fallback_used = False
+
+        try:
+            protected_facts = [
+                f"{outcome.completion_percent}%",
+                next_fact,
+                plan_status_fact,
+            ]
+            if outcome.plan_changed:
+                protected_facts.append(change_fact)
+            commentary = NeutralCommentary(
+                event_id=f"{checkpoint_id}:commentary",
+                turn_id=state.ledger.turn_id,
+                stage=Stage.REPLANNING,
+                attempt=max(1, int(response.provider_attempt or 1)),
+                text=candidate,
+                required_facts=tuple(protected_facts),
+                minimal_persona_fallback_reason=(
+                    "replan_model_commentary_fallback" if fallback_used else ""
+                ),
+            )
+        except CommentaryValidationError:
+            commentary = NeutralCommentary(
+                event_id=f"{checkpoint_id}:commentary",
+                turn_id=state.ledger.turn_id,
+                stage=Stage.REPLANNING,
+                attempt=max(1, int(response.provider_attempt or 1)),
+                text=deterministic,
+                required_facts=tuple(protected_facts),
+                minimal_persona_fallback_reason=(
+                    "replan_model_commentary_fallback"
+                ),
+            )
+            fallback_used = True
+
+        accepted = False
+        error_type = ""
+        try:
+            accepted = bool(await self.commentary.publish(commentary))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - presentation cannot govern work
+            error_type = type(exc).__name__
+            self.logger.warning(
+                "HER v2 mandatory Replan commentary failed safely at %s: %s",
+                checkpoint_id,
+                exc,
+            )
+        self._audit_optional_commentary(
+            state,
+            event="replan_commentary_publish_result",
+            event_id=f"{commentary.event_id}:publish",
+            payload={
+                "stage": Stage.REPLANNING.value,
+                "checkpoint_id": checkpoint_id,
+                "accepted": accepted,
+                "fallback_used": fallback_used,
+                "error_type": error_type or None,
+                "completion_percent": outcome.completion_percent,
+                "plan_changed": outcome.plan_changed,
+                "text_sha256": hashlib.sha256(
+                    commentary.text.encode("utf-8")
+                ).hexdigest(),
+                "text_length": len(commentary.text),
+                "workflow_authority": False,
+                "exactly_once_identity": commentary.event_id,
+            },
+        )
+        if accepted:
+            state.progress.record("commentary", commentary.text)
 
     async def _review_and_remediate(
         self,
@@ -1669,7 +1968,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         classification: TriageClassification,
         execution: ExecutionOutcome,
         max_reviews: int,
-        max_replans: int,
     ) -> tuple[ExecutionOutcome | None, ReviewOutcome | None]:
         if max_reviews <= 0:
             return execution, None
@@ -1693,29 +1991,33 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             return execution, finding.outcome
 
         initial_findings = finding.findings or (finding.summary,)
-        can_remediate = (
-            state.active_plan is not None and state.replan_count < max_replans
-        )
+        can_remediate = state.active_plan is not None
         if not can_remediate:
             self._merge_assurance_limitations(state, initial_findings)
             return execution, finding.outcome
 
-        await self._perform_replan(
+        replan = await self._perform_replan(
             state,
             classification,
             reason="independent_review_failed",
             reviewer_findings=initial_findings,
         )
-        await self._transition(state, LifecycleState.EXECUTING)
-        execution = await self._execute_once(state, classification)
-        await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
-        if execution is None:
-            self._merge_assurance_limitations(state, initial_findings)
-            return None, finding.outcome
-        self._merge_execution_evidence(state, execution)
-        state.review_remediated = True
-        if execution.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
-            return execution, finding.outcome
+        if replan.completion_percent < 100:
+            await self._transition(state, LifecycleState.EXECUTING)
+            execution = await self._execute_once(state, classification)
+            await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
+            if execution is None:
+                self._merge_assurance_limitations(state, initial_findings)
+                return None, finding.outcome
+            self._merge_execution_evidence(state, execution)
+            state.review_remediated = True
+            if execution.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
+                return execution, finding.outcome
+        else:
+            # Completion at 100% is authoritative for controlling further work:
+            # keep the existing Execution evidence and continue only with the
+            # applicable read-only/validation assurance stage.
+            await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
 
         # Reviewed always closes a remediated finding once. Assured proceeds
         # from remediation into its stronger Verification stage instead.
@@ -1786,7 +2088,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         classification: TriageClassification,
         execution: ExecutionOutcome,
         max_verifications: int,
-        max_replans: int,
     ) -> tuple[ExecutionOutcome | None, VerificationOutcome | None]:
         last_outcome: VerificationOutcome | None = None
         while state.verification_count < max_verifications:
@@ -1826,7 +2127,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             can_remediate = (
                 state.verification_count < max_verifications
                 and state.active_plan is not None
-                and state.replan_count < max_replans
             )
             if not can_remediate:
                 self._merge_assurance_limitations(
@@ -1838,7 +2138,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 )
                 return execution, last_outcome
 
-            await self._perform_replan(
+            replan = await self._perform_replan(
                 state,
                 classification,
                 reason="assurance_verification_failed",
@@ -1846,17 +2146,21 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     check.observed or check.claim for check in failed_checks
                 ),
             )
-            await self._transition(state, LifecycleState.EXECUTING)
-            execution = await self._execute_once(state, classification)
-            await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
-            if execution is None:
-                self._merge_assurance_limitations(state, (finding.summary,))
-                return None, last_outcome
-            self._merge_execution_evidence(state, execution)
-            if execution.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
-                return execution, last_outcome
+            if replan.completion_percent < 100:
+                await self._transition(state, LifecycleState.EXECUTING)
+                execution = await self._execute_once(state, classification)
+                await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
+                if execution is None:
+                    self._merge_assurance_limitations(state, (finding.summary,))
+                    return None, last_outcome
+                self._merge_execution_evidence(state, execution)
+                if execution.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
+                    return execution, last_outcome
+            else:
+                await self._transition(state, LifecycleState.EXECUTION_COMPLETED)
             # The next loop is a fresh Verification invocation against the
-            # remediated, latest workspace state.
+            # latest workspace state, whether or not Replanning found more
+            # substantive work was still authorised.
         return execution, last_outcome
 
     async def _verification_once(

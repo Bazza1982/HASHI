@@ -970,8 +970,8 @@ class _EvidenceRecordingToolRegistry:
         raise RuntimeError("completed tool result has no matching evidence receipt")
 
 
-class _HighRiskCheckpointToolRegistry:
-    """Gate new high-risk tools at exact post-receipt safe boundaries."""
+class _CompulsoryReplanToolRegistry:
+    """Run compulsory Replanning at exact Execution tool boundaries."""
 
     def __init__(self, base: _EvidenceRecordingToolRegistry, coordinator: Any):
         self._base = base
@@ -993,7 +993,8 @@ class _HighRiskCheckpointToolRegistry:
         )
         if immediate_denial is not None:
             await self._coordinator.record_immediate_result(
-                self._base.receipt_for_result(immediate_denial)
+                self._base.receipt_for_result(immediate_denial),
+                result_summary=str(getattr(immediate_denial, "output", "") or ""),
             )
             return immediate_denial
         admission = await self._coordinator.before_tool(
@@ -1001,13 +1002,34 @@ class _HighRiskCheckpointToolRegistry:
             arguments=arguments,
             tool_call_id=tool_call_id,
         )
+        if not admission.admitted:
+            from tools.registry import ToolResult
+
+            directive = admission.directive
+            if directive is None:
+                raise RuntimeError("Replan-blocked admission has no directive")
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output=directive.execution_control_message(
+                    requested_tool_executed=False
+                ),
+                is_error=True,
+                details={
+                    "control_disposition": "compulsory_replan",
+                    "checkpoint_id": directive.checkpoint_id,
+                    "completion_percent": directive.outcome.completion_percent,
+                    "plan_changed": directive.outcome.plan_changed,
+                    "tool_executed": False,
+                },
+            )
         try:
             result = await self._base.execute(tool_name, arguments, tool_call_id)
             receipt = self._base.receipt_for_result(result)
             details = dict(getattr(result, "details", None) or {})
-            await self._coordinator.after_tool(
+            directive = await self._coordinator.after_tool(
                 admission,
                 receipt,
+                result_summary=str(getattr(result, "output", "") or ""),
                 immediate_safety_result=(
                     str(details.get("control_disposition") or "")
                     in {"approval_required", "denied", "user_input_required"}
@@ -1016,6 +1038,33 @@ class _HighRiskCheckpointToolRegistry:
         except BaseException:
             await self._coordinator.abandon_tool(admission)
             raise
+        if directive is not None:
+            from tools.registry import ToolResult
+
+            output = str(getattr(result, "output", "") or "")
+            output = (
+                f"{output.rstrip()}\n\n"
+                f"{directive.execution_control_message(requested_tool_executed=True)}"
+            )
+            replan_details = dict(getattr(result, "details", None) or {})
+            replan_details.update(
+                {
+                    "control_disposition": "compulsory_replan",
+                    "checkpoint_id": directive.checkpoint_id,
+                    "completion_percent": directive.outcome.completion_percent,
+                    "plan_changed": directive.outcome.plan_changed,
+                    "tool_executed": True,
+                }
+            )
+            result = ToolResult(
+                tool_call_id=str(
+                    getattr(result, "tool_call_id", "") or tool_call_id
+                ),
+                output=output,
+                is_error=bool(getattr(result, "is_error", False)),
+                content=getattr(result, "content", None),
+                details=replan_details,
+            )
         return result
 
     async def record_policy_denial(
@@ -1035,7 +1084,8 @@ class _HighRiskCheckpointToolRegistry:
             decision=decision,
         )
         await self._coordinator.record_immediate_result(
-            self._base.receipt_for_result(result)
+            self._base.receipt_for_result(result),
+            result_summary=str(getattr(result, "output", "") or ""),
         )
         return result
 
@@ -1241,7 +1291,7 @@ class _AdapterDelivery(DeliveryPort):
                 delivery_class=DELIVERY_USER_COMMENTARY,
                 origin="her_v2:persona_packaging",
                 phase=commentary.stage.value,
-                required=False,
+                required=commentary.stage is Stage.REPLANNING,
                 provenance=commentary.provenance,
                 detail=(
                     "persona_packaging_fallback=true; "
@@ -1542,11 +1592,11 @@ class HashiStageProvider(StageProvider):
                 if request.stage is not Stage.EXECUTION:
                     await backend.shutdown()
                     raise StageInvocationError(
-                        "checkpoint coordinator may be installed only for Execution",
+                        "compulsory Replan coordinator may be installed only for Execution",
                         retryable=False,
                         code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                     )
-                selected_registry = _HighRiskCheckpointToolRegistry(
+                selected_registry = _CompulsoryReplanToolRegistry(
                     evidence_registry,
                     request.checkpoint_coordinator,
                 )
@@ -2468,13 +2518,26 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
         self.package_index = 0
 
     async def package(self, commentary: NeutralCommentary) -> PackagedCommentary:
+        if commentary.minimal_persona_fallback_reason:
+            # Reuse the established minimal Persona fallback. Its identity
+            # comes from ``source.display_name``; this boundary does not read
+            # or construct a separate internal Agent-name identity.
+            return self._fallback(
+                commentary,
+                commentary.minimal_persona_fallback_reason,
+            )
         if not self.source.usable:
             return self._fallback(
                 commentary,
                 self.source.unavailable_reason or "persona_block_unavailable",
             )
         self.package_index += 1
-        package_request_id = f"{self.request_id}:persona-package:{self.package_index}"
+        event_digest = hashlib.sha256(
+            commentary.event_id.encode("utf-8")
+        ).hexdigest()[:16]
+        package_request_id = (
+            f"{self.request_id}:persona-package:{event_digest}:{self.package_index}"
+        )
         try:
             binder = getattr(self.provider, "bind_persona_audit_context", None)
             if callable(binder):
@@ -2489,6 +2552,18 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
                 neutral_commentary=commentary.text,
                 request_id=package_request_id,
             )
+            normalized_text = " ".join(text.split()).casefold()
+            if any(
+                " ".join(fact.split()).casefold() not in normalized_text
+                for fact in commentary.required_facts
+            ):
+                self.logger.warning(
+                    "HER v2 Persona commentary omitted protected facts; using fallback"
+                )
+                return self._fallback(
+                    commentary,
+                    "persona_fact_preservation_failed",
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - deterministic presentation fallback

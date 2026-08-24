@@ -12,7 +12,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .checkpoint import HighRiskCheckpointCoordinator
+    from .checkpoint import CompulsoryReplanCoordinator
 
 
 class StrEnum(str, Enum):
@@ -29,7 +29,7 @@ class TriageClassification(StrEnum):
 
 
 class CheckpointPolicy(StrEnum):
-    """Periodic Execution-checkpoint policy selected by authoritative Triage."""
+    """Compatibility-named immutable Execution risk metadata from Triage."""
 
     STANDARD = "STANDARD"
     HIGH_RISK = "HIGH_RISK"
@@ -127,7 +127,6 @@ class Stage(StrEnum):
     TRIAGE = "triage"
     PLANNING = "planning"
     EXECUTION = "execution"
-    CHECKPOINT = "checkpoint"
     REPLANNING = "replanning"
     REVIEW = "review"
     VERIFICATION = "verification"
@@ -179,9 +178,6 @@ DEFAULT_ROUTES_BY_STAGE: Mapping[Stage, Route] = {
     Stage.TRIAGE: Route.TRIAGE,
     Stage.PLANNING: Route.PLANNING,
     Stage.EXECUTION: Route.EXECUTION_COMPLEX,
-    # Checkpoint is an internal substage and follows the configured Review
-    # route rather than creating another user-facing model route.
-    Stage.CHECKPOINT: Route.REVIEW,
     Stage.REPLANNING: Route.REPLANNING,
     Stage.REVIEW: Route.REVIEW,
     Stage.VERIFICATION: Route.VERIFICATION,
@@ -213,12 +209,6 @@ class VerificationOutcome(StrEnum):
     NOT_AI_VERIFIABLE = "NOT_AI_VERIFIABLE"
     UNAVAILABLE = "UNAVAILABLE"
     INCONCLUSIVE = "INCONCLUSIVE"
-
-
-class CheckpointDecision(StrEnum):
-    CONTINUE = "CONTINUE"
-    USER_INPUT_REQUIRED = "USER_INPUT_REQUIRED"
-    HALT = "HALT"
 
 
 class Verifiability(StrEnum):
@@ -266,7 +256,10 @@ class StageRequest:
     provider_activity_callback: Callable[[Mapping[str, Any]], None] | None = field(
         default=None, compare=False, repr=False
     )
-    checkpoint_coordinator: HighRiskCheckpointCoordinator | None = field(
+    # Compatibility field name retained for provider adapters shipped with the
+    # earlier checkpoint package; its active value is now a compulsory Replan
+    # coordinator and is never risk-gated.
+    checkpoint_coordinator: CompulsoryReplanCoordinator | None = field(
         default=None, compare=False, repr=False
     )
 
@@ -283,6 +276,7 @@ class StageResponse:
     provider_attempt: int = 1
     tool_receipts: tuple[ToolEvidenceReceipt, ...] = ()
     media_routing: tuple[Mapping[str, Any], ...] = ()
+    validation_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -295,10 +289,16 @@ class TriageDecision:
 
 
 @dataclass(frozen=True)
-class CheckpointFinding:
-    decision: CheckpointDecision
-    summary: str
-    question: str = ""
+class ReplanningOutcome:
+    """Validated answers to the compulsory HER v2 Replanning calibration."""
+
+    plan: Mapping[str, Any]
+    completion_percent: int
+    completion_basis: str
+    plan_changed: bool
+    change_reason: str
+    next_step: str
+    commentary: str = ""
 
 
 @dataclass(frozen=True)

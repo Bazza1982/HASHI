@@ -10,12 +10,11 @@ from typing import Any, Callable, Mapping, TypeVar
 from .interfaces import StructuredOutputError
 from .models import (
     WORK_CLASSIFICATIONS,
-    CheckpointDecision,
-    CheckpointFinding,
     CheckpointPolicy,
     ExecutionDisposition,
     ExecutionOutcome,
     FinalisationOutcome,
+    ReplanningOutcome,
     ReviewFinding,
     ReviewOutcome,
     Stage,
@@ -84,6 +83,12 @@ def _semantic_key(value: Any) -> str:
                 value.checkpoint_policy.value if value.checkpoint_policy else None
             ),
             "checkpoint_reason": value.checkpoint_reason,
+        }
+    elif isinstance(value, ReplanningOutcome):
+        value = {
+            key: item
+            for key, item in asdict(value).items()
+            if key != "commentary"
         }
     elif isinstance(value, Mapping):
         # Planning commentary and provider transport metadata do not alter the
@@ -445,24 +450,6 @@ def parse_triage(data: Mapping[str, Any]) -> TriageDecision:
 
 
 @_stage_parser()
-def parse_checkpoint(data: Mapping[str, Any]) -> CheckpointFinding:
-    decision = _enum_value(CheckpointDecision, data.get("decision"))
-    summary = _text_value(data.get("summary"), data.get("reason"))
-    if not summary:
-        raise StructuredOutputError("Checkpoint assessment requires a summary")
-    question = _text_value(data.get("question"), data.get("clarification"))
-    if decision is CheckpointDecision.USER_INPUT_REQUIRED and not question:
-        raise StructuredOutputError(
-            "Checkpoint USER_INPUT_REQUIRED requires a concrete question"
-        )
-    if decision is not CheckpointDecision.USER_INPUT_REQUIRED and question:
-        raise StructuredOutputError(
-            "Only Checkpoint USER_INPUT_REQUIRED may provide a question"
-        )
-    return CheckpointFinding(decision, summary, question)
-
-
-@_stage_parser()
 def parse_plan(data: Mapping[str, Any]) -> Mapping[str, Any]:
     plan = data.get("plan")
     if plan is None:
@@ -474,6 +461,127 @@ def parse_plan(data: Mapping[str, Any]) -> Mapping[str, Any]:
     normalized = dict(data)
     normalized["plan"] = plan
     return normalized
+
+
+@_stage_parser()
+def parse_replanning(data: Mapping[str, Any]) -> ReplanningOutcome:
+    """Validate the three compulsory Replanning calibration answers.
+
+    Commentary deliberately remains recoverable presentation data: an absent
+    or malformed value is normalised to empty so Runtime can build the required
+    deterministic message from the validated control fields.
+    """
+
+    forbidden = {
+        "authoritative_user_goal",
+        "authority",
+        "classification",
+        "goal",
+        "permissions",
+        "user_goal",
+    }
+    supplied_forbidden = sorted(
+        key
+        for key in forbidden
+        if key in data and data.get(key) not in (None, "", [], {})
+    )
+    if supplied_forbidden:
+        raise StructuredOutputError(
+            "Replanning cannot replace goal, classification, authority, or "
+            f"permissions: {', '.join(supplied_forbidden)}"
+        )
+
+    steps = data.get("plan")
+    if steps is None:
+        steps = data.get("steps")
+    if not isinstance(steps, (list, str)) or not steps:
+        raise StructuredOutputError("Replanning requires a non-empty plan")
+    if isinstance(steps, list) and (
+        not steps or any(not isinstance(item, str) or not item.strip() for item in steps)
+    ):
+        raise StructuredOutputError(
+            "Replanning plan must contain only non-empty strings"
+        )
+    if isinstance(steps, str) and not steps.strip():
+        raise StructuredOutputError("Replanning requires a non-empty plan")
+
+    success_criteria = data.get("success_criteria")
+    if not isinstance(success_criteria, (list, str)) or not success_criteria:
+        raise StructuredOutputError(
+            "Replanning requires non-empty success_criteria"
+        )
+    if isinstance(success_criteria, list) and (
+        not success_criteria
+        or any(
+            not isinstance(item, str) or not item.strip()
+            for item in success_criteria
+        )
+    ):
+        raise StructuredOutputError(
+            "Replanning success_criteria must contain only non-empty strings"
+        )
+    if isinstance(success_criteria, str) and not success_criteria.strip():
+        raise StructuredOutputError(
+            "Replanning requires non-empty success_criteria"
+        )
+
+    raw_percent = data.get("completion_percent")
+    if isinstance(raw_percent, bool) or not isinstance(raw_percent, int):
+        raise StructuredOutputError(
+            "Replanning completion_percent must be an integer from 0 through 100"
+        )
+    if not 0 <= raw_percent <= 100:
+        raise StructuredOutputError(
+            "Replanning completion_percent must be from 0 through 100"
+        )
+    completion_basis = _text_value(data.get("completion_basis"))
+    if not completion_basis:
+        raise StructuredOutputError(
+            "Replanning requires an evidence-based completion_basis"
+        )
+
+    raw_plan_changed = data.get("plan_changed")
+    if not isinstance(raw_plan_changed, bool):
+        raise StructuredOutputError("Replanning plan_changed must be a boolean")
+    change_reason = _text_value(
+        data.get("change_reason"), data.get("changed_because")
+    )
+    if raw_plan_changed and not change_reason:
+        raise StructuredOutputError(
+            "A changed Replanning plan requires a concrete change_reason"
+        )
+    if not raw_plan_changed and change_reason:
+        raise StructuredOutputError(
+            "An unchanged Replanning plan must not invent a change_reason"
+        )
+
+    next_step = _text_value(data.get("next_step"))
+    if not next_step:
+        raise StructuredOutputError("Replanning requires a concrete next_step")
+
+    plan: dict[str, Any] = {
+        "plan": steps,
+        "success_criteria": success_criteria,
+    }
+    for key in ("parallel_groups", "sub_agents"):
+        if key in data:
+            plan[key] = data[key]
+
+    raw_commentary = data.get("commentary")
+    commentary = (
+        raw_commentary.strip()
+        if isinstance(raw_commentary, str) and raw_commentary.strip()
+        else ""
+    )
+    return ReplanningOutcome(
+        plan=plan,
+        completion_percent=raw_percent,
+        completion_basis=completion_basis,
+        plan_changed=raw_plan_changed,
+        change_reason=change_reason,
+        next_step=next_step,
+        commentary=commentary,
+    )
 
 
 def _parse_execution_data(data: Mapping[str, Any]) -> ExecutionOutcome:

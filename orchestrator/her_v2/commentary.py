@@ -1,9 +1,10 @@
-"""Optional HER v2 commentary lane.
+"""HER v2 commentary lane.
 
-The live workflow may publish only commentary authored as part of a successful
-stage result.  This module deliberately knows nothing about lifecycle events,
-plans, execution state, provider prompts, Persona files, or Telegram.  Persona
-packaging and transport are composed outside :class:`HERv2Runtime`.
+Ordinary stage commentary is optional; compulsory Replanning builds its
+required neutral event from a successful validated stage result. This module
+deliberately knows nothing about lifecycle events, plans, execution state,
+provider prompts, Persona files, or Telegram. Persona packaging and transport
+are composed outside :class:`HERv2Runtime`.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ COMMENTARY_STAGES = frozenset(
 
 
 class CommentaryValidationError(ValueError):
-    """An optional commentary field exists but is not safe to publish."""
+    """A commentary field or event is not safe to publish."""
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,8 @@ class NeutralCommentary:
     stage: Stage
     attempt: int
     text: str
+    required_facts: tuple[str, ...] = ()
+    minimal_persona_fallback_reason: str = ""
 
     def __post_init__(self) -> None:
         event_id = str(self.event_id or "").strip()
@@ -68,9 +71,22 @@ class NeutralCommentary:
             raise CommentaryValidationError(
                 "neutral commentary exceeds the bounded size"
             )
+        required_facts = tuple(
+            str(item or "").strip() for item in self.required_facts
+        )
+        if any(not item for item in required_facts):
+            raise CommentaryValidationError(
+                "neutral commentary required facts must be non-empty"
+            )
         object.__setattr__(self, "event_id", event_id)
         object.__setattr__(self, "turn_id", turn_id)
         object.__setattr__(self, "text", text)
+        object.__setattr__(self, "required_facts", required_facts)
+        object.__setattr__(
+            self,
+            "minimal_persona_fallback_reason",
+            str(self.minimal_persona_fallback_reason or "").strip()[:120],
+        )
 
 
 @dataclass(frozen=True)

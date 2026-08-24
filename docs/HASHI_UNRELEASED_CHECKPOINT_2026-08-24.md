@@ -1,8 +1,8 @@
 # HASHI Unreleased Integration Checkpoint — 2026-08-24
 
-Status: **local `main` integrated and verified; documentation and publication
-hygiene are complete for an authorised fast-forward push; no tag or GitHub push
-has been performed**
+Status: **the original integration baseline was published at `2e3a3f0`; the
+current working tree contains a corrective compulsory-Replanning update that
+has not been rebooted, deployed, tagged, or pushed**
 
 This checkpoint records the broader HASHI v4 platform line. It does not change
 the independent HASHI AAI Enterprise package line at
@@ -19,6 +19,9 @@ the independent HASHI AAI Enterprise package line at
 | Divergence before this documentation commit | `0` behind, `79` ahead of `origin/main` |
 | Expected divergence after this documentation commit | `0` behind, `80` ahead of `origin/main` |
 | Push shape | ordinary fast-forward; no force push or history rewrite |
+
+The identity table records the already-published integration event. It is not a
+claim that later corrective working-tree changes have been published.
 
 The feature histories remain represented by their original commits and merge
 records. The consolidation did not resurrect source or assets explicitly
@@ -37,10 +40,12 @@ retired by the HER v2 and repository-slimming architecture.
 - Reviewed uses independent read-only inspection and one closure Review after
   remediation. Assured adds validation-only Verification in the authoritative
   workspace with exact current-invocation receipts and at most three attempts.
-- Triage records a separate immutable `STANDARD` or `HIGH_RISK` checkpoint
-  policy. High-risk Execution reassesses at the next safe tool boundary after
-  10 completed results or 300 monotonic seconds without creating a tool, time,
-  provider-attempt, or completion ceiling.
+- Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) Execution now
+  unconditionally enters Replanning at the next safe boundary after 10
+  completed results or 300 monotonic seconds. Each Replan assesses completion
+  and plan suitability, activates a plan version, and sends one Persona-rendered
+  or deterministic fallback commentary. Triage's immutable `STANDARD` or
+  `HIGH_RISK` field remains risk metadata and cannot gate the cadence.
 - Legacy execution ceilings were removed. Immediate policy and approval
   decisions, explicit user control, meaningful-progress idle detection, scoped
   transport guards, explicitly requested single-tool timeouts, and bounded
@@ -82,8 +87,21 @@ retired by the HER v2 and repository-slimming architecture.
 
 ## Verification evidence
 
-The integrated implementation baseline completed these gates before this
-documentation pass:
+The compulsory-Replanning corrective working tree completed these local gates:
+
+| Gate | Result |
+| --- | --- |
+| Complete offline product suite | `2677 passed`, `2 skipped`, `40 deselected` |
+| Core deterministic gate | `237 passed` |
+| All HER v2 test modules | `346 passed`, `1 skipped` |
+| Focused Ruff correctness rules | passed |
+| Python compilation | passed |
+| Git diff/whitespace check | passed |
+| Internal Markdown targets | `207` checked; `0` missing |
+| Runtime reload/reboot/canary | not performed; separate authority required |
+
+The already-published integrated implementation baseline had completed these
+historical gates before its documentation pass:
 
 | Gate | Result |
 | --- | --- |
@@ -95,7 +113,7 @@ documentation pass:
 | `/reboot min` adoption | passed; implementation baseline loaded |
 | `/reboot max` adoption | passed; implementation baseline retained |
 | Runtime health after adoption | configured Agents online; Workbench, API Gateway, Telegram, and scheduler healthy |
-| Real HER v2 canary | passed on `main` at `cc010d1`; observed checkpoint policy was `STANDARD` |
+| Historical HER v2 canary | passed on `main` at `cc010d1`; it predates the compulsory-Replanning correction and does not certify its live cadence |
 
 The documentation and publication-hygiene pass completed these additional
 gates:
@@ -128,9 +146,10 @@ was added to the publication range.
 - The deterministic guard preventing an Immediate Response from claiming
   unperformed action remains a separate open design item. Prompt instruction
   alone is not treated as proof that this case is impossible.
-- The live HER canary observed the `STANDARD` path. A real `HIGH_RISK` periodic
-  trigger, a threshold-triggered Auto Compact cycle, and provider-specific
-  multi-image canaries remain separate capability-level rollout evidence.
+- No running instance has been reloaded for this corrective working-tree
+  update. A real Adaptive-or-above 10-result/300-second compulsory Replan, a
+  threshold-triggered Auto Compact cycle, and provider-specific multi-image
+  canaries remain separate capability-level rollout evidence.
 - A broad full-repository Ruff sweep still reports `1696` pre-existing style
   findings. The focused correctness rules used by this integration passed; the
   style backlog is not represented as newly clean.
@@ -140,13 +159,11 @@ was added to the publication range.
 
 ## GitHub publication boundary
 
-The fetched GitHub branch is an ancestor of local `main`, so publication can be
-an ordinary fast-forward. The final outbound range was reviewed for credentials,
-private workspace/runtime state, unexpected binaries, oversized objects, broken
-Markdown links, and unintended local files; the publication-hygiene results are
-recorded above.
+The reviewed integration range was published as an ordinary fast-forward ending
+at `2e3a3f0`; no force push, tag, or Release was used. The credential, private
+state, binary, size, link, and unintended-file checks above apply to that
+historical publication range.
 
-The documentation commit is the only new commit after the integrated
-implementation baseline. Tag creation, release creation, runtime deployment,
-and the GitHub push are separate operations and remain intentionally pending
-until explicitly requested.
+The later compulsory-Replanning correction is a new working-tree change and is
+outside that reviewed range. Its local verification is recorded above; commit,
+push, reload, deployment, and live canary still require separate authority.
