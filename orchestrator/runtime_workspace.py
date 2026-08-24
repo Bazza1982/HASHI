@@ -12,6 +12,11 @@ from orchestrator.command_ui import card_title, confirm_card
 from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.her_v2.runtime_configuration import HER_V2_CONFIGURATION_STATE_KEY
 from orchestrator.memory_index import MemoryIndex
+from orchestrator.memory_search_mode import (
+    apply_memory_search_preference,
+    is_memory_search_enabled,
+    set_memory_search_enabled,
+)
 from orchestrator.memory_plus_mode import (
     ensure_memory_plus_notepad,
     ensure_memory_plus_observer,
@@ -48,10 +53,11 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
     assembler = getattr(runtime, "context_assembler", None)
 
     if args in ("", "status"):
+        search_enabled = is_memory_search_enabled(runtime.workspace_dir)
         if assembler:
             turns_state = "ON ✅" if assembler.turns_injection_enabled else "PAUSED ⏸️"
-            saved_state = "ON ✅" if assembler.saved_memory_injection_enabled else "PAUSED ⏸️"
-            state = f"turns={turns_state}, saved={saved_state}"
+            search_state = "ON ✅" if search_enabled else "OFF ⬜"
+            state = f"turns={turns_state}, long-term search={search_state} (persistent)"
         else:
             state = "unknown (assembler not ready)"
         stats = runtime.memory_store.get_stats() if hasattr(runtime, "memory_store") else {}
@@ -73,7 +79,7 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
             f"<b>Stored</b> · <code>{turns}</code> turns · <code>{memories}</code> memories\n"
             f"<b>BGE sync</b> · <code>{sync_state}</code>\n\n"
             "Changes apply immediately and preserve stored data unless <code>wipe</code> is explicitly used.\n\n"
-            "<code>/memory plus on|off</code> · <code>on</code> · <code>pause</code> · <code>saved on|off</code> · "
+            "<code>/memory plus on|off</code> · <code>on</code> · <code>pause</code> · <code>search on|off|status</code> · "
             "<code>sync on|off</code> · <code>wipe</code>",
             parse_mode="HTML",
             reply_markup=memory_plus_keyboard(bool(continuity["enabled"])),
@@ -98,11 +104,13 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
             "⏸️ Memory+ continuity OFF. Today, carryover, and history files were preserved.",
         )
     elif args == "on":
+        set_memory_search_enabled(runtime.workspace_dir, True)
         if assembler:
             assembler.turns_injection_enabled = True
             assembler.saved_memory_injection_enabled = True
         await runtime._reply_text(update, "✅ Memory injection ON. Recent turns and saved memories will be included in context.")
     elif args == "pause":
+        set_memory_search_enabled(runtime.workspace_dir, False)
         if assembler:
             assembler.turns_injection_enabled = False
             assembler.saved_memory_injection_enabled = False
@@ -111,20 +119,20 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
             "⏸️ Memory injection PAUSED. Recent turns and saved memories are preserved but not injected into context.\n"
             "Use /memory on to resume.",
         )
-    elif args == "saved on":
+    elif args in {"search on", "saved on"}:
+        set_memory_search_enabled(runtime.workspace_dir, True)
         if assembler:
             assembler.saved_memory_injection_enabled = True
-        await runtime._reply_text(update, "✅ Saved memory auto-injection ON. Long-term memories may be included in future context.")
-    elif args == "saved off":
+        await runtime._reply_text(update, "✅ Long-term memory search ON (persistent). Relevant saved memories may be retrieved for future turns.")
+    elif args in {"search off", "saved off"}:
+        set_memory_search_enabled(runtime.workspace_dir, False)
         if assembler:
             assembler.saved_memory_injection_enabled = False
-        await runtime._reply_text(update, "⏸️ Saved memory auto-injection OFF. Long-term memories are preserved but not automatically injected.")
-    elif args == "saved status":
-        if assembler:
-            state = "ON ✅" if assembler.saved_memory_injection_enabled else "PAUSED ⏸️"
-        else:
-            state = "unknown (assembler not ready)"
-        await runtime._reply_text(update, f"Saved memory auto-injection: {state}")
+        await runtime._reply_text(update, "⬜ Long-term memory search OFF (persistent). Saved memories remain stored and retrieve_memories() is not called per turn.")
+    elif args in {"search status", "saved status"}:
+        enabled = is_memory_search_enabled(runtime.workspace_dir)
+        state = "ON ✅" if enabled else "OFF ⬜"
+        await runtime._reply_text(update, f"Long-term memory search: {state} (persistent)")
     elif args == "wipe":
         if hasattr(runtime, "memory_store"):
             result = runtime.memory_store.clear_all()
@@ -164,8 +172,8 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
     else:
         await runtime._reply_text(
             update,
-            "Usage: /memory [plus on | plus off | on | pause | saved on | saved off | "
-            "saved status | wipe | sync on | sync off | status]",
+            "Usage: /memory [plus on | plus off | on | pause | search on | search off | "
+            "search status | wipe | sync on | sync off | status]",
         )
 
 
@@ -329,6 +337,7 @@ def _reinitialize_workspace_runtime(runtime: Any) -> None:
         sys_prompt_manager=runtime.sys_prompt_manager,
         global_sys_prompt_manager=getattr(runtime, "global_sys_prompt_manager", None),
     )
+    apply_memory_search_preference(runtime.context_assembler, runtime.workspace_dir)
     runtime.reload_post_turn_observers()
 
 

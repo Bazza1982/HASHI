@@ -669,6 +669,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         prompt_kwargs["context_profile"] = context_profile
     compaction_snapshot = None
     history_compaction_enabled = False
+    cross_session_timeline_entries: list[dict[str, Any]] = []
     if (
         runtime.config.active_backend == "her-v2"
         and not incremental
@@ -684,9 +685,14 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     ):
         from orchestrator.context_compaction import install_history_section
 
+        cross_session_timeline_entries = runtime_cross_session.timeline_entries(
+            runtime,
+            item,
+        )
         extra_sections, compaction_snapshot = install_history_section(
             runtime,
             base_extra_sections,
+            cross_session_entries=cross_session_timeline_entries,
         )
         history_compaction_enabled = compaction_snapshot is not None
         prompt_kwargs["extra_sections"] = extra_sections
@@ -735,6 +741,9 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         states[item.request_id] = {
             "effective_prompt": effective_prompt,
             "base_extra_sections": list(base_extra_sections),
+            "cross_session_timeline_entries": list(
+                cross_session_timeline_entries
+            ),
             "context_profile": context_profile,
             "inject_memory": history_compaction_enabled,
             "is_bridge_request": bool(is_bridge_request),
@@ -2174,7 +2183,13 @@ async def recover_typed_context_capacity_rejection(
         return None
 
     base_sections = list(state.get("base_extra_sections") or [])
-    sections, _snapshot = install_history_section(runtime, base_sections)
+    sections, _snapshot = install_history_section(
+        runtime,
+        base_sections,
+        cross_session_entries=list(
+            state.get("cross_session_timeline_entries") or []
+        ),
+    )
     builder = runtime.context_assembler.build_prompt_payload
     kwargs = {
         "extra_sections": sections,

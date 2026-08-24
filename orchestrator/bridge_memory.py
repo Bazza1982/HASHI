@@ -817,7 +817,9 @@ class BridgeContextAssembler:
         self.sys_prompt_manager = sys_prompt_manager
         self.global_sys_prompt_manager = global_sys_prompt_manager
         self.turns_injection_enabled: bool = True
-        self.saved_memory_injection_enabled: bool = True
+        # Long-term retrieval is opt-in.  Recent conversational continuity is
+        # assembled separately and must not require a memory search.
+        self.saved_memory_injection_enabled: bool = False
 
     @property
     def memory_injection_enabled(self) -> bool:
@@ -947,11 +949,16 @@ class BridgeContextAssembler:
         system_text = "" if incremental else self._load_system_prompt()
         inject_base = not incremental and inject_memory
         managed_history = False
+        managed_history_title = ""
         if extra_sections:
             try:
-                from orchestrator.context_compaction import managed_history_present
+                from orchestrator.context_compaction import (
+                    MANAGED_HISTORY_TITLE,
+                    managed_history_present,
+                )
 
                 managed_history = managed_history_present(extra_sections)
+                managed_history_title = MANAGED_HISTORY_TITLE
             except Exception:
                 managed_history = False
         inject_turns = (
@@ -1050,8 +1057,16 @@ class BridgeContextAssembler:
                 item_count=len(active_skills),
             )
 
-        if extra_sections:
-            for title, body in extra_sections:
+        regular_extra_sections: list[tuple[str, str]] = []
+        managed_history_sections: list[tuple[str, str]] = []
+        for title, body in extra_sections or []:
+            if managed_history_title and str(title) == managed_history_title:
+                managed_history_sections.append((title, body))
+            else:
+                regular_extra_sections.append((title, body))
+
+        if regular_extra_sections:
+            for title, body in regular_extra_sections:
                 if not title or not body:
                     continue
                 add_section(f"extra:{title.lower().replace(' ', '_')}", title, [body], item_count=1)
@@ -1062,10 +1077,20 @@ class BridgeContextAssembler:
                 memory_parts.append(f"[{m['memory_type']}/{m['source']}] {m['content']}")
             add_section(
                 "relevant_long_term_memory",
-                "RELEVANT LONG-TERM MEMORY",
+                "OPTIONAL LONG-TERM MEMORY SEARCH RESULTS — OLDER BACKGROUND",
                 memory_parts,
                 item_count=len(memories),
             )
+
+        # Managed history contains old continuity followed by the unified
+        # recent timeline.  Keep it after optional retrieved memory so neither
+        # memory search nor an old receipt can sit closer to the request than
+        # the immediate conversation.
+        if managed_history_sections:
+            for title, body in managed_history_sections:
+                if not title or not body:
+                    continue
+                add_section(f"extra:{title.lower().replace(' ', '_')}", title, [body], item_count=1)
 
         if recent_turns:
             recent_parts = []

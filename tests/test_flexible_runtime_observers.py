@@ -150,7 +150,7 @@ async def test_pending_scheduler_recovery_is_injected_into_next_user_turn():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["fixed", "flex"])
-async def test_completed_scheduler_turn_is_injected_for_fixed_and_flex_modes(
+async def test_completed_scheduler_turn_uses_unified_timeline_in_her_flex_mode(
     tmp_path,
     mode,
 ):
@@ -186,10 +186,14 @@ async def test_completed_scheduler_turn_is_injected_for_fixed_and_flex_modes(
         _item("text"),
         "What just happened?",
         is_bridge_request=False,
+        metadata={"engine": "her-v2"},
     )
 
-    assert sections[-1][0] == "CROSS-SESSION TURN RECEIPTS"
-    assert "Scheduler task paused" in sections[-1][1]
+    if mode == "flex":
+        assert sections == []
+    else:
+        assert sections[-1][0] == "CROSS-SESSION TURN RECEIPTS"
+        assert "Scheduler task paused" in sections[-1][1]
 
 
 @pytest.mark.asyncio

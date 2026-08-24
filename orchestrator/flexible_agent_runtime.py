@@ -104,6 +104,7 @@ from orchestrator.flexible_backend_registry import (
     normalize_model,
 )
 from orchestrator.memory_index import MemoryIndex
+from orchestrator.memory_search_mode import apply_memory_search_preference
 from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
@@ -327,6 +328,7 @@ class FlexibleAgentRuntime:
             sys_prompt_manager=self.sys_prompt_manager,
             global_sys_prompt_manager=self.global_sys_prompt_manager,
         )
+        apply_memory_search_preference(self.context_assembler, self.workspace_dir)
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
         self.backend_manager.runtime = self
@@ -930,6 +932,17 @@ class FlexibleAgentRuntime:
             metadata=metadata,
         )
         sections += runtime_scheduler_recovery.context_section(self, item.source)
+        if (
+            str((metadata or {}).get("engine") or "") == HER_V2_ENGINE
+            and str(
+                getattr(self.backend_manager, "agent_mode", "flex") or "flex"
+            ).lower()
+            == "flex"
+        ):
+            # HER-v2 receipts are merged into the managed conversation timeline
+            # by actual completion time.  A second standalone section would
+            # duplicate history and make old receipts look artificially recent.
+            return sections
         return sections + runtime_cross_session.context_section(self, item)
 
     def _schedule_post_turn_observers(

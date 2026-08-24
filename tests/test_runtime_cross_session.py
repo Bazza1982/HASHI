@@ -117,6 +117,13 @@ def test_scheduler_choice_receipt_is_persisted_and_injected(tmp_path):
     assert "Comment one" in sections[0][1]
     assert "read-only context" in sections[0][1]
 
+    timeline = runtime_cross_session.timeline_entries(runtime, user_item)
+    assert len(timeline) == 1
+    assert timeline[0]["receipt_id"] == receipt["receipt_id"]
+    assert timeline[0]["completed_at"] == receipt["updated_at"]
+    assert timeline[0]["user_text"] == item.prompt
+    assert timeline[0]["assistant_text"] == visible
+
 
 def test_primary_pending_turn_persists_checkpoint_and_binds_a_full_flex_reply(tmp_path):
     runtime = _runtime(tmp_path, mode="flex")
@@ -572,6 +579,12 @@ def test_successful_bound_reply_resolves_receipt(tmp_path):
     assert receipt["active"] is False
     assert receipt["resolved_by"] == "req-choice"
     assert receipt["assistant_text"] == "Action completed."
+    timeline = runtime_cross_session.timeline_entries(
+        runtime,
+        _item(request_id="req-after", source="text", prompt="What happened?"),
+    )
+    assert timeline[0]["user_text"] == "A"
+    assert timeline[0]["assistant_text"] == "Action completed."
 
 
 def test_failed_bound_reply_keeps_original_checkpoint_retryable(tmp_path):

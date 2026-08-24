@@ -677,6 +677,81 @@ def context_section(runtime: Any, item: Any) -> list[tuple[str, str]]:
     return [("CROSS-SESSION TURN RECEIPTS", "\n\n".join(parts))]
 
 
+def timeline_entries(runtime: Any, item: Any) -> list[dict[str, Any]]:
+    """Return receipts as timestamped exchanges for the HER-v2 history timeline.
+
+    This is presentation data only.  Reply binding remains a separate,
+    authoritative mechanism.  Unlike ``context_section()``, callers combine
+    these records with normal turns and apply one shared recency limit.
+    """
+
+    source = str(_value(item, "source", "") or "").strip().lower()
+    if source.startswith("scheduler") or source in _SKIP_CONTEXT_SOURCES:
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for receipt in _read_state(runtime)["receipts"]:
+        if not _chat_matches(receipt, _value(item, "chat_id", None)):
+            continue
+        delivery = receipt.get("delivery_receipt")
+        last_attempt = receipt.get("last_attempt")
+        updated_at = receipt.get("updated_at")
+        last_attempt_at = (
+            last_attempt.get("at") if isinstance(last_attempt, Mapping) else None
+        )
+        completed_at = updated_at or (
+            delivery.get("recorded_at") if isinstance(delivery, Mapping) else None
+        ) or last_attempt_at or receipt.get("created_at") or 0
+        try:
+            completed_at = float(completed_at)
+        except (TypeError, ValueError):
+            completed_at = 0.0
+        try:
+            successful_update_is_latest = float(updated_at or 0) >= float(
+                last_attempt_at or 0
+            )
+        except (TypeError, ValueError):
+            successful_update_is_latest = bool(updated_at)
+        latest_user_text = (
+            receipt.get("last_user_text")
+            if successful_update_is_latest and receipt.get("last_user_text")
+            else receipt.get("task_prompt")
+        )
+        entries.append(
+            {
+                "kind": "cross_session_receipt",
+                "receipt_id": str(receipt.get("receipt_id") or ""),
+                "request_id": str(receipt.get("request_id") or ""),
+                "sequence": int(receipt.get("last_sequence") or 0),
+                "completed_at": completed_at,
+                "source": str(receipt.get("source") or "unknown"),
+                "summary": _bounded_text(receipt.get("summary"), 1_000),
+                "status": str(receipt.get("status") or "unknown"),
+                "task_status": str(
+                    receipt.get("task_status")
+                    or receipt.get("status")
+                    or "unknown"
+                ),
+                "delivered": bool(receipt.get("delivered")),
+                "active": bool(receipt.get("active")),
+                "user_text": _bounded_text(
+                    latest_user_text, MAX_CONTEXT_PROMPT_CHARS
+                ),
+                "assistant_text": _bounded_text(
+                    receipt.get("assistant_text"), MAX_CONTEXT_RESPONSE_CHARS
+                ),
+            }
+        )
+    entries.sort(
+        key=lambda entry: (
+            float(entry.get("completed_at") or 0),
+            int(entry.get("sequence") or 0),
+            str(entry.get("receipt_id") or ""),
+        )
+    )
+    return entries
+
+
 def load_receipts(runtime: Any) -> list[dict[str, Any]]:
     """Return a defensive copy for diagnostics and tests."""
     return [dict(receipt) for receipt in _read_state(runtime)["receipts"]]

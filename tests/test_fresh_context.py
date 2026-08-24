@@ -65,25 +65,53 @@ def test_bridge_context_assembler_splits_turn_and_saved_memory_flags():
 
     prompt = assembler.build_prompt("hello", "deepseek-api")
     assert "RECENT CONTEXT" in prompt
-    assert "RELEVANT LONG-TERM MEMORY" in prompt
+    assert "OPTIONAL LONG-TERM MEMORY SEARCH RESULTS" not in prompt
+    assert store.recent_calls == 1
+    assert store.memory_calls == 0
+
+    store.recent_calls = 0
+    store.memory_calls = 0
+    assembler.saved_memory_injection_enabled = True
+    prompt = assembler.build_prompt("hello", "deepseek-api")
+    assert "RECENT CONTEXT" in prompt
+    assert "OPTIONAL LONG-TERM MEMORY SEARCH RESULTS" in prompt
     assert store.recent_calls == 1
     assert store.memory_calls == 1
 
     store.recent_calls = 0
     store.memory_calls = 0
     assembler.saved_memory_injection_enabled = False
-    prompt = assembler.build_prompt("hello", "deepseek-api")
-    assert "RECENT CONTEXT" in prompt
-    assert "RELEVANT LONG-TERM MEMORY" not in prompt
-    assert store.recent_calls == 1
-    assert store.memory_calls == 0
-
-    store.recent_calls = 0
     assembler.turns_injection_enabled = False
     prompt = assembler.build_prompt("hello", "deepseek-api")
     assert "RECENT CONTEXT" not in prompt
-    assert "RELEVANT LONG-TERM MEMORY" not in prompt
+    assert "OPTIONAL LONG-TERM MEMORY SEARCH RESULTS" not in prompt
     assert store.recent_calls == 0
+    assert store.memory_calls == 0
+
+
+def test_managed_prompt_orders_policy_then_old_memory_then_recent_then_request(tmp_path):
+    from orchestrator.context_compaction import MANAGED_HISTORY_TITLE
+
+    system_md = tmp_path / "AGENT.md"
+    system_md.write_text("SYSTEM-POLICY", encoding="utf-8")
+    store = FakeMemoryStore()
+    assembler = BridgeContextAssembler(store, system_md=system_md)
+    assembler.saved_memory_injection_enabled = True
+
+    prompt = assembler.build_prompt(
+        "CURRENT-REQUEST",
+        "her-v2",
+        extra_sections=[
+            ("WORKZONE", "WORKZONE-POLICY"),
+            (MANAGED_HISTORY_TITLE, "OLD-CAPSULE\nRECENT-TIMELINE"),
+        ],
+    )
+
+    assert prompt.index("SYSTEM-POLICY") < prompt.index("WORKZONE-POLICY")
+    assert prompt.index("WORKZONE-POLICY") < prompt.index("saved memory")
+    assert prompt.index("saved memory") < prompt.index("OLD-CAPSULE")
+    assert prompt.index("OLD-CAPSULE") < prompt.index("RECENT-TIMELINE")
+    assert prompt.index("RECENT-TIMELINE") < prompt.index("CURRENT-REQUEST")
 
 
 @pytest.mark.asyncio

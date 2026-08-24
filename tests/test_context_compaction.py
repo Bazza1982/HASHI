@@ -4,6 +4,7 @@ import asyncio
 import json
 import sqlite3
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,6 +42,7 @@ from orchestrator.context_compaction import (
     resolve_compact_route,
     resolve_target_capacity,
     resolve_trigger_budget,
+    render_history,
     schedule_execution_stage,
 )
 from orchestrator.her_v2.interfaces import StageInvocationError
@@ -179,6 +181,88 @@ def _valid_invoker(calls: list | None = None):
         return SimpleNamespace(text=json.dumps(payload), structured_data=None)
 
     return invoke
+
+
+def test_recent_history_merges_turns_and_receipts_by_completion_time(tmp_path):
+    runtime = _Runtime(tmp_path)
+    _write_turns(runtime, 2, chars=1)
+    receipt_epoch = datetime.fromisoformat(
+        "2026-08-22T00:00:30+10:00"
+    ).timestamp()
+
+    sections, snapshot = install_history_section(
+        runtime,
+        [],
+        cross_session_entries=[
+            {
+                "kind": "cross_session_receipt",
+                "receipt_id": "receipt-middle",
+                "sequence": 1,
+                "completed_at": receipt_epoch,
+                "source": "scheduler",
+                "status": "completed",
+                "task_status": "completed",
+                "delivered": True,
+                "user_text": "receipt-user",
+                "assistant_text": "receipt-assistant",
+            }
+        ],
+    )
+
+    assert snapshot is not None
+    rendered = sections[0][1]
+    assert rendered.index("user-0:u") < rendered.index("receipt-user")
+    assert rendered.index("receipt-user") < rendered.index("user-1:u")
+    assert "+10:00 AEST" in rendered
+    assert "turn:1 | recorded_at=2026-08-22T00:00:00+10:00 AEST" in rendered
+    assert "turn:2 | recorded_at=2026-08-22T00:00:01+10:00 AEST" in rendered
+    immediate = rendered.rindex("IMMEDIATE PREVIOUS")
+    assert immediate < rendered.rindex("user-1:u")
+    assert "CROSS-SESSION TURN RECEIPTS" not in rendered
+
+
+def test_recent_history_deduplicates_matching_receipt_and_limits_combined_timeline(tmp_path):
+    runtime = _Runtime(tmp_path)
+    _write_turns(runtime, 2, chars=1)
+    snapshot = ContextCompactionCoordinator(runtime).snapshot()
+    base_epoch = datetime.fromisoformat("2026-08-22T00:02:00+10:00").timestamp()
+    receipts = [
+        {
+            "kind": "cross_session_receipt",
+            "receipt_id": "receipt-duplicate",
+            "sequence": 1,
+            "completed_at": base_epoch,
+            "source": "scheduler",
+            "status": "completed",
+            "task_status": "completed",
+            "delivered": True,
+            "user_text": "user-1:u",
+            "assistant_text": "assistant-1:a",
+        }
+    ]
+    for index in range(9):
+        receipts.append(
+            {
+                "kind": "cross_session_receipt",
+                "receipt_id": f"receipt-{index}",
+                "sequence": index + 2,
+                "completed_at": base_epoch + index + 1,
+                "source": "scheduler",
+                "status": "completed",
+                "task_status": "completed",
+                "delivered": True,
+                "user_text": f"receipt-user-{index}",
+                "assistant_text": f"receipt-assistant-{index}",
+            }
+        )
+
+    rendered = render_history(snapshot, cross_session_entries=receipts)
+    recent = rendered.split("RECENT CONVERSATION TIMELINE", 1)[1]
+
+    assert rendered.count("user-1:u") == 1
+    assert "merged receipts=receipt-duplicate" in rendered
+    assert recent.count("\nUSER:\n") == 10
+    assert recent.count("IMMEDIATE PREVIOUS") == 1
 
 
 def test_default_route_uses_active_quick_model_high_effort_and_tier_2(tmp_path):
@@ -987,6 +1071,26 @@ async def test_build_turn_prompt_never_compacts_or_warns_before_execution(
         lambda _runtime, _item, prompt: prompt,
     )
     monkeypatch.setattr(
+        runtime_pipeline.runtime_cross_session,
+        "timeline_entries",
+        lambda _runtime, _item: [
+            {
+                "kind": "cross_session_receipt",
+                "receipt_id": "receipt-pipeline",
+                "sequence": 1,
+                "completed_at": datetime.fromisoformat(
+                    "2026-08-24T12:00:00+10:00"
+                ).timestamp(),
+                "source": "scheduler",
+                "status": "completed",
+                "task_status": "completed",
+                "delivered": True,
+                "user_text": "scheduled task",
+                "assistant_text": "scheduled result",
+            }
+        ],
+    )
+    monkeypatch.setattr(
         runtime_pipeline.runtime_retry,
         "prepare_interrupted_task_continuation",
         lambda _runtime, _item, prompt, **_kwargs: prompt,
@@ -1007,6 +1111,9 @@ async def test_build_turn_prompt_never_compacts_or_warns_before_execution(
     )
 
     assert "CURRENT-AUTHORITY:" in result.final_prompt
+    assert "receipt-pipeline" in result.final_prompt
+    assert "IMMEDIATE PREVIOUS" in result.final_prompt
+    assert "CROSS-SESSION TURN RECEIPTS" not in result.final_prompt
     assert result.context_warnings == ()
     assert runtime._context_compaction_prompt_tokens[item.request_id] > 0
 
