@@ -966,7 +966,6 @@ class HERv2Adapter(BaseBackend):
                 "review_count": result.review_count,
                 "replan_count": result.replan_count,
                 "checkpoint_count": result.checkpoint_count,
-                "checkpoint_policy": result.ledger.get("checkpoint_policy"),
                 "final_was_immediate": result.final_was_immediate,
                 "final_already_delivered": result.final_already_delivered,
                 "delivery": {

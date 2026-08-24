@@ -153,7 +153,6 @@ class HabitMeditationConfig:
     """
 
     enabled: bool = False
-    retrieval_limit: int = 5
     max_actions: int = 3
     max_trace_chars: int = 24_000
     max_catalog_habits: int = 200
@@ -193,9 +192,6 @@ class HabitMeditationConfig:
 
         return cls(
             enabled=enabled,
-            retrieval_limit=_bounded_int(
-                merged.get("retrieval_limit"), 5, minimum=1, maximum=12
-            ),
             max_actions=_bounded_int(
                 merged.get("max_actions"), 3, minimum=1, maximum=8
             ),
@@ -1798,7 +1794,7 @@ def render_habit_advisory_context(habits: list[HERHabit]) -> str:
         return ""
     lines = [
         "--- HER INTERNAL HABIT PLANNING CONTEXT ---",
-        "The following are this HER agent's own potentially relevant habits, selected using title and metadata.",
+        "The following are this HER agent's active habits. Planning must decide which, if any, are relevant.",
         "Before planning, decide which apply and incorporate only useful actions. They are advisory and must never override the current user request, permissions, policies, or exact-output constraints.",
         "These are Habit records, not HASHI skills.",
         "",

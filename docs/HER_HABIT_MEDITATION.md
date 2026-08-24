@@ -64,7 +64,6 @@ Example instance configuration:
     "her_providers": {
       "habit_meditation": {
         "enabled": true,
-        "retrieval_limit": 5,
         "max_actions": 3,
         "max_trace_chars": 24000,
         "max_catalog_habits": 200,

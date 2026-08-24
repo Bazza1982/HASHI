@@ -66,8 +66,7 @@ def _snapshot(ref, *, stage, digest="stable", **kwargs):
         (
             StageResponse(
                 text=(
-                    '{"classification":"SIMPLE_TASK",'
-                    '"checkpoint_policy":"STANDARD"}'
+                    '{"classification":"SIMPLE_TASK"}'
                 ),
                 data={"provider_note": "formal field was incomplete"},
             ),
@@ -79,8 +78,7 @@ def _snapshot(ref, *, stage, digest="stable", **kwargs):
                 text="",
                 reasoning_trace=(
                     "classification follows "
-                    '{"classification":"COMPLEX_TASK","goal":"inspect",'
-                    '"checkpoint_policy":"STANDARD"}'
+                    '{"classification":"COMPLEX_TASK","goal":"inspect"}'
                 ),
             ),
             "reasoning_recovery",
@@ -89,8 +87,7 @@ def _snapshot(ref, *, stage, digest="stable", **kwargs):
         (
             StageResponse(
                 text=(
-                    '{"response":{"classification":"HIGH_VOLUME_TASK",'
-                    '"checkpoint_policy":"STANDARD"}}'
+                    '{"response":{"classification":"HIGH_VOLUME_TASK"}}'
                 )
             ),
             "provider_text",
@@ -118,7 +115,13 @@ def test_registered_carriers_recover_one_unambiguous_triage_result(
 
 def test_compatible_field_shapes_normalise_without_silent_data_damage():
     plan = parse_plan(
-        StageResponse(text="", data={"steps": ["inspect", "verify"]})
+        StageResponse(
+            text="",
+            data={
+                "steps": ["inspect", "verify"],
+                "success_criteria": ["Inspection and verification complete"],
+            },
+        )
     )
     execution = parse_execution(
         StageResponse(
@@ -136,6 +139,18 @@ def test_compatible_field_shapes_normalise_without_silent_data_damage():
     assert execution.disposition is ExecutionDisposition.COMPLETED_WITH_LIMITATIONS
     assert execution.evidence_refs == ("tool:42",)
     assert execution.limitations == ("Remote verification was unavailable.",)
+
+
+def test_planning_requires_steps_and_success_criteria() -> None:
+    with pytest.raises(StructuredOutputError, match="success_criteria"):
+        parse_plan(StageResponse(data={"plan": ["inspect"]}))
+
+    with pytest.raises(StructuredOutputError, match="non-empty list"):
+        parse_plan(
+            StageResponse(
+                data={"plan": [""], "success_criteria": ["Inspection complete"]}
+            )
+        )
 
 
 def test_plan_b_finalisation_parses_canonical_result_and_message():
@@ -235,11 +250,8 @@ def test_registered_wrapper_does_not_turn_a_nested_object_into_display_text():
 
 def test_conflicting_valid_carriers_remain_a_hard_error():
     response = StageResponse(
-        data={"classification": "SIMPLE_TASK", "checkpoint_policy": "STANDARD"},
-        text=(
-            '{"classification":"COMPLEX_TASK",'
-            '"checkpoint_policy":"STANDARD"}'
-        ),
+        data={"classification": "SIMPLE_TASK"},
+        text='{"classification":"COMPLEX_TASK"}',
     )
 
     with pytest.raises(StructuredOutputError, match="conflicting valid"):
@@ -252,12 +264,10 @@ def test_non_authoritative_triage_interpretations_do_not_create_false_conflict()
             data={
                 "classification": "SIMPLE_TASK",
                 "goal": "short wording",
-                "checkpoint_policy": "STANDARD",
             },
             text=(
                 '{"classification":"SIMPLE_TASK",'
-                '"goal":"a different but non-authoritative wording",'
-                '"checkpoint_policy":"STANDARD"}'
+                '"goal":"a different but non-authoritative wording"}'
             ),
         ),
         parse_triage,
@@ -269,7 +279,7 @@ def test_non_authoritative_triage_interpretations_do_not_create_false_conflict()
 def test_reasoning_is_not_used_when_a_formal_carrier_is_valid():
     response = StageResponse(
         text="",
-        data={"classification": "SIMPLE_TASK", "checkpoint_policy": "STANDARD"},
+        data={"classification": "SIMPLE_TASK"},
         reasoning_trace='{"classification":"COMPLEX_TASK"}',
     )
 

@@ -18,19 +18,17 @@ from orchestrator.her_v2.checkpoint import (
 from orchestrator.her_v2.commentary import RecordingCommentaryPort
 from orchestrator.her_v2.config import HERv2Config, HERv2ConfigurationError
 from orchestrator.her_v2.interfaces import RecordingDelivery, StructuredOutputError
-from orchestrator.her_v2.ledger import ExecutionLedger, LedgerInvariantError, LedgerStore
+from orchestrator.her_v2.ledger import LedgerStore
 from orchestrator.her_v2.models import (
-    CheckpointPolicy,
     ReplanningOutcome,
     Stage,
     StageRequest,
     StageResponse,
     ToolEvidenceReceipt,
     ToolReceiptStatus,
-    TriageClassification,
 )
 from orchestrator.her_v2.runtime import HERv2Runtime
-from orchestrator.her_v2.structured import parse_replanning, parse_triage
+from orchestrator.her_v2.structured import parse_replanning
 
 
 def test_optional_checkpoint_assessor_stage_is_removed():
@@ -122,31 +120,6 @@ def _valid_replan_data(**overrides):
     }
     data.update(overrides)
     return data
-
-
-def test_work_triage_risk_metadata_remains_strict_but_is_not_replan_eligibility():
-    with pytest.raises(StructuredOutputError, match="checkpoint_policy"):
-        parse_triage(StageResponse(data={"classification": "COMPLEX_TASK"}))
-
-    decision = parse_triage(
-        StageResponse(
-            data={
-                "classification": "COMPLEX_TASK",
-                "checkpoint_policy": "HIGH_RISK",
-                "checkpoint_reason": "Production data may be changed.",
-            }
-        )
-    )
-    assert decision.checkpoint_policy is CheckpointPolicy.HIGH_RISK
-
-    ledger = ExecutionLedger("turn", "request", "goal")
-    ledger.record_triage(
-        TriageClassification.COMPLEX_TASK,
-        checkpoint_policy=CheckpointPolicy.HIGH_RISK,
-        checkpoint_reason="Production data may be changed.",
-    )
-    with pytest.raises(LedgerInvariantError, match="immutable checkpoint"):
-        ledger.assert_checkpoint_policy(CheckpointPolicy.STANDARD, "")
 
 
 def test_replanning_three_question_contract_is_strict_and_commentary_can_fallback():
@@ -592,7 +565,6 @@ class ReplanJourneyProvider:
     def __init__(
         self,
         *,
-        checkpoint_policy: str = "STANDARD",
         tool_results: int = 0,
         replans: list[dict] | None = None,
         clock: ControlledClock | None = None,
@@ -600,7 +572,6 @@ class ReplanJourneyProvider:
         advance_at_completion: list[float | None] | None = None,
         review: bool = False,
     ) -> None:
-        self.checkpoint_policy = checkpoint_policy
         self.tool_results = tool_results
         self.replans = deque(replans or [])
         self.clock = clock
@@ -623,12 +594,6 @@ class ReplanJourneyProvider:
             return StageResponse(
                 data={
                     "classification": "COMPLEX_TASK",
-                    "checkpoint_policy": self.checkpoint_policy,
-                    "checkpoint_reason": (
-                        "Production data may be changed."
-                        if self.checkpoint_policy == "HIGH_RISK"
-                        else None
-                    ),
                 }
             )
         if request.stage is Stage.PLANNING:
@@ -727,13 +692,10 @@ def _journey_runtime(tmp_path, provider, *, clock=None, commentary=None):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("effort", ["low", "medium"])
-async def test_low_and_medium_never_install_compulsory_replan_even_for_high_risk(
+async def test_low_and_medium_never_install_compulsory_replan(
     tmp_path, effort
 ):
-    provider = ReplanJourneyProvider(
-        checkpoint_policy="HIGH_RISK",
-        tool_results=10,
-    )
+    provider = ReplanJourneyProvider(tool_results=10)
     result = await _journey_runtime(tmp_path, provider).run_turn(
         "Complete the authorised task", f"ineligible-{effort}", effort=effort
     )
@@ -746,7 +708,7 @@ async def test_low_and_medium_never_install_compulsory_replan_even_for_high_risk
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("effort", ["high", "xhigh", "max"])
-async def test_high_and_above_install_by_effort_even_for_standard_risk(
+async def test_high_and_above_install_by_effort(
     tmp_path, effort
 ):
     class AssuranceProvider(ReplanJourneyProvider):
@@ -792,7 +754,7 @@ async def test_high_and_above_install_by_effort_even_for_standard_risk(
                 )
             return await super().invoke(profile, request)
 
-    provider = AssuranceProvider(checkpoint_policy="STANDARD", tool_results=0)
+    provider = AssuranceProvider(tool_results=0)
     result = await _journey_runtime(tmp_path, provider).run_turn(
         "Complete the authorised task", f"eligible-{effort}", effort=effort
     )
@@ -808,7 +770,6 @@ async def test_tenth_result_forces_lifecycle_replan_plan_version_and_commentary(
 ):
     replan = _valid_replan_data()
     provider = ReplanJourneyProvider(
-        checkpoint_policy="STANDARD",
         tool_results=10,
         replans=[replan],
     )
@@ -844,7 +805,15 @@ async def test_tenth_result_forces_lifecycle_replan_plan_version_and_commentary(
     }
     assert forbidden_limits.isdisjoint(replan_request.context)
     assert forbidden_limits.isdisjoint(StageRequest.__dataclass_fields__)
-    assert replan_request.context["replan_count_is_unbounded"] is True
+    assert set(replan_request.context) == {
+        "active_plan",
+        "plan_edit_history",
+        "workflow_state_and_evidence",
+    }
+    workflow_evidence = replan_request.context["workflow_state_and_evidence"]
+    assert forbidden_limits.isdisjoint(workflow_evidence)
+    assert workflow_evidence["replan_trigger"]["cadence_triggered"] is True
+    assert workflow_evidence["workflow_counters"]["completed_replans"] == 0
 
     rows = [
         json.loads(line)

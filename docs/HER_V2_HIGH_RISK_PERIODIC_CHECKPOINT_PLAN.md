@@ -3,8 +3,8 @@
 Status: **superseded and not an active HER v2 contract**.
 
 This document name is retained only so older links resolve. The optional
-`STANDARD`/`HIGH_RISK` checkpoint-assessor design was incorrect: it allowed a
-model to choose `CONTINUE`, `USER_INPUT_REQUIRED`, or `HALT`, emitted no
+model-authored risk-label checkpoint-assessor design was incorrect: it allowed
+a model to choose `CONTINUE`, `USER_INPUT_REQUIRED`, or `HALT`, emitted no
 commentary, and used risk metadata as the cadence gate. That behaviour has been
 removed from code and tests.
 

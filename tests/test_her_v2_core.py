@@ -17,7 +17,6 @@ from orchestrator.her_v2.ledger import (
 )
 from orchestrator.her_v2.lifecycle import LifecycleMachine, LifecycleViolation
 from orchestrator.her_v2.models import (
-    CheckpointPolicy,
     Effort,
     ExecutionDisposition,
     LifecycleState,
@@ -73,15 +72,9 @@ def test_lifecycle_violation_is_not_silently_repaired():
 
 def test_triage_classification_is_immutable_and_plan_replacement_is_replan_only():
     ledger = ExecutionLedger("turn-1", "request:1", "goal:1")
-    ledger.record_triage(
-        TriageClassification.COMPLEX_TASK,
-        checkpoint_policy=CheckpointPolicy.STANDARD,
-    )
+    ledger.record_triage(TriageClassification.COMPLEX_TASK)
     with pytest.raises(LedgerInvariantError, match="immutable"):
-        ledger.record_triage(
-            TriageClassification.SIMPLE_TASK,
-            checkpoint_policy=CheckpointPolicy.STANDARD,
-        )
+        ledger.record_triage(TriageClassification.SIMPLE_TASK)
 
     ledger.transition(LifecycleState.PLANNED)
     ledger.activate_plan("plan-v1")
@@ -105,8 +98,6 @@ def test_ledger_snapshot_is_minimal_and_caps_log_references():
         "goal_ref",
         "status",
         "classification",
-        "checkpoint_policy",
-        "checkpoint_reason",
         "plan_id",
         "last_update",
         "log_refs",
@@ -120,16 +111,10 @@ def test_ledger_snapshot_is_minimal_and_caps_log_references():
 def test_restart_reconciliation_marks_incomplete_turn_error_without_resuming(tmp_path):
     store = LedgerStore(tmp_path / "ledgers")
     incomplete = ExecutionLedger("old", "request:old", "goal:old")
-    incomplete.record_triage(
-        TriageClassification.SIMPLE_TASK,
-        checkpoint_policy=CheckpointPolicy.STANDARD,
-    )
+    incomplete.record_triage(TriageClassification.SIMPLE_TASK)
     incomplete.transition(LifecycleState.EXECUTING)
     complete = ExecutionLedger("done", "request:done", "goal:done")
-    complete.record_triage(
-        TriageClassification.DIRECT_RESPONSE,
-        checkpoint_policy=None,
-    )
+    complete.record_triage(TriageClassification.DIRECT_RESPONSE)
     complete.transition(LifecycleState.FINALISING)
     complete.transition(LifecycleState.COMPLETED)
     store.save(incomplete)
@@ -143,9 +128,7 @@ def test_restart_reconciliation_marks_incomplete_turn_error_without_resuming(tmp
     assert store.load("done").status is LifecycleState.COMPLETED
 
 
-def test_restart_reconciliation_fails_closed_for_legacy_work_without_checkpoint_policy(
-    tmp_path,
-):
+def test_restart_reconciliation_ignores_retired_legacy_checkpoint_fields(tmp_path):
     store = LedgerStore(tmp_path / "ledgers")
     legacy = ExecutionLedger.from_dict(
         {
@@ -155,9 +138,12 @@ def test_restart_reconciliation_fails_closed_for_legacy_work_without_checkpoint_
             "goal_ref": "goal:legacy-work",
             "status": "EXECUTING",
             "classification": "COMPLEX_TASK",
+            "checkpoint_policy": "HIGH_RISK",
+            "checkpoint_reason": "retired legacy metadata",
         }
     )
-    assert legacy.checkpoint_policy is None
+    assert "checkpoint_policy" not in legacy.to_dict()
+    assert "checkpoint_reason" not in legacy.to_dict()
     store.save(legacy)
 
     reconciled = store.reconcile_interrupted()
@@ -165,7 +151,7 @@ def test_restart_reconciliation_fails_closed_for_legacy_work_without_checkpoint_
     assert [item.turn_id for item in reconciled] == ["legacy-work"]
     persisted = store.load("legacy-work")
     assert persisted.status is LifecycleState.ERROR
-    assert persisted.checkpoint_policy is None
+    assert "checkpoint_policy" not in persisted.to_dict()
     assert persisted.terminal_reason == "unexpected_process_interruption"
 
 

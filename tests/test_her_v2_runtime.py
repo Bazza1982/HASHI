@@ -191,6 +191,20 @@ class ScriptedProvider:
             raise
         if isinstance(value, Exception):
             raise value
+        if request.stage is Stage.PLANNING and isinstance(value, dict):
+            value = dict(value)
+            value.setdefault(
+                "success_criteria", ["The requested result is completed and checked"]
+            )
+            value.setdefault("parallel_groups", [])
+            raw_sub_agents = value.setdefault("sub_agents", [])
+            if isinstance(raw_sub_agents, list):
+                for raw_assignment in raw_sub_agents:
+                    if not isinstance(raw_assignment, dict):
+                        continue
+                    raw_assignment.setdefault("profile", "lightweight")
+                    raw_assignment.setdefault("tools", [])
+                    raw_assignment.setdefault("allow_side_effects", False)
         if isinstance(value, StageResponse):
             return value
         if request.stage is Stage.VERIFICATION and isinstance(value, dict):
@@ -376,12 +390,6 @@ def _runtime(
 
 
 def _initial(classification, *, triage_goal="interpreted goal", clarification=""):
-    checkpoint_policy = (
-        "STANDARD"
-        if classification
-        in {"SIMPLE_TASK", "COMPLEX_TASK", "HIGH_VOLUME_TASK"}
-        else None
-    )
     return {
         Stage.IMMEDIATE_RESPONSE: [{"message": "I have it."}],
         Stage.TRIAGE: [
@@ -389,8 +397,6 @@ def _initial(classification, *, triage_goal="interpreted goal", clarification=""
                 "classification": classification,
                 "goal": triage_goal,
                 "clarification": clarification,
-                "checkpoint_policy": checkpoint_policy,
-                "checkpoint_reason": None,
             }
         ],
     }
@@ -563,7 +569,7 @@ async def test_unfulfillable_multimodal_direct_response_uses_work_path(tmp_path)
 
     assert result.terminal_state is TerminalState.COMPLETED
     assert result.classification is TriageClassification.SIMPLE_TASK
-    assert result.ledger["checkpoint_policy"] == "STANDARD"
+    assert "checkpoint_policy" not in result.ledger
     assert result.final_was_immediate is False
     assert Stage.EXECUTION in {
         request.stage for _profile, request in provider.requests
@@ -798,7 +804,7 @@ async def test_triage_first_work_starts_without_waiting_and_repairs_late_immedia
     scripts = {
         Stage.IMMEDIATE_RESPONSE: [delayed_immediate],
         Stage.TRIAGE: [
-            {"classification": "SIMPLE_TASK", "checkpoint_policy": "STANDARD"}
+            {"classification": "SIMPLE_TASK"}
         ],
         Stage.EXECUTION: [blocked_execution],
         Stage.FINALISATION: [{"report": "Checked and complete."}],
@@ -860,7 +866,7 @@ async def test_unrepairable_immediate_text_remains_visible_for_work(tmp_path):
             )
         ],
         Stage.TRIAGE: [
-            {"classification": "SIMPLE_TASK", "checkpoint_policy": "STANDARD"}
+            {"classification": "SIMPLE_TASK"}
         ],
         Stage.EXECUTION: [{"disposition": "COMPLETED", "summary": "Done."}],
         Stage.FINALISATION: [{"report": "Done."}],
@@ -903,7 +909,7 @@ async def test_final_completion_supersedes_a_still_pending_immediate_response(tm
     scripts = {
         Stage.IMMEDIATE_RESPONSE: [blocked_immediate],
         Stage.TRIAGE: [
-            {"classification": "SIMPLE_TASK", "checkpoint_policy": "STANDARD"}
+            {"classification": "SIMPLE_TASK"}
         ],
         Stage.EXECUTION: [{"disposition": "COMPLETED", "summary": "Done."}],
         Stage.FINALISATION: [{"report": "Done."}],
@@ -1019,9 +1025,6 @@ async def test_optional_immediate_failure_does_not_block_authoritative_triage(
             {
                 "classification": classification,
                 "clarification": clarification,
-                "checkpoint_policy": (
-                    "STANDARD" if classification == "SIMPLE_TASK" else None
-                ),
             }
         ],
     }
@@ -1445,11 +1448,31 @@ async def test_review_imposed_replanning_does_not_reconsult_habits(tmp_path):
     replan_request = next(
         call for _profile, call in provider.requests if call.stage is Stage.REPLANNING
     )
-    assert replan_request.context["habits_included"] is False
+    assert set(replan_request.context) == {
+        "active_plan",
+        "plan_edit_history",
+        "workflow_state_and_evidence",
+    }
     assert "habits" not in replan_request.context
-    assert replan_request.context["execution_evidence_refs"] == [
+    workflow_evidence = replan_request.context["workflow_state_and_evidence"]
+    assert workflow_evidence["evidence_refs"] == [
         "evidence:constraint"
     ]
+    assert workflow_evidence["ledger"]["status"] == "REPLANNING"
+    assert workflow_evidence["review"] == {
+        "outcome": "FAIL",
+        "summary": "The old API is unavailable.",
+        "findings": ["Use the supported API."],
+        "evidence_refs": [
+            next(
+                receipt["evidence_ref"]
+                for receipt in workflow_evidence["tool_receipts"]
+                if receipt["tool_name"] == "workspace_inspect"
+                and receipt["details"].get("operation") == "diff"
+            )
+        ],
+        "remediation_applied": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -1663,6 +1686,20 @@ async def test_max_assurance_remediation_and_verification_are_bounded_at_three(t
     assert result.verification_count == 3
     assert result.assurance_status == "FAILED"
     assert result.replan_count == 2
+    replan_requests = [
+        call
+        for _profile, call in provider.requests
+        if call.stage is Stage.REPLANNING
+    ]
+    assert replan_requests[0].context["plan_edit_history"] == []
+    second_history = replan_requests[1].context["plan_edit_history"]
+    assert len(second_history) == 1
+    assert second_history[0]["revision"] == 1
+    assert second_history[0]["plan_changed"] is True
+    assert second_history[0]["resulting_plan"]["plan"] == ["remediation 1"]
+    assert replan_requests[1].context["workflow_state_and_evidence"][
+        "verification"
+    ]["outcome"] == "FAILED"
     assert sum(call.stage is Stage.REVIEW for _profile, call in provider.requests) == 1
     assert (
         sum(
@@ -2058,17 +2095,22 @@ async def test_normal_mode_honours_bounded_subagent_side_effect_requests(tmp_pat
 @pytest.mark.asyncio
 async def test_subagent_side_effect_flag_must_be_a_real_boolean(tmp_path):
     scripts = _initial("HIGH_VOLUME_TASK")
+    invalid_plan = {
+        "plan": ["invalid delegation"],
+        "sub_agents": [
+            {
+                "id": "unsafe",
+                "task": "Attempt an update",
+                "allow_side_effects": "false",
+            }
+        ],
+    }
     scripts[Stage.PLANNING] = [
         {
-            "plan": ["invalid delegation"],
-            "sub_agents": [
-                {
-                    "id": "unsafe",
-                    "task": "Attempt an update",
-                    "allow_side_effects": "false",
-                }
-            ],
+            **invalid_plan,
+            "sub_agents": [dict(invalid_plan["sub_agents"][0])],
         }
+        for _ in range(10)
     ]
     provider = ScriptedProvider(scripts)
 
@@ -2077,7 +2119,13 @@ async def test_subagent_side_effect_flag_must_be_a_real_boolean(tmp_path):
     )
 
     assert result.terminal_state is TerminalState.ERROR
-    assert "allow_side_effects must be a boolean" in result.error
+    assert "STRUCTURED_OUTPUT_INVALID" in result.error
+    assert any(
+        "allow_side_effects must be a boolean"
+        in str(request.context.get("previous_structure_error", {}).get("error", ""))
+        for _profile, request in provider.requests
+        if request.stage is Stage.PLANNING
+    )
     assert not any(
         request.role.startswith("sub_agent:")
         for _profile, request in provider.requests
@@ -3057,8 +3105,7 @@ async def test_triage_recovers_unambiguous_control_json_from_reasoning(tmp_path)
                 reasoning_trace=(
                     "The task requires work.\n"
                     '{"classification":"COMPLEX_TASK",'
-                    '"goal":"Diagnose the fault",'
-                    '"checkpoint_policy":"STANDARD"}'
+                    '"goal":"Diagnose the fault"}'
                 ),
                 provider="fake-api",
                 model="model-triage",
@@ -3457,7 +3504,7 @@ async def test_structured_output_repair_has_no_attempt_cap_and_preserves_classif
         StageResponse(
             text=(
                 'prefix {"classification":"simple-task","goal":"Do it",'
-                '"checkpoint_policy":"STANDARD"} suffix'
+                '"clarification":null} suffix'
             ),
             reasoning_trace=None,
             provider="fake-api",
@@ -3610,7 +3657,6 @@ async def test_steer_stops_old_turn_and_new_turn_gets_fresh_triage(tmp_path):
             {
                 "classification": "COMPLEX_TASK",
                 "goal": "old",
-                "checkpoint_policy": "STANDARD",
             },
             {"classification": "DIRECT_RESPONSE", "goal": "new"},
         ],

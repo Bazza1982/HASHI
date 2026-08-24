@@ -115,17 +115,12 @@ class HERv2Learning:
         )
 
     async def retrieve(self, *, goal: str, turn_id: str) -> Sequence[str]:
+        del goal
         config = self.config_getter()
         if not config.enabled:
             return ()
-        # Bridge-managed conversation context is useful to the live turn, but
-        # it is not Habit-retrieval authority.  Match only against the current
-        # authoritative request, using the legacy bounded extraction contract.
-        current_request = her_habits.extract_current_request(goal)
-        selected = self.store.retrieve(
-            current_request, limit=config.retrieval_limit
-        )
-        context = her_habits.render_habit_advisory_context(selected)
+        active_habits = self.store.load()
+        context = her_habits.render_habit_advisory_context(active_habits)
         ref = self._audit(
             event_id=f"{turn_id}:habits:planning-retrieval",
             turn_id=turn_id,
@@ -133,10 +128,11 @@ class HERv2Learning:
             stage=Stage.PLANNING.value,
             event="habit_planning_retrieval",
             payload={
-                "selected_habit_ids": [habit.habit_id for habit in selected],
-                "selected_count": len(selected),
+                "active_habit_ids": [habit.habit_id for habit in active_habits],
+                "active_count": len(active_habits),
                 "planning_only": True,
                 "authority": "advisory",
+                "selection": "all_active_habits",
             },
         )
         # The runtime stores only a compact log reference in its Ledger.  The

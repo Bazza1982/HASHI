@@ -15,7 +15,6 @@ from .interfaces import (
 )
 from .lifecycle import LifecycleViolation
 from .models import (
-    CheckpointPolicy,
     DeliveryRecord,
     ExecutionOutcome,
     LifecycleState,
@@ -39,8 +38,6 @@ class RuntimeSupportMixin:
         self,
         state: _TurnState,
         classification: TriageClassification,
-        checkpoint_policy: CheckpointPolicy | None,
-        checkpoint_reason: str,
     ) -> None:
         ref = self._audit(
             state,
@@ -50,19 +47,10 @@ class RuntimeSupportMixin:
             event_id=f"{state.ledger.turn_id}:classification",
             payload={
                 "classification": classification.value,
-                "checkpoint_policy": (
-                    checkpoint_policy.value if checkpoint_policy else None
-                ),
-                "checkpoint_reason": checkpoint_reason or None,
-                "checkpoint_policy_immutable": True,
             },
         )
         state.ledger.add_log_ref(ref)
-        state.ledger.record_triage(
-            classification,
-            checkpoint_policy=checkpoint_policy,
-            checkpoint_reason=checkpoint_reason,
-        )
+        state.ledger.record_triage(classification)
         self.ledger_store.save(state.ledger)
 
     async def _transition(
@@ -117,20 +105,19 @@ class RuntimeSupportMixin:
             if limitation not in state.limitations:
                 state.limitations.append(limitation)
 
-    async def _render_required_message(
+    async def _render_required_clarification(
         self,
         state: _TurnState,
         *,
-        kind: str,
         text: str,
         event_id: str,
     ) -> tuple[str, str, str]:
-        """Render Persona without granting presentation workflow authority."""
+        """Render a required clarification without granting workflow authority."""
 
         message = RequiredUserMessage(
             event_id=event_id,
             turn_id=state.ledger.turn_id,
-            kind=kind,
+            kind="clarification",
             text=text,
         )
         if self.required_persona is None:
@@ -141,7 +128,7 @@ class RuntimeSupportMixin:
                 event="required_persona_render_skipped",
                 event_id=f"{event_id}:persona:skipped",
                 payload={
-                    "kind": kind,
+                    "kind": message.kind,
                     "reason": "renderer_unavailable",
                     "source_text_sha256": hashlib.sha256(
                         message.text.encode("utf-8")
@@ -162,7 +149,7 @@ class RuntimeSupportMixin:
             event="required_persona_render_started",
             event_id=f"{event_id}:persona:start",
             payload={
-                "kind": kind,
+                "kind": message.kind,
                 "source_text_sha256": hashlib.sha256(
                     message.text.encode("utf-8")
                 ).hexdigest(),
@@ -205,7 +192,7 @@ class RuntimeSupportMixin:
             event="required_persona_render_completed",
             event_id=f"{event_id}:persona:complete",
             payload={
-                "kind": kind,
+                "kind": message.kind,
                 "source_text_sha256": hashlib.sha256(
                     message.text.encode("utf-8")
                 ).hexdigest(),

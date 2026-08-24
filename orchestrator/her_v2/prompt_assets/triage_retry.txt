@@ -1,4 +1,0 @@
-$prompt
-
-The previous output was rejected for the following validation issue. Correct the JSON envelope and classify the same request under the system rules:
-$retry_feedback

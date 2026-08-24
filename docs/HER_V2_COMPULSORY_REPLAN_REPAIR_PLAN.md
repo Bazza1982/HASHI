@@ -38,9 +38,7 @@ selected execution mode is one of:
 - Assured (`max`).
 
 Fast path (`low`) and Planned (`medium`) do not install the cadence. Eligibility
-is determined only by HER execution mode. The Triage `checkpoint_policy` risk
-field, if retained for compatibility and audit context, must not enable,
-disable, postpone, or replace compulsory Replanning.
+is determined only by HER execution mode.
 
 The first cadence window starts only after the principal lifecycle enters
 `EXECUTING`. Planning, Triage, Immediate Response, commentary packaging,
@@ -254,9 +252,8 @@ Use an injected monotonic clock and barriers to prove:
 
 Add end-to-end fake-provider journeys proving:
 
-1. `low` and `medium` never install compulsory cadence, even when Triage says
-   `HIGH_RISK`;
-2. `high`, `xhigh`, and `max` install it even when Triage says `STANDARD`;
+1. `low` and `medium` never install compulsory cadence;
+2. `high`, `xhigh`, and `max` always install it;
 3. an eligible short task below both thresholds completes with zero Replans;
 4. the tenth result forces `EXECUTING -> REPLANNING -> EXECUTING`, plan version
    N+1, one commentary, then a fresh 0/300 window;
@@ -306,7 +303,7 @@ replay.
 The following old assertions directly contradict the locked design and must no
 longer pass:
 
-- periodic control is installed only for Triage `HIGH_RISK`;
+- periodic control is gated by a model-authored Triage risk label;
 - a checkpoint model decides `CONTINUE`, `USER_INPUT_REQUIRED`, or `HALT`;
 - periodic control has `may_replan=false`;
 - checkpoint/replan emits no commentary;
@@ -360,8 +357,7 @@ Completed on 2026-08-24 in the HASHI1 working tree:
 
 - removed the old `CHECKPOINT` stage, assessor schema, decision types, prompt
   asset, provider route, and contradictory prompt tests;
-- installed effort-based compulsory cadence for `high`, `xhigh`, and `max`,
-  independent of immutable Triage risk metadata;
+- installed effort-based compulsory cadence for `high`, `xhigh`, and `max`;
 - implemented safe-boundary 10-result/300-second coordination, three-question
   structured Replanning, plan version activation, below-100 continuation,
   100% stop, exact receipt preservation, and no-side-effect-replay context;

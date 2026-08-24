@@ -5,14 +5,18 @@ from pathlib import Path
 import pytest
 
 from orchestrator.her_v2 import prompt_catalog
-from orchestrator.her_v2.models import Effort, Stage, StageRequest
+from orchestrator.her_v2.models import (
+    Effort,
+    Stage,
+    StageRequest,
+    TriageClassification,
+)
 from orchestrator.her_v2.prompt_catalog import PromptAssetError
 from orchestrator.her_v2.prompts import (
     render_finalisation_system_prompt,
     render_immediate_response_system_prompt,
     render_internal_stage_system_prompt,
     render_persona_commentary_system_prompt,
-    render_persona_required_message_system_prompt,
     render_stage_prompt,
 )
 
@@ -39,7 +43,7 @@ def test_external_prompt_inventory_is_complete_and_cwd_independent(
 
     monkeypatch.chdir(tmp_path)
     prompt_catalog.validate_prompt_assets()
-    assert "Triage classifier" in prompt_catalog.load_prompt_asset("system_triage")
+    assert "triage classifier" in prompt_catalog.load_prompt_asset("system_triage")
 
 
 def test_external_prompt_placeholder_drift_fails_closed(
@@ -102,13 +106,6 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
         persona_block_begin="[persona]",
         persona_block_end="[persona_end]",
     )
-    assert "Do not add a question" in render_persona_required_message_system_prompt(
-        message_kind="final",
-        kind_rule="Do not add a question.",
-        persona_guidance="Speak plainly.",
-        persona_block_begin="[persona]",
-        persona_block_end="[persona_end]",
-    )
 
 
 def test_review_and_verification_prompts_enforce_tool_backed_bounded_evidence() -> None:
@@ -142,21 +139,83 @@ def test_review_and_verification_prompts_enforce_tool_backed_bounded_evidence() 
     assert "NOT_AI_VERIFIABLE" in verification_request
 
 
-def test_triage_prompt_requires_independent_checkpoint_risk_selection() -> None:
+def test_triage_uses_one_complete_prompt_without_checkpoint_risk_metadata() -> None:
     system_prompt = render_internal_stage_system_prompt(_request(Stage.TRIAGE))
     stage_prompt = render_stage_prompt(_request(Stage.TRIAGE))
 
-    assert "select its independent Execution checkpoint risk policy" in system_prompt
-    assert "Complexity, volume, and HER execution mode do not decide" in system_prompt
-    assert "checkpoint_policy" in stage_prompt
-    assert "STANDARD | HIGH_RISK" in stage_prompt
+    assert system_prompt == stage_prompt
+    assert "TRIAGE AGENT" in stage_prompt or "TRAIGE AGENT" in stage_prompt
+    assert "User request and context:" in stage_prompt
+    assert "checkpoint_policy" not in stage_prompt
+    assert "checkpoint_reason" not in stage_prompt
 
 
-def test_replanning_prompt_never_describes_commentary_as_optional() -> None:
-    system_prompt = render_internal_stage_system_prompt(_request(Stage.REPLANNING))
-    stage_prompt = render_stage_prompt(_request(Stage.REPLANNING))
+def test_planning_uses_one_complete_prompt_with_all_runtime_inputs() -> None:
+    request = StageRequest(
+        turn_id="turn-1",
+        request_ref="hashi-request:req-1",
+        stage=Stage.PLANNING,
+        role="primary",
+        attempt=1,
+        goal="Complete the supplied goal.",
+        classification=TriageClassification.COMPLEX_TASK,
+        effort=Effort.MEDIUM,
+        context={"habits": ["Habit one", "Habit two"]},
+    )
 
-    assert "Replanning is compulsory" in system_prompt
-    assert "you must still author it" in system_prompt
-    assert "Replanning is different: its commentary is required" in stage_prompt
-    assert "Runtime supplies a deterministic verified-field fallback" in stage_prompt
+    rendered = render_stage_prompt(request)
+    assert render_internal_stage_system_prompt(request) == rendered
+    assert "Complete the supplied goal." in rendered
+    assert "`COMPLEX_TASK`" in rendered
+    assert "Habit one\n\nHabit two" in rendered
+    assert '"success_criteria"' in rendered
+    assert "$goal" not in rendered
+    assert "$classification" not in rendered
+    assert "$all_active_habits" not in rendered
+    assert "$schema" not in rendered
+
+
+def test_replanning_uses_complete_prompt_with_real_runtime_inputs() -> None:
+    request = StageRequest(
+        turn_id="turn-1",
+        request_ref="hashi-request:req-1",
+        stage=Stage.REPLANNING,
+        role="primary",
+        attempt=1,
+        goal="Complete the authorised repair.",
+        classification=TriageClassification.COMPLEX_TASK,
+        effort=Effort.HIGH,
+        plan_id="turn-1:plan:v2",
+        context={
+            "active_plan": {
+                "plan": ["Inspect", "Repair", "Verify"],
+                "success_criteria": ["The repair is verified"],
+            },
+            "plan_edit_history": [
+                {
+                    "revision": 1,
+                    "plan_changed": True,
+                    "change_reason": "The first route was unavailable.",
+                }
+            ],
+            "workflow_state_and_evidence": {
+                "ledger": {"status": "REPLANNING"},
+                "evidence_refs": ["receipt:verified-change"],
+                "review": {"outcome": "FAIL"},
+            },
+        },
+    )
+
+    stage_prompt = render_stage_prompt(request)
+    assert render_internal_stage_system_prompt(request) == stage_prompt
+    assert "Complete the authorised repair." in stage_prompt
+    assert "COMPLEX_TASK" in stage_prompt
+    assert '"Repair"' in stage_prompt
+    assert '"revision": 1' in stage_prompt
+    assert '"receipt:verified-change"' in stage_prompt
+    assert '"completion_percent"' in stage_prompt
+    assert '"commentary"' in stage_prompt
+    assert "$active_plan" not in stage_prompt
+    assert "$plan_edit_history" not in stage_prompt
+    assert "$workflow_state_and_evidence" not in stage_prompt
+    assert "$schema" not in stage_prompt

@@ -28,13 +28,6 @@ class TriageClassification(StrEnum):
     CONFIRMATION_REQUIRED = "CONFIRMATION_REQUIRED"
 
 
-class CheckpointPolicy(StrEnum):
-    """Compatibility-named immutable Execution risk metadata from Triage."""
-
-    STANDARD = "STANDARD"
-    HIGH_RISK = "HIGH_RISK"
-
-
 WORK_CLASSIFICATIONS = frozenset(
     {
         TriageClassification.SIMPLE_TASK,
@@ -284,8 +277,6 @@ class TriageDecision:
     classification: TriageClassification
     goal: str
     clarification: str = ""
-    checkpoint_policy: CheckpointPolicy | None = None
-    checkpoint_reason: str = ""
 
 
 @dataclass(frozen=True)

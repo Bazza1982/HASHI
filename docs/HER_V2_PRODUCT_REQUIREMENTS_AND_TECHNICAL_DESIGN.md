@@ -220,14 +220,17 @@ HER v2 keeps five boundaries distinct:
    [persona_end]
    ```
 
-   Text outside that block is unavailable to commentary packaging, required
-   clarification rendering, Immediate Response, and Finalisation.
-4. Commentary delivery accepts only the typed output of Persona packaging.
-   Generic workflow delivery is not a commentary transport.
+   Text outside that block is unavailable to commentary/clarification packaging,
+   Immediate Response, and Finalisation.
+4. Commentary and Triage clarification share one isolated Persona Commentary
+   Agent. Their delivery boundaries remain distinct: commentary accepts only a
+   typed `PackagedCommentary`, while clarification retains its typed required
+   message identity and must be delivered.
 5. Finalisation is one combined model call that normalises Execution when
    necessary and renders the final message from the same result using the
-   extracted Persona block. A pre-execution Triage clarification retains its
-   separate typed required-message renderer because no Execution result exists.
+   extracted Persona block. A pre-execution Triage clarification uses the shared
+   Persona Commentary Agent and then returns to its required-message delivery
+   path because no Execution result exists.
 
 Commentary is optional presentation, never workflow authority. A missing,
 empty, malformed, oversized, packaging-failed, or delivery-failed commentary
@@ -235,7 +238,7 @@ cannot invalidate, retry, reclassify, replan, stop, or complete a stage. Missing
 or invalid Persona markers use deterministic minimal guidance based on the
 configured HASHI display name and the form of address `您`. A failed or invalid
 combined Finalisation is a technical `ERROR` with a deterministic local report;
-a failed Triage-clarification renderer preserves the validated question and
+a failed Triage-clarification Persona edit preserves the validated question and
 cannot change workflow state.
 When the Persona block is unavailable to Immediate Response, its prompt uses
 the same configured display name and polite form of address `您` as its entire
@@ -265,8 +268,6 @@ The authoritative request is the user's current instruction together with the ap
 Triage is the sole authority for classifying a turn. Once the Triage result has been validated and recorded in the Ledger:
 
 - the classification is immutable for that turn;
-- every work classification has an immutable `STANDARD` or `HIGH_RISK`
-  checkpoint policy, with a required reason for `HIGH_RISK`;
 - planning may not redefine complexity;
 - execution may not silently change the classification;
 - replanning may change the approach but not the classification;
@@ -274,13 +275,6 @@ Triage is the sole authority for classifying a turn. Once the Triage result has 
 - a suspected misclassification is recorded as evidence but corrected only through a future turn.
 
 This immutability is intentional. Triage quality is improved through prompt refinement, tests, and operational evidence rather than by allowing downstream stages to overrule it.
-
-The compatibility-named checkpoint risk field is independent of task
-complexity and execution effort. It records risk metadata and does not grant
-tool or side-effect authority, install a model checkpoint assessor, or enable
-or disable compulsory Replanning. A malformed work Triage response that omits
-the policy is repaired through the normal structured-output path or fails
-truthfully; Runtime never silently substitutes `STANDARD`.
 
 ### 4.3 Plan authority
 
@@ -490,13 +484,6 @@ Triage uses a lightweight model with a high provider reasoning setting. It produ
 - HER requests clarification or confirmation.
 - The turn becomes terminal state `PENDING_USER_INPUT`.
 
-For `SIMPLE_TASK`, `COMPLEX_TASK`, and `HIGH_VOLUME_TASK`, Triage also returns
-exactly one `checkpoint_policy`: `STANDARD` or `HIGH_RISK`. `HIGH_RISK` is used
-when continuing Execution can materially and irreversibly affect data,
-production, security or access, credentials, money, external communications,
-or another high-consequence target, and it requires a concise
-`checkpoint_reason`. Non-work classifications carry neither field.
-
 ### 6.3 Immediate Response and Triage race handling
 
 The Immediate Response and Triage may finish in either order. HER must enforce the following rules:
@@ -613,8 +600,8 @@ evidence.
 
 Every Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) Execution cycle
 installs one request-local cadence coordinator after Execution starts. Fast path
-(`low`) and Planned (`medium`) do not. Triage risk metadata cannot enable,
-disable, postpone, or replace this rule.
+(`low`) and Planned (`medium`) do not. Eligibility is determined only by the
+selected execution mode.
 
 A Replan becomes due at the first inclusive threshold of 10 newly completed
 Tool Gateway receipts or 300 monotonic seconds in the current window.
@@ -707,13 +694,12 @@ Habits contain accumulated operational experience such as:
 
 Habits are advisory inputs to initial Planning. They are never user intent, execution evidence, or authority.
 
-Habit retrieval is enabled by the single Habit–Meditation switch. It ranks only
-the title and compact metadata, is bounded by the configured retrieval limit,
-and uses only the current authoritative request after the final Bridge
-current-request marker. Bridge conversation background is not retrieval input.
-The selected Habit bodies may be disclosed to initial Planning only; Execution,
+Habit loading is enabled by the single Habit–Meditation switch. Initial
+Planning receives every valid active Habit and decides semantically which, if
+any, apply to the complete authoritative goal and supplied context.
+The active Habit bodies may be disclosed to initial Planning only; Execution,
 Replanning, Review, Verification, and Finalisation do not receive or re-read them. Because
-`low` effort omits Planning, it omits Habit retrieval while retaining eligible
+`low` effort omits Planning, it omits Habit loading while retaining eligible
 post-execution Meditation.
 
 When the capability is disabled, or the request is marked
@@ -1361,8 +1347,9 @@ successful reasoning stage. Compulsory Replanning instead requires one update
 and deterministically reconstructs it from validated fields when necessary.
 HASHI extracts Persona guidance and supplies only the explicit marker block to isolated presentation invocations. Combined
 Finalisation consumes that block while producing the canonical Execution
-payload and final message in one call; only a pre-execution Triage clarification
-uses the older required-message presentation interface.
+payload and final message in one call. A pre-execution Triage clarification uses
+the same Persona Commentary Agent as interim commentary, then returns to its
+typed required-message delivery path.
 
 HER v2 prompt prose is stored as versioned UTF-8 assets under
 `orchestrator/her_v2/prompt_assets/`. The loader resolves those assets relative

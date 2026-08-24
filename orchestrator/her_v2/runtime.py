@@ -53,7 +53,6 @@ from .ledger import ExecutionLedger, LedgerInvariantError, LedgerStore
 from .lifecycle import LifecycleViolation
 from .models import (
     WORK_CLASSIFICATIONS,
-    CheckpointPolicy,
     DeliveryRecord,
     Effort,
     ExecutionDisposition,
@@ -128,6 +127,7 @@ class _TurnState:
     tool_receipts: dict[str, ToolEvidenceReceipt] = field(default_factory=dict)
     limitations: list[str] = field(default_factory=list)
     active_plan: Mapping[str, Any] | None = None
+    plan_edit_history: list[Mapping[str, Any]] = field(default_factory=list)
     plan_version: int = 0
     replan_count: int = 0
     review_count: int = 0
@@ -437,13 +437,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 triage = replace(
                     triage,
                     classification=TriageClassification.SIMPLE_TASK,
-                    # This is a capability-only escalation for local attachment
-                    # inspection after Triage determined that no ordinary work or
-                    # side effect was required.  Install the explicit STANDARD
-                    # policy required by every executable ledger instead of
-                    # leaving the synthetic work classification policy-less.
-                    checkpoint_policy=CheckpointPolicy.STANDARD,
-                    checkpoint_reason="",
                 )
                 self._audit(
                     state,
@@ -465,8 +458,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                             else None
                         ),
                         "classification_override": TriageClassification.SIMPLE_TASK.value,
-                        "checkpoint_policy_override": CheckpointPolicy.STANDARD.value,
-                        "checkpoint_policy_reason": "local_media_capability_fallback",
                         "reason": "direct_response_media_capability_unfulfilled",
                     },
                 )
@@ -489,8 +480,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         self._record_triage(
             state,
             triage.classification,
-            triage.checkpoint_policy,
-            triage.checkpoint_reason,
         )
         state.progress.record("classification", triage.classification.value)
 
@@ -587,9 +576,8 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 clarification,
                 clarification_provenance,
                 clarification_detail,
-            ) = await self._render_required_message(
+            ) = await self._render_required_clarification(
                 state,
-                kind="clarification",
                 text=triage.clarification,
                 event_id=f"{state.ledger.turn_id}:clarification",
             )
@@ -1681,6 +1669,120 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 assignment.attachment_ids,
             )
 
+    @staticmethod
+    def _replanning_workflow_state_and_evidence(
+        state: _TurnState,
+        *,
+        reason: str,
+        reviewer_findings: Sequence[str],
+        checkpoint_id: str,
+        cadence_context: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        raw_execution = state.last_execution_response
+        execution_response = (
+            {
+                "text": raw_execution.text,
+                "data": dict(raw_execution.data),
+                "provider": raw_execution.provider,
+                "model": raw_execution.model,
+                "usage": dict(raw_execution.usage),
+                "evidence_refs": list(raw_execution.evidence_refs),
+                "validation_source": raw_execution.validation_source or None,
+            }
+            if raw_execution is not None
+            else None
+        )
+        review = (
+            {
+                "outcome": state.last_review.outcome.value,
+                "summary": state.last_review.summary,
+                "findings": list(state.last_review.findings),
+                "evidence_refs": list(state.last_review.evidence_refs),
+                "remediation_applied": state.review_remediated,
+            }
+            if state.last_review is not None
+            else None
+        )
+        verification = (
+            {
+                "outcome": state.last_verification.outcome.value,
+                "summary": state.last_verification.summary,
+                "checks": [
+                    {
+                        "claim": check.claim,
+                        "verifiability": check.verifiability.value,
+                        "result": check.result.value,
+                        "method": check.method,
+                        "evidence_refs": list(check.evidence_refs),
+                        "observed": check.observed,
+                        "required": check.required,
+                    }
+                    for check in state.last_verification.checks
+                ],
+                "evidence_refs": list(state.last_verification.evidence_refs),
+                "limitations": list(state.last_verification.limitations),
+            }
+            if state.last_verification is not None
+            else None
+        )
+        return {
+            "replan_trigger": {
+                "reason": reason,
+                "checkpoint_id": checkpoint_id,
+                "cadence_triggered": bool(checkpoint_id),
+                "cadence": dict(cadence_context or {}),
+                "reviewer_or_verifier_findings": list(reviewer_findings),
+            },
+            "ledger": state.ledger.to_dict(),
+            "execution": {
+                "invocation_id": state.last_execution_invocation_id or None,
+                "response": execution_response,
+                "structured_output_valid": state.last_execution_structure_valid,
+                "structure_error": state.last_execution_error or None,
+                "provider_failure": (
+                    state.last_execution_failure.audit_payload()
+                    if state.last_execution_failure is not None
+                    else None
+                ),
+                "elapsed_s": round(state.execution_elapsed_s, 6),
+            },
+            "evidence_refs": list(state.evidence_refs),
+            "tool_receipts": [
+                {
+                    "evidence_ref": receipt.evidence_ref,
+                    "stage": receipt.stage.value,
+                    "invocation_id": receipt.invocation_id,
+                    "attempt": receipt.attempt,
+                    "tool_call_id": receipt.tool_call_id,
+                    "tool_name": receipt.tool_name,
+                    "status": receipt.status.value,
+                    "read_only": receipt.read_only,
+                    "completed": receipt.completed,
+                    "output_sha256": receipt.output_sha256,
+                    "details": dict(receipt.details),
+                }
+                for receipt in sorted(
+                    state.tool_receipts.values(), key=lambda item: item.evidence_ref
+                )
+            ],
+            "limitations": list(state.limitations),
+            "review": review,
+            "verification": verification,
+            "foreground_cleanup": dict(state.last_foreground_cleanup) or None,
+            "attachment_manifest": [dict(item) for item in state.attachment_manifest],
+            "media_routing_by_stage": {
+                stage: [dict(entry) for entry in entries]
+                for stage, entries in state.media_routing_by_stage.items()
+            },
+            "workflow_counters": {
+                "completed_replans": state.replan_count,
+                "reviews": state.review_count,
+                "verifications": state.verification_count,
+                "checkpoints": state.checkpoint_count,
+                "execution_cycles": state.execution_cycle_serial,
+            },
+        }
+
     async def _perform_replan(
         self,
         state: _TurnState,
@@ -1696,6 +1798,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 "Replanning requires an active plan", retryable=False
             )
         prior_plan = dict(state.active_plan)
+        prior_plan_id = state.ledger.plan_id
         logical_replan_id = str(checkpoint_id or "").strip() or (
             f"{state.ledger.turn_id}:replan:{state.replan_count + 1}"
         )
@@ -1714,9 +1817,23 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 raise StructuredOutputError(
                     "plan_changed=true requires a materially changed replacement plan"
                 )
+            if outcome.completion_percent == 100 and (
+                outcome.plan_changed or replacement_semantics != previous_semantics
+            ):
+                raise StructuredOutputError(
+                    "completion_percent=100 requires an unchanged active plan and "
+                    "plan_changed=false"
+                )
             return outcome
 
         await self._transition(state, LifecycleState.REPLANNING)
+        workflow_state_and_evidence = self._replanning_workflow_state_and_evidence(
+            state,
+            reason=reason,
+            reviewer_findings=reviewer_findings,
+            checkpoint_id=logical_replan_id if checkpoint_id else "",
+            cadence_context=cadence_context,
+        )
         response, outcome = await self._invoke_stage(
             state,
             Stage.REPLANNING,
@@ -1724,51 +1841,31 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             allow_tools=False,
             publish_commentary=False,
             context={
-                "classification": classification.value,
                 "active_plan": prior_plan,
-                "reason": reason,
-                "checkpoint_id": logical_replan_id,
-                "cadence_triggered": bool(checkpoint_id),
-                "cadence": dict(cadence_context or {}),
-                "reviewer_findings": list(reviewer_findings),
-                "execution_evidence_refs": list(state.evidence_refs),
-                "current_limitations": list(state.limitations),
-                "required_self_questions": [
-                    {
-                        "question": "How complete is the original authorised goal?",
-                        "required_fields": [
-                            "completion_percent",
-                            "completion_basis",
-                        ],
-                    },
-                    {
-                        "question": "Is the active plan still appropriate?",
-                        "required_fields": [
-                            "plan_changed",
-                            "change_reason",
-                            "plan",
-                            "success_criteria",
-                        ],
-                    },
-                    {
-                        "question": "What update should be sent to the user now?",
-                        "required_fields": ["next_step", "commentary"],
-                    },
+                "plan_edit_history": [
+                    dict(entry) for entry in state.plan_edit_history
                 ],
-                "completion_routing": {
-                    "below_100": "resume_execution",
-                    "at_100": "stop_adding_work_then_review_or_finalise",
-                },
-                "goal_is_immutable": True,
-                "classification_is_immutable": True,
-                "authority_may_not_expand": True,
-                "replan_count_is_unbounded": True,
-                "habits_included": False,
+                "workflow_state_and_evidence": workflow_state_and_evidence,
             },
         )
         assert isinstance(outcome, ReplanningOutcome)
         state.replan_count += 1
         self._activate_plan(state, outcome.plan, replacement=True)
+        state.plan_edit_history.append(
+            {
+                "revision": state.replan_count,
+                "trigger": reason,
+                "checkpoint_id": logical_replan_id if checkpoint_id else None,
+                "previous_plan_id": prior_plan_id,
+                "active_plan_id": state.ledger.plan_id,
+                "completion_percent": outcome.completion_percent,
+                "completion_basis": outcome.completion_basis,
+                "plan_changed": outcome.plan_changed,
+                "change_reason": outcome.change_reason or None,
+                "next_step": outcome.next_step,
+                "resulting_plan": dict(outcome.plan),
+            }
+        )
         await self._publish_mandatory_replan_commentary(
             state,
             outcome=outcome,

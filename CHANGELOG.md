@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   high-risk checkpoint implementation. Adaptive (`high`), Reviewed (`xhigh`),
   and Assured (`max`) Execution now unconditionally enters Replanning at the
   next safe boundary after 10 completed Tool Gateway results or 300 monotonic
-  seconds, regardless of Triage risk metadata. Every Replan answers completion,
+  seconds. Every Replan answers completion,
   plan-suitability, and user-update questions; activates a new plan version even
   when unchanged; sends exactly one Persona-rendered or deterministic fallback
   commentary; then resumes below 100% or stops adding work at 100%. Legacy

@@ -55,7 +55,6 @@ from orchestrator.her_v2.models import (
     ToolReceiptStatus,
 )
 from orchestrator.her_v2.presentation import (
-    MAX_RENDERED_REQUIRED_MESSAGE_CHARS,
     RenderedRequiredMessage,
     RequiredPersonaRenderer,
     RequiredUserMessage,
@@ -66,8 +65,8 @@ from orchestrator.her_v2.prompts import (
     render_immediate_response_system_prompt,
     render_internal_stage_system_prompt,
     render_persona_commentary_system_prompt,
-    render_persona_required_message_system_prompt,
     render_stage_prompt,
+    uses_complete_system_prompt,
 )
 from orchestrator.her_v2.retry import (
     DEFAULT_PROVIDER_RETRY_POLICY,
@@ -88,6 +87,24 @@ from tools.token_tracker import resolve_cost_source
 
 
 _HASHI_VERIFICATION_POLICY_ARGUMENT = "_hashi_verification_policy"
+_PERSONA_COMMENTARY_AGENT_FAILED_FIELD = "persona_commentary_agent_failed"
+
+
+def _persona_commentary_agent_failure(text: str) -> tuple[bool, str]:
+    """Recognise only the Persona commentary agent's explicit JSON failure."""
+
+    try:
+        payload = json.loads(str(text or "").strip())
+    except (json.JSONDecodeError, TypeError):
+        return False, ""
+    if not isinstance(payload, Mapping) or (
+        payload.get(_PERSONA_COMMENTARY_AGENT_FAILED_FIELD) is not True
+    ):
+        return False, ""
+
+    raw_reason = payload.get("reason")
+    reason = raw_reason if isinstance(raw_reason, str) else ""
+    return True, reason or "unspecified"
 
 
 def _backend_tool_control(backend: Any) -> tuple[bool, bool]:
@@ -1895,17 +1912,27 @@ class HashiStageProvider(StageProvider):
                 internal_prompt = _internal_stage_system_prompt(request)
                 if internal_prompt is not None:
                     installed = _install_system_prompt(backend, internal_prompt)
-                    if not installed and request.stage is Stage.EXECUTION:
+                    if not installed and (
+                        request.stage is Stage.EXECUTION
+                        or uses_complete_system_prompt(request.stage)
+                    ):
                         raise StageInvocationError(
-                            "execution backend cannot isolate the HER v2 system prompt",
+                            f"{request.stage.value} backend cannot isolate the HER v2 system prompt",
                             retryable=False,
                             code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                             human_description=(
-                                "The configured Execution provider cannot isolate "
+                                f"The configured {request.stage.value} provider cannot isolate "
                                 "the required system prompt."
                             ),
                         )
-                    if not installed:
+                    if installed and uses_complete_system_prompt(request.stage):
+                        # The complete, dynamically rendered stage contract is now
+                        # isolated from the configured Agent Persona.  The raw goal
+                        # provides the non-empty user turn required by every backend;
+                        # all instructions, evidence, and output schema remain owned
+                        # by the single external system prompt asset.
+                        stage_prompt = request.goal
+                    elif not installed:
                         stage_prompt = f"{internal_prompt}\n\n{stage_prompt}"
             generation_kwargs: dict[str, Any] = {
                 "is_retry": request.attempt > 1,
@@ -2161,47 +2188,6 @@ class HashiStageProvider(StageProvider):
             request_id=request_id,
             message_label="commentary",
             max_chars=MAX_PACKAGED_COMMENTARY_CHARS,
-        )
-
-    async def package_persona_required_message(
-        self,
-        profile: ProviderProfile,
-        *,
-        persona_block: str,
-        neutral_message: str,
-        message_kind: str,
-        request_id: str,
-    ) -> str:
-        """Render one validated final report or clarification with Persona."""
-
-        kind = str(message_kind or "").strip()
-        if kind not in {"final", "clarification"}:
-            raise StageInvocationError(
-                f"unsupported required Persona message kind: {kind!r}",
-                retryable=False,
-                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
-                human_description="The required Persona message kind is invalid.",
-            )
-        label = "FINAL REPORT" if kind == "final" else "CLARIFICATION QUESTION"
-        kind_rule = (
-            "Do not add a question, invitation, next step, or offer of more work."
-            if kind == "final"
-            else "Keep it as the same clarification question; do not answer it or add another question."
-        )
-        system_prompt = render_persona_required_message_system_prompt(
-            message_kind=kind.replace("_", " "),
-            kind_rule=kind_rule,
-            persona_guidance=persona_block,
-            persona_block_begin=her_persona.PERSONA_BLOCK_BEGIN,
-            persona_block_end=her_persona.PERSONA_BLOCK_END,
-        )
-        return await self._package_persona_text(
-            profile,
-            prompt=f"VALIDATED {label} (quoted, read-only)\n{neutral_message}",
-            system_prompt=system_prompt,
-            request_id=request_id,
-            message_label=kind,
-            max_chars=MAX_RENDERED_REQUIRED_MESSAGE_CHARS,
         )
 
     async def _package_persona_text(
@@ -2552,17 +2538,16 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
                 neutral_commentary=commentary.text,
                 request_id=package_request_id,
             )
-            normalized_text = " ".join(text.split()).casefold()
-            if any(
-                " ".join(fact.split()).casefold() not in normalized_text
-                for fact in commentary.required_facts
-            ):
+            declared_failure, failure_reason = _persona_commentary_agent_failure(text)
+            if declared_failure:
                 self.logger.warning(
-                    "HER v2 Persona commentary omitted protected facts; using fallback"
+                    "HER v2 Persona commentary agent declared failure; "
+                    "using display-name fallback: reason=%s",
+                    failure_reason,
                 )
                 return self._fallback(
                     commentary,
-                    "persona_fact_preservation_failed",
+                    _PERSONA_COMMENTARY_AGENT_FAILED_FIELD,
                 )
         except asyncio.CancelledError:
             raise
@@ -2606,13 +2591,23 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
                     turn_id=message.turn_id,
                     request_ref=f"hashi-request:{self.request_id}",
                 )
-            text = await self.provider.package_persona_required_message(
+            text = await self.provider.package_persona_commentary(
                 self.profile,
                 persona_block=self.source.guidance,
-                neutral_message=message.text,
-                message_kind=message.kind,
+                neutral_commentary=message.text,
                 request_id=package_request_id,
             )
+            declared_failure, failure_reason = _persona_commentary_agent_failure(text)
+            if declared_failure:
+                self.logger.warning(
+                    "HER v2 Persona commentary agent declared clarification failure; "
+                    "using display-name fallback: reason=%s",
+                    failure_reason,
+                )
+                return self._required_fallback(
+                    message,
+                    _PERSONA_COMMENTARY_AGENT_FAILED_FIELD,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - required content has safe fallback
@@ -2630,11 +2625,7 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
     def _required_fallback(
         self, message: RequiredUserMessage, reason: str
     ) -> RenderedRequiredMessage:
-        prefix = (
-            f"{self.source.display_name} 向您汇报：\n\n"
-            if message.kind == "final"
-            else f"{self.source.display_name} 想请您确认："
-        )
+        prefix = f"{self.source.display_name} 想请您确认："
         return RenderedRequiredMessage(
             source_event_id=message.event_id,
             kind=message.kind,

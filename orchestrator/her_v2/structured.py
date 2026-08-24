@@ -9,8 +9,6 @@ from typing import Any, Callable, Mapping, TypeVar
 
 from .interfaces import StructuredOutputError
 from .models import (
-    WORK_CLASSIFICATIONS,
-    CheckpointPolicy,
     ExecutionDisposition,
     ExecutionOutcome,
     FinalisationOutcome,
@@ -79,10 +77,6 @@ def _semantic_key(value: Any) -> str:
         value = {
             "classification": value.classification.value,
             "clarification": value.clarification,
-            "checkpoint_policy": (
-                value.checkpoint_policy.value if value.checkpoint_policy else None
-            ),
-            "checkpoint_reason": value.checkpoint_reason,
         }
     elif isinstance(value, ReplanningOutcome):
         value = {
@@ -411,42 +405,7 @@ def parse_triage(data: Mapping[str, Any]) -> TriageDecision:
         raise StructuredOutputError(
             "CONFIRMATION_REQUIRED requires a clarification question"
         )
-    raw_checkpoint_policy = data.get("checkpoint_policy")
-    checkpoint_reason = _text_value(data.get("checkpoint_reason"))
-    if classification in WORK_CLASSIFICATIONS:
-        if raw_checkpoint_policy is None or not str(raw_checkpoint_policy).strip():
-            raise StructuredOutputError(
-                "work Triage requires an explicit checkpoint_policy"
-            )
-        checkpoint_policy = _enum_value(
-            CheckpointPolicy,
-            raw_checkpoint_policy,
-        )
-        if checkpoint_policy is CheckpointPolicy.HIGH_RISK and not checkpoint_reason:
-            raise StructuredOutputError(
-                "HIGH_RISK checkpoint_policy requires a checkpoint_reason"
-            )
-        if checkpoint_policy is CheckpointPolicy.STANDARD and checkpoint_reason:
-            raise StructuredOutputError(
-                "STANDARD checkpoint_policy must not provide a checkpoint_reason"
-            )
-    else:
-        if raw_checkpoint_policy is not None and str(raw_checkpoint_policy).strip():
-            raise StructuredOutputError(
-                "non-work Triage must set checkpoint_policy to null"
-            )
-        if checkpoint_reason:
-            raise StructuredOutputError(
-                "non-work Triage must not provide a checkpoint_reason"
-            )
-        checkpoint_policy = None
-    return TriageDecision(
-        classification,
-        goal,
-        clarification,
-        checkpoint_policy,
-        checkpoint_reason,
-    )
+    return TriageDecision(classification, goal, clarification)
 
 
 @_stage_parser()
@@ -454,12 +413,78 @@ def parse_plan(data: Mapping[str, Any]) -> Mapping[str, Any]:
     plan = data.get("plan")
     if plan is None:
         plan = data.get("steps")
-    if not isinstance(plan, (list, str)) or not plan:
-        raise StructuredOutputError("Planning requires a non-empty plan")
-    if "plan" in data:
-        return data
-    normalized = dict(data)
-    normalized["plan"] = plan
+    if not isinstance(plan, list) or not plan or any(
+        not isinstance(item, str) or not item.strip() for item in plan
+    ):
+        raise StructuredOutputError(
+            "Planning plan must be a non-empty list of non-empty strings"
+        )
+    success_criteria = data.get("success_criteria")
+    if not isinstance(success_criteria, list) or not success_criteria or any(
+        not isinstance(item, str) or not item.strip()
+        for item in success_criteria
+    ):
+        raise StructuredOutputError(
+            "Planning success_criteria must be a non-empty list of non-empty strings"
+        )
+    parallel_groups = data.get("parallel_groups", [])
+    if not isinstance(parallel_groups, list):
+        raise StructuredOutputError("Planning parallel_groups must be a list")
+    sub_agents = data.get("sub_agents", [])
+    if not isinstance(sub_agents, list):
+        raise StructuredOutputError("Planning sub_agents must be a list")
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(sub_agents, start=1):
+        if not isinstance(raw, Mapping):
+            raise StructuredOutputError(
+                f"Planning sub-agent assignment {index} must be an object"
+            )
+        assignment_id = _text_value(raw.get("id"))
+        task = _text_value(raw.get("task"))
+        profile = _text_value(raw.get("profile"))
+        tools = raw.get("tools")
+        attachment_ids = raw.get("attachment_ids")
+        allow_side_effects = raw.get("allow_side_effects")
+        if not assignment_id or assignment_id in seen_ids:
+            raise StructuredOutputError(
+                "Planning sub-agent assignments require unique non-empty IDs"
+            )
+        seen_ids.add(assignment_id)
+        if not task or not profile:
+            raise StructuredOutputError(
+                "Planning sub-agent assignments require task and profile"
+            )
+        if not isinstance(tools, list) or any(
+            not isinstance(item, str) or not item.strip() for item in tools
+        ):
+            raise StructuredOutputError(
+                "Planning sub-agent assignment tools must be a list of strings"
+            )
+        if attachment_ids is not None and (
+            not isinstance(attachment_ids, list)
+            or any(
+                not isinstance(item, str) or not item.strip()
+                for item in attachment_ids
+            )
+        ):
+            raise StructuredOutputError(
+                "Planning sub-agent attachment_ids must be a list of strings"
+            )
+        if not isinstance(allow_side_effects, bool):
+            raise StructuredOutputError(
+                "Planning sub-agent allow_side_effects must be a boolean"
+            )
+    commentary = data.get("commentary")
+    if commentary is not None and not isinstance(commentary, str):
+        raise StructuredOutputError("Planning commentary must be a string")
+    normalized = {
+        "plan": plan,
+        "success_criteria": success_criteria,
+        "parallel_groups": parallel_groups,
+        "sub_agents": sub_agents,
+    }
+    if isinstance(commentary, str) and commentary.strip():
+        normalized["commentary"] = commentary.strip()
     return normalized
 
 
@@ -562,10 +587,9 @@ def parse_replanning(data: Mapping[str, Any]) -> ReplanningOutcome:
     plan: dict[str, Any] = {
         "plan": steps,
         "success_criteria": success_criteria,
+        "parallel_groups": data.get("parallel_groups", []),
+        "sub_agents": data.get("sub_agents", []),
     }
-    for key in ("parallel_groups", "sub_agents"):
-        if key in data:
-            plan[key] = data[key]
 
     raw_commentary = data.get("commentary")
     commentary = (

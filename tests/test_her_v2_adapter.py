@@ -48,7 +48,6 @@ from orchestrator.her_v2.interfaces import ProviderFailureCode, StageInvocationE
 from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.ledger import ExecutionLedger, LedgerStore
 from orchestrator.her_v2.models import (
-    CheckpointPolicy,
     Effort,
     LifecycleState,
     ReplanningOutcome,
@@ -226,7 +225,6 @@ class _WorkAndMeditationProvider(_DirectProvider):
             Stage.TRIAGE: {
                 "classification": "SIMPLE_TASK",
                 "goal": request.goal,
-                "checkpoint_policy": "STANDARD",
             },
             Stage.EXECUTION: {
                 "disposition": "COMPLETED",
@@ -281,7 +279,6 @@ class _SideEffectFailureProvider(_DirectProvider):
             payload = {
                 "classification": "SIMPLE_TASK",
                 "goal": request.goal,
-                "checkpoint_policy": "STANDARD",
             }
         elif request.stage is Stage.EXECUTION:
             request.provider_activity_callback(
@@ -337,7 +334,10 @@ class _PlannedWorkAndMeditationProvider(_WorkAndMeditationProvider):
             self.requests.append((profile, request))
             return StageResponse(
                 text="",
-                data={"plan": ["Complete the current request safely"]},
+                data={
+                    "plan": ["Complete the current request safely"],
+                    "success_criteria": ["The current request is completed safely"],
+                },
                 provider=profile.engine,
                 model=profile.model,
                 reasoning_trace="trace:planning",
@@ -356,9 +356,11 @@ class _EffortPolicyProvider:
             Stage.TRIAGE: {
                 "classification": "SIMPLE_TASK",
                 "goal": request.goal,
-                "checkpoint_policy": "STANDARD",
             },
-            Stage.PLANNING: {"plan": ["Execute the scheduled specification"]},
+            Stage.PLANNING: {
+                "plan": ["Execute the scheduled specification"],
+                "success_criteria": ["The scheduled specification is completed"],
+            },
             Stage.EXECUTION: {
                 "disposition": "COMPLETED",
                 "summary": "Completed.",
@@ -702,7 +704,6 @@ async def test_adapter_finalises_unusable_execution_as_runtime_error(tmp_path):
                 payload = {
                     "classification": "SIMPLE_TASK",
                     "goal": request.goal,
-                    "checkpoint_policy": "STANDARD",
                 }
             elif request.stage is Stage.EXECUTION:
                 return StageResponse(
@@ -1252,10 +1253,7 @@ async def test_adapter_reconciles_old_inflight_ledger_without_resuming_it(tmp_pa
     setattr(config, "_her_v2_stage_provider", provider)
     store = LedgerStore(config.workspace_dir / "backend_state" / "her_v2" / "ledgers")
     ledger = ExecutionLedger("interrupted", "request:old", "goal:old")
-    ledger.record_triage(
-        TriageClassification.COMPLEX_TASK,
-        checkpoint_policy=CheckpointPolicy.STANDARD,
-    )
+    ledger.record_triage(TriageClassification.COMPLEX_TASK)
     ledger.transition(LifecycleState.EXECUTING)
     store.save(ledger)
     adapter = HERv2Adapter(config, _global_config(tmp_path))
@@ -1608,18 +1606,14 @@ async def test_triage_receives_complete_policy_and_minimal_turn_prompt():
     await provider.invoke(profile, request)
 
     backend = manager.backends[-1]
-    assert backend.sys_prompt.startswith(
-        "You are the authoritative HER v2 Triage classifier."
-    )
-    assert "Do not answer the request, acknowledge it, plan it, execute it" in (
+    assert "triage classifier agent" in backend.sys_prompt
+    assert "configured agent persona" not in backend.sys_prompt
+    assert "User request and context:" in backend.sys_prompt
+    assert "Earlier context already contains the result. Please check it." in (
         backend.sys_prompt
     )
-    assert "supplied context already contains a reliable result" in backend.sys_prompt
-    assert 'merely because the user says "check"' in backend.sys_prompt
-    assert "current, recent, live, or externally stored information" in (
-        backend.sys_prompt
-    )
-    assert "Choose exactly one classification" in backend.sys_prompt
+    assert backend.prompt == request.goal
+    assert "Choose one and only one classification" in backend.sys_prompt
     for classification in (
         "DIRECT_RESPONSE",
         "SIMPLE_TASK",
@@ -1635,29 +1629,16 @@ async def test_triage_receives_complete_policy_and_minimal_turn_prompt():
         "goal, target, scope, required choice, or authority is materially unclear",
     ):
         assert decision_boundary in backend.sys_prompt
-    assert "conservatively choose SIMPLE_TASK" in backend.sys_prompt
-    assert "Return only the required JSON object" in backend.sys_prompt
-
-    assert backend.prompt == """Authoritative user request and supplied context:
-
-Earlier context already contains the result. Please check it.
-
-Return exactly one JSON object matching this shape:
-
-{
-  "classification": "DIRECT_RESPONSE | SIMPLE_TASK | COMPLEX_TASK | HIGH_VOLUME_TASK | CONFIRMATION_REQUIRED",
-  "goal": "optional concise interpretation of the current request, or null when unnecessary",
-  "clarification": "a concrete question required only for CONFIRMATION_REQUIRED; otherwise null",
-  "checkpoint_policy": "STANDARD | HIGH_RISK for SIMPLE_TASK, COMPLEX_TASK, or HIGH_VOLUME_TASK; null otherwise",
-  "checkpoint_reason": "required non-empty risk reason for HIGH_RISK; null otherwise"
-}"""
-    assert "For Planning, Execution, Replanning, and Review" not in backend.prompt
-    assert "her_effort" not in backend.prompt
-    assert "tools_authorised_for_this_stage" not in backend.prompt
-    assert "external_side_effects_authorised_for_this_stage" not in backend.prompt
-    assert "invocation_role" not in backend.prompt
-    assert "turn_id" not in backend.prompt
-    assert "request_ref" not in backend.prompt
+    assert "Return exactly one valid JSON object" in backend.sys_prompt
+    assert "checkpoint_policy" not in backend.sys_prompt
+    assert "checkpoint_reason" not in backend.sys_prompt
+    assert "For Planning, Execution, Replanning, and Review" not in backend.sys_prompt
+    assert "her_effort" not in backend.sys_prompt
+    assert "tools_authorised_for_this_stage" not in backend.sys_prompt
+    assert "external_side_effects_authorised_for_this_stage" not in backend.sys_prompt
+    assert "invocation_role" not in backend.sys_prompt
+    assert "turn_id" not in backend.sys_prompt
+    assert "request_ref" not in backend.sys_prompt
 
     retry_request = StageRequest(
         **{
@@ -1676,12 +1657,9 @@ Return exactly one JSON object matching this shape:
 
     await provider.invoke(profile, retry_request)
 
-    retry_prompt = manager.backends[-1].prompt
-    assert retry_prompt.startswith(backend.prompt)
-    assert "The previous output was rejected" in retry_prompt
-    assert '"attempt": 1' in retry_prompt
-    assert "provider returned an empty structured response" in retry_prompt
-    assert "legacy generic instruction" not in retry_prompt
+    retry_backend = manager.backends[-1]
+    assert retry_backend.prompt == backend.prompt
+    assert retry_backend.sys_prompt == backend.sys_prompt
 
 
 @pytest.mark.asyncio
@@ -1771,11 +1749,17 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
             _stage_request(stage, allow_tools=False, allow_side_effects=False),
         )
         planning_backend = manager.backends[-1]
+        assert planning_backend.prompt == "Do the requested work"
         assert "configured agent persona" not in planning_backend.sys_prompt
-        assert (
-            "HER v2 Planner" in planning_backend.sys_prompt
-            or "HER v2 Replanner" in planning_backend.sys_prompt
-        )
+        if stage is Stage.PLANNING:
+            assert "planning agent for an agentic workflow" in (
+                planning_backend.sys_prompt
+            )
+        else:
+            assert "replanning agent in an agentic workflow" in (
+                planning_backend.sys_prompt
+            )
+            assert '"completion_percent"' in planning_backend.sys_prompt
 
     await provider.invoke(
         profile,
@@ -2632,58 +2616,6 @@ Please scan Outlook.""",
     assert "The old endpoint was removed" in backend.prompt
     assert "authoritative_user_goal" not in backend.prompt
     assert "plan_steps" not in backend.prompt
-    assert provider.tool_call_count == 0
-
-    final_report = (
-        "## Verified result\n\n"
-        "- Path: `C:\\\\Work\\\\report.md`\n"
-        "- Receipt: `job-42`"
-    )
-    required_rendered = await provider.package_persona_required_message(
-        profile,
-        persona_block="Address the user as Captain and use a warm voice.",
-        neutral_message=final_report,
-        message_kind="final",
-        request_id="request-1:persona-package:final:1",
-    )
-
-    required_backend = manager.backends[-1]
-    assert required_rendered
-    assert required_backend.tool_registry is None
-    assert required_backend.shutdown_called is True
-    assert "HER V2 REQUIRED MESSAGE PERSONA RENDERING" in (
-        required_backend.sys_prompt
-    )
-    assert "Address the user as Captain" in required_backend.sys_prompt
-    assert "Preserve the original Markdown structure" in required_backend.sys_prompt
-    assert "Do not add a question, invitation, next step" in (
-        required_backend.sys_prompt
-    )
-    assert "FULL AGENT OPERATIONAL CONTENT" not in required_backend.sys_prompt
-    assert "PRIVATE WORKFLOW INSTRUCTIONS" not in required_backend.sys_prompt
-    assert required_backend.prompt.startswith(
-        "VALIDATED FINAL REPORT (quoted, read-only)"
-    )
-    assert final_report in required_backend.prompt
-    assert "Address the user as Captain" not in required_backend.prompt
-    assert provider.tool_call_count == 0
-
-    await provider.package_persona_required_message(
-        profile,
-        persona_block="Address the user as Captain and use a warm voice.",
-        neutral_message="Which account should be changed?",
-        message_kind="clarification",
-        request_id="request-1:persona-package:clarification:2",
-    )
-
-    clarification_backend = manager.backends[-1]
-    assert "Keep it as the same clarification question" in (
-        clarification_backend.sys_prompt
-    )
-    assert clarification_backend.prompt.startswith(
-        "VALIDATED CLARIFICATION QUESTION (quoted, read-only)"
-    )
-    assert clarification_backend.tool_registry is None
     assert provider.tool_call_count == 0
 
     system_md.write_text(

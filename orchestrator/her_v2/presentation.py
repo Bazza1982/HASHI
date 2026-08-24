@@ -1,8 +1,8 @@
-"""Persona presentation boundary for required HER v2 user messages.
+"""Persona presentation boundary for required HER v2 clarifications.
 
-Final reports and clarification questions remain workflow-owned required
-messages.  This module changes presentation only: it cannot change delivery
-kind, source identity, workflow authority, or the validated message meaning.
+Clarification questions remain workflow-owned required messages. This module
+changes presentation only: it cannot change delivery kind, source identity,
+workflow authority, or the validated message meaning.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
-REQUIRED_MESSAGE_KINDS = frozenset({"final", "clarification"})
+REQUIRED_MESSAGE_KINDS = frozenset({"clarification"})
 MAX_RENDERED_REQUIRED_MESSAGE_CHARS = 128_000
 
 
@@ -21,7 +21,7 @@ class RequiredMessageValidationError(ValueError):
 
 @dataclass(frozen=True)
 class RequiredUserMessage:
-    """One validated, Persona-free message that must reach the user."""
+    """One validated, Persona-free clarification that must reach the user."""
 
     event_id: str
     turn_id: str
@@ -92,7 +92,7 @@ class RenderedRequiredMessage:
 
 
 class RequiredPersonaRenderer(Protocol):
-    """Presentation-only boundary for required user messages."""
+    """Presentation-only boundary for required clarification messages."""
 
     async def render(
         self, message: RequiredUserMessage

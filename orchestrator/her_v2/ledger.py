@@ -13,8 +13,6 @@ from typing import Any, Iterable, Mapping
 
 from .lifecycle import LifecycleMachine, LifecycleViolation
 from .models import (
-    WORK_CLASSIFICATIONS,
-    CheckpointPolicy,
     LifecycleState,
     TERMINAL_STATES,
     TriageClassification,
@@ -43,8 +41,6 @@ class ExecutionLedger:
     goal_ref: str
     status: LifecycleState = LifecycleState.RECEIVED
     classification: TriageClassification | None = None
-    checkpoint_policy: CheckpointPolicy | None = None
-    checkpoint_reason: str = ""
     plan_id: str | None = None
     last_update: str = field(default_factory=utc_now)
     log_refs: list[str] = field(default_factory=list)
@@ -56,35 +52,6 @@ class ExecutionLedger:
             raise LedgerInvariantError("turn, request, and goal references are required")
         if self.format not in {"her-v2-ledger-v1", "her-v2-ledger-v2"}:
             raise LedgerInvariantError("unsupported HER v2 ledger format")
-        self.checkpoint_reason = str(self.checkpoint_reason or "").strip()
-        if self.classification in WORK_CLASSIFICATIONS:
-            if (
-                self.format == "her-v2-ledger-v2"
-                and self.checkpoint_policy is None
-            ):
-                raise LedgerInvariantError(
-                    "a v2 work ledger requires an explicit checkpoint policy"
-                )
-            if (
-                self.checkpoint_policy is CheckpointPolicy.HIGH_RISK
-                and not self.checkpoint_reason
-            ):
-                raise LedgerInvariantError(
-                    "a HIGH_RISK checkpoint policy requires a reason"
-                )
-            if (
-                self.checkpoint_policy is CheckpointPolicy.STANDARD
-                and self.checkpoint_reason
-            ):
-                raise LedgerInvariantError(
-                    "a STANDARD checkpoint policy cannot carry a risk reason"
-                )
-        elif self.classification is not None and (
-            self.checkpoint_policy is not None or self.checkpoint_reason
-        ):
-            raise LedgerInvariantError(
-                "a non-work ledger cannot carry an Execution checkpoint policy"
-            )
         self._machine = LifecycleMachine(self.status)
 
     def _touch(self) -> None:
@@ -93,51 +60,18 @@ class ExecutionLedger:
     def record_triage(
         self,
         classification: TriageClassification,
-        *,
-        checkpoint_policy: CheckpointPolicy | None,
-        checkpoint_reason: str = "",
     ) -> None:
         if self.classification is not None:
             raise LedgerInvariantError("Triage classification is immutable once recorded")
         if self.status is not LifecycleState.RECEIVED:
             raise LedgerInvariantError("Triage may only be recorded from RECEIVED")
-        reason = str(checkpoint_reason or "").strip()
-        if classification in WORK_CLASSIFICATIONS:
-            if checkpoint_policy is None:
-                raise LedgerInvariantError(
-                    "work Triage requires an explicit checkpoint policy"
-                )
-            if checkpoint_policy is CheckpointPolicy.HIGH_RISK and not reason:
-                raise LedgerInvariantError(
-                    "HIGH_RISK checkpoint policy requires a reason"
-                )
-            if checkpoint_policy is CheckpointPolicy.STANDARD and reason:
-                raise LedgerInvariantError(
-                    "STANDARD checkpoint policy cannot carry a risk reason"
-                )
-        elif checkpoint_policy is not None or reason:
-            raise LedgerInvariantError(
-                "non-work Triage cannot install an Execution checkpoint policy"
-            )
         self.classification = classification
-        self.checkpoint_policy = checkpoint_policy
-        self.checkpoint_reason = reason
         self.transition(LifecycleState.TRIAGED)
 
     def assert_classification(self, classification: TriageClassification) -> None:
         if self.classification != classification:
             raise LedgerInvariantError(
                 "downstream stage attempted to change the immutable Triage classification"
-            )
-
-    def assert_checkpoint_policy(
-        self, policy: CheckpointPolicy | None, reason: str
-    ) -> None:
-        if self.checkpoint_policy is not policy or self.checkpoint_reason != str(
-            reason or ""
-        ).strip():
-            raise LedgerInvariantError(
-                "downstream stage attempted to change the immutable checkpoint policy"
             )
 
     def transition(
@@ -195,10 +129,6 @@ class ExecutionLedger:
             "goal_ref": self.goal_ref,
             "status": self.status.value,
             "classification": self.classification.value if self.classification else None,
-            "checkpoint_policy": (
-                self.checkpoint_policy.value if self.checkpoint_policy else None
-            ),
-            "checkpoint_reason": self.checkpoint_reason or None,
             "plan_id": self.plan_id,
             "last_update": self.last_update,
             "log_refs": list(self.log_refs),
@@ -218,12 +148,6 @@ class ExecutionLedger:
                 if classification_raw
                 else None
             )
-            checkpoint_policy_raw = raw.get("checkpoint_policy")
-            checkpoint_policy = (
-                CheckpointPolicy(str(checkpoint_policy_raw))
-                if checkpoint_policy_raw
-                else None
-            )
             ledger_format = str(raw.get("format") or "her-v2-ledger-v1")
             ledger = cls(
                 turn_id=str(raw["turn_id"]),
@@ -231,8 +155,6 @@ class ExecutionLedger:
                 goal_ref=str(raw["goal_ref"]),
                 status=status,
                 classification=classification,
-                checkpoint_policy=checkpoint_policy,
-                checkpoint_reason=str(raw.get("checkpoint_reason") or ""),
                 plan_id=(str(raw["plan_id"]) if raw.get("plan_id") else None),
                 last_update=str(raw.get("last_update") or utc_now()),
                 log_refs=[str(item) for item in raw.get("log_refs") or []],

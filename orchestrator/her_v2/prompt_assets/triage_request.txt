@@ -1,7 +1,0 @@
-Authoritative user request and supplied context:
-
-$goal
-
-Return exactly one JSON object matching this shape:
-
-$schema

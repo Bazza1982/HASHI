@@ -214,14 +214,14 @@ async def test_habit_retrieval_is_disabled_without_reading_catalogue(tmp_path, m
     def forbidden_read(*_args, **_kwargs):
         raise AssertionError("disabled HER v2 learning must not inspect Habit files")
 
-    monkeypatch.setattr(service.store, "retrieve", forbidden_read)
+    monkeypatch.setattr(service.store, "load", forbidden_read)
     assert await service.retrieve(goal="anything", turn_id="turn-disabled") == ()
     assert not (_root / "habits").exists()
     assert not service.meditation_journal.root.exists()
 
 
 @pytest.mark.asyncio
-async def test_planning_retrieval_ignores_bridge_background(tmp_path):
+async def test_planning_receives_all_active_habits_for_semantic_selection(tmp_path):
     service, _root = _service(tmp_path, ScriptedMaintenance([]))
     outcomes = service.store.apply_actions(
         [
@@ -253,9 +253,9 @@ async def test_planning_retrieval_ignores_bridge_background(tmp_path):
 
     assert len(advisory) == 1
     assert current_id in advisory[0]
-    assert background_id not in advisory[0]
+    assert background_id in advisory[0]
     assert "violetcinder" in advisory[0]
-    assert "amberquartz" not in advisory[0]
+    assert "amberquartz" in advisory[0]
 
 
 @pytest.mark.asyncio

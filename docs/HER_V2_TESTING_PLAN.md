@@ -159,12 +159,7 @@ Prohibited behaviour includes:
 Tests must prove:
 
 - Triage records exactly one valid classification;
-- every work classification records exactly one explicit `STANDARD` or
-  `HIGH_RISK` checkpoint policy, and `HIGH_RISK` records a non-empty reason;
-- missing work policy is repaired or fails truthfully and never silently
-  defaults to `STANDARD`;
 - the classification is immutable once recorded;
-- the checkpoint policy and reason are immutable once recorded;
 - Planning, Execution, Replanning, Review, Verification, and sub-agents cannot reclassify;
 - later evidence suggesting a classification error does not mutate the current turn;
 - a future turn may use prior evidence, but receives a new Triage decision.
@@ -448,7 +443,7 @@ Tests must prove that Replanning:
   `SIMPLE_TASK` classification;
 - may escalate execution capability without mutating classification; and
 - runs unconditionally for `high`, `xhigh`, and `max` at each inclusive
-  10-result or 300-second safe boundary, regardless of Triage risk metadata.
+  10-result or 300-second safe boundary.
 
 There is no Replan ceiling. Structural tests reject `max_replans`,
 `replan_limit`, and `replan_limits`; controlled tests must complete more than
@@ -531,7 +526,7 @@ Deterministic tests use an injected monotonic clock and exact Tool Gateway
 receipts to prove:
 
 - `low` and `medium` never install the cadence, while `high`, `xhigh`, and
-  `max` always install it regardless of `STANDARD`/`HIGH_RISK` risk metadata;
+  `max` always install it;
 - nine results and `299.999` seconds are not due; result 10 or exactly `300.0`
   seconds is due inclusively and forces Replanning at the next safe boundary;
 - no checkpoint model chooses `CONTINUE`, ask, or halt; count and time becoming
@@ -703,11 +698,11 @@ Tests must prove:
 - user intent overrides conflicting Habit guidance;
 - Execution evidence overrides Habits;
 - Replanning does not read Habits again;
-- Habit retrieval ranks only title and metadata against the bounded current
-  request and cannot match solely from Bridge conversation background;
+- initial Planning receives every valid active Habit and decides which, if any,
+  apply to the complete authoritative goal and supplied context;
 - disabled and request-ineligible turns neither read the catalogue nor add
   Habit-specific Planning context;
-- `low` effort skips Habit retrieval but still schedules eligible Meditation
+- `low` effort skips Habit loading but still schedules eligible Meditation
   only after final-delivery-boundary acceptance and terminal persistence;
 - repeated Meditation scheduling for one turn produces one durable job, one
   model decision, and one idempotent Write;
@@ -1101,11 +1096,12 @@ Tests must prove:
   display-name packaging fallback without another Persona model call, under
   one stable exactly-once event ID;
 - runtime passes neutral commentary through a commentary port, sends combined
-  Finalisation output through required delivery, and retains the separate
-  required-message presentation interface only for pre-execution Triage
-  clarifications;
-- commentary and Triage-clarification Persona invocations receive the exact
-  configured `[persona]` marker block and exactly one eligible source message;
+  Finalisation output through required delivery, and routes pre-execution Triage
+  clarification through the same Persona Commentary Agent before restoring its
+  typed required-message delivery identity;
+- commentary and Triage-clarification Persona invocations use the same prompt,
+  receive the exact configured `[persona]` marker block, and receive exactly one
+  eligible source message;
 - Finalisation receives that same marker block, the current request, and the
   complete Execution/review inputs, but no unmarked Agent instructions;
 - content outside that marker block cannot reach the packaging model;
@@ -1449,8 +1445,8 @@ Before HER v2 is accepted, the suite must contain logically complete coverage of
     source coverage, immutable raw retention, atomic commit/concurrency,
     truthful failure, compactor-only deadline isolation, Gemini statelessness,
     and unchanged initial OpenRouter/DeepSeek tool loops.
-22. compulsory Adaptive-or-above Replanning: effort eligibility independent of
-    immutable Triage risk metadata, exact 10/300 cadence, three-question output,
+22. compulsory Adaptive-or-above Replanning: effort eligibility, exact 10/300
+    cadence, three-question output,
     plan versioning, mandatory exactly-once Persona/fallback commentary,
     safe-boundary concurrency, 100% stop, receipt preservation, audit, and no
     Replan or workflow ceiling.

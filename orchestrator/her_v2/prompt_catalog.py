@@ -45,23 +45,23 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
     "system_persona_commentary": frozenset(
         {"persona_block_begin", "persona_block_end", "persona_guidance"}
     ),
-    "system_persona_required_message": frozenset(
+    "system_planning": frozenset(
+        {"all_active_habits", "classification", "goal", "schema"}
+    ),
+    "system_replanning": frozenset(
         {
-            "kind_rule",
-            "message_kind",
-            "persona_block_begin",
-            "persona_block_end",
-            "persona_guidance",
+            "active_plan",
+            "classification",
+            "goal",
+            "plan_edit_history",
+            "schema",
+            "workflow_state_and_evidence",
         }
     ),
-    "system_planning": frozenset(),
-    "system_replanning": frozenset(),
     "system_review": frozenset(),
     "system_verification": frozenset(),
     "system_sub_agent": frozenset(),
-    "system_triage": frozenset(),
-    "triage_request": frozenset({"goal", "schema"}),
-    "triage_retry": frozenset({"prompt", "retry_feedback"}),
+    "system_triage": frozenset({"goal", "schema"}),
 }
 
 

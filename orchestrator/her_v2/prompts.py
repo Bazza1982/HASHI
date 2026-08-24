@@ -24,13 +24,6 @@ _SCHEMAS = {
             "a concrete question required only for CONFIRMATION_REQUIRED; otherwise "
             "null"
         ),
-        "checkpoint_policy": (
-            "STANDARD | HIGH_RISK for SIMPLE_TASK, COMPLEX_TASK, or "
-            "HIGH_VOLUME_TASK; null otherwise"
-        ),
-        "checkpoint_reason": (
-            "required non-empty risk reason for HIGH_RISK; null otherwise"
-        ),
     },
     Stage.PLANNING: {
         "plan": ["ordered, concrete action"],
@@ -74,6 +67,19 @@ _SCHEMAS = {
         "next_step": (
             "next authorised action, or Review/Finalisation when completion is 100"
         ),
+        "parallel_groups": [],
+        "sub_agents": [
+            {
+                "id": "unique bounded assignment id",
+                "task": "bounded task",
+                "profile": "configured execution profile",
+                "tools": [],
+                "attachment_ids": [
+                    "only attachment_id values required and explicitly delegated"
+                ],
+                "allow_side_effects": False,
+            }
+        ],
         "commentary": (
             "required concise neutral update stating completion percentage, whether "
             "the plan changed, why when changed, and the next step; Runtime creates "
@@ -218,23 +224,53 @@ def render_stage_prompt(request: StageRequest) -> str:
             goal=_immediate_response_goal(request.goal),
         )
     if request.stage is Stage.TRIAGE:
-        prompt = render_prompt_asset(
-            "triage_request",
+        return render_prompt_asset(
+            "system_triage",
             goal=request.goal,
             schema=json.dumps(_SCHEMAS[Stage.TRIAGE], ensure_ascii=False, indent=2),
         )
-        previous_error = request.context.get("previous_structure_error")
-        if not isinstance(previous_error, dict):
-            return prompt
-        retry_feedback = {
-            "attempt": previous_error.get("attempt"),
-            "error": previous_error.get("error"),
-        }
+    if request.stage is Stage.PLANNING:
+        raw_habits = request.context.get("habits")
+        habits = (
+            [str(item) for item in raw_habits if str(item).strip()]
+            if isinstance(raw_habits, (list, tuple))
+            else []
+        )
         return render_prompt_asset(
-            "triage_retry",
-            prompt=prompt,
-            retry_feedback=json.dumps(
-                retry_feedback, ensure_ascii=False, sort_keys=True
+            "system_planning",
+            goal=request.goal,
+            classification=(
+                request.classification.value if request.classification else ""
+            ),
+            all_active_habits="\n\n".join(habits) if habits else "[]",
+            schema=json.dumps(
+                _SCHEMAS[Stage.PLANNING], ensure_ascii=False, indent=2
+            ),
+        )
+    if request.stage is Stage.REPLANNING:
+        return render_prompt_asset(
+            "system_replanning",
+            goal=request.goal,
+            classification=(
+                request.classification.value if request.classification else ""
+            ),
+            active_plan=json.dumps(
+                request.context.get("active_plan") or {},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            plan_edit_history=json.dumps(
+                request.context.get("plan_edit_history") or [],
+                ensure_ascii=False,
+                indent=2,
+            ),
+            workflow_state_and_evidence=json.dumps(
+                request.context.get("workflow_state_and_evidence") or {},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            schema=json.dumps(
+                _SCHEMAS[Stage.REPLANNING], ensure_ascii=False, indent=2
             ),
         )
     if request.stage is Stage.EXECUTION:
@@ -350,15 +386,22 @@ def render_stage_prompt(request: StageRequest) -> str:
 
 
 _SYSTEM_PROMPT_ASSETS = {
-    Stage.TRIAGE: "system_triage",
-    Stage.PLANNING: "system_planning",
     Stage.EXECUTION: "system_execution",
-    Stage.REPLANNING: "system_replanning",
     Stage.REVIEW: "system_review",
     Stage.VERIFICATION: "system_verification",
     Stage.MEDITATION: "system_meditation",
     Stage.DREAM: "system_dream",
 }
+
+_COMPLETE_SYSTEM_PROMPT_STAGES = frozenset(
+    {Stage.TRIAGE, Stage.PLANNING, Stage.REPLANNING}
+)
+
+
+def uses_complete_system_prompt(stage: Stage) -> bool:
+    """Return whether one rendered asset is the stage's complete system prompt."""
+
+    return stage in _COMPLETE_SYSTEM_PROMPT_STAGES
 
 
 def render_internal_stage_system_prompt(request: StageRequest) -> str | None:
@@ -366,6 +409,8 @@ def render_internal_stage_system_prompt(request: StageRequest) -> str | None:
 
     if request.role.startswith("sub_agent:"):
         return load_prompt_asset("system_sub_agent")
+    if uses_complete_system_prompt(request.stage):
+        return render_stage_prompt(request)
     asset_name = _SYSTEM_PROMPT_ASSETS.get(request.stage)
     return load_prompt_asset(asset_name) if asset_name else None
 
@@ -421,27 +466,6 @@ def render_persona_commentary_system_prompt(
     return (
         render_prompt_asset(
             "system_persona_commentary",
-            persona_block_begin=persona_block_begin,
-            persona_guidance=persona_guidance,
-            persona_block_end=persona_block_end,
-        )
-        + "\n"
-    )
-
-
-def render_persona_required_message_system_prompt(
-    *,
-    message_kind: str,
-    kind_rule: str,
-    persona_guidance: str,
-    persona_block_begin: str,
-    persona_block_end: str,
-) -> str:
-    return (
-        render_prompt_asset(
-            "system_persona_required_message",
-            message_kind=message_kind,
-            kind_rule=kind_rule,
             persona_block_begin=persona_block_begin,
             persona_guidance=persona_guidance,
             persona_block_end=persona_block_end,

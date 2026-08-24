@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 import pytest
@@ -146,20 +147,12 @@ class _PackagingProvider:
     def __init__(self, *, error=None):
         self.error = error
         self.calls = []
-        self.required_calls = []
 
     async def package_persona_commentary(self, profile, **kwargs):
         self.calls.append((profile, kwargs))
         if self.error is not None:
             raise self.error
         return "Captain, three checks passed; final verification is running."
-
-    async def package_persona_required_message(self, profile, **kwargs):
-        self.required_calls.append((profile, kwargs))
-        if self.error is not None:
-            raise self.error
-        return f"Captain, rendered {kwargs['message_kind']}: {kwargs['neutral_message']}"
-
 
 def _packaging_source(*, usable=True, reason=None, display_name="Navigator"):
     return HERPersonaPackagingSource(
@@ -196,6 +189,92 @@ async def test_configured_packager_passes_only_neutral_text_and_persona_block():
 
 
 @pytest.mark.asyncio
+async def test_declared_persona_commentary_agent_failure_logs_reason_and_falls_back(
+    caplog,
+):
+    provider = _PackagingProvider()
+    failure_reason = "Cannot preserve the original facts.\n" + ("detail " * 100)
+
+    async def declared_failure(profile, **kwargs):
+        provider.calls.append((profile, kwargs))
+        return json.dumps(
+            {
+                "persona_commentary_agent_failed": True,
+                "reason": failure_reason,
+            }
+        )
+
+    provider.package_persona_commentary = declared_failure
+    logger_name = "test.her-v2-declared-persona-commentary-failure"
+    packager = _ConfiguredPersonaPackager(
+        provider=provider,
+        profile=ProviderProfile(
+            "lightweight", "openrouter-api", "configured/model"
+        ),
+        source=_packaging_source(display_name="Public Navigator"),
+        request_id="request",
+        logger=logging.getLogger(logger_name),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=logger_name):
+        packaged = await packager.package(_neutral())
+
+    assert packaged.fallback is True
+    assert packaged.provenance == "minimal_persona_fallback"
+    assert packaged.error_type == "persona_commentary_agent_failed"
+    assert packaged.text.startswith("Public Navigator 向您汇报：")
+    assert packaged.text.endswith(_neutral().text)
+    assert failure_reason in caplog.text
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        "Sorry, I cannot edit this commentary.",
+        (
+            '{"persona_commentary_agent_failed":"true",'
+            '"reason":"String booleans are not the failure signal."}'
+        ),
+        (
+            "```json\n"
+            '{"persona_commentary_agent_failed":true,"reason":"fenced"}\n'
+            "```"
+        ),
+        (
+            "Failure details: "
+            '{"persona_commentary_agent_failed":true,"reason":"prefixed"}'
+        ),
+    ],
+)
+async def test_other_outputs_are_not_inferred_to_be_persona_agent_failures(model_output):
+    provider = _PackagingProvider()
+
+    async def response(profile, **kwargs):
+        provider.calls.append((profile, kwargs))
+        return model_output
+
+    provider.package_persona_commentary = response
+    packager = _ConfiguredPersonaPackager(
+        provider=provider,
+        profile=ProviderProfile(
+            "lightweight", "openrouter-api", "configured/model"
+        ),
+        source=_packaging_source(),
+        request_id="request",
+        logger=logging.getLogger("test.her-v2-strict-persona-failure-signal"),
+    )
+
+    packaged = await packager.package(_neutral())
+
+    assert packaged.fallback is False
+    assert packaged.provenance == "persona_packager"
+    assert packaged.text == model_output
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("source", "error", "reason"),
     [
@@ -228,7 +307,7 @@ async def test_missing_block_or_packaging_failure_uses_deterministic_minimal_fal
 
 
 @pytest.mark.asyncio
-async def test_replan_persona_fact_loss_uses_display_name_fallback():
+async def test_non_sentinel_persona_response_is_not_classified_as_failure():
     provider = _PackagingProvider()
 
     async def refusal(profile, **kwargs):
@@ -259,14 +338,11 @@ async def test_replan_persona_fact_loss_uses_display_name_fallback():
 
     packaged = await packager.package(commentary)
 
-    assert packaged.fallback is True
-    assert packaged.provenance == "minimal_persona_fallback"
-    assert packaged.error_type == "persona_fact_preservation_failed"
+    assert packaged.fallback is False
+    assert packaged.provenance == "persona_packager"
+    assert packaged.error_type == ""
     assert packaged.source_event_id == commentary.event_id
-    assert packaged.text.startswith("Navigator 向您汇报：")
-    assert "60%" in packaged.text
-    assert "plan is unchanged" in packaged.text.casefold()
-    assert "Next:" in packaged.text
+    assert packaged.text == "Sorry, I cannot rewrite that update."
     assert len(provider.calls) == 1
 
 
@@ -309,9 +385,14 @@ async def test_model_commentary_fallback_uses_display_name_without_persona_call(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["final", "clarification"])
-async def test_configured_packager_renders_typed_required_messages(kind):
+async def test_required_clarification_reuses_commentary_persona_agent():
     provider = _PackagingProvider()
+
+    async def render_clarification(profile, **kwargs):
+        provider.calls.append((profile, kwargs))
+        return f"Captain, {kwargs['neutral_commentary']}"
+
+    provider.package_persona_commentary = render_clarification
     packager = _ConfiguredPersonaPackager(
         provider=provider,
         profile=ProviderProfile(
@@ -322,34 +403,27 @@ async def test_configured_packager_renders_typed_required_messages(kind):
         logger=logging.getLogger("test.her-v2-required-persona"),
     )
     message = RequiredUserMessage(
-        event_id=f"turn:{kind}",
+        event_id="turn:clarification",
         turn_id="turn",
-        kind=kind,
-        text="## Result\n\n- Receipt: `job-42`",
+        kind="clarification",
+        text="Which account should be changed?",
     )
 
     rendered = await packager.render(message)
 
     assert rendered.source_event_id == message.event_id
-    assert rendered.kind == kind
+    assert rendered.kind == "clarification"
     assert rendered.provenance == "persona_packager"
     assert rendered.fallback is False
     assert rendered.text.endswith(message.text)
-    assert len(provider.required_calls) == 1
-    _profile, inputs = provider.required_calls[0]
-    assert set(inputs) == {
-        "persona_block",
-        "neutral_message",
-        "message_kind",
-        "request_id",
-    }
+    assert len(provider.calls) == 1
+    _profile, inputs = provider.calls[0]
+    assert set(inputs) == {"persona_block", "neutral_commentary", "request_id"}
     assert inputs["persona_block"] == "Address the user as Captain."
-    assert inputs["neutral_message"] == message.text
-    assert inputs["message_kind"] == kind
+    assert inputs["neutral_commentary"] == message.text
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["final", "clarification"])
 @pytest.mark.parametrize(
     ("source", "error", "reason"),
     [
@@ -362,7 +436,7 @@ async def test_configured_packager_renders_typed_required_messages(kind):
     ],
 )
 async def test_required_message_rendering_has_deterministic_persona_fallback(
-    kind, source, error, reason
+    source, error, reason
 ):
     provider = _PackagingProvider(error=error)
     packager = _ConfiguredPersonaPackager(
@@ -375,28 +449,70 @@ async def test_required_message_rendering_has_deterministic_persona_fallback(
         logger=logging.getLogger("test.her-v2-required-persona-fallback"),
     )
     message = RequiredUserMessage(
-        event_id=f"turn:{kind}",
+        event_id="turn:clarification",
         turn_id="turn",
-        kind=kind,
+        kind="clarification",
         text="Keep this exact validated content.",
     )
 
     rendered = await packager.render(message)
 
-    expected_prefix = (
-        "Navigator 向您汇报：\n\n"
-        if kind == "final"
-        else "Navigator 想请您确认："
-    )
     assert rendered.fallback is True
     assert rendered.provenance == "minimal_persona_fallback"
     assert rendered.error_type == reason
-    assert rendered.text == f"{expected_prefix}{message.text}"
-    assert len(provider.required_calls) == (0 if not source.usable else 1)
+    assert rendered.text == f"Navigator 想请您确认：{message.text}"
+    assert len(provider.calls) == (0 if not source.usable else 1)
 
 
 @pytest.mark.asyncio
-async def test_required_fallback_never_drops_a_large_validated_report():
+async def test_required_clarification_declared_failure_logs_full_reason_and_falls_back(
+    caplog,
+):
+    provider = _PackagingProvider()
+    failure_reason = "Cannot preserve the clarification.\n" + ("detail " * 100)
+
+    async def declared_failure(profile, **kwargs):
+        provider.calls.append((profile, kwargs))
+        return json.dumps(
+            {
+                "persona_commentary_agent_failed": True,
+                "reason": failure_reason,
+            }
+        )
+
+    provider.package_persona_commentary = declared_failure
+    logger_name = "test.her-v2-required-clarification-declared-failure"
+    packager = _ConfiguredPersonaPackager(
+        provider=provider,
+        profile=ProviderProfile(
+            "lightweight", "openrouter-api", "configured/model"
+        ),
+        source=_packaging_source(display_name="Public Navigator"),
+        request_id="request",
+        logger=logging.getLogger(logger_name),
+    )
+    message = RequiredUserMessage(
+        event_id="turn:clarification",
+        turn_id="turn",
+        kind="clarification",
+        text="Which account should be changed?",
+    )
+
+    with caplog.at_level(logging.WARNING, logger=logger_name):
+        rendered = await packager.render(message)
+
+    assert rendered.fallback is True
+    assert rendered.provenance == "minimal_persona_fallback"
+    assert rendered.error_type == "persona_commentary_agent_failed"
+    assert rendered.text == (
+        "Public Navigator 想请您确认：Which account should be changed?"
+    )
+    assert failure_reason in caplog.text
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_required_fallback_never_drops_a_large_validated_clarification():
     provider = _PackagingProvider()
     packager = _ConfiguredPersonaPackager(
         provider=provider,
@@ -407,16 +523,16 @@ async def test_required_fallback_never_drops_a_large_validated_report():
         request_id="request",
         logger=logging.getLogger("test.her-v2-required-persona-large-fallback"),
     )
-    report = "R" * (MAX_RENDERED_REQUIRED_MESSAGE_CHARS + 1)
+    clarification = "Q" * (MAX_RENDERED_REQUIRED_MESSAGE_CHARS + 1)
     message = RequiredUserMessage(
-        event_id="turn:final",
+        event_id="turn:clarification",
         turn_id="turn",
-        kind="final",
-        text=report,
+        kind="clarification",
+        text=clarification,
     )
 
     rendered = await packager.render(message)
 
     assert rendered.fallback is True
-    assert rendered.text.endswith(report)
-    assert provider.required_calls == []
+    assert rendered.text.endswith(clarification)
+    assert provider.calls == []
