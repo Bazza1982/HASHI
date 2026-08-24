@@ -8,6 +8,8 @@ from orchestrator.context_compaction import (
     cancel_runtime_compaction,
     compact_status_text,
     coordinator_for,
+    estimate_effective_context_tokens,
+    load_policy,
 )
 from orchestrator.flexible_backend_registry import HER_V2_ENGINE
 
@@ -53,50 +55,26 @@ def _outcome_text(outcome: Any) -> str:
     }.get(str(outcome.status), "ℹ️ Context compaction result")
     lines = [
         f"<b>{title}</b>",
-        "",
-        f"<b>Status</b> · <code>{html.escape(str(outcome.status))}</code>",
     ]
     if outcome.code:
         lines.append(f"<b>Code</b> · <code>{html.escape(str(outcome.code))}</code>")
-    if outcome.compaction_id:
-        lines.append(
-            f"<b>Compaction</b> · <code>{html.escape(str(outcome.compaction_id))}</code>"
-        )
-    if outcome.route_provider or outcome.route_model:
-        lines.append(
-            "<b>Route</b> · <code>"
-            f"{html.escape(str(outcome.route_provider or '-'))} / "
-            f"{html.escape(str(outcome.route_model or '-'))}</code>"
-        )
-        lines.append(
-            f"<b>HER effort</b> · <code>{html.escape(str(outcome.her_effort or 'high'))}</code>"
-        )
-        lines.append(
-            "<b>Provider reasoning</b> · <code>"
-            f"{html.escape(str(outcome.route_reasoning or '-'))}</code>"
-        )
-    if getattr(outcome, "trigger", None):
-        lines.append(
-            f"<b>Trigger</b> · <code>{html.escape(str(outcome.trigger))}</code>"
-        )
     if outcome.changed:
+        saved = max(0, int(outcome.before_tokens) - int(outcome.after_tokens))
         lines.extend(
             [
-                f"<b>Before</b> · <code>{int(outcome.before_tokens):,} tokens</code>",
-                f"<b>After</b> · <code>{int(outcome.after_tokens):,} tokens</code>",
-                f"<b>Covered through</b> · <code>turn:{int(outcome.covered_through_turn_id)}</code>",
-                f"<b>Attempts</b> · <code>{int(outcome.attempt_count)}</code>",
+                f"<b>Selected history before</b> · <code>{int(outcome.before_tokens):,} tokens</code>",
+                f"<b>Selected history after</b> · <code>{int(outcome.after_tokens):,} tokens</code>",
+                f"<b>Reduced by</b> · <code>{saved:,} tokens</code>",
             ]
+        )
+    elif int(getattr(outcome, "before_tokens", 0) or 0) > 0:
+        lines.append(
+            f"<b>Current context</b> · <code>{int(outcome.before_tokens):,} tokens</code>"
         )
     if outcome.message:
         lines.extend(["", html.escape(str(outcome.message))])
-    lines.extend(
-        [
-            "",
-            "Raw transcript records were not deleted. A failed or cancelled operation "
-            "does not change the active context pointer.",
-        ]
-    )
+    if outcome.changed:
+        lines.extend(["", "Raw transcript records were retained."])
     return "\n".join(lines)
 
 
@@ -147,12 +125,24 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
         )
         return
 
+    policy = load_policy(runtime)
+    current_tokens = estimate_effective_context_tokens(runtime)
+    if current_tokens < policy.manual_min_tokens:
+        outcome = await coordinator.compact(
+            trigger="manual_command",
+            request_ref=f"compact-command:{getattr(update, 'update_id', 'unknown')}",
+            force=True,
+        )
+        await _send(runtime, update, _outcome_text(outcome))
+        return
+
     await _send(
         runtime,
         update,
         "🗜️ <b>Context compaction started</b>\n\n"
-        "Only the eligible historical prefix is being sent to the configured "
-        "tool-free Compact route.",
+        f"Current context · <code>{current_tokens:,} tokens</code>\n"
+        f"Manual threshold · <code>{policy.manual_min_tokens:,} tokens</code>\n"
+        f"Automatic trigger · <code>&gt; {policy.auto_trigger_tokens:,} tokens</code>",
     )
     outcome = await coordinator.compact(
         trigger="manual_command",

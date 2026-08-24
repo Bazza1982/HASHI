@@ -23,9 +23,10 @@ import tempfile
 import threading
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from orchestrator.flexible_backend_registry import (
@@ -45,15 +46,19 @@ CONTEXT_CAPACITY_EXHAUSTED = "CONTEXT_CAPACITY_EXHAUSTED"
 CONTEXT_COMPACTION_STATE_INVALID = "CONTEXT_COMPACTION_STATE_INVALID"
 CONTEXT_CAPACITY_REJECTED = "CONTEXT_CAPACITY_REJECTED"
 
-DEFAULT_HIGH_WATERMARK = 0.80
-DEFAULT_LOW_WATERMARK = 0.60
 DEFAULT_RECENT_EXCHANGES = 10
 DEFAULT_RESPONSE_HEADROOM_TOKENS = 16_384
 DEFAULT_MAX_CAPSULE_CHARS = 24_000
-# Unknown provider capacity must not disable HASHI's own context maintenance.
-# These are product budgets, not claims about a model's actual context window.
-DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS = 64_000
-DEFAULT_UNKNOWN_TARGET_LOW_TOKENS = 48_000
+# Compact uses a product-level operating window, independent of provider
+# capacity metadata: manual requests become useful at 64k effective tokens and
+# automatic maintenance starts only after the context exceeds 128k.
+DEFAULT_MANUAL_COMPACTION_MIN_TOKENS = 64_000
+DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS = 128_000
+DEFAULT_POST_COMPACTION_TARGET_TOKENS = 64_000
+# Backward-compatible imports for callers that used the former unknown-target
+# names.  They now describe the same universal 64k-128k operating window.
+DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS = DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
+DEFAULT_UNKNOWN_TARGET_LOW_TOKENS = DEFAULT_POST_COMPACTION_TARGET_TOKENS
 # Live HASHI API evidence showed that a 64k mixed-character estimate serializes
 # to roughly 100k provider tokens once the maintenance schema and provider
 # envelope are included.  Keep unknown-capacity maintenance chunks well below
@@ -144,6 +149,38 @@ def estimate_target_overhead_tokens(runtime: Any) -> int:
     )
 
 
+def estimate_effective_context_tokens(
+    runtime: Any,
+    *,
+    prompt_tokens: int | None = None,
+) -> int:
+    """Return HASHI's effective current-context estimate for Compact policy.
+
+    The most recently assembled prompt is authoritative when available.  A
+    cold command process falls back to the managed history plus the Agent
+    system prompt.  Provider tool-schema overhead is included because it is
+    serialized into the same context window.
+    """
+
+    measured = _safe_int(prompt_tokens, minimum=1)
+    if measured is None:
+        measured = _safe_int(
+            getattr(runtime, "_last_full_prompt_tokens", None),
+            minimum=1,
+        )
+    if measured is None:
+        history_tokens = 0
+        with contextlib.suppress(Exception):
+            history_tokens = estimate_tokens(render_history(coordinator_for(runtime).snapshot()))
+        system_tokens = 0
+        system_getter = getattr(runtime, "_get_system_prompt_text", None)
+        if callable(system_getter):
+            with contextlib.suppress(Exception):
+                system_tokens = estimate_tokens(str(system_getter() or ""))
+        measured = history_tokens + system_tokens
+    return max(0, int(measured)) + estimate_target_overhead_tokens(runtime)
+
+
 def _safe_int(value: Any, *, minimum: int = 1) -> int | None:
     try:
         parsed = int(value)
@@ -216,13 +253,12 @@ class CompactRouteConfig:
 
 @dataclass(frozen=True)
 class CompactionPolicy:
-    high_watermark: float = DEFAULT_HIGH_WATERMARK
-    low_watermark: float = DEFAULT_LOW_WATERMARK
     recent_exchanges: int = DEFAULT_RECENT_EXCHANGES
     response_headroom_tokens: int = DEFAULT_RESPONSE_HEADROOM_TOKENS
     max_capsule_chars: int = DEFAULT_MAX_CAPSULE_CHARS
-    unknown_target_high_tokens: int = DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS
-    unknown_target_low_tokens: int = DEFAULT_UNKNOWN_TARGET_LOW_TOKENS
+    manual_min_tokens: int = DEFAULT_MANUAL_COMPACTION_MIN_TOKENS
+    auto_trigger_tokens: int = DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
+    post_compaction_target_tokens: int = DEFAULT_POST_COMPACTION_TARGET_TOKENS
     tier_2_attempt_seconds: float = DEFAULT_TIER_2_ATTEMPT_SECONDS
     tier_2_recovery_seconds: float = DEFAULT_TIER_2_RECOVERY_SECONDS
     tier_3_attempt_seconds: float = DEFAULT_TIER_3_ATTEMPT_SECONDS
@@ -592,33 +628,19 @@ def load_policy(runtime: Any) -> CompactionPolicy:
     block = _workspace_state(runtime).get(STATE_KEY)
     block = block if isinstance(block, Mapping) else {}
     raw = block.get("policy") if isinstance(block.get("policy"), Mapping) else {}
-    high = _safe_float(raw.get("high_watermark"), minimum=0.05, maximum=0.99) or DEFAULT_HIGH_WATERMARK
-    low = _safe_float(raw.get("low_watermark"), minimum=0.01, maximum=0.98) or DEFAULT_LOW_WATERMARK
-    if low >= high:
-        low, high = DEFAULT_LOW_WATERMARK, DEFAULT_HIGH_WATERMARK
-    unknown_high = (
-        _safe_int(raw.get("unknown_target_high_tokens"), minimum=4_096)
-        or DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS
-    )
-    unknown_low = (
-        _safe_int(raw.get("unknown_target_low_tokens"), minimum=2_048)
-        or DEFAULT_UNKNOWN_TARGET_LOW_TOKENS
-    )
-    if unknown_low >= unknown_high:
-        unknown_low = DEFAULT_UNKNOWN_TARGET_LOW_TOKENS
-        unknown_high = DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS
 
     def deadline(name: str, default: float) -> float:
         return _safe_float(raw.get(name), minimum=1.0, maximum=3600.0) or default
 
     return CompactionPolicy(
-        high_watermark=high,
-        low_watermark=low,
         recent_exchanges=_safe_int(raw.get("recent_exchanges")) or DEFAULT_RECENT_EXCHANGES,
         response_headroom_tokens=_safe_int(raw.get("response_headroom_tokens")) or DEFAULT_RESPONSE_HEADROOM_TOKENS,
         max_capsule_chars=_safe_int(raw.get("max_capsule_chars"), minimum=256) or DEFAULT_MAX_CAPSULE_CHARS,
-        unknown_target_high_tokens=unknown_high,
-        unknown_target_low_tokens=unknown_low,
+        # The user-selected operating window is product policy, not mutable
+        # Agent state. Stale or hand-edited threshold fields are ignored.
+        manual_min_tokens=DEFAULT_MANUAL_COMPACTION_MIN_TOKENS,
+        auto_trigger_tokens=DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS,
+        post_compaction_target_tokens=DEFAULT_POST_COMPACTION_TARGET_TOKENS,
         tier_2_attempt_seconds=deadline("tier_2_attempt_seconds", DEFAULT_TIER_2_ATTEMPT_SECONDS),
         tier_2_recovery_seconds=deadline("tier_2_recovery_seconds", DEFAULT_TIER_2_RECOVERY_SECONDS),
         tier_3_attempt_seconds=deadline("tier_3_attempt_seconds", DEFAULT_TIER_3_ATTEMPT_SECONDS),
@@ -764,36 +786,20 @@ def resolve_trigger_budget(
     *,
     policy: CompactionPolicy | None = None,
 ) -> CompactionTriggerBudget:
-    """Resolve automatic pressure thresholds for known and unknown targets.
+    """Resolve the universal manual/automatic Compact operating window.
 
-    A declared provider capacity keeps the ratio-based policy.  When capacity
-    metadata is absent, HASHI uses an explicitly named absolute input budget;
-    this enables proactive maintenance without pretending the budget is the
-    model's true context window.
+    Provider capacity metadata remains diagnostic information only.  It must
+    not silently move the user-selected 64k manual floor or 128k automatic
+    trigger, and response headroom is not counted as existing context.
     """
 
     effective_policy = policy or load_policy(runtime)
     target = resolve_target_capacity(runtime)
-    if target is None:
-        return CompactionTriggerBudget(
-            high_projected_tokens=effective_policy.unknown_target_high_tokens,
-            low_input_tokens=effective_policy.unknown_target_low_tokens,
-            response_headroom_tokens=0,
-            provenance="hashi_unknown_target_guard_v1",
-            target=None,
-        )
     return CompactionTriggerBudget(
-        high_projected_tokens=max(
-            1,
-            int(target.context_window_tokens * effective_policy.high_watermark),
-        ),
-        low_input_tokens=max(
-            1,
-            int(target.context_window_tokens * effective_policy.low_watermark)
-            - target.response_headroom_tokens,
-        ),
-        response_headroom_tokens=target.response_headroom_tokens,
-        provenance=target.provenance,
+        high_projected_tokens=effective_policy.auto_trigger_tokens,
+        low_input_tokens=effective_policy.post_compaction_target_tokens,
+        response_headroom_tokens=0,
+        provenance="hashi_compaction_window_64k_128k_v1",
         target=target,
     )
 
@@ -925,6 +931,8 @@ def _read_turns(memory_store: Any) -> tuple[dict[str, Any], ...]:
 
 
 def _recent_start(turns: Sequence[Mapping[str, Any]], recent_exchanges: int) -> int:
+    if recent_exchanges <= 0:
+        return len(turns)
     user_indexes = [index for index, row in enumerate(turns) if str(row.get("role") or "").lower() == "user"]
     if len(user_indexes) <= recent_exchanges:
         return 0
@@ -1796,14 +1804,35 @@ class ContextCompactionCoordinator:
         required_reduction_tokens: int | None = None,
         continue_request_on_failure: bool = False,
     ) -> CompactionOutcome:
+        policy = load_policy(self.runtime)
+        if trigger == "manual_command":
+            current_tokens = estimate_effective_context_tokens(self.runtime)
+            if current_tokens < policy.manual_min_tokens:
+                return CompactionOutcome(
+                    status="not_needed",
+                    trigger=trigger,
+                    code="BELOW_MANUAL_COMPACTION_WINDOW",
+                    before_tokens=current_tokens,
+                    message=(
+                        f"Current context is {current_tokens:,} tokens, below the "
+                        f"{policy.manual_min_tokens:,}-token manual Compact threshold."
+                    ),
+                )
         task = asyncio.current_task()
         async with self._operation_lock:
             self._active_task = task
             compaction_id = f"cmp-{uuid.uuid4().hex}"
             route = resolve_compact_route(self.runtime)
-            policy = load_policy(self.runtime)
             try:
-                snapshot = self.snapshot()
+                snapshot = (
+                    _snapshot(
+                        self.store,
+                        self.memory_store,
+                        replace(policy, recent_exchanges=0),
+                    )
+                    if trigger == "manual_command" and force
+                    else self.snapshot()
+                )
                 trigger_budget = resolve_trigger_budget(
                     self.runtime,
                     policy=policy,
@@ -1817,11 +1846,26 @@ class ContextCompactionCoordinator:
                     ),
                 )
                 if selection is None:
+                    manual_request = trigger == "manual_command"
                     return CompactionOutcome(
                         status="not_needed",
                         trigger=trigger,
                         compaction_id=compaction_id,
-                        message="No eligible historical prefix exists outside the recent guard.",
+                        code=(
+                            "NO_COMPACTABLE_HISTORY"
+                            if manual_request
+                            else "NO_ELIGIBLE_HISTORY_OUTSIDE_RECENT_GUARD"
+                        ),
+                        before_tokens=(
+                            estimate_effective_context_tokens(self.runtime)
+                            if manual_request
+                            else 0
+                        ),
+                        message=(
+                            "No historical conversation content is available to compact."
+                            if manual_request
+                            else "No eligible historical prefix exists outside the recent guard."
+                        ),
                         covered_through_turn_id=snapshot.covered_through_turn_id,
                         route_provider=route.provider,
                         route_model=route.model,
@@ -1887,8 +1931,11 @@ class ContextCompactionCoordinator:
                         },
                         "before_tokens": selection.before_tokens,
                         "estimator": route.capacity.estimator if route.capacity else None,
-                        "high_watermark": policy.high_watermark,
-                        "low_watermark": policy.low_watermark,
+                        "manual_min_tokens": policy.manual_min_tokens,
+                        "auto_trigger_tokens": policy.auto_trigger_tokens,
+                        "post_compaction_target_tokens": (
+                            policy.post_compaction_target_tokens
+                        ),
                         "trigger_budget_high_tokens": (
                             trigger_budget.high_projected_tokens
                         ),
@@ -2029,6 +2076,15 @@ class ContextCompactionCoordinator:
                         "her_effort": route.her_effort,
                     },
                 )
+                last_prompt_tokens = _safe_int(
+                    getattr(self.runtime, "_last_full_prompt_tokens", None),
+                    minimum=1,
+                )
+                if last_prompt_tokens is not None:
+                    self.runtime._last_full_prompt_tokens = max(
+                        1,
+                        last_prompt_tokens - actual_reduction,
+                    )
                 return CompactionOutcome(
                     status="completed",
                     trigger=trigger,
@@ -2152,15 +2208,14 @@ class ContextCompactionCoordinator:
             + max(0, int(additional_tokens))
             + budget.response_headroom_tokens
         )
-        if projected < budget.high_projected_tokens:
+        if projected <= budget.high_projected_tokens:
             return CompactionOutcome(
                 status="not_needed",
                 trigger=trigger,
                 before_tokens=prompt_tokens,
                 message=(
-                    "Target prompt is below the proactive watermark."
-                    if budget.target is not None
-                    else "Target prompt is below the HASHI unknown-capacity maintenance threshold."
+                    f"Current context is {projected:,} tokens; automatic Compact "
+                    f"starts only above {budget.high_projected_tokens:,} tokens."
                 ),
             )
         required = max(
@@ -2251,33 +2306,61 @@ def record_capacity_blocked(
     )
 
 
-def schedule_post_turn(
+def schedule_execution_stage(
     runtime: Any,
     *,
     request_ref: str,
     prompt_tokens: int,
     chat_id: Any | None = None,
     deliver_to_telegram: bool = False,
-) -> None:
+) -> bool:
+    """Start threshold-triggered Compact without awaiting it.
+
+    This function is called when the main HER v2 Execution stage begins.  The
+    returned task is deliberately detached from the foreground lifecycle: no
+    Compact result, exception, retry, timeout, or warning delivery can delay or
+    change the current model request.
+    """
+
     if str(getattr(getattr(runtime, "config", None), "active_backend", "")) != HER_V2_ENGINE:
-        return
+        return False
     if getattr(
         getattr(runtime, "context_assembler", None),
         "turns_injection_enabled",
         True,
     ) is False:
-        return
-    policy = load_policy(runtime)
-    budget = resolve_trigger_budget(runtime, policy=policy)
-    overhead_tokens = estimate_target_overhead_tokens(runtime)
-    if (
-        int(prompt_tokens)
-        + overhead_tokens
-        + budget.response_headroom_tokens
-        < budget.high_projected_tokens
-    ):
-        return
-    coordinator = coordinator_for(runtime)
+        return False
+    try:
+        policy = load_policy(runtime)
+        budget = resolve_trigger_budget(runtime, policy=policy)
+        effective_tokens = estimate_effective_context_tokens(
+            runtime,
+            prompt_tokens=int(prompt_tokens),
+        )
+        # Exactly 128k remains inside the manual window. Automatic maintenance
+        # starts only after the context moves outside its upper boundary.
+        if effective_tokens <= budget.high_projected_tokens:
+            return False
+        coordinator = coordinator_for(runtime)
+        scheduled_requests = getattr(
+            runtime,
+            "_context_compaction_execution_requests",
+            None,
+        )
+        if not isinstance(scheduled_requests, set):
+            scheduled_requests = set()
+            runtime._context_compaction_execution_requests = scheduled_requests
+        request_key = str(request_ref)
+        if request_key in scheduled_requests:
+            return False
+        scheduled_requests.add(request_key)
+    except Exception as exc:
+        logger.warning(
+            "Execution-stage context compaction scheduling failed safely: %s: %s",
+            type(exc).__name__,
+            _redact_control_text(exc),
+        )
+        raise
 
     async def warn_user(error: ContextCapacityError) -> None:
         warning_id = ""
@@ -2289,15 +2372,30 @@ def schedule_post_turn(
             )
         except Exception as audit_exc:
             logger.warning(
-                "Post-turn context compaction warning audit failed safely: %s: %s",
+                "Execution-stage context compaction warning audit failed safely: %s: %s",
                 type(audit_exc).__name__,
                 _redact_control_text(audit_exc),
             )
         rendered = capacity_warning_text(error)
         logger.warning(
-            "Post-turn context compaction warning; request continued: %s",
+            "Execution-stage context compaction warning; request continued: %s",
             _redact_control_text(error),
         )
+        # Request activity and metadata are always updated, including when
+        # /verbose is off. Telegram delivery below is also independent of
+        # /verbose and is awaited only by this detached maintenance task.
+        with contextlib.suppress(Exception):
+            from orchestrator import runtime_pipeline
+
+            runtime_pipeline.surface_context_compaction_warnings(
+                runtime,
+                SimpleNamespace(
+                    request_id=request_ref,
+                    chat_id=chat_id,
+                    deliver_to_telegram=False,
+                ),
+                (rendered,),
+            )
         if not deliver_to_telegram or chat_id is None:
             return
         try:
@@ -2321,7 +2419,7 @@ def schedule_post_turn(
                 )
         except Exception as exc:
             logger.warning(
-                "Post-turn context compaction warning delivery failed safely: %s: %s",
+                "Execution-stage context compaction warning delivery failed safely: %s: %s",
                 type(exc).__name__,
                 _redact_control_text(exc),
             )
@@ -2341,13 +2439,12 @@ def schedule_post_turn(
     async def run() -> None:
         try:
             outcome = await coordinator.compact(
-                trigger="post_turn_watermark",
+                trigger="execution_stage_auto",
                 request_ref=request_ref,
                 force=False,
                 required_reduction_tokens=max(
                     1,
-                    int(prompt_tokens)
-                    + overhead_tokens
+                    effective_tokens
                     - budget.low_input_tokens,
                 ),
                 continue_request_on_failure=True,
@@ -2356,10 +2453,11 @@ def schedule_post_turn(
                 await warn_user(
                     ContextCapacityError(
                         str(outcome.code or "COMPACTION_NOT_COMPLETED"),
-                        "Background context compaction did not complete; it did not stop or invalidate the current task.",
+                        "Automatic context compaction did not complete; the current task continued without waiting for it.",
                         facts={
-                            "effective_tokens": int(prompt_tokens),
-                            "context_budget_tokens": budget.high_projected_tokens,
+                            "effective_tokens": effective_tokens,
+                            "auto_trigger_tokens": budget.high_projected_tokens,
+                            "post_compaction_target_tokens": budget.low_input_tokens,
                             "budget_provenance": budget.provenance,
                             "compaction_status": outcome.status,
                             "compaction_code": outcome.code,
@@ -2373,21 +2471,50 @@ def schedule_post_turn(
             await warn_user(
                 ContextCapacityError(
                     "COMPACTION_INTERNAL_FAILURE",
-                    "Background context compaction failed unexpectedly; it did not stop or invalidate the current task.",
+                    "Automatic context compaction failed unexpectedly; the current task continued without waiting for it.",
                     facts={
+                        "effective_tokens": effective_tokens,
+                        "auto_trigger_tokens": budget.high_projected_tokens,
                         "error_type": type(exc).__name__,
                         "original_context_unchanged": True,
                     },
                 )
             )
 
-    task = asyncio.create_task(run(), name=f"context-compact-{getattr(runtime, 'name', 'agent')}-{request_ref}")
+    maintenance = run()
+    try:
+        task = asyncio.create_task(
+            maintenance,
+            name=(
+                f"context-compact-execution-"
+                f"{getattr(runtime, 'name', 'agent')}-{request_ref}"
+            ),
+        )
+    except Exception:
+        maintenance.close()
+        scheduled_requests.discard(request_key)
+        raise
     tasks = getattr(runtime, "_context_compaction_tasks", None)
     if not isinstance(tasks, set):
         tasks = set()
         runtime._context_compaction_tasks = tasks
     tasks.add(task)
     task.add_done_callback(tasks.discard)
+    return True
+
+
+def schedule_post_turn(
+    runtime: Any,
+    *,
+    request_ref: str,
+    prompt_tokens: int,
+    chat_id: Any | None = None,
+    deliver_to_telegram: bool = False,
+) -> None:
+    """Deprecated compatibility hook; automatic Compact is Execution-owned."""
+
+    del runtime, request_ref, prompt_tokens, chat_id, deliver_to_telegram
+    return None
 
 
 def compact_status_text(runtime: Any) -> str:
@@ -2396,6 +2523,7 @@ def compact_status_text(runtime: Any) -> str:
     target: CapacityProfile | None = status["target_capacity"]
     policy = load_policy(runtime)
     trigger_budget = resolve_trigger_budget(runtime, policy=policy)
+    current_tokens = estimate_effective_context_tokens(runtime)
     capacity_text = (
         f"{route.capacity.context_window_tokens:,} tokens ({route.capacity.provenance})"
         if route.capacity
@@ -2404,11 +2532,7 @@ def compact_status_text(runtime: Any) -> str:
     target_text = (
         f"{target.provider}/{target.model} · {target.context_window_tokens:,} tokens ({target.provenance})"
         if target
-        else (
-            "unknown · HASHI maintenance threshold "
-            f"{trigger_budget.high_projected_tokens:,}→"
-            f"{trigger_budget.low_input_tokens:,} tokens"
-        )
+        else "unknown (does not change the Compact window)"
     )
     eligibility = "READY" if not status["state_error"] else "ERROR"
     reason = html.escape(
@@ -2427,6 +2551,10 @@ def compact_status_text(runtime: Any) -> str:
         f"<b>Timeout tier</b> · <code>{html.escape(route.timeout_tier or route.config.timeout_tier)}</code>\n"
         f"<b>Compact capacity</b> · <code>{html.escape(capacity_text)}</code>\n"
         f"<b>Target capacity</b> · <code>{html.escape(target_text)}</code>\n"
+        f"<b>Current context</b> · <code>{current_tokens:,} tokens</code>\n"
+        f"<b>Manual window</b> · <code>{policy.manual_min_tokens:,}–{policy.auto_trigger_tokens:,} tokens</code>\n"
+        f"<b>Automatic trigger</b> · <code>&gt; {trigger_budget.high_projected_tokens:,} tokens · Execution stage · non-blocking</code>\n"
+        f"<b>Compact target</b> · <code>{trigger_budget.low_input_tokens:,} tokens</code>\n"
         f"<b>Cross-provider</b> · <code>{'YES' if route.crosses_provider else 'NO'}</code>\n"
         f"<b>Generation</b> · <code>{status['generation'] if status['generation'] is not None else '-'}</code>\n"
         f"<b>Covered through turn</b> · <code>{status['covered_through_turn_id'] if status['covered_through_turn_id'] is not None else '-'}</code>\n"
@@ -2444,6 +2572,7 @@ def capacity_warning_text(error: ContextCapacityError) -> str:
         "model",
         "context_window_tokens",
         "context_budget_tokens",
+        "auto_trigger_tokens",
         "post_compaction_target_tokens",
         "budget_provenance",
         "protected_tokens",
@@ -2488,6 +2617,9 @@ __all__ = [
     "CONTEXT_CAPACITY_EXHAUSTED",
     "CONTEXT_CAPACITY_REJECTED",
     "CONTEXT_PROTECTED_SET_TOO_LARGE",
+    "DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS",
+    "DEFAULT_MANUAL_COMPACTION_MIN_TOKENS",
+    "DEFAULT_POST_COMPACTION_TARGET_TOKENS",
     "MANAGED_HISTORY_TITLE",
     "CapacityProfile",
     "CompactRouteConfig",
@@ -2506,6 +2638,7 @@ __all__ = [
     "coordinator_for",
     "ensure_route_state",
     "estimate_target_overhead_tokens",
+    "estimate_effective_context_tokens",
     "estimate_tokens",
     "install_history_section",
     "load_policy",
@@ -2518,5 +2651,6 @@ __all__ = [
     "resolve_compact_route",
     "resolve_target_capacity",
     "resolve_trigger_budget",
+    "schedule_execution_stage",
     "schedule_post_turn",
 ]

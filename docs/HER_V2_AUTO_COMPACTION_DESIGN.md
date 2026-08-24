@@ -58,16 +58,21 @@ without claiming that 32,000 is the model's context capacity. A real provider
 capacity rejection remains an execution error and must not change the active
 context pointer.
 
-Unknown target-model capacity does not disable automatic maintenance. HASHI
-uses an explicitly named absolute maintenance threshold instead of fabricating a model
-capacity: pre-turn and post-turn compaction trigger at 64,000 estimated tokens
-and aim below 48,000. These values are HASHI product budgets, not provider
-metadata or a permission to stop work. If the protected set itself reaches the
-threshold, or compaction cannot bring the effective prompt below it, HASHI
-keeps the protected/current context intact, emits a mandatory user-visible
-warning, and still invokes the selected model with the best safely assembled
-context. The provider may then accept or reject that request under its actual
-capacity rules.
+Target-model capacity metadata does not move the Compact thresholds. HASHI
+uses one fixed product window for known and unknown targets:
+
+- below 64,000 effective tokens, manual `/compact` reports that compaction is
+  not yet useful and gives the exact current count;
+- from 64,000 through 128,000 effective tokens, manual `/compact` executes;
+- above 128,000 effective tokens, the first main HER v2 Execution invocation
+  starts automatic Compact as a detached background task; and
+- successful automatic maintenance targets 64,000 effective tokens.
+
+The effective count includes the assembled prompt and serialized target tool
+schemas. The boundary is strict: exactly 128,000 tokens does not trigger
+automatic Compact. Provider capacity remains diagnostic information and the
+32,000-token maintenance-call partition remains an implementation budget; neither
+changes the 64,000–128,000 operating window.
 
 ## 3. Authority and safety boundary
 
@@ -93,9 +98,12 @@ of provider effort levels does not block Compact.
 ## 4. Protected and eligible context
 
 The current request, current execution state, open tool transactions,
-permissions, side-effect truth, latest protected exchange guard, and system
-policy remain verbatim. Only an older eligible historical prefix may be
-replaced by a validated continuity capsule.
+permissions, side-effect truth, and system policy remain verbatim. Automatic
+Compact also preserves the latest protected exchange guard. An explicit manual
+`/compact` at or above 64,000 tokens removes that recent-exchange eligibility
+guard so the command is not rejected merely because the history is recent;
+only historical conversation content may still be replaced by a validated
+continuity capsule.
 
 Raw transcript rows are append-only and are never deleted by Compact.
 
@@ -128,22 +136,32 @@ Manual controls:
 - `/model compact off [tier]` — disable Compact;
 - `/model compact tier <auto|tier_2|tier_3>` — select the watchdog tier.
 
-Automatic paths use the same route resolver and transaction:
+Manual `/compact` is accepted at every effective size of 64,000 tokens or
+greater. Below that floor it performs no model call and reports the exact
+threshold comparison. At or above the floor it invokes the initiating Agent's
+Quick/Light backend immediately and reports the selected-history reduction.
 
-- pre-turn soft-watermark compaction for declared capacities, or the absolute
-  64,000→48,000 HASHI maintenance threshold when target capacity is unknown;
-- post-turn scheduling using the same resolved threshold;
-- one safe retry after a typed target context-capacity rejection when no new
-  tool, external side effect, or delivery occurred.
+Threshold-triggered automatic Compact has exactly one scheduling boundary:
+the first main HER v2 Execution provider invocation, and only when the effective
+context is above 128,000 tokens. Prompt assembly, Planning, and post-turn
+observers do not invoke or wait for Compact. Execution schedules a detached
+maintenance task and immediately continues its own provider call with the
+already assembled prompt. A successful background commit affects later prompt
+assembly, never the in-flight request.
 
-Automatic Compact is never a pre-HER gate. A failed, locked, timed-out,
-retry-exhausted, unavailable, or non-shrinking compaction leaves the current
-request runnable. HASHI uses an already committed smaller capsule when one
-helps; otherwise it preserves the original prompt. It records the condition,
-surfaces a mandatory warning independently of `/verbose`, and continues the
-same model request. This rule also applies when an estimate reaches or exceeds
-120,000 tokens: the threshold triggers maintenance and warning behaviour, not
-a new execution stop condition.
+Automatic Compact is forever non-blocking. Failure, lock contention, timeout,
+retry exhaustion, an unavailable route, invalid output, or a
+non-shrinking result cannot fail, pause, retry, or change the current HER task.
+Every unsuccessful automatic outcome records the condition and emits a
+mandatory user-visible warning independently of `/verbose`; warning delivery
+itself also runs outside the foreground task. The active pointer advances only
+after a complete validated commit.
+
+A typed rejection from the selected target provider is a separate reactive
+recovery path: when the rejected call provably performed no tool call, external
+side effect, or delivery, HASHI may compact and retry that rejected request
+once. This does not alter the threshold-triggered Execution-stage scheduling
+contract above.
 
 ## 7. Audit and user-visible status
 
@@ -156,8 +174,8 @@ Audit events record:
 - mapped provider reasoning;
 - tool, external-side-effect, and sub-agent authority as disabled;
 - capacity metadata when known;
-- the resolved trigger budget and provenance, including the named
-  unknown-capacity maintenance threshold;
+- the fixed 64,000-token manual floor, strict above-128,000 automatic trigger,
+  64,000-token target, and their product-policy provenance;
 - source IDs/hashes and protected hashes;
 - timeout tier and attempt;
 - result, failure code, and atomic commit outcome; and
@@ -166,8 +184,11 @@ Audit events record:
 - mandatory warning scheduling/delivery outcome when automatic maintenance
   does not complete.
 
-`/compact` and `/compact status` show the effective provider/model, HER
-effort, provider reasoning, trigger/result, and pointer information.
+`/compact` reports the current count and thresholds before work, then the
+selected-history reduction or an exact not-needed reason. Internal compaction
+IDs and route diagnostics are omitted from ordinary results. `/compact status`
+retains route, effort, pointer, capacity, current-count, and window diagnostics
+for troubleshooting.
 
 ## 8. Verification requirements
 
@@ -178,11 +199,14 @@ Release verification must cover:
 - providers with enable-only reasoning;
 - missing capability declarations and missing Compact capacity without route
   lock;
-- unknown target capacity automatically compacting a Sunny-sized historical
-  prompt before HER, plus warning-and-continue behaviour when that compaction
-  fails;
-- a 120,000-token policy threshold with both retryable Compact attempts
-  exhausted, proving the selected model still receives the original request;
+- manual boundary behaviour at 63,999, 64,000, and 128,000 tokens;
+- automatic boundary behaviour at exactly 128,000 and 128,001 tokens for both
+  known and unknown target capacity;
+- no automatic Compact call during prompt assembly or post-turn handling;
+- one detached trigger at the first main Execution invocation, excluding
+  sub-agent Execution and later Execution retries;
+- both retryable Compact attempts exhausted while the selected model still
+  receives the original request and `/verbose off` still receives the warning;
 - missing active Quick grant with no fallback;
 - manual and automatic triggers;
 - model failure, malformed output, timeout, and cancellation;

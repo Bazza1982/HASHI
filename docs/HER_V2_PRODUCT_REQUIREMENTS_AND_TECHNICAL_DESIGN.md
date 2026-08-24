@@ -1232,18 +1232,24 @@ fall back to Pro, a global default, or a different provider. Gemini remains
 stateless, and this maintenance path does not split, cap, or replace the
 existing OpenRouter or DeepSeek request-local tool loops.
 
-Declared target capacity uses configured high/low watermark ratios. When
-target capacity is unknown, HASHI still performs automatic maintenance through
-a named absolute 64,000→48,000 estimated-token threshold; this threshold is product
-policy, not invented provider metadata. Unknown compactor capacity uses
-conservative 32,000 estimated-token source partitions. Automatic compaction is
-never a prerequisite for the current model call. Protected-set overflow,
-Compact unavailability, timeout, validation failure, or retry exhaustion keeps
-the best safely assembled context, emits a mandatory user-visible warning, and
-continues the selected model request. This remains true at 120,000 estimated
-tokens or above. The provider's own capacity rejection remains truthful, but
-HASHI does not pre-emptively turn a maintenance threshold into an execution
-stop.
+Known and unknown target capacity use the same fixed product window. Below
+64,000 effective tokens, manual `/compact` reports the exact not-needed reason;
+from 64,000 tokens upward it executes. Automatic Compact triggers strictly
+above 128,000 tokens, targets 64,000 tokens, and is scheduled only when the
+first main Execution provider invocation begins. Exactly 128,000 tokens remains
+inside the manual window. Prompt assembly and post-turn handling never invoke
+automatic Compact. Unknown compactor capacity continues to use conservative
+32,000 estimated-token source partitions.
+
+Execution creates a detached maintenance task and immediately continues its
+already assembled provider call. Compact unavailability, lock contention,
+timeout, validation failure, retry exhaustion, or a non-shrinking
+result cannot pause, fail, retry, or otherwise change the foreground task. Every
+unsuccessful automatic outcome emits a mandatory user-visible warning even
+with `/verbose off`; warning delivery is also outside the foreground task. A
+successful atomic pointer commit affects later prompt assembly only. The
+provider's own capacity acceptance or rejection remains truthful and is not a
+Compact gate.
 
 Each individual semantic compactor model call may use the expressly authorised
 absolute watchdog defined by a dedicated Tier 2 or Tier 3 Compact policy. Tier

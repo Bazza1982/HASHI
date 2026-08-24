@@ -10,15 +10,17 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.base import BackendResponse
+from adapters.her_v2 import _ExecutionStageCompactionProvider
 from orchestrator import runtime_pipeline
 from orchestrator.admin_local_testing import execute_local_command
 from orchestrator.bridge_memory import BridgeContextAssembler
 from orchestrator.context_compaction import (
     CAPSULE_FORMAT,
     CONTEXT_PROTECTED_SET_TOO_LARGE,
+    DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS,
+    DEFAULT_MANUAL_COMPACTION_MIN_TOKENS,
+    DEFAULT_POST_COMPACTION_TARGET_TOKENS,
     DEFAULT_UNKNOWN_COMPACTOR_BUDGET_TOKENS,
-    DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS,
-    DEFAULT_UNKNOWN_TARGET_LOW_TOKENS,
     CapacityProfile,
     CompactionFailure,
     CompactionRequest,
@@ -34,14 +36,15 @@ from orchestrator.context_compaction import (
     ensure_route_state,
     estimate_tokens,
     install_history_section,
+    load_policy,
     load_route_config,
     resolve_compact_route,
     resolve_target_capacity,
     resolve_trigger_budget,
-    schedule_post_turn,
+    schedule_execution_stage,
 )
 from orchestrator.her_v2.interfaces import StageInvocationError
-from orchestrator.her_v2.models import StageRequest
+from orchestrator.her_v2.models import Stage, StageRequest
 from orchestrator.runtime_pipeline import (
     _typed_capacity_recovery_is_safe,
     recover_typed_context_capacity_rejection,
@@ -400,6 +403,79 @@ async def test_successful_compaction_keeps_raw_turns_and_commits_once(tmp_path):
     assert "COMPACTED HISTORY CAPSULE" in rendered
     assert "user-0:" not in rendered
     assert "user-2:" in rendered
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_is_unnecessary_only_below_64k(tmp_path):
+    runtime = _Runtime(tmp_path)
+    runtime._last_full_prompt_tokens = DEFAULT_MANUAL_COMPACTION_MIN_TOKENS - 1
+    calls = []
+    coordinator = ContextCompactionCoordinator(
+        runtime,
+        invoker=_valid_invoker(calls),
+    )
+
+    outcome = await coordinator.compact(
+        trigger="manual_command",
+        request_ref="manual-below-window",
+        force=True,
+    )
+
+    assert outcome.status == "not_needed"
+    assert outcome.code == "BELOW_MANUAL_COMPACTION_WINDOW"
+    assert outcome.before_tokens == DEFAULT_MANUAL_COMPACTION_MIN_TOKENS - 1
+    assert f"{DEFAULT_MANUAL_COMPACTION_MIN_TOKENS:,}" in outcome.message
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_executes_at_64k_without_recent_guard_block(tmp_path):
+    runtime = _Runtime(tmp_path)
+    _write_turns(runtime, 2, chars=2_000)
+    runtime._last_full_prompt_tokens = DEFAULT_MANUAL_COMPACTION_MIN_TOKENS
+    calls = []
+    coordinator = ContextCompactionCoordinator(
+        runtime,
+        invoker=_valid_invoker(calls),
+    )
+
+    outcome = await coordinator.compact(
+        trigger="manual_command",
+        request_ref="manual-at-window",
+        force=True,
+    )
+
+    assert outcome.status == "completed"
+    assert outcome.changed is True
+    assert calls
+    assert coordinator.store.read_state()["generation"] == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_at_64k_reports_no_history_without_guard_claim(tmp_path):
+    runtime = _Runtime(tmp_path)
+    runtime._last_full_prompt_tokens = DEFAULT_MANUAL_COMPACTION_MIN_TOKENS
+    calls = []
+    coordinator = ContextCompactionCoordinator(
+        runtime,
+        invoker=_valid_invoker(calls),
+    )
+
+    outcome = await coordinator.compact(
+        trigger="manual_command",
+        request_ref="manual-no-history",
+        force=True,
+    )
+
+    assert outcome.status == "not_needed"
+    assert outcome.code == "NO_COMPACTABLE_HISTORY"
+    assert outcome.before_tokens == DEFAULT_MANUAL_COMPACTION_MIN_TOKENS
+    assert (
+        outcome.message
+        == "No historical conversation content is available to compact."
+    )
+    assert "recent guard" not in outcome.message
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -797,7 +873,7 @@ async def test_oversized_record_is_paged_then_committed_with_original_source_ids
     assert list(record["source_hashes"]) == ["turn:1", "turn:2", "turn:3", "turn:4"]
 
 
-def test_unknown_target_capacity_uses_hashi_absolute_auto_guard(tmp_path):
+def test_compaction_window_is_fixed_when_target_capacity_is_unknown(tmp_path):
     runtime = _Runtime(tmp_path)
     for grant in runtime.backend_manager.config.allowed_backends:
         grant.pop("context_window_tokens", None)
@@ -824,10 +900,46 @@ def test_unknown_target_capacity_uses_hashi_absolute_auto_guard(tmp_path):
     budget = resolve_trigger_budget(runtime)
     assert budget.target is None
     assert budget.is_unknown_capacity_guard is True
-    assert budget.high_projected_tokens == DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS
-    assert budget.low_input_tokens == DEFAULT_UNKNOWN_TARGET_LOW_TOKENS
-    assert budget.provenance == "hashi_unknown_target_guard_v1"
+    assert budget.high_projected_tokens == DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
+    assert budget.low_input_tokens == DEFAULT_POST_COMPACTION_TARGET_TOKENS
+    assert budget.provenance == "hashi_compaction_window_64k_128k_v1"
     assert DEFAULT_UNKNOWN_COMPACTOR_BUDGET_TOKENS == 32_000
+
+
+def test_declared_provider_capacity_does_not_move_64k_128k_window(tmp_path):
+    runtime = _Runtime(tmp_path, capacity=1_000_000, headroom=16_384)
+
+    budget = resolve_trigger_budget(runtime)
+
+    assert budget.target is not None
+    assert budget.target.context_window_tokens == 1_000_000
+    assert budget.high_projected_tokens == DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
+    assert budget.low_input_tokens == DEFAULT_POST_COMPACTION_TARGET_TOKENS
+    assert budget.response_headroom_tokens == 0
+
+
+def test_persisted_threshold_fields_cannot_move_fixed_window(tmp_path):
+    runtime = _Runtime(tmp_path)
+    runtime.state_store.value = {
+        "context_compaction": {
+            "policy": {
+                "manual_min_tokens": 12_000,
+                "auto_trigger_tokens": 24_000,
+                "post_compaction_target_tokens": 8_000,
+                "unknown_target_high_tokens": 32_000,
+                "unknown_target_low_tokens": 16_000,
+            }
+        }
+    }
+
+    policy = load_policy(runtime)
+
+    assert policy.manual_min_tokens == DEFAULT_MANUAL_COMPACTION_MIN_TOKENS
+    assert policy.auto_trigger_tokens == DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
+    assert (
+        policy.post_compaction_target_tokens
+        == DEFAULT_POST_COMPACTION_TARGET_TOKENS
+    )
 
 
 def test_capacity_error_rendering_is_stable_and_escaped():
@@ -847,7 +959,7 @@ def test_capacity_error_rendering_is_stable_and_escaped():
 
 
 @pytest.mark.asyncio
-async def test_build_turn_prompt_preserves_oversized_protected_request_and_warns(
+async def test_build_turn_prompt_never_compacts_or_warns_before_execution(
     tmp_path,
     monkeypatch,
 ):
@@ -895,13 +1007,12 @@ async def test_build_turn_prompt_preserves_oversized_protected_request_and_warns
     )
 
     assert "CURRENT-AUTHORITY:" in result.final_prompt
-    assert result.context_warnings
-    assert CONTEXT_PROTECTED_SET_TOO_LARGE in result.context_warnings[0]
-    assert "continuing" in result.context_warnings[0]
+    assert result.context_warnings == ()
+    assert runtime._context_compaction_prompt_tokens[item.request_id] > 0
 
 
 @pytest.mark.asyncio
-async def test_build_turn_prompt_auto_compacts_above_watermark_and_preserves_request(
+async def test_build_turn_prompt_only_measures_context_before_execution(
     tmp_path,
     monkeypatch,
 ):
@@ -916,9 +1027,10 @@ async def test_build_turn_prompt_auto_compacts_above_watermark_and_preserves_req
         capabilities=SimpleNamespace(supports_sessions=False),
     )
     runtime.context_assembler = BridgeContextAssembler(runtime.memory_store, None)
+    compact_calls = []
     runtime._context_compaction_coordinator = ContextCompactionCoordinator(
         runtime,
-        invoker=_valid_invoker(),
+        invoker=_valid_invoker(compact_calls),
     )
     runtime._consume_session_primer = lambda item: item.prompt
     runtime._workzone_prompt_section = lambda: []
@@ -957,15 +1069,16 @@ async def test_build_turn_prompt_auto_compacts_above_watermark_and_preserves_req
     )
 
     assert "CURRENT-AUTHORITY-MUST-SURVIVE" in result.final_prompt
-    assert "COMPACTED HISTORY CAPSULE" in result.final_prompt
-    assert "user-0:" not in result.final_prompt
+    assert "COMPACTED HISTORY CAPSULE" not in result.final_prompt
+    assert "user-0:" in result.final_prompt
     assert "user-11:" in result.final_prompt
-    assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 1
+    assert compact_calls == []
+    assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 0
     assert runtime._last_prompt_audit["budget_applied"] is False
 
 
 @pytest.mark.asyncio
-async def test_unknown_capacity_auto_compacts_sunny_sized_history_before_her(
+async def test_unknown_capacity_over_128k_still_waits_for_execution_stage(
     tmp_path,
     monkeypatch,
 ):
@@ -990,7 +1103,7 @@ async def test_unknown_capacity_auto_compacts_sunny_sized_history_before_her(
     runtime.state_store.value = {
         "context_compaction": {"policy": {"recent_exchanges": 1}}
     }
-    _write_turns(runtime, 14, chars=12_000)
+    _write_turns(runtime, 14, chars=20_000)
     runtime.backend_manager.current_backend = SimpleNamespace(
         _session_id=None,
         tool_registry=None,
@@ -1039,18 +1152,18 @@ async def test_unknown_capacity_auto_compacts_sunny_sized_history_before_her(
     )
 
     assert "CURRENT-UNKNOWN-CAPACITY-AUTHORITY" in result.final_prompt
-    assert "COMPACTED HISTORY CAPSULE" in result.final_prompt
-    assert calls
-    assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 1
+    assert "COMPACTED HISTORY CAPSULE" not in result.final_prompt
+    assert calls == []
+    assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 0
     assert (
         resolve_trigger_budget(runtime).is_unknown_capacity_guard
         is True
     )
-    assert estimate_tokens(result.final_prompt) < DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS
+    assert estimate_tokens(result.final_prompt) > DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
 
 
 @pytest.mark.asyncio
-async def test_unknown_capacity_compaction_failure_warns_and_continues_to_her(
+async def test_compactor_is_not_called_during_prompt_assembly(
     tmp_path,
     monkeypatch,
 ):
@@ -1083,7 +1196,10 @@ async def test_unknown_capacity_compaction_failure_warns_and_continues_to_her(
     )
     runtime.context_assembler = BridgeContextAssembler(runtime.memory_store, None)
 
-    async def invalid(*_args):
+    compact_calls = []
+
+    async def invalid(*args):
+        compact_calls.append(args)
         return SimpleNamespace(text="{}", structured_data=None)
 
     runtime._context_compaction_coordinator = ContextCompactionCoordinator(
@@ -1128,15 +1244,13 @@ async def test_unknown_capacity_compaction_failure_warns_and_continues_to_her(
 
     assert "CURRENT-MUST-REACH-HER-UNCOMPACTED" in result.final_prompt
     assert "user-0:" in result.final_prompt
-    assert result.context_warnings
-    assert "CONTEXT_CAPACITY_EXHAUSTED" in result.context_warnings[0]
-    assert f"{DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS}" in result.context_warnings[0]
-    assert "continuing" in result.context_warnings[0]
+    assert result.context_warnings == ()
+    assert compact_calls == []
     assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 0
 
 
 @pytest.mark.asyncio
-async def test_120k_retry_exhaustion_warns_and_still_calls_selected_model(
+async def test_execution_stage_retry_exhaustion_warns_and_does_not_block_model(
     tmp_path,
     monkeypatch,
 ):
@@ -1162,8 +1276,6 @@ async def test_120k_retry_exhaustion_warns_and_still_calls_selected_model(
         "context_compaction": {
             "policy": {
                 "recent_exchanges": 1,
-                "unknown_target_high_tokens": 120_000,
-                "unknown_target_low_tokens": 90_000,
             }
         }
     }
@@ -1199,6 +1311,14 @@ async def test_120k_retry_exhaustion_warns_and_still_calls_selected_model(
     runtime._last_prompt_audit = {}
     runtime._thinking_chars_this_req = 0
     runtime._last_full_prompt_tokens = 0
+    runtime._verbose = False
+    sent = []
+
+    async def send_long_message(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+        return 0.0, 1
+
+    runtime.send_long_message = send_long_message
     monkeypatch.setattr(
         runtime_pipeline.runtime_cross_session,
         "prepare_reply_binding",
@@ -1216,7 +1336,8 @@ async def test_120k_retry_exhaustion_warns_and_still_calls_selected_model(
         source="text",
         silent=False,
         is_retry=False,
-        deliver_to_telegram=False,
+        deliver_to_telegram=True,
+        chat_id=123,
         skip_memory_injection=False,
     )
 
@@ -1226,13 +1347,21 @@ async def test_120k_retry_exhaustion_warns_and_still_calls_selected_model(
         is_bridge_request=False,
     )
 
-    assert estimate_tokens(result.final_prompt) >= 120_000
-    assert len(compact_calls) == 2
+    assert estimate_tokens(result.final_prompt) > DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
+    assert compact_calls == []
     assert "CURRENT-REQUEST-MUST-CONTINUE-AFTER-RETRIES" in result.final_prompt
     assert "user-0:" in result.final_prompt
-    assert result.context_warnings
-    assert "PROVIDER_SERVER_ERROR" in result.context_warnings[0]
-    assert "continuing" in result.context_warnings[0]
+    assert result.context_warnings == ()
+
+    scheduled = schedule_execution_stage(
+        runtime,
+        request_ref=item.request_id,
+        prompt_tokens=runtime._context_compaction_prompt_tokens[item.request_id],
+        chat_id=item.chat_id,
+        deliver_to_telegram=True,
+    )
+    assert scheduled is True
+    assert compact_calls == []
 
     model_calls = []
 
@@ -1255,6 +1384,11 @@ async def test_120k_retry_exhaustion_warns_and_still_calls_selected_model(
     assert generation.response.is_success is True
     assert len(model_calls) == 1
     assert model_calls[0][0] == result.final_prompt
+    await asyncio.gather(*tuple(runtime._context_compaction_tasks))
+    assert len(compact_calls) == 2
+    assert sent
+    assert "warning" in sent[0][1].lower()
+    assert "continued without waiting" in sent[0][1]
 
     audit_rows = [
         json.loads(line)
@@ -1320,7 +1454,7 @@ async def test_context_compaction_warning_delivery_is_mandatory_and_nonblocking(
 
 
 @pytest.mark.asyncio
-async def test_unknown_capacity_post_turn_uses_same_absolute_guard(tmp_path):
+async def test_execution_stage_auto_starts_only_above_128k(tmp_path):
     runtime = _Runtime(tmp_path)
     for grant in runtime.backend_manager.config.allowed_backends:
         grant.pop("context_window_tokens", None)
@@ -1339,7 +1473,10 @@ async def test_unknown_capacity_post_turn_uses_same_absolute_guard(tmp_path):
             }
         }
     }
-    _write_turns(runtime, 30, chars=4_000)
+    runtime.state_store.value = {
+        "context_compaction": {"policy": {"recent_exchanges": 1}}
+    }
+    _write_turns(runtime, 40, chars=4_000)
     runtime.context_assembler = SimpleNamespace(turns_injection_enabled=True)
     calls = []
     runtime._context_compaction_coordinator = ContextCompactionCoordinator(
@@ -1347,30 +1484,64 @@ async def test_unknown_capacity_post_turn_uses_same_absolute_guard(tmp_path):
         invoker=_valid_invoker(calls),
     )
 
-    schedule_post_turn(
+    scheduled = schedule_execution_stage(
         runtime,
-        request_ref="req-unknown-below",
-        prompt_tokens=DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS - 1,
+        request_ref="req-at-boundary",
+        prompt_tokens=DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS,
     )
+    assert scheduled is False
     assert not getattr(runtime, "_context_compaction_tasks", set())
 
-    schedule_post_turn(
+    scheduled = schedule_execution_stage(
         runtime,
-        request_ref="req-unknown-above",
-        prompt_tokens=DEFAULT_UNKNOWN_TARGET_HIGH_TOKENS,
+        request_ref="req-above-boundary",
+        prompt_tokens=DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS + 1,
     )
+    assert scheduled is True
+    duplicate = schedule_execution_stage(
+        runtime,
+        request_ref="req-above-boundary",
+        prompt_tokens=DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS + 1,
+    )
+    assert duplicate is False
     tasks = tuple(runtime._context_compaction_tasks)
     assert tasks
     await asyncio.gather(*tasks)
 
     assert calls
     request = calls[0][1]
-    assert request.trigger == "post_turn_watermark"
+    assert request.trigger == "execution_stage_auto"
     assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 1
 
 
 @pytest.mark.asyncio
-async def test_post_turn_compaction_failure_is_visible_without_blocking_completion(
+async def test_execution_provider_triggers_once_only_for_main_execution():
+    invoked = []
+    triggered = []
+
+    class BaseProvider:
+        async def invoke(self, profile, request):
+            invoked.append((profile, request))
+            return "ok"
+
+    provider = _ExecutionStageCompactionProvider(
+        BaseProvider(),
+        lambda: triggered.append("execution"),
+    )
+    await provider.invoke(None, SimpleNamespace(stage=Stage.TRIAGE, role="lightweight"))
+    await provider.invoke(
+        None,
+        SimpleNamespace(stage=Stage.EXECUTION, role="sub_agent:worker-1"),
+    )
+    await provider.invoke(None, SimpleNamespace(stage=Stage.EXECUTION, role="premium"))
+    await provider.invoke(None, SimpleNamespace(stage=Stage.EXECUTION, role="premium"))
+
+    assert len(invoked) == 4
+    assert triggered == ["execution"]
+
+
+@pytest.mark.asyncio
+async def test_execution_stage_compaction_failure_is_visible_with_verbose_off(
     tmp_path,
 ):
     runtime = _Runtime(tmp_path, capacity=20_000, headroom=512)
@@ -1378,8 +1549,6 @@ async def test_post_turn_compaction_failure_is_visible_without_blocking_completi
         "context_compaction": {
             "policy": {
                 "recent_exchanges": 1,
-                "high_watermark": 0.10,
-                "low_watermark": 0.05,
             }
         }
     }
@@ -1393,6 +1562,7 @@ async def test_post_turn_compaction_failure_is_visible_without_blocking_completi
         runtime,
         invoker=invalid,
     )
+    runtime._verbose = False
     sent = []
 
     async def send_long_message(chat_id, text, **kwargs):
@@ -1401,13 +1571,14 @@ async def test_post_turn_compaction_failure_is_visible_without_blocking_completi
 
     runtime.send_long_message = send_long_message
 
-    schedule_post_turn(
+    scheduled = schedule_execution_stage(
         runtime,
-        request_ref="req-post-turn-warning",
-        prompt_tokens=3_000,
+        request_ref="req-execution-warning",
+        prompt_tokens=DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS + 1,
         chat_id=123,
         deliver_to_telegram=True,
     )
+    assert scheduled is True
     tasks = tuple(runtime._context_compaction_tasks)
     assert tasks
     await asyncio.gather(*tasks)
@@ -1415,7 +1586,7 @@ async def test_post_turn_compaction_failure_is_visible_without_blocking_completi
     assert sent
     assert sent[0][0] == 123
     assert "context compaction warning" in sent[0][1].lower()
-    assert "continuing" in sent[0][1]
+    assert "continued without waiting" in sent[0][1]
     audit_rows = [
         json.loads(line)
         for line in runtime._context_compaction_coordinator.store.audit_path.read_text(
@@ -1441,8 +1612,6 @@ async def test_paused_turn_injection_does_not_inject_or_compact_raw_history(
         "context_compaction": {
             "policy": {
                 "recent_exchanges": 1,
-                "high_watermark": 0.10,
-                "low_watermark": 0.05,
             }
         }
     }
@@ -1494,22 +1663,23 @@ async def test_paused_turn_injection_does_not_inject_or_compact_raw_history(
         item,
         is_bridge_request=False,
     )
-    schedule_post_turn(
+    scheduled = schedule_execution_stage(
         runtime,
         request_ref=item.request_id,
-        prompt_tokens=100_000,
+        prompt_tokens=DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS + 1,
     )
 
     assert "CURRENT-WITH-HISTORY-PAUSED" in result.final_prompt
     assert "HASHI MANAGED CONVERSATION HISTORY" not in result.final_prompt
     assert "user-0:" not in result.final_prompt
     assert calls == []
+    assert scheduled is False
     assert runtime._context_compaction_prompt_states[item.request_id]["inject_memory"] is False
     assert not getattr(runtime, "_context_compaction_tasks", set())
 
 
 @pytest.mark.asyncio
-async def test_soft_pressure_compactor_failure_continues_with_unchanged_fitting_prompt(
+async def test_prompt_assembly_never_runs_soft_pressure_compactor(
     tmp_path,
     monkeypatch,
 ):
@@ -1518,8 +1688,6 @@ async def test_soft_pressure_compactor_failure_continues_with_unchanged_fitting_
         "context_compaction": {
             "policy": {
                 "recent_exchanges": 1,
-                "high_watermark": 0.10,
-                "low_watermark": 0.05,
             }
         }
     }
@@ -1580,9 +1748,8 @@ async def test_soft_pressure_compactor_failure_continues_with_unchanged_fitting_
     assert "CURRENT-REQUEST-STILL-FITS" in result.final_prompt
     assert "user-0:" in result.final_prompt
     assert "COMPACTED HISTORY CAPSULE" not in result.final_prompt
-    assert calls
-    assert result.context_warnings
-    assert "continuing" in result.context_warnings[0]
+    assert calls == []
+    assert result.context_warnings == ()
     assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 0
 
 

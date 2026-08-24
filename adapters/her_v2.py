@@ -11,7 +11,8 @@ import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Mapping
+from types import SimpleNamespace
+from typing import Any, Callable, Mapping
 
 from adapters import her_persona
 from adapters.base import BackendCapabilities, BackendResponse, BaseBackend
@@ -69,6 +70,35 @@ __all__ = [
     "_UnboundedToolRegistry",
     "_backend_response_error",
 ]
+
+
+class _ExecutionStageCompactionProvider:
+    """Fire one detached Compact trigger when main Execution first starts."""
+
+    def __init__(self, base: StageProvider, on_execution: Callable[[], Any]) -> None:
+        self._base = base
+        self._on_execution = on_execution
+        self._scheduled = False
+
+    async def invoke(
+        self,
+        profile: ProviderProfile,
+        request: StageRequest,
+    ) -> StageResponse:
+        if (
+            not self._scheduled
+            and request.stage is Stage.EXECUTION
+            and not request.role.startswith("sub_agent:")
+        ):
+            self._scheduled = True
+            # The callback only creates a background maintenance task.  Never
+            # await it or couple its outcome to Execution.
+            try:
+                self._on_execution()
+            except Exception:
+                # Even a bug in trigger setup must not delay or fail Execution.
+                pass
+        return await self._base.invoke(profile, request)
 
 
 class HERv2Adapter(BaseBackend):
@@ -221,6 +251,56 @@ class HERv2Adapter(BaseBackend):
         ):
             return dict(current)
         return {}
+
+    def _schedule_execution_stage_compaction(self, request_id: str) -> bool:
+        runtime = self._runtime_context()
+        if runtime is None:
+            return False
+        request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", None)
+        prompt_tokens = (
+            int(request_tokens.get(request_id) or 0)
+            if isinstance(request_tokens, Mapping)
+            else 0
+        )
+        if prompt_tokens <= 0:
+            return False
+        meta = self._runtime_request_meta(request_id)
+        try:
+            from orchestrator.context_compaction import schedule_execution_stage
+
+            return schedule_execution_stage(
+                runtime,
+                request_ref=request_id,
+                prompt_tokens=prompt_tokens,
+                chat_id=meta.get("chat_id"),
+                deliver_to_telegram=bool(meta.get("deliver_to_telegram")),
+            )
+        except Exception as exc:  # scheduling must never enter HER control flow
+            self.logger.warning(
+                "Execution-stage Compact trigger failed safely request=%s error=%s",
+                request_id,
+                type(exc).__name__,
+            )
+            try:
+                from orchestrator import runtime_pipeline
+
+                runtime_pipeline.surface_context_compaction_warnings(
+                    runtime,
+                    SimpleNamespace(
+                        request_id=request_id,
+                        chat_id=meta.get("chat_id"),
+                        deliver_to_telegram=bool(meta.get("deliver_to_telegram")),
+                    ),
+                    (
+                        "⚠️ <b>HER v2 context compaction warning</b>\n\n"
+                        "Automatic Compact could not be started, but Execution "
+                        "continued without waiting for it.\n"
+                        f"<b>Error type</b> · <code>{type(exc).__name__}</code>",
+                    ),
+                )
+            except Exception:
+                pass
+            return False
 
     def _habit_notification_context(
         self, request_id: str, *, silent: bool
@@ -831,9 +911,13 @@ class HERv2Adapter(BaseBackend):
             required_persona = commentary_packager
         if required_persona is None:
             required_persona = configured_packager
+        execution_provider = _ExecutionStageCompactionProvider(
+            provider,
+            lambda: self._schedule_execution_stage_compaction(request_id),
+        )
         runtime = HERv2Runtime(
             config=runtime_config,
-            provider=provider,
+            provider=execution_provider,
             ledger_store=self._ledger_store,
             audit_log=self._audit_log,
             delivery=delivery,

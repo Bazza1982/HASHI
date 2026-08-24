@@ -1000,18 +1000,20 @@ must prove the following boundaries.
 - the active provider/model must have an exact Agent grant; no retired
   cross-provider confirmation or independent-route state may be consulted;
 - an unknown engine with declared capabilities works without a name allowlist,
-  while fabricated capacity metadata fails safely; unknown target capacity
-  uses the named 64,000→48,000 HASHI automatic threshold without pretending it is
-  provider metadata, and unknown Compact capacity uses conservative 32,000
-  estimated-token maintenance partitions.
+  while fabricated capacity metadata fails safely; known and unknown target
+  capacity both retain the fixed 64,000–128,000 HASHI product window, and
+  unknown Compact capacity uses conservative 32,000 estimated-token
+  maintenance partitions.
 
 **Context authority and atomicity**
 
 - typed segments, rather than flat-prompt text heuristics, select one exact
   eligible source prefix;
 - system/developer policy, current request, classification, goal, active plan,
-  recent-dialogue guard, open tool transaction, permissions, unresolved
-  side-effect truth, and required evidence remain byte-identical;
+  open tool transaction, permissions, unresolved side-effect truth, and
+  required evidence remain byte-identical; automatic Compact also preserves
+  the recent-dialogue guard, while manual Compact deliberately removes only
+  that eligibility guard;
 - the Compact call receives only eligible quoted source, stable identifiers,
   schema, and the permitted minimal relevance header—not Persona, unrelated
   system/developer rules, secrets, tool schemas, or open tool data;
@@ -1025,21 +1027,23 @@ must prove the following boundaries.
 
 **Capacity and failure truth**
 
-- synthetic model capacities cover below-watermark, exact boundary,
-  soft-pressure, post-compaction target, protected-set overflow, and typed
-  provider-capacity rejection;
+- fixed-boundary tests cover manual 63,999/64,000 and automatic
+  128,000/128,001 token cases, a 64,000 target, known and unknown target
+  capacity, and typed provider-capacity rejection;
 - response headroom is capacity accounting, not a main-model output-token
   ceiling;
-- every automatic Compact failure continues with the original or best reduced
-  prompt and emits a mandatory warning independently of `/verbose`;
+- every automatic Compact failure leaves the already assembled prompt and
+  foreground task unchanged and emits a mandatory warning independently of
+  `/verbose`;
   `CONTEXT_PROTECTED_SET_TOO_LARGE` and `CONTEXT_CAPACITY_EXHAUSTED` remain
   stable warning/audit codes without silent truncation or route switching;
-- for unknown target capacity, a Sunny-sized historical prompt is compacted
-  before HER when possible; if compaction fails, the unchanged prompt still
-  reaches the selected model and the user sees the warning;
-- with a 120,000 estimated-token threshold, exhaust both permitted Compact
-  attempts and prove that the original selected-model call still occurs exactly
-  once with the current request and protected context intact;
+- prompt assembly and post-turn handling never invoke automatic Compact;
+- above 128,000 tokens, the first main Execution invocation schedules exactly
+  one detached Compact task; sub-agent Execution and later retries do not
+  schedule another;
+- exhaust both permitted Compact attempts and prove that main Execution is
+  invoked immediately with its original prompt, remains successful, and emits
+  the warning even with `/verbose off`;
 - a target request is replayed after a capacity rejection only when that failed
   request produced no tool call or side effect.
 
