@@ -216,6 +216,20 @@ class _FakeAppServerProcess:
             if self.forbidden_item_type:
                 self.stdout.emit(
                     {
+                        "method": "item/started",
+                        "params": {
+                            "threadId": self.thread_id,
+                            "turnId": self.turn_id,
+                            "item": {
+                                "type": self.forbidden_item_type,
+                                "id": "forbidden-local-tool",
+                                "status": "inProgress",
+                            },
+                        },
+                    }
+                )
+                self.stdout.emit(
+                    {
                         "method": "item/completed",
                         "params": {
                             "threadId": self.thread_id,
