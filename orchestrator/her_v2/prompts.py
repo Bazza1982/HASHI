@@ -232,6 +232,10 @@ def render_stage_prompt(request: StageRequest) -> str:
         # user turn for provider compatibility without introducing a second
         # prompt asset or a conflicting structured-output instruction.
         return _immediate_response_goal(request.goal)
+    if request.stage is Stage.DIRECT:
+        # Direct's complete contract, tools, advisory catalogues, Persona, and
+        # authoritative goal live in one isolated system prompt.
+        return request.goal
     if request.stage is Stage.TRIAGE:
         return render_prompt_asset(
             "system_triage",
@@ -460,6 +464,7 @@ _SYSTEM_PROMPT_ASSETS = {
 
 _COMPLETE_SYSTEM_PROMPT_STAGES = frozenset(
     {
+        Stage.DIRECT,
         Stage.TRIAGE,
         Stage.PLANNING,
         Stage.REPLANNING,
@@ -487,9 +492,14 @@ def render_internal_stage_system_prompt(request: StageRequest) -> str | None:
         return load_prompt_asset("system_verification_report_repair")
     if request.stage is Stage.DREAM and request.context.get("dream_role") == "report":
         return load_prompt_asset("system_dream_report")
-    if request.stage in {Stage.EXECUTION, Stage.REVIEW, Stage.FINALISATION}:
-        # Primary Execution, Review, and Finalisation are rendered dynamically
-        # after the adapter has assembled their invocation-specific inputs.
+    if request.stage in {
+        Stage.DIRECT,
+        Stage.EXECUTION,
+        Stage.REVIEW,
+        Stage.FINALISATION,
+    }:
+        # Direct, primary Execution, Review, and Finalisation are rendered
+        # dynamically after the adapter has assembled invocation-specific inputs.
         return None
     if uses_complete_system_prompt(request.stage):
         return render_stage_prompt(request)
@@ -528,6 +538,46 @@ def render_finalisation_system_prompt(
         ),
         completion_evidence=json.dumps(
             dict(completion_evidence), ensure_ascii=False, indent=2
+        ),
+        persona_block_begin=persona_block_begin,
+        persona_guidance=_persona_guidance(
+            guidance=guidance, display_name=display_name, usable=usable
+        ),
+        persona_block_end=persona_block_end,
+    )
+
+
+def render_direct_system_prompt(
+    *,
+    goal: str,
+    habit_catalogue: Sequence[str],
+    skills_catalogue: Sequence[Mapping[str, Any]],
+    tool_catalogue: Sequence[Mapping[str, Any]],
+    guidance: str,
+    display_name: str,
+    usable: bool,
+    persona_block_begin: str,
+    persona_block_end: str,
+) -> str:
+    """Render the complete zero-orchestration Direct contract."""
+
+    return render_prompt_asset(
+        "system_direct",
+        goal=goal,
+        habit_catalogue=(
+            json.dumps(list(habit_catalogue), ensure_ascii=False, indent=2)
+            if habit_catalogue
+            else "[]"
+        ),
+        skills_catalogue=(
+            json.dumps(list(skills_catalogue), ensure_ascii=False, indent=2)
+            if skills_catalogue
+            else "[]"
+        ),
+        tool_catalogue=(
+            json.dumps(list(tool_catalogue), ensure_ascii=False, indent=2)
+            if tool_catalogue
+            else "No tools are available for this invocation."
         ),
         persona_block_begin=persona_block_begin,
         persona_guidance=_persona_guidance(

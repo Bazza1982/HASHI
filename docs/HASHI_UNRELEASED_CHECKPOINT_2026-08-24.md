@@ -34,9 +34,10 @@ retired by the HER v2 and repository-slimming architecture.
 - HER v2 is the sole supported HER backend. `her` resolves forward to
   `her-v2`; `claw-cli` is rejected, and `/rebuild` is a side-effect-free
   retirement notice.
-- Fast path, Planned, Adaptive, Reviewed, and Assured preserve the compatible
-  `low` through `max` wire values while separating orchestration depth from
-  provider reasoning.
+- Direct, Fast path, Planned, Adaptive, Reviewed, and Assured use the canonical
+  `zero` through `max` wire values while separating orchestration depth from
+  provider reasoning. Direct is one fully capable Quick-model call at default
+  provider reasoning `high`, never upgrades, and invokes no other HER stage.
 - Reviewed uses independent read-only inspection and one closure Review after
   remediation. Assured adds validation-only Verification in the authoritative
   workspace with exact current-invocation receipts and at most three attempts.

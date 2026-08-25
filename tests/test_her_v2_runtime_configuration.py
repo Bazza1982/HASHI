@@ -346,6 +346,38 @@ def test_default_routes_expose_actual_execution_classification_profiles(tmp_path
     assert selected.model_slot_for_route(Route.EXECUTION_HIGH_VOLUME) == "pro"
 
 
+def test_direct_route_is_fixed_to_quick_with_overridable_high_reasoning(tmp_path):
+    manager = _manager(tmp_path)
+    selected = manager.get_her_v2_configuration()
+
+    assert selected.model_slot_for_route(Route.DIRECT) == "fast"
+    assert selected.target_for_route(Route.DIRECT) == selected.target_for_slot("fast")
+    assert selected.reasoning_for_route(_her_v2_config(), Route.DIRECT) == "high"
+
+    overridden = manager.prepare_her_v2_route_reasoning(
+        "direct",
+        "xhigh",
+        current=selected,
+    )
+    assert overridden.reasoning_for_route(_her_v2_config(), Route.DIRECT) == "xhigh"
+
+    with pytest.raises(ValueError, match="always uses the Quick"):
+        manager.prepare_her_v2_route_model_slot(
+            "direct",
+            "pro",
+            current=selected,
+        )
+
+    hybrid = manager.prepare_her_v2_hybrid(current=selected)
+    with pytest.raises(ValueError, match="always uses the Quick"):
+        manager.prepare_her_v2_route_target(
+            "direct",
+            "openrouter-api",
+            "deepseek/deepseek-v4-flash",
+            current=hybrid,
+        )
+
+
 def test_apply_configuration_persists_and_refreshes_live_adapter_atomically(tmp_path):
     manager = _manager(tmp_path)
     manager.current_backend = SimpleNamespace(

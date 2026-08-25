@@ -167,7 +167,20 @@ class ExecutionLedger:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise LedgerInvariantError("invalid HER v2 ledger payload") from exc
-        if ledger.classification is None and ledger.status is not LifecycleState.RECEIVED:
+        direct_completion = (
+            ledger.status is LifecycleState.COMPLETED
+            and ledger.terminal_reason == "direct_response_delivered"
+        )
+        pre_triage_terminal = ledger.status in {
+            LifecycleState.ERROR,
+            LifecycleState.STOPPED,
+        }
+        if (
+            ledger.classification is None
+            and ledger.status is not LifecycleState.RECEIVED
+            and not direct_completion
+            and not pre_triage_terminal
+        ):
             raise LedgerInvariantError("a post-Triage ledger requires a classification")
         return ledger
 

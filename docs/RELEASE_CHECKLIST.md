@@ -52,9 +52,13 @@
     Wrapper, Audit, and Dual Brain preserve their full-context contracts
   - HER v2 remains the active Habit/Meditation owner and request-scoped
     eligibility prevents internal or ephemeral work from entering `/habit`
-  - HER UI and status show Fast path, Planned, Adaptive, Reviewed, and Assured
-    while persisted/API values remain `low`, `medium`, `high`, `xhigh`, and
+  - HER UI and status show Direct, Fast path, Planned, Adaptive, Reviewed, and Assured
+    while persisted/API values remain `zero`, `low`, `medium`, `high`, `xhigh`, and
     `max`; `/effort reviewed` and `/effort assured` normalize correctly
+  - Direct (`zero`) proves exactly one Quick-model call at default provider
+    reasoning `high`, complete tool/side-effect capability, no orchestration
+    upgrade or other HER stage, normal verbose tool progress, attachment fallback,
+    and `COMPLETED` for every successful natural-language return
   - Reviewed and Assured regressions prove read-only tool delegation, exact
     current-invocation receipts, stable before/after snapshots, one Reviewed
     closure check, and the three-attempt Assured Verification ceiling

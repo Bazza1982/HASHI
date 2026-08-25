@@ -179,11 +179,13 @@ HER v2 is the sole supported HER execution backend:
 
 - **Provider-neutral orchestration** — Triage, Planning, Execution, Review,
   Verification, and Finalisation are explicit, independently testable stages.
-- **HER execution modes** — Fast path (`low`), Planned (`medium`), Adaptive
-  (`high`), Reviewed (`xhigh`), and Assured (`max`) control orchestration depth
-  without changing provider reasoning settings or limiting ordinary tool-call
-  count. Scheduled cron and heartbeat work defaults to Fast path unless the job
-  overrides it.
+- **HER execution modes** — Direct (`zero`), Fast path (`low`), Planned
+  (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`)
+  control orchestration depth without changing provider reasoning settings or
+  limiting ordinary tool-call count. Direct is one fully capable Quick-model
+  agent at default provider reasoning `high`; it never upgrades and invokes no
+  other HER stage. Scheduled cron and heartbeat work defaults to Fast path
+  unless the job overrides it.
 - **Evidence-backed assurance** — Reviewed performs an independent read-only
   Review and one closure check after remediation. Assured adds latest-state
   Verification with exact tool receipts and up to three attempts. Configured
@@ -734,11 +736,16 @@ For Grok CLI, `/effort` offers `low`, `medium`, and `high`. HASHI defaults
 Grok sessions to `medium`, passes the selection to the CLI explicitly, and
 persists the chosen level for that backend across agent reloads.
 
-For HER v2, `/effort` opens the **HER execution mode** menu. It displays Fast
-path (`low`), Planned (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and
-Assured (`max`). The descriptive names are accepted as command aliases; saved
-configuration and wire values remain canonical, so `/effort reviewed` stores
-`xhigh` and `/effort assured` stores `max`. Other backends keep their existing
+For HER v2, `/effort` opens the **HER execution mode** menu. It displays Direct
+(`zero`), Fast path (`low`), Planned (`medium`), Adaptive (`high`), Reviewed
+(`xhigh`), and Assured (`max`). Direct makes one fully capable Quick-model call
+at default provider reasoning `high`, with no Immediate Response, Triage,
+Planning, Replanning, delegation, Review, Verification, or Finalisation. It
+never auto-upgrades, and any successful natural-language return is completed,
+including a request for missing information. The descriptive names are
+accepted as command aliases; saved configuration and wire values remain
+canonical, so `/effort direct` stores `zero`, `/effort reviewed` stores `xhigh`,
+and `/effort assured` stores `max`. Other backends keep their existing
 reasoning-effort menus and labels.
 
 The `/backend` and `/model` menus finish as one configuration flow. For HER v2,
@@ -1543,9 +1550,10 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **Provider-neutral orchestration** — HER v2 owns explicit Triage, Planning,
   Execution, Review, Verification, and Finalisation stages without a native
   Claw runtime
-- **Task-matched execution modes** — Fast path, Planned, Adaptive, Reviewed,
-  and Assured remain independent from provider reasoning and ordinary
-  tool-call count
+- **Task-matched execution modes** — Direct, Fast path, Planned, Adaptive,
+  Reviewed, and Assured remain independent from provider reasoning and
+  ordinary tool-call count; Direct is a single fully capable Quick-model agent
+  with zero HER orchestration and no automatic upgrade
 - **Hard-evidence assurance** — read-only Review and validation-only
   Verification accept only exact completed current-invocation receipts;
   Assured runs configured recipes or direct argv checks in the authoritative

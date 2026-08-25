@@ -16,6 +16,7 @@ from orchestrator.her_v2.models import (
 from orchestrator.her_v2.prompt_catalog import PromptAssetError
 from orchestrator.her_v2.prompts import (
     json_repair_schema_for_stage,
+    render_direct_system_prompt,
     render_execution_system_prompt,
     render_finalisation_system_prompt,
     render_immediate_response_system_prompt,
@@ -125,6 +126,7 @@ def test_every_live_json_contract_routes_to_specialist_schema() -> None:
         is not None
     )
     for stage in (
+        Stage.DIRECT,
         Stage.IMMEDIATE_RESPONSE,
         Stage.EXECUTION,
         Stage.FINALISATION,
@@ -423,6 +425,45 @@ Please inspect the request.""",
     assert "Please inspect the request." in system_prompt
     assert "Return exactly one JSON object" not in user_prompt
     assert "Return exactly one JSON object" not in system_prompt
+
+
+def test_direct_prompt_is_one_natural_language_agent_with_full_catalogues() -> None:
+    request = _request(Stage.DIRECT)
+    system_prompt = render_direct_system_prompt(
+        goal=request.goal,
+        habit_catalogue=["Check the current workspace before reporting success."],
+        skills_catalogue=[
+            {
+                "id": "reports",
+                "description": "Build reports",
+                "skill_md": "/skills/reports/SKILL.md",
+            }
+        ],
+        tool_catalogue=[
+            {
+                "type": "function",
+                "function": {"name": "file_write"},
+                "hashi_read_only": False,
+            }
+        ],
+        guidance="Address the user as Captain.",
+        display_name="Agent",
+        usable=True,
+        persona_block_begin="[persona]",
+        persona_block_end="[persona_end]",
+    )
+
+    assert render_stage_prompt(request) == request.goal
+    assert render_internal_stage_system_prompt(request) is None
+    assert "zero-orchestration Direct route" in system_prompt
+    assert "Never hand the task off" in system_prompt
+    assert "request an orchestration upgrade" in system_prompt
+    assert '"name": "file_write"' in system_prompt
+    assert '"id": "reports"' in system_prompt
+    assert "Check the current workspace" in system_prompt
+    assert "Address the user as Captain." in system_prompt
+    assert "Return only the natural-language response" in system_prompt
+    assert "$tool_catalogue" not in system_prompt
 
 
 def test_review_uses_one_complete_prompt_with_draft_plan_and_actual_tools() -> None:

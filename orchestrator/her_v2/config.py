@@ -146,6 +146,7 @@ class ProviderTarget:
 
 
 DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
+    Stage.DIRECT: "lightweight",
     Stage.IMMEDIATE_RESPONSE: "lightweight",
     Stage.TRIAGE: "triage",
     Stage.PLANNING: "premium",
@@ -173,6 +174,7 @@ class HERv2Config:
     route_reasoning: Mapping[Route, str] = field(default_factory=dict)
     review_limits: Mapping[Effort, int] = field(
         default_factory=lambda: {
+            Effort.ZERO: 0,
             Effort.LOW: 0,
             Effort.MEDIUM: 0,
             Effort.HIGH: 0,
@@ -182,6 +184,7 @@ class HERv2Config:
     )
     verification_limits: Mapping[Effort, int] = field(
         default_factory=lambda: {
+            Effort.ZERO: 0,
             Effort.LOW: 0,
             Effort.MEDIUM: 0,
             Effort.HIGH: 0,
@@ -211,6 +214,15 @@ class HERv2Config:
         if self.routing_mode != "hybrid" and self.route_targets:
             raise HERv2ConfigurationError(
                 "custom task-route targets require Hybrid mode"
+            )
+        if self.route_model_slots.get(Route.DIRECT, "fast") != "fast":
+            raise HERv2ConfigurationError(
+                "the Direct route always uses the Quick model slot"
+            )
+        if Route.DIRECT in self.route_targets:
+            raise HERv2ConfigurationError(
+                "the Direct route always uses the Quick model slot and cannot "
+                "select a custom target"
             )
         if self.user_idle_timeout_s <= 0:
             raise HERv2ConfigurationError("idle-progress timeout must be positive")
@@ -367,6 +379,7 @@ class HERv2Config:
         fast_roles = {
             stage_roles[stage]
             for stage in {
+                Stage.DIRECT,
                 Stage.IMMEDIATE_RESPONSE,
                 Stage.TRIAGE,
                 Stage.MEDITATION,
@@ -379,6 +392,7 @@ class HERv2Config:
             for stage, role in stage_roles.items()
             if stage
             not in {
+                Stage.DIRECT,
                 Stage.IMMEDIATE_RESPONSE,
                 Stage.TRIAGE,
                 Stage.MEDITATION,
@@ -420,6 +434,10 @@ class HERv2Config:
                 raise HERv2ConfigurationError(
                     f"invalid model slot {slot!r} for route {route.value!r}"
                 )
+            if route is Route.DIRECT and slot != "fast":
+                raise HERv2ConfigurationError(
+                    "the Direct route always uses the Quick model slot"
+                )
             route_model_slots[route] = slot
         for route, slot in route_model_slots.items():
             if slot not in slot_models and slot not in targets:
@@ -438,6 +456,11 @@ class HERv2Config:
                 raise HERv2ConfigurationError(
                     f"unknown HER v2 custom route target: {route_name!r}"
                 ) from exc
+            if route is Route.DIRECT:
+                raise HERv2ConfigurationError(
+                    "the Direct route always uses the Quick model slot and cannot "
+                    "select a custom target"
+                )
             if not isinstance(value, Mapping):
                 raise HERv2ConfigurationError(
                     f"HER v2 custom route target {route.value!r} must be an object"
@@ -474,11 +497,25 @@ class HERv2Config:
 
         review_limits = _effort_int_map(
             raw.get("review_limits"),
-            {Effort.LOW: 0, Effort.MEDIUM: 0, Effort.HIGH: 0, Effort.XHIGH: 1, Effort.MAX: 1},
+            {
+                Effort.ZERO: 0,
+                Effort.LOW: 0,
+                Effort.MEDIUM: 0,
+                Effort.HIGH: 0,
+                Effort.XHIGH: 1,
+                Effort.MAX: 1,
+            },
         )
         verification_limits = _effort_int_map(
             raw.get("verification_limits"),
-            {Effort.LOW: 0, Effort.MEDIUM: 0, Effort.HIGH: 0, Effort.XHIGH: 0, Effort.MAX: 3},
+            {
+                Effort.ZERO: 0,
+                Effort.LOW: 0,
+                Effort.MEDIUM: 0,
+                Effort.HIGH: 0,
+                Effort.XHIGH: 0,
+                Effort.MAX: 3,
+            },
         )
         return cls(
             profiles=profiles,
@@ -512,7 +549,7 @@ class HERv2Config:
         engine = profile.engine
         model = profile.model
         custom_target = self.route_targets.get(route)
-        slot = self.route_model_slots.get(route)
+        slot = "fast" if route is Route.DIRECT else self.route_model_slots.get(route)
         slot_target = self.targets.get(slot) if slot in {"fast", "pro"} else None
         if custom_target is not None:
             engine = custom_target.engine
@@ -524,7 +561,11 @@ class HERv2Config:
             model = self.slot_models[slot]
         reasoning = self.route_reasoning.get(route)
         if reasoning is None:
-            reasoning = self.stage_reasoning.get(stage, profile.reasoning)
+            reasoning = self.stage_reasoning.get(stage)
+        if reasoning is None:
+            # Zero is orchestration complexity, not a provider effort value.
+            # Its one Direct call has an independent provider default.
+            reasoning = "high" if route is Route.DIRECT else profile.reasoning
         return replace(profile, engine=engine, model=model, reasoning=reasoning)
 
     def profile_for_name(self, name: str) -> ProviderProfile:
@@ -594,7 +635,9 @@ class HERv2Config:
         stage = ROUTE_STAGES[parsed]
         profile = base_profile
         if profile is None:
-            if parsed in {
+            if parsed is Route.DIRECT:
+                role = self.stage_roles.get(stage, "lightweight")
+            elif parsed in {
                 Route.EXECUTION_SIMPLE,
                 Route.EXECUTION_COMPLEX,
                 Route.EXECUTION_HIGH_VOLUME,

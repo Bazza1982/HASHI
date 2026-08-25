@@ -54,8 +54,10 @@ The development accumulated after the first v4 foundation alpha is now
 consolidated as the `v4.0.0-alpha.2` release candidate:
 
 - provider-neutral HER v2 as the sole HER execution backend;
-- `low`, `medium`, `high`, `xhigh`, and `max` execution-effort policies,
-  independent from provider reasoning and tool-call count;
+- `zero`, `low`, `medium`, `high`, `xhigh`, and `max` execution-effort
+  policies, independent from provider reasoning and tool-call count; `zero`
+  is a single fully capable Direct agent with no other HER stage or automatic
+  upgrade;
 - persistent direct-conversation ordering, isolated scheduler execution,
   reply-target snapshots, explicit stream ownership, and idempotent delivery;
 - explicit staged orchestration, Tool Gateway/MCP, secure multimedia, and

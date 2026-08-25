@@ -348,6 +348,41 @@ async def test_mixed_stage_request_sends_only_native_subset_to_provider():
 
 
 @pytest.mark.asyncio
+async def test_direct_uses_existing_local_media_fallback_when_quick_is_text_only():
+    content = _content()
+    backend = _Backend(
+        [BackendResponse(text="Inspected through the local tool path.", duration_ms=1)],
+        supports_tools=True,
+    )
+    backend.input_capability = InputCapability(
+        provider="fake-api",
+        model="text-only-model",
+        input_modalities=frozenset({"text"}),
+        input_transports={},
+        source="test",
+    )
+    provider = HashiStageProvider(
+        backend_manager=_Manager(backend),
+        tool_registry=_MediaRegistry(),
+    )
+
+    result = await provider.invoke(
+        _profile(),
+        _request(
+            Stage.DIRECT,
+            content,
+            allow_tools=True,
+            allow_side_effects=True,
+        ),
+    )
+
+    assert backend.calls[0]["request_content"] is _MISSING
+    assert result.text == "Inspected through the local tool path."
+    assert result.media_routing[0]["route"] == "local_fallback"
+    assert backend.tool_registry.is_allowed("media_read") is True
+
+
+@pytest.mark.asyncio
 async def test_mixed_stage_merges_adapter_fallback_for_native_subset():
     content = _content(include_audio=True)
     backend = _Backend(

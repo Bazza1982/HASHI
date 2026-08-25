@@ -38,6 +38,7 @@ WORK_CLASSIFICATIONS = frozenset(
 
 
 class Effort(StrEnum):
+    ZERO = "zero"
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -46,6 +47,7 @@ class Effort(StrEnum):
 
 
 EFFORT_DISPLAY_LABELS: Mapping[Effort, str] = {
+    Effort.ZERO: "Direct",
     Effort.LOW: "Fast path",
     Effort.MEDIUM: "Planned",
     Effort.HIGH: "Adaptive",
@@ -54,6 +56,8 @@ EFFORT_DISPLAY_LABELS: Mapping[Effort, str] = {
 }
 
 _EFFORT_ALIASES: Mapping[str, Effort] = {
+    "direct": Effort.ZERO,
+    "zero_orchestration": Effort.ZERO,
     "fast": Effort.LOW,
     "fast_path": Effort.LOW,
     "planned": Effort.MEDIUM,
@@ -110,6 +114,7 @@ TERMINAL_STATES = frozenset(LifecycleState(item.value) for item in TerminalState
 
 
 class Stage(StrEnum):
+    DIRECT = "direct"
     IMMEDIATE_RESPONSE = "immediate_response"
     TRIAGE = "triage"
     PLANNING = "planning"
@@ -134,6 +139,7 @@ class Route(StrEnum):
     stage.
     """
 
+    DIRECT = "direct"
     IMMEDIATE_RESPONSE = "immediate_response"
     TRIAGE = "triage"
     PLANNING = "planning"
@@ -149,6 +155,7 @@ class Route(StrEnum):
 
 
 ROUTE_STAGES: Mapping[Route, Stage] = {
+    Route.DIRECT: Stage.DIRECT,
     Route.IMMEDIATE_RESPONSE: Stage.IMMEDIATE_RESPONSE,
     Route.TRIAGE: Stage.TRIAGE,
     Route.PLANNING: Stage.PLANNING,
@@ -165,6 +172,7 @@ ROUTE_STAGES: Mapping[Route, Stage] = {
 
 
 DEFAULT_ROUTES_BY_STAGE: Mapping[Stage, Route] = {
+    Stage.DIRECT: Route.DIRECT,
     Stage.IMMEDIATE_RESPONSE: Route.IMMEDIATE_RESPONSE,
     Stage.TRIAGE: Route.TRIAGE,
     Stage.PLANNING: Route.PLANNING,

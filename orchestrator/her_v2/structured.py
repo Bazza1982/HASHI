@@ -398,6 +398,27 @@ def parse_execution_message(data: Mapping[str, Any]) -> str:
     return text
 
 
+def parse_direct_message(response: StageResponse) -> str:
+    """Accept any non-empty Direct result without imposing an output envelope."""
+
+    # A Direct response is user-authored presentation, not a control object.
+    # Preserve JSON, Markdown, code, and other requested output formats exactly
+    # as text instead of interpreting a JSON-looking answer as stage metadata.
+    text = str(response.text or "").strip()
+    if not text:
+        data = response.data if isinstance(response.data, Mapping) else {}
+        text = _text_value(
+            data.get("message"),
+            data.get("response"),
+            data.get("text"),
+            data.get("final_message"),
+            data.get("result"),
+        )
+    if not text:
+        raise StructuredOutputError("Direct requires a non-empty final response")
+    return text
+
+
 @_stage_parser()
 def parse_triage(data: Mapping[str, Any]) -> TriageDecision:
     classification = _enum_value(

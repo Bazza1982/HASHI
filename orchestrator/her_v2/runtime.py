@@ -89,6 +89,7 @@ from .runtime_support import (
     _terminal_reason,
 )
 from .structured import (
+    parse_direct_message,
     parse_execution,
     parse_execution_message,
     parse_finalisation,
@@ -258,6 +259,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         retry_policy: ProviderRetryPolicy | None = None,
         workzone_ref: str = "",
         checkpoint_clock: Callable[[], float] = time.monotonic,
+        skills_catalogue: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -276,6 +278,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         self.retry_policy = retry_policy or DEFAULT_PROVIDER_RETRY_POLICY
         self.workzone_ref = str(workzone_ref or "")
         self.checkpoint_clock = checkpoint_clock
+        self.skills_catalogue = tuple(
+            dict(item)
+            for item in (skills_catalogue or ())
+            if isinstance(item, Mapping)
+        )
         self._controls: dict[str, TurnControl] = {}
         self._turn_tasks: dict[str, asyncio.Task] = {}
         self._background_tasks: set[asyncio.Task] = set()
@@ -424,6 +431,9 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         )
         state.ledger.add_log_ref(ref)
         self.ledger_store.save(state.ledger)
+
+        if state.effort is Effort.ZERO:
+            return await self._run_direct(state)
 
         immediate_task = asyncio.create_task(
             self._invoke_stage(
@@ -762,6 +772,61 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 reason="authoritative_work_path_ended_before_immediate_response",
                 deliver_if_source_ready=False,
             )
+
+    async def _run_direct(self, state: _TurnState) -> TurnResult:
+        """Run the zero-orchestration path as one fully capable agent call."""
+
+        habits: Sequence[str] = ()
+        if self.config.meditation_enabled:
+            with suppress(Exception):
+                habits = await self.habits.retrieve(
+                    goal=state.goal,
+                    turn_id=state.ledger.turn_id,
+                )
+
+        response, direct_text = await self._invoke_stage(
+            state,
+            Stage.DIRECT,
+            parse_direct_message,
+            allow_tools=True,
+            allow_side_effects=not self.config.shadow_mode,
+            context={
+                "habit_catalogue": list(habits),
+                "habits_are_advisory": True,
+                "skills_catalogue": [dict(item) for item in self.skills_catalogue],
+                "zero_orchestration": True,
+                "automatic_effort_upgrade_allowed": False,
+                "sub_agent_delegation_allowed": False,
+            },
+            publish_commentary=False,
+        )
+        assert isinstance(direct_text, str)
+        for evidence_ref in response.evidence_refs:
+            if evidence_ref not in state.evidence_refs:
+                state.evidence_refs.append(evidence_ref)
+
+        await self._deliver(
+            state,
+            kind="final",
+            text=direct_text,
+            event_id=f"{state.ledger.turn_id}:final",
+            required=True,
+            provenance="zero_orchestration_direct",
+            detail=(
+                "single_direct_invocation=true; orchestration_upgrade=false; "
+                "finalisation_invoked=false"
+            ),
+        )
+        await self._transition(
+            state,
+            LifecycleState.COMPLETED,
+            terminal_reason="direct_response_delivered",
+        )
+        return self._result(
+            state,
+            terminal=TerminalState.COMPLETED,
+            text=direct_text,
+        )
 
     async def _deliver_pending_immediate(
         self,

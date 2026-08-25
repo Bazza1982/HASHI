@@ -62,6 +62,7 @@ from orchestrator.her_v2.presentation import (
 )
 from orchestrator.her_v2.progress import ProviderActivityTracker
 from orchestrator.her_v2.prompts import (
+    render_direct_system_prompt,
     render_execution_system_prompt,
     render_finalisation_system_prompt,
     render_immediate_response_system_prompt,
@@ -646,6 +647,27 @@ def _execution_system_prompt(
         goal=goal,
         active_plan=active_plan,
         delegated_execution=delegated_execution,
+        tool_catalogue=tool_catalogue,
+        guidance=source.guidance,
+        display_name=source.display_name,
+        usable=source.usable,
+        persona_block_begin=her_persona.PERSONA_BLOCK_BEGIN,
+        persona_block_end=her_persona.PERSONA_BLOCK_END,
+    )
+
+
+def _direct_system_prompt(
+    source: her_persona.HERPersonaPackagingSource,
+    *,
+    goal: str,
+    habit_catalogue: Sequence[str],
+    skills_catalogue: Sequence[Mapping[str, Any]],
+    tool_catalogue: Sequence[Mapping[str, Any]],
+) -> str:
+    return render_direct_system_prompt(
+        goal=goal,
+        habit_catalogue=habit_catalogue,
+        skills_catalogue=skills_catalogue,
         tool_catalogue=tool_catalogue,
         guidance=source.guidance,
         display_name=source.display_name,
@@ -2079,6 +2101,7 @@ class HashiStageProvider(StageProvider):
                 request.stage is Stage.EXECUTION
                 and not request.role.startswith("sub_agent:")
             )
+            primary_direct = request.stage is Stage.DIRECT
             primary_review = (
                 request.stage is Stage.REVIEW
                 and not request.role.startswith("sub_agent:")
@@ -2121,6 +2144,7 @@ class HashiStageProvider(StageProvider):
                     Stage.FINALISATION,
                 }
                 or primary_execution
+                or primary_direct
             ):
                 backend_config = backend.config
                 backend_extra = dict(getattr(backend_config, "extra", None) or {})
@@ -2135,7 +2159,7 @@ class HashiStageProvider(StageProvider):
                     system_prompt = _immediate_response_system_prompt(
                         source, goal=request.goal
                     )
-                elif primary_execution:
+                elif primary_direct or primary_execution:
                     definitions_getter = getattr(
                         selected_registry, "get_tool_definitions", None
                     )
@@ -2147,34 +2171,63 @@ class HashiStageProvider(StageProvider):
                         for item in raw_definitions
                         if isinstance(item, Mapping)
                     ]
-                    raw_sub_agent_results = request.context.get("sub_agent_results", [])
-                    delegated_results = (
-                        [
-                            dict(item)
-                            for item in raw_sub_agent_results
-                            if isinstance(item, Mapping)
-                        ]
-                        if isinstance(raw_sub_agent_results, list)
-                        else []
-                    )
-                    system_prompt = _execution_system_prompt(
-                        source,
-                        goal=request.goal,
-                        active_plan=(
-                            request.context.get("active_plan")
-                            if isinstance(request.context.get("active_plan"), Mapping)
-                            else None
-                        ),
-                        delegated_execution=(
-                            {
-                                "plan_id": request.plan_id,
-                                "results": delegated_results,
-                            }
-                            if delegated_results
-                            else None
-                        ),
-                        tool_catalogue=tool_catalogue,
-                    )
+                    if primary_direct:
+                        raw_habits = request.context.get("habit_catalogue")
+                        habits = (
+                            [str(item) for item in raw_habits if str(item).strip()]
+                            if isinstance(raw_habits, (list, tuple))
+                            else []
+                        )
+                        raw_skills = request.context.get("skills_catalogue")
+                        skills = (
+                            [
+                                dict(item)
+                                for item in raw_skills
+                                if isinstance(item, Mapping)
+                            ]
+                            if isinstance(raw_skills, (list, tuple))
+                            else []
+                        )
+                        system_prompt = _direct_system_prompt(
+                            source,
+                            goal=request.goal,
+                            habit_catalogue=habits,
+                            skills_catalogue=skills,
+                            tool_catalogue=tool_catalogue,
+                        )
+                    else:
+                        raw_sub_agent_results = request.context.get(
+                            "sub_agent_results", []
+                        )
+                        delegated_results = (
+                            [
+                                dict(item)
+                                for item in raw_sub_agent_results
+                                if isinstance(item, Mapping)
+                            ]
+                            if isinstance(raw_sub_agent_results, list)
+                            else []
+                        )
+                        system_prompt = _execution_system_prompt(
+                            source,
+                            goal=request.goal,
+                            active_plan=(
+                                request.context.get("active_plan")
+                                if isinstance(
+                                    request.context.get("active_plan"), Mapping
+                                )
+                                else None
+                            ),
+                            delegated_execution=(
+                                {
+                                    "plan_id": request.plan_id,
+                                    "results": delegated_results,
+                                }
+                                if delegated_results
+                                else None
+                            ),
+                            tool_catalogue=tool_catalogue,
+                        )
                 else:
                     system_prompt = _finalisation_system_prompt(
                         source,
@@ -2196,7 +2249,11 @@ class HashiStageProvider(StageProvider):
                         ),
                     )
                 if not _install_system_prompt(backend, system_prompt):
-                    if request.stage is Stage.FINALISATION or primary_execution:
+                    if (
+                        request.stage is Stage.FINALISATION
+                        or primary_execution
+                        or primary_direct
+                    ):
                         raise StageInvocationError(
                             f"{request.stage.value} backend cannot isolate the HER v2 system prompt",
                             retryable=False,

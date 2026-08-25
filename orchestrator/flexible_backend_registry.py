@@ -80,7 +80,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "privacy_levels": [0, 1],
         "models": ["role-configured"],
         "default_model": "role-configured",
-        "efforts": ["low", "medium", "high", "xhigh", "max"],
+        "efforts": ["zero", "low", "medium", "high", "xhigh", "max"],
         "default_effort": "medium",
         # Each role profile resolves credentials through its concrete provider.
         "secret_keys": [],

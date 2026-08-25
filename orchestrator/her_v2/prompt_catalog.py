@@ -30,6 +30,17 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
     "stage_request": frozenset(
         {"context", "reviewer_rule", "schema", "sub_agent_rule"}
     ),
+    "system_direct": frozenset(
+        {
+            "goal",
+            "habit_catalogue",
+            "persona_block_begin",
+            "persona_block_end",
+            "persona_guidance",
+            "skills_catalogue",
+            "tool_catalogue",
+        }
+    ),
     "system_dream": frozenset(),
     "system_dream_report": frozenset(),
     "system_execution": frozenset(

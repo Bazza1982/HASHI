@@ -37,8 +37,9 @@ selected execution mode is one of:
 - Reviewed (`xhigh`); or
 - Assured (`max`).
 
-Fast path (`low`) and Planned (`medium`) do not install the cadence. Eligibility
-is determined only by HER execution mode.
+Direct (`zero`) never enters Triage or Execution and therefore cannot install
+the cadence. Fast path (`low`) and Planned (`medium`) do not install it either.
+Eligibility is determined only by HER execution mode.
 
 The first cadence window starts only after the principal lifecycle enters
 `EXECUTING`. Planning, Triage, Immediate Response, commentary packaging,

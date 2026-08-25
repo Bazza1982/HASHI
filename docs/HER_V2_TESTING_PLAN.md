@@ -228,8 +228,12 @@ Tests must prove that classification and effort remain separate concerns:
 - effort labels are never passed as provider reasoning settings merely because their names appear similar.
 
 Command, Telegram, Workbench, job, and status tests must also prove that HER
-shows Fast path, Planned, Adaptive, Reviewed, and Assured while preserving the
-canonical `low`, `medium`, `high`, `xhigh`, and `max` wire values. Descriptive
+shows Direct, Fast path, Planned, Adaptive, Reviewed, and Assured while preserving the
+canonical `zero`, `low`, `medium`, `high`, `xhigh`, and `max` wire values. Direct
+must prove exactly one Quick-model call at default provider reasoning `high`, no
+automatic effort upgrade or other HER stage, complete primary tool authority,
+normal verbose progress, the existing attachment fallback, and a completed
+terminal state for any successful natural-language return. Descriptive
 aliases, especially `/effort reviewed` and `/effort assured`, must persist the
 canonical value. Non-HER backends must retain their existing Effort labels and
 model-aware choices.

@@ -73,9 +73,10 @@ def test_grok_cli_exposes_reasoning_effort_with_medium_default():
 
 
 def test_retired_her_id_exposes_only_v2_orchestration_efforts():
-    expected = ["low", "medium", "high", "xhigh", "max"]
+    expected = ["zero", "low", "medium", "high", "xhigh", "max"]
     assert get_available_efforts("her", "deepseek/deepseek-v4-pro") == expected
     assert normalize_effort("her", None, "deepseek/deepseek-v4-pro") == "medium"
+    assert normalize_effort("her", "zero", "deepseek/deepseek-v4-pro") == "zero"
     assert normalize_effort("her", "max", "deepseek/deepseek-v4-pro") == "max"
     assert normalize_effort("her", "max+", "deepseek/deepseek-v4-pro") == "medium"
     assert normalize_effort("her", "ultra", "deepseek/deepseek-v4-pro") == "medium"

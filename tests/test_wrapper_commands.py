@@ -1693,12 +1693,20 @@ def test_her_v2_route_menu_splits_execution_without_removed_repair_route(tmp_pat
     review_markup = str(
         runtime_model_selection.her_v2_route_keyboard(runtime, "review")
     )
+    direct_markup = str(
+        runtime_model_selection.her_v2_route_keyboard(runtime, "direct")
+    )
 
+    assert "Direct" in route_markup
     assert "Simple execution" in route_markup
     assert "Complex execution" in route_markup
     assert "High-volume execution" in route_markup
     assert "Structure repair" not in route_markup
     assert "Follow source" not in review_markup
+    assert "Model · Quick" in direct_markup
+    assert "Model · Pro" not in direct_markup
+    assert "Model · Custom" not in direct_markup
+    assert "Inherit (high)" in direct_markup
 
 
 @pytest.mark.asyncio
@@ -1833,6 +1841,7 @@ async def test_her_v2_effort_menu_uses_execution_mode_names(tmp_path):
     assert "HER EXECUTION MODE" in messages[-1]
     markup = str(runtime._reply_payloads[-1]["reply_markup"])
     for label in (
+        "Direct (zero)",
         "Fast path (low)",
         "Planned (medium)",
         "Adaptive (high)",

@@ -17,7 +17,11 @@ class LifecycleViolation(RuntimeError):
 
 
 _PRINCIPAL_EDGES: dict[LifecycleState, frozenset[LifecycleState]] = {
-    LifecycleState.RECEIVED: frozenset({LifecycleState.TRIAGED}),
+    # Zero-effort Direct has no Triage or later workflow stage.  A successful
+    # provider turn therefore closes straight from RECEIVED.
+    LifecycleState.RECEIVED: frozenset(
+        {LifecycleState.TRIAGED, LifecycleState.COMPLETED}
+    ),
     LifecycleState.TRIAGED: frozenset(
         {
             LifecycleState.PLANNED,

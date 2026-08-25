@@ -252,6 +252,44 @@ class HERv2Adapter(BaseBackend):
             return True
         return bool(meta.get("habit_learning_eligible"))
 
+    def _direct_skill_catalogue(self) -> tuple[dict[str, Any], ...]:
+        """Expose enabled task Skills as a bounded Direct-route index."""
+
+        runtime = self._runtime_context()
+        manager = getattr(runtime, "skill_manager", None)
+        list_skills = getattr(manager, "list_skills", None)
+        is_enabled = getattr(manager, "is_skill_enabled", None)
+        if not callable(list_skills):
+            return ()
+        runtime_toggle_ids = set(getattr(manager, "RUNTIME_TOGGLE_IDS", ()))
+        rows: list[dict[str, Any]] = []
+        try:
+            skills = list_skills()
+        except Exception as exc:
+            self.logger.warning(
+                "HER v2 Direct Skill catalogue unavailable: %s", type(exc).__name__
+            )
+            return ()
+        for skill in skills:
+            skill_id = str(getattr(skill, "id", "") or "").strip()
+            if not skill_id or skill_id in runtime_toggle_ids:
+                continue
+            if callable(is_enabled) and not is_enabled(
+                Path(self.config.workspace_dir), skill_id
+            ):
+                continue
+            skill_dir = Path(getattr(skill, "skill_dir", ""))
+            rows.append(
+                {
+                    "id": skill_id,
+                    "name": str(getattr(skill, "name", "") or skill_id),
+                    "description": str(getattr(skill, "description", "") or ""),
+                    "skill_md": str(skill_dir / "SKILL.md"),
+                    "allowed_tools": getattr(skill, "allowed_tools", None),
+                }
+            )
+        return tuple(rows)
+
     def _runtime_request_meta(self, request_id: str) -> dict[str, Any]:
         runtime = self._runtime_context()
         registry = getattr(runtime, "_request_meta_by_id", None)
@@ -1024,6 +1062,7 @@ class HERv2Adapter(BaseBackend):
             logger=self.logger,
             retry_policy=self._provider_retry_policy(),
             workzone_ref=str(self.config.workspace_dir.resolve()),
+            skills_catalogue=self._direct_skill_catalogue(),
         )
         self._active_runtimes[request_id] = runtime
         try:

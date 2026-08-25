@@ -14,6 +14,7 @@ from orchestrator.her_v2.models import (
     VerificationOutcome,
 )
 from orchestrator.her_v2.structured import (
+    parse_direct_message,
     parse_execution,
     parse_finalisation,
     parse_immediate,
@@ -23,6 +24,15 @@ from orchestrator.her_v2.structured import (
     validate_review_response,
     validate_verification_response,
 )
+
+
+def test_direct_preserves_json_looking_user_output_as_natural_language():
+    text = '{"report":{"status":"complete"}}'
+
+    assert parse_direct_message(StageResponse(text=text)) == text
+    assert parse_direct_message(
+        StageResponse(data={"message": "Please provide the account ID."})
+    ) == "Please provide the account ID."
 
 
 def _receipt(

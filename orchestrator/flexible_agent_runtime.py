@@ -4870,8 +4870,9 @@ class FlexibleAgentRuntime:
         current = self._get_current_effort() or (available[0] if available else "n/a")
         if self.config.active_backend == HER_V2_ENGINE:
             consequence = (
-                "HER execution mode controls Planning, Replanning, independent Review, "
-                "and Assured Verification. It never changes provider reasoning."
+                "Direct runs one Quick agent with no orchestration stages. Higher HER "
+                "execution modes add Planning, Replanning, independent Review, and "
+                "Assured Verification. /effort never changes provider reasoning."
             )
         else:
             consequence = (
@@ -5094,8 +5095,9 @@ class FlexibleAgentRuntime:
         current_effort = self._get_current_effort() or available[0]
         if self.config.active_backend == HER_V2_ENGINE:
             consequence = (
-                "HER execution mode controls Planning, Replanning, independent Review, "
-                "and Assured Verification. It does not change provider reasoning."
+                "Direct runs one Quick agent with no orchestration stages. Higher HER "
+                "execution modes add Planning, Replanning, independent Review, and "
+                "Assured Verification. /effort does not change provider reasoning."
             )
         else:
             consequence = (

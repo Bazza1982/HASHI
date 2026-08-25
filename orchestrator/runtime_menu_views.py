@@ -323,6 +323,8 @@ def her_commentary_text(*, enabled: bool, effort: str) -> str:
         current=f"<b>{status_label(enabled)}</b>",
         facts=[
             f"<b>HER execution mode</b> · <code>{html.escape(effort)}</code>",
+            "<b>Direct</b> · <code>zero</code> · no HER acknowledgement or "
+            "commentary stage; normal /verbose provider and tool updates remain available",
             "<b>Planned</b> · <code>medium</code> · may emit the model-authored "
             "Persona acknowledgement",
             "<b>Adaptive+</b> · <code>high+</code> · may also emit model-authored "
@@ -468,7 +470,7 @@ def her_v2_routes_text(
             + (" · <b>DRAFT</b>" if draft else "")
         ),
         facts=[
-            "<b>Target</b> · each route selects <code>Quick</code>, <code>Pro</code>, or <code>Custom</code>",
+            "<b>Target</b> · Direct is fixed to <code>Quick</code>; other routes select <code>Quick</code>, <code>Pro</code>, or <code>Custom</code>",
             f"<b>Custom targets</b> · <code>{custom_target_count}</code>",
             "<b>Reasoning</b> · each route independently selects provider reasoning",
             f"<b>Custom reasoning</b> · <code>{explicit_reasoning_count}</code> route overrides",

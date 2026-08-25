@@ -21,6 +21,7 @@ from orchestrator.memory_plus_mode import set_memory_plus_enabled
 
 HER_V2_ROUTE_ORDER = tuple(Route)
 HER_V2_ROUTE_LABELS = {
+    Route.DIRECT: "Direct",
     Route.IMMEDIATE_RESPONSE: "Immediate response",
     Route.TRIAGE: "Triage",
     Route.PLANNING: "Planning",
@@ -500,7 +501,7 @@ def her_v2_route_keyboard(runtime, route: Route | str) -> InlineKeyboardMarkup:
     parsed = _her_v2_route(route)
     selected = _her_v2_edit_configuration(runtime)
     current_slot = selected.route_target_mode(parsed)
-    slots = ["fast", "pro"]
+    slots = ["fast"] if parsed is Route.DIRECT else ["fast", "pro"]
     buttons = [
         [
             InlineKeyboardButton(
@@ -513,7 +514,7 @@ def her_v2_route_keyboard(runtime, route: Route | str) -> InlineKeyboardMarkup:
             for slot in slots
         ]
     ]
-    if selected.routing_mode == "hybrid":
+    if selected.routing_mode == "hybrid" and parsed is not Route.DIRECT:
         buttons.append(
             [
                 InlineKeyboardButton(

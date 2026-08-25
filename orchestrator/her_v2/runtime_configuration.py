@@ -33,6 +33,7 @@ HER_V2_STANDARD_REASONING = ("off", "low", "medium", "high", "xhigh", "max")
 
 _FAST_STAGES = frozenset(
     {
+        Stage.DIRECT,
         Stage.IMMEDIATE_RESPONSE,
         Stage.TRIAGE,
         Stage.MEDITATION,
@@ -225,6 +226,13 @@ class HERv2RuntimeConfiguration:
             _route(name).value: _target(value)
             for name, value in self.route_targets.items()
         }
+        if self.route_model_slots.get(Route.DIRECT.value, "fast") != "fast":
+            raise ValueError("the Direct route always uses the Quick model slot")
+        if Route.DIRECT.value in parsed_routes:
+            raise ValueError(
+                "the Direct route always uses the Quick model slot and cannot "
+                "select a custom target"
+            )
         object.__setattr__(self, "routing_mode", mode)
         object.__setattr__(self, "provider", _common([fast.provider, pro.provider]))
         object.__setattr__(self, "fast_provider", fast.provider)
@@ -260,6 +268,8 @@ class HERv2RuntimeConfiguration:
 
     def model_slot_for_route(self, route: Route | str) -> str:
         parsed = _route(route)
+        if parsed is Route.DIRECT:
+            return "fast"
         return self.route_model_slots.get(parsed.value, "pro")
 
     def target_for_slot(self, slot: str) -> ProviderModelTarget:
@@ -303,6 +313,8 @@ class HERv2RuntimeConfiguration:
         override = self.stage_reasoning.get(stage.value)
         if override is not None:
             return override
+        if parsed is Route.DIRECT:
+            return "high"
         role = route_profile_names(raw).get(parsed, "")
         value = self.profile_reasoning.get(role)
         return str(value) if value is not None else "default"
@@ -718,6 +730,8 @@ def set_her_v2_route_model_slot(
 ) -> HERv2RuntimeConfiguration:
     parsed = _route(route)
     normalized = _route_slot(parsed, slot)
+    if parsed is Route.DIRECT and normalized != "fast":
+        raise ValueError("the Direct route always uses the Quick model slot")
     updated = dict(current.route_model_slots)
     updated[parsed.value] = normalized
     route_targets = dict(current.route_targets)
@@ -740,6 +754,11 @@ def set_her_v2_route_target(
     if current.routing_mode != "hybrid":
         raise ValueError("custom task-route targets require Hybrid mode")
     parsed = _route(route)
+    if parsed is Route.DIRECT:
+        raise ValueError(
+            "the Direct route always uses the Quick model slot and cannot select "
+            "a custom target"
+        )
     target = ProviderModelTarget(provider, model)
     if target.model not in allowed_models:
         raise ValueError(

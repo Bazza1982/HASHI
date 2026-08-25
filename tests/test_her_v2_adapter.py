@@ -186,6 +186,22 @@ class _DirectProvider:
         )
 
 
+class _ZeroProvider:
+    def __init__(self):
+        self.requests = []
+
+    async def invoke(self, profile, request):
+        self.requests.append((profile, request))
+        if request.stage is not Stage.DIRECT:
+            raise AssertionError(f"unexpected stage: {request.stage}")
+        return StageResponse(
+            text="Please provide the missing identifier.",
+            provider=profile.engine,
+            model=profile.model,
+            reasoning_trace="direct trace",
+        )
+
+
 class _ImmediateFirstDirectProvider(_DirectProvider):
     async def invoke(self, profile, request):
         if request.stage is Stage.TRIAGE:
@@ -488,6 +504,7 @@ def test_public_her_alias_resolves_forward_and_claw_id_is_removed():
     assert "her" not in BACKEND_REGISTRY
     assert "claw-cli" not in BACKEND_REGISTRY
     assert BACKEND_REGISTRY["her-v2"]["efforts"] == [
+        "zero",
         "low",
         "medium",
         "high",
@@ -561,6 +578,66 @@ async def test_adapter_direct_response_uses_final_lane_once(tmp_path):
         "delivery_id": response.stream_metadata["her_v2"]["delivery"]["delivery_id"],
         "message_event_id": response.stream_metadata["her_v2"]["delivery"]["event_id"],
     }
+
+
+@pytest.mark.asyncio
+async def test_adapter_zero_effort_is_one_direct_call_and_question_is_completed(
+    tmp_path,
+):
+    provider = _ZeroProvider()
+    config = _agent_config(tmp_path, effort="zero")
+    skill_manager = SimpleNamespace(
+        RUNTIME_TOGGLE_IDS=frozenset({"debug", "recall"}),
+        list_skills=lambda: [
+            SimpleNamespace(
+                id="reports",
+                name="Reports",
+                description="Build reports",
+                skill_dir=tmp_path / "skills" / "reports",
+                allowed_tools="Read Write",
+            ),
+            SimpleNamespace(
+                id="debug",
+                name="Debug",
+                description="Runtime toggle",
+                skill_dir=tmp_path / "skills" / "debug",
+                allowed_tools=None,
+            ),
+        ],
+        is_skill_enabled=lambda _workspace, skill_id: skill_id != "disabled",
+    )
+    config._hashi_runtime = SimpleNamespace(skill_manager=skill_manager)
+    config._her_v2_stage_provider = provider
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response(
+        "Complete this difficult task directly",
+        "request-zero",
+    )
+
+    assert response.is_success is True
+    assert response.text == "Please provide the missing identifier."
+    assert response.stop_reason == "completed"
+    assert response.stream_metadata["her_v2"]["terminal_state"] == "COMPLETED"
+    assert response.stream_metadata["her_v2"]["classification"] is None
+    assert response.stream_metadata["her_v2"]["plan_id"] is None
+    assert response.stream_metadata["her_v2"]["effort"] == {
+        "configured": "zero",
+        "effective": "zero",
+        "reason": "agent_default",
+    }
+    assert len(provider.requests) == 1
+    profile, request = provider.requests[0]
+    assert request.stage is Stage.DIRECT
+    assert request.allow_tools is True
+    assert request.allow_side_effects is True
+    assert [item["id"] for item in request.context["skills_catalogue"]] == [
+        "reports"
+    ]
+    assert profile.name == "lightweight"
+    assert profile.reasoning == "high"
+    await adapter.shutdown()
 
 
 @pytest.mark.asyncio
@@ -2176,6 +2253,71 @@ async def test_hashi_stage_provider_records_exact_completed_tool_evidence_receip
     assert receipt.evidence_ref in manager.backends[0].tool_result.output
     assert "HASHI_EVIDENCE_RECEIPT" in manager.backends[0].tool_result.output
     assert registry.execution_contexts[-1]["safety_mode"] == "read_only"
+
+
+@pytest.mark.asyncio
+async def test_hashi_stage_provider_installs_full_direct_contract_and_tools():
+    manager = _FakeManager()
+    registry = _BaseToolRegistry()
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=registry,
+        on_stream_event=capture,
+    )
+    base = _stage_request(
+        Stage.DIRECT,
+        allow_tools=True,
+        allow_side_effects=True,
+    )
+    request = StageRequest(
+        **{
+            **base.__dict__,
+            "role": "lightweight",
+            "effort": Effort.ZERO,
+            "classification": None,
+            "plan_id": None,
+            "context": {
+                "habit_catalogue": ["Verify before reporting success."],
+                "skills_catalogue": [
+                    {
+                        "id": "reports",
+                        "description": "Build reports",
+                        "skill_md": "/skills/reports/SKILL.md",
+                    }
+                ],
+            },
+        }
+    )
+
+    response = await provider.invoke(
+        ProviderProfile(
+            "lightweight",
+            "openrouter-api",
+            "configured/model",
+            reasoning="high",
+        ),
+        request,
+    )
+
+    backend = manager.backends[-1]
+    assert response.text
+    assert backend.prompt == "Do the requested work"
+    assert "zero-orchestration Direct route" in backend.sys_prompt
+    assert "Never hand the task off" in backend.sys_prompt
+    assert '"name": "file_write"' in backend.sys_prompt
+    assert '"id": "reports"' in backend.sys_prompt
+    assert "Verify before reporting success." in backend.sys_prompt
+    assert backend.tool_registry.is_allowed("file_write") is True
+    assert backend.tool_registry.max_loops is None
+    assert backend.config.extra["reasoning_effort"] == "high"
+    assert backend.reasoning_enabled is True
+    assert [event.kind for event in events] == [KIND_THINKING, KIND_TOOL_START]
+    assert all(event.kind != KIND_COMMENTARY for event in events)
 
 
 @pytest.mark.asyncio

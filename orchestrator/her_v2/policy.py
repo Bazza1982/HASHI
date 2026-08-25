@@ -14,6 +14,7 @@ from .models import (
 
 @dataclass(frozen=True)
 class EffortPolicy:
+    direct: bool
     planning: bool
     replanning: bool
     review: bool
@@ -26,7 +27,8 @@ def resolve_policy(
     review_limit: int,
 ) -> EffortPolicy:
     return EffortPolicy(
-        planning=effort is not Effort.LOW,
+        direct=effort is Effort.ZERO,
+        planning=effort not in {Effort.ZERO, Effort.LOW},
         replanning=effort in {Effort.HIGH, Effort.XHIGH, Effort.MAX},
         review=(effort in {Effort.XHIGH, Effort.MAX} and int(review_limit) > 0),
         max_reviews=max(0, int(review_limit)),

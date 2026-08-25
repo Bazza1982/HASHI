@@ -16,7 +16,8 @@ platform line.
 HER v2 is HASHI-owned orchestration over provider, tool, delivery, and audit
 interfaces. Its release contract includes:
 
-- five task-matched execution modes with stable `low` through `max` wire values;
+- six task-matched execution modes using stable `zero` through `max` wire
+  values;
 - compulsory Adaptive-or-above Replanning at each 10-result or 300-second safe
   boundary, independent of immutable Triage risk metadata;
 - adaptive Planning and Replanning, tool-backed independent Review, and
@@ -42,15 +43,17 @@ compatible.
 
 | Display name | Wire value | Execution contract |
 | --- | --- | --- |
+| Direct | `zero` | One fully capable Quick-model agent at default provider reasoning `high`; no other HER stage and no automatic effort upgrade |
 | Fast path | `low` | Direct Execution without formal Planning |
 | Planned | `medium` | Planning followed by Execution |
 | Adaptive | `high` | Planning and Execution with compulsory Replanning every 10 completed results or 300 seconds at a safe boundary |
 | Reviewed | `xhigh` | Adaptive path plus one independent read-only Review; a failed Review permits one Primary-Agent remediation and one closure Review |
 | Assured | `max` | Reviewed path plus comprehensive Verification of the latest state, with at most three Verification attempts and remediation between failed checks |
 
-`/effort reviewed` and `/effort assured` are accepted aliases and persist as
-`xhigh` and `max`. Fast path, Planned, and Adaptive aliases normalize in the
-same way. Non-HER backends retain their established reasoning-effort UI.
+`/effort direct`, `/effort reviewed`, and `/effort assured` are accepted aliases
+and persist as `zero`, `xhigh`, and `max`. Fast path, Planned, and Adaptive
+aliases normalize in the same way. Non-HER backends retain their established
+reasoning-effort UI.
 
 Review is read-only; Verification has validation-only workspace authority.
 Passing or failing findings require completed receipts from the exact current

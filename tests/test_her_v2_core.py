@@ -155,6 +155,37 @@ def test_restart_reconciliation_ignores_retired_legacy_checkpoint_fields(tmp_pat
     assert persisted.terminal_reason == "unexpected_process_interruption"
 
 
+def test_completed_direct_ledger_does_not_require_a_triage_classification(tmp_path):
+    store = LedgerStore(tmp_path / "ledgers")
+    direct = ExecutionLedger("direct", "request:direct", "goal:direct")
+    direct.transition(
+        LifecycleState.COMPLETED,
+        terminal_reason="direct_response_delivered",
+    )
+    store.save(direct)
+
+    loaded = store.load("direct")
+
+    assert loaded.status is LifecycleState.COMPLETED
+    assert loaded.classification is None
+    assert loaded.terminal_reason == "direct_response_delivered"
+
+
+@pytest.mark.parametrize("terminal", [LifecycleState.ERROR, LifecycleState.STOPPED])
+def test_pre_triage_failure_ledgers_remain_loadable_without_classification(
+    tmp_path, terminal
+):
+    store = LedgerStore(tmp_path / "ledgers")
+    ledger = ExecutionLedger("pre-triage", "request:pre", "goal:pre")
+    ledger.transition(terminal, terminal_reason="provider_failed")
+    store.save(ledger)
+
+    loaded = store.load("pre-triage")
+
+    assert loaded.status is terminal
+    assert loaded.classification is None
+
+
 @pytest.mark.parametrize(
     ("legacy", "current"),
     [
@@ -181,14 +212,16 @@ def test_legacy_terminal_ledgers_load_into_current_plan_b_states(legacy, current
 
 def test_effort_is_orchestration_policy_not_provider_reasoning():
     cases = [
-        (Effort.LOW, False, False, False, 0),
-        (Effort.MEDIUM, True, False, False, 0),
-        (Effort.HIGH, True, True, False, 0),
-        (Effort.XHIGH, True, True, True, 1),
-        (Effort.MAX, True, True, True, 1),
+        (Effort.ZERO, True, False, False, False, 0),
+        (Effort.LOW, False, False, False, False, 0),
+        (Effort.MEDIUM, False, True, False, False, 0),
+        (Effort.HIGH, False, True, True, False, 0),
+        (Effort.XHIGH, False, True, True, True, 1),
+        (Effort.MAX, False, True, True, True, 1),
     ]
     for (
         effort,
+        direct,
         planning,
         replanning,
         review,
@@ -196,10 +229,12 @@ def test_effort_is_orchestration_policy_not_provider_reasoning():
     ) in cases:
         policy = resolve_policy(effort, review_limit=reviews)
         assert (
+            policy.direct,
             policy.planning,
             policy.replanning,
             policy.review,
         ) == (
+            direct,
             planning,
             replanning,
             review,
@@ -212,12 +247,15 @@ def test_effort_is_orchestration_policy_not_provider_reasoning():
 
 def test_her_execution_mode_labels_and_aliases_keep_canonical_wire_values():
     assert [effort_display_label(item) for item in Effort] == [
+        "Direct (zero)",
         "Fast path (low)",
         "Planned (medium)",
         "Adaptive (high)",
         "Reviewed (xhigh)",
         "Assured (max)",
     ]
+    assert parse_effort("direct") is Effort.ZERO
+    assert parse_effort("zero orchestration") is Effort.ZERO
     assert parse_effort("reviewed") is Effort.XHIGH
     assert parse_effort("assured") is Effort.MAX
     assert parse_effort("Fast path") is Effort.LOW
@@ -228,6 +266,51 @@ def test_max_review_is_enabled_without_a_verification_policy():
 
     assert policy.review is True
     assert not hasattr(policy, "assurance")
+
+
+def test_direct_route_uses_quick_model_and_high_reasoning_by_default():
+    config = HERv2Config.from_mapping(
+        {
+            "profiles": _profiles(),
+            "targets": {
+                "fast": {"provider": "provider-api", "model": "quick-model"},
+                "pro": {"provider": "provider-api", "model": "pro-model"},
+            },
+        }
+    )
+
+    direct = config.profile_for(Stage.DIRECT)
+
+    assert direct.model == "quick-model"
+    assert direct.reasoning == "high"
+
+
+def test_direct_route_reasoning_can_be_explicitly_overridden_but_model_stays_quick():
+    config = HERv2Config.from_mapping(
+        {
+            "profiles": _profiles(),
+            "targets": {
+                "fast": {"provider": "provider-api", "model": "quick-model"},
+                "pro": {"provider": "provider-api", "model": "pro-model"},
+            },
+            "route_reasoning": {"direct": "xhigh"},
+            "route_model_slots": {"direct": "fast"},
+        }
+    )
+
+    direct = config.profile_for(Stage.DIRECT)
+
+    assert direct.model == "quick-model"
+    assert direct.reasoning == "xhigh"
+
+    with pytest.raises(HERv2ConfigurationError, match="always uses the Quick"):
+        HERv2Config.from_mapping(
+            {
+                "profiles": _profiles(),
+                "slot_models": {"fast": "quick-model", "pro": "pro-model"},
+                "route_model_slots": {"direct": "pro"},
+            }
+        )
 
 
 def test_terminal_truth_table():

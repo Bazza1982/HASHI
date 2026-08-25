@@ -235,8 +235,9 @@ HER v2 keeps five boundaries distinct:
    Agent. Their delivery boundaries remain distinct: commentary accepts only a
    typed `PackagedCommentary`, while clarification retains its typed required
    message identity and must be delivered.
-5. Primary Execution renders its own natural-language user response with the
-   extracted Persona block. `low`, `medium`, and ordinary `high` deliver that
+5. Direct and Primary Execution render their own natural-language user response
+   with the extracted Persona block. `zero` returns the sole Direct response;
+   `low`, `medium`, and ordinary `high` deliver the Primary Execution
    response directly. `xhigh` and `max` expose it provisionally as a labelled
    `DRAFT RESPONSE`, then Review and Finalisation replace that
    exact placeholder. A pre-execution Triage clarification uses the shared
@@ -353,11 +354,12 @@ reference, generic tool-use marker, stale receipt, or start event is not evidenc
 ## 5. HER Execution Modes
 
 HER execution mode controls orchestration behaviour, not provider reasoning.
-The canonical wire values remain unchanged for configuration and API
-compatibility. User interfaces show the descriptive names below.
+The existing `low` through `max` wire values remain compatible; `zero` adds the
+Direct route. User interfaces show the descriptive names below.
 
 | Display name | Wire value | Required orchestration behaviour |
 |---|---|---|
+| Direct | `zero` | Zero orchestration: exactly one fully capable Direct agent on the Quick model, with no Immediate Response, Triage, Planning, Replanning, delegation, Review, Verification, or Finalisation |
 | Fast path | `low` | Fast execution with minimal orchestration; no formal Planning stage |
 | Planned | `medium` | Formal Planning followed by Execution |
 | Adaptive | `high` | Planning and Execution with compulsory Replanning every 10 completed tool results or 300 seconds at the next safe boundary |
@@ -372,6 +374,17 @@ safety policy still apply, but a generic registry `max_loops` value is not a
 HER v2 termination condition. Effort never changes this rule.
 
 Execution mode determines the maximum orchestration path available. Triage classifications `DIRECT_RESPONSE` and `CONFIRMATION_REQUIRED` terminate through their dedicated paths without unnecessary planning, regardless of the selected mode.
+
+`zero` is a distinct pre-Triage route, not a simpler classification and not an
+alias for `low`. Task difficulty never upgrades it. The Direct agent receives
+the full Primary Execution Tool Registry, including side-effect-capable tools,
+while remaining bound by the user's actual authority and scope. It inspects and
+checks its own work as useful, may use relevant Habits and Skills, and returns
+natural language directly. A successful provider return always closes as
+`COMPLETED`, including a question asking for missing information. No
+`PENDING_USER_INPUT` Direct terminal is created. Provider reasoning/tool events
+may still use the normal `/verbose` lane, but no HER acknowledgement,
+commentary, or draft message is generated.
 
 Each effective task route derives its base capability from configurable role
 profiles such as `lightweight`, `premium`, and `reviewer`, then independently
@@ -391,6 +404,10 @@ Execution is split into Simple, Complex, and High-volume routes because
 classification changes the actual profile. JSON Repair inherits its rejected
 source stage's frozen provider/model target and is not a separately
 configurable public route.
+Direct always follows the Quick provider/model target. Its independent provider
+reasoning default is `high`; an explicit Direct route-reasoning setting may
+override that default. HER never passes the `zero` effort label as provider
+reasoning and never silently substitutes a model or reasoning value.
 `/backend` selects `her-v2` without exposing the internal `role-configured`
 sentinel.
 
@@ -429,7 +446,9 @@ must not be silently coerced to `low` or allowed to change global Agent state.
 
 ## 6. Stage 1: Initial Processing
 
-Initial processing applies to every HER turn. Two processes begin promptly and independently.
+Initial processing applies to every non-zero HER turn. `zero` completes through
+the single Direct route before this stage. For all other efforts, two processes
+begin promptly and independently.
 
 ### 6.1 Immediate user response
 
@@ -1397,7 +1416,11 @@ HER v2 is ready for production rollout only when:
 - a recorded Triage classification cannot be mutated within the turn;
 - Direct Response produces exactly one user-facing response;
 - `/steer` terminates the old turn and starts a separately classified new turn;
-- low, medium, high, xhigh, and max policies follow the required stage matrix;
+- zero, low, medium, high, xhigh, and max policies follow the required stage matrix;
+- zero performs exactly one Direct call on Quick with default provider reasoning
+  `high`, never auto-upgrades, exposes full Primary Execution tool authority and
+  existing attachment fallback, invokes none of the ordinary HER stages, and
+  records every successful natural-language return as completed;
 - high, xhigh, and max unconditionally enter Replanning at each inclusive
   10-result or 300-second safe boundary after Execution begins, while low and
   medium never install the cadence;

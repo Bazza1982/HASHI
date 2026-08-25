@@ -22,6 +22,7 @@ from orchestrator.her_v2.interfaces import (
 from orchestrator.her_v2.ledger import LedgerStore
 from orchestrator.her_v2.models import (
     Effort,
+    LifecycleState,
     Stage,
     StageResponse,
     TerminalState,
@@ -420,6 +421,7 @@ def _runtime(
     commentary=None,
     required_persona=None,
     retry_policy=None,
+    skills_catalogue=None,
 ):
     root = tmp_path / "her-v2"
     return HERv2Runtime(
@@ -435,6 +437,7 @@ def _runtime(
         meditation=meditation if meditation is not None else habits,
         dream=dream,
         retry_policy=retry_policy,
+        skills_catalogue=skills_catalogue,
     )
 
 
@@ -449,6 +452,108 @@ def _initial(classification, *, triage_goal="interpreted goal", clarification=""
             }
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_path):
+    receipt = ToolEvidenceReceipt(
+        "test-tool:direct:write",
+        Stage.DIRECT,
+        "direct-invocation",
+        1,
+        "write-1",
+        "file_write",
+        ToolReceiptStatus.SUCCESS,
+        False,
+        True,
+        "write-output",
+        {"path": "result.txt"},
+    )
+    provider = ScriptedProvider(
+        {
+            Stage.DIRECT: [
+                StageResponse(
+                    data={"message": "Please provide the missing account ID."},
+                    provider="fake-api",
+                    model="quick-model",
+                    evidence_refs=(receipt.evidence_ref,),
+                    tool_receipts=(receipt,),
+                )
+            ]
+        }
+    )
+    commentary = RecordingCommentaryPort()
+    habits = TrackingHabits()
+    runtime = _runtime(
+        tmp_path,
+        provider,
+        config=_config(
+            meditation_enabled=True,
+            targets={
+                "fast": {"provider": "fake-api", "model": "quick-model"},
+                "pro": {"provider": "fake-api", "model": "pro-model"},
+            },
+        ),
+        commentary=commentary,
+        habits=habits,
+        skills_catalogue=(
+            {
+                "id": "reports",
+                "description": "Build reports",
+                "skill_md": "/skills/reports/SKILL.md",
+            },
+        ),
+    )
+
+    result = await runtime.run_turn(
+        "Perform a difficult task directly",
+        "request-zero-direct",
+        effort=Effort.ZERO,
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.text == "Please provide the missing account ID."
+    assert result.classification is None
+    assert result.ledger["status"] == LifecycleState.COMPLETED.value
+    assert result.ledger["plan_id"] is None
+    assert result.review_count == 0
+    assert result.replan_count == 0
+    assert result.verification_count == 0
+    assert result.checkpoint_count == 0
+    assert result.evidence_refs == (receipt.evidence_ref,)
+    assert [(item.kind, item.text) for item in result.delivery_records] == [
+        ("final", "Please provide the missing account ID.")
+    ]
+    assert commentary.records == []
+    assert commentary.drafts == []
+    assert len(provider.requests) == 1
+    profile, request = provider.requests[0]
+    assert request.stage is Stage.DIRECT
+    assert request.effort is Effort.ZERO
+    assert request.classification is None
+    assert request.plan_id is None
+    assert request.allow_tools is True
+    assert request.allow_side_effects is True
+    assert request.checkpoint_coordinator is None
+    assert request.context["automatic_effort_upgrade_allowed"] is False
+    assert request.context["sub_agent_delegation_allowed"] is False
+    assert request.context["habit_catalogue"] == ["advisory habit"]
+    assert request.context["skills_catalogue"][0]["id"] == "reports"
+    assert profile.model == "quick-model"
+    assert profile.reasoning == "high"
+    assert len(habits.retrievals) == 1
+    assert habits.meditation_started.is_set() is False
+    assert habits.meditations == []
+    assert {
+        Stage.IMMEDIATE_RESPONSE,
+        Stage.TRIAGE,
+        Stage.PLANNING,
+        Stage.EXECUTION,
+        Stage.REPLANNING,
+        Stage.REVIEW,
+        Stage.VERIFICATION,
+        Stage.FINALISATION,
+    }.isdisjoint(request.stage for _profile, request in provider.requests)
 
 
 @pytest.mark.asyncio
