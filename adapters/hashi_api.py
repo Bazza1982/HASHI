@@ -71,6 +71,18 @@ def _provider_base_url(global_config: Any) -> str:
 class HashiApiAdapter(OpenRouterAdapter):
     """Stateless OpenAI-compatible adapter for HASHI's own API gateway."""
 
+    def _trace(self, message: str, *args: Any) -> None:
+        """Emit best-effort observability without entering the request boundary."""
+
+        logger = getattr(self, "logger", None)
+        log = getattr(logger, "info", None) or getattr(logger, "debug", None)
+        if not callable(log):
+            return
+        try:
+            log(message, *args)
+        except Exception:  # noqa: BLE001 - diagnostics must never alter execution
+            return
+
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
             supports_sessions=False,
@@ -381,7 +393,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                     )
 
                     try:
-                        self.logger.info(
+                        self._trace(
                             "HASHI_API_TRACE provider_call_started "
                             "request_id=%s provider_call=%s after_tool_end=%s "
                             "streaming=%s model=%s",
@@ -430,7 +442,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                         continue
                     break
 
-                self.logger.info(
+                self._trace(
                     "HASHI_API_TRACE provider_call_completed "
                     "request_id=%s provider_call=%s after_tool_end=%s "
                     "finish_reason=%s tool_calls=%s",
@@ -483,7 +495,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                     native_local_refs=native_local_refs,
                     all_media_native=all_media_native,
                 )
-                self.logger.info(
+                self._trace(
                     "HASHI_API_TRACE tool_round_completed "
                     "request_id=%s tool_round=%s tool_calls=%s",
                     request_id,

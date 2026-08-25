@@ -2597,7 +2597,7 @@ async def test_tool_capable_api_families_do_not_flatten_replan_control(
     adapter._deepseek_headers = lambda: {}
     adapter._ollama_headers = lambda: {}
     adapter._xai_headers = lambda: {}
-    adapter._hashi_headers = lambda: {}
+    adapter._hashi_headers = lambda **_kwargs: {}
     adapter._use_responses_api = lambda: False
 
     async def resolve_bearer(*_args, **_kwargs):
