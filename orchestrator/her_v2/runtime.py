@@ -106,6 +106,84 @@ class _ResumeExecutionAfterReplan(BaseException):
     """A completion-boundary Replan found authorised work still remains."""
 
 
+def _subagent_result_payload(result: SubAgentResult) -> dict[str, Any]:
+    return {
+        "plan_id": result.plan_id,
+        "assignment_id": result.assignment_id,
+        "disposition": result.disposition.value,
+        "summary": result.summary,
+        "evidence_refs": list(result.evidence_refs),
+        "limitations": list(result.limitations),
+        "attachment_ids": list(result.attachment_ids),
+        "source_plan_id": result.source_plan_id or result.plan_id,
+        "reused": result.reused,
+    }
+
+
+def _tool_catalogue_name(entry: Mapping[str, Any]) -> str:
+    function = entry.get("function")
+    return str(
+        function.get("name") if isinstance(function, Mapping) else ""
+    ).strip()
+
+
+@dataclass
+class _SubAgentBatch:
+    """One delegation batch frozen to one authoritative plan snapshot."""
+
+    plan_id: str
+    plan_version: int
+    assignments: tuple[SubAgentAssignment, ...]
+    parallel_groups: tuple[tuple[str, ...], ...]
+    predecessor_plan_id: str = ""
+    results: dict[str, SubAgentResult] = field(default_factory=dict)
+    running: set[str] = field(default_factory=set)
+    cancelled: set[str] = field(default_factory=set)
+
+    def as_payload(self) -> dict[str, Any]:
+        statuses: list[dict[str, Any]] = []
+        for assignment in self.assignments:
+            result = self.results.get(assignment.assignment_id)
+            if result is not None:
+                status = result.disposition.value
+            elif assignment.assignment_id in self.running:
+                status = "RUNNING"
+            elif assignment.assignment_id in self.cancelled:
+                status = "CANCELLED"
+            else:
+                status = "PENDING"
+            statuses.append(
+                {
+                    "assignment_id": assignment.assignment_id,
+                    "status": status,
+                }
+            )
+        return {
+            "plan_id": self.plan_id,
+            "plan_version": self.plan_version,
+            "predecessor_plan_id": self.predecessor_plan_id or None,
+            "parallel_groups": [list(group) for group in self.parallel_groups],
+            "assignments": [
+                {
+                    **dict(assignment.definition),
+                    "id": assignment.assignment_id,
+                    "task": assignment.task,
+                    "profile": assignment.profile,
+                    "tools": list(assignment.tools),
+                    "attachment_ids": list(assignment.attachment_ids),
+                    "allow_side_effects": assignment.allow_side_effects,
+                }
+                for assignment in self.assignments
+            ],
+            "assignment_statuses": statuses,
+            "results": [
+                _subagent_result_payload(self.results[assignment.assignment_id])
+                for assignment in self.assignments
+                if assignment.assignment_id in self.results
+            ],
+        }
+
+
 @dataclass
 class _TurnState:
     request: str
@@ -127,6 +205,8 @@ class _TurnState:
     active_plan: Mapping[str, Any] | None = None
     plan_edit_history: list[Mapping[str, Any]] = field(default_factory=list)
     plan_version: int = 0
+    previous_plan_id: str = ""
+    sub_agent_batches: dict[str, _SubAgentBatch] = field(default_factory=dict)
     replan_count: int = 0
     review_count: int = 0
     verification_count: int = 0
@@ -152,7 +232,9 @@ class _TurnState:
     late_immediate_source_task: asyncio.Task | None = None
     late_immediate_delivery_task: asyncio.Task | None = None
     execution_completed_by_replan: bool = False
+    execution_draft_serial: int = 0
     execution_draft_event_id: str = ""
+    execution_draft_text: str = ""
     execution_draft_delivered: bool = False
 
 
@@ -763,6 +845,39 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             },
         )
 
+    def _execution_tool_catalogue(self) -> tuple[Mapping[str, Any], ...]:
+        resolver = getattr(self.provider, "tool_catalogue", None)
+        if not callable(resolver):
+            return ()
+        try:
+            raw_catalogue = resolver(
+                allow_side_effects=not self.config.shadow_mode,
+                delegated_tools=None,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "HER v2 could not render the advisory execution tool catalogue: %s",
+                exc,
+            )
+            return ()
+        if not isinstance(raw_catalogue, Sequence) or isinstance(
+            raw_catalogue, (str, bytes)
+        ):
+            return ()
+        catalogue: list[Mapping[str, Any]] = []
+        seen: set[str] = set()
+        for raw in raw_catalogue:
+            if not isinstance(raw, Mapping):
+                continue
+            entry = dict(raw)
+            name = _tool_catalogue_name(entry)
+            if not name or name in seen:
+                continue
+            entry["hashi_read_only"] = entry.get("hashi_read_only") is True
+            seen.add(name)
+            catalogue.append(entry)
+        return tuple(catalogue)
+
     async def _run_work(
         self, state: _TurnState, classification: TriageClassification
     ) -> TurnResult:
@@ -772,9 +887,30 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             review_limit=self.config.review_limits[state.effort],
         )
         if policy.planning:
+            execution_tool_catalogue = self._execution_tool_catalogue()
+
+            def validate_plan(response: StageResponse) -> Mapping[str, Any]:
+                plan = parse_plan(response)
+                if (
+                    classification is not TriageClassification.HIGH_VOLUME_TASK
+                    and plan.get("sub_agents")
+                ):
+                    raise StructuredOutputError(
+                        "Sub-agent assignments are permitted only for HIGH_VOLUME_TASK"
+                    )
+                return plan
+
             planning_context: dict[str, Any] = {
                 "classification": classification.value,
+                "available_execution_tools": [
+                    dict(item) for item in execution_tool_catalogue
+                ],
+                "execution_allow_side_effects": not self.config.shadow_mode,
             }
+            if classification is TriageClassification.HIGH_VOLUME_TASK:
+                planning_context["available_sub_agent_profiles"] = list(
+                    self.config.sub_agent_execution_profile_names()
+                )
             # ``meditation_enabled`` is the compatibility switch for the
             # whole Habit–Meditation loop, matching /habit off semantics.
             if self.config.meditation_enabled:
@@ -792,7 +928,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             _response, plan = await self._invoke_stage(
                 state,
                 Stage.PLANNING,
-                parse_plan,
+                validate_plan,
                 allow_tools=False,
                 context=planning_context,
             )
@@ -884,18 +1020,9 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             )
 
         if isinstance(execution, str) and state.effort in {Effort.XHIGH, Effort.MAX}:
-            draft_event_id = f"{state.ledger.turn_id}:execution:draft"
-            draft_text = f"DRAFT RESPONSE\n\n{execution}"
-            state.execution_draft_event_id = draft_event_id
-            state.execution_draft_delivered = await self._deliver(
+            await self._advance_execution_draft_commentary(
                 state,
-                kind="draft",
-                text=draft_text,
-                event_id=draft_event_id,
-                required=False,
-                phase="execution",
-                provenance="primary_execution_draft",
-                detail="temporary=true; pending_review_and_finalisation=true",
+                response=execution,
             )
 
         if policy.review and execution is not None:
@@ -947,9 +1074,12 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             "active_plan": (
                 dict(state.active_plan) if state.active_plan is not None else None
             ),
-            "plan_edit_history": [
-                dict(entry) for entry in state.plan_edit_history
-            ],
+            "delegated_execution": (
+                state.sub_agent_batches[str(state.ledger.plan_id)].as_payload()
+                if str(state.ledger.plan_id) in state.sub_agent_batches
+                else None
+            ),
+            "plan_edit_history": [dict(entry) for entry in state.plan_edit_history],
             "evidence_refs": list(state.evidence_refs),
             "limitations": list(state.limitations),
             "evidence_receipts": [
@@ -1122,8 +1252,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 role="runtime",
                 event="finalisation_review_disclosure_appended",
                 event_id=(
-                    f"{state.ledger.turn_id}:finalisation:"
-                    "review-disclosure-appended"
+                    f"{state.ledger.turn_id}:finalisation:review-disclosure-appended"
                 ),
                 payload={
                     "review_outcome": (
@@ -1410,15 +1539,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             execution_context: dict[str, Any] = {
                 "active_plan": state.active_plan,
                 "sub_agent_results": [
-                    {
-                        "assignment_id": result.assignment_id,
-                        "disposition": result.disposition.value,
-                        "summary": result.summary,
-                        "evidence_refs": list(result.evidence_refs),
-                        "limitations": list(result.limitations),
-                        "attachment_ids": list(result.attachment_ids),
-                    }
-                    for result in sub_agent_results
+                    _subagent_result_payload(result) for result in sub_agent_results
                 ],
             }
             if replan_coordinator is not None:
@@ -1436,6 +1557,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                         },
                     }
                 )
+            execution_plan_id = str(state.ledger.plan_id or "")
             _response, execution = await self._invoke_stage(
                 state,
                 Stage.EXECUTION,
@@ -1453,6 +1575,38 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             for ref in _response.evidence_refs:
                 if ref not in state.evidence_refs:
                     state.evidence_refs.append(ref)
+            delegated_plan_snapshot = bool(
+                classification is TriageClassification.HIGH_VOLUME_TASK
+                and (
+                    sub_agent_results
+                    or (
+                        isinstance(state.active_plan, Mapping)
+                        and state.active_plan.get("sub_agents")
+                    )
+                )
+            )
+            if (
+                delegated_plan_snapshot
+                and str(state.ledger.plan_id or "") != execution_plan_id
+            ):
+                self._audit(
+                    state,
+                    stage=Stage.EXECUTION.value,
+                    role="runtime",
+                    event="execution_candidate_superseded_by_plan_snapshot",
+                    event_id=(
+                        f"{state.ledger.turn_id}:execution:invocation:"
+                        f"{execution_invocation}:plan-superseded"
+                    ),
+                    plan_id=execution_plan_id,
+                    payload={
+                        "candidate_plan_id": execution_plan_id,
+                        "active_plan_id": state.ledger.plan_id,
+                        "execution_replayed": False,
+                        "completed_side_effects_preserved": True,
+                    },
+                )
+                raise _ResumeExecutionAfterReplan()
             if replan_coordinator is not None:
                 candidate_payload: Mapping[str, Any] = (
                     _execution_payload(execution)
@@ -1534,19 +1688,118 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         state: _TurnState,
         checkpoint: CompulsoryReplanCoordinator | None,
     ) -> tuple[SubAgentResult, ...]:
-        raw_assignments = (
-            state.active_plan.get("sub_agents", [])
-            if isinstance(state.active_plan, Mapping)
-            else []
-        )
-        if not raw_assignments:
+        plan_id = str(state.ledger.plan_id or "")
+        if not plan_id or not isinstance(state.active_plan, Mapping):
+            raise StageInvocationError(
+                "sub-agent dispatch requires an authoritative plan snapshot",
+                retryable=False,
+            )
+        batch = self._subagent_batch(state, plan_id, state.active_plan)
+        if not batch.assignments:
             return ()
+
+        assignment_by_id = {
+            assignment.assignment_id: assignment for assignment in batch.assignments
+        }
+        waves = (
+            batch.parallel_groups
+            if batch.parallel_groups
+            else (tuple(assignment_by_id),)
+        )
+        for wave_index, wave in enumerate(waves, start=1):
+            pending = [
+                assignment_by_id[assignment_id]
+                for assignment_id in wave
+                if assignment_id not in batch.results
+            ]
+            if not pending:
+                continue
+            batch.running.update(item.assignment_id for item in pending)
+            tasks = [
+                asyncio.create_task(
+                    self._invoke_subagent_for_batch(
+                        state,
+                        batch,
+                        assignment,
+                        checkpoint,
+                    ),
+                    name=(
+                        f"her-v2-sub-agent:{state.ledger.turn_id}:"
+                        f"{batch.plan_version}:{assignment.assignment_id}"
+                    ),
+                )
+                for assignment in pending
+            ]
+            try:
+                wave_results = tuple(await asyncio.gather(*tasks))
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                for assignment in pending:
+                    if assignment.assignment_id not in batch.results:
+                        batch.cancelled.add(assignment.assignment_id)
+                raise
+            finally:
+                batch.running.difference_update(
+                    assignment.assignment_id for assignment in pending
+                )
+            for result in wave_results:
+                assert batch.results.get(result.assignment_id) == result
+
+            current_plan_id = str(state.ledger.plan_id or "")
+            if current_plan_id != batch.plan_id:
+                remaining_ids = {
+                    assignment_id
+                    for later_wave in waves[wave_index:]
+                    for assignment_id in later_wave
+                    if assignment_id not in batch.results
+                }
+                batch.cancelled.update(remaining_ids)
+                self._audit(
+                    state,
+                    stage=Stage.EXECUTION.value,
+                    role="runtime",
+                    event="sub_agent_batch_superseded",
+                    event_id=(
+                        f"{state.ledger.turn_id}:sub-agent-batch:"
+                        f"{batch.plan_version}:superseded"
+                    ),
+                    plan_id=batch.plan_id,
+                    payload={
+                        "batch_plan_id": batch.plan_id,
+                        "active_plan_id": current_plan_id or None,
+                        "completed_assignment_ids": list(batch.results),
+                        "cancelled_assignment_ids": sorted(batch.cancelled),
+                        "results_attached_to_replacement_plan": False,
+                    },
+                )
+                raise _ResumeExecutionAfterReplan()
+
+        return tuple(
+            batch.results[assignment.assignment_id] for assignment in batch.assignments
+        )
+
+    def _subagent_batch(
+        self,
+        state: _TurnState,
+        plan_id: str,
+        plan: Mapping[str, Any],
+    ) -> _SubAgentBatch:
+        existing = state.sub_agent_batches.get(plan_id)
+        if existing is not None:
+            return existing
+
+        raw_assignments = (
+            plan.get("sub_agents", []) if isinstance(plan, Mapping) else []
+        )
         if not isinstance(raw_assignments, list):
             raise StageInvocationError(
                 "high-volume plan sub_agents must be a list", retryable=False
             )
         assignments: list[SubAgentAssignment] = []
         seen: set[str] = set()
+        available_profiles = set(self.config.sub_agent_execution_profile_names())
         for index, raw in enumerate(raw_assignments, start=1):
             if not isinstance(raw, Mapping):
                 raise StageInvocationError(
@@ -1560,12 +1813,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     "sub-agent assignments require unique IDs and bounded tasks",
                     retryable=False,
                 )
-            if (
-                profile_name not in self.config.profiles
-                or profile_name == self.config.stage_roles.get(Stage.REVIEW)
-            ):
+            if profile_name not in available_profiles:
                 raise StageInvocationError(
-                    f"sub-agent assignment {assignment_id!r} selects an unavailable execution profile",
+                    f"sub-agent assignment {assignment_id!r} selects unavailable "
+                    f"execution profile {profile_name!r}; available profiles: "
+                    f"{', '.join(sorted(available_profiles))}",
                     retryable=False,
                 )
             raw_tools = raw.get("tools") or []
@@ -1643,27 +1895,176 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     tools=tuple(str(item) for item in raw_tools if str(item).strip()),
                     allow_side_effects=requested_side_effects,
                     attachment_ids=selected_attachment_ids,
+                    definition=dict(raw),
                 )
             )
             seen.add(assignment_id)
-        tasks = [
-            asyncio.create_task(self._invoke_subagent(state, assignment, checkpoint))
-            for assignment in assignments
-        ]
+
+        raw_parallel_groups = plan.get("parallel_groups", [])
+        if not isinstance(raw_parallel_groups, list):
+            raise StageInvocationError(
+                "high-volume plan parallel_groups must be a list", retryable=False
+            )
+        parallel_groups: list[tuple[str, ...]] = []
+        scheduled_ids: set[str] = set()
+        for index, raw_group in enumerate(raw_parallel_groups, start=1):
+            if (
+                not isinstance(raw_group, list)
+                or not raw_group
+                or any(
+                    not isinstance(item, str) or not item.strip() for item in raw_group
+                )
+            ):
+                raise StageInvocationError(
+                    f"sub-agent parallel group {index} is invalid", retryable=False
+                )
+            group = tuple(item.strip() for item in raw_group)
+            unknown = set(group) - seen
+            repeated = set(group) & scheduled_ids
+            if unknown or repeated or len(group) != len(set(group)):
+                raise StageInvocationError(
+                    f"sub-agent parallel group {index} has invalid assignment IDs",
+                    retryable=False,
+                    details={
+                        "unknown_assignment_ids": sorted(unknown),
+                        "repeated_assignment_ids": sorted(repeated),
+                    },
+                )
+            scheduled_ids.update(group)
+            parallel_groups.append(group)
+        if parallel_groups and scheduled_ids != seen:
+            raise StageInvocationError(
+                "sub-agent parallel_groups must schedule every assignment",
+                retryable=False,
+                details={"omitted_assignment_ids": sorted(seen - scheduled_ids)},
+            )
+
+        batch = _SubAgentBatch(
+            plan_id=plan_id,
+            plan_version=state.plan_version,
+            assignments=tuple(assignments),
+            parallel_groups=tuple(parallel_groups),
+            predecessor_plan_id=state.previous_plan_id,
+        )
+        state.sub_agent_batches[plan_id] = batch
+        predecessor = state.sub_agent_batches.get(state.previous_plan_id)
+        if predecessor is not None:
+            previous_assignments = {
+                item.assignment_id: item for item in predecessor.assignments
+            }
+            for assignment in batch.assignments:
+                previous_assignment = previous_assignments.get(assignment.assignment_id)
+                previous_result = predecessor.results.get(assignment.assignment_id)
+                if (
+                    previous_assignment is None
+                    or previous_result is None
+                    or previous_result.disposition
+                    not in {
+                        ExecutionDisposition.COMPLETED,
+                        ExecutionDisposition.COMPLETED_WITH_LIMITATIONS,
+                    }
+                    or self._subagent_assignment_signature(previous_assignment)
+                    != self._subagent_assignment_signature(assignment)
+                ):
+                    continue
+                source_plan_id = (
+                    previous_result.source_plan_id or previous_result.plan_id
+                )
+                reused = replace(
+                    previous_result,
+                    plan_id=plan_id,
+                    source_plan_id=source_plan_id,
+                    reused=True,
+                )
+                batch.results[assignment.assignment_id] = reused
+                self._audit(
+                    state,
+                    stage=Stage.EXECUTION.value,
+                    role="runtime",
+                    event="sub_agent_result_reused",
+                    event_id=(
+                        f"{state.ledger.turn_id}:sub-agent-batch:"
+                        f"{batch.plan_version}:{assignment.assignment_id}:reused"
+                    ),
+                    plan_id=plan_id,
+                    payload={
+                        "assignment_id": assignment.assignment_id,
+                        "source_plan_id": source_plan_id,
+                        "target_plan_id": plan_id,
+                        "assignment_preserved_exactly": True,
+                        "prior_result_successful": True,
+                    },
+                )
+        self._audit(
+            state,
+            stage=Stage.EXECUTION.value,
+            role="runtime",
+            event="sub_agent_batch_created",
+            event_id=(
+                f"{state.ledger.turn_id}:sub-agent-batch:{batch.plan_version}:created"
+            ),
+            plan_id=plan_id,
+            payload={
+                "plan_id": plan_id,
+                "predecessor_plan_id": batch.predecessor_plan_id or None,
+                "assignment_ids": [item.assignment_id for item in batch.assignments],
+                "parallel_groups": [list(group) for group in batch.parallel_groups],
+                "reused_assignment_ids": [
+                    item.assignment_id
+                    for item in batch.assignments
+                    if item.assignment_id in batch.results
+                ],
+            },
+        )
+        return batch
+
+    @staticmethod
+    def _subagent_assignment_signature(assignment: SubAgentAssignment) -> str:
+        return _payload_hash(
+            {
+                **dict(assignment.definition),
+                "id": assignment.assignment_id,
+                "task": assignment.task,
+                "profile": assignment.profile,
+                "tools": list(assignment.tools),
+                "attachment_ids": list(assignment.attachment_ids),
+                "allow_side_effects": assignment.allow_side_effects,
+            }
+        )
+
+    async def _invoke_subagent_for_batch(
+        self,
+        state: _TurnState,
+        batch: _SubAgentBatch,
+        assignment: SubAgentAssignment,
+        checkpoint: CompulsoryReplanCoordinator | None,
+    ) -> SubAgentResult:
         try:
-            results = tuple(await asyncio.gather(*tasks))
-        except BaseException:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            result = await self._invoke_subagent(
+                state,
+                assignment,
+                checkpoint,
+                plan_id=batch.plan_id,
+                plan_version=batch.plan_version,
+            )
+        except asyncio.CancelledError:
+            batch.cancelled.add(assignment.assignment_id)
             raise
-        return results
+        else:
+            batch.results[assignment.assignment_id] = result
+            batch.cancelled.discard(assignment.assignment_id)
+            return result
+        finally:
+            batch.running.discard(assignment.assignment_id)
 
     async def _invoke_subagent(
         self,
         state: _TurnState,
         assignment: SubAgentAssignment,
         checkpoint: CompulsoryReplanCoordinator | None,
+        *,
+        plan_id: str,
+        plan_version: int,
     ) -> SubAgentResult:
         profile = self.config.profile_for_name(assignment.profile)
         role = f"sub_agent:{assignment.assignment_id}"
@@ -1671,7 +2072,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             assignment.allow_side_effects and not self.config.shadow_mode
         )
         event_prefix = (
-            f"{state.ledger.turn_id}:sub-agent:{state.plan_version}:"
+            f"{state.ledger.turn_id}:sub-agent:{plan_version}:"
             f"{assignment.assignment_id}"
         )
         self._audit(
@@ -1682,7 +2083,10 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             event_id=f"{event_prefix}:assigned",
             provider=profile.engine,
             model=profile.model,
+            plan_id=plan_id,
             payload={
+                "plan_id": plan_id,
+                "assignment_id": assignment.assignment_id,
                 "task": assignment.task,
                 "profile": assignment.profile,
                 "delegated_tools": list(assignment.tools),
@@ -1696,16 +2100,38 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             },
         )
         request_context = {
+            "plan_id": plan_id,
             "assignment_id": assignment.assignment_id,
             "assigned_task": assignment.task,
+            "assignment_definition": dict(assignment.definition),
+            "profile": assignment.profile,
             "delegated_tools": list(assignment.tools),
             "authorized_attachment_ids": list(assignment.attachment_ids),
-            "authority": "bounded_execution_only",
+            "authority": {
+                "scope": "bounded_execution_only",
+                "may_change_user_goal": False,
+                "may_change_classification": False,
+                "may_change_active_plan": False,
+                "may_replan": False,
+                "may_contact_user": False,
+                "may_finalise": False,
+                "may_create_subagents": False,
+            },
             "may_replan": False,
             "may_contact_user": False,
             "may_finalise": False,
             "may_create_subagents": False,
             "shadow_mode": self.config.shadow_mode,
+            "replan_continuation": (
+                dict(state.replan_continuation)
+                if state.replan_continuation and state.previous_plan_id
+                else None
+            ),
+            "continuation_rules": {
+                "continue_from_current_workspace": True,
+                "preserve_completed_evidence": True,
+                "never_repeat_completed_side_effects_because_of_replanning": True,
+            },
         }
         try:
             response, outcome = await self._invoke_stage(
@@ -1720,6 +2146,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 publish_commentary=False,
                 retry_on_failure=not side_effects_authorised,
                 checkpoint_coordinator=checkpoint,
+                bound_plan_id=plan_id,
             )
             assert isinstance(outcome, ExecutionOutcome)
             if outcome.disposition is ExecutionDisposition.USER_INPUT_REQUIRED:
@@ -1733,12 +2160,14 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 dict.fromkeys((*outcome.evidence_refs, *response.evidence_refs))
             )
             result = SubAgentResult(
-                assignment.assignment_id,
-                outcome.disposition,
-                outcome.summary,
-                evidence_refs,
-                outcome.limitations,
-                assignment.attachment_ids,
+                assignment_id=assignment.assignment_id,
+                plan_id=plan_id,
+                disposition=outcome.disposition,
+                summary=outcome.summary,
+                evidence_refs=evidence_refs,
+                limitations=outcome.limitations,
+                attachment_ids=assignment.attachment_ids,
+                source_plan_id=plan_id,
             )
             self._audit(
                 state,
@@ -1748,13 +2177,8 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 event_id=f"{event_prefix}:completed",
                 provider=response.provider or profile.engine,
                 model=response.model or profile.model,
-                payload={
-                    "disposition": result.disposition.value,
-                    "summary": result.summary,
-                    "evidence_refs": list(result.evidence_refs),
-                    "limitations": list(result.limitations),
-                    "attachment_ids": list(result.attachment_ids),
-                },
+                plan_id=plan_id,
+                payload=_subagent_result_payload(result),
             )
             return result
         except (TurnStopped, AuditPersistenceError):
@@ -1773,15 +2197,17 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 event_id=f"{event_prefix}:failed",
                 provider=profile.engine,
                 model=profile.model,
+                plan_id=plan_id,
                 payload=failure_payload,
             )
             return SubAgentResult(
-                assignment.assignment_id,
-                ExecutionDisposition.FAILED,
-                f"Sub-agent execution failed: {exc}",
-                (),
-                ("Sub-agent result unavailable.",),
-                assignment.attachment_ids,
+                assignment_id=assignment.assignment_id,
+                plan_id=plan_id,
+                disposition=ExecutionDisposition.FAILED,
+                summary=f"Sub-agent execution failed: {exc}",
+                limitations=("Sub-agent result unavailable.",),
+                attachment_ids=assignment.attachment_ids,
+                source_plan_id=plan_id,
             )
 
     @staticmethod
@@ -1842,6 +2268,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 ),
                 "elapsed_s": round(state.execution_elapsed_s, 6),
             },
+            "delegated_execution": (
+                state.sub_agent_batches[str(state.ledger.plan_id)].as_payload()
+                if str(state.ledger.plan_id) in state.sub_agent_batches
+                else None
+            ),
             "evidence_refs": list(state.evidence_refs),
             "tool_receipts": [
                 {
@@ -1893,6 +2324,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             )
         prior_plan = dict(state.active_plan)
         prior_plan_id = state.ledger.plan_id
+        execution_tool_catalogue = self._execution_tool_catalogue()
         logical_replan_id = str(checkpoint_id or "").strip() or (
             f"{state.ledger.turn_id}:replan:{state.replan_count + 1}"
         )
@@ -1918,6 +2350,13 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     "completion_percent=100 requires an unchanged active plan and "
                     "plan_changed=false"
                 )
+            if (
+                classification is not TriageClassification.HIGH_VOLUME_TASK
+                and outcome.plan.get("sub_agents")
+            ):
+                raise StructuredOutputError(
+                    "Replanning may delegate sub-agents only for HIGH_VOLUME_TASK"
+                )
             return outcome
 
         await self._transition(state, LifecycleState.REPLANNING)
@@ -1928,17 +2367,26 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             checkpoint_id=logical_replan_id if checkpoint_id else "",
             cadence_context=cadence_context,
         )
+        replanning_context: dict[str, Any] = {
+            "active_plan": prior_plan,
+            "available_execution_tools": [
+                dict(item) for item in execution_tool_catalogue
+            ],
+            "execution_allow_side_effects": not self.config.shadow_mode,
+            "plan_edit_history": [dict(entry) for entry in state.plan_edit_history],
+            "workflow_state_and_evidence": workflow_state_and_evidence,
+        }
+        if classification is TriageClassification.HIGH_VOLUME_TASK:
+            replanning_context["available_sub_agent_profiles"] = list(
+                self.config.sub_agent_execution_profile_names()
+            )
         response, outcome = await self._invoke_stage(
             state,
             Stage.REPLANNING,
             validate_replan,
             allow_tools=False,
             publish_commentary=False,
-            context={
-                "active_plan": prior_plan,
-                "plan_edit_history": [dict(entry) for entry in state.plan_edit_history],
-                "workflow_state_and_evidence": workflow_state_and_evidence,
-            },
+            context=replanning_context,
         )
         assert isinstance(outcome, ReplanningOutcome)
         state.replan_count += 1
@@ -2208,6 +2656,14 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 if execution is None:
                     self._merge_review_limitations(state, failure_reasons)
                     return None, finding.outcome
+                if isinstance(execution, str) and state.effort in {
+                    Effort.XHIGH,
+                    Effort.MAX,
+                }:
+                    await self._advance_execution_draft_commentary(
+                        state,
+                        response=execution,
+                    )
                 if isinstance(execution, ExecutionOutcome):
                     self._merge_execution_evidence(state, execution)
                 state.review_remediated = True

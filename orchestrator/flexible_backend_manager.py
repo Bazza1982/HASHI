@@ -172,7 +172,23 @@ class FlexibleBackendManager:
                         state.pop("active_provider", None)
                         state_needs_repair = True
                 if "agent_mode" in state:
-                    self.agent_mode = state["agent_mode"]
+                    persisted_mode = state["agent_mode"]
+                    if (
+                        self.config.active_backend == HER_V2_ENGINE
+                        and persisted_mode == "fixed"
+                    ):
+                        # HER v2 has always been stateless.  Older ``her`` state
+                        # could retain its former CLI session mode when the
+                        # backend ID was upgraded, so repair only that legacy
+                        # combination at the same boundary that upgrades the ID.
+                        self.agent_mode = "flex"
+                        state["agent_mode"] = "flex"
+                        state_needs_repair = True
+                        self.logger.warning(
+                            "Migrated stale HER v2 agent_mode=fixed to flex."
+                        )
+                    else:
+                        self.agent_mode = persisted_mode
                 if "privacy_level" in state:
                     try:
                         self.privacy_level = parse_privacy_level(state["privacy_level"])

@@ -68,13 +68,7 @@ def parse_effort(value: Effort | str) -> Effort:
 
     if isinstance(value, Effort):
         return value
-    normalized = (
-        str(value or "")
-        .strip()
-        .casefold()
-        .replace("-", "_")
-        .replace(" ", "_")
-    )
+    normalized = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
     aliased = _EFFORT_ALIASES.get(normalized)
     return aliased if aliased is not None else Effort(normalized)
 
@@ -372,16 +366,20 @@ class SubAgentAssignment:
     tools: tuple[str, ...] = ()
     allow_side_effects: bool = False
     attachment_ids: tuple[str, ...] = ()
+    definition: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class SubAgentResult:
     assignment_id: str
+    plan_id: str
     disposition: ExecutionDisposition
     summary: str
     evidence_refs: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     attachment_ids: tuple[str, ...] = ()
+    source_plan_id: str = ""
+    reused: bool = False
 
 
 @dataclass(frozen=True)

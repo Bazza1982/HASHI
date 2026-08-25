@@ -89,10 +89,12 @@ class RuntimeSupportMixin:
     def _activate_plan(
         self, state: _TurnState, plan: Mapping[str, Any], *, replacement: bool
     ) -> None:
+        previous_plan_id = str(state.ledger.plan_id or "")
         state.plan_version += 1
         plan_id = f"{state.ledger.turn_id}:plan:v{state.plan_version}"
         state.ledger.activate_plan(plan_id, replacement=replacement)
         state.active_plan = dict(plan)
+        state.previous_plan_id = previous_plan_id if replacement else ""
         self.ledger_store.save(state.ledger)
 
     def _merge_execution_evidence(
@@ -225,8 +227,10 @@ class RuntimeSupportMixin:
         provenance: str = "",
         detail: str = "",
     ) -> bool:
-        if kind == "commentary":
-            raise ValueError("raw commentary cannot use the workflow delivery boundary")
+        if kind in {"commentary", "draft"}:
+            raise ValueError(
+                "raw commentary cannot use the workflow delivery boundary"
+            )
         if any(item.event_id == event_id for item in state.deliveries):
             return True
         delivery_id = ""
@@ -397,9 +401,12 @@ class RuntimeSupportMixin:
                 if resolution == "discard":
                     state.deliveries.pop(index)
                 else:
-                    kind = (
-                        "acknowledgement" if resolution == "commentary" else resolution
-                    )
+                    kind = resolution
+                    if (
+                        resolution == "commentary"
+                        and state.deliveries[index].kind != "draft"
+                    ):
+                        kind = "acknowledgement"
                     state.deliveries[index] = DeliveryRecord(
                         kind, text, target_event_id
                     )
@@ -417,6 +424,7 @@ class RuntimeSupportMixin:
         provider: str = "",
         model: str = "",
         attempt: int = 1,
+        plan_id: str | None = None,
         payload: Mapping[str, Any] | None = None,
     ) -> str:
         return self.audit_log.append(
@@ -429,7 +437,7 @@ class RuntimeSupportMixin:
             provider=provider,
             model=model,
             attempt=attempt,
-            plan_id=state.ledger.plan_id,
+            plan_id=plan_id if plan_id is not None else state.ledger.plan_id,
             payload=payload,
         )
 

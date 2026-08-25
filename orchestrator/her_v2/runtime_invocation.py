@@ -9,7 +9,10 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
-from orchestrator.her_json_repair import render_json_repair_input
+from orchestrator.her_json_repair import (
+    render_json_repair_input,
+    render_verification_report_repair_input,
+)
 from orchestrator.multimodal_contract import (
     attachment_manifest,
     canonical_request_content,
@@ -20,6 +23,7 @@ from .audit import AuditPersistenceError
 from .checkpoint import CompulsoryReplanCoordinator
 from .commentary import (
     CommentaryValidationError,
+    DraftResponseCommentary,
     commentary_from_stage_response,
 )
 from .config import ProviderProfile
@@ -29,7 +33,7 @@ from .interfaces import (
     StructuredOutputError,
     TurnStopped,
 )
-from .models import Stage, StageRequest, StageResponse, ToolEvidenceReceipt
+from .models import DeliveryRecord, Stage, StageRequest, StageResponse, ToolEvidenceReceipt
 from .progress import ProviderActivityTracker
 from .prompts import json_repair_schema_for_stage
 from .runtime_support import _payload_hash
@@ -79,8 +83,7 @@ def _used_typed_media_fallback(value: Any) -> bool:
         return False
     return any(
         isinstance(item, Mapping)
-        and str(item.get("reason") or "")
-        == "provider_typed_modality_unsupported"
+        and str(item.get("reason") or "") == "provider_typed_modality_unsupported"
         for item in value
     )
 
@@ -101,12 +104,16 @@ class RuntimeInvocationMixin:
         defer_structured_error: bool = False,
         retry_on_failure: bool = True,
         checkpoint_coordinator: CompulsoryReplanCoordinator | None = None,
+        bound_plan_id: str | None = None,
     ) -> tuple[StageResponse, Any]:
         if checkpoint_coordinator is not None and stage is not Stage.EXECUTION:
             raise ValueError(
                 "a compulsory Replan coordinator may be attached only to Execution"
             )
         selected = profile or self.config.profile_for(stage)
+        invocation_plan_id = (
+            str(bound_plan_id) if bound_plan_id is not None else state.ledger.plan_id
+        )
         role = role_override or (
             selected.name
             if profile is not None
@@ -148,7 +155,8 @@ class RuntimeInvocationMixin:
                 local_ref = str(item.get("local_ref") or "")
                 if local_ref:
                     stage_goal = stage_goal.replace(
-                        local_ref, "[attachment path available only through assignment manifest]"
+                        local_ref,
+                        "[attachment path available only through assignment manifest]",
                     )
             authorised_ids = {
                 str(item.get("attachment_id") or "")
@@ -196,7 +204,7 @@ class RuntimeInvocationMixin:
             "allow_side_effects": allow_side_effects,
             "delegated_tools": base_context.get("delegated_tools"),
             "workzone": self.workzone_ref or None,
-            "plan_id": state.ledger.plan_id,
+            "plan_id": invocation_plan_id,
             "attachments": [
                 {
                     "attachment_id": item.get("attachment_id"),
@@ -241,7 +249,7 @@ class RuntimeInvocationMixin:
                 goal=stage_goal,
                 classification=state.ledger.classification,
                 effort=state.effort,
-                plan_id=state.ledger.plan_id,
+                plan_id=invocation_plan_id,
                 context=attempt_context,
                 request_content=copy.deepcopy(stage_request_content),
                 attachment_manifest=tuple(
@@ -271,6 +279,7 @@ class RuntimeInvocationMixin:
                 provider=selected.engine,
                 model=selected.model,
                 attempt=attempt,
+                plan_id=invocation_plan_id,
                 payload={
                     "goal_ref": state.ledger.goal_ref,
                     "classification": (
@@ -312,6 +321,7 @@ class RuntimeInvocationMixin:
                     provider=response.provider or selected.engine,
                     model=response.model or selected.model,
                     attempt=attempt,
+                    plan_id=invocation_plan_id,
                     payload={
                         "text": response.text,
                         "data": dict(response.data),
@@ -342,7 +352,7 @@ class RuntimeInvocationMixin:
                     provider=response.provider or selected.engine,
                     model=response.model or selected.model,
                     attempt=attempt,
-                    plan_id=state.ledger.plan_id,
+                    plan_id=invocation_plan_id,
                     trace=response.reasoning_trace,
                 )
                 state.ledger.add_log_ref(reasoning_ref)
@@ -365,6 +375,7 @@ class RuntimeInvocationMixin:
                             provider=response.provider or selected.engine,
                             model=response.model or selected.model,
                             attempt=attempt,
+                            plan_id=invocation_plan_id,
                             payload={
                                 "validation_source": resolution.source,
                                 "rejected_candidates": [
@@ -390,6 +401,7 @@ class RuntimeInvocationMixin:
                                 required_schema=repair_schema,
                                 source_invocation_id=invocation_id,
                                 source_attempt=attempt,
+                                source_plan_id=invocation_plan_id,
                             )
                         except (TurnStopped, AuditPersistenceError):
                             raise
@@ -417,7 +429,9 @@ class RuntimeInvocationMixin:
                                 ),
                                 details={"validation_error": str(exc)},
                             ) from exc
-                        if stage is not Stage.EXECUTION or role.startswith("sub_agent:"):
+                        if stage is not Stage.EXECUTION or role.startswith(
+                            "sub_agent:"
+                        ):
                             raise
                         parsed = None
                         validation_source = "deferred_to_finalisation"
@@ -430,6 +444,7 @@ class RuntimeInvocationMixin:
                             provider=response.provider or selected.engine,
                             model=response.model or selected.model,
                             attempt=attempt,
+                            plan_id=invocation_plan_id,
                             payload={
                                 "validation_error": str(exc),
                                 "execution_replayed": False,
@@ -451,6 +466,7 @@ class RuntimeInvocationMixin:
                     provider=effective_response.provider or selected.engine,
                     model=effective_response.model or selected.model,
                     attempt=attempt,
+                    plan_id=invocation_plan_id,
                     payload={
                         "output": (
                             dict(effective_response.data)
@@ -482,8 +498,7 @@ class RuntimeInvocationMixin:
                             "invocation_id": invocation_id,
                             "attempt": attempt,
                             "decisions": [
-                                dict(item)
-                                for item in effective_response.media_routing
+                                dict(item) for item in effective_response.media_routing
                             ],
                         }
                     )
@@ -582,6 +597,7 @@ class RuntimeInvocationMixin:
                     provider=selected.engine,
                     model=selected.model,
                     attempt=attempt,
+                    plan_id=invocation_plan_id,
                     payload={
                         **last_error.audit_payload(),
                         "will_retry": will_retry,
@@ -632,6 +648,7 @@ class RuntimeInvocationMixin:
                 retry_delay=retry_delay,
                 retry_invariant_hash=retry_invariant_hash,
                 invocation_id=invocation_id,
+                plan_id=invocation_plan_id,
             )
 
     async def _invoke_json_repair(
@@ -648,11 +665,33 @@ class RuntimeInvocationMixin:
         required_schema: Mapping[str, Any],
         source_invocation_id: str,
         source_attempt: int,
+        source_plan_id: str | None,
     ) -> tuple[StageResponse, Any]:
         """Repair only a rejected JSON envelope without replaying its stage."""
 
         role = "json_repair_specialist"
         invocation_id = f"{source_invocation_id}:json-repair"
+        verification_report_repair = bool(
+            source_stage is Stage.VERIFICATION and preserved_response.tool_receipts
+        )
+        frozen_tool_receipts = [
+            _tool_receipt_payload(receipt)
+            for receipt in preserved_response.tool_receipts
+        ]
+        frozen_evidence_refs = list(
+            dict.fromkeys(
+                (
+                    *preserved_response.evidence_refs,
+                    *(
+                        receipt.evidence_ref
+                        for receipt in preserved_response.tool_receipts
+                    ),
+                )
+            )
+        )
+        repair_mode = (
+            "verification_report" if verification_report_repair else "json_schema"
+        )
         invariant_payload = {
             "provider": selected.engine,
             "model": selected.model,
@@ -661,6 +700,17 @@ class RuntimeInvocationMixin:
             "source_invocation_id": source_invocation_id,
             "source_attempt": source_attempt,
             "required_schema_sha256": _payload_hash(required_schema),
+            "repair_mode": repair_mode,
+            "frozen_evidence_sha256": (
+                _payload_hash(
+                    {
+                        "tool_receipts": frozen_tool_receipts,
+                        "evidence_refs": frozen_evidence_refs,
+                    }
+                )
+                if verification_report_repair
+                else None
+            ),
             "allow_tools": False,
             "allow_side_effects": False,
             "workzone": self.workzone_ref or None,
@@ -675,11 +725,20 @@ class RuntimeInvocationMixin:
             repair_attempt += 1
             if state.control.stopped:
                 raise TurnStopped(state.control.reason)
-            repair_input = render_json_repair_input(
-                rejected_output=_rejected_output(current_rejected),
-                required_schema=required_schema,
-                validation_error=str(current_error),
-            )
+            if verification_report_repair:
+                repair_input = render_verification_report_repair_input(
+                    rejected_output=_rejected_output(current_rejected),
+                    required_schema=required_schema,
+                    validation_error=str(current_error),
+                    frozen_tool_receipts=frozen_tool_receipts,
+                    frozen_evidence_refs=frozen_evidence_refs,
+                )
+            else:
+                repair_input = render_json_repair_input(
+                    rejected_output=_rejected_output(current_rejected),
+                    required_schema=required_schema,
+                    validation_error=str(current_error),
+                )
             retry_invariant_hash = _payload_hash(
                 {
                     "source_invariant_hash": source_invariant_hash,
@@ -698,10 +757,12 @@ class RuntimeInvocationMixin:
                 goal=repair_input,
                 classification=None,
                 effort=state.effort,
+                plan_id=source_plan_id,
                 context={
                     "json_repair_input": repair_input,
                     "source_stage": source_stage.value,
                     "source_invocation_id": source_invocation_id,
+                    "repair_mode": repair_mode,
                 },
                 request_content=None,
                 attachment_manifest=(),
@@ -723,11 +784,14 @@ class RuntimeInvocationMixin:
                 provider=selected.engine,
                 model=selected.model,
                 attempt=repair_attempt,
+                plan_id=source_plan_id,
                 payload={
                     "source_stage": source_stage.value,
                     "source_role": source_role,
                     "source_invocation_id": source_invocation_id,
                     "source_attempt": source_attempt,
+                    "repair_mode": repair_mode,
+                    "frozen_receipt_count": len(frozen_tool_receipts),
                     "allow_tools": False,
                     "allow_side_effects": False,
                     "retry_invariant_hash": retry_invariant_hash,
@@ -751,6 +815,7 @@ class RuntimeInvocationMixin:
                     provider=response.provider or selected.engine,
                     model=response.model or selected.model,
                     attempt=repair_attempt,
+                    plan_id=source_plan_id,
                     payload={
                         "text": response.text,
                         "data": dict(response.data),
@@ -769,7 +834,7 @@ class RuntimeInvocationMixin:
                     provider=response.provider or selected.engine,
                     model=response.model or selected.model,
                     attempt=repair_attempt,
-                    plan_id=state.ledger.plan_id,
+                    plan_id=source_plan_id,
                     trace=response.reasoning_trace,
                 )
                 state.ledger.add_log_ref(reasoning_ref)
@@ -795,13 +860,13 @@ class RuntimeInvocationMixin:
                     provider=response.provider or selected.engine,
                     model=response.model or selected.model,
                     attempt=repair_attempt,
+                    plan_id=source_plan_id,
                     payload={
                         "source_stage": source_stage.value,
                         "source_stage_replayed": False,
+                        "repair_mode": repair_mode,
                         "output": (
-                            dict(effective.data)
-                            if effective.data
-                            else effective.text
+                            dict(effective.data) if effective.data else effective.text
                         ),
                         "preserved_evidence_refs": list(
                             preserved_response.evidence_refs
@@ -839,12 +904,9 @@ class RuntimeInvocationMixin:
                 retry_kind = "provider_recovery"
             except Exception as exc:
                 current_error = StageInvocationError(
-                    "JSON repair provider failure: "
-                    f"{type(exc).__name__}: {exc}",
+                    f"JSON repair provider failure: {type(exc).__name__}: {exc}",
                     code=ProviderFailureCode.PROVIDER_UNKNOWN,
-                    human_description=(
-                        "The JSON repair provider failed unexpectedly."
-                    ),
+                    human_description=("The JSON repair provider failed unexpectedly."),
                 )
                 retry_kind = "provider_recovery"
                 retry_reason = (
@@ -873,6 +935,7 @@ class RuntimeInvocationMixin:
                 provider=selected.engine,
                 model=selected.model,
                 attempt=repair_attempt,
+                plan_id=source_plan_id,
                 payload={
                     **current_error.audit_payload(),
                     "source_stage": source_stage.value,
@@ -910,6 +973,7 @@ class RuntimeInvocationMixin:
                 retry_delay=retry_delay,
                 retry_invariant_hash=retry_invariant_hash,
                 invocation_id=invocation_id,
+                plan_id=source_plan_id,
                 same_goal=retry_kind != "structured_repair",
             )
 
@@ -988,6 +1052,142 @@ class RuntimeInvocationMixin:
         if accepted:
             state.progress.record("commentary", commentary.text)
 
+    async def _advance_execution_draft_commentary(
+        self,
+        state: _TurnState,
+        *,
+        response: str,
+    ) -> bool:
+        """Make each completed Primary Execution response immediately visible.
+
+        The newest response owns the replaceable Telegram message.  When Review
+        causes another Execution pass, the previous draft is first retained as
+        permanent commentary and the new response becomes the provisional one.
+        Presentation failure never blocks Review or Finalisation.
+        """
+
+        next_serial = state.execution_draft_serial + 1
+        base_event_id = f"{state.ledger.turn_id}:execution:draft"
+        event_id = (
+            base_event_id
+            if next_serial == 1
+            else f"{base_event_id}:{next_serial}"
+        )
+        try:
+            candidate = DraftResponseCommentary(
+                event_id=event_id,
+                turn_id=state.ledger.turn_id,
+                response=response,
+            )
+        except CommentaryValidationError:
+            # Preserve the existing rejected-event audit contract.
+            return await self._publish_execution_draft_commentary(
+                state,
+                response=response,
+                event_id=event_id,
+            )
+
+        previous_event_id = state.execution_draft_event_id
+        previous_text = state.execution_draft_text
+        previous_delivered = bool(
+            state.execution_draft_delivered and previous_event_id
+        )
+        previous_solidified = False
+        if previous_delivered:
+            previous_solidified = await self._resolve_initial(
+                state,
+                resolution="commentary",
+                text=previous_text,
+                target_event_id=previous_event_id,
+                event_id=f"{previous_event_id}:commentary",
+            )
+
+        state.execution_draft_serial = next_serial
+        accepted = await self._publish_execution_draft_commentary(
+            state,
+            response=candidate.response,
+            event_id=event_id,
+        )
+        if accepted:
+            state.execution_draft_event_id = event_id
+            state.execution_draft_text = candidate.text
+            state.execution_draft_delivered = True
+        elif previous_delivered and not previous_solidified:
+            # If neither operation reached transport, keep the last known
+            # provisional target available for the eventual Final response.
+            state.execution_draft_event_id = previous_event_id
+            state.execution_draft_text = previous_text
+            state.execution_draft_delivered = True
+        else:
+            state.execution_draft_event_id = ""
+            state.execution_draft_text = ""
+            state.execution_draft_delivered = False
+        return accepted
+
+    async def _publish_execution_draft_commentary(
+        self,
+        state: _TurnState,
+        *,
+        response: str,
+        event_id: str,
+    ) -> bool:
+        """Publish an exact replaceable draft only through the typed lane."""
+
+        try:
+            commentary = DraftResponseCommentary(
+                event_id=event_id,
+                turn_id=state.ledger.turn_id,
+                response=response,
+            )
+        except CommentaryValidationError as exc:
+            self._audit_optional_commentary(
+                state,
+                event="draft_commentary_rejected",
+                event_id=f"{event_id}:rejected",
+                payload={"reason": str(exc), "workflow_authority": False},
+            )
+            return False
+
+        accepted = False
+        error_type = ""
+        publisher = getattr(self.commentary, "publish_draft", None)
+        if not callable(publisher):
+            error_type = "draft_commentary_path_unavailable"
+        else:
+            try:
+                accepted = bool(await publisher(commentary))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - provisional display is optional
+                error_type = type(exc).__name__
+                self.logger.warning(
+                    "HER v2 draft commentary lane failed safely: %s", exc
+                )
+        self._audit_optional_commentary(
+            state,
+            event="draft_commentary_publish_result",
+            event_id=f"{event_id}:publish",
+            payload={
+                "stage": Stage.EXECUTION.value,
+                "accepted": accepted,
+                "error_type": error_type or None,
+                "text_sha256": hashlib.sha256(
+                    commentary.text.encode("utf-8")
+                ).hexdigest(),
+                "text_length": len(commentary.text),
+                "exact_primary_execution_text": True,
+                "replaceable": accepted,
+                "workflow_authority": False,
+            },
+        )
+        if accepted:
+            if all(item.event_id != event_id for item in state.deliveries):
+                state.deliveries.append(
+                    DeliveryRecord("draft", commentary.text, event_id)
+                )
+            state.progress.record("commentary", commentary.text)
+        return accepted
+
     def _audit_optional_commentary(
         self,
         state: _TurnState,
@@ -1048,6 +1248,7 @@ class RuntimeInvocationMixin:
         retry_delay: float,
         retry_invariant_hash: str,
         invocation_id: str,
+        plan_id: str | None = None,
         same_goal: bool = True,
     ) -> None:
         """Audit and wait for a same-route fresh-connection recovery."""
@@ -1077,6 +1278,7 @@ class RuntimeInvocationMixin:
             provider=provider,
             model=model,
             attempt=attempt,
+            plan_id=plan_id,
             payload={
                 "retry_kind": retry_kind,
                 "failed_attempt": attempt,

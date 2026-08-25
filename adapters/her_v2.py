@@ -80,6 +80,20 @@ class _ExecutionStageCompactionProvider:
         self._on_execution = on_execution
         self._scheduled = False
 
+    def tool_catalogue(
+        self,
+        *,
+        allow_side_effects: bool,
+        delegated_tools=None,
+    ):
+        resolver = getattr(self._base, "tool_catalogue", None)
+        if not callable(resolver):
+            return ()
+        return resolver(
+            allow_side_effects=allow_side_effects,
+            delegated_tools=delegated_tools,
+        )
+
     async def invoke(
         self,
         profile: ProviderProfile,
@@ -925,8 +939,11 @@ class HERv2Adapter(BaseBackend):
         )
         delivery = _AdapterDelivery(
             on_stream_event,
-            allow_early=(
+            allow_immediate_response=(
                 not silent
+                # The state loader normalises HER v2's retired ``fixed`` value
+                # to ``flex``. Other working modes own their final presentation,
+                # so only plain Flex may publish a pre-Triage direct response.
                 and str(getattr(self._backend_manager(), "agent_mode", "flex"))
                 .strip()
                 .lower()

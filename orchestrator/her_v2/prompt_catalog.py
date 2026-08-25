@@ -35,6 +35,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
     "system_execution": frozenset(
         {
             "active_plan",
+            "delegated_execution",
             "goal",
             "persona_block_begin",
             "persona_block_end",
@@ -62,11 +63,20 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
         {"persona_block_begin", "persona_block_end", "persona_guidance"}
     ),
     "system_planning": frozenset(
-        {"all_active_habits", "classification", "goal", "schema"}
+        {
+            "all_active_habits",
+            "available_execution_tools",
+            "available_sub_agent_profiles",
+            "classification",
+            "goal",
+            "schema",
+        }
     ),
     "system_replanning": frozenset(
         {
             "active_plan",
+            "available_execution_tools",
+            "available_sub_agent_profiles",
             "classification",
             "goal",
             "plan_edit_history",
@@ -79,6 +89,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
     ),
     "system_sub_agent": frozenset(),
     "system_triage": frozenset({"goal", "schema"}),
+    "system_verification_report_repair": frozenset(),
 }
 
 

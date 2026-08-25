@@ -541,6 +541,26 @@ class HERv2Config:
             return replace(profile, model=model)
         return replace(profile, engine=target.engine, model=target.model)
 
+    def sub_agent_execution_profile_names(self) -> tuple[str, ...]:
+        """Return the configured profiles that may execute delegated work.
+
+        Delegated assignments select an execution route profile, not an
+        arbitrary stage role such as Triage or Review.  Deriving this catalogue
+        from the three execution routes keeps Planning, Replanning, and Runtime
+        validation aligned when profiles or route fallbacks are customised.
+        """
+
+        names: list[str] = []
+        for classification in (
+            TriageClassification.SIMPLE_TASK,
+            TriageClassification.COMPLEX_TASK,
+            TriageClassification.HIGH_VOLUME_TASK,
+        ):
+            name = self.execution_profile_for(classification).name
+            if name not in names:
+                names.append(name)
+        return tuple(names)
+
     def all_provider_profiles(self) -> tuple[ProviderProfile, ...]:
         """Return every provider/model pair that active routing can invoke."""
 

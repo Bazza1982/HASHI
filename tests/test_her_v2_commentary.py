@@ -10,6 +10,7 @@ from adapters.her_persona import HERPersonaPackagingSource
 from adapters.her_v2 import _AdapterDelivery, _ConfiguredPersonaPackager
 from orchestrator.her_v2.commentary import (
     CommentaryValidationError,
+    DraftResponseCommentary,
     NeutralCommentary,
     PackagedCommentary,
     PersonaCommentaryPipeline,
@@ -86,15 +87,45 @@ async def test_commentary_pipeline_packages_before_delivery_and_deduplicates_rep
 
 
 @pytest.mark.asyncio
-async def test_generic_delivery_boundary_rejects_raw_commentary_strings():
-    delivery = _AdapterDelivery(lambda _event: None, allow_early=True)
+async def test_draft_response_uses_typed_commentary_delivery_without_rewriting():
+    timeline = []
+    packager = _RecordingPackager(timeline)
+    delivery = _RecordingDelivery(timeline)
+    pipeline = PersonaCommentaryPipeline(packager=packager, delivery=delivery)
+    draft = DraftResponseCommentary(
+        event_id="turn:execution:draft",
+        turn_id="turn",
+        response="Exact Primary Execution response.",
+    )
 
-    with pytest.raises(ValueError, match="raw commentary"):
-        await delivery.deliver(
-            kind="commentary",
-            text="unpackaged text",
-            event_id="turn:raw",
-        )
+    accepted = await asyncio.gather(
+        pipeline.publish_draft(draft),
+        pipeline.publish_draft(draft),
+    )
+
+    assert accepted == [True, True]
+    assert packager.calls == []
+    assert len(delivery.calls) == 1
+    packaged = delivery.calls[0]
+    assert packaged.draft_response is True
+    assert packaged.text == "DRAFT RESPONSE\n\nExact Primary Execution response."
+    assert packaged.provenance == "primary_execution_draft"
+
+
+@pytest.mark.asyncio
+async def test_generic_delivery_boundary_rejects_raw_commentary_strings():
+    delivery = _AdapterDelivery(
+        lambda _event: None,
+        allow_immediate_response=True,
+    )
+
+    for kind in ("commentary", "draft"):
+        with pytest.raises(ValueError, match="raw commentary"):
+            await delivery.deliver(
+                kind=kind,
+                text="unpackaged text",
+                event_id=f"turn:raw:{kind}",
+            )
 
 
 def test_optional_commentary_extraction_is_bounded_and_stage_scoped():

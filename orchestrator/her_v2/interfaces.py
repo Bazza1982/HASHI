@@ -264,6 +264,17 @@ class RecordingDelivery:
         self.records.append(DeliveryRecord(kind=kind, text=text, event_id=event_id))
         return True
 
+    async def deliver_packaged_commentary(self, commentary: Any) -> bool:
+        event_id = str(getattr(commentary, "source_event_id", "") or "")
+        text = str(getattr(commentary, "text", "") or "")
+        if not event_id or not text:
+            return False
+        kind = "draft" if getattr(commentary, "draft_response", False) else "commentary"
+        if any(item.event_id == event_id for item in self.records):
+            return True
+        self.records.append(DeliveryRecord(kind=kind, text=text, event_id=event_id))
+        return True
+
     async def resolve_initial(
         self,
         *,
@@ -287,7 +298,9 @@ class RecordingDelivery:
         if resolution == "discard":
             self.records.pop(index)
         else:
-            kind = "acknowledgement" if resolution == "commentary" else resolution
+            kind = resolution
+            if resolution == "commentary" and self.records[index].kind != "draft":
+                kind = "acknowledgement"
             self.records[index] = DeliveryRecord(kind, text, target_event_id)
         return DeliveryReceipt(True, True, f"provisional_{resolution}")
 

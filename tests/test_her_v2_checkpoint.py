@@ -127,9 +127,7 @@ def test_replanning_three_question_contract_is_strict_and_commentary_can_fallbac
     assert result.completion_percent == 60
     assert result.plan_changed is False
 
-    fallback = parse_replanning(
-        StageResponse(data=_valid_replan_data(commentary=None))
-    )
+    fallback = parse_replanning(StageResponse(data=_valid_replan_data(commentary=None)))
     assert fallback.commentary == ""
 
     invalid_cases = [
@@ -143,12 +141,40 @@ def test_replanning_three_question_contract_is_strict_and_commentary_can_fallbac
         ({"next_step": ""}, "next_step"),
         ({"success_criteria": []}, "success_criteria"),
         ({"goal": "replacement goal"}, "cannot replace"),
+        (
+            {
+                "sub_agents": [
+                    {
+                        "id": "worker",
+                        "task": "Inspect",
+                        "profile": "lightweight",
+                        "tools": [],
+                        "allow_side_effects": False,
+                    }
+                ],
+                "parallel_groups": [["missing"]],
+            },
+            "unknown sub-agent assignment IDs",
+        ),
+        (
+            {
+                "sub_agents": [
+                    {
+                        "id": "worker",
+                        "task": "Inspect",
+                        "profile": "lightweight",
+                        "tools": [],
+                        "allow_side_effects": False,
+                    }
+                ],
+                "parallel_groups": [["worker"], ["worker"]],
+            },
+            "only one parallel group",
+        ),
     ]
     for override, message in invalid_cases:
         with pytest.raises(StructuredOutputError, match=message):
-            parse_replanning(
-                StageResponse(data=_valid_replan_data(**override))
-            )
+            parse_replanning(StageResponse(data=_valid_replan_data(**override)))
 
 
 def test_legacy_replan_count_limits_are_rejected_configuration():
@@ -585,6 +611,18 @@ class ReplanJourneyProvider:
         self._receipt_serial = 0
         self._advanced_before_tool = False
 
+    def tool_catalogue(self, *, allow_side_effects, delegated_tools=None):
+        del allow_side_effects
+        if delegated_tools is not None and "test_tool" not in delegated_tools:
+            return ()
+        return (
+            {
+                "type": "function",
+                "function": {"name": "test_tool"},
+                "hashi_read_only": True,
+            },
+        )
+
     async def invoke(self, profile, request):
         del profile
         self.requests.append(request)
@@ -692,9 +730,7 @@ def _journey_runtime(tmp_path, provider, *, clock=None, commentary=None):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("effort", ["low", "medium"])
-async def test_low_and_medium_never_install_compulsory_replan(
-    tmp_path, effort
-):
+async def test_low_and_medium_never_install_compulsory_replan(tmp_path, effort):
     provider = ReplanJourneyProvider(tool_results=10)
     result = await _journey_runtime(tmp_path, provider).run_turn(
         "Complete the authorised task", f"ineligible-{effort}", effort=effort
@@ -702,15 +738,15 @@ async def test_low_and_medium_never_install_compulsory_replan(
     assert result.terminal_state.value == "COMPLETED"
     assert result.replan_count == 0
     assert result.checkpoint_count == 0
-    execution = next(item for item in provider.requests if item.stage is Stage.EXECUTION)
+    execution = next(
+        item for item in provider.requests if item.stage is Stage.EXECUTION
+    )
     assert execution.checkpoint_coordinator is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("effort", ["high", "xhigh", "max"])
-async def test_high_and_above_install_by_effort(
-    tmp_path, effort
-):
+async def test_high_and_above_install_by_effort(tmp_path, effort):
     class AssuranceProvider(ReplanJourneyProvider):
         async def invoke(self, profile, request):
             if request.stage is Stage.REVIEW:
@@ -719,34 +755,60 @@ async def test_high_and_above_install_by_effort(
                 prefix = request.invocation_id
                 receipts = (
                     ToolEvidenceReceipt(
-                        f"{prefix}:before", Stage.VERIFICATION, prefix, request.attempt,
-                        "before", "workspace_inspect", ToolReceiptStatus.SUCCESS,
-                        True, True, "before", {"operation": "snapshot", "snapshot_sha256": "stable"},
+                        f"{prefix}:before",
+                        Stage.VERIFICATION,
+                        prefix,
+                        request.attempt,
+                        "before",
+                        "workspace_inspect",
+                        ToolReceiptStatus.SUCCESS,
+                        True,
+                        True,
+                        "before",
+                        {"operation": "snapshot", "snapshot_sha256": "stable"},
                     ),
                     ToolEvidenceReceipt(
-                        f"{prefix}:check", Stage.VERIFICATION, prefix, request.attempt,
-                        "check", "workspace_inspect", ToolReceiptStatus.SUCCESS,
-                        True, True, "check", {"operation": "diff", "exit_code": 0},
+                        f"{prefix}:check",
+                        Stage.VERIFICATION,
+                        prefix,
+                        request.attempt,
+                        "check",
+                        "workspace_inspect",
+                        ToolReceiptStatus.SUCCESS,
+                        True,
+                        True,
+                        "check",
+                        {"operation": "diff", "exit_code": 0},
                     ),
                     ToolEvidenceReceipt(
-                        f"{prefix}:after", Stage.VERIFICATION, prefix, request.attempt,
-                        "after", "workspace_inspect", ToolReceiptStatus.SUCCESS,
-                        True, True, "after", {"operation": "snapshot", "snapshot_sha256": "stable"},
+                        f"{prefix}:after",
+                        Stage.VERIFICATION,
+                        prefix,
+                        request.attempt,
+                        "after",
+                        "workspace_inspect",
+                        ToolReceiptStatus.SUCCESS,
+                        True,
+                        True,
+                        "after",
+                        {"operation": "snapshot", "snapshot_sha256": "stable"},
                     ),
                 )
                 return StageResponse(
                     data={
                         "outcome": "VERIFIED",
                         "summary": "Verified.",
-                        "checks": [{
-                            "claim": "Current result",
-                            "verifiability": "VERIFIABLE",
-                            "result": "VERIFIED",
-                            "method": "workspace_diff",
-                            "evidence_refs": [receipts[1].evidence_ref],
-                            "observed": "Current evidence passed.",
-                            "required": True,
-                        }],
+                        "checks": [
+                            {
+                                "claim": "Current result",
+                                "verifiability": "VERIFIABLE",
+                                "result": "VERIFIED",
+                                "method": "workspace_diff",
+                                "evidence_refs": [receipts[1].evidence_ref],
+                                "observed": "Current evidence passed.",
+                                "required": True,
+                            }
+                        ],
                         "evidence_refs": [receipts[1].evidence_ref],
                     },
                     evidence_refs=tuple(item.evidence_ref for item in receipts),
@@ -759,7 +821,9 @@ async def test_high_and_above_install_by_effort(
         "Complete the authorised task", f"eligible-{effort}", effort=effort
     )
     assert result.terminal_state.value == "COMPLETED"
-    execution = next(item for item in provider.requests if item.stage is Stage.EXECUTION)
+    execution = next(
+        item for item in provider.requests if item.stage is Stage.EXECUTION
+    )
     assert execution.checkpoint_coordinator is not None
     assert result.replan_count == 0
 
@@ -774,9 +838,9 @@ async def test_tenth_result_forces_lifecycle_replan_plan_version_and_commentary(
         replans=[replan],
     )
     commentary = RecordingCommentaryPort()
-    result = await _journey_runtime(
-        tmp_path, provider, commentary=commentary
-    ).run_turn("Complete all acceptance criteria", "count-replan", effort="high")
+    result = await _journey_runtime(tmp_path, provider, commentary=commentary).run_turn(
+        "Complete all acceptance criteria", "count-replan", effort="high"
+    )
 
     assert result.terminal_state.value == "COMPLETED"
     assert result.replan_count == 1
@@ -807,9 +871,18 @@ async def test_tenth_result_forces_lifecycle_replan_plan_version_and_commentary(
     assert forbidden_limits.isdisjoint(StageRequest.__dataclass_fields__)
     assert set(replan_request.context) == {
         "active_plan",
+        "available_execution_tools",
+        "execution_allow_side_effects",
         "plan_edit_history",
         "workflow_state_and_evidence",
     }
+    assert replan_request.context["available_execution_tools"] == [
+        {
+            "type": "function",
+            "function": {"name": "test_tool"},
+            "hashi_read_only": True,
+        }
+    ]
     workflow_evidence = replan_request.context["workflow_state_and_evidence"]
     assert forbidden_limits.isdisjoint(workflow_evidence)
     assert workflow_evidence["replan_trigger"]["cadence_triggered"] is True
@@ -876,9 +949,12 @@ async def test_tool_free_completion_boundary_cannot_bypass_due_replan(tmp_path):
     ][1]
     continuation = second_execution.context["replan_continuation"]
     assert continuation["completion_percent"] == 60
-    assert second_execution.context["continuation_rules"][
-        "never_repeat_completed_side_effects_because_of_replanning"
-    ] is True
+    assert (
+        second_execution.context["continuation_rules"][
+            "never_repeat_completed_side_effects_because_of_replanning"
+        ]
+        is True
+    )
 
 
 @pytest.mark.asyncio
@@ -895,9 +971,9 @@ async def test_replan_100_stops_more_tools_and_routes_directly_to_review(tmp_pat
         review=True,
     )
     commentary = RecordingCommentaryPort()
-    result = await _journey_runtime(
-        tmp_path, provider, commentary=commentary
-    ).run_turn("Complete and review the task", "complete-replan", effort="xhigh")
+    result = await _journey_runtime(tmp_path, provider, commentary=commentary).run_turn(
+        "Complete and review the task", "complete-replan", effort="xhigh"
+    )
 
     assert result.terminal_state.value == "COMPLETED"
     assert provider.executed_tools == 10
@@ -915,9 +991,9 @@ async def test_missing_model_commentary_uses_verified_deterministic_fallback_onc
     replan = _valid_replan_data(commentary=None)
     provider = ReplanJourneyProvider(tool_results=10, replans=[replan])
     commentary = RecordingCommentaryPort()
-    result = await _journey_runtime(
-        tmp_path, provider, commentary=commentary
-    ).run_turn("Complete the task", "commentary-fallback", effort="high")
+    result = await _journey_runtime(tmp_path, provider, commentary=commentary).run_turn(
+        "Complete the task", "commentary-fallback", effort="high"
+    )
 
     assert result.terminal_state.value == "COMPLETED"
     assert len(commentary.records) == 1
@@ -950,9 +1026,9 @@ async def test_commentary_missing_changed_plan_status_uses_fallback_once(tmp_pat
     provider = ReplanJourneyProvider(tool_results=10, replans=[replan])
     commentary = RecordingCommentaryPort()
 
-    result = await _journey_runtime(
-        tmp_path, provider, commentary=commentary
-    ).run_turn("Complete the task", "changed-status-fallback", effort="high")
+    result = await _journey_runtime(tmp_path, provider, commentary=commentary).run_turn(
+        "Complete the task", "changed-status-fallback", effort="high"
+    )
 
     assert result.terminal_state.value == "COMPLETED"
     assert len(commentary.records) == 1
@@ -981,9 +1057,9 @@ async def test_oversized_replan_update_uses_bounded_fallback_without_stopping_wo
     provider = ReplanJourneyProvider(tool_results=10, replans=[replan])
     commentary = RecordingCommentaryPort()
 
-    result = await _journey_runtime(
-        tmp_path, provider, commentary=commentary
-    ).run_turn("Complete the task", "bounded-replan-update", effort="high")
+    result = await _journey_runtime(tmp_path, provider, commentary=commentary).run_turn(
+        "Complete the task", "bounded-replan-update", effort="high"
+    )
 
     assert result.terminal_state.value == "COMPLETED"
     assert result.replan_count == 1

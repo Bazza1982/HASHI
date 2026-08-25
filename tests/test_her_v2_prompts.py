@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
+from orchestrator.her_json_repair import render_verification_report_repair_input
 from orchestrator.her_v2 import prompt_catalog
 from orchestrator.her_v2.models import (
     Effort,
@@ -69,6 +71,40 @@ def test_json_repair_prompt_is_generic_tool_free_and_data_driven() -> None:
     )
     assert render_stage_prompt(request) == request.context["json_repair_input"]
     assert render_internal_stage_system_prompt(request) == prompt
+
+
+def test_verification_report_repair_receives_frozen_evidence_without_tools() -> None:
+    repair_input = render_verification_report_repair_input(
+        rejected_output='{"outcome":"VERIFIED"}',
+        required_schema={"outcome": "VERIFIED | PARTIALLY_VERIFIED"},
+        validation_error=(
+            "verification method 'read_only_api' lacks a matching tool receipt"
+        ),
+        frozen_tool_receipts=[
+            {
+                "evidence_ref": "receipt:file-list",
+                "tool_name": "file_list",
+                "status": "SUCCESS",
+                "completed": True,
+            }
+        ],
+        frozen_evidence_refs=["receipt:file-list"],
+    )
+    request = _request(
+        Stage.JSON_REPAIR,
+        json_repair_input=repair_input,
+        repair_mode="verification_report",
+    )
+
+    payload = json.loads(render_stage_prompt(request))
+    system_prompt = render_internal_stage_system_prompt(request)
+
+    assert payload["frozen_tool_receipts"][0]["tool_name"] == "file_list"
+    assert payload["frozen_evidence_refs"] == ["receipt:file-list"]
+    assert system_prompt is not None
+    assert "Verification Report Repair Agent" in system_prompt
+    assert "Do not call tools" in system_prompt
+    assert "Do not convert successful evidence into `UNAVAILABLE`" in system_prompt
 
 
 def test_every_live_json_contract_routes_to_specialist_schema() -> None:
@@ -145,7 +181,9 @@ def test_every_stage_prompt_renders_from_validated_assets(stage: Stage) -> None:
 
 def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> None:
     request = _request(Stage.EXECUTION, sub_agent=True)
-    assert "bounded HER v2 sub-agent" in render_internal_stage_system_prompt(request)
+    assert render_internal_stage_system_prompt(request) == (
+        "Follow the supplied assignment and authority envelope exactly."
+    )
 
     common = {
         "guidance": "Speak plainly.",
@@ -189,12 +227,18 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
     execution = render_execution_system_prompt(
         goal="Inspect and report the current state.",
         active_plan={"plan": ["inspect", "report"]},
+        delegated_execution={
+            "plan_id": "turn-1:plan:v1",
+            "results": [{"assignment_id": "worker", "summary": "Inspected."}],
+        },
         tool_catalogue=[{"function": {"name": "file_read"}}],
         **common,
     )
     assert "Inspect and report the current state." in execution
     assert '"inspect"' in execution
     assert '"name": "file_read"' in execution
+    assert '"plan_id": "turn-1:plan:v1"' in execution
+    assert '"assignment_id": "worker"' in execution
     assert "Speak plainly." in execution
     assert "Return exactly one JSON object" not in execution
     assert "$goal" not in execution
@@ -257,8 +301,13 @@ def test_primary_execution_uses_natural_language_prompt_while_subagent_keeps_jso
 
     assert render_stage_prompt(primary) == primary.goal
     assert render_internal_stage_system_prompt(primary) is None
-    assert "Return exactly one JSON object" in render_stage_prompt(subagent)
-    assert "bounded HER v2 sub-agent" in render_internal_stage_system_prompt(subagent)
+    subagent_prompt = render_stage_prompt(subagent)
+    assert "Return exactly one JSON object" in subagent_prompt
+    assert "Bounded assignment and authority envelope" in subagent_prompt
+    assert '"may_replan": false' in subagent_prompt
+    assert render_internal_stage_system_prompt(subagent) == (
+        "Follow the supplied assignment and authority envelope exactly."
+    )
 
 
 def test_planning_binds_high_volume_assignments_to_runtime_plan_snapshot() -> None:
@@ -274,6 +323,50 @@ def test_planning_binds_high_volume_assignments_to_runtime_plan_snapshot() -> No
     assert "unrelated historical batches" in prompt
 
 
+def test_planning_renders_exact_available_subagent_profile_names() -> None:
+    request = _request(
+        Stage.PLANNING,
+        available_sub_agent_profiles=["lightweight", "premium", "orchestrator"],
+    )
+
+    rendered = render_stage_prompt(request)
+
+    assert '["lightweight", "premium", "orchestrator"]' in rendered
+    assert "Do not invent aliases such as `default`" in rendered
+    assert "$available_sub_agent_profiles" not in rendered
+
+
+@pytest.mark.parametrize("stage", [Stage.PLANNING, Stage.REPLANNING])
+def test_planning_roles_receive_exact_registered_tool_catalogue(stage: Stage) -> None:
+    request = _request(
+        stage,
+        available_execution_tools=[
+            {
+                "type": "function",
+                "function": {"name": "file_read"},
+                "hashi_read_only": True,
+            },
+            {
+                "type": "function",
+                "function": {"name": "file_write"},
+                "hashi_read_only": False,
+            },
+        ],
+    )
+
+    rendered = render_stage_prompt(request)
+
+    assert '"name": "file_read"' in rendered
+    assert '"name": "file_write"' in rendered
+    assert '"hashi_read_only": true' in rendered
+    assert "Never invent a tool or capability name" in rendered
+    assert "$available_execution_tools" not in rendered
+    if stage is Stage.PLANNING:
+        assert "Never add multiple progress messages" in rendered
+    else:
+        assert "Produce exactly one concise user-facing commentary" in rendered
+
+
 def test_replanning_requires_explicit_reuse_in_replacement_plan() -> None:
     prompt = prompt_catalog.load_prompt_asset("system_replanning")
 
@@ -281,9 +374,7 @@ def test_replanning_requires_explicit_reuse_in_replacement_plan() -> None:
         "Results and assignments from the previous plan do not automatically enter"
         in prompt
     )
-    assert (
-        "explicitly preserves or redefines the corresponding assignment" in prompt
-    )
+    assert "explicitly preserves or redefines the corresponding assignment" in prompt
     assert "combination of `plan_id` and assignment `id`" in prompt
     assert "must not search for or adopt unrelated historical batches" in prompt
 

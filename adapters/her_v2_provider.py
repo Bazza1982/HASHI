@@ -9,8 +9,9 @@ import json
 import logging
 import re
 import ssl
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import httpx
 
@@ -532,22 +533,25 @@ def _registry_allowed_names(registry: Any) -> tuple[str, ...]:
     names = getattr(registry, "allowed_tool_names", None)
     if callable(names):
         return tuple(str(item) for item in names() if str(item).strip())
-    definitions = getattr(registry, "get_tool_definitions", None)
-    if not callable(definitions):
-        return ()
     result: list[str] = []
-    try:
-        available = definitions(tiers=None)
-    except TypeError:
-        # Older or third-party registries may not expose tier filtering.
-        available = definitions()
-    for item in available:
-        if not isinstance(item, Mapping):
-            continue
+    for item in _registry_tool_definitions(registry):
         name = str((item.get("function") or {}).get("name") or "").strip()
         if name:
             result.append(name)
     return tuple(result)
+
+
+def _registry_tool_definitions(registry: Any) -> tuple[dict[str, Any], ...]:
+    definitions = getattr(registry, "get_tool_definitions", None)
+    if not callable(definitions):
+        return ()
+    try:
+        available = definitions(tiers=None)
+    except TypeError:
+        available = definitions()
+    if not isinstance(available, Sequence) or isinstance(available, (str, bytes)):
+        return ()
+    return tuple(dict(item) for item in available if isinstance(item, Mapping))
 
 
 def _registry_is_read_only(registry: Any, tool_name: str) -> bool:
@@ -635,11 +639,13 @@ def _execution_system_prompt(
     *,
     goal: str,
     active_plan: Mapping[str, Any] | None,
+    delegated_execution: Mapping[str, Any] | None,
     tool_catalogue: list[Mapping[str, Any]],
 ) -> str:
     return render_execution_system_prompt(
         goal=goal,
         active_plan=active_plan,
+        delegated_execution=delegated_execution,
         tool_catalogue=tool_catalogue,
         guidance=source.guidance,
         display_name=source.display_name,
@@ -720,7 +726,8 @@ class _DelegatedToolRegistry:
         )
 
     def get_tool_definitions(self, tiers=None):
-        definitions = self._base.get_tool_definitions(tiers=tiers)
+        del tiers
+        definitions = _registry_tool_definitions(self._base)
         return [
             item
             for item in definitions
@@ -866,6 +873,12 @@ class _EvidenceRecordingToolRegistry:
         output = str(getattr(result, "output", "") or "")
         details = dict(getattr(result, "details", None) or {})
         details.setdefault("receipt_serial", self._serial)
+        if self._request.role.startswith("sub_agent:"):
+            details.setdefault("plan_id", self._request.plan_id)
+            details.setdefault(
+                "assignment_id",
+                str(self._request.context.get("assignment_id") or ""),
+            )
         if attachment_ids:
             details["attachment_ids"] = list(attachment_ids)
         return ToolEvidenceReceipt(
@@ -1036,9 +1049,18 @@ class _EvidenceRecordingToolRegistry:
 class _CompulsoryReplanToolRegistry:
     """Run compulsory Replanning at exact Execution tool boundaries."""
 
-    def __init__(self, base: _EvidenceRecordingToolRegistry, coordinator: Any):
+    def __init__(
+        self,
+        base: _EvidenceRecordingToolRegistry,
+        coordinator: Any,
+        *,
+        bound_plan_id: str = "",
+        enforce_plan_binding: bool = False,
+    ):
         self._base = base
         self._coordinator = coordinator
+        self._bound_plan_id = str(bound_plan_id or "")
+        self._enforce_plan_binding = bool(enforce_plan_binding)
         self.max_loops = None
 
     @property
@@ -1048,7 +1070,46 @@ class _CompulsoryReplanToolRegistry:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._base, name)
 
+    def _superseding_directive(self):
+        directive = getattr(self._coordinator, "latest_directive", None)
+        if (
+            not self._enforce_plan_binding
+            or directive is None
+            or not self._bound_plan_id
+            or str(directive.active_plan_id or "") == self._bound_plan_id
+        ):
+            return None
+        return directive
+
+    def _superseded_message(self, directive: Any, *, tool_executed: bool) -> str:
+        boundary = (
+            "The tool result above completed before the replacement plan became active."
+            if tool_executed
+            else "The requested tool was not executed."
+        )
+        return (
+            "HASHI_PLAN_SUPERSEDED\n"
+            f"bound_plan_id: {self._bound_plan_id}\n"
+            f"active_plan_id: {directive.active_plan_id}\n"
+            f"checkpoint_id: {directive.checkpoint_id}\n"
+            f"{boundary} This bounded assignment belongs to the superseded plan. "
+            "Do not call another tool or adopt the replacement plan. Return only a "
+            "truthful bounded result describing completed evidence and remaining work."
+        )
+
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
+        superseding = self._superseding_directive()
+        if superseding is not None:
+            return await self._base.record_policy_denial(
+                tool_name,
+                arguments,
+                tool_call_id,
+                output=self._superseded_message(
+                    superseding,
+                    tool_executed=False,
+                ),
+                decision="plan_superseded",
+            )
         immediate_denial = self._base.record_immediate_denial_if_any(
             tool_name,
             arguments,
@@ -1071,14 +1132,24 @@ class _CompulsoryReplanToolRegistry:
             directive = admission.directive
             if directive is None:
                 raise RuntimeError("Replan-blocked admission has no directive")
+            if (
+                self._enforce_plan_binding
+                and self._bound_plan_id
+                and str(directive.active_plan_id or "") != self._bound_plan_id
+            ):
+                output = self._superseded_message(directive, tool_executed=False)
+                disposition = "plan_superseded"
+            else:
+                output = directive.execution_control_message(
+                    requested_tool_executed=False
+                )
+                disposition = "compulsory_replan"
             return ToolResult(
                 tool_call_id=tool_call_id,
-                output=directive.execution_control_message(
-                    requested_tool_executed=False
-                ),
+                output=output,
                 is_error=True,
                 details={
-                    "control_disposition": "compulsory_replan",
+                    "control_disposition": disposition,
                     "checkpoint_id": directive.checkpoint_id,
                     "completion_percent": directive.outcome.completion_percent,
                     "plan_changed": directive.outcome.plan_changed,
@@ -1105,14 +1176,23 @@ class _CompulsoryReplanToolRegistry:
             from tools.registry import ToolResult
 
             output = str(getattr(result, "output", "") or "")
-            output = (
-                f"{output.rstrip()}\n\n"
-                f"{directive.execution_control_message(requested_tool_executed=True)}"
+            plan_superseded = bool(
+                self._enforce_plan_binding
+                and self._bound_plan_id
+                and str(directive.active_plan_id or "") != self._bound_plan_id
             )
+            control_message = (
+                self._superseded_message(directive, tool_executed=True)
+                if plan_superseded
+                else directive.execution_control_message(requested_tool_executed=True)
+            )
+            output = f"{output.rstrip()}\n\n{control_message}"
             replan_details = dict(getattr(result, "details", None) or {})
             replan_details.update(
                 {
-                    "control_disposition": "compulsory_replan",
+                    "control_disposition": (
+                        "plan_superseded" if plan_superseded else "compulsory_replan"
+                    ),
                     "checkpoint_id": directive.checkpoint_id,
                     "completion_percent": directive.outcome.completion_percent,
                     "plan_changed": directive.outcome.plan_changed,
@@ -1256,9 +1336,14 @@ class _MediaRoutingToolRegistry:
 
 
 class _AdapterDelivery(DeliveryPort):
-    def __init__(self, callback: StreamCallback, *, allow_early: bool):
+    def __init__(
+        self,
+        callback: StreamCallback,
+        *,
+        allow_immediate_response: bool,
+    ):
         self.callback = callback
-        self.allow_early = bool(allow_early)
+        self.allow_immediate_response = bool(allow_immediate_response)
 
     async def deliver(
         self,
@@ -1272,7 +1357,7 @@ class _AdapterDelivery(DeliveryPort):
         detail: str = "",
         delivery_id: str = "",
     ) -> DeliveryReceipt:
-        if kind == "commentary":
+        if kind in {"commentary", "draft"}:
             raise ValueError("raw commentary cannot enter the HASHI transport boundary")
         if self.callback is None:
             if kind in {"final", "clarification"}:
@@ -1286,7 +1371,7 @@ class _AdapterDelivery(DeliveryPort):
                 delivered=False,
                 disposition="stream_callback_unavailable",
             )
-        if kind in {"immediate", "draft"} and not self.allow_early:
+        if kind == "immediate" and not self.allow_immediate_response:
             return DeliveryReceipt(
                 accepted=False,
                 delivered=False,
@@ -1294,9 +1379,6 @@ class _AdapterDelivery(DeliveryPort):
             )
         if kind in {"acknowledgement", "immediate"}:
             event_kind = KIND_ACKNOWLEDGEMENT
-            delivery_class = DELIVERY_USER_COMMENTARY
-        elif kind == "draft":
-            event_kind = KIND_COMMENTARY
             delivery_class = DELIVERY_USER_COMMENTARY
         else:
             # The HASHI HER message router defers this lane to the ordinary
@@ -1326,7 +1408,7 @@ class _AdapterDelivery(DeliveryPort):
             )
         # Legacy callbacks return None.  Only an explicit router receipt proves
         # that an early message can replace ordinary final delivery.
-        if kind in {"immediate", "draft"}:
+        if kind == "immediate":
             delivered = accepted is True
             return DeliveryReceipt(
                 accepted=delivered,
@@ -1353,19 +1435,34 @@ class _AdapterDelivery(DeliveryPort):
                 summary=commentary.text,
                 event_id=commentary.source_event_id,
                 delivery_class=DELIVERY_USER_COMMENTARY,
-                origin="her_v2:persona_packaging",
+                origin=(
+                    "her_v2:primary_execution"
+                    if commentary.draft_response
+                    else "her_v2:persona_packaging"
+                ),
                 phase=commentary.stage.value,
-                required=commentary.stage is Stage.REPLANNING,
+                # A Primary Execution draft is prescribed user-visible output,
+                # not optional stage chatter. ``allow_immediate_response`` has
+                # no bearing on this reviewed-workflow message.
+                required=(
+                    commentary.draft_response
+                    or commentary.stage is Stage.REPLANNING
+                ),
                 provenance=commentary.provenance,
                 detail=(
-                    "persona_packaging_fallback=true; "
-                    f"error_type={commentary.error_type or 'unknown'}"
-                    if commentary.fallback
-                    else "persona_packaging_fallback=false"
+                    "temporary=true; pending_review_and_finalisation=true; "
+                    "exact_primary_execution_text=true"
+                    if commentary.draft_response
+                    else (
+                        "persona_packaging_fallback=true; "
+                        f"error_type={commentary.error_type or 'unknown'}"
+                        if commentary.fallback
+                        else "persona_packaging_fallback=false"
+                    )
                 ),
             )
         )
-        return accepted is not False
+        return accepted is True if commentary.draft_response else accepted is not False
 
     async def resolve_initial(
         self,
@@ -1541,6 +1638,43 @@ class HashiStageProvider(StageProvider):
             str(request_ref),
         )
 
+    def tool_catalogue(
+        self,
+        *,
+        allow_side_effects: bool,
+        delegated_tools: Sequence[str] | None = None,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Return the exact Registry-approved prompt catalogue."""
+
+        if self.tool_registry is None:
+            return ()
+        requested = (
+            [str(item).strip() for item in delegated_tools if str(item).strip()]
+            if delegated_tools is not None
+            else list(_registry_allowed_names(self.tool_registry))
+        )
+        narrowed = _DelegatedToolRegistry(
+            self.tool_registry,
+            requested,
+            read_only=not allow_side_effects,
+        )
+        catalogue: list[Mapping[str, Any]] = []
+        for definition in _registry_tool_definitions(narrowed):
+            name = str(
+                (definition.get("function") or {}).get("name") or ""
+            ).strip()
+            if not name:
+                continue
+            catalogue.append(
+                {
+                    **definition,
+                    "hashi_read_only": _registry_is_read_only(
+                        self.tool_registry, name
+                    ),
+                }
+            )
+        return tuple(catalogue)
+
     async def invoke(
         self, profile: ProviderProfile, request: StageRequest
     ) -> StageResponse:
@@ -1660,6 +1794,8 @@ class HashiStageProvider(StageProvider):
                 selected_registry = _CompulsoryReplanToolRegistry(
                     evidence_registry,
                     request.checkpoint_coordinator,
+                    bound_plan_id=str(request.plan_id or ""),
+                    enforce_plan_binding=request.role.startswith("sub_agent:"),
                 )
             selected_registry = _UnboundedToolRegistry(selected_registry)
         if controls_tools:
@@ -1919,7 +2055,26 @@ class HashiStageProvider(StageProvider):
                     code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                     human_description="The configured provider could not be initialized.",
                 )
-            stage_prompt = render_stage_prompt(request)
+            prompt_request = request
+            if request.stage in {Stage.PLANNING, Stage.REPLANNING} and (
+                "available_execution_tools" not in request.context
+            ):
+                prompt_request = replace(
+                    request,
+                    context={
+                        **dict(request.context),
+                        "available_execution_tools": list(
+                            self.tool_catalogue(
+                                allow_side_effects=bool(
+                                    request.context.get(
+                                        "execution_allow_side_effects", True
+                                    )
+                                )
+                            )
+                        ),
+                    },
+                )
+            stage_prompt = render_stage_prompt(prompt_request)
             primary_execution = (
                 request.stage is Stage.EXECUTION
                 and not request.role.startswith("sub_agent:")
@@ -1945,9 +2100,7 @@ class HashiStageProvider(StageProvider):
                         if isinstance(request.context.get("active_plan"), Mapping)
                         else None
                     ),
-                    draft_response=str(
-                        request.context.get("draft_response") or ""
-                    ),
+                    draft_response=str(request.context.get("draft_response") or ""),
                     available_review_tools=review_tools,
                 )
                 if not _install_system_prompt(backend, system_prompt):
@@ -1994,6 +2147,16 @@ class HashiStageProvider(StageProvider):
                         for item in raw_definitions
                         if isinstance(item, Mapping)
                     ]
+                    raw_sub_agent_results = request.context.get("sub_agent_results", [])
+                    delegated_results = (
+                        [
+                            dict(item)
+                            for item in raw_sub_agent_results
+                            if isinstance(item, Mapping)
+                        ]
+                        if isinstance(raw_sub_agent_results, list)
+                        else []
+                    )
                     system_prompt = _execution_system_prompt(
                         source,
                         goal=request.goal,
@@ -2002,15 +2165,21 @@ class HashiStageProvider(StageProvider):
                             if isinstance(request.context.get("active_plan"), Mapping)
                             else None
                         ),
+                        delegated_execution=(
+                            {
+                                "plan_id": request.plan_id,
+                                "results": delegated_results,
+                            }
+                            if delegated_results
+                            else None
+                        ),
                         tool_catalogue=tool_catalogue,
                     )
                 else:
                     system_prompt = _finalisation_system_prompt(
                         source,
                         goal=request.goal,
-                        draft_response=str(
-                            request.context.get("draft_response") or ""
-                        ),
+                        draft_response=str(request.context.get("draft_response") or ""),
                         reviewer_findings=(
                             request.context.get("reviewer_findings")
                             if isinstance(
@@ -2041,7 +2210,7 @@ class HashiStageProvider(StageProvider):
                 elif request.stage is Stage.FINALISATION:
                     stage_prompt = request.goal
             else:
-                internal_prompt = _internal_stage_system_prompt(request)
+                internal_prompt = _internal_stage_system_prompt(prompt_request)
                 if internal_prompt is not None:
                     installed = _install_system_prompt(backend, internal_prompt)
                     if not installed and (

@@ -939,12 +939,15 @@ async def test_adapter_draft_uses_commentary_lane_and_can_be_replaced() -> None:
         events.append(event)
         return True
 
-    delivery = _AdapterDelivery(capture, allow_early=True)
-    draft = await delivery.deliver(
-        kind="draft",
-        text="DRAFT RESPONSE\n\nWork completed.",
-        event_id="turn-1:execution:draft",
-        phase="execution",
+    delivery = _AdapterDelivery(capture, allow_immediate_response=True)
+    draft = await delivery.deliver_packaged_commentary(
+        PackagedCommentary(
+            source_event_id="turn-1:execution:draft",
+            stage=Stage.EXECUTION,
+            text="DRAFT RESPONSE\n\nWork completed.",
+            provenance="primary_execution_draft",
+            draft_response=True,
+        )
     )
     resolved = await delivery.resolve_initial(
         resolution="final",
@@ -953,14 +956,43 @@ async def test_adapter_draft_uses_commentary_lane_and_can_be_replaced() -> None:
         event_id="turn-1:execution:draft:final",
     )
 
-    assert draft.accepted is True and draft.delivered is True
+    assert draft is True
     assert events[0].kind == KIND_COMMENTARY
     assert events[0].delivery_class == DELIVERY_USER_COMMENTARY
     assert events[0].summary.startswith("DRAFT RESPONSE")
+    assert events[0].provenance == "primary_execution_draft"
+    assert events[0].required is True
+    assert "exact_primary_execution_text=true" in events[0].detail
     assert resolved.accepted is True and resolved.delivered is True
     assert events[1].kind == KIND_INITIAL_RESOLUTION
     assert events[1].resolution == "final"
     assert events[1].target_event_id == events[0].event_id
+
+
+@pytest.mark.asyncio
+async def test_adapter_draft_is_independent_of_immediate_response_eligibility() -> None:
+    events = []
+
+    async def capture(event):
+        events.append(event)
+        return True
+
+    delivery = _AdapterDelivery(capture, allow_immediate_response=False)
+    accepted = await delivery.deliver_packaged_commentary(
+        PackagedCommentary(
+            source_event_id="turn-1:execution:draft",
+            stage=Stage.EXECUTION,
+            text="DRAFT RESPONSE\n\nWork completed.",
+            provenance="primary_execution_draft",
+            draft_response=True,
+        )
+    )
+
+    assert accepted is True
+    assert len(events) == 1
+    assert events[0].kind == KIND_COMMENTARY
+    assert events[0].required is True
+    assert events[0].summary == "DRAFT RESPONSE\n\nWork completed."
 
 
 @pytest.mark.asyncio
@@ -1779,9 +1811,74 @@ async def test_json_repair_uses_isolated_specialist_prompt_and_no_tools():
 
 
 @pytest.mark.asyncio
+async def test_verification_report_repair_uses_evidence_aware_tool_free_prompt():
+    manager = _FakeManager()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=_BaseToolRegistry(),
+    )
+    profile = ProviderProfile(
+        "reviewer",
+        "openrouter-api",
+        "configured/model",
+        reasoning="provider-high",
+    )
+    repair_input = json.dumps(
+        {
+            "rejected_output": '{"outcome":"VERIFIED"}',
+            "required_schema": {
+                "outcome": "VERIFIED | PARTIALLY_VERIFIED",
+            },
+            "validation_error": (
+                "verification method 'read_only_api' lacks a matching tool receipt"
+            ),
+            "frozen_tool_receipts": [
+                {
+                    "evidence_ref": "receipt:file-list",
+                    "tool_name": "file_list",
+                    "status": "SUCCESS",
+                    "completed": True,
+                }
+            ],
+            "frozen_evidence_refs": ["receipt:file-list"],
+        },
+        sort_keys=True,
+    )
+    base = _stage_request(
+        Stage.JSON_REPAIR,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    request = StageRequest(
+        **{
+            **base.__dict__,
+            "role": "json_repair_specialist",
+            "goal": repair_input,
+            "classification": None,
+            "plan_id": None,
+            "context": {
+                "json_repair_input": repair_input,
+                "repair_mode": "verification_report",
+            },
+            "request_content": None,
+            "attachment_manifest": (),
+        }
+    )
+
+    await provider.invoke(profile, request)
+
+    backend = manager.backends[-1]
+    assert backend.prompt == repair_input
+    assert backend.tool_registry is None
+    assert backend.sys_prompt.startswith("You are the Verification Report Repair Agent")
+    assert "frozen receipts" in backend.sys_prompt
+    assert "Do not call tools" in backend.sys_prompt
+
+
+@pytest.mark.asyncio
 async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning():
     manager = _FakeManager()
-    registry = object()
+    registry = _BaseToolRegistry()
     events = []
 
     async def capture(event):
@@ -1811,7 +1908,15 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
             ),
             "context": {
                 "active_plan": {"plan": ["inspect", "change", "verify"]},
-                "sub_agent_results": [],
+                "sub_agent_results": [
+                    {
+                        "plan_id": "plan-v1",
+                        "assignment_id": "inspection-worker",
+                        "disposition": "COMPLETED",
+                        "summary": "The delegated inspection completed.",
+                        "evidence_refs": ["receipt:inspection"],
+                    }
+                ],
             },
         }
     )
@@ -1830,6 +1935,9 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     assert "Memory+ recent facts" in backend.prompt
     assert "Cross-session receipt evidence" in backend.prompt
     assert '"inspect"' in backend.sys_prompt
+    assert '"assignment_id": "inspection-worker"' in backend.sys_prompt
+    assert '"plan_id": "plan-v1"' in backend.sys_prompt
+    assert "only that runtime-attached batch" in backend.sys_prompt
     assert "natural language" in backend.sys_prompt
     assert "Return exactly one JSON object" not in backend.sys_prompt
     assert "REPLAN_REQUIRED" not in backend.sys_prompt
@@ -1868,6 +1976,10 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
         planning_backend = manager.backends[-1]
         assert planning_backend.prompt == "Do the requested work"
         assert "configured agent persona" not in planning_backend.sys_prompt
+        assert '"name": "file_read"' in planning_backend.sys_prompt
+        assert '"name": "file_write"' in planning_backend.sys_prompt
+        assert '"hashi_read_only": true' in planning_backend.sys_prompt
+        assert "Never invent a tool or capability name" in planning_backend.sys_prompt
         if stage is Stage.PLANNING:
             assert "planning agent for an agentic workflow" in (
                 planning_backend.sys_prompt
@@ -1959,6 +2071,37 @@ async def test_review_system_prompt_receives_latest_draft_plan_and_real_tools():
     assert '"name": "file_read"' in backend.sys_prompt
     assert '"name": "verification_run"' in backend.sys_prompt
     assert "configured agent persona" not in backend.sys_prompt
+
+
+@pytest.mark.asyncio
+async def test_empty_delegated_catalogue_does_not_block_provider_invocation():
+    manager = _FakeManager()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=_BaseToolRegistry(),
+    )
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=True,
+        allow_side_effects=False,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "role": "sub_agent:unknown-tool",
+            "context": {"delegated_tools": ["invented_search"]},
+        }
+    )
+
+    response = await provider.invoke(
+        ProviderProfile("worker", "openrouter-api", "configured/model"),
+        request,
+    )
+
+    assert json.loads(response.text)["disposition"] == "COMPLETED"
+    assert manager.backends[-1].shutdown_called is True
+    assert manager.backends[-1].prompt
+    assert manager.backends[-1].tool_registry.get_tool_definitions() == []
 
 
 @pytest.mark.asyncio
@@ -2072,10 +2215,7 @@ async def test_review_verification_tool_injects_timeout_and_workspace_authority(
                 "verification-call",
             )
             return BackendResponse(
-                text=(
-                    '{"status":"PASS","reason":"policy captured",'
-                    '"conditions":null}'
-                ),
+                text=('{"status":"PASS","reason":"policy captured","conditions":null}'),
                 duration_ms=1,
                 tool_call_count=1,
                 tool_loop_count=1,
@@ -2929,13 +3069,31 @@ async def test_subagent_receives_only_explicitly_delegated_tools():
         **{
             **request.__dict__,
             "role": "sub_agent:bounded",
-            "context": {"delegated_tools": ["file_read"]},
+            "context": {
+                "assignment_id": "bounded",
+                "assigned_task": "Inspect one file",
+                "delegated_tools": ["file_read"],
+                "authorized_attachment_ids": [],
+                "authority": {
+                    "scope": "bounded_execution_only",
+                    "may_replan": False,
+                    "may_contact_user": False,
+                    "may_finalise": False,
+                    "may_create_subagents": False,
+                },
+            },
         }
     )
 
     await provider.invoke(profile, request)
 
     delegated = manager.backends[-1].tool_registry
+    assert manager.backends[-1].sys_prompt == (
+        "Follow the supplied assignment and authority envelope exactly."
+    )
+    assert "Bounded assignment and authority envelope" in manager.backends[-1].prompt
+    assert '"plan_id": "plan-v1"' in manager.backends[-1].prompt
+    assert '"may_replan": false' in manager.backends[-1].prompt
     assert delegated.max_loops is None
     names = {item["function"]["name"] for item in delegated.get_tool_definitions()}
     assert names == {"file_read"}
@@ -2945,6 +3103,47 @@ async def test_subagent_receives_only_explicitly_delegated_tools():
     assert denied.is_error is True
     assert "outside this sub-agent's delegated authority" in denied.output
     assert [item[0] for item in base_registry.executed] == ["file_read"]
+
+
+@pytest.mark.asyncio
+async def test_superseded_subagent_plan_cannot_start_another_tool():
+    manager = _FakeManager()
+    base_registry = _BaseToolRegistry()
+    provider = HashiStageProvider(backend_manager=manager, tool_registry=base_registry)
+    profile = ProviderProfile("lightweight", "openrouter-api", "configured/model")
+    directive = ReplanDirective(
+        checkpoint_id="checkpoint-1",
+        outcome=_adapter_replan_outcome(),
+        active_plan_id="plan-v2",
+    )
+    request = _stage_request(Stage.EXECUTION, allow_tools=True)
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "role": "sub_agent:bounded",
+            "context": {
+                "assignment_id": "bounded",
+                "assigned_task": "Inspect one file",
+                "delegated_tools": ["file_read"],
+                "authorized_attachment_ids": [],
+            },
+            "checkpoint_coordinator": SimpleNamespace(latest_directive=directive),
+        }
+    )
+
+    await provider.invoke(profile, request)
+    denied = await manager.backends[-1].tool_registry.execute(
+        "file_read", {"path": "a"}, "call-after-replan"
+    )
+
+    assert denied.is_error is True
+    assert "HASHI_PLAN_SUPERSEDED" in denied.output
+    assert "bound_plan_id: plan-v1" in denied.output
+    assert "active_plan_id: plan-v2" in denied.output
+    assert base_registry.executed == []
+    assert [
+        item[2].details["control_disposition"] for item in base_registry.denials
+    ] == ["plan_superseded"]
 
 
 @pytest.mark.asyncio

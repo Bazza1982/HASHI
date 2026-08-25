@@ -19,6 +19,7 @@ from .structured import response_data
 
 MAX_NEUTRAL_COMMENTARY_CHARS = 4_000
 MAX_PACKAGED_COMMENTARY_CHARS = 8_000
+MAX_DRAFT_RESPONSE_COMMENTARY_CHARS = 128_000
 
 # Immediate Response and Finalisation already own dedicated user-facing lanes.
 # Triage is classification authority, while sub-agents are not user-facing.
@@ -90,6 +91,37 @@ class NeutralCommentary:
 
 
 @dataclass(frozen=True)
+class DraftResponseCommentary:
+    """Exact provisional Primary Execution text for the commentary lane."""
+
+    event_id: str
+    turn_id: str
+    response: str
+
+    def __post_init__(self) -> None:
+        event_id = str(self.event_id or "").strip()
+        turn_id = str(self.turn_id or "").strip()
+        response = str(self.response or "").strip()
+        if not event_id or not turn_id:
+            raise CommentaryValidationError(
+                "draft response commentary requires event and turn identifiers"
+            )
+        if not response:
+            raise CommentaryValidationError("draft response commentary is empty")
+        if len(self.text) > MAX_DRAFT_RESPONSE_COMMENTARY_CHARS:
+            raise CommentaryValidationError(
+                "draft response commentary exceeds the bounded size"
+            )
+        object.__setattr__(self, "event_id", event_id)
+        object.__setattr__(self, "turn_id", turn_id)
+        object.__setattr__(self, "response", response)
+
+    @property
+    def text(self) -> str:
+        return f"DRAFT RESPONSE\n\n{self.response}"
+
+
+@dataclass(frozen=True)
 class PackagedCommentary:
     """Persona-packaged output accepted by the commentary delivery boundary."""
 
@@ -99,6 +131,7 @@ class PackagedCommentary:
     provenance: str
     fallback: bool = False
     error_type: str = ""
+    draft_response: bool = False
 
     def __post_init__(self) -> None:
         source_event_id = str(self.source_event_id or "").strip()
@@ -114,9 +147,21 @@ class PackagedCommentary:
             )
         if not text:
             raise CommentaryValidationError("packaged commentary is empty")
-        if len(text) > MAX_PACKAGED_COMMENTARY_CHARS:
+        max_chars = (
+            MAX_DRAFT_RESPONSE_COMMENTARY_CHARS
+            if self.draft_response
+            else MAX_PACKAGED_COMMENTARY_CHARS
+        )
+        if len(text) > max_chars:
             raise CommentaryValidationError(
                 "packaged commentary exceeds the bounded size"
+            )
+        if self.draft_response and (
+            self.stage is not Stage.EXECUTION
+            or not text.startswith("DRAFT RESPONSE\n\n")
+        ):
+            raise CommentaryValidationError(
+                "draft response commentary must preserve the labelled Execution draft"
             )
         object.__setattr__(self, "source_event_id", source_event_id)
         object.__setattr__(self, "text", text)
@@ -128,6 +173,8 @@ class CommentaryPort(Protocol):
     """Runtime-facing neutral commentary boundary."""
 
     async def publish(self, commentary: NeutralCommentary) -> bool: ...
+
+    async def publish_draft(self, commentary: DraftResponseCommentary) -> bool: ...
 
 
 class PersonaPackager(Protocol):
@@ -150,11 +197,17 @@ class NullCommentaryPort:
         del commentary
         return False
 
+    async def publish_draft(self, commentary: DraftResponseCommentary) -> bool:
+        del commentary
+        return False
+
 
 @dataclass
 class RecordingCommentaryPort:
     records: list[NeutralCommentary] = field(default_factory=list)
+    drafts: list[DraftResponseCommentary] = field(default_factory=list)
     fail: bool = False
+    accept_drafts: bool = False
 
     async def publish(self, commentary: NeutralCommentary) -> bool:
         if self.fail:
@@ -162,6 +215,13 @@ class RecordingCommentaryPort:
         if all(item.event_id != commentary.event_id for item in self.records):
             self.records.append(commentary)
         return True
+
+    async def publish_draft(self, commentary: DraftResponseCommentary) -> bool:
+        if self.fail:
+            raise RuntimeError("recording commentary port failure")
+        if all(item.event_id != commentary.event_id for item in self.drafts):
+            self.drafts.append(commentary)
+        return self.accept_drafts
 
 
 class PersonaCommentaryPipeline:
@@ -191,6 +251,14 @@ class PersonaCommentaryPipeline:
                 self._attempts[commentary.event_id] = task
         return await asyncio.shield(task)
 
+    async def publish_draft(self, commentary: DraftResponseCommentary) -> bool:
+        async with self._lock:
+            task = self._attempts.get(commentary.event_id)
+            if task is None:
+                task = asyncio.create_task(self._deliver_draft(commentary))
+                self._attempts[commentary.event_id] = task
+        return await asyncio.shield(task)
+
     async def _package_then_deliver(self, commentary: NeutralCommentary) -> bool:
         try:
             packaged = await self.packager.package(commentary)
@@ -198,6 +266,21 @@ class PersonaCommentaryPipeline:
                 raise CommentaryValidationError(
                     "packager changed the source commentary identity"
                 )
+            return bool(await self.delivery.deliver_packaged_commentary(packaged))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+
+    async def _deliver_draft(self, commentary: DraftResponseCommentary) -> bool:
+        try:
+            packaged = PackagedCommentary(
+                source_event_id=commentary.event_id,
+                stage=Stage.EXECUTION,
+                text=commentary.text,
+                provenance="primary_execution_draft",
+                draft_response=True,
+            )
             return bool(await self.delivery.deliver_packaged_commentary(packaged))
         except asyncio.CancelledError:
             raise

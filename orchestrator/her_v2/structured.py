@@ -428,6 +428,107 @@ def parse_triage(data: Mapping[str, Any]) -> TriageDecision:
     return TriageDecision(classification, goal, clarification)
 
 
+def _validated_delegation_plan_fields(
+    data: Mapping[str, Any],
+    *,
+    stage_label: str,
+) -> tuple[list[Any], list[Any]]:
+    """Validate one complete delegation schedule shared by Plan and Replan.
+
+    ``parallel_groups`` is an ordered list of execution waves.  Assignment IDs
+    within one wave may run concurrently.  An empty field retains the legacy
+    high-volume default of one concurrent wave containing every assignment;
+    when supplied it must schedule every assignment exactly once.  Keeping
+    this contract deterministic prevents Runtime from inventing dependencies
+    or concurrency beyond the planning authority's declared schedule.
+    """
+
+    sub_agents = data.get("sub_agents", [])
+    if not isinstance(sub_agents, list):
+        raise StructuredOutputError(f"{stage_label} sub_agents must be a list")
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(sub_agents, start=1):
+        if not isinstance(raw, Mapping):
+            raise StructuredOutputError(
+                f"{stage_label} sub-agent assignment {index} must be an object"
+            )
+        assignment_id = _text_value(raw.get("id"))
+        task = _text_value(raw.get("task"))
+        profile = _text_value(raw.get("profile"))
+        tools = raw.get("tools")
+        attachment_ids = raw.get("attachment_ids")
+        allow_side_effects = raw.get("allow_side_effects")
+        if not assignment_id or assignment_id in seen_ids:
+            raise StructuredOutputError(
+                f"{stage_label} sub-agent assignments require unique non-empty IDs"
+            )
+        seen_ids.add(assignment_id)
+        if not task or not profile:
+            raise StructuredOutputError(
+                f"{stage_label} sub-agent assignments require task and profile"
+            )
+        if not isinstance(tools, list) or any(
+            not isinstance(item, str) or not item.strip() for item in tools
+        ):
+            raise StructuredOutputError(
+                f"{stage_label} sub-agent assignment tools must be a list of strings"
+            )
+        if attachment_ids is not None and (
+            not isinstance(attachment_ids, list)
+            or any(
+                not isinstance(item, str) or not item.strip() for item in attachment_ids
+            )
+        ):
+            raise StructuredOutputError(
+                f"{stage_label} sub-agent attachment_ids must be a list of strings"
+            )
+        if not isinstance(allow_side_effects, bool):
+            raise StructuredOutputError(
+                f"{stage_label} sub-agent allow_side_effects must be a boolean"
+            )
+
+    parallel_groups = data.get("parallel_groups", [])
+    if not isinstance(parallel_groups, list):
+        raise StructuredOutputError(f"{stage_label} parallel_groups must be a list")
+    scheduled_ids: set[str] = set()
+    for index, raw_group in enumerate(parallel_groups, start=1):
+        if (
+            not isinstance(raw_group, list)
+            or not raw_group
+            or any(not isinstance(item, str) or not item.strip() for item in raw_group)
+        ):
+            raise StructuredOutputError(
+                f"{stage_label} parallel group {index} must be a non-empty list "
+                "of assignment IDs"
+            )
+        group_ids = [item.strip() for item in raw_group]
+        if len(group_ids) != len(set(group_ids)):
+            raise StructuredOutputError(
+                f"{stage_label} parallel group {index} contains duplicate assignment IDs"
+            )
+        unknown = sorted(set(group_ids) - seen_ids)
+        if unknown:
+            raise StructuredOutputError(
+                f"{stage_label} parallel group {index} references unknown sub-agent "
+                f"assignment IDs: {', '.join(unknown)}"
+            )
+        repeated = sorted(set(group_ids) & scheduled_ids)
+        if repeated:
+            raise StructuredOutputError(
+                f"{stage_label} sub-agent assignments may appear in only one parallel "
+                f"group: {', '.join(repeated)}"
+            )
+        scheduled_ids.update(group_ids)
+    if parallel_groups:
+        omitted = sorted(seen_ids - scheduled_ids)
+        if omitted:
+            raise StructuredOutputError(
+                f"{stage_label} parallel_groups must schedule every sub-agent "
+                f"assignment when supplied: {', '.join(omitted)}"
+            )
+    return sub_agents, parallel_groups
+
+
 @_stage_parser()
 def parse_plan(data: Mapping[str, Any]) -> Mapping[str, Any]:
     plan = data.get("plan")
@@ -452,52 +553,10 @@ def parse_plan(data: Mapping[str, Any]) -> Mapping[str, Any]:
         raise StructuredOutputError(
             "Planning success_criteria must be a non-empty list of non-empty strings"
         )
-    parallel_groups = data.get("parallel_groups", [])
-    if not isinstance(parallel_groups, list):
-        raise StructuredOutputError("Planning parallel_groups must be a list")
-    sub_agents = data.get("sub_agents", [])
-    if not isinstance(sub_agents, list):
-        raise StructuredOutputError("Planning sub_agents must be a list")
-    seen_ids: set[str] = set()
-    for index, raw in enumerate(sub_agents, start=1):
-        if not isinstance(raw, Mapping):
-            raise StructuredOutputError(
-                f"Planning sub-agent assignment {index} must be an object"
-            )
-        assignment_id = _text_value(raw.get("id"))
-        task = _text_value(raw.get("task"))
-        profile = _text_value(raw.get("profile"))
-        tools = raw.get("tools")
-        attachment_ids = raw.get("attachment_ids")
-        allow_side_effects = raw.get("allow_side_effects")
-        if not assignment_id or assignment_id in seen_ids:
-            raise StructuredOutputError(
-                "Planning sub-agent assignments require unique non-empty IDs"
-            )
-        seen_ids.add(assignment_id)
-        if not task or not profile:
-            raise StructuredOutputError(
-                "Planning sub-agent assignments require task and profile"
-            )
-        if not isinstance(tools, list) or any(
-            not isinstance(item, str) or not item.strip() for item in tools
-        ):
-            raise StructuredOutputError(
-                "Planning sub-agent assignment tools must be a list of strings"
-            )
-        if attachment_ids is not None and (
-            not isinstance(attachment_ids, list)
-            or any(
-                not isinstance(item, str) or not item.strip() for item in attachment_ids
-            )
-        ):
-            raise StructuredOutputError(
-                "Planning sub-agent attachment_ids must be a list of strings"
-            )
-        if not isinstance(allow_side_effects, bool):
-            raise StructuredOutputError(
-                "Planning sub-agent allow_side_effects must be a boolean"
-            )
+    sub_agents, parallel_groups = _validated_delegation_plan_fields(
+        data,
+        stage_label="Planning",
+    )
     commentary = data.get("commentary")
     if commentary is not None and not isinstance(commentary, str):
         raise StructuredOutputError("Planning commentary must be a string")
@@ -602,11 +661,15 @@ def parse_replanning(data: Mapping[str, Any]) -> ReplanningOutcome:
     if not next_step:
         raise StructuredOutputError("Replanning requires a concrete next_step")
 
+    sub_agents, parallel_groups = _validated_delegation_plan_fields(
+        data,
+        stage_label="Replanning",
+    )
     plan: dict[str, Any] = {
         "plan": steps,
         "success_criteria": success_criteria,
-        "parallel_groups": data.get("parallel_groups", []),
-        "sub_agents": data.get("sub_agents", []),
+        "parallel_groups": parallel_groups,
+        "sub_agents": sub_agents,
     }
 
     raw_commentary = data.get("commentary")

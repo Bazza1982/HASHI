@@ -9,7 +9,10 @@ import pytest
 
 from orchestrator.her_v2 import runtime_invocation as runtime_invocation_module
 from orchestrator.her_v2.audit import DurableAuditLog
-from orchestrator.her_v2.commentary import RecordingCommentaryPort
+from orchestrator.her_v2.commentary import (
+    PersonaCommentaryPipeline,
+    RecordingCommentaryPort,
+)
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.interfaces import (
     ProviderFailureCode,
@@ -25,6 +28,7 @@ from orchestrator.her_v2.models import (
     ToolEvidenceReceipt,
     ToolReceiptStatus,
     TriageClassification,
+    VerificationOutcome,
 )
 from orchestrator.her_v2.presentation import (
     RenderedRequiredMessage,
@@ -32,6 +36,7 @@ from orchestrator.her_v2.presentation import (
 )
 from orchestrator.her_v2.progress import ProviderActivityTracker
 from orchestrator.her_v2.runtime import HERv2Runtime
+from orchestrator.her_v2.structured import validate_verification_response
 from orchestrator.multimodal_contract import canonical_request_content
 
 
@@ -167,6 +172,37 @@ class ScriptedProvider:
         self.requests = []
         self.started = defaultdict(asyncio.Event)
         self.cancelled = defaultdict(int)
+
+    def tool_catalogue(self, *, allow_side_effects, delegated_tools=None):
+        read_only = {
+            "file_list",
+            "file_read",
+            "media_read",
+            "process_list",
+            "workspace_inspect",
+        }
+        names = [
+            "file_list",
+            "file_read",
+            "file_write",
+            "media_read",
+            "process_list",
+            "verification_run",
+            "workspace_inspect",
+        ]
+        if delegated_tools is not None:
+            requested = {str(item) for item in delegated_tools}
+            names = [name for name in names if name in requested]
+        if not allow_side_effects:
+            names = [name for name in names if name in read_only]
+        return tuple(
+            {
+                "type": "function",
+                "function": {"name": name},
+                "hashi_read_only": name in read_only,
+            }
+            for name in names
+        )
 
     async def invoke(self, profile, request):
         self.requests.append((profile, request))
@@ -363,6 +399,12 @@ class RecordingRequiredPersonaRenderer:
             text=f"Persona {message.kind}:\n\n{message.text}",
             provenance="test_persona_renderer",
         )
+
+
+class _DraftOnlyPackager:
+    async def package(self, commentary):
+        del commentary
+        raise AssertionError("an Execution draft must not be Persona-rewritten")
 
 
 def _runtime(
@@ -1432,6 +1474,8 @@ async def test_review_imposed_replanning_does_not_reconsult_habits(tmp_path):
     )
     assert set(replan_request.context) == {
         "active_plan",
+        "available_execution_tools",
+        "execution_allow_side_effects",
         "plan_edit_history",
         "workflow_state_and_evidence",
     }
@@ -1463,11 +1507,16 @@ async def test_xhigh_publishes_replaceable_draft_then_replaces_it_with_final(
         }
     )
     delivery = RecordingDelivery()
+    commentary = PersonaCommentaryPipeline(
+        packager=_DraftOnlyPackager(),
+        delivery=delivery,
+    )
 
     result = await _runtime(
         tmp_path,
         ScriptedProvider(scripts),
         delivery=delivery,
+        commentary=commentary,
     ).run_turn("Complete carefully", "request-xhigh-draft", effort=Effort.XHIGH)
 
     assert result.terminal_state is TerminalState.COMPLETED
@@ -1485,14 +1534,91 @@ async def test_xhigh_publishes_replaceable_draft_then_replaces_it_with_final(
     draft = next(
         row
         for row in rows
-        if row["event"] == "delivery_result" and row["payload"]["kind"] == "draft"
+        if row["event"] == "draft_commentary_publish_result"
     )
     assert draft["payload"]["accepted"] is True
+    assert draft["payload"]["exact_primary_execution_text"] is True
     resolution = next(
         row for row in rows if row["event"] == "initial_resolution_result"
     )
     assert resolution["payload"]["resolution"] == "final"
     assert resolution["payload"]["delivered"] is True
+
+
+@pytest.mark.asyncio
+async def test_max_solidifies_old_draft_and_publishes_each_remediation_draft(
+    tmp_path,
+):
+    scripts = _initial("COMPLEX_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [{"plan": ["execute", "review", "repair"]}],
+            Stage.EXECUTION: [
+                StageResponse(text="Initial Execution response."),
+                StageResponse(text="Remediated Execution response."),
+            ],
+            Stage.REVIEW: [
+                {
+                    "outcome": "FAIL",
+                    "summary": "One issue remains.",
+                    "findings": ["Repair the issue."],
+                },
+                {"outcome": "PASS", "summary": "The repair passed."},
+            ],
+            Stage.REPLANNING: [
+                {
+                    "plan": ["repair", "review again"],
+                    "success_criteria": ["The issue is repaired"],
+                    "completion_percent": 50,
+                    "completion_basis": "Review found one remaining issue.",
+                    "plan_changed": True,
+                    "change_reason": "The first response needs repair.",
+                    "next_step": "Repair the issue and review again.",
+                }
+            ],
+            Stage.FINALISATION: [{"report": "Reviewed final response."}],
+        }
+    )
+    delivery = RecordingDelivery()
+    commentary = PersonaCommentaryPipeline(
+        packager=_DraftOnlyPackager(),
+        delivery=delivery,
+    )
+
+    result = await _runtime(
+        tmp_path,
+        ScriptedProvider(scripts),
+        delivery=delivery,
+        commentary=commentary,
+    ).run_turn("Complete carefully", "request-max-drafts", effort=Effort.MAX)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.text == "Reviewed final response."
+    assert result.final_already_delivered is True
+    assert [(item.kind, item.text) for item in delivery.records] == [
+        ("acknowledgement", "I have it."),
+        ("commentary", "DRAFT RESPONSE\n\nInitial Execution response."),
+        ("final", "Reviewed final response."),
+    ]
+    assert delivery.records[1].event_id.endswith(":execution:draft")
+    assert delivery.records[2].event_id.endswith(":execution:draft:2")
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    published = [
+        row
+        for row in rows
+        if row["event"] == "draft_commentary_publish_result"
+    ]
+    assert [row["payload"]["accepted"] for row in published] == [True, True]
+    resolutions = [
+        row for row in rows if row["event"] == "initial_resolution_result"
+    ]
+    assert [row["payload"]["resolution"] for row in resolutions] == [
+        "commentary",
+        "final",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1582,7 +1708,9 @@ async def test_xhigh_review_fail_performs_one_repair_without_closure_review(tmp_
     assert len(reviews) == 1
     assert all(review.allow_tools is True for review in reviews)
     assert all(review.allow_side_effects is True for review in reviews)
-    assert all("verification_run" in review.context["delegated_tools"] for review in reviews)
+    assert all(
+        "verification_run" in review.context["delegated_tools"] for review in reviews
+    )
     assert all(
         review.context["reviewer_authority"]
         == "independent_verification_without_remediation"
@@ -1597,8 +1725,7 @@ async def test_xhigh_review_fail_performs_one_repair_without_closure_review(tmp_
     assert finalisation_request.context["draft_response"] == "Remediated."
     assert finalisation_request.context["reviewer_findings"]["status"] == "FAIL"
     assert (
-        finalisation_request.context["reviewer_findings"]["remediation_applied"]
-        is True
+        finalisation_request.context["reviewer_findings"]["remediation_applied"] is True
     )
 
 
@@ -1610,9 +1737,7 @@ async def test_xhigh_finalisation_accepts_natural_language_and_replaces_draft(
     scripts.update(
         {
             Stage.PLANNING: [{"plan": ["build"]}],
-            Stage.EXECUTION: [
-                {"disposition": "COMPLETED", "summary": "Draft result."}
-            ],
+            Stage.EXECUTION: [{"disposition": "COMPLETED", "summary": "Draft result."}],
             Stage.REVIEW: [
                 {
                     "status": "PASS",
@@ -1626,8 +1751,18 @@ async def test_xhigh_finalisation_accepts_natural_language_and_replaces_draft(
         }
     )
     provider = ScriptedProvider(scripts)
+    delivery = RecordingDelivery()
+    commentary = PersonaCommentaryPipeline(
+        packager=_DraftOnlyPackager(),
+        delivery=delivery,
+    )
 
-    result = await _runtime(tmp_path, provider).run_turn(
+    result = await _runtime(
+        tmp_path,
+        provider,
+        delivery=delivery,
+        commentary=commentary,
+    ).run_turn(
         "Build and review", "request-xhigh-natural-final", effort=Effort.XHIGH
     )
 
@@ -1696,9 +1831,7 @@ async def test_review_replan_at_100_stops_substantive_remediation_work(tmp_path)
         for _profile, request in provider.requests
         if request.stage is Stage.FINALISATION
     )
-    history = finalisation_request.context["completion_evidence"][
-        "plan_edit_history"
-    ]
+    history = finalisation_request.context["completion_evidence"]["plan_edit_history"]
     assert history[-1]["completion_percent"] == 100
 
 
@@ -1787,9 +1920,7 @@ async def test_max_repeats_review_and_remediation_until_conditional_pass(
     assert second_history[0]["plan_changed"] is True
     assert second_history[0]["resulting_plan"]["plan"] == ["remediation 1"]
     assert (
-        replan_requests[1].context["workflow_state_and_evidence"]["review"][
-            "status"
-        ]
+        replan_requests[1].context["workflow_state_and_evidence"]["review"]["status"]
         == "FAIL"
     )
     assert sum(call.stage is Stage.REVIEW for _profile, call in provider.requests) == 3
@@ -1950,10 +2081,7 @@ async def test_max_failed_review_remediates_then_reviews_latest_draft(
         if request.stage is Stage.REVIEW
     ]
     assert review_requests[0].context["draft_response"] == "Initial implementation."
-    assert (
-        review_requests[1].context["draft_response"]
-        == "Remediated implementation."
-    )
+    assert review_requests[1].context["draft_response"] == "Remediated implementation."
     assert (
         sum(
             request.stage is Stage.VERIFICATION
@@ -1974,9 +2102,7 @@ async def test_max_review_technical_failure_does_not_enter_an_endless_loop(
             Stage.EXECUTION: [
                 {"disposition": "COMPLETED", "summary": "Execution completed."}
             ],
-            Stage.REVIEW: [
-                StageInvocationError("reviewer offline", retryable=False)
-            ],
+            Stage.REVIEW: [StageInvocationError("reviewer offline", retryable=False)],
             Stage.FINALISATION: [
                 {"report": "Execution completed; Review was unavailable."}
             ],
@@ -2003,12 +2129,8 @@ async def test_finalisation_cannot_hide_review_technical_unavailability(tmp_path
             Stage.EXECUTION: [
                 {"disposition": "COMPLETED", "summary": "Execution completed."}
             ],
-            Stage.REVIEW: [
-                StageInvocationError("reviewer offline", retryable=False)
-            ],
-            Stage.FINALISATION: [
-                {"report": "Execution completed successfully."}
-            ],
+            Stage.REVIEW: [StageInvocationError("reviewer offline", retryable=False)],
+            Stage.FINALISATION: [{"report": "Execution completed successfully."}],
         }
     )
 
@@ -2040,9 +2162,7 @@ async def test_finalisation_cannot_hide_conditional_review_limitations(tmp_path)
                     "conditions": "One workbook tab remains manually reviewable only.",
                 }
             ],
-            Stage.FINALISATION: [
-                {"report": "Execution completed successfully."}
-            ],
+            Stage.FINALISATION: [{"report": "Execution completed successfully."}],
         }
     )
 
@@ -2168,6 +2288,14 @@ async def test_high_volume_subagents_are_bounded_and_cannot_replan_or_finalise(
     assert all(
         request.context["may_create_subagents"] is False for request in sub_requests
     )
+    assert all(
+        request.plan_id and request.plan_id.endswith(":plan:v1")
+        for request in sub_requests
+    )
+    assert all(
+        request.context["authority"]["may_change_active_plan"] is False
+        for request in sub_requests
+    )
     assert next(
         request for request in sub_requests if request.role == "sub_agent:research-a"
     ).context["delegated_tools"] == ["file_read"]
@@ -2182,6 +2310,9 @@ async def test_high_volume_subagents_are_bounded_and_cannot_replan_or_finalise(
     )
     assert primary.role == "orchestrator"
     assert len(primary.context["sub_agent_results"]) == 2
+    assert {item["plan_id"] for item in primary.context["sub_agent_results"]} == {
+        primary.plan_id
+    }
     prohibited = next(
         item
         for item in primary.context["sub_agent_results"]
@@ -2229,6 +2360,321 @@ async def test_high_volume_subagents_have_no_fixed_count_ceiling(tmp_path):
         )
         == 3
     )
+
+
+@pytest.mark.asyncio
+async def test_high_volume_parallel_groups_run_as_ordered_waves(tmp_path):
+    first_wave_started = asyncio.Event()
+    release_first_wave = asyncio.Event()
+    second_wave_started = asyncio.Event()
+    started_ids: set[str] = set()
+
+    async def first_wave(request):
+        started_ids.add(request.context["assignment_id"])
+        if started_ids == {"one", "two"}:
+            first_wave_started.set()
+        await release_first_wave.wait()
+        return {
+            "disposition": "COMPLETED",
+            "summary": f"{request.context['assignment_id']} completed.",
+        }
+
+    async def second_wave(request):
+        second_wave_started.set()
+        return {"disposition": "COMPLETED", "summary": "three completed."}
+
+    scripts = _initial("HIGH_VOLUME_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["run two independent checks", "run dependent check"],
+                    "sub_agents": [
+                        {"id": "one", "task": "bounded one"},
+                        {"id": "two", "task": "bounded two"},
+                        {"id": "three", "task": "bounded three"},
+                    ],
+                    "parallel_groups": [["one", "two"], ["three"]],
+                }
+            ],
+            Stage.EXECUTION: [
+                first_wave,
+                first_wave,
+                second_wave,
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Primary synthesis completed.",
+                },
+            ],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+    turn = asyncio.create_task(
+        _runtime(tmp_path, provider).run_turn(
+            "Run the ordered batch",
+            "request-subagent-waves",
+            effort="medium",
+        )
+    )
+
+    await asyncio.wait_for(first_wave_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    assert second_wave_started.is_set() is False
+    release_first_wave.set()
+    result = await asyncio.wait_for(turn, timeout=2)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert second_wave_started.is_set() is True
+    primary = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.EXECUTION
+        and not request.role.startswith("sub_agent:")
+    )
+    assert [item["assignment_id"] for item in primary.context["sub_agent_results"]] == [
+        "one",
+        "two",
+        "three",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_replan_replaces_subagent_batch_without_attaching_old_plan_results(
+    tmp_path,
+):
+    async def trigger_replan(request):
+        coordinator = request.checkpoint_coordinator
+        assert coordinator is not None
+        directive = None
+        for index in range(10):
+            admission = await coordinator.before_tool(
+                tool_name="file_read",
+                arguments={"path": f"item-{index}"},
+                tool_call_id=f"old-{index}",
+            )
+            directive = await coordinator.after_tool(
+                admission,
+                ToolEvidenceReceipt(
+                    evidence_ref=f"old:{index}",
+                    stage=Stage.EXECUTION,
+                    invocation_id=request.invocation_id,
+                    attempt=request.attempt,
+                    tool_call_id=f"old-{index}",
+                    tool_name="file_read",
+                    status=ToolReceiptStatus.SUCCESS,
+                    read_only=True,
+                    completed=True,
+                    output_sha256=f"old-hash-{index}",
+                    details={"assignment_id": "old"},
+                ),
+                result_summary=f"old result {index}",
+            )
+        assert directive is not None
+        return {
+            "disposition": "COMPLETED",
+            "summary": "Old-plan assignment finished after replacement.",
+        }
+
+    scripts = _initial("HIGH_VOLUME_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["delegate old route", "synthesise"],
+                    "sub_agents": [{"id": "old", "task": "Inspect old route"}],
+                }
+            ],
+            Stage.REPLANNING: [
+                {
+                    "plan": ["delegate replacement route", "synthesise"],
+                    "success_criteria": ["The replacement route is complete"],
+                    "parallel_groups": [],
+                    "sub_agents": [
+                        {
+                            "id": "new",
+                            "task": "Inspect replacement route",
+                            "profile": "lightweight",
+                            "tools": [],
+                            "attachment_ids": [],
+                            "allow_side_effects": False,
+                        }
+                    ],
+                    "completion_percent": 50,
+                    "completion_basis": "The old route was replaced before synthesis.",
+                    "plan_changed": True,
+                    "change_reason": "Current evidence requires the replacement route.",
+                    "next_step": "Run the replacement assignment and synthesise it.",
+                    "commentary": (
+                        "Progress is 50%. The plan changed because current evidence "
+                        "requires the replacement route. Next: Run the replacement "
+                        "assignment and synthesise it."
+                    ),
+                }
+            ],
+            Stage.EXECUTION: [
+                trigger_replan,
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Replacement assignment completed.",
+                },
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Primary used only the replacement batch.",
+                },
+            ],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Process the changing batch",
+        "request-subagent-replacement",
+        effort="high",
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    sub_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.role.startswith("sub_agent:")
+    ]
+    assert [request.role for request in sub_requests] == [
+        "sub_agent:old",
+        "sub_agent:new",
+    ]
+    assert sub_requests[0].plan_id.endswith(":plan:v1")
+    assert sub_requests[1].plan_id.endswith(":plan:v2")
+    primary = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.EXECUTION
+        and not request.role.startswith("sub_agent:")
+    )
+    assert primary.plan_id.endswith(":plan:v2")
+    assert [item["assignment_id"] for item in primary.context["sub_agent_results"]] == [
+        "new"
+    ]
+    assert all(
+        item["plan_id"] == primary.plan_id
+        for item in primary.context["sub_agent_results"]
+    )
+    replan_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.REPLANNING
+    )
+    delegated = replan_request.context["workflow_state_and_evidence"][
+        "delegated_execution"
+    ]
+    assert delegated["plan_id"].endswith(":plan:v1")
+    assert delegated["assignment_statuses"] == [
+        {"assignment_id": "old", "status": "RUNNING"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unchanged_replan_rebinds_successful_preserved_assignment_once(tmp_path):
+    async def trigger_replan(request):
+        coordinator = request.checkpoint_coordinator
+        assert coordinator is not None
+        for index in range(10):
+            admission = await coordinator.before_tool(
+                tool_name="file_read",
+                arguments={"path": f"item-{index}"},
+                tool_call_id=f"preserved-{index}",
+            )
+            await coordinator.after_tool(
+                admission,
+                ToolEvidenceReceipt(
+                    evidence_ref=f"preserved:{index}",
+                    stage=Stage.EXECUTION,
+                    invocation_id=request.invocation_id,
+                    attempt=request.attempt,
+                    tool_call_id=f"preserved-{index}",
+                    tool_name="file_read",
+                    status=ToolReceiptStatus.SUCCESS,
+                    read_only=True,
+                    completed=True,
+                    output_sha256=f"preserved-hash-{index}",
+                ),
+                result_summary=f"preserved result {index}",
+            )
+        return {
+            "disposition": "COMPLETED",
+            "summary": "The preserved assignment completed once.",
+        }
+
+    assignment = {
+        "id": "preserved",
+        "task": "Inspect the preserved route",
+        "profile": "lightweight",
+        "tools": [],
+        "attachment_ids": [],
+        "allow_side_effects": False,
+    }
+    scripts = _initial("HIGH_VOLUME_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["delegate preserved route", "synthesise"],
+                    "success_criteria": ["The preserved route is complete"],
+                    "parallel_groups": [],
+                    "sub_agents": [dict(assignment)],
+                }
+            ],
+            Stage.REPLANNING: [
+                {
+                    "plan": ["delegate preserved route", "synthesise"],
+                    "success_criteria": ["The preserved route is complete"],
+                    "parallel_groups": [],
+                    "sub_agents": [dict(assignment)],
+                    "completion_percent": 70,
+                    "completion_basis": "The delegated result is completing.",
+                    "plan_changed": False,
+                    "change_reason": None,
+                    "next_step": "Preserve the result and synthesise it.",
+                    "commentary": (
+                        "Progress is 70%. The plan is unchanged. Next: Preserve the "
+                        "result and synthesise it."
+                    ),
+                }
+            ],
+            Stage.EXECUTION: [
+                trigger_replan,
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Primary synthesised the rebound result.",
+                },
+            ],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Process the preserved batch",
+        "request-subagent-preserved",
+        effort="high",
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    sub_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.role.startswith("sub_agent:")
+    ]
+    assert len(sub_requests) == 1
+    primary = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.EXECUTION
+        and not request.role.startswith("sub_agent:")
+    )
+    rebound = primary.context["sub_agent_results"]
+    assert len(rebound) == 1
+    assert rebound[0]["plan_id"].endswith(":plan:v2")
+    assert rebound[0]["source_plan_id"].endswith(":plan:v1")
+    assert rebound[0]["reused"] is True
 
 
 @pytest.mark.asyncio
@@ -2351,6 +2797,48 @@ async def test_json_repair_normalises_unambiguous_subagent_boolean(tmp_path):
         if request.role == "sub_agent:safe"
     )
     assert sub_request.allow_side_effects is False
+
+
+@pytest.mark.asyncio
+async def test_planning_tool_catalogue_is_advisory_not_a_repair_gate(tmp_path):
+    scripts = _initial("HIGH_VOLUME_TASK")
+    assignment = {
+        "id": "assignment_1",
+        "task": "Inspect one target",
+        "profile": "lightweight",
+        "tools": ["invented_search"],
+        "attachment_ids": [],
+        "allow_side_effects": False,
+    }
+    plan = {
+        "plan": ["delegate one bounded check", "synthesise"],
+        "success_criteria": ["The bounded check is integrated"],
+        "parallel_groups": [["assignment_1"]],
+    }
+    scripts[Stage.PLANNING] = [{**plan, "sub_agents": [assignment]}]
+    scripts[Stage.EXECUTION] = [
+        {"disposition": "COMPLETED", "summary": "Target inspected."},
+        {"disposition": "COMPLETED", "summary": "Result integrated."},
+    ]
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Inspect the batch",
+        "request-advisory-subagent-tool-catalogue",
+        effort="medium",
+    )
+
+    sub_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.role == "sub_agent:assignment_1"
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert not any(
+        request.stage is Stage.JSON_REPAIR for _profile, request in provider.requests
+    )
+    assert sub_request.context["delegated_tools"] == ["invented_search"]
 
 
 @pytest.mark.asyncio
@@ -3694,9 +4182,7 @@ async def test_specialist_json_repair_has_no_attempt_cap_and_preserves_classific
         call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
     ]
     repair_requests = [
-        call
-        for _profile, call in provider.requests
-        if call.stage is Stage.JSON_REPAIR
+        call for _profile, call in provider.requests if call.stage is Stage.JSON_REPAIR
     ]
     assert len(triage_requests) == 1
     assert len(repair_requests) == 4
@@ -3790,10 +4276,255 @@ async def test_review_json_repair_preserves_receipts_without_replaying_review(
         for _profile, request in provider.requests
         if request.stage is Stage.FINALISATION
     )
-    receipts = finalisation_request.context["completion_evidence"][
-        "evidence_receipts"
-    ]
+    receipts = finalisation_request.context["completion_evidence"]["evidence_receipts"]
     assert [item["evidence_ref"] for item in receipts] == ["review:inspection:1"]
+
+
+@pytest.mark.asyncio
+async def test_verification_report_repair_uses_frozen_receipts_without_replay(
+    tmp_path,
+):
+    captured_finding = None
+
+    def invalid_verification(request):
+        callback = request.provider_activity_callback
+        assert callback is not None
+        callback(
+            {
+                "kind": "tool_start",
+                "content": "verification_run started",
+                "tool_name": "verification_run",
+                "tool_read_only": False,
+            }
+        )
+        callback(
+            {
+                "kind": "tool_end",
+                "content": "verification_run completed",
+                "tool_name": "verification_run",
+            }
+        )
+        before_ref = "verification:snapshot:before"
+        test_ref = "verification:test:success"
+        file_list_ref = "verification:file-list:success"
+        after_ref = "verification:snapshot:after"
+        receipts = (
+            ToolEvidenceReceipt(
+                before_ref,
+                Stage.VERIFICATION,
+                request.invocation_id,
+                request.attempt,
+                "snapshot-before",
+                "workspace_inspect",
+                ToolReceiptStatus.SUCCESS,
+                True,
+                True,
+                "before-output",
+                {"operation": "snapshot", "snapshot_sha256": "stable"},
+            ),
+            ToolEvidenceReceipt(
+                test_ref,
+                Stage.VERIFICATION,
+                request.invocation_id,
+                request.attempt,
+                "verification-run",
+                "verification_run",
+                ToolReceiptStatus.SUCCESS,
+                False,
+                True,
+                "test-output",
+                {
+                    "operation": "run",
+                    "recipe": "pytest_core",
+                    "exit_code": 0,
+                    "execution_scope": "workspace",
+                    "workspace_copied": False,
+                    "process_isolated": False,
+                    "process_authority": "inherited",
+                    "identity_policy": "inherited",
+                    "filesystem_policy": "inherited",
+                    "environment_policy": "inherited",
+                    "network_policy": "inherited",
+                    "home_policy": "inherited",
+                    "workspace_access": {
+                        "read": True,
+                        "write": True,
+                        "execute": True,
+                    },
+                    "timeout_s": 1800.0,
+                    "timeout_policy": {
+                        "execution_floor_s": 300.0,
+                        "effective_timeout_s": 1800.0,
+                    },
+                },
+            ),
+            ToolEvidenceReceipt(
+                file_list_ref,
+                Stage.VERIFICATION,
+                request.invocation_id,
+                request.attempt,
+                "file-list",
+                "file_list",
+                ToolReceiptStatus.SUCCESS,
+                True,
+                True,
+                "file-list-output",
+                {"operation": "list", "path": "workspace"},
+            ),
+            ToolEvidenceReceipt(
+                after_ref,
+                Stage.VERIFICATION,
+                request.invocation_id,
+                request.attempt,
+                "snapshot-after",
+                "workspace_inspect",
+                ToolReceiptStatus.SUCCESS,
+                True,
+                True,
+                "after-output",
+                {"operation": "snapshot", "snapshot_sha256": "stable"},
+            ),
+        )
+        return StageResponse(
+            data={
+                "outcome": "VERIFIED",
+                "summary": "The checks ran, with one remaining evidence gap.",
+                "checks": [
+                    {
+                        "claim": "Core tests pass",
+                        "verifiability": "VERIFIABLE",
+                        "result": "VERIFIED",
+                        "method": "artifact_inspection",
+                        "evidence_refs": [test_ref],
+                        "observed": "The core recipe exited 0.",
+                        "required": True,
+                    },
+                    {
+                        "claim": "The requested files establish the full business purpose",
+                        "verifiability": "PARTIALLY_VERIFIABLE",
+                        "result": "PARTIALLY_VERIFIED",
+                        "method": "read_only_api",
+                        "evidence_refs": [file_list_ref],
+                        "observed": "The files establish only part of the purpose.",
+                        "required": True,
+                    },
+                ],
+                "evidence_refs": [test_ref, file_list_ref],
+                "limitations": ["The business purpose is only partly evidenced."],
+            },
+            provider="fake-api",
+            model="model-reviewer",
+            evidence_refs=tuple(receipt.evidence_ref for receipt in receipts),
+            tool_receipts=receipts,
+        )
+
+    def repaired_verification(request):
+        repair_payload = json.loads(request.goal)
+        receipts = repair_payload["frozen_tool_receipts"]
+        assert {receipt["tool_name"] for receipt in receipts} == {
+            "workspace_inspect",
+            "verification_run",
+            "file_list",
+        }
+        assert request.context["repair_mode"] == "verification_report"
+        assert request.allow_tools is False
+        assert request.allow_side_effects is False
+        return {
+            "outcome": "PARTIALLY_VERIFIED",
+            "summary": "The core tests passed; the business purpose is partly evidenced.",
+            "checks": [
+                {
+                    "claim": "Core tests pass",
+                    "verifiability": "VERIFIABLE",
+                    "result": "VERIFIED",
+                    "method": "workspace_test",
+                    "evidence_refs": ["verification:test:success"],
+                    "observed": "The core recipe exited 0.",
+                    "required": True,
+                },
+                {
+                    "claim": "The requested files establish the full business purpose",
+                    "verifiability": "PARTIALLY_VERIFIABLE",
+                    "result": "PARTIALLY_VERIFIED",
+                    "method": "artifact_inspection",
+                    "evidence_refs": ["verification:file-list:success"],
+                    "observed": "The files establish only part of the purpose.",
+                    "required": True,
+                },
+            ],
+            "evidence_refs": [
+                "verification:test:success",
+                "verification:file-list:success",
+            ],
+            "limitations": ["The business purpose is only partly evidenced."],
+        }
+
+    scripts = _initial("COMPLEX_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [{"plan": ["implement", "verify"]}],
+            Stage.EXECUTION: [
+                {"disposition": "COMPLETED", "summary": "Implementation completed."}
+            ],
+            Stage.VERIFICATION: [invalid_verification],
+            Stage.JSON_REPAIR: [repaired_verification],
+            Stage.REVIEW: [
+                {
+                    "status": "PASS",
+                    "reason": "The latest result satisfies the request.",
+                    "conditions": None,
+                }
+            ],
+            Stage.FINALISATION: [{"report": "Implementation completed."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+    runtime = _runtime(tmp_path, provider)
+    original_review = runtime._review_and_remediate
+
+    async def verify_then_review(state, classification, execution, max_reviews):
+        nonlocal captured_finding
+        _response, captured_finding = await runtime._invoke_stage(
+            state,
+            Stage.VERIFICATION,
+            validate_verification_response,
+            allow_tools=True,
+            allow_side_effects=True,
+        )
+        return await original_review(
+            state,
+            classification,
+            execution,
+            max_reviews,
+        )
+
+    runtime._review_and_remediate = verify_then_review
+    result = await runtime.run_turn(
+        "Implement and verify the result",
+        "request-verification-frozen-report-repair",
+        effort=Effort.MAX,
+    )
+
+    verification_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.VERIFICATION
+    ]
+    repair_requests = [
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.JSON_REPAIR
+    ]
+    audit_text = (tmp_path / "her-v2" / "audit.jsonl").read_text()
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert captured_finding is not None
+    assert captured_finding.outcome is VerificationOutcome.PARTIALLY_VERIFIED
+    assert len(verification_requests) == 1
+    assert len(repair_requests) == 1
+    assert "SIDE_EFFECT_REPLAY_BLOCKED" not in audit_text
+    assert '"source_stage_replayed": false' in audit_text
+    assert '"repair_mode": "verification_report"' in audit_text
 
 
 @pytest.mark.asyncio
@@ -4117,7 +4848,12 @@ async def test_disabled_habit_pipeline_preserves_the_plain_planning_path(tmp_pat
         if request.stage is Stage.PLANNING
     )
     assert result.terminal_state is TerminalState.COMPLETED
-    assert planning_request.context == {"classification": "COMPLEX_TASK"}
+    assert planning_request.context["classification"] == "COMPLEX_TASK"
+    assert planning_request.context["execution_allow_side_effects"] is True
+    assert {
+        item["function"]["name"]
+        for item in planning_request.context["available_execution_tools"]
+    } >= {"file_read", "file_write", "verification_run"}
     await runtime.shutdown()
 
 

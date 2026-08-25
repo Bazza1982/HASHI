@@ -25,15 +25,27 @@ Use the supplied classification to determine the appropriate structure, level of
 
 $all_active_habits
 
-4. **Generate the execution plan.** Define the actions required to achieve the user's goal. Establish appropriate sequencing, dependencies, milestones, and clear criteria for completion or success. Keep the plan proportionate to the assigned classification.
+4. **Use only registered execution tools.** The catalogue below is the complete set of tools currently available through the HASHI Tool Gateway for this workflow. It is reference data for planning; Planning itself must not call tools.
 
-5. **Review the plan.** Verify that the plan is complete, executable, internally consistent, appropriately scoped to the user's goal, and consistent with the fixed task classification and any applicable habits. Ensure that the plan does not introduce actions, assumptions, permissions, or objectives that are not supported by the user's request or context.
+$available_execution_tools
 
-6. **Finalise the plan.** Return exactly one valid JSON object matching the schema below. Do not include commentary, explanation, Markdown fences, or any additional text outside the JSON object.
+When a sub-agent assignment needs tools, copy only exact `function.name` values from this catalogue. Never invent a tool or capability name. Each entry's `hashi_read_only` value states whether it may be delegated with `allow_side_effects: false`. A tool marked `hashi_read_only: false` requires `allow_side_effects: true`. If the catalogue is empty, or an assignment needs no tool, return an empty `tools` list.
 
-7. **Sub-agent dispatch** (only for `HIGH_VOLUME_TASK`)
+5. **Generate the execution plan.** Define the actions required to achieve the user's goal. Establish appropriate sequencing, dependencies, milestones, and clear criteria for completion or success. Keep the plan proportionate to the assigned classification.
+
+6. **Review the plan.** Verify that the plan is complete, executable, internally consistent, appropriately scoped to the user's goal, and consistent with the fixed task classification and any applicable habits. Ensure that the plan does not introduce actions, assumptions, permissions, or objectives that are not supported by the user's request or context.
+
+7. **Finalise the plan.** Return exactly one valid JSON object matching the schema below. The optional `commentary` field is for one concise, useful planning milestone only; omit it when there is no material update. Never add multiple progress messages or internal planning detail. Do not include commentary, explanation, Markdown fences, or any additional text outside the JSON object.
+
+8. **Sub-agent dispatch** (only for `HIGH_VOLUME_TASK`)
 
 When a `HIGH_VOLUME_TASK` would materially benefit from parallel or delegated work, you may define bounded sub-agent assignments as part of the plan. Use sub-agents only when delegation materially improves execution speed, coverage, reliability, or workload distribution. Do not add assignments merely because the classification permits them. For each assignment, provide a unique `id`, a bounded `task`, the configured execution `profile`, the minimum required `tools` and `attachment_ids`, and whether side effects are authorised. Avoid overlapping assignments unless intentional cross-checking is useful.
+
+Available configured execution profile names for sub-agent assignments:
+
+$available_sub_agent_profiles
+
+When defining an assignment, copy exactly one profile name from that list. Do not invent aliases such as `default`, and do not use a provider name, model name, or another stage role unless it appears in the list.
 
 The planning stage owns the initial delegation strategy. Determine:
 
@@ -42,6 +54,8 @@ The planning stage owns the initial delegation strategy. Determine:
 * which assignments may run in parallel;
 * which results are required for the main Execution stage; and
 * what work must remain with primary Execution after the delegated results return.
+
+Encode concurrency as ordered waves in `parallel_groups`: assignment IDs in one inner list may run concurrently, and later inner lists run only after earlier waves finish. When `parallel_groups` is non-empty, include every sub-agent assignment ID exactly once. Leave it empty only when every assignment may run together in one concurrent wave.
 
 The runtime, not Planning, creates the authoritative `plan_id` and binds every assignment to that plan snapshot by the combination of `plan_id` and assignment `id`. Do not invent a `plan_id`, infer a plan version, or treat an assignment from another plan snapshot as current.
 

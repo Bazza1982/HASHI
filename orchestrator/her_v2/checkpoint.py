@@ -163,7 +163,9 @@ class CheckpointSnapshot:
                 else None
             )
         else:
-            payload["execution_candidate_present"] = self.execution_candidate is not None
+            payload["execution_candidate_present"] = (
+                self.execution_candidate is not None
+            )
         return payload
 
     def replan_payload(self) -> dict[str, Any]:
@@ -224,6 +226,7 @@ class CompulsoryReplanCoordinator:
         self._checkpoint_count = 0
         self._checkpoint_task: asyncio.Task[ReplanDirective] | None = None
         self._terminal_interruption: ReplanCompletionInterruption | None = None
+        self._latest_directive: ReplanDirective | None = None
         self._closed = False
 
     @property
@@ -233,6 +236,12 @@ class CompulsoryReplanCoordinator:
     @property
     def receipts(self) -> tuple[ToolEvidenceReceipt, ...]:
         return tuple(self._receipts.values())
+
+    @property
+    def latest_directive(self) -> ReplanDirective | None:
+        """Return the latest completed Replan directive for plan-bound callers."""
+
+        return self._latest_directive
 
     @property
     def completed_result_count(self) -> int:
@@ -425,6 +434,7 @@ class CompulsoryReplanCoordinator:
                     raise TypeError("replan evaluator returned an untyped directive")
                 if directive.checkpoint_id != snapshot.checkpoint_id:
                     raise ValueError("Replanning changed the checkpoint identity")
+                self._latest_directive = directive
             except asyncio.CancelledError:
                 raise
             except (TurnStopped, AuditPersistenceError) as exc:
@@ -519,9 +529,7 @@ class CompulsoryReplanCoordinator:
             boundary_kind=boundary_kind,
             prospective_action=(dict(prospective) if prospective is not None else None),
             execution_candidate=(
-                dict(execution_candidate)
-                if execution_candidate is not None
-                else None
+                dict(execution_candidate) if execution_candidate is not None else None
             ),
         )
 

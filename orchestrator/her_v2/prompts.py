@@ -27,7 +27,7 @@ _SCHEMAS = {
     Stage.PLANNING: {
         "plan": ["ordered, concrete action"],
         "success_criteria": ["observable criterion"],
-        "parallel_groups": [],
+        "parallel_groups": [["assignment IDs in one concurrent execution wave"]],
         "sub_agents": [
             {
                 "id": "unique bounded assignment id",
@@ -66,7 +66,7 @@ _SCHEMAS = {
         "next_step": (
             "next authorised action, or Review/Finalisation when completion is 100"
         ),
-        "parallel_groups": [],
+        "parallel_groups": [["assignment IDs in one concurrent execution wave"]],
         "sub_agents": [
             {
                 "id": "unique bounded assignment id",
@@ -215,11 +215,7 @@ def _immediate_response_goal(goal: str) -> str:
 def render_stage_prompt(request: StageRequest) -> str:
     json_repair_input = request.context.get("json_repair_input")
     if request.stage is Stage.JSON_REPAIR:
-        return (
-            json_repair_input
-            if isinstance(json_repair_input, str)
-            else request.goal
-        )
+        return json_repair_input if isinstance(json_repair_input, str) else request.goal
     meditation_input = request.context.get("meditation_input")
     if request.stage is Stage.MEDITATION and isinstance(meditation_input, str):
         # All Meditation instructions live in its isolated system prompt.
@@ -256,6 +252,15 @@ def render_stage_prompt(request: StageRequest) -> str:
                 request.classification.value if request.classification else ""
             ),
             all_active_habits="\n\n".join(habits) if habits else "[]",
+            available_execution_tools=json.dumps(
+                request.context.get("available_execution_tools") or [],
+                ensure_ascii=False,
+                indent=2,
+            ),
+            available_sub_agent_profiles=json.dumps(
+                request.context.get("available_sub_agent_profiles") or [],
+                ensure_ascii=False,
+            ),
             schema=json.dumps(_SCHEMAS[Stage.PLANNING], ensure_ascii=False, indent=2),
         )
     if request.stage is Stage.REPLANNING:
@@ -280,6 +285,15 @@ def render_stage_prompt(request: StageRequest) -> str:
                 ensure_ascii=False,
                 indent=2,
             ),
+            available_execution_tools=json.dumps(
+                request.context.get("available_execution_tools") or [],
+                ensure_ascii=False,
+                indent=2,
+            ),
+            available_sub_agent_profiles=json.dumps(
+                request.context.get("available_sub_agent_profiles") or [],
+                ensure_ascii=False,
+            ),
             schema=json.dumps(_SCHEMAS[Stage.REPLANNING], ensure_ascii=False, indent=2),
         )
     if request.stage is Stage.EXECUTION:
@@ -303,17 +317,62 @@ def render_stage_prompt(request: StageRequest) -> str:
             )
         assignment_section = ""
         if request.role.startswith("sub_agent:"):
-            assignment_keys = [
-                "assignment_id",
-                "assigned_task",
-                "delegated_tools",
-                "authorized_attachment_ids",
-            ]
-            if "authorized_attachment_manifest" in request.context:
-                assignment_keys.append("authorized_attachment_manifest")
-            assignment = {key: request.context.get(key) for key in assignment_keys}
-            assignment_section = "\n\nBounded assignment:\n" + json.dumps(
-                assignment, ensure_ascii=False, indent=2
+            raw_definition = request.context.get("assignment_definition")
+            definition = (
+                dict(raw_definition)
+                if isinstance(raw_definition, Mapping)
+                else {
+                    "id": request.context.get("assignment_id"),
+                    "task": request.context.get("assigned_task"),
+                    "profile": request.context.get("profile"),
+                    "tools": request.context.get("delegated_tools") or [],
+                    "attachment_ids": (
+                        request.context.get("authorized_attachment_ids") or []
+                    ),
+                    "allow_side_effects": request.allow_side_effects,
+                }
+            )
+            authority = request.context.get("authority")
+            envelope: dict[str, Any] = {
+                "plan_id": request.plan_id,
+                "immutable_classification": (
+                    request.classification.value if request.classification else None
+                ),
+                "assignment": definition,
+                "delegated_capabilities": {
+                    "tools": request.context.get("delegated_tools") or [],
+                    "attachment_ids": (
+                        request.context.get("authorized_attachment_ids") or []
+                    ),
+                    "attachment_manifest": (
+                        request.context.get("authorized_attachment_manifest") or []
+                    ),
+                    "allow_tools": request.allow_tools,
+                    "allow_side_effects": request.allow_side_effects,
+                },
+                "authority": (
+                    dict(authority)
+                    if isinstance(authority, Mapping)
+                    else {
+                        "scope": "bounded_execution_only",
+                        "may_replan": False,
+                        "may_contact_user": False,
+                        "may_finalise": False,
+                        "may_create_subagents": False,
+                    }
+                ),
+            }
+            continuation = request.context.get("replan_continuation")
+            if isinstance(continuation, Mapping) and continuation:
+                envelope["replan_continuation"] = dict(continuation)
+                envelope["continuation_rules"] = dict(
+                    request.context.get("continuation_rules")
+                    if isinstance(request.context.get("continuation_rules"), Mapping)
+                    else {}
+                )
+            assignment_section = (
+                "\n\nBounded assignment and authority envelope:\n"
+                + json.dumps(envelope, ensure_ascii=False, indent=2)
             )
         return render_prompt_asset(
             "execution_request",
@@ -421,6 +480,11 @@ def render_internal_stage_system_prompt(request: StageRequest) -> str | None:
 
     if request.role.startswith("sub_agent:"):
         return load_prompt_asset("system_sub_agent")
+    if (
+        request.stage is Stage.JSON_REPAIR
+        and request.context.get("repair_mode") == "verification_report"
+    ):
+        return load_prompt_asset("system_verification_report_repair")
     if request.stage is Stage.DREAM and request.context.get("dream_role") == "report":
         return load_prompt_asset("system_dream_report")
     if request.stage in {Stage.EXECUTION, Stage.REVIEW, Stage.FINALISATION}:
@@ -455,8 +519,7 @@ def render_finalisation_system_prompt(
         "system_finalisation",
         goal=goal,
         draft_response=(
-            str(draft_response).strip()
-            or "No execution draft response was produced."
+            str(draft_response).strip() or "No execution draft response was produced."
         ),
         reviewer_findings=(
             json.dumps(reviewer_findings, ensure_ascii=False, indent=2)
@@ -498,6 +561,7 @@ def render_execution_system_prompt(
     *,
     goal: str,
     active_plan: Mapping[str, Any] | None,
+    delegated_execution: Mapping[str, Any] | None,
     tool_catalogue: Sequence[Mapping[str, Any]],
     guidance: str,
     display_name: str,
@@ -513,6 +577,11 @@ def render_execution_system_prompt(
             json.dumps(active_plan, ensure_ascii=False, indent=2)
             if active_plan is not None
             else "No active plan was supplied."
+        ),
+        delegated_execution=(
+            json.dumps(dict(delegated_execution), ensure_ascii=False, indent=2)
+            if delegated_execution is not None
+            else "No delegated execution batch was attached."
         ),
         tool_catalogue=(
             json.dumps(list(tool_catalogue), ensure_ascii=False, indent=2)

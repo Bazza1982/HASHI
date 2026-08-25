@@ -410,6 +410,29 @@ def test_legacy_single_route_state_migrates_without_exposing_role_configured(tmp
     assert selected.pro_model == "deepseek-v4-flash"
 
 
+@pytest.mark.parametrize("persisted_backend", ["her", "her-v2"])
+def test_stale_her_v2_fixed_mode_is_repaired_to_flex(
+    tmp_path,
+    persisted_backend,
+):
+    manager = _manager(
+        tmp_path,
+        state={
+            "active_backend": persisted_backend,
+            "agent_mode": "fixed",
+            "unrelated": {"keep": True},
+        },
+    )
+
+    state = json.loads(manager.state_file.read_text(encoding="utf-8"))
+
+    assert manager.config.active_backend == "her-v2"
+    assert manager.agent_mode == "flex"
+    assert state["active_backend"] == "her-v2"
+    assert state["agent_mode"] == "flex"
+    assert state["unrelated"] == {"keep": True}
+
+
 def test_persisted_hybrid_provider_names_normalize_to_engine_ids(tmp_path):
     manager = _manager(
         tmp_path,
