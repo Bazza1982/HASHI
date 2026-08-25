@@ -279,6 +279,11 @@ class HERv2Config:
                 raise HERv2ConfigurationError(
                     f"unknown HER v2 stage role: {stage_name!r}"
                 ) from exc
+            if stage is Stage.JSON_REPAIR:
+                raise HERv2ConfigurationError(
+                    "json_repair is an internal specialist stage and inherits "
+                    "its rejected source stage profile"
+                )
             stage_roles[stage] = str(role).strip()
 
         stage_reasoning_raw = raw.get("stage_reasoning") or {}
@@ -292,6 +297,10 @@ class HERv2Config:
                 raise HERv2ConfigurationError(
                     f"unknown HER v2 reasoning stage: {stage_name!r}"
                 ) from exc
+            if stage is Stage.JSON_REPAIR:
+                raise HERv2ConfigurationError(
+                    "json_repair reasoning is inherited from its rejected source stage"
+                )
             reasoning = str(value or "").strip()
             if not reasoning:
                 raise HERv2ConfigurationError(
@@ -590,6 +599,10 @@ class HERv2Config:
         return self._configured_route_profile(profile, parsed)
 
     def profile_for(self, stage: Stage) -> ProviderProfile:
+        if stage is Stage.JSON_REPAIR:
+            raise HERv2ConfigurationError(
+                "json_repair requires the frozen rejected source stage profile"
+            )
         role = self.stage_roles.get(stage)
         if not role or role not in self.profiles:
             raise HERv2ConfigurationError(

@@ -9,14 +9,15 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.base import BackendResponse, TokenUsage
-from adapters.her_habits import HERHabitStore
-from adapters.her_v2 import (
-    HERv2Adapter,
-    HashiStageProvider,
-    _backend_response_error,
-)
 from adapters.deepseek_api import DeepSeekAdapter
 from adapters.hashi_api import HashiApiAdapter
+from adapters.her_habits import HERHabitStore
+from adapters.her_v2 import (
+    HashiStageProvider,
+    HERv2Adapter,
+    _AdapterDelivery,
+    _backend_response_error,
+)
 from adapters.ollama_api import OllamaAdapter
 from adapters.openrouter_api import OpenRouterAdapter, _APIResult
 from adapters.registry import get_backend_class
@@ -24,19 +25,20 @@ from adapters.stream_events import (
     DELIVERY_FINAL,
     DELIVERY_INTERNAL,
     DELIVERY_USER_COMMENTARY,
-    KIND_INITIAL_RESOLUTION,
     KIND_COMMENTARY,
+    KIND_INITIAL_RESOLUTION,
     KIND_THINKING,
     KIND_TOOL_START,
     StreamEvent,
 )
 from adapters.xai_api import XaiApiAdapter
+from orchestrator import runtime_her_dream, runtime_her_habits
 from orchestrator.config import AgentConfig, GlobalConfig
 from orchestrator.flexible_backend_registry import (
     BACKEND_REGISTRY,
     canonical_backend_engine,
 )
-from orchestrator.her_v2.config import ProviderProfile
+from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.checkpoint import (
     CheckpointSnapshot,
     CompulsoryReplanCoordinator,
@@ -44,8 +46,8 @@ from orchestrator.her_v2.checkpoint import (
     ReplanDirective,
 )
 from orchestrator.her_v2.commentary import PackagedCommentary
+from orchestrator.her_v2.config import ProviderProfile
 from orchestrator.her_v2.interfaces import ProviderFailureCode, StageInvocationError
-from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.ledger import ExecutionLedger, LedgerStore
 from orchestrator.her_v2.models import (
     Effort,
@@ -61,7 +63,6 @@ from orchestrator.her_v2.presentation import (
     RenderedRequiredMessage,
     RequiredUserMessage,
 )
-from orchestrator import runtime_her_dream, runtime_her_habits
 
 
 def _profiles():
@@ -85,9 +86,17 @@ def _profiles():
             False,
         ),
         ("HTTP 403 Forbidden", ProviderFailureCode.PROVIDER_PERMISSION_DENIED, False),
-        ("HTTP 408 Request Timeout", ProviderFailureCode.PROVIDER_REQUEST_TIMEOUT, True),
+        (
+            "HTTP 408 Request Timeout",
+            ProviderFailureCode.PROVIDER_REQUEST_TIMEOUT,
+            True,
+        ),
         ("HTTP 429 Rate Limited", ProviderFailureCode.PROVIDER_RATE_LIMITED, True),
-        ("HTTP 503 Service Unavailable", ProviderFailureCode.PROVIDER_SERVER_ERROR, True),
+        (
+            "HTTP 503 Service Unavailable",
+            ProviderFailureCode.PROVIDER_SERVER_ERROR,
+            True,
+        ),
         (
             "connection reset by peer",
             ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
@@ -309,9 +318,7 @@ class _SideEffectFailureProvider(_DirectProvider):
             raise StageInvocationError(
                 "provider stream ended before completion",
                 code=ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT,
-                human_description=(
-                    "The provider response began but did not complete."
-                ),
+                human_description=("The provider response began but did not complete."),
             )
         elif request.stage is Stage.FINALISATION:
             payload = {
@@ -551,12 +558,8 @@ async def test_adapter_direct_response_uses_final_lane_once(tmp_path):
         "delivered": False,
         "disposition": "deferred_to_final_boundary",
         "required": True,
-        "delivery_id": response.stream_metadata["her_v2"]["delivery"][
-            "delivery_id"
-        ],
-        "message_event_id": response.stream_metadata["her_v2"]["delivery"][
-            "event_id"
-        ],
+        "delivery_id": response.stream_metadata["her_v2"]["delivery"]["delivery_id"],
+        "message_event_id": response.stream_metadata["her_v2"]["delivery"]["event_id"],
     }
 
 
@@ -591,7 +594,7 @@ async def test_scheduler_effort_is_request_scoped_and_provider_reasoning_is_unch
     assert Stage.PLANNING not in scheduled_stages
     assert Stage.REVIEW not in scheduled_stages
     assert Stage.EXECUTION in scheduled_stages
-    assert Stage.FINALISATION in scheduled_stages
+    assert Stage.FINALISATION not in scheduled_stages
     assert scheduled.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
         "effective": "low",
@@ -620,7 +623,7 @@ async def test_scheduler_effort_is_request_scoped_and_provider_reasoning_is_unch
     ordinary_stages = [request.stage for _profile, request in provider.requests]
     assert Stage.PLANNING in ordinary_stages
     assert Stage.REVIEW in ordinary_stages
-    assert Stage.VERIFICATION in ordinary_stages
+    assert Stage.VERIFICATION not in ordinary_stages
     assert ordinary.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
         "effective": "max",
@@ -661,21 +664,27 @@ async def test_adapter_correlates_ordinary_transport_receipt_with_stable_deliver
 
     assert delivery["delivery_id"]
     assert delivery["event_id"]
-    assert adapter.record_transport_delivery_receipt(
-        request_id="request-delivery-receipt",
-        delivery_id=delivery["delivery_id"],
-        delivered=True,
-        disposition="transport_delivered",
-        chunk_count=1,
-    ) is True
+    assert (
+        adapter.record_transport_delivery_receipt(
+            request_id="request-delivery-receipt",
+            delivery_id=delivery["delivery_id"],
+            delivered=True,
+            disposition="transport_delivered",
+            chunk_count=1,
+        )
+        is True
+    )
     # The same transport callback is idempotent and cannot duplicate audit truth.
-    assert adapter.record_transport_delivery_receipt(
-        request_id="request-delivery-receipt",
-        delivery_id=delivery["delivery_id"],
-        delivered=True,
-        disposition="transport_delivered",
-        chunk_count=1,
-    ) is True
+    assert (
+        adapter.record_transport_delivery_receipt(
+            request_id="request-delivery-receipt",
+            delivery_id=delivery["delivery_id"],
+            delivered=True,
+            disposition="transport_delivered",
+            chunk_count=1,
+        )
+        is True
+    )
 
     rows = [
         json.loads(line)
@@ -683,9 +692,7 @@ async def test_adapter_correlates_ordinary_transport_receipt_with_stable_deliver
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    receipts = [
-        row for row in rows if row["event"] == "transport_delivery_receipt"
-    ]
+    receipts = [row for row in rows if row["event"] == "transport_delivery_receipt"]
     assert len(receipts) == 1
     assert receipts[0]["payload"]["delivery_id"] == delivery["delivery_id"]
     assert receipts[0]["payload"]["message_event_id"] == delivery["event_id"]
@@ -694,7 +701,9 @@ async def test_adapter_correlates_ordinary_transport_receipt_with_stable_deliver
 
 
 @pytest.mark.asyncio
-async def test_adapter_finalises_unusable_execution_as_runtime_error(tmp_path):
+async def test_adapter_accepts_primary_execution_natural_language_without_finalisation(
+    tmp_path,
+):
     class _MalformedExecutionProvider(_DirectProvider):
         async def invoke(self, profile, request):
             self.requests.append((profile, request))
@@ -740,19 +749,19 @@ async def test_adapter_finalises_unusable_execution_as_runtime_error(tmp_path):
         "Perform the action once", "request-adapter-plan-b-error"
     )
 
-    assert response.is_success is False
-    assert response.stop_reason == "error"
-    assert response.error == "execution_result_unusable"
-    assert response.stream_metadata["her_v2"]["terminal_state"] == "ERROR"
-    assert response.text == "The execution result could not be interpreted."
-    assert sum(
-        request.stage is Stage.EXECUTION
+    assert response.is_success is True
+    assert response.stop_reason == "completed"
+    assert response.error is None
+    assert response.stream_metadata["her_v2"]["terminal_state"] == "COMPLETED"
+    assert response.text == "execution reply without valid JSON"
+    assert (
+        sum(request.stage is Stage.EXECUTION for _profile, request in provider.requests)
+        == 1
+    )
+    assert all(
+        request.stage is not Stage.FINALISATION
         for _profile, request in provider.requests
-    ) == 1
-    assert sum(
-        request.stage is Stage.FINALISATION
-        for _profile, request in provider.requests
-    ) == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -854,13 +863,15 @@ async def test_adapter_uses_combined_finalisation_without_required_persona_rende
     )
 
     assert response.is_success is True
-    assert response.text == "Completed and verified."
+    assert response.text == "Verified and completed the requested work."
     assert renderer.messages == []
     final_events = [event for event in events if event.delivery_class == DELIVERY_FINAL]
     assert len(final_events) == 1
     assert final_events[0].summary == response.text
-    assert final_events[0].provenance == "her_v2_combined_finalisation"
-    assert final_events[0].detail == "persona_rendered_in_finalisation=true"
+    assert final_events[0].provenance == "primary_execution_natural_language"
+    assert final_events[0].detail == (
+        "execution_workflow_completed=true; finalisation_invoked=false"
+    )
     assert response.stream_metadata["her_v2"]["delivery"]["delivery_id"]
 
 
@@ -918,6 +929,38 @@ async def test_adapter_does_not_send_early_without_resolution_capability(tmp_pat
     assert response.stream_metadata["her_v2"]["final_already_delivered"] is False
     assert [event.delivery_class for event in events] == [DELIVERY_FINAL]
     assert all(event.kind != KIND_INITIAL_RESOLUTION for event in events)
+
+
+@pytest.mark.asyncio
+async def test_adapter_draft_uses_commentary_lane_and_can_be_replaced() -> None:
+    events = []
+
+    async def capture(event):
+        events.append(event)
+        return True
+
+    delivery = _AdapterDelivery(capture, allow_early=True)
+    draft = await delivery.deliver(
+        kind="draft",
+        text="DRAFT RESPONSE\n\nWork completed.",
+        event_id="turn-1:execution:draft",
+        phase="execution",
+    )
+    resolved = await delivery.resolve_initial(
+        resolution="final",
+        text="Reviewed final response.",
+        target_event_id="turn-1:execution:draft",
+        event_id="turn-1:execution:draft:final",
+    )
+
+    assert draft.accepted is True and draft.delivered is True
+    assert events[0].kind == KIND_COMMENTARY
+    assert events[0].delivery_class == DELIVERY_USER_COMMENTARY
+    assert events[0].summary.startswith("DRAFT RESPONSE")
+    assert resolved.accepted is True and resolved.delivered is True
+    assert events[1].kind == KIND_INITIAL_RESOLUTION
+    assert events[1].resolution == "final"
+    assert events[1].target_event_id == events[0].event_id
 
 
 @pytest.mark.asyncio
@@ -1016,9 +1059,7 @@ async def test_meditation_uses_turn_frozen_provider_target(tmp_path):
 
     profiles = [profile for profile, _request in provider.requests]
     assert {profile.engine for profile in profiles} == {"openrouter-api"}
-    assert {profile.model for profile in profiles} == {
-        "anthropic/claude-sonnet-4.6"
-    }
+    assert {profile.model for profile in profiles} == {"anthropic/claude-sonnet-4.6"}
     assert {profile.reasoning for profile in profiles} == {"low"}
     await adapter.shutdown()
 
@@ -1038,7 +1079,7 @@ async def test_adapter_runs_durable_meditation_after_completed_turn(tmp_path):
 
     response = await adapter.generate_response("Complete safely", "request-learning")
     assert response.is_success is True
-    assert response.text == "Completed and verified."
+    assert response.text == "Verified and completed the requested work."
 
     for _ in range(200):
         jobs = list(adapter._her_meditation_journal().root.glob("*.json"))
@@ -1071,7 +1112,10 @@ async def test_adapter_runs_durable_meditation_after_completed_turn(tmp_path):
     assert meditation_profile.model != premium_profile.model
     assert meditation_request.allow_tools is False
     assert meditation_request.allow_side_effects is False
-    assert "HER HABIT MEDITATION" in meditation_request.context["maintenance_prompt"]
+    meditation_input = json.loads(meditation_request.context["meditation_input"])
+    assert meditation_input["mode"] == "initial"
+    assert meditation_input["agent_name"] == "agent"
+    assert "maintenance_prompt" not in meditation_request.context
     await adapter.shutdown()
 
 
@@ -1183,11 +1227,27 @@ async def test_dream_command_path_runs_outside_live_turn_with_v2_audit(tmp_path)
     assert report
     assert manifest is not None
     dream_requests = [
-        request for _profile, request in provider.requests if request.stage is Stage.DREAM
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.DREAM
     ]
     assert len(dream_requests) == 2
     assert any(":analysis:" in request.turn_id for request in dream_requests)
     assert any(":persona" in request.turn_id for request in dream_requests)
+    analysis_request = next(
+        request for request in dream_requests if ":analysis:" in request.turn_id
+    )
+    persona_request = next(
+        request for request in dream_requests if ":persona" in request.turn_id
+    )
+    assert analysis_request.context["dream_role"] == "maintenance"
+    assert json.loads(analysis_request.context["dream_input"])["mode"] == "initial"
+    assert persona_request.context["dream_role"] == "report"
+    assert json.loads(persona_request.context["dream_input"])["mode"] == (
+        "persona_report"
+    )
+    assert "maintenance_prompt" not in analysis_request.context
+    assert "maintenance_prompt" not in persona_request.context
     assert all(request.allow_tools is False for request in dream_requests)
     assert all(request.allow_side_effects is False for request in dream_requests)
     audit_rows = [
@@ -1308,9 +1368,7 @@ class _FakeBackend:
     ):
         del request_id, is_retry, silent
         self.prompt = prompt
-        await on_stream_event(
-            StreamEvent(kind=KIND_THINKING, summary="provider trace")
-        )
+        await on_stream_event(StreamEvent(kind=KIND_THINKING, summary="provider trace"))
         await on_stream_event(
             StreamEvent(kind=KIND_TOOL_START, summary="tool activity", tool_name="bash")
         )
@@ -1443,7 +1501,9 @@ class _BaseToolRegistry:
 
     async def execute(self, name, arguments, tool_call_id=""):
         self.executed.append((name, arguments, tool_call_id))
-        return SimpleNamespace(tool_call_id=tool_call_id, output="allowed", is_error=False)
+        return SimpleNamespace(
+            tool_call_id=tool_call_id, output="allowed", is_error=False
+        )
 
     async def execute_with_audit_context(
         self, name, arguments, tool_call_id="", *, audit_context=None
@@ -1451,12 +1511,8 @@ class _BaseToolRegistry:
         self.execution_contexts.append(dict(audit_context or {}))
         return await self.execute(name, arguments, tool_call_id)
 
-    def record_delegated_denial(
-        self, name, arguments, result, *, audit_context=None
-    ):
-        self.denials.append(
-            (name, arguments, result, dict(audit_context or {}))
-        )
+    def record_delegated_denial(self, name, arguments, result, *, audit_context=None):
+        self.denials.append((name, arguments, result, dict(audit_context or {})))
 
 
 def _stage_request(stage, *, allow_tools, allow_side_effects=False):
@@ -1478,7 +1534,10 @@ def _stage_request(stage, *, allow_tools, allow_side_effects=False):
 
 def _adapter_replan_outcome(*, completion_percent: int = 50) -> ReplanningOutcome:
     return ReplanningOutcome(
-        plan={"plan": ["Continue from current evidence."], "success_criteria": ["done"]},
+        plan={
+            "plan": ["Continue from current evidence."],
+            "success_criteria": ["done"],
+        },
         completion_percent=completion_percent,
         completion_basis="Completed tool receipts were compared with the original goal.",
         plan_changed=False,
@@ -1542,8 +1601,7 @@ async def test_persona_packaging_retries_once_with_a_fresh_backend(tmp_path):
     }
     assert all(backend.shutdown_called for backend in manager.backends)
     assert all(
-        "idle_timeout_sec" not in backend.config.extra
-        for backend in manager.backends
+        "idle_timeout_sec" not in backend.config.extra for backend in manager.backends
     )
     rows = [
         json.loads(line)
@@ -1574,8 +1632,9 @@ async def test_persona_packaging_retries_once_with_a_fresh_backend(tmp_path):
     assert retry["payload"]["same_classification"] is True
     assert retry["payload"]["same_permissions"] is True
     assert retry["payload"]["same_workzone"] is True
-    assert failed["payload"]["retry_invariant_hash"] == (
-        completed["payload"]["retry_invariant_hash"]
+    assert (
+        failed["payload"]["retry_invariant_hash"]
+        == (completed["payload"]["retry_invariant_hash"])
     )
     assert "retry_tier" not in completed["payload"]
     assert "attempt_timeout_s" not in completed["payload"]
@@ -1663,6 +1722,63 @@ async def test_triage_receives_complete_policy_and_minimal_turn_prompt():
 
 
 @pytest.mark.asyncio
+async def test_json_repair_uses_isolated_specialist_prompt_and_no_tools():
+    manager = _FakeManager()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=_BaseToolRegistry(),
+    )
+    profile = ProviderProfile(
+        "triage",
+        "openrouter-api",
+        "configured/model",
+        reasoning="provider-low",
+    )
+    repair_input = json.dumps(
+        {
+            "rejected_output": '{"classification":"simple-task"}',
+            "required_schema": {
+                "classification": (
+                    "DIRECT_RESPONSE | SIMPLE_TASK | COMPLEX_TASK | "
+                    "HIGH_VOLUME_TASK | CONFIRMATION_REQUIRED"
+                ),
+                "goal": "optional string or null",
+                "clarification": "required question or null",
+            },
+            "validation_error": "classification is invalid",
+        },
+        sort_keys=True,
+    )
+    base = _stage_request(
+        Stage.JSON_REPAIR,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    request = StageRequest(
+        **{
+            **base.__dict__,
+            "role": "json_repair_specialist",
+            "goal": repair_input,
+            "classification": None,
+            "plan_id": None,
+            "context": {"json_repair_input": repair_input},
+            "request_content": None,
+            "attachment_manifest": (),
+        }
+    )
+
+    await provider.invoke(profile, request)
+
+    backend = manager.backends[-1]
+    assert backend.prompt == repair_input
+    assert backend.tool_registry is None
+    assert backend.sys_prompt.startswith("You are the JSON Repair Agent")
+    assert "configured agent persona" not in backend.sys_prompt
+    assert "Do the requested work" not in backend.prompt
+    assert "Do not call tools" in backend.sys_prompt
+
+
+@pytest.mark.asyncio
 async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning():
     manager = _FakeManager()
     registry = object()
@@ -1709,13 +1825,13 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     assert backend.tool_registry.max_loops is None
     assert backend.reasoning_enabled is True
     assert backend.config.extra["reasoning_effort"] == "provider-high"
-    assert backend.sys_prompt.startswith("You are the HER v2 Execution stage.")
+    assert backend.sys_prompt.startswith("You are an execution agent")
     assert "RECENT TURN MESSAGES" in backend.prompt
     assert "Memory+ recent facts" in backend.prompt
     assert "Cross-session receipt evidence" in backend.prompt
-    assert '"inspect"' in backend.prompt
-    assert "COMPLETED_WITH_LIMITATIONS" in backend.sys_prompt
-    assert "USER_INPUT_REQUIRED" in backend.sys_prompt
+    assert '"inspect"' in backend.sys_prompt
+    assert "natural language" in backend.sys_prompt
+    assert "Return exactly one JSON object" not in backend.sys_prompt
     assert "REPLAN_REQUIRED" not in backend.sys_prompt
     assert "ABANDONED" not in backend.sys_prompt
     assert "ERROR" not in backend.sys_prompt
@@ -1738,10 +1854,11 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     reviewer_backend = manager.backends[-1]
     assert reviewer_backend.tool_registry is None
     assert reviewer_backend.sys_prompt.startswith(
-        "You are the independent strict HER v2 Reviewer"
+        "You are an independent reviewer agent for an agentic workflow"
     )
-    assert "independent read-only assessor" in reviewer_backend.prompt
-    assert '"tools_authorised_for_this_stage": false' in reviewer_backend.prompt
+    assert "No review tools are available" in reviewer_backend.sys_prompt
+    assert "Return exactly one valid JSON object" in reviewer_backend.sys_prompt
+    assert reviewer_backend.prompt == "Do the requested work"
 
     for stage in (Stage.PLANNING, Stage.REPLANNING):
         await provider.invoke(
@@ -1772,15 +1889,76 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     finalisation_backend = manager.backends[-1]
     assert finalisation_backend.tool_registry is None
     assert finalisation_backend.sys_prompt.startswith(
-        "You are the HER v2 Finalisation stage"
+        "You are the finalisation agent in an agentic workflow"
     )
-    assert "normalisation, ledger-payload, and user-message" in (
+    assert "Return only the final user-facing response" in (
         finalisation_backend.sys_prompt
     )
     assert "Agent display name: agent" in finalisation_backend.sys_prompt
     assert "configured agent persona" not in finalisation_backend.sys_prompt
-    assert '"execution_result"' in finalisation_backend.prompt
-    assert '"final_message"' in finalisation_backend.prompt
+    assert "Return exactly one JSON object" not in finalisation_backend.sys_prompt
+    assert finalisation_backend.prompt == "Do the requested work"
+
+
+@pytest.mark.asyncio
+async def test_review_system_prompt_receives_latest_draft_plan_and_real_tools():
+    class ReviewToolRegistry(_BaseToolRegistry):
+        def is_allowed(self, name):
+            return name in {"file_read", "verification_run"}
+
+        def allowed_tool_names(self):
+            return ("file_read", "verification_run")
+
+        def get_tool_definitions(self, tiers=None):
+            del tiers
+            return [
+                {"type": "function", "function": {"name": "file_read"}},
+                {
+                    "type": "function",
+                    "function": {"name": "verification_run"},
+                },
+            ]
+
+    manager = _FakeManager()
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=ReviewToolRegistry(),
+    )
+    request = _stage_request(
+        Stage.REVIEW,
+        allow_tools=True,
+        allow_side_effects=True,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "context": {
+                "active_plan": {
+                    "plan": ["implement"],
+                    "success_criteria": ["tests pass"],
+                },
+                "draft_response": "Implemented the requested change.",
+                "delegated_tools": ["file_read", "verification_run"],
+                "verification_run_policy": {
+                    "workspace": "authoritative_current_workspace"
+                },
+                "execution_elapsed_s": 10.0,
+            },
+        }
+    )
+
+    await provider.invoke(
+        ProviderProfile("reviewer", "openrouter-api", "configured/model"),
+        request,
+    )
+
+    backend = manager.backends[-1]
+    assert backend.prompt == request.goal
+    assert "Implemented the requested change." in backend.sys_prompt
+    assert '"tests pass"' in backend.sys_prompt
+    assert '"name": "file_read"' in backend.sys_prompt
+    assert '"name": "verification_run"' in backend.sys_prompt
+    assert "configured agent persona" not in backend.sys_prompt
 
 
 @pytest.mark.asyncio
@@ -1858,7 +2036,7 @@ async def test_hashi_stage_provider_records_exact_completed_tool_evidence_receip
 
 
 @pytest.mark.asyncio
-async def test_verification_injects_runtime_timeout_basis_and_workspace_authority():
+async def test_review_verification_tool_injects_timeout_and_workspace_authority():
     class VerificationToolRegistry(_BaseToolRegistry):
         def is_allowed(self, name):
             return name == "verification_run" or super().is_allowed(name)
@@ -1894,7 +2072,10 @@ async def test_verification_injects_runtime_timeout_basis_and_workspace_authorit
                 "verification-call",
             )
             return BackendResponse(
-                text='{"outcome":"UNAVAILABLE","summary":"policy captured"}',
+                text=(
+                    '{"status":"PASS","reason":"policy captured",'
+                    '"conditions":null}'
+                ),
                 duration_ms=1,
                 tool_call_count=1,
                 tool_loop_count=1,
@@ -1910,7 +2091,7 @@ async def test_verification_injects_runtime_timeout_basis_and_workspace_authorit
     registry = VerificationToolRegistry()
     provider = HashiStageProvider(backend_manager=manager, tool_registry=registry)
     request = _stage_request(
-        Stage.VERIFICATION,
+        Stage.REVIEW,
         allow_tools=True,
         allow_side_effects=True,
     )
@@ -1942,11 +2123,9 @@ async def test_verification_injects_runtime_timeout_basis_and_workspace_authorit
         "network": "inherited",
         "execution_elapsed_s": 3600,
     }
-    assert registry.execution_contexts[-1]["safety_mode"] == (
-        "workspace_verification"
-    )
+    assert registry.execution_contexts[-1]["safety_mode"] == ("workspace_verification")
     assert registry.execution_contexts[-1]["authority_mode"] == (
-        "her_v2_assured_verification"
+        "her_v2_review_verification"
     )
     assert registry.execution_contexts[-1]["verification_execution_elapsed_s"] == 3600
 
@@ -1960,9 +2139,7 @@ async def test_hashi_stage_provider_makes_every_effort_tool_loop_unbounded():
         backend_manager=manager,
         tool_registry=registry,
     )
-    profile = ProviderProfile(
-        "premium", "openrouter-api", "configured/model"
-    )
+    profile = ProviderProfile("premium", "openrouter-api", "configured/model")
     for effort in Effort:
         request = _stage_request(
             Stage.EXECUTION,
@@ -2276,10 +2453,7 @@ async def test_policy_denial_returns_before_due_replan_gates_next_admission():
                 "file_read", {}, "provider-call-11"
             )
             assert replan_control.is_error is True
-            assert (
-                replan_control.details["control_disposition"]
-                == "compulsory_replan"
-            )
+            assert replan_control.details["control_disposition"] == "compulsory_replan"
             timeline.append("replan_control_returned")
             allowed = await self.tool_registry.execute(
                 "file_read", {}, "provider-call-12"
@@ -2385,10 +2559,7 @@ async def test_tool_registry_denial_precedes_time_due_replan():
                 "file_read", {"path": "inside"}, "provider-allowed"
             )
             assert replan_control.is_error is True
-            assert (
-                replan_control.details["control_disposition"]
-                == "compulsory_replan"
-            )
+            assert replan_control.details["control_disposition"] == "compulsory_replan"
             timeline.append("replan_control_returned")
             allowed = await self.tool_registry.execute(
                 "file_read", {"path": "inside"}, "provider-allowed-after-replan"
@@ -2451,6 +2622,7 @@ async def test_tool_registry_denial_precedes_time_due_replan():
     assert len(registry.denials) == 1
     assert len(response.tool_receipts) == 2
 
+
 @pytest.mark.asyncio
 async def test_persona_presentation_lanes_receive_only_block_and_minimal_inputs(
     tmp_path,
@@ -2508,49 +2680,34 @@ Please scan Outlook.""",
 
     immediate_backend = manager.backends[-1]
     assert immediate_backend.sys_prompt.startswith(
-        "[persona]\nUse a warm voice and address the user as Captain.\n[persona_end]"
+        "You are an immediate response agent"
     )
-    assert "For an obviously direct conversational request" in (
+    assert "Use a warm voice and address the user as Captain." in (
         immediate_backend.sys_prompt
     )
-    assert "has no tool access or tool authority" in immediate_backend.sys_prompt
-    assert "it does not need tools" in immediate_backend.sys_prompt
-    assert "only that stage may determine actual tool availability" in (
+    assert "Choose exactly one of the following two response modes" in (
         immediate_backend.sys_prompt
     )
-    assert "from real invocation results" in immediate_backend.sys_prompt
-    assert "private control information for your behaviour only" in (
+    assert "When this mode applies, answer the user's request directly" in (
         immediate_backend.sys_prompt
     )
-    assert "never repeat or explain tool availability" in (
+    assert "requires checking, execution, new evidence, tool use" in (
         immediate_backend.sys_prompt
     )
-    assert "Never call a tool or emit a tool call, tool-control envelope" in (
+    assert "Do not perform or simulate the work" in immediate_backend.sys_prompt
+    assert "Do not imply that the work has already been completed" in (
         immediate_backend.sys_prompt
     )
-    assert "requires checking, execution, or new evidence" in (
-        immediate_backend.sys_prompt
-    )
-    assert "Even if the user's request says what to report" in (
-        immediate_backend.sys_prompt
-    )
-    assert "do not make, infer, or repeat that judgement" in (
-        immediate_backend.sys_prompt
-    )
-    assert "return only a short receipt acknowledgement" in (
-        immediate_backend.sys_prompt
-    )
-    assert "Do not execute, plan, assess feasibility, discuss capability" in (
-        immediate_backend.sys_prompt
-    )
-    assert "claim an execution result" in immediate_backend.sys_prompt
-    assert "narrate a concrete execution attempt" in immediate_backend.sys_prompt
     assert "FULL AGENT OPERATIONAL CONTENT" not in immediate_backend.sys_prompt
     assert "PRIVATE WORKFLOW INSTRUCTIONS" not in immediate_backend.sys_prompt
     assert "GLOBAL SYS CONTENT" not in immediate_backend.prompt
     assert "FULL AGENT OPERATIONAL CONTENT" not in immediate_backend.prompt
     assert "Earlier context remains available" in immediate_backend.prompt
     assert "Please scan Outlook" in immediate_backend.prompt
+    assert "Please scan Outlook" in immediate_backend.sys_prompt
+    assert "$goal" not in immediate_backend.sys_prompt
+    assert "Return exactly one JSON object" not in immediate_backend.prompt
+    assert "Return exactly one JSON object" not in immediate_backend.sys_prompt
     assert "tools_authorised_for_this_stage" not in immediate_backend.prompt
     assert "invocation_role" not in immediate_backend.prompt
 
@@ -2563,19 +2720,16 @@ Please scan Outlook.""",
         **{
             **finalisation_request.__dict__,
             "context": {
-                "raw_execution_output": {
-                    "text": "The requested work completed.",
-                    "data": {},
-                    "evidence_refs": ["receipt:42"],
+                "draft_response": "The requested work completed.",
+                "reviewer_findings": {
+                    "status": "PASS",
+                    "reason": "The completed work satisfies the request.",
+                    "conditions": None,
                 },
-                "parsed_execution_result": {
-                    "disposition": "COMPLETED",
-                    "summary": "The requested work completed.",
+                "completion_evidence": {
                     "evidence_refs": ["receipt:42"],
                     "limitations": [],
-                    "clarification": None,
                 },
-                "execution_json_valid": True,
             },
         }
     )
@@ -2586,15 +2740,13 @@ Please scan Outlook.""",
     assert "Use a warm voice and address the user as Captain." in (
         finalisation_backend.sys_prompt
     )
-    assert "FULL AGENT OPERATIONAL CONTENT" not in (
-        finalisation_backend.sys_prompt
-    )
-    assert "PRIVATE WORKFLOW INSTRUCTIONS" not in (
-        finalisation_backend.sys_prompt
-    )
-    assert "The requested work completed." in finalisation_backend.prompt
-    assert '"execution_result"' in finalisation_backend.prompt
-    assert '"final_message"' in finalisation_backend.prompt
+    assert "FULL AGENT OPERATIONAL CONTENT" not in (finalisation_backend.sys_prompt)
+    assert "PRIVATE WORKFLOW INSTRUCTIONS" not in (finalisation_backend.sys_prompt)
+    assert "The requested work completed." in finalisation_backend.sys_prompt
+    assert '"status": "PASS"' in finalisation_backend.sys_prompt
+    assert '"evidence_refs"' in finalisation_backend.sys_prompt
+    assert finalisation_backend.prompt == finalisation_request.goal
+    assert "Return exactly one JSON object" not in finalisation_backend.sys_prompt
 
     rendered = await provider.package_persona_commentary(
         profile,
@@ -2632,10 +2784,9 @@ Please scan Outlook.""",
     )
 
     fallback_backend = manager.backends[-1]
-    assert fallback_backend.sys_prompt.startswith(
-        "[persona]\n"
-        "Agent display name: agent. Use a polite tone and address the user as 您.\n"
-        "[persona_end]"
+    assert (
+        "Agent display name: agent. Use a polite tone and address the user as 您."
+        in fallback_backend.sys_prompt
     )
     assert "FULL AGENT CONTENT WITHOUT A PERSONA BLOCK" not in (
         fallback_backend.sys_prompt
@@ -2654,9 +2805,7 @@ async def test_raw_provider_commentary_cannot_bypass_persona_packaging():
         backend_manager=manager,
         on_stream_event=capture,
     )
-    profile = ProviderProfile(
-        "premium", "openrouter-api", "configured/model"
-    )
+    profile = ProviderProfile("premium", "openrouter-api", "configured/model")
 
     await provider.invoke(
         profile,
@@ -2714,7 +2863,11 @@ async def test_hashi_stage_provider_accepts_unknown_engine_by_safe_capability():
             self.config = SimpleNamespace(extra={}, system_md=None, name="safe")
             self.capabilities = SimpleNamespace(supports_tool_use=False)
             self.prompt = ""
+            self.sys_prompt = ""
             self.shutdown_called = False
+
+        def set_system_prompt(self, prompt):
+            self.sys_prompt = prompt
 
         async def initialize(self):
             return True
@@ -2724,7 +2877,11 @@ async def test_hashi_stage_provider_accepts_unknown_engine_by_safe_capability():
             return BackendResponse(
                 text="",
                 duration_ms=1,
-                structured_data={"outcome": "PASS", "summary": "verified"},
+                structured_data={
+                    "status": "PASS",
+                    "reason": "verified",
+                    "conditions": None,
+                },
             )
 
         async def shutdown(self):
@@ -2751,8 +2908,13 @@ async def test_hashi_stage_provider_accepts_unknown_engine_by_safe_capability():
     )
 
     assert result.text == ""
-    assert result.data == {"outcome": "PASS", "summary": "verified"}
-    assert "independent strict HER v2 Reviewer" in manager.backends[0].prompt
+    assert result.data == {
+        "status": "PASS",
+        "reason": "verified",
+        "conditions": None,
+    }
+    assert "independent reviewer agent" in manager.backends[0].sys_prompt
+    assert manager.backends[0].prompt == "Do the requested work"
     assert manager.backends[0].shutdown_called is True
 
 
@@ -2760,12 +2922,8 @@ async def test_hashi_stage_provider_accepts_unknown_engine_by_safe_capability():
 async def test_subagent_receives_only_explicitly_delegated_tools():
     manager = _FakeManager()
     base_registry = _BaseToolRegistry()
-    provider = HashiStageProvider(
-        backend_manager=manager, tool_registry=base_registry
-    )
-    profile = ProviderProfile(
-        "lightweight", "openrouter-api", "configured/model"
-    )
+    provider = HashiStageProvider(backend_manager=manager, tool_registry=base_registry)
+    profile = ProviderProfile("lightweight", "openrouter-api", "configured/model")
     request = _stage_request(Stage.EXECUTION, allow_tools=True)
     request = StageRequest(
         **{
@@ -2779,9 +2937,7 @@ async def test_subagent_receives_only_explicitly_delegated_tools():
 
     delegated = manager.backends[-1].tool_registry
     assert delegated.max_loops is None
-    names = {
-        item["function"]["name"] for item in delegated.get_tool_definitions()
-    }
+    names = {item["function"]["name"] for item in delegated.get_tool_definitions()}
     assert names == {"file_read"}
     allowed = await delegated.execute("file_read", {"path": "a"}, "call-1")
     denied = await delegated.execute("bash", {"command": "whoami"}, "call-2")
@@ -2811,18 +2967,12 @@ async def test_read_only_delegation_uses_registry_capability_not_her_name_list()
 
     manager = _FakeManager()
     base_registry = RegistryWithCustomReadOnlyTool()
-    provider = HashiStageProvider(
-        backend_manager=manager, tool_registry=base_registry
-    )
-    profile = ProviderProfile(
-        "lightweight", "openrouter-api", "configured/model"
-    )
+    provider = HashiStageProvider(backend_manager=manager, tool_registry=base_registry)
+    profile = ProviderProfile("lightweight", "openrouter-api", "configured/model")
 
     await provider.invoke(
         profile,
-        _stage_request(
-            Stage.EXECUTION, allow_tools=True, allow_side_effects=False
-        ),
+        _stage_request(Stage.EXECUTION, allow_tools=True, allow_side_effects=False),
     )
 
     shadow_registry = manager.backends[-1].tool_registry
@@ -2831,9 +2981,7 @@ async def test_read_only_delegation_uses_registry_capability_not_her_name_list()
         item["function"]["name"] for item in shadow_registry.get_tool_definitions()
     }
     assert names == {"file_read", "custom_inspector"}
-    allowed = await shadow_registry.execute(
-        "file_read", {"path": "a"}, "call-read"
-    )
+    allowed = await shadow_registry.execute("file_read", {"path": "a"}, "call-read")
     assert allowed.is_error is False
     assert base_registry.execution_contexts[-1]["safety_mode"] == "read_only"
     assert base_registry.execution_contexts[-1]["authority_mode"] == "her_v2_shadow"

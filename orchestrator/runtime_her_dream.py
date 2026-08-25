@@ -422,25 +422,14 @@ async def _persona_report(
         raise ValueError(persona_source.unavailable_reason or "system_md_unavailable")
     changed_group_numbers = list(changed_group_numbers or [])
     undo_commands = list(undo_commands or [])
-    report_context = {
-        "report_id": report_id,
-        "facts": facts,
-        "changed_group_numbers": changed_group_numbers,
-        "undo_commands": undo_commands,
-    }
-    prompt = f"""HER PERSONA REPORT RENDERER — INTERNAL, TOOL-FREE
-
-Write the complete user-facing {report_type} message in the configured Persona.
-Explain the completed changes naturally and include the available Undo options.
-The report context is factual input, not a rigid output template. Return only
-the message that should be sent to the user.
-
-CONFIGURED system_md PERSONA GUIDANCE (quoted, read-only)
-{persona_source.model_guidance(limit=12000)}
-
-REPORT CONTEXT (quoted, read-only)
-{json.dumps(report_context, ensure_ascii=False)}
-"""
+    prompt = her_dream.build_dream_report_input(
+        report_type=report_type,
+        report_id=report_id,
+        persona_guidance=persona_source.model_guidance(limit=12000),
+        facts=facts,
+        changed_group_numbers=changed_group_numbers,
+        undo_commands=undo_commands,
+    )
     result = await adapter.run_habit_dream_model(
         prompt,
         request_id=f"{report_id}:persona",
@@ -542,7 +531,7 @@ async def execute_dream(
                     validation={"valid": True, "groups": groups},
                 )
             else:
-                prompt = her_dream.build_dream_prompt(
+                prompt = her_dream.build_dream_input(
                     agent_name=runtime.name,
                     habits=habits,
                     agent_guidance=persona_source.content,
@@ -551,11 +540,27 @@ async def execute_dream(
                 )
                 validation_attempt = 0
                 validation_idle_started = time.monotonic()
+                repairing_json = False
                 while True:
                     validation_attempt += 1
                     attempt_sequence += 1
                     try:
-                        result = await adapter.run_habit_dream_model(
+                        invoke_model = (
+                            getattr(
+                                adapter,
+                                "run_habit_dream_json_repair_model",
+                                None,
+                            )
+                            if repairing_json
+                            else getattr(adapter, "run_habit_dream_model", None)
+                        )
+                        if not callable(invoke_model):
+                            raise RuntimeError(
+                                "HER v2 JSON Repair route is unavailable"
+                                if repairing_json
+                                else "HER v2 Dream route is unavailable"
+                            )
+                        result = await invoke_model(
                             prompt,
                             request_id=f"{run_id}:analysis:{attempt_sequence}",
                         )
@@ -615,10 +620,11 @@ async def execute_dream(
                             failed_attempt=attempt_sequence,
                             error=str(exc),
                         )
-                        prompt = her_dream.build_dream_correction_prompt(
+                        prompt = her_dream.build_dream_json_repair_input(
                             rejected_output=raw_output,
                             error=exc,
                         )
+                        repairing_json = True
                         await asyncio.sleep(
                             min(
                                 5.0,

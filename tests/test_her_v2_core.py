@@ -181,40 +181,33 @@ def test_legacy_terminal_ledgers_load_into_current_plan_b_states(legacy, current
 
 def test_effort_is_orchestration_policy_not_provider_reasoning():
     cases = [
-        (Effort.LOW, False, False, False, False, 0, 0),
-        (Effort.MEDIUM, True, False, False, False, 0, 0),
-        (Effort.HIGH, True, True, False, False, 0, 0),
-        (Effort.XHIGH, True, True, True, False, 1, 0),
-        (Effort.MAX, True, True, True, True, 1, 3),
+        (Effort.LOW, False, False, False, 0),
+        (Effort.MEDIUM, True, False, False, 0),
+        (Effort.HIGH, True, True, False, 0),
+        (Effort.XHIGH, True, True, True, 1),
+        (Effort.MAX, True, True, True, 1),
     ]
     for (
         effort,
         planning,
         replanning,
         review,
-        assurance,
         reviews,
-        verifications,
     ) in cases:
-        policy = resolve_policy(
-            effort,
-            review_limit=reviews,
-            verification_limit=verifications,
-        )
+        policy = resolve_policy(effort, review_limit=reviews)
         assert (
             policy.planning,
             policy.replanning,
             policy.review,
-            policy.assurance,
         ) == (
             planning,
             replanning,
             review,
-            assurance,
         ), effort
         assert not hasattr(policy, "max_replans"), effort
+        assert not hasattr(policy, "assurance"), effort
+        assert not hasattr(policy, "max_verifications"), effort
         assert policy.max_reviews == reviews, effort
-        assert policy.max_verifications == verifications, effort
 
 
 def test_her_execution_mode_labels_and_aliases_keep_canonical_wire_values():
@@ -230,14 +223,11 @@ def test_her_execution_mode_labels_and_aliases_keep_canonical_wire_values():
     assert parse_effort("Fast path") is Effort.LOW
 
 
-def test_assurance_verification_limit_is_hard_capped_at_three():
-    policy = resolve_policy(
-        Effort.MAX,
-        review_limit=10,
-        verification_limit=99,
-    )
+def test_max_review_is_enabled_without_a_verification_policy():
+    policy = resolve_policy(Effort.MAX, review_limit=1)
 
-    assert policy.max_verifications == 3
+    assert policy.review is True
+    assert not hasattr(policy, "assurance")
 
 
 def test_terminal_truth_table():
@@ -276,6 +266,15 @@ def test_provider_profiles_route_by_configuration_and_cannot_recurse_into_her():
         }
     )
     assert configured.profile_for(Stage.MEDITATION).name == "premium"
+    with pytest.raises(HERv2ConfigurationError, match="frozen rejected source"):
+        config.profile_for(Stage.JSON_REPAIR)
+    with pytest.raises(HERv2ConfigurationError, match="internal specialist"):
+        HERv2Config.from_mapping(
+            {
+                "profiles": _profiles(),
+                "stage_roles": {"json_repair": "premium"},
+            }
+        )
     with pytest.raises(HERv2ConfigurationError, match="non-HER"):
         ProviderProfile("bad", "her-v2", "recursive")
 

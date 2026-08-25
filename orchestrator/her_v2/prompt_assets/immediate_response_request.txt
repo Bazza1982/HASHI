@@ -1,4 +1,0 @@
-Request:
-$goal
-
-Return exactly one JSON object: {"message": "<response>"}

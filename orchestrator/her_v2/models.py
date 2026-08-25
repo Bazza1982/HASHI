@@ -126,6 +126,10 @@ class Stage(StrEnum):
     FINALISATION = "finalisation"
     MEDITATION = "meditation"
     DREAM = "dream"
+    # Internal, tool-free specialist step.  It deliberately has no public
+    # Route or independently configurable profile: each invocation inherits
+    # the rejected source stage's frozen provider target.
+    JSON_REPAIR = "json_repair"
 
 
 class Route(StrEnum):
@@ -306,11 +310,7 @@ class ExecutionOutcome:
 
 @dataclass(frozen=True)
 class FinalisationOutcome:
-    """Canonical ledger payload plus the Persona-rendered user message.
-
-    ``execution_result_present`` distinguishes the Plan B ``null`` result from
-    the legacy report-only envelope accepted during rolling upgrades.
-    """
+    """Persona-rendered final response with legacy envelope compatibility."""
 
     execution_result: ExecutionOutcome | None
     final_message: str

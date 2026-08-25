@@ -30,7 +30,6 @@ from .audit import AuditPersistenceError, DurableAuditLog
 from .interfaces import StageInvocationError
 from .models import Stage, StageResponse, TerminalState
 
-
 MaintenanceInvoker = Callable[
     [Stage, str, str, str, float], Awaitable[StageResponse]
 ]
@@ -169,7 +168,7 @@ class HERv2Learning:
             completion_status=terminal_state.value,
             stop_reason=terminal_state.value.casefold(),
         )
-        prompt = her_habits.build_meditation_prompt(
+        prompt = her_habits.build_meditation_input(
             agent_name=self.agent_name,
             # Meditation is turn-based.  Do not persist Bridge conversation
             # background into the durable learning job for this turn.
@@ -318,6 +317,7 @@ class HERv2Learning:
                     actions: list[Mapping[str, Any]] | None = None
                     validation_attempt = 0
                     validation_idle_started = time.monotonic()
+                    invocation_stage = Stage.MEDITATION
                     while actions is None:
                         validation_attempt += 1
                         self._audit(
@@ -327,7 +327,7 @@ class HERv2Learning:
                             ),
                             turn_id=turn_id,
                             request_ref=request_ref,
-                            stage=Stage.MEDITATION.value,
+                            stage=invocation_stage.value,
                             event="stage_started",
                             attempt=validation_attempt,
                             payload={
@@ -337,7 +337,7 @@ class HERv2Learning:
                             },
                         )
                         response = await self.invoke_model(
-                            Stage.MEDITATION,
+                            invocation_stage,
                             prompt,
                             turn_id,
                             f"{job_id}:attempt:{validation_attempt}",
@@ -361,8 +361,12 @@ class HERv2Learning:
                             ),
                             turn_id=turn_id,
                             request_ref=request_ref,
-                            stage=Stage.MEDITATION.value,
-                            role="meditation",
+                            stage=invocation_stage.value,
+                            role=(
+                                "json_repair_specialist"
+                                if invocation_stage is Stage.JSON_REPAIR
+                                else "meditation"
+                            ),
                             provider=response.provider,
                             model=response.model,
                             attempt=validation_attempt,
@@ -376,7 +380,7 @@ class HERv2Learning:
                             ),
                             turn_id=turn_id,
                             request_ref=request_ref,
-                            stage=Stage.MEDITATION.value,
+                            stage=invocation_stage.value,
                             event="stage_completed",
                             provider=response.provider,
                             model=response.model,
@@ -397,10 +401,14 @@ class HERv2Learning:
                                 config.meditation_idle_timeout_seconds
                             ):
                                 raise
-                            prompt = her_habits.build_meditation_correction_prompt(
+                            prompt = her_habits.build_meditation_json_repair_input(
                                 rejected_output=response.text,
                                 error=exc,
+                                max_actions=int(
+                                    job.get("max_actions") or config.max_actions
+                                ),
                             )
+                            invocation_stage = Stage.JSON_REPAIR
                             await asyncio.sleep(
                                 min(
                                     5.0,

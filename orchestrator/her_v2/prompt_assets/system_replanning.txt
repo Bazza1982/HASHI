@@ -14,7 +14,7 @@ A value below 100 means authorised work remains. A value of 100 means the origin
 
 2. **Plan calibration.** If `completion_percent` is below 100, determine whether the current active plan remains appropriate.
 
-Inspect the completed work, job ledger, tool results, failures, constraints, unexpected findings, plan history, and any supplied Review or Verification findings.
+Inspect the completed work, job ledger, tool results, failures, constraints, unexpected findings, plan history, and any supplied Review findings.
 
 If current evidence requires the execution plan to change, set `plan_changed` to `true`, provide a concrete `change_reason`, and revise only the parts of the plan necessary to respond to that evidence.
 

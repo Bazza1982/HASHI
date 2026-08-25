@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import json
+from typing import Any, Mapping, Sequence
 
 from .models import Stage, StageRequest
 from .prompt_catalog import load_prompt_asset, render_prompt_asset
 
 _SCHEMAS = {
-    Stage.IMMEDIATE_RESPONSE: {
-        "message": "direct response or short receipt acknowledgement"
-    },
     Stage.TRIAGE: {
         "classification": (
             "DIRECT_RESPONSE | SIMPLE_TASK | COMPLEX_TASK | "
@@ -103,15 +102,10 @@ _SCHEMAS = {
         ),
     },
     Stage.REVIEW: {
-        "outcome": "PASS | CONDITIONAL_PASS | FAIL | INCONCLUSIVE | UNAVAILABLE",
-        "summary": "independent evidence-based review",
-        "findings": [],
-        "evidence_refs": [
-            "exact HASHI_EVIDENCE_RECEIPT values from this Review invocation"
-        ],
-        "commentary": (
-            "optional concise neutral user-facing update based only on this "
-            "completed stage result; omit when no useful update exists"
+        "status": "PASS | CONDITIONAL_PASS | FAIL",
+        "reason": "reason for the review decision",
+        "conditions": (
+            "material conditions for CONDITIONAL_PASS; null for PASS or FAIL"
         ),
     },
     Stage.VERIFICATION: {
@@ -151,26 +145,34 @@ _SCHEMAS = {
             "completed stage result; omit when no useful update exists"
         ),
     },
-    Stage.FINALISATION: {
-        "execution_result": {
-            "disposition": (
-                "COMPLETED | COMPLETED_WITH_LIMITATIONS | FAILED | USER_INPUT_REQUIRED"
-            ),
-            "summary": "canonical truthful execution result",
-            "work_performed": ["concrete action actually performed"],
-            "verification": ["check actually run and its result"],
-            "evidence_refs": [],
-            "limitations": [],
-            "remaining_work": [],
-            "clarification": "required only for USER_INPUT_REQUIRED",
-        },
-        "final_message": (
-            "final user-facing response rendered with the supplied Persona"
-        ),
-    },
     Stage.MEDITATION: {"actions": []},
     Stage.DREAM: {"groups": []},
 }
+
+
+_JSON_REPAIR_STAGES = frozenset(
+    {
+        Stage.TRIAGE,
+        Stage.PLANNING,
+        Stage.REPLANNING,
+        Stage.REVIEW,
+        Stage.VERIFICATION,
+    }
+)
+
+
+def json_repair_schema_for_stage(
+    stage: Stage,
+    *,
+    role: str = "",
+) -> Mapping[str, Any] | None:
+    """Return the frozen schema for stages whose model answer must be JSON."""
+
+    if stage in _JSON_REPAIR_STAGES:
+        return copy.deepcopy(_SCHEMAS[stage])
+    if stage is Stage.EXECUTION and str(role).startswith("sub_agent:"):
+        return copy.deepcopy(_SCHEMAS[Stage.EXECUTION])
+    return None
 
 
 _BRIDGE_CURRENT_REQUEST_MARKER = "--- CURRENT USER REQUEST — AUTHORITATIVE ---"
@@ -211,18 +213,29 @@ def _immediate_response_goal(goal: str) -> str:
 
 
 def render_stage_prompt(request: StageRequest) -> str:
-    maintenance_prompt = request.context.get("maintenance_prompt")
-    if request.stage in {Stage.MEDITATION, Stage.DREAM} and isinstance(
-        maintenance_prompt, str
-    ):
-        return render_prompt_asset(
-            "background_maintenance", maintenance_prompt=maintenance_prompt
+    json_repair_input = request.context.get("json_repair_input")
+    if request.stage is Stage.JSON_REPAIR:
+        return (
+            json_repair_input
+            if isinstance(json_repair_input, str)
+            else request.goal
         )
+    meditation_input = request.context.get("meditation_input")
+    if request.stage is Stage.MEDITATION and isinstance(meditation_input, str):
+        # All Meditation instructions live in its isolated system prompt.
+        # The provider-facing user turn contains data only.
+        return meditation_input
+    dream_input = request.context.get("dream_input")
+    if request.stage is Stage.DREAM and isinstance(dream_input, str):
+        # Dream maintenance and Persona reporting use separate isolated system
+        # contracts.  Their provider-facing user turns contain data only.
+        return dream_input
     if request.stage is Stage.IMMEDIATE_RESPONSE:
-        return render_prompt_asset(
-            "immediate_response_request",
-            goal=_immediate_response_goal(request.goal),
-        )
+        # The complete Immediate Response contract, including this same filtered
+        # goal, is installed as its isolated system prompt.  Keep a non-empty
+        # user turn for provider compatibility without introducing a second
+        # prompt asset or a conflicting structured-output instruction.
+        return _immediate_response_goal(request.goal)
     if request.stage is Stage.TRIAGE:
         return render_prompt_asset(
             "system_triage",
@@ -243,9 +256,7 @@ def render_stage_prompt(request: StageRequest) -> str:
                 request.classification.value if request.classification else ""
             ),
             all_active_habits="\n\n".join(habits) if habits else "[]",
-            schema=json.dumps(
-                _SCHEMAS[Stage.PLANNING], ensure_ascii=False, indent=2
-            ),
+            schema=json.dumps(_SCHEMAS[Stage.PLANNING], ensure_ascii=False, indent=2),
         )
     if request.stage is Stage.REPLANNING:
         return render_prompt_asset(
@@ -269,11 +280,14 @@ def render_stage_prompt(request: StageRequest) -> str:
                 ensure_ascii=False,
                 indent=2,
             ),
-            schema=json.dumps(
-                _SCHEMAS[Stage.REPLANNING], ensure_ascii=False, indent=2
-            ),
+            schema=json.dumps(_SCHEMAS[Stage.REPLANNING], ensure_ascii=False, indent=2),
         )
     if request.stage is Stage.EXECUTION:
+        if not request.role.startswith("sub_agent:"):
+            # Primary Execution owns a natural-language user response.  Its
+            # complete contract, plan, tools, Persona, and goal are installed
+            # as one isolated system prompt by the provider adapter.
+            return request.goal
         active_plan = request.context.get("active_plan")
         sub_agent_results = request.context.get("sub_agent_results")
         active_plan_section = ""
@@ -297,9 +311,7 @@ def render_stage_prompt(request: StageRequest) -> str:
             ]
             if "authorized_attachment_manifest" in request.context:
                 assignment_keys.append("authorized_attachment_manifest")
-            assignment = {
-                key: request.context.get(key) for key in assignment_keys
-            }
+            assignment = {key: request.context.get(key) for key in assignment_keys}
             assignment_section = "\n\nBounded assignment:\n" + json.dumps(
                 assignment, ensure_ascii=False, indent=2
             )
@@ -312,14 +324,9 @@ def render_stage_prompt(request: StageRequest) -> str:
             schema=json.dumps(_SCHEMAS[Stage.EXECUTION], ensure_ascii=False, indent=2),
         )
     if request.stage is Stage.FINALISATION:
-        return render_prompt_asset(
-            "finalisation_request",
-            goal=request.goal,
-            context=json.dumps(dict(request.context), ensure_ascii=False, indent=2),
-            schema=json.dumps(
-                _SCHEMAS[Stage.FINALISATION], ensure_ascii=False, indent=2
-            ),
-        )
+        # The complete Finalisation contract and all evidence are rendered in
+        # the isolated system prompt.  The raw goal is the backend's user turn.
+        return request.goal
     context = {
         "turn_id": request.turn_id,
         "request_ref": request.request_ref,
@@ -387,14 +394,19 @@ def render_stage_prompt(request: StageRequest) -> str:
 
 _SYSTEM_PROMPT_ASSETS = {
     Stage.EXECUTION: "system_execution",
-    Stage.REVIEW: "system_review",
-    Stage.VERIFICATION: "system_verification",
     Stage.MEDITATION: "system_meditation",
     Stage.DREAM: "system_dream",
+    Stage.JSON_REPAIR: "system_json_repair",
 }
 
 _COMPLETE_SYSTEM_PROMPT_STAGES = frozenset(
-    {Stage.TRIAGE, Stage.PLANNING, Stage.REPLANNING}
+    {
+        Stage.TRIAGE,
+        Stage.PLANNING,
+        Stage.REPLANNING,
+        Stage.REVIEW,
+        Stage.FINALISATION,
+    }
 )
 
 
@@ -409,6 +421,12 @@ def render_internal_stage_system_prompt(request: StageRequest) -> str | None:
 
     if request.role.startswith("sub_agent:"):
         return load_prompt_asset("system_sub_agent")
+    if request.stage is Stage.DREAM and request.context.get("dream_role") == "report":
+        return load_prompt_asset("system_dream_report")
+    if request.stage in {Stage.EXECUTION, Stage.REVIEW, Stage.FINALISATION}:
+        # Primary Execution, Review, and Finalisation are rendered dynamically
+        # after the adapter has assembled their invocation-specific inputs.
+        return None
     if uses_complete_system_prompt(request.stage):
         return render_stage_prompt(request)
     asset_name = _SYSTEM_PROMPT_ASSETS.get(request.stage)
@@ -423,6 +441,10 @@ def _persona_guidance(*, guidance: str, display_name: str, usable: bool) -> str:
 
 def render_finalisation_system_prompt(
     *,
+    goal: str,
+    draft_response: str,
+    reviewer_findings: Mapping[str, Any] | None,
+    completion_evidence: Mapping[str, Any],
     guidance: str,
     display_name: str,
     usable: bool,
@@ -431,6 +453,19 @@ def render_finalisation_system_prompt(
 ) -> str:
     return render_prompt_asset(
         "system_finalisation",
+        goal=goal,
+        draft_response=(
+            str(draft_response).strip()
+            or "No execution draft response was produced."
+        ),
+        reviewer_findings=(
+            json.dumps(reviewer_findings, ensure_ascii=False, indent=2)
+            if reviewer_findings is not None
+            else "No Review findings were supplied."
+        ),
+        completion_evidence=json.dumps(
+            dict(completion_evidence), ensure_ascii=False, indent=2
+        ),
         persona_block_begin=persona_block_begin,
         persona_guidance=_persona_guidance(
             guidance=guidance, display_name=display_name, usable=usable
@@ -441,6 +476,7 @@ def render_finalisation_system_prompt(
 
 def render_immediate_response_system_prompt(
     *,
+    goal: str,
     guidance: str,
     display_name: str,
     usable: bool,
@@ -449,11 +485,75 @@ def render_immediate_response_system_prompt(
 ) -> str:
     return render_prompt_asset(
         "system_immediate_response",
+        goal=_immediate_response_goal(goal),
         persona_block_begin=persona_block_begin,
         persona_guidance=_persona_guidance(
             guidance=guidance, display_name=display_name, usable=usable
         ),
         persona_block_end=persona_block_end,
+    )
+
+
+def render_execution_system_prompt(
+    *,
+    goal: str,
+    active_plan: Mapping[str, Any] | None,
+    tool_catalogue: Sequence[Mapping[str, Any]],
+    guidance: str,
+    display_name: str,
+    usable: bool,
+    persona_block_begin: str,
+    persona_block_end: str,
+) -> str:
+    """Render the complete primary Execution contract as one system prompt."""
+
+    return render_prompt_asset(
+        "system_execution",
+        active_plan=(
+            json.dumps(active_plan, ensure_ascii=False, indent=2)
+            if active_plan is not None
+            else "No active plan was supplied."
+        ),
+        tool_catalogue=(
+            json.dumps(list(tool_catalogue), ensure_ascii=False, indent=2)
+            if tool_catalogue
+            else "No tools are available for this invocation."
+        ),
+        persona_block_begin=persona_block_begin,
+        persona_guidance=_persona_guidance(
+            guidance=guidance, display_name=display_name, usable=usable
+        ),
+        persona_block_end=persona_block_end,
+        goal=goal,
+    )
+
+
+def render_review_system_prompt(
+    *,
+    goal: str,
+    active_plan: Mapping[str, Any] | None,
+    draft_response: str,
+    available_review_tools: Sequence[Mapping[str, Any]],
+) -> str:
+    """Render the complete independent Review contract as one system prompt."""
+
+    return render_prompt_asset(
+        "system_review",
+        available_review_tools=(
+            json.dumps(list(available_review_tools), ensure_ascii=False, indent=2)
+            if available_review_tools
+            else "No review tools are available for this invocation."
+        ),
+        goal=goal,
+        active_plan=(
+            json.dumps(active_plan, ensure_ascii=False, indent=2)
+            if active_plan is not None
+            else "No active plan was supplied."
+        ),
+        draft_response=(
+            str(draft_response).strip()
+            or "The execution agent returned no draft response."
+        ),
     )
 
 

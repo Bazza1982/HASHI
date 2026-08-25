@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .models import LifecycleState, TERMINAL_STATES
+from .models import TERMINAL_STATES, LifecycleState
 
 
 class LifecycleViolation(RuntimeError):
@@ -44,6 +44,8 @@ _PRINCIPAL_EDGES: dict[LifecycleState, frozenset[LifecycleState]] = {
             LifecycleState.REVIEWING,
             LifecycleState.VERIFYING,
             LifecycleState.FINALISING,
+            LifecycleState.COMPLETED,
+            LifecycleState.ERROR,
         }
     ),
     LifecycleState.REVIEWING: frozenset(

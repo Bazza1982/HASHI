@@ -10,8 +10,9 @@ from adapters.her_dream import (
     DreamValidationError,
     HERDreamJournal,
     StaleDreamState,
-    build_dream_correction_prompt,
-    build_dream_prompt,
+    build_dream_input,
+    build_dream_json_repair_input,
+    build_dream_report_input,
     catalog_fingerprint,
     commit_dream_proposal,
     latest_undoable_run,
@@ -56,11 +57,11 @@ def _begin(journal: HERDreamJournal, store: HERHabitStore, run_id: str) -> str:
     return fingerprint
 
 
-def test_dream_prompt_is_her_only_closed_and_redacts_secret_like_authority(tmp_path):
+def test_dream_input_is_bounded_data_and_redacts_secret_like_authority(tmp_path):
     store = HERHabitStore(tmp_path)
     _create_habit(store, "Verify exact output")
 
-    prompt = build_dream_prompt(
+    dream_input = build_dream_input(
         agent_name="zelda",
         habits=store.load(),
         agent_guidance="Use a warm persona. api_key=secret-value-123456",
@@ -70,24 +71,60 @@ def test_dream_prompt_is_her_only_closed_and_redacts_secret_like_authority(tmp_p
         ],
     )
 
-    assert "HER HABIT DREAM" in prompt
-    assert '"groups"' in prompt
-    assert "bridge_memory.sqlite" not in prompt
-    assert "[REDACTED_SECRET]" in prompt
-    assert "secret-value-123456" not in prompt
-    assert "justification <= 500 characters" in prompt
-    assert "aim for <=\n400" in prompt
+    payload = json.loads(dream_input)
+    assert payload["mode"] == "initial"
+    assert payload["agent_name"] == "zelda"
+    assert payload["max_change_groups"] == 5
+    assert payload["max_reason_chars"] == 500
+    assert payload["target_reason_chars"] == 400
+    assert payload["active_habit_catalogue"]
+    rendered = json.dumps(payload, ensure_ascii=False)
+    assert "bridge_memory.sqlite" not in rendered
+    assert "[REDACTED_SECRET]" in rendered
+    assert "secret-value-123456" not in rendered
 
 
-def test_dream_correction_prompt_returns_the_validation_error_to_the_model():
-    prompt = build_dream_correction_prompt(
+def test_dream_json_repair_input_uses_shared_specialist_envelope():
+    dream_input = build_dream_json_repair_input(
         rejected_output='{"groups":[{"reason":"too long"}]}',
         error=DreamValidationError("groups[0].reason exceeds 500 characters"),
     )
 
-    assert "groups[0].reason exceeds 500 characters" in prompt
-    assert '"reason":"too long"' in prompt
-    assert "Change only what is needed" in prompt
+    payload = json.loads(dream_input)
+    assert set(payload) == {
+        "rejected_output",
+        "required_schema",
+        "validation_error",
+    }
+    assert payload["rejected_output"] == '{"groups":[{"reason":"too long"}]}'
+    assert payload["validation_error"] == (
+        "groups[0].reason exceeds 500 characters"
+    )
+    schema = payload["required_schema"]
+    assert schema["required"] == ["groups"]
+    assert schema["groups"]["max_items"] == 5
+    assert schema["additional_fields"] is False
+
+
+def test_dream_report_input_is_data_only():
+    report_input = build_dream_report_input(
+        report_type="Dream completion",
+        report_id="D-123",
+        persona_guidance="Use a calm voice.",
+        facts=["Combined two Habits."],
+        changed_group_numbers=[1],
+        undo_commands=["/dream undo D-123"],
+    )
+
+    assert json.loads(report_input) == {
+        "changed_group_numbers": [1],
+        "facts": ["Combined two Habits."],
+        "mode": "persona_report",
+        "persona_guidance": "Use a calm voice.",
+        "report_id": "D-123",
+        "report_type": "Dream completion",
+        "undo_commands": ["/dream undo D-123"],
+    }
 
 
 def test_dream_parser_accepts_closed_operations_and_blocks_protected_mutation(tmp_path):

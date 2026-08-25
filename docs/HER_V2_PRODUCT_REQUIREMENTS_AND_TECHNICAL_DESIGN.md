@@ -83,7 +83,7 @@ HER v2 has no turn-count, elapsed-time, wall-clock, stage, provider-attempt,
 tool-round, sub-agent-count, call-count, step-count, cumulative-token, or
 output-token execution ceiling at any stage. This rule applies equally to
 Immediate Response, Triage, Planning, Execution, Replanning, Review,
-Verification, Finalisation, Persona packaging, Meditation, Dream, delegated sub-agents,
+Finalisation, Persona packaging, Meditation, Dream, delegated sub-agents,
 provider adapters, and tool-enabled provider loops. A provider operation must
 never be defined so broadly that a transport timeout silently becomes a clock
 around model generation, foreground tool execution, and subsequent model
@@ -107,9 +107,9 @@ The only already-authorised controls that may stop or bound work are:
   (`high`) and above, runs at the next safe Execution boundary after 10
   completed results or 300 monotonic seconds, and never caps results, elapsed
   runtime, provider attempts, active tools, Replans, or completion;
-- the Reviewed closure and Assured Verification/remediation iteration ceilings
-  explicitly defined by HER execution-mode policy; compulsory Replanning has no
-  count ceiling; and
+- the single Review-driven remediation round for Reviewed (`xhigh`); Assured
+  (`max`) instead has no Review/fix round ceiling and continues until `PASS` or
+  `CONDITIONAL_PASS`; compulsory Replanning has no count ceiling; and
 - exactly one safe fresh-connection recovery after an eligible provider
   failure, as defined in section 18. This is a recovery allowance after a typed
   failure, not permission to time-limit a healthy attempt.
@@ -150,7 +150,7 @@ Removing or replacing one optional capability must not break unrelated stages. I
 
 The active user's goal is the highest authority for a turn. Planning, execution, replanning, and review exist only to fulfil that goal.
 
-No stage may intentionally substitute a different objective. If intent is unclear or material authority is missing, Triage must classify the request as `CONFIRMATION_REQUIRED`. If execution later discovers information or authority that Triage could not have known was missing, Execution may return `USER_INPUT_REQUIRED`; the current turn then reaches `PENDING_USER_INPUT` without changing its recorded classification.
+No stage may intentionally substitute a different objective. If intent is unclear or material authority is missing, Triage must classify the request as `CONFIRMATION_REQUIRED`. If execution later discovers information or authority that Triage could not have known was missing, Execution must ask the concrete question truthfully in its natural-language response without changing the recorded classification.
 
 ### 3.5 Execution continuity
 
@@ -158,8 +158,9 @@ HER prefers useful progress over perfection of intermediate artefacts:
 
 - give an eligible transient provider failure one fresh-connection recovery
   attempt, subject to the side-effect replay rules in section 18;
-- treat structured-envelope correction as a separate semantic repair path,
-  bounded by the user meaningful-progress idle boundary;
+- route every model-authored JSON/schema rejection through the isolated,
+  tool-free JSON Repair specialist, bounded by the user meaningful-progress
+  idle boundary;
 - replan when execution evidence invalidates the current approach;
 - do not fail because an optional commentary message was not delivered;
 - do not discard completed work because reporting failed;
@@ -186,14 +187,22 @@ HER applies one deterministic compatibility membrane:
    goal, classification, evidence, permissions, or lifecycle authority.
 
 Reasoning recovery is therefore a bounded carrier fallback, not permission to
-infer a classification from prose. Plain text is accepted directly only for
-Immediate Response. Finalisation must return its combined structured result.
+infer a classification from prose. Plain text is accepted directly for
+Immediate Response, Primary Execution, and Finalisation. Primary Execution and
+Finalisation deliberately have no JSON envelope or structure-repair
+requirement; bounded sub-agents retain their existing structured JSON contract.
 JSON-string control-character repair accepts only the otherwise unchanged
 object produced by a non-strict JSON decoder; it does not complete truncated
-structures or infer fields. A retryable, side-effect-free stage receives the
-previous validation defect so it can correct the envelope instead of blindly
-repeating the same request. Main Execution is never replayed merely to repair
-its envelope. A provider failure during main Execution may be recovered only
+structures or infer fields. A rejected JSON stage is not called again merely
+to correct its report. Runtime freezes the first response and all completed
+tool receipts, then gives the JSON Repair specialist exactly three quoted data
+fields: `rejected_output`, `required_schema`, and `validation_error`. The
+specialist inherits the frozen source provider/model target, has no tools,
+attachments, Persona, task context, or side-effect authority, and may change
+only syntax or schema representation. Its repaired output is validated against
+the original stage validator while the original evidence receipts remain
+attached. Primary Execution is never replayed merely to repair its response. A
+provider failure during main Execution may be recovered only
 before any tool call or after completed, provably read-only tool calls.
 Finalisation may use its one provider recovery attempt, but every attempt must
 receive the same immutable Execution evidence.
@@ -202,7 +211,7 @@ receive the same immutable Execution evidence.
 
 HER v2 keeps five boundaries distinct:
 
-1. Planning, Execution, Review, Verification, and non-cadence Replanning may
+1. Planning, Execution, Review, and non-cadence Replanning may
    include one optional neutral `commentary` string in a successful structured
    result. Every cadence-triggered Replanning must produce one commentary with
    completion percentage, plan-change status and reason when changed, and the
@@ -221,14 +230,16 @@ HER v2 keeps five boundaries distinct:
    ```
 
    Text outside that block is unavailable to commentary/clarification packaging,
-   Immediate Response, and Finalisation.
+   Immediate Response, Primary Execution, and Finalisation.
 4. Commentary and Triage clarification share one isolated Persona Commentary
    Agent. Their delivery boundaries remain distinct: commentary accepts only a
    typed `PackagedCommentary`, while clarification retains its typed required
    message identity and must be delivered.
-5. Finalisation is one combined model call that normalises Execution when
-   necessary and renders the final message from the same result using the
-   extracted Persona block. A pre-execution Triage clarification uses the shared
+5. Primary Execution renders its own natural-language user response with the
+   extracted Persona block. `low`, `medium`, and ordinary `high` deliver that
+   response directly. `xhigh` and `max` expose it provisionally as a labelled
+   `DRAFT RESPONSE`, then Review and Finalisation replace that
+   exact placeholder. A pre-execution Triage clarification uses the shared
    Persona Commentary Agent and then returns to its required-message delivery
    path because no Execution result exists.
 
@@ -245,7 +256,8 @@ the same configured display name and polite form of address `您` as its entire
 fallback Persona guidance; it never falls back to the rest of `system_md`.
 
 This boundary governs interim commentary packaging, Triage clarification
-rendering, and the Persona inputs used by Immediate Response and Finalisation.
+rendering, and the Persona inputs used by Immediate Response, Primary
+Execution, and Finalisation.
 Immediate Response receives the extracted block directly and, for
 `DIRECT_RESPONSE`, becomes the sole final answer. Finalisation sends its
 validated `final_message` directly through the required delivery path; it is
@@ -286,11 +298,11 @@ There is one active plan version at a time.
 - Only the Replanning stage may replace the active plan.
 - Sub-agents may not change or replace the plan.
 
-### 4.4 Execution, Review, and Verification authority
+### 4.4 Execution and Review authority
 
-Execution owns the substantive work and its disposition. Finalisation renders
-the user-facing outcome without replacing a valid disposition. Review and
-Verification findings are advisory evidence. A reviewer or verifier cannot:
+Execution owns the substantive work and truthful draft response. Applicable
+Finalisation renders the reviewed user-facing outcome without rewriting the
+Execution record. Review findings are advisory evidence. A reviewer cannot:
 
 - change the user's goal;
 - change the Triage classification;
@@ -298,12 +310,11 @@ Verification findings are advisory evidence. A reviewer or verifier cannot:
 - publish a user-facing final answer;
 - independently authorise additional side effects.
 
-Review may use only tools marked read-only by the HASHI Tool Registry.
-Verification uses the same inspection set plus the explicitly non-read-only
-`verification_run` capability for validation in the authoritative workspace.
-That exception is runtime-delegated, validation-only, and cannot be widened by
-the verifier. Findings may cause Runtime to ask the Primary Agent to remediate;
-the verifier cannot perform that remediation itself.
+Review receives the Registry-approved inspection tools plus the explicitly
+delegated `verification_run` capability for validation in the authoritative
+workspace. That exception is validation-only and cannot be widened by the
+reviewer. Review may inspect and test but never remediate. A `FAIL` causes
+Runtime to ask the Primary Agent to Replan and perform any correction.
 
 The periodic cadence detector is not a model decision stage. It only observes
 the fixed thresholds and safe boundaries, then unconditionally invokes the
@@ -350,8 +361,8 @@ compatibility. User interfaces show the descriptive names below.
 | Fast path | `low` | Fast execution with minimal orchestration; no formal Planning stage |
 | Planned | `medium` | Formal Planning followed by Execution |
 | Adaptive | `high` | Planning and Execution with compulsory Replanning every 10 completed tool results or 300 seconds at the next safe boundary |
-| Reviewed | `xhigh` | Adaptive behaviour plus one tool-backed independent Review; a failed Review permits one Primary-Agent remediation and one read-only closure Review |
-| Assured | `max` | Adaptive behaviour plus one tool-backed Review and a comprehensive Verification loop against the latest state, with at most three Verification attempts |
+| Reviewed | `xhigh` | Adaptive behaviour plus one independent Review; a failed Review permits exactly one Primary-Agent remediation, whose latest draft proceeds directly to Finalisation without another Review |
+| Assured | `max` | Adaptive behaviour plus an unbounded Review/Replan/Execution loop against the latest draft until Review returns `PASS` or `CONDITIONAL_PASS` |
 
 HER v2 does not impose a tool-call round or turn ceiling on tool-enabled
 Execution or delegated sub-agent invocations. Once tools are authorised for a
@@ -377,8 +388,9 @@ each effective task route, and exposes Compact enablement plus its Tier 2/Tier
 Quick/Light provider and model at fixed high HER effort; it has no third
 provider/model path and never silently falls back to Pro or a global default.
 Execution is split into Simple, Complex, and High-volume routes because
-classification changes the actual profile. Structure repair may follow its
-source model.
+classification changes the actual profile. JSON Repair inherits its rejected
+source stage's frozen provider/model target and is not a separately
+configurable public route.
 `/backend` selects `her-v2` without exposing the internal `role-configured`
 sentinel.
 
@@ -423,23 +435,19 @@ Initial processing applies to every HER turn. Two processes begin promptly and i
 
 The Immediate Response is generated by a lightweight model using a non-reasoning or lowest-overhead provider mode.
 
-Its system prompt contains only the configured `[persona]` block and the
-Immediate-specific behaviour below. The rest of `system_md` and the Bridge
-`/sys` packaging are not supplied to this invocation:
+Its one complete system prompt contains the filtered current request and context,
+the configured `[persona]` block, and the Immediate-specific behaviour. The rest
+of `system_md` and the Bridge `/sys` packaging are not supplied to this
+invocation. The model independently selects one of two presentation modes while
+Triage runs in parallel:
 
-- for an obviously direct conversational request, answer immediately;
-- for work that must continue, provide only a short receipt acknowledgement;
-- tool access and tool authority are absent and this is private behavioural
-  information that must not be repeated to the user;
-- absence of tools in this stage is not evidence that Execution tools are
-  unavailable; only a later Execution stage may determine actual availability
-  from real invocation results, including when the user supplied an
-  "if tools are unavailable" reporting branch;
-- never call a tool or emit tool syntax, a tool-control envelope, or an
-  executable command;
-- do not execute, plan, assess feasibility, discuss capability, claim an
-  execution result, or narrate a concrete execution attempt, because the actual
-  work belongs to a later stage.
+- `DIRECT RESPONSE` answers only requests that need no new evidence, tools,
+  access, planning, execution, or side effect;
+- `ACKNOWLEDGEMENT` gives only a short natural receipt when substantive work
+  belongs to a later workflow stage;
+- neither mode exposes its internal mode choice or other metadata;
+- acknowledgement must not perform or simulate work, assess feasibility,
+  describe tool availability, provide preliminary findings, or imply completion.
 
 Its purposes are to:
 
@@ -525,7 +533,7 @@ Planning uses a premium model with a high provider reasoning setting and conside
 - recovery and meaningful-progress strategy;
 - testing and verification strategy;
 - parallelisation opportunities;
-- Review and Verification requirements implied by HER execution mode.
+- Review requirements implied by HER execution mode.
 
 The completed plan becomes binding. Only Replanning may replace it.
 
@@ -545,27 +553,21 @@ Planning failures are technical failures. Valid examples include:
 
 Execution follows the active plan when a formal plan exists. Low-effort execution follows a minimal execution directive derived from the immutable Triage result.
 
-Execution uses a dedicated HER v2 system prompt, not the Agent's full
-`system_md` and not its Persona. Its user message contains the complete request
-context supplied by HASHI—the same recent turns, Memory+ content, cross-session
-receipts, and other context visible to Planning—plus the active plan when one
-exists and any completed delegated inputs. The system prompt directs Execution
-to carry out the request faithfully with the tools available to that invocation,
-follow the supplied plan, report only work that actually occurred, and return
-exactly one JSON object.
+Primary Execution uses one dedicated, dynamically rendered HER v2 system
+prompt. It receives the complete request context, optional active plan, the
+actual narrowed tool catalogue, and only the explicit Persona guidance. It
+performs the work and returns a non-empty natural-language user response. It
+must distinguish completed, incomplete, failed, blocked, and unverified work
+truthfully, but it does not return a machine disposition or JSON envelope.
 
-The only Execution dispositions are:
-
-- `COMPLETED`;
-- `COMPLETED_WITH_LIMITATIONS`;
-- `FAILED`;
-- `USER_INPUT_REQUIRED`.
-
-The result also records a truthful summary, work performed, verification,
-evidence references, limitations, remaining work, and a clarification question
-when required. Technical `ERROR` belongs to HER v2 Runtime and is not available
-for Execution to select. Execution cannot request Replanning; HER v2 imposes
-Replanning only through the configured execution-mode assurance policy.
+A non-empty natural-language response means the Execution workflow ended
+normally and is recorded as `COMPLETED`; it does not mean every requested
+objective necessarily succeeded. Provider, permission, tool-infrastructure,
+and empty-response failures that Runtime can identify remain technical
+`ERROR`. Those failures retain the existing replay-safe transient recovery,
+and Runtime logs and renders the complete final error after recovery is
+exhausted. Execution cannot request Replanning; HER v2 imposes Replanning only
+through the configured execution-mode assurance policy.
 
 ### 8.1 Simple tasks
 
@@ -588,11 +590,10 @@ Replanning only through the configured execution-mode assurance policy.
 
 ### 8.4 Execution-discovered user input
 
-Execution may return `USER_INPUT_REQUIRED` only with a concrete clarification
-question and truthful evidence explaining why progress cannot safely continue.
-HER skips Review and Verification, passes the result through the single combined Finalisation
-call, delivers its Persona-rendered clarification, and then reaches
-`PENDING_USER_INPUT`. Bounded sub-agents may not use this disposition to contact
+When Execution discovers missing user input, its natural-language response must
+state the concrete question and the truthful reason work cannot safely
+continue. This is a normally completed Execution response, not a technical
+error. Bounded sub-agents retain their structured contract and may not contact
 the user; they return the missing-information finding to the Primary Agent as
 evidence.
 
@@ -630,9 +631,9 @@ Finalisation.
 Immediate Tool Gateway denial, approval, missing authority, `/stop`, `/steer`,
 audit failure, and cancellation retain their existing authority. The Primary
 Agent and bounded sub-agents share one coordinator within an authoritative
-Execution cycle. A later Review or Verification remediation starts a fresh
-Execution cycle. The cadence does not consume Review or Verification attempt
-allowances, has no Replan-count ceiling, and does not impose a time, token,
+Execution cycle. A later Review remediation starts a fresh Execution cycle.
+The cadence does not consume the xhigh Review-remediation allowance, has no
+Replan-count ceiling, and does not impose a time, token,
 turn, tool-round, provider-attempt, or whole-workflow limit. The normative
 detailed contract is the
 [HER v2 Compulsory Replanning Repair Plan](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md).
@@ -672,14 +673,13 @@ Replanning considers:
 - completed and remaining work;
 - tool and execution evidence;
 - failures and newly discovered constraints;
-- reviewer findings or failed Verification checks when remediation follows an
-  assurance stage.
+- reviewer failure reasons when remediation follows Review.
 
 Replanning does not consult Habits again. Current execution evidence takes precedence over historical advice.
 
 The Execution cadence is fixed at 10 completed tool results or 300 monotonic
-seconds, whichever occurs first. Review or Verification findings may also
-invoke Replanning for their separately bounded remediation paths. There is no
+seconds, whichever occurs first. Review failures may also invoke Replanning for
+their effort-specific remediation paths. There is no
 Replanning attempt deadline, token budget, turn/loop ceiling, or total Replan
 count limit, and periodic Replans never exhaust assurance remediation.
 
@@ -698,7 +698,7 @@ Habit loading is enabled by the single Habit–Meditation switch. Initial
 Planning receives every valid active Habit and decides semantically which, if
 any, apply to the complete authoritative goal and supplied context.
 The active Habit bodies may be disclosed to initial Planning only; Execution,
-Replanning, Review, Verification, and Finalisation do not receive or re-read them. Because
+Replanning, Review, and Finalisation do not receive or re-read them. Because
 `low` effort omits Planning, it omits Habit loading while retaining eligible
 post-execution Meditation.
 
@@ -730,6 +730,11 @@ precede the background model call; the later transport receipt remains separate
 audit truth. A stable job identity deduplicates repeated scheduling for one
 turn, while distinct turns that reuse a request ID remain independent.
 
+If Meditation returns invalid JSON or violates its closed action schema, the
+next model call is the shared JSON Repair specialist—not another Meditation
+call. The durable source output is retained and the repaired JSON is passed
+through the same deterministic Meditation validator before any Habit write.
+
 ### 10.2 Dream
 
 Dream is a background maintenance process that may:
@@ -742,30 +747,32 @@ Dream is a background maintenance process that may:
 
 Dream is outside the critical live-execution path.
 
+If Dream returns invalid JSON or violates its closed catalogue-change schema,
+the next model call is the same shared JSON Repair specialist—not another Dream
+maintenance call. The repaired proposal still passes the full Dream validator,
+catalogue fingerprint check, journal, and atomic commit boundary.
+
 ## 11. Stage 5: Review and Remediation
 
 Independent Review applies to `xhigh` and `max` after execution has produced candidate deliverables.
 
 The reviewer uses a premium model with the maximum appropriate provider
-reasoning setting and a strict reviewer persona. Review independence is
+reasoning setting and an independent reviewer role. Review independence is
 achieved through prompt, role, and context separation; a different model
-provider is not mandatory. The invocation has Tool Gateway access but is
-strictly read-only.
+provider is not mandatory. The invocation has Tool Gateway access for
+inspection and validation, but cannot modify or remediate the work.
 
 The reviewer receives:
 
 - the original request;
-- the immutable Triage result;
-- active and historical plan references;
-- execution evidence and deliverables;
-- relevant limitations and permission boundaries.
+- the active plan and its success criteria when one exists;
+- the natural-language `draft_response` and resulting deliverables;
+- the exact Registry-approved Review tool catalogue.
 
-The reviewer must begin and end an evidence-backed assessment with
-`workspace_inspect` snapshots. Passing, conditional, and failing claims must
-cite exact completed receipts from the current Review invocation, and the two
-snapshot digests must match. Workspace drift makes the result
-`INCONCLUSIVE`. Review cannot pass from prose, boundary snapshots alone, or a
-duplicated receipt.
+The reviewer independently inspects, tests, or verifies the result where
+appropriate. It reports only evidence established from supplied context or its
+own tool use, but objective tool verification is not mandatory for inherently
+subjective or otherwise non-verifiable requests.
 
 The reviewer returns one outcome:
 
@@ -779,45 +786,32 @@ The work is substantially complete but contains disclosed limitations, caveats, 
 
 ### 11.3 `FAIL`
 
-The work is incomplete or below the required quality and is supported by
-current tool evidence. If the remediation limit permits, the Primary Agent
-performs Replanning and remediation.
-
-### 11.4 `INCONCLUSIVE`
-
-The available completed evidence cannot support a stable conclusion, including
-when the workspace changes during the assessment.
-
-### 11.5 `UNAVAILABLE`
-
-The Review stage itself could not run or produce a valid tool-backed result.
-Technical failure is reported as `UNAVAILABLE`; it must not be converted into
-`CONDITIONAL_PASS`.
+The work is incomplete, materially wrong, or missing required work. Runtime
+passes the reason to Replanning and the Primary Execution agent for correction.
 
 Review findings are advisory. They may trigger HER-controlled Replanning and
-remediation, but they cannot replace a valid Execution disposition. Execution
-remains responsible for its result and Finalisation remains responsible for the
-user-facing report.
+remediation, but they cannot rewrite the authorised goal or the truthful
+Execution record. Execution owns the draft response and Finalisation owns the
+reviewed user-facing report.
 
 Review limits are strict:
 
-- Reviewed (`xhigh`): one independent Review; on `FAIL`, at most one
-  Primary-Agent remediation followed by exactly one read-only closure Review;
-- Assured (`max`): one independent Review; on `FAIL`, at most one immediate
-  Primary-Agent remediation before comprehensive Verification.
+- Reviewed (`xhigh`): one independent Review; on `FAIL`, exactly one
+  Review-driven Replan/Execution remediation opportunity, then Finalisation of
+  the latest post-repair draft without a closure Review;
+- Assured (`max`): every `FAIL` triggers Replanning and Primary Execution,
+  followed by a fresh Review of the latest draft. No fixed Review/fix round
+  limit applies; the loop ends at `PASS` or `CONDITIONAL_PASS`.
 
-After the applicable limit is reached, HER continues with the mode's next stage
-and clearly preserves unresolved findings. Review never overwrites the valid
-Execution disposition.
+Runtime-only provider or tool infrastructure failure is not a model-authored
+Review classification and cannot cause an endless max-effort loop.
 
-## 12. Stage 6: Assured Verification
+## 12. Review validation tool contract
 
-Comprehensive Verification applies only to Assured (`max`) work turns after
-Review and any resulting remediation. It evaluates the latest Execution result
-and current workspace state, not an earlier candidate.
-
-Verification has Tool Gateway access with validation-only side-effect authority.
-It cannot remediate, contact the user, or widen its own tool set. It uses:
+There is no separate Verification stage. Independent Review receives the
+validation capabilities needed to assess the latest Execution draft and
+current workspace state. It cannot remediate, contact the user, or widen its
+own tool set. Its delegated catalogue may include:
 
 - `workspace_inspect` for bounded status, diff, search, hash, artifact, and
   before/after snapshot evidence;
@@ -826,67 +820,53 @@ It cannot remediate, contact the user, or widen its own tool set. It uses:
   They inherit the HASHI process identity, filesystem access, environment,
   `HOME`, and network access. `argv` is executed without an implicit shell.
 
-The runtime records cumulative wall-clock time across all authoritative
-Execution attempts, including high-volume sub-agents and remediation. The
-default effective verification timeout is:
+Runtime records cumulative wall-clock time across all authoritative Execution
+attempts, including high-volume sub-agents and remediation. The default
+effective timeout for a Review `verification_run` call is:
 
 `max(configured, requested, 300s, execution elapsed × 1.5 + 300s)`
 
-The verifier may request more time but cannot reduce that result. The minimum
+The reviewer may request more time but cannot reduce that result. The minimum
 timeout is five minutes; configuration cannot reduce the execution multiplier
 below 1.0 or the grace below 60 seconds. Thus a one-hour Execution receives a
 5,700-second default verification budget, not a fixed short deadline.
 
-Direct validation may create ordinary caches or test artifacts. Opening and
-closing snapshots still detect unexpected candidate drift. Receipts record the
-workspace scope, command source and argv hash, inherited authority and access
-checks, timeout inputs/effective value, exit code, elapsed time, and cleanup.
+Direct validation may create ordinary caches or test artifacts. Receipts record
+the workspace scope, command source and argv hash, inherited authority and
+access checks, timeout inputs/effective value, exit code, elapsed time, and
+cleanup. These receipts remain workflow evidence, but the Review JSON contract
+contains only `status`, `reason`, and `conditions`. A subjective or inherently
+non-verifiable request may receive `CONDITIONAL_PASS`; lack of objective
+verification alone is not a `FAIL`.
 
-Each required check records its claim, verifiability, method, observed result,
-and exact current-invocation evidence receipts. A start without completion is
-not evidence. A failed tool may support only `FAILED` or `INCONCLUSIVE`; it
-cannot support a passing or unavailable claim. `VERIFIED`,
-`PARTIALLY_VERIFIED`, and `FAILED` assessments require stable opening and
-closing workspace snapshots.
+## 13. Stage 6: Finalisation and Reporting
 
-The overall Verification outcome is one of:
-
-- `VERIFIED`;
-- `PARTIALLY_VERIFIED`;
-- `FAILED`;
-- `NOT_AI_VERIFIABLE`;
-- `UNAVAILABLE`;
-- `INCONCLUSIVE`.
-
-A failed required check may trigger Primary-Agent Replanning and remediation,
-followed by a fresh Verification of the resulting latest state. An
-`INCONCLUSIVE` result may retry while attempts remain. The hard ceiling is
-three Verification attempts, including configured values greater than three.
-`PARTIALLY_VERIFIED` without a failed required check,
-`NOT_AI_VERIFIABLE`, and `UNAVAILABLE` proceed with explicit limitations.
-
-## 13. Stage 7: Finalisation and Reporting
-
-Finalisation applies to every turn, although `DIRECT_RESPONSE` reuses the Immediate Response and sends no additional final message.
+Finalisation applies to `xhigh` and `max`, plus the exceptional `high` boundary
+where compulsory Replanning proves 100% completion before Execution has
+produced a natural-language response. It does not run for ordinary `low`,
+`medium`, or `high`; those modes deliver Primary Execution directly.
 
 ### 13.1 Exit assessment
 
-Execution assesses whether the requested outcome was achieved and records one
-of its four dispositions. Runtime deterministically maps that disposition to
-the corresponding terminal state. Finalisation does not make a second outcome
-decision when valid Execution JSON exists.
+Primary Execution provides a truthful natural-language response. A normally
+returned response means the Execution workflow completed; Finalisation must not
+invent a machine disposition for it. The exceptional Replanning-completion
+path may still supply its deterministic completion record because no Execution
+response exists.
 
 Finalisation considers:
 
 - the current request and its complete supplied context;
 - the complete raw Execution output;
-- the parsed Execution result when valid;
+- the natural-language `draft_response`, or the exceptional deterministic
+  completion record when applicable;
 - execution and tool evidence references;
-- reviewer findings and unresolved limitations;
-- Verification checks, receipts, outcome, and limitations when present;
+- applicable reviewer findings and unresolved limitations. For xhigh, a
+  pre-repair `FAIL` is repair input rather than a current unresolved judgement
+  once the single permitted repair Execution has produced a newer draft;
 - the marked Persona guidance used to render `final_message`.
 
-Review and Verification findings must be considered critically rather than accepted blindly.
+Review findings must be considered critically rather than accepted blindly.
 
 ### 13.2 User-facing reporting
 
@@ -897,50 +877,60 @@ The report communicates, as applicable:
 - remaining limitations;
 - known issues and risks;
 - assumptions;
-- relevant review findings;
-- whether the result is verified, partly verified, not AI-verifiable, or
-  unavailable;
+- material conditions or uncertainty established by Review;
 - the final task state.
 
 Reporting must be honest and must not claim unverified work as complete.
 
 Finalisation is one combined model stage. Its ordinary path is one provider
 call; an eligible transient provider failure permits one fresh-connection
-recovery call. Both attempts receive the current request, the same complete raw
-Execution output, the same parsed Execution result when that envelope was
-valid, the same optional Review and Verification findings, and only the explicit `[persona]`
-block from the configured Agent system file. It never receives the rest of that
-file and has no Tool Gateway.
+recovery call. Both attempts receive the current request, the same latest
+`draft_response` when available, the same applicable `reviewer_findings`, the
+same `completion_evidence`, and only the explicit `[persona]` block from the
+configured Agent system file. It never receives the rest of that file and has
+no Tool Gateway.
 
-Finalisation returns one JSON object containing `execution_result` and
-`final_message`. When parsed Execution JSON exists, its disposition is the
-source of truth and Runtime preserves it even if Finalisation attempts to
-change it. When Execution returned malformed but meaningful output,
-Finalisation may normalise the clear meaning into the Execution schema. When
-the output has no usable meaning, `execution_result` is `null` and Runtime
-selects technical `ERROR`. `final_message` is rendered with the supplied
-Persona in the same call and must preserve Markdown, code, links, paths,
-identifiers, numbers, facts, uncertainty, limitations, and clarification.
+Finalisation returns only the natural-language user-facing response. Runtime
+treats that non-empty response as presentation of the normally completed
+Execution workflow, not as a second outcome classifier. The response is
+rendered with the supplied Persona in the same call and must preserve Markdown,
+code, links, paths, identifiers, numbers, facts, uncertainty, limitations, and
+clarification.
 
-There is no independent structure-repair model and no separate final Persona
-renderer. A retry is another attempt at the same combined Finalisation
-operation, not a new reporting workflow. A Direct Response remains
-Persona-authored by Immediate Response.
+Runtime deterministically enforces material Review disclosure after that model
+call. If Finalisation omits a `CONDITIONAL_PASS` condition, runtime-only
+`UNAVAILABLE` or `INCONCLUSIVE` state, or an unresolved `FAIL`, Runtime appends
+a concise user-facing validation note and audits the append. It does not revive
+an xhigh pre-repair `FAIL` after the permitted remediation produced a newer
+draft, nor a `FAIL` whose completion question Replanning resolved at 100%.
+
+For `xhigh` and `max`, Runtime first sends `DRAFT RESPONSE` plus the exact
+Primary Execution text through the user Commentary lane only when transport
+proves that exact message can later be edited. After an xhigh Review failure,
+the one permitted repair Execution replaces the internal draft used by
+Finalisation without publishing another provisional message. Finalisation then
+replaces the original placeholder with the latest formal response. If
+provisional delivery or edit is unavailable, Runtime falls back to the ordinary
+single final-delivery lane.
+
+Finalisation has no JSON envelope, so the JSON Repair specialist is not part of
+this path. There is no separate final Persona renderer. A provider recovery is
+another attempt at the same combined Finalisation operation, not a new
+reporting workflow. A Direct Response remains Persona-authored by Immediate
+Response.
 
 ### 13.3 Reporting failure
 
 For one transient provider-failure sequence, Finalisation may make at most two
 attempts: the initial attempt and one eligible fresh-connection recovery.
-Structured-envelope correction remains the separate semantic repair path from
-section 3.7 and may issue another Finalisation-stage call under the user
-idle-progress boundary; it does not replenish the one provider-recovery
-allowance. Neither attempt has an HER elapsed-time deadline. Runtime freezes
-and hashes the Finalisation input before the first attempt; every recovery or
-structure-correction attempt must reuse the same Execution invocation identity,
-raw output, parsed result, evidence references, Review and Verification findings, goal,
+Finalisation's natural-language output has no structured-envelope correction
+loop. Neither provider attempt has an HER elapsed-time deadline. Runtime freezes
+and hashes the Finalisation input before the first attempt; every provider
+recovery must reuse the same Execution invocation identity,
+raw output, parsed result, evidence references, Review findings, goal,
 classification, permissions, provider, model, and workzone. Execution is never
-called again. If recovery is unavailable or the applicable repair paths are
-exhausted, Runtime preserves Execution evidence, selects technical `ERROR`, and
+called again. If recovery is unavailable or exhausted, Runtime preserves
+Execution evidence, selects technical `ERROR`, and
 sends a deterministic local fallback report containing the typed error code and
 human-readable description.
 
@@ -957,7 +947,6 @@ The canonical lifecycle states are:
 - `REPLANNING`
 - `EXECUTION_COMPLETED`
 - `REVIEWING`
-- `VERIFYING`
 - `FINALISING`
 - terminal states defined in Section 15
 
@@ -990,22 +979,19 @@ EXECUTING
 EXECUTION_COMPLETED [XHIGH/MAX]
   -> REVIEWING
 
-REVIEWING [FAIL with remediation available]
+REVIEWING [XHIGH FAIL]
+  -> REPLANNING
+  -> EXECUTING
+  -> EXECUTION_COMPLETED
+  -> FINALISING
+
+REVIEWING [MAX FAIL]
   -> REPLANNING
   -> EXECUTING
   -> EXECUTION_COMPLETED
   -> REVIEWING
 
-REVIEWING [ASSURED]
-  -> VERIFYING
-
-VERIFYING [failed required check with remediation available]
-  -> REPLANNING
-  -> EXECUTING
-  -> EXECUTION_COMPLETED
-  -> VERIFYING
-
-EXECUTION_COMPLETED, REVIEWING, or VERIFYING
+EXECUTION_COMPLETED or REVIEWING
   -> FINALISING
   -> TERMINAL
 
@@ -1164,16 +1150,17 @@ hash on both attempts. Backoff and a provider-supplied `Retry-After` value are
 scheduling inputs, not attempt deadlines or permission to create a recovery
 window.
 
-Deterministic carrier recovery and structured-envelope correction occur before
-provider recovery. A side-effect-free structured correction receives the prior
-validation defect; it is a semantic repair path under the user idle-progress
-boundary, not another allowance for transport failures.
+Deterministic carrier recovery occurs before model repair. When a JSON/schema
+defect remains, Runtime freezes the source response and receipts and invokes
+the isolated JSON Repair specialist. Invalid specialist output may be repaired
+again under the user idle-progress boundary; it never replays the source stage
+and does not replenish the one provider-recovery allowance.
 
 Main Execution may use the provider recovery only when no tool has started or
 when every started tool is provably read-only and has completed. Unknown,
 incomplete, or side-effecting tool activity blocks automatic replay. A
 side-effect-authorised Execution result is never replayed merely to repair its
-output format; its raw output goes to Finalisation. Read-only sub-agents receive
+natural-language presentation. Read-only sub-agents receive
 the same single provider recovery. Finalisation receives at most one recovery
 and reuses immutable Execution evidence; the Execution invocation count remains
 one.
@@ -1338,16 +1325,16 @@ HER v2 owns:
 - lightweight Ledger management;
 - plan version selection;
 - compulsory Replanning cadence and plan-version control;
-- Review, closure, Verification, and remediation limits;
-- deterministic mapping from the canonical Execution disposition to terminal
-  state, plus technical runtime terminal states.
+- Review, closure, and remediation policy;
+- deterministic completion of a normally returned Execution workflow, plus
+  technical runtime terminal states.
 
 HER v2 may validate and publish optional neutral commentary returned by a
 successful reasoning stage. Compulsory Replanning instead requires one update
 and deterministically reconstructs it from validated fields when necessary.
-HASHI extracts Persona guidance and supplies only the explicit marker block to isolated presentation invocations. Combined
-Finalisation consumes that block while producing the canonical Execution
-payload and final message in one call. A pre-execution Triage clarification uses
+HASHI extracts Persona guidance and supplies only the explicit marker block to isolated presentation invocations. Applicable
+Finalisation consumes that block while producing the reviewed final message in
+one call. A pre-execution Triage clarification uses
 the same Persona Commentary Agent as interim commentary, then returns to its
 typed required-message delivery path.
 
@@ -1389,8 +1376,8 @@ The migration sequence is:
 4. deliver `low` Direct Response and Simple Task paths;
 5. add `medium` Planning;
 6. add `high` Replanning;
-7. add Reviewed (`xhigh`) Review/remediation/closure and Assured (`max`)
-   Review/Verification/remediation;
+7. add Reviewed (`xhigh`) one-round Review remediation and Assured (`max`)
+   unbounded Review/remediation;
 8. integrate sub-agents;
 9. integrate Habits, Meditation, and Dream last;
 10. certify normal-mode execution with HASHI permissions restricting canary
@@ -1424,14 +1411,14 @@ HER v2 is ready for production rollout only when:
 - cron and heartbeat prompt work defaults to request-local `low` effort across
   scheduled, manual, and recovery triggers; valid job overrides win without
   changing provider reasoning or leaking into later ordinary turns;
-- Replanning, Review, and Verification loops cannot violate lifecycle order;
-- passing assurance claims require completed receipts from the exact current
-  stage invocation and stable before/after snapshots; fabricated, stale,
-  cross-stage, incomplete, and failed passing evidence is rejected;
-- Assured Verification runs configured recipes or direct argv checks in the
-  authoritative workspace with inherited execution authority; its enforced
-  timeout grows from cumulative Execution time and cannot be shortened by the
-  verifier;
+- Replanning and Review loops cannot violate lifecycle order;
+- xhigh performs no more than one Review-driven remediation round before
+  Finalisation, while max repeats Review/Replan/Execution until `PASS` or
+  `CONDITIONAL_PASS` without a fixed round ceiling;
+- Review may run configured validation recipes or direct argv checks in the
+  authoritative workspace with inherited execution authority; its effective
+  tool timeout grows from cumulative Execution time and cannot be shortened by
+  the reviewer;
 - eligible provider failures receive no more and no less than one safe
   fresh-connection recovery; typed exclusions, invariant hashes, and
   process-restart non-resumption are enforced without an attempt deadline;
@@ -1459,9 +1446,9 @@ HER v2 is ready for production rollout only when:
 - lifecycle and workflow events cannot generate Persona commentary;
 - commentary and Triage-clarification packaging receive no raw request, plan,
   reasoning trace, lifecycle snapshot, or unmarked `system_md` content;
-- combined Finalisation receives the current request and complete Execution
-  inputs but only the marked Persona block from `system_md`; it preserves a
-  valid Execution disposition and required-delivery identity;
+- applicable Finalisation receives the current request, `draft_response`, and
+  complete execution evidence but only the marked Persona block from
+  `system_md`; it preserves required-delivery identity;
 - commentary packaging and delivery failures cannot alter workflow outcome;
 - failed HER v2 initialization fails closed or uses an explicitly selected
   non-HER backend; it never rolls back to retired HER.
@@ -1482,8 +1469,8 @@ The following decisions are authoritative for HER v2:
    separate tool-free Compact request follows the narrow Tier 2/Tier 3 exception
    in section 19.4.
 7. Immediate Response becomes the sole final user-facing answer for `DIRECT_RESPONSE`.
-8. Review is read-only; Verification has validation-only workspace authority;
-   both are advisory and never user-facing.
+8. Review may inspect and run validation-only checks but cannot remediate; it
+   is advisory and never user-facing.
 9. The Primary Agent owns execution and reporting.
 10. The Ledger is minimal operational state; HASHI logs are audit truth.
 11. All available reasoning traces must be logged.
@@ -1500,19 +1487,21 @@ The following decisions are authoritative for HER v2:
     workflow events never originate Persona speech.
 18. Commentary and Triage-clarification packaging are presentation-only and
     receive one eligible message plus the explicit configured Persona block.
-19. Combined Finalisation receives complete Execution inputs and that Persona
-    block, preserves a valid Execution disposition, and produces the final
-    required message without a second Persona call.
+19. Applicable Finalisation receives the complete Execution draft/evidence and
+    that Persona block, then produces the reviewed final required message
+    without a second Persona call.
 20. Reporting failure does not discard completed work.
 21. Recovery is conversational, not transactional.
 22. HER core is provider-neutral and modular.
-23. A model-authored assurance claim is never evidence: only exact, completed,
-    current-invocation Tool Registry receipts may support it, and a failed tool
-    can support only a failed or inconclusive assessment.
-24. Review and Verification never replace Execution's disposition; Finalisation
-    reports verified, partly verified, not AI-verifiable, and unavailable work
-    distinctly.
-25. Auto Compact is HASHI-owned, tool-free, atomically reversible capacity
+23. Review reports only what supplied context or its own independent checks can
+    establish; lack of objective verification alone may justify
+    `CONDITIONAL_PASS` but not `FAIL`.
+24. Review never rewrites the authorised goal or truthful Execution record;
+    Finalisation preserves the Review status, reasons, and conditions.
+25. Runtime deterministically discloses material conditional, unavailable,
+    inconclusive, or unresolved Review state when Finalisation omits it, without
+    misreporting a repaired or Replanning-resolved prior `FAIL` as current.
+26. Auto Compact is HASHI-owned, tool-free, atomically reversible capacity
     maintenance; its dedicated Tier 2/Tier 3 call watchdog never becomes an
     ordinary HER stage, provider, tool-loop, or execution deadline.
 

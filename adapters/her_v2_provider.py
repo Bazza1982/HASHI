@@ -61,10 +61,12 @@ from orchestrator.her_v2.presentation import (
 )
 from orchestrator.her_v2.progress import ProviderActivityTracker
 from orchestrator.her_v2.prompts import (
+    render_execution_system_prompt,
     render_finalisation_system_prompt,
     render_immediate_response_system_prompt,
     render_internal_stage_system_prompt,
     render_persona_commentary_system_prompt,
+    render_review_system_prompt,
     render_stage_prompt,
     uses_complete_system_prompt,
 )
@@ -81,10 +83,8 @@ from orchestrator.multimodal_contract import (
     subset_request_content,
     validate_authorized_media_references,
 )
-
 from tools.meter_cost import PerCallUsageLineItem
 from tools.token_tracker import resolve_cost_source
-
 
 _HASHI_VERIFICATION_POLICY_ARGUMENT = "_hashi_verification_policy"
 _PERSONA_COMMENTARY_AGENT_FAILED_FIELD = "persona_commentary_agent_failed"
@@ -596,8 +596,17 @@ def _internal_stage_system_prompt(request: StageRequest) -> str | None:
 
 def _finalisation_system_prompt(
     source: her_persona.HERPersonaPackagingSource,
+    *,
+    goal: str,
+    draft_response: str,
+    reviewer_findings: Mapping[str, Any] | None,
+    completion_evidence: Mapping[str, Any],
 ) -> str:
     return render_finalisation_system_prompt(
+        goal=goal,
+        draft_response=draft_response,
+        reviewer_findings=reviewer_findings,
+        completion_evidence=completion_evidence,
         guidance=source.guidance,
         display_name=source.display_name,
         usable=source.usable,
@@ -608,13 +617,50 @@ def _finalisation_system_prompt(
 
 def _immediate_response_system_prompt(
     source: her_persona.HERPersonaPackagingSource,
+    *,
+    goal: str,
 ) -> str:
     return render_immediate_response_system_prompt(
+        goal=goal,
         guidance=source.guidance,
         display_name=source.display_name,
         usable=source.usable,
         persona_block_begin=her_persona.PERSONA_BLOCK_BEGIN,
         persona_block_end=her_persona.PERSONA_BLOCK_END,
+    )
+
+
+def _execution_system_prompt(
+    source: her_persona.HERPersonaPackagingSource,
+    *,
+    goal: str,
+    active_plan: Mapping[str, Any] | None,
+    tool_catalogue: list[Mapping[str, Any]],
+) -> str:
+    return render_execution_system_prompt(
+        goal=goal,
+        active_plan=active_plan,
+        tool_catalogue=tool_catalogue,
+        guidance=source.guidance,
+        display_name=source.display_name,
+        usable=source.usable,
+        persona_block_begin=her_persona.PERSONA_BLOCK_BEGIN,
+        persona_block_end=her_persona.PERSONA_BLOCK_END,
+    )
+
+
+def _review_system_prompt(
+    *,
+    goal: str,
+    active_plan: Mapping[str, Any] | None,
+    draft_response: str,
+    available_review_tools: list[Mapping[str, Any]],
+) -> str:
+    return render_review_system_prompt(
+        goal=goal,
+        active_plan=active_plan,
+        draft_response=draft_response,
+        available_review_tools=available_review_tools,
     )
 
 
@@ -654,7 +700,7 @@ class _DelegatedToolRegistry:
             self.audit_context.update(
                 {
                     "safety_mode": "workspace_verification",
-                    "authority_mode": "her_v2_assured_verification",
+                    "authority_mode": "her_v2_review_verification",
                     "verification_execution_elapsed_s": self._verification_policy.get(
                         "execution_elapsed_s"
                     ),
@@ -810,7 +856,9 @@ class _EvidenceRecordingToolRegistry:
                 "attempt",
                 str(self._request.attempt),
                 "call",
-                _evidence_ref_segment(effective_call_id, fallback=f"call-{self._serial}"),
+                _evidence_ref_segment(
+                    effective_call_id, fallback=f"call-{self._serial}"
+                ),
                 "receipt",
                 str(self._serial),
             )
@@ -940,9 +988,7 @@ class _EvidenceRecordingToolRegistry:
                 tool_name,
                 arguments,
                 result,
-                audit_context=dict(
-                    getattr(self._base, "audit_context", {}) or {}
-                ),
+                audit_context=dict(getattr(self._base, "audit_context", {}) or {}),
             )
         receipt = self._receipt(
             tool_name=tool_name,
@@ -955,7 +1001,9 @@ class _EvidenceRecordingToolRegistry:
         return self._attach_receipt(result, receipt, fallback_call_id=tool_call_id)
 
     @staticmethod
-    def _attach_receipt(result: Any, receipt: ToolEvidenceReceipt, *, fallback_call_id: str):
+    def _attach_receipt(
+        result: Any, receipt: ToolEvidenceReceipt, *, fallback_call_id: str
+    ):
         from tools.registry import ToolResult
 
         output = str(getattr(result, "output", "") or "")
@@ -969,9 +1017,7 @@ class _EvidenceRecordingToolRegistry:
             }
         )
         return ToolResult(
-            tool_call_id=str(
-                getattr(result, "tool_call_id", "") or fallback_call_id
-            ),
+            tool_call_id=str(getattr(result, "tool_call_id", "") or fallback_call_id),
             output=output,
             is_error=bool(getattr(result, "is_error", False)),
             content=getattr(result, "content", None),
@@ -1074,9 +1120,7 @@ class _CompulsoryReplanToolRegistry:
                 }
             )
             result = ToolResult(
-                tool_call_id=str(
-                    getattr(result, "tool_call_id", "") or tool_call_id
-                ),
+                tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
                 output=output,
                 is_error=bool(getattr(result, "is_error", False)),
                 content=getattr(result, "content", None),
@@ -1242,7 +1286,7 @@ class _AdapterDelivery(DeliveryPort):
                 delivered=False,
                 disposition="stream_callback_unavailable",
             )
-        if kind == "immediate" and not self.allow_early:
+        if kind in {"immediate", "draft"} and not self.allow_early:
             return DeliveryReceipt(
                 accepted=False,
                 delivered=False,
@@ -1250,6 +1294,9 @@ class _AdapterDelivery(DeliveryPort):
             )
         if kind in {"acknowledgement", "immediate"}:
             event_kind = KIND_ACKNOWLEDGEMENT
+            delivery_class = DELIVERY_USER_COMMENTARY
+        elif kind == "draft":
+            event_kind = KIND_COMMENTARY
             delivery_class = DELIVERY_USER_COMMENTARY
         else:
             # The HASHI HER message router defers this lane to the ordinary
@@ -1279,7 +1326,7 @@ class _AdapterDelivery(DeliveryPort):
             )
         # Legacy callbacks return None.  Only an explicit router receipt proves
         # that an early message can replace ordinary final delivery.
-        if kind == "immediate":
+        if kind in {"immediate", "draft"}:
             delivered = accepted is True
             return DeliveryReceipt(
                 accepted=delivered,
@@ -1412,9 +1459,7 @@ class HashiStageProvider(StageProvider):
                 {
                     "input": int(getattr(response.usage, "input_tokens", 0) or 0),
                     "output": int(getattr(response.usage, "output_tokens", 0) or 0),
-                    "thinking": int(
-                        getattr(response.usage, "thinking_tokens", 0) or 0
-                    ),
+                    "thinking": int(getattr(response.usage, "thinking_tokens", 0) or 0),
                     "token_source": (
                         "provider" if response.usage is not None else "estimated"
                     ),
@@ -1591,8 +1636,7 @@ class HashiStageProvider(StageProvider):
                             "execution_elapsed_s", 0.0
                         ),
                     }
-                    if request.stage is Stage.VERIFICATION
-                    and request.allow_side_effects
+                    if request.stage is Stage.REVIEW and request.allow_side_effects
                     else None
                 ),
             )
@@ -1676,9 +1720,7 @@ class HashiStageProvider(StageProvider):
                     )
             capability = None
             if media_preflight_error is None:
-                capability_resolver = getattr(
-                    backend, "resolve_input_capability", None
-                )
+                capability_resolver = getattr(backend, "resolve_input_capability", None)
                 capability = (
                     capability_resolver()
                     if callable(capability_resolver)
@@ -1878,10 +1920,55 @@ class HashiStageProvider(StageProvider):
                     human_description="The configured provider could not be initialized.",
                 )
             stage_prompt = render_stage_prompt(request)
-            if request.stage in {
-                Stage.IMMEDIATE_RESPONSE,
-                Stage.FINALISATION,
-            }:
+            primary_execution = (
+                request.stage is Stage.EXECUTION
+                and not request.role.startswith("sub_agent:")
+            )
+            primary_review = (
+                request.stage is Stage.REVIEW
+                and not request.role.startswith("sub_agent:")
+            )
+            if primary_review:
+                definitions_getter = getattr(
+                    selected_registry, "get_tool_definitions", None
+                )
+                raw_definitions = (
+                    definitions_getter() if callable(definitions_getter) else []
+                )
+                review_tools = [
+                    dict(item) for item in raw_definitions if isinstance(item, Mapping)
+                ]
+                system_prompt = _review_system_prompt(
+                    goal=request.goal,
+                    active_plan=(
+                        request.context.get("active_plan")
+                        if isinstance(request.context.get("active_plan"), Mapping)
+                        else None
+                    ),
+                    draft_response=str(
+                        request.context.get("draft_response") or ""
+                    ),
+                    available_review_tools=review_tools,
+                )
+                if not _install_system_prompt(backend, system_prompt):
+                    raise StageInvocationError(
+                        "review backend cannot isolate the HER v2 system prompt",
+                        retryable=False,
+                        code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                        human_description=(
+                            "The configured Review provider cannot isolate the "
+                            "required system prompt."
+                        ),
+                    )
+                stage_prompt = request.goal
+            elif (
+                request.stage
+                in {
+                    Stage.IMMEDIATE_RESPONSE,
+                    Stage.FINALISATION,
+                }
+                or primary_execution
+            ):
                 backend_config = backend.config
                 backend_extra = dict(getattr(backend_config, "extra", None) or {})
                 source = her_persona.load_persona_packaging_source(
@@ -1891,29 +1978,75 @@ class HashiStageProvider(StageProvider):
                         or getattr(backend_config, "name", None)
                     ),
                 )
-                system_prompt = (
-                    _immediate_response_system_prompt(source)
-                    if request.stage is Stage.IMMEDIATE_RESPONSE
-                    else _finalisation_system_prompt(source)
-                )
+                if request.stage is Stage.IMMEDIATE_RESPONSE:
+                    system_prompt = _immediate_response_system_prompt(
+                        source, goal=request.goal
+                    )
+                elif primary_execution:
+                    definitions_getter = getattr(
+                        selected_registry, "get_tool_definitions", None
+                    )
+                    raw_definitions = (
+                        definitions_getter() if callable(definitions_getter) else []
+                    )
+                    tool_catalogue = [
+                        dict(item)
+                        for item in raw_definitions
+                        if isinstance(item, Mapping)
+                    ]
+                    system_prompt = _execution_system_prompt(
+                        source,
+                        goal=request.goal,
+                        active_plan=(
+                            request.context.get("active_plan")
+                            if isinstance(request.context.get("active_plan"), Mapping)
+                            else None
+                        ),
+                        tool_catalogue=tool_catalogue,
+                    )
+                else:
+                    system_prompt = _finalisation_system_prompt(
+                        source,
+                        goal=request.goal,
+                        draft_response=str(
+                            request.context.get("draft_response") or ""
+                        ),
+                        reviewer_findings=(
+                            request.context.get("reviewer_findings")
+                            if isinstance(
+                                request.context.get("reviewer_findings"), Mapping
+                            )
+                            else None
+                        ),
+                        completion_evidence=(
+                            request.context.get("completion_evidence")
+                            if isinstance(
+                                request.context.get("completion_evidence"), Mapping
+                            )
+                            else {}
+                        ),
+                    )
                 if not _install_system_prompt(backend, system_prompt):
-                    if request.stage is Stage.FINALISATION:
+                    if request.stage is Stage.FINALISATION or primary_execution:
                         raise StageInvocationError(
-                            "finalisation backend cannot isolate the HER v2 system prompt",
+                            f"{request.stage.value} backend cannot isolate the HER v2 system prompt",
                             retryable=False,
                             code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                             human_description=(
-                                "The configured Finalisation provider cannot isolate "
-                                "the required system prompt."
+                                f"The configured {request.stage.value} provider cannot "
+                                "isolate the required system prompt."
                             ),
                         )
                     stage_prompt = f"{system_prompt}\n\n{stage_prompt}"
+                elif request.stage is Stage.FINALISATION:
+                    stage_prompt = request.goal
             else:
                 internal_prompt = _internal_stage_system_prompt(request)
                 if internal_prompt is not None:
                     installed = _install_system_prompt(backend, internal_prompt)
                     if not installed and (
                         request.stage is Stage.EXECUTION
+                        or request.stage is Stage.JSON_REPAIR
                         or uses_complete_system_prompt(request.stage)
                     ):
                         raise StageInvocationError(
@@ -1985,8 +2118,7 @@ class HashiStageProvider(StageProvider):
                     response_ids
                     and len(response_ids) == len(set(response_ids))
                     and all(
-                        attachment_id in expected_ids
-                        for attachment_id in response_ids
+                        attachment_id in expected_ids for attachment_id in response_ids
                     )
                     and response_ids
                     == tuple(
@@ -2007,9 +2139,7 @@ class HashiStageProvider(StageProvider):
                     merge_valid = True
                     for expected in media_routing:
                         expected_item = dict(expected)
-                        attachment_id = str(
-                            expected_item.get("attachment_id") or ""
-                        )
+                        attachment_id = str(expected_item.get("attachment_id") or "")
                         replacement = response_by_id.get(attachment_id)
                         if replacement is None:
                             merged_routing.append(expected_item)
@@ -2037,8 +2167,7 @@ class HashiStageProvider(StageProvider):
             adapter_media_fallback_attempted = bool(
                 response_metadata.get("multimodal_fallback_attempted")
             ) or any(
-                str(item.get("reason") or "")
-                == "provider_typed_modality_unsupported"
+                str(item.get("reason") or "") == "provider_typed_modality_unsupported"
                 for item in media_routing
             )
             her_media_fallback_attempted = False
@@ -2060,8 +2189,7 @@ class HashiStageProvider(StageProvider):
                 and fallback_registry is not None
                 and bool(local_fallback_modalities)
                 and all(
-                    str(item.get("modality") or "")
-                    in local_fallback_modalities
+                    str(item.get("modality") or "") in local_fallback_modalities
                     for item in media_routing
                 )
             ):
@@ -2518,9 +2646,9 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
                 self.source.unavailable_reason or "persona_block_unavailable",
             )
         self.package_index += 1
-        event_digest = hashlib.sha256(
-            commentary.event_id.encode("utf-8")
-        ).hexdigest()[:16]
+        event_digest = hashlib.sha256(commentary.event_id.encode("utf-8")).hexdigest()[
+            :16
+        ]
         package_request_id = (
             f"{self.request_id}:persona-package:{event_digest}:{self.package_index}"
         )

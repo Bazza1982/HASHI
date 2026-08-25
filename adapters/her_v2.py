@@ -474,6 +474,7 @@ class HERv2Adapter(BaseBackend):
         turn_id: str,
         request_id: str,
         timeout_s: float | None,
+        json_repair_source_stage: Stage | None = None,
     ) -> StageResponse:
         # ``timeout_s`` remains in the legacy callback signature.  HER v2 does
         # not turn it into a provider-attempt or maintenance-stage deadline.
@@ -485,8 +486,13 @@ class HERv2Adapter(BaseBackend):
                 code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                 human_description="HER v2 learning services are not initialized.",
             )
-        profile = self._v2_config.profile_for(stage)
-        if stage is Stage.MEDITATION and self._learning is not None:
+        routing_stage = (
+            json_repair_source_stage or Stage.MEDITATION
+            if stage is Stage.JSON_REPAIR
+            else stage
+        )
+        profile = self._v2_config.profile_for(routing_stage)
+        if routing_stage is Stage.MEDITATION and self._learning is not None:
             job_id = str(request_id).split(":attempt:", 1)[0]
             job = (
                 self._learning.meditation_journal.get(job_id)
@@ -509,11 +515,29 @@ class HERv2Adapter(BaseBackend):
                 )
         policy = self._provider_retry_policy()
         context = {
-            "maintenance_prompt": prompt,
             "authority": "background_advisory_maintenance",
             "may_contact_user": False,
             "may_enter_live_lifecycle": False,
         }
+        if stage is Stage.MEDITATION:
+            context["meditation_input"] = prompt
+        elif stage is Stage.JSON_REPAIR:
+            context = {
+                "json_repair_input": prompt,
+                "source_stage": routing_stage.value,
+            }
+        elif stage is Stage.DREAM:
+            context["dream_input"] = prompt
+            try:
+                dream_payload = json.loads(prompt)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                dream_payload = {}
+            context["dream_role"] = (
+                "report"
+                if isinstance(dream_payload, Mapping)
+                and dream_payload.get("mode") == "persona_report"
+                else "maintenance"
+            )
         invariant_hash = (
             "sha256:"
             + hashlib.sha256(
@@ -535,7 +559,11 @@ class HERv2Adapter(BaseBackend):
                 ).encode("utf-8")
             ).hexdigest()
         )
-        role = self._v2_config.stage_roles.get(stage, profile.name)
+        role = (
+            "json_repair_specialist"
+            if stage is Stage.JSON_REPAIR
+            else self._v2_config.stage_roles.get(stage, profile.name)
+        )
         last_error: StageInvocationError | None = None
         for attempt in range(1, policy.max_provider_retries + 2):
             activity = ProviderActivityTracker()
@@ -547,7 +575,11 @@ class HERv2Adapter(BaseBackend):
                 stage=stage,
                 role=role,
                 attempt=attempt,
-                goal="Agent-local background learning maintenance",
+                goal=(
+                    prompt
+                    if stage is Stage.JSON_REPAIR
+                    else "Agent-local background learning maintenance"
+                ),
                 classification=None,
                 effort=Effort.LOW,
                 context=copy.deepcopy(context),
@@ -711,16 +743,48 @@ class HERv2Adapter(BaseBackend):
         *,
         request_id: str,
     ) -> StageResponse:
+        return await self._run_habit_dream_stage(
+            Stage.DREAM,
+            prompt,
+            request_id=request_id,
+        )
+
+    async def run_habit_dream_json_repair_model(
+        self,
+        prompt: str,
+        *,
+        request_id: str,
+    ) -> StageResponse:
+        """Repair rejected Dream JSON without rerunning Dream maintenance."""
+
+        return await self._run_habit_dream_stage(
+            Stage.JSON_REPAIR,
+            prompt,
+            request_id=request_id,
+        )
+
+    async def _run_habit_dream_stage(
+        self,
+        stage: Stage,
+        prompt: str,
+        *,
+        request_id: str,
+    ) -> StageResponse:
         if self._learning is None or self._audit_log is None or self._v2_config is None:
             raise RuntimeError("HER v2 Dream services are not initialized")
         turn_id = f"dream:{request_id}"
         profile = self._v2_config.profile_for(Stage.DREAM)
+        role = (
+            "json_repair_specialist"
+            if stage is Stage.JSON_REPAIR
+            else self._v2_config.stage_roles.get(Stage.DREAM, profile.name)
+        )
         self._audit_log.append(
             event_id=f"{turn_id}:start",
             turn_id=turn_id,
             request_ref=f"hashi-background:{request_id}",
-            stage=Stage.DREAM.value,
-            role=self._v2_config.stage_roles.get(Stage.DREAM, profile.name),
+            stage=stage.value,
+            role=role,
             event="stage_started",
             provider=profile.engine,
             model=profile.model,
@@ -728,18 +792,19 @@ class HERv2Adapter(BaseBackend):
         )
         async with self._learning.dream_execution_lock:
             response = await self._invoke_maintenance_model(
-                Stage.DREAM,
+                stage,
                 prompt,
                 turn_id,
                 request_id,
                 None,
+                Stage.DREAM if stage is Stage.JSON_REPAIR else None,
             )
         self._audit_log.record_reasoning(
             event_id=f"{turn_id}:reasoning",
             turn_id=turn_id,
             request_ref=f"hashi-background:{request_id}",
-            stage=Stage.DREAM.value,
-            role=self._v2_config.stage_roles.get(Stage.DREAM, profile.name),
+            stage=stage.value,
+            role=role,
             provider=response.provider or profile.engine,
             model=response.model or profile.model,
             attempt=response.provider_attempt,
@@ -750,8 +815,8 @@ class HERv2Adapter(BaseBackend):
             event_id=f"{turn_id}:complete",
             turn_id=turn_id,
             request_ref=f"hashi-background:{request_id}",
-            stage=Stage.DREAM.value,
-            role=self._v2_config.stage_roles.get(Stage.DREAM, profile.name),
+            stage=stage.value,
+            role=role,
             event="stage_completed",
             provider=response.provider or profile.engine,
             model=response.model or profile.model,

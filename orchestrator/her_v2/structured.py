@@ -26,7 +26,6 @@ from .models import (
     VerificationOutcome,
 )
 
-
 ParsedT = TypeVar("ParsedT")
 MappingParser = Callable[[Mapping[str, Any]], ParsedT]
 
@@ -80,9 +79,7 @@ def _semantic_key(value: Any) -> str:
         }
     elif isinstance(value, ReplanningOutcome):
         value = {
-            key: item
-            for key, item in asdict(value).items()
-            if key != "commentary"
+            key: item for key, item in asdict(value).items() if key != "commentary"
         }
     elif isinstance(value, Mapping):
         # Planning commentary and provider transport metadata do not alter the
@@ -207,7 +204,9 @@ def _candidate_group(
         candidates.append(_Candidate(source, data))
 
     if include_reasoning:
-        for index, data in enumerate(extract_json_objects(response.reasoning_trace or "")):
+        for index, data in enumerate(
+            extract_json_objects(response.reasoning_trace or "")
+        ):
             add(f"reasoning_recovery:{index + 1}", data)
         return tuple(candidates)
 
@@ -318,9 +317,11 @@ def resolve_stage_response(
         raise StructuredOutputError(
             f"provider response has no compatible structured result ({detail})"
         )
-    if not str(response.text or "").strip() and not str(
-        response.reasoning_trace or ""
-    ).strip() and not response.data:
+    if (
+        not str(response.text or "").strip()
+        and not str(response.reasoning_trace or "").strip()
+        and not response.data
+    ):
         raise StructuredOutputError("provider returned an empty structured response")
     raise StructuredOutputError("provider response contains no valid JSON object")
 
@@ -378,6 +379,25 @@ def parse_immediate(data: Mapping[str, Any]) -> str:
     return text
 
 
+@_stage_parser(plain_text_field="message")
+def parse_execution_message(data: Mapping[str, Any]) -> str:
+    """Accept the primary Execution agent's natural-language response."""
+
+    text = _text_value(
+        data.get("message"),
+        data.get("response"),
+        data.get("text"),
+        data.get("final_message"),
+        # Rolling compatibility for scripted providers that still return the
+        # old Execution envelope.  This does not restore JSON as a requirement.
+        data.get("summary"),
+        data.get("result"),
+    )
+    if not text:
+        raise StructuredOutputError("Execution requires a non-empty response")
+    return text
+
+
 @_stage_parser()
 def parse_triage(data: Mapping[str, Any]) -> TriageDecision:
     classification = _enum_value(
@@ -413,16 +433,21 @@ def parse_plan(data: Mapping[str, Any]) -> Mapping[str, Any]:
     plan = data.get("plan")
     if plan is None:
         plan = data.get("steps")
-    if not isinstance(plan, list) or not plan or any(
-        not isinstance(item, str) or not item.strip() for item in plan
+    if (
+        not isinstance(plan, list)
+        or not plan
+        or any(not isinstance(item, str) or not item.strip() for item in plan)
     ):
         raise StructuredOutputError(
             "Planning plan must be a non-empty list of non-empty strings"
         )
     success_criteria = data.get("success_criteria")
-    if not isinstance(success_criteria, list) or not success_criteria or any(
-        not isinstance(item, str) or not item.strip()
-        for item in success_criteria
+    if (
+        not isinstance(success_criteria, list)
+        or not success_criteria
+        or any(
+            not isinstance(item, str) or not item.strip() for item in success_criteria
+        )
     ):
         raise StructuredOutputError(
             "Planning success_criteria must be a non-empty list of non-empty strings"
@@ -463,8 +488,7 @@ def parse_plan(data: Mapping[str, Any]) -> Mapping[str, Any]:
         if attachment_ids is not None and (
             not isinstance(attachment_ids, list)
             or any(
-                not isinstance(item, str) or not item.strip()
-                for item in attachment_ids
+                not isinstance(item, str) or not item.strip() for item in attachment_ids
             )
         ):
             raise StructuredOutputError(
@@ -522,7 +546,8 @@ def parse_replanning(data: Mapping[str, Any]) -> ReplanningOutcome:
     if not isinstance(steps, (list, str)) or not steps:
         raise StructuredOutputError("Replanning requires a non-empty plan")
     if isinstance(steps, list) and (
-        not steps or any(not isinstance(item, str) or not item.strip() for item in steps)
+        not steps
+        or any(not isinstance(item, str) or not item.strip() for item in steps)
     ):
         raise StructuredOutputError(
             "Replanning plan must contain only non-empty strings"
@@ -532,23 +557,18 @@ def parse_replanning(data: Mapping[str, Any]) -> ReplanningOutcome:
 
     success_criteria = data.get("success_criteria")
     if not isinstance(success_criteria, (list, str)) or not success_criteria:
-        raise StructuredOutputError(
-            "Replanning requires non-empty success_criteria"
-        )
+        raise StructuredOutputError("Replanning requires non-empty success_criteria")
     if isinstance(success_criteria, list) and (
         not success_criteria
         or any(
-            not isinstance(item, str) or not item.strip()
-            for item in success_criteria
+            not isinstance(item, str) or not item.strip() for item in success_criteria
         )
     ):
         raise StructuredOutputError(
             "Replanning success_criteria must contain only non-empty strings"
         )
     if isinstance(success_criteria, str) and not success_criteria.strip():
-        raise StructuredOutputError(
-            "Replanning requires non-empty success_criteria"
-        )
+        raise StructuredOutputError("Replanning requires non-empty success_criteria")
 
     raw_percent = data.get("completion_percent")
     if isinstance(raw_percent, bool) or not isinstance(raw_percent, int):
@@ -568,9 +588,7 @@ def parse_replanning(data: Mapping[str, Any]) -> ReplanningOutcome:
     raw_plan_changed = data.get("plan_changed")
     if not isinstance(raw_plan_changed, bool):
         raise StructuredOutputError("Replanning plan_changed must be a boolean")
-    change_reason = _text_value(
-        data.get("change_reason"), data.get("changed_because")
-    )
+    change_reason = _text_value(data.get("change_reason"), data.get("changed_because"))
     if raw_plan_changed and not change_reason:
         raise StructuredOutputError(
             "A changed Replanning plan requires a concrete change_reason"
@@ -631,18 +649,11 @@ def _parse_execution_data(data: Mapping[str, Any]) -> ExecutionOutcome:
         raise StructuredOutputError("Execution requires a truthful result summary")
     evidence = _string_items(data.get("evidence_refs"), field="evidence_refs")
     limitations = _string_items(data.get("limitations"), field="limitations")
-    work_performed = _string_items(
-        data.get("work_performed"), field="work_performed"
-    )
+    work_performed = _string_items(data.get("work_performed"), field="work_performed")
     verification = _string_items(data.get("verification"), field="verification")
-    remaining_work = _string_items(
-        data.get("remaining_work"), field="remaining_work"
-    )
+    remaining_work = _string_items(data.get("remaining_work"), field="remaining_work")
     clarification = _text_value(data.get("clarification"), data.get("question"))
-    if (
-        disposition is ExecutionDisposition.USER_INPUT_REQUIRED
-        and not clarification
-    ):
+    if disposition is ExecutionDisposition.USER_INPUT_REQUIRED and not clarification:
         raise StructuredOutputError(
             "USER_INPUT_REQUIRED requires a clarification question"
         )
@@ -665,9 +676,50 @@ def parse_execution(data: Mapping[str, Any]) -> ExecutionOutcome:
 
 @_stage_parser()
 def parse_review(data: Mapping[str, Any]) -> ReviewFinding:
+    if any(key in data for key in ("status", "reason", "conditions")):
+        expected = {"status", "reason", "conditions"}
+        missing = expected - set(data)
+        unexpected = set(data) - expected
+        if missing:
+            raise StructuredOutputError(
+                f"Review response is missing fields: {sorted(missing)}"
+            )
+        if unexpected:
+            raise StructuredOutputError(
+                f"Review response contains unexpected fields: {sorted(unexpected)}"
+            )
+        outcome = _enum_value(ReviewOutcome, data.get("status"))
+        if outcome not in {
+            ReviewOutcome.PASS,
+            ReviewOutcome.CONDITIONAL_PASS,
+            ReviewOutcome.FAIL,
+        }:
+            raise StructuredOutputError(
+                "Review status must be PASS, CONDITIONAL_PASS, or FAIL"
+            )
+        reason = _text_value(data.get("reason"))
+        if not reason:
+            raise StructuredOutputError("Review requires a reason")
+        raw_conditions = data.get("conditions")
+        if outcome is ReviewOutcome.CONDITIONAL_PASS:
+            if not isinstance(raw_conditions, str) or not raw_conditions.strip():
+                raise StructuredOutputError(
+                    "CONDITIONAL_PASS requires non-empty conditions"
+                )
+            conditions = (raw_conditions.strip(),)
+        else:
+            if raw_conditions is not None:
+                raise StructuredOutputError(
+                    f"{outcome.value} requires conditions to be null"
+                )
+            conditions = ()
+        return ReviewFinding(outcome, reason, conditions, ())
+
+    # Rolling compatibility for in-flight scripted providers using the prior
+    # internal Review envelope. New model prompts expose only the contract above.
     outcome = _enum_value(
         ReviewOutcome,
-        data.get("outcome") or data.get("status"),
+        data.get("outcome"),
         aliases={
             "CONDITIONAL": "CONDITIONAL_PASS",
             "PASSED": "PASS",
@@ -811,9 +863,7 @@ def _validated_receipts(
         )
     receipts = tuple(known[ref] for ref in refs)
     if any(not receipt.completed for receipt in receipts):
-        raise StructuredOutputError(
-            f"{field} cites a tool call that did not complete"
-        )
+        raise StructuredOutputError(f"{field} cites a tool call that did not complete")
     return receipts
 
 
@@ -855,51 +905,15 @@ def _require_stable_snapshot(response: StageResponse) -> None:
 
 
 def validate_review_response(response: StageResponse) -> ReviewFinding:
-    """Reject paper-only PASS/FAIL claims and stale or fabricated evidence."""
+    """Validate the three-state Review decision contract.
+
+    Review tools remain independently recorded by the Tool Gateway, but the
+    reviewer may also judge work that cannot be objectively tool-verified.
+    Therefore a valid decision does not require receipt citations.
+    """
 
     finding = parse_review(response)
     assert isinstance(finding, ReviewFinding)
-    _receipt_index(response, expected_stage=Stage.REVIEW)
-    if finding.outcome in {ReviewOutcome.UNAVAILABLE, ReviewOutcome.INCONCLUSIVE}:
-        if finding.evidence_refs:
-            cited = _validated_receipts(
-                response,
-                finding.evidence_refs,
-                field="Review evidence_refs",
-                expected_stage=Stage.REVIEW,
-            )
-            if finding.outcome is ReviewOutcome.UNAVAILABLE and any(
-                not receipt.successful for receipt in cited
-            ):
-                raise StructuredOutputError(
-                    "failed tools can support only FAIL or INCONCLUSIVE Review outcomes"
-                )
-        return finding
-    if not finding.evidence_refs:
-        raise StructuredOutputError(
-            f"Review {finding.outcome.value} requires current tool evidence"
-        )
-    cited = _validated_receipts(
-        response,
-        finding.evidence_refs,
-        field="Review evidence_refs",
-        expected_stage=Stage.REVIEW,
-    )
-    if not any(
-        receipt.tool_name != "workspace_inspect"
-        or receipt.details.get("operation") != "snapshot"
-        for receipt in cited
-    ):
-        raise StructuredOutputError(
-            "Review requires substantive evidence beyond boundary snapshots"
-        )
-    if finding.outcome in {ReviewOutcome.PASS, ReviewOutcome.CONDITIONAL_PASS} and any(
-        not receipt.successful for receipt in cited
-    ):
-        raise StructuredOutputError(
-            "failed or incomplete tools cannot support a passing Review"
-        )
-    _require_stable_snapshot(response)
     return finding
 
 
@@ -910,7 +924,9 @@ _METHOD_TOOLS: Mapping[str, frozenset[str]] = {
     "workspace_diff": frozenset({"workspace_inspect"}),
     "workspace_search": frozenset({"workspace_inspect"}),
     "file_hash": frozenset({"workspace_inspect"}),
-    "artifact_inspection": frozenset({"workspace_inspect", "file_read", "media_read"}),
+    "artifact_inspection": frozenset(
+        {"workspace_inspect", "file_read", "file_list", "media_read"}
+    ),
     "process_health": frozenset({"process_list"}),
     "read_only_api": frozenset({"web_fetch", "hashi_scheduler_status"}),
     "visual_inspection": frozenset(
@@ -986,9 +1002,7 @@ def _validate_verification_check(
             raise StructuredOutputError(
                 "VERIFIED and PARTIALLY_VERIFIED checks require successful current receipts"
             )
-        if not any(
-            receipt.tool_name in allowed_tools for receipt in receipts
-        ):
+        if not any(receipt.tool_name in allowed_tools for receipt in receipts):
             raise StructuredOutputError(
                 f"verification method {check.method!r} lacks a matching tool receipt"
             )
@@ -1009,7 +1023,9 @@ def _validate_verification_check(
                 "FAILED checks must be classified as verifiable"
             )
         if not receipts:
-            raise StructuredOutputError("FAILED checks require concrete current evidence")
+            raise StructuredOutputError(
+                "FAILED checks require concrete current evidence"
+            )
     elif check.result is VerificationOutcome.NOT_AI_VERIFIABLE:
         if check.verifiability is not Verifiability.NOT_AI_VERIFIABLE:
             raise StructuredOutputError(
@@ -1092,13 +1108,12 @@ def validate_verification_response(response: StageResponse) -> VerificationFindi
     return finding
 
 
-@_stage_parser()
+@_stage_parser(plain_text_field="final_message")
 def parse_finalisation(data: Mapping[str, Any]) -> FinalisationOutcome:
-    """Parse the one-call Plan B ledger result and Persona-rendered message.
+    """Accept Finalisation's natural-language response.
 
-    A report-only object remains readable during a rolling upgrade, but it has
-    no authority to synthesize an Execution result when the original Execution
-    JSON was invalid.
+    The former JSON envelope remains readable during a rolling upgrade, but
+    Finalisation no longer has to produce or classify an execution result.
     """
 
     execution_result_present = "execution_result" in data
@@ -1122,10 +1137,6 @@ def parse_finalisation(data: Mapping[str, Any]) -> FinalisationOutcome:
     if not final_message:
         raise StructuredOutputError(
             "Finalisation requires a Persona-rendered final_message"
-        )
-    if not execution_result_present and "report" not in data:
-        raise StructuredOutputError(
-            "Finalisation requires execution_result (object or null)"
         )
     return FinalisationOutcome(
         execution_result=execution,

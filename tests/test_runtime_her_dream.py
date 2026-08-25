@@ -42,10 +42,36 @@ class FakeDreamAdapter:
         *,
         request_id: str,
     ) -> Any:
+        return await self._invoke_dream_model(
+            prompt,
+            request_id=request_id,
+            route="dream",
+        )
+
+    async def run_habit_dream_json_repair_model(
+        self,
+        prompt: str,
+        *,
+        request_id: str,
+    ) -> Any:
+        return await self._invoke_dream_model(
+            prompt,
+            request_id=request_id,
+            route="json_repair",
+        )
+
+    async def _invoke_dream_model(
+        self,
+        prompt: str,
+        *,
+        request_id: str,
+        route: str,
+    ) -> Any:
         self.calls.append(
             {
                 "prompt": prompt,
                 "request_id": request_id,
+                "route": route,
                 "write_lock_held": self._habit_execution_lock.locked(),
             }
         )
@@ -58,10 +84,8 @@ class FakeDreamAdapter:
             if isinstance(response, Exception):
                 raise response
             return SimpleNamespace(text=str(response))
-        if "HER PERSONA REPORT RENDERER" in prompt:
-            context = json.loads(
-                prompt.split("REPORT CONTEXT (quoted, read-only)\n", 1)[1]
-            )
+        context = json.loads(prompt)
+        if context.get("mode") == "persona_report":
             return SimpleNamespace(
                 text="\n".join(
                     [
@@ -376,7 +400,20 @@ async def test_dream_repairs_beyond_removed_validation_attempt_cap(tmp_path):
         f"{manifest['run_id']}:analysis:{attempt}"
         for attempt in range(1, 6)
     ]
-    assert "exceeds 500 characters" in adapter.calls[4]["prompt"]
+    assert [call["route"] for call in adapter.calls[:5]] == [
+        "dream",
+        "json_repair",
+        "json_repair",
+        "json_repair",
+        "json_repair",
+    ]
+    repair_payload = json.loads(adapter.calls[4]["prompt"])
+    assert "exceeds 500 characters" in repair_payload["validation_error"]
+    assert set(repair_payload) == {
+        "rejected_output",
+        "required_schema",
+        "validation_error",
+    }
     audit = adapter._journal.audit_path.read_text(encoding="utf-8")
     assert "dream_validation_retry" in audit
 
@@ -430,7 +467,7 @@ async def test_dream_complete_body_can_be_rendered_in_configured_persona(tmp_pat
     )
 
     def persona_response(prompt: str, _request_id: str) -> str:
-        assert "REPORT CONTEXT" in prompt
+        assert json.loads(prompt)["mode"] == "persona_report"
         return (
             "陛下，昭君已完成今夜的整理。\n\n"
             "昭君逐项看过了，目前没有需要调整的 Habit。\n"

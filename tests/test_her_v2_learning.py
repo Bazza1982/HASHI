@@ -113,9 +113,13 @@ async def test_meditation_persists_validated_habit_and_full_audit(tmp_path):
     habits = service.store.load()
     assert [habit.title for habit in habits] == ["Verify current state"]
     assert invoker.calls[0]["stage"] is Stage.MEDITATION
-    assert "HER HABIT MEDITATION" in invoker.calls[0]["prompt"]
-    assert "configured lightweight/flash model" in invoker.calls[0]["prompt"]
-    assert "same HER backend model" not in invoker.calls[0]["prompt"]
+    meditation_input = json.loads(invoker.calls[0]["prompt"])
+    assert meditation_input["mode"] == "initial"
+    assert meditation_input["agent_name"] == "agent"
+    assert meditation_input["max_actions"] == 3
+    assert meditation_input["current_user_request"] == (
+        "Update the external setting safely"
+    )
     jobs = list(service.meditation_journal.root.glob("*.json"))
     assert len(jobs) == 1
     job = json.loads(jobs[0].read_text(encoding="utf-8"))
@@ -138,6 +142,39 @@ async def test_meditation_persists_validated_habit_and_full_audit(tmp_path):
     } <= events
     reasoning = next(row for row in rows if row["event"] == "reasoning_trace")
     assert reasoning["payload"]["availability"] == "available"
+
+
+@pytest.mark.asyncio
+async def test_meditation_format_repair_uses_json_repair_specialist(tmp_path):
+    invoker = ScriptedMaintenance(["not-json", '{"actions":[]}'])
+    service, _root = _service(tmp_path, invoker)
+
+    await service.bind_turn().meditate(
+        turn_id="turn-learning-repair",
+        goal="Complete the current request safely.",
+        summary="The request completed.",
+        evidence_refs=(),
+        limitations=(),
+        terminal_state=TerminalState.COMPLETED,
+    )
+    await _wait_for_learning(service)
+
+    assert len(invoker.calls) == 2
+    initial_input = json.loads(invoker.calls[0]["prompt"])
+    correction_input = json.loads(invoker.calls[1]["prompt"])
+    assert initial_input["mode"] == "initial"
+    assert invoker.calls[0]["stage"] is Stage.MEDITATION
+    assert invoker.calls[1]["stage"] is Stage.JSON_REPAIR
+    assert set(correction_input) == {
+        "rejected_output",
+        "required_schema",
+        "validation_error",
+    }
+    assert correction_input["rejected_output"] == "not-json"
+    assert correction_input["validation_error"] == (
+        "Meditation response must be one JSON object"
+    )
+    assert correction_input["required_schema"]["actions"]["max_items"] == 3
 
 
 @pytest.mark.asyncio
@@ -278,12 +315,14 @@ async def test_meditation_persists_only_the_current_turn_request(tmp_path):
     await _wait_for_learning(service)
 
     assert len(invoker.calls) == 1
-    assert "VIOLETCINDER-TURN" in invoker.calls[0]["prompt"]
-    assert "AMBERQUARTZ-CONTEXT" not in invoker.calls[0]["prompt"]
+    meditation_input = json.loads(invoker.calls[0]["prompt"])
+    assert "VIOLETCINDER-TURN" in meditation_input["current_user_request"]
+    assert "AMBERQUARTZ-CONTEXT" not in meditation_input["current_user_request"]
     [job_path] = list(service.meditation_journal.root.glob("*.json"))
     job = json.loads(job_path.read_text(encoding="utf-8"))
-    assert "VIOLETCINDER-TURN" in job["prompt"]
-    assert "AMBERQUARTZ-CONTEXT" not in job["prompt"]
+    persisted_input = json.loads(job["prompt"])
+    assert "VIOLETCINDER-TURN" in persisted_input["current_user_request"]
+    assert "AMBERQUARTZ-CONTEXT" not in persisted_input["current_user_request"]
     assert job["status"] == "no_change"
 
 

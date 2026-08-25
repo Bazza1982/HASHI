@@ -179,6 +179,16 @@ def test_plan_b_finalisation_parses_canonical_result_and_message():
     assert result.execution_result_present is True
 
 
+def test_finalisation_accepts_natural_language_without_json_envelope():
+    result = parse_finalisation(
+        StageResponse(text="Captain, the final result is ready.")
+    )
+
+    assert result.execution_result is None
+    assert result.execution_result_present is False
+    assert result.final_message == "Captain, the final result is ready."
+
+
 def test_plan_b_finalisation_accepts_null_only_as_runtime_error_input():
     result = parse_finalisation(
         StageResponse(
@@ -294,152 +304,78 @@ def test_unstructured_triage_prose_is_not_guessed_into_authority():
         parse_triage(StageResponse(text="This looks like a simple task."))
 
 
-def test_review_pass_requires_exact_completed_current_tool_receipts():
-    receipts = (
-        _snapshot("before", stage=Stage.REVIEW),
-        _receipt(
-            "inspection",
-            stage=Stage.REVIEW,
-            details={"operation": "diff", "exit_code": 0},
-        ),
-        _snapshot("after", stage=Stage.REVIEW),
-    )
+def test_review_pass_uses_the_new_three_field_contract_without_mandatory_tools():
     finding = validate_review_response(
         StageResponse(
             data={
-                "outcome": "PASS",
-                "summary": "The current diff satisfies the plan.",
-                "evidence_refs": ["inspection"],
+                "status": "PASS",
+                "reason": "The completed result satisfies the request.",
+                "conditions": None,
             },
-            provider_attempt=1,
-            tool_receipts=receipts,
         )
     )
 
     assert finding.outcome is ReviewOutcome.PASS
-    assert finding.evidence_refs == ("inspection",)
+    assert finding.summary == "The completed result satisfies the request."
+    assert finding.findings == ()
 
 
 @pytest.mark.parametrize(
-    ("data", "receipts", "error"),
+    ("data", "error"),
     [
         (
             {
-                "outcome": "PASS",
-                "summary": "Paper-only pass.",
-                "evidence_refs": [],
+                "status": "CONDITIONAL_PASS",
+                "reason": "The subjective result cannot be objectively proven.",
+                "conditions": None,
             },
-            (),
-            "requires current tool evidence",
+            "requires non-empty conditions",
         ),
         (
             {
-                "outcome": "PASS",
-                "summary": "Fabricated reference.",
-                "evidence_refs": ["fabricated"],
+                "status": "PASS",
+                "reason": "The result passes.",
+                "conditions": "Unexpected limitation.",
             },
-            (
-                _snapshot("before", stage=Stage.REVIEW),
-                _snapshot("after", stage=Stage.REVIEW),
-            ),
-            "unknown or stale",
+            "requires conditions to be null",
         ),
         (
             {
-                "outcome": "PASS",
-                "summary": "A failed call was misreported as proof.",
-                "evidence_refs": ["inspection"],
+                "status": "FAIL",
+                "reason": "The result fails.",
+                "conditions": None,
+                "extra": "not allowed",
             },
-            (
-                _snapshot("before", stage=Stage.REVIEW),
-                _receipt(
-                    "inspection",
-                    stage=Stage.REVIEW,
-                    status=ToolReceiptStatus.FAILED,
-                ),
-                _snapshot("after", stage=Stage.REVIEW),
-            ),
-            "cannot support a passing Review",
+            "unexpected fields",
         ),
         (
             {
-                "outcome": "FAIL",
-                "summary": "An incomplete start was called evidence.",
-                "evidence_refs": ["inspection"],
+                "status": "INCONCLUSIVE",
+                "reason": "Not part of the model contract.",
+                "conditions": None,
             },
-            (
-                _snapshot("before", stage=Stage.REVIEW),
-                _receipt(
-                    "inspection",
-                    stage=Stage.REVIEW,
-                    status=ToolReceiptStatus.FAILED,
-                    completed=False,
-                ),
-                _snapshot("after", stage=Stage.REVIEW),
-            ),
-            "did not complete",
-        ),
-        (
-            {
-                "outcome": "PASS",
-                "summary": "One receipt was counted twice.",
-                "evidence_refs": ["inspection", "inspection"],
-            },
-            (
-                _snapshot("before", stage=Stage.REVIEW),
-                _receipt("inspection", stage=Stage.REVIEW),
-                _snapshot("after", stage=Stage.REVIEW),
-            ),
-            "duplicate tool evidence",
-        ),
-        (
-            {
-                "outcome": "PASS",
-                "summary": "Only the boundary snapshots were cited.",
-                "evidence_refs": ["before", "after"],
-            },
-            (
-                _snapshot("before", stage=Stage.REVIEW),
-                _snapshot("after", stage=Stage.REVIEW),
-            ),
-            "substantive evidence",
+            "must be PASS, CONDITIONAL_PASS, or FAIL",
         ),
     ],
 )
-def test_review_rejects_paper_fabricated_failed_or_incomplete_pass_evidence(
-    data, receipts, error
-):
+def test_review_rejects_invalid_three_field_decisions(data, error):
     with pytest.raises(StructuredOutputError, match=error):
-        validate_review_response(
-            StageResponse(data=data, provider_attempt=1, tool_receipts=receipts)
+        validate_review_response(StageResponse(data=data))
+
+
+def test_review_conditional_pass_preserves_conditions_for_finalisation():
+    finding = validate_review_response(
+        StageResponse(
+            data={
+                "status": "CONDITIONAL_PASS",
+                "reason": "The result substantially satisfies the request.",
+                "conditions": "Visual quality remains subjective.",
+            }
         )
-
-
-def test_review_rejects_stale_invocation_and_workspace_drift():
-    mixed = (
-        _snapshot("before", stage=Stage.REVIEW, invocation="old"),
-        _receipt("inspection", stage=Stage.REVIEW, invocation="current"),
-        _snapshot("after", stage=Stage.REVIEW, invocation="current"),
     )
-    data = {
-        "outcome": "FAIL",
-        "summary": "A concrete issue was observed.",
-        "evidence_refs": ["inspection"],
-    }
-    with pytest.raises(StructuredOutputError, match="multiple invocations"):
-        validate_review_response(
-            StageResponse(data=data, provider_attempt=1, tool_receipts=mixed)
-        )
 
-    drifted = (
-        _snapshot("before", stage=Stage.REVIEW, digest="one"),
-        _receipt("inspection", stage=Stage.REVIEW),
-        _snapshot("after", stage=Stage.REVIEW, digest="two"),
-    )
-    with pytest.raises(StructuredOutputError, match="drifted"):
-        validate_review_response(
-            StageResponse(data=data, provider_attempt=1, tool_receipts=drifted)
-        )
+    assert finding.outcome is ReviewOutcome.CONDITIONAL_PASS
+    assert finding.findings == ("Visual quality remains subjective.",)
 
 
 def test_review_technical_unavailability_is_not_a_conditional_pass():
@@ -598,6 +534,42 @@ def test_assured_verification_rejects_an_invented_verification_method():
         validate_verification_response(
             StageResponse(**{**response.__dict__, "data": data})
         )
+
+
+def test_artifact_inspection_accepts_file_list_receipts():
+    response = _workspace_verification_response()
+    data = dict(response.data)
+    data["checks"] = [
+        {
+            **dict(response.data["checks"][0]),
+            "method": "artifact_inspection",
+            "evidence_refs": ["file-list"],
+            "observed": "The requested workbook files were listed.",
+        }
+    ]
+    data["evidence_refs"] = ["file-list"]
+    receipts = (
+        response.tool_receipts[0],
+        _receipt(
+            "file-list",
+            stage=Stage.VERIFICATION,
+            tool_name="file_list",
+            details={"operation": "list", "path": "workspace"},
+        ),
+        response.tool_receipts[-1],
+    )
+
+    finding = validate_verification_response(
+        StageResponse(
+            **{
+                **response.__dict__,
+                "data": data,
+                "tool_receipts": receipts,
+            }
+        )
+    )
+
+    assert finding.outcome is VerificationOutcome.VERIFIED
 
 
 def test_not_ai_verifiable_is_reported_without_invented_tool_evidence():

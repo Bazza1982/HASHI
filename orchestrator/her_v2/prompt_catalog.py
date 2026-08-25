@@ -18,7 +18,6 @@ PROMPT_ASSET_ROOT = Path(__file__).with_name("prompt_assets")
 # prompt fails during import/hot reload instead of silently changing a model
 # invocation.
 PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
-    "background_maintenance": frozenset({"maintenance_prompt"}),
     "execution_request": frozenset(
         {
             "active_plan_section",
@@ -28,19 +27,36 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "sub_agent_results_section",
         }
     ),
-    "finalisation_request": frozenset({"context", "goal", "schema"}),
-    "immediate_response_request": frozenset({"goal"}),
     "stage_request": frozenset(
         {"context", "reviewer_rule", "schema", "sub_agent_rule"}
     ),
     "system_dream": frozenset(),
-    "system_execution": frozenset(),
+    "system_dream_report": frozenset(),
+    "system_execution": frozenset(
+        {
+            "active_plan",
+            "goal",
+            "persona_block_begin",
+            "persona_block_end",
+            "persona_guidance",
+            "tool_catalogue",
+        }
+    ),
     "system_finalisation": frozenset(
-        {"persona_block_begin", "persona_block_end", "persona_guidance"}
+        {
+            "completion_evidence",
+            "draft_response",
+            "goal",
+            "persona_block_begin",
+            "persona_block_end",
+            "persona_guidance",
+            "reviewer_findings",
+        }
     ),
     "system_immediate_response": frozenset(
-        {"persona_block_begin", "persona_block_end", "persona_guidance"}
+        {"goal", "persona_block_begin", "persona_block_end", "persona_guidance"}
     ),
+    "system_json_repair": frozenset(),
     "system_meditation": frozenset(),
     "system_persona_commentary": frozenset(
         {"persona_block_begin", "persona_block_end", "persona_guidance"}
@@ -58,8 +74,9 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "workflow_state_and_evidence",
         }
     ),
-    "system_review": frozenset(),
-    "system_verification": frozenset(),
+    "system_review": frozenset(
+        {"active_plan", "available_review_tools", "draft_response", "goal"}
+    ),
     "system_sub_agent": frozenset(),
     "system_triage": frozenset({"goal", "schema"}),
 }

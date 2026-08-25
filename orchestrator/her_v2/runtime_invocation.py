@@ -5,12 +5,19 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
-from .checkpoint import CompulsoryReplanCoordinator
+from orchestrator.her_json_repair import render_json_repair_input
+from orchestrator.multimodal_contract import (
+    attachment_manifest,
+    canonical_request_content,
+    subset_request_content,
+)
 
 from .audit import AuditPersistenceError
+from .checkpoint import CompulsoryReplanCoordinator
 from .commentary import (
     CommentaryValidationError,
     commentary_from_stage_response,
@@ -24,19 +31,31 @@ from .interfaces import (
 )
 from .models import Stage, StageRequest, StageResponse, ToolEvidenceReceipt
 from .progress import ProviderActivityTracker
+from .prompts import json_repair_schema_for_stage
 from .runtime_support import _payload_hash
 from .structured import resolve_stage_response
-from orchestrator.multimodal_contract import (
-    attachment_manifest,
-    canonical_request_content,
-    subset_request_content,
-)
 
 if TYPE_CHECKING:
     from .runtime import _TurnState
 
 
 Validator = Callable[[StageResponse], Any]
+
+
+def _rejected_output(response: StageResponse) -> str:
+    """Preserve every provider-authored structured candidate as quoted data."""
+
+    text = str(response.text or "").strip()
+    data = dict(response.data) if response.data else {}
+    if data and text:
+        return json.dumps(
+            {"provider_data": data, "provider_text": text},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    if data:
+        return json.dumps(data, ensure_ascii=False, sort_keys=True)
+    return text
 
 
 def _tool_receipt_payload(receipt: ToolEvidenceReceipt) -> dict[str, Any]:
@@ -195,8 +214,8 @@ class RuntimeInvocationMixin:
             ),
         }
         retry_invariant_hash = _payload_hash(invariant_payload)
+        repair_schema = json_repair_schema_for_stage(stage, role=role)
         last_error: StageInvocationError | None = None
-        structure_retry_feedback: Mapping[str, Any] | None = None
         state.stage_invocation_serial += 1
         invocation_serial = state.stage_invocation_serial
         invocation_id = (
@@ -212,14 +231,6 @@ class RuntimeInvocationMixin:
             if state.control.stopped:
                 raise TurnStopped(state.control.reason)
             attempt_context = copy.deepcopy(base_context)
-            if structure_retry_feedback is not None:
-                attempt_context["previous_structure_error"] = dict(
-                    structure_retry_feedback
-                )
-                attempt_context["retry_instruction"] = (
-                    "Correct only the reported response-envelope defect. Preserve "
-                    "the authoritative goal, classification, evidence, and uncertainty."
-                )
             provider_activity = ProviderActivityTracker()
             request = StageRequest(
                 turn_id=state.ledger.turn_id,
@@ -365,27 +376,66 @@ class RuntimeInvocationMixin:
                             },
                         )
                 except StructuredOutputError as exc:
-                    if not defer_structured_error:
-                        raise
-                    if stage is not Stage.EXECUTION or role.startswith("sub_agent:"):
-                        raise
-                    parsed = None
-                    validation_source = "deferred_to_finalisation"
-                    self._audit(
-                        state,
-                        stage=stage.value,
-                        role=role,
-                        event="execution_structure_deferred_to_finalisation",
-                        event_id=f"{attempt_prefix}:deferred-to-finalisation",
-                        provider=response.provider or selected.engine,
-                        model=response.model or selected.model,
-                        attempt=attempt,
-                        payload={
-                            "validation_error": str(exc),
-                            "execution_replayed": False,
-                            "raw_output_preserved": True,
-                        },
-                    )
+                    if repair_schema is not None:
+                        try:
+                            effective_response, parsed = await self._invoke_json_repair(
+                                state,
+                                source_stage=stage,
+                                source_role=role,
+                                selected=selected,
+                                validator=validator,
+                                preserved_response=response,
+                                rejected_response=response,
+                                validation_error=exc,
+                                required_schema=repair_schema,
+                                source_invocation_id=invocation_id,
+                                source_attempt=attempt,
+                            )
+                        except (TurnStopped, AuditPersistenceError):
+                            raise
+                        except StageInvocationError as repair_exc:
+                            raise repair_exc.terminal_copy(
+                                f"{stage.value} JSON repair failed without replaying "
+                                f"the source stage: {repair_exc}",
+                                attempts=max(1, repair_exc.attempts),
+                                details={
+                                    "source_stage": stage.value,
+                                    "source_stage_replayed": False,
+                                    "json_repair_used": True,
+                                },
+                            ) from repair_exc
+                        validation_source = "specialist_json_repair"
+                    else:
+                        if not defer_structured_error:
+                            raise StageInvocationError(
+                                f"{stage.value} returned no usable natural-language "
+                                f"response: {exc}",
+                                code=ProviderFailureCode.PROVIDER_EMPTY_RESPONSE,
+                                human_description=(
+                                    "The provider returned no usable natural-language "
+                                    "response."
+                                ),
+                                details={"validation_error": str(exc)},
+                            ) from exc
+                        if stage is not Stage.EXECUTION or role.startswith("sub_agent:"):
+                            raise
+                        parsed = None
+                        validation_source = "deferred_to_finalisation"
+                        self._audit(
+                            state,
+                            stage=stage.value,
+                            role=role,
+                            event="execution_structure_deferred_to_finalisation",
+                            event_id=f"{attempt_prefix}:deferred-to-finalisation",
+                            provider=response.provider or selected.engine,
+                            model=response.model or selected.model,
+                            attempt=attempt,
+                            payload={
+                                "validation_error": str(exc),
+                                "execution_replayed": False,
+                                "raw_output_preserved": True,
+                            },
+                        )
 
                 effective_response = replace(
                     effective_response,
@@ -464,12 +514,6 @@ class RuntimeInvocationMixin:
                     exc.details.get("media_routing")
                 ):
                     media_fallback_consumed = True
-                if isinstance(exc, StructuredOutputError):
-                    structure_retry_feedback = {
-                        "attempt": attempt,
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                    }
             except Exception as exc:
                 last_error = StageInvocationError(
                     f"{stage.value} provider failure: {type(exc).__name__}: {exc}",
@@ -477,7 +521,6 @@ class RuntimeInvocationMixin:
                     human_description="The provider stage failed unexpectedly.",
                 )
             assert isinstance(last_error, StageInvocationError)
-            is_structured_repair = isinstance(last_error, StructuredOutputError)
             unobserved_side_effects = bool(
                 last_error.side_effects_possible and not provider_activity.tool_started
             )
@@ -485,9 +528,7 @@ class RuntimeInvocationMixin:
                 provider_activity.replay_safe(allow_side_effects=allow_side_effects)
                 and not unobserved_side_effects
             )
-            retry_kind = (
-                "structured_repair" if is_structured_repair else "provider_recovery"
-            )
+            retry_kind = "provider_recovery"
             retry_reason = "eligible"
             if not retry_on_failure:
                 retry_reason = "retry_disabled_for_call"
@@ -495,14 +536,7 @@ class RuntimeInvocationMixin:
                 retry_reason = "failure_non_retryable"
             elif not replay_safe:
                 retry_reason = "side_effect_replay_blocked"
-            elif is_structured_repair and state.progress.expired(
-                self.config.user_idle_timeout_s
-            ):
-                retry_reason = "user_meaningful_progress_idle_expired"
-            elif (
-                not is_structured_repair
-                and provider_retry_count >= self.retry_policy.max_provider_retries
-            ):
+            elif provider_retry_count >= self.retry_policy.max_provider_retries:
                 retry_reason = "provider_recovery_already_used"
             will_retry = retry_reason == "eligible"
             possible_side_effects = bool(
@@ -586,8 +620,7 @@ class RuntimeInvocationMixin:
                     attempts=attempt,
                     details={"retry_reason": retry_reason},
                 ) from last_error
-            if not is_structured_repair:
-                provider_retry_count += 1
+            provider_retry_count += 1
             await self._wait_for_stage_retry(
                 state,
                 stage=stage,
@@ -599,6 +632,285 @@ class RuntimeInvocationMixin:
                 retry_delay=retry_delay,
                 retry_invariant_hash=retry_invariant_hash,
                 invocation_id=invocation_id,
+            )
+
+    async def _invoke_json_repair(
+        self,
+        state: _TurnState,
+        *,
+        source_stage: Stage,
+        source_role: str,
+        selected: ProviderProfile,
+        validator: Validator,
+        preserved_response: StageResponse,
+        rejected_response: StageResponse,
+        validation_error: StructuredOutputError,
+        required_schema: Mapping[str, Any],
+        source_invocation_id: str,
+        source_attempt: int,
+    ) -> tuple[StageResponse, Any]:
+        """Repair only a rejected JSON envelope without replaying its stage."""
+
+        role = "json_repair_specialist"
+        invocation_id = f"{source_invocation_id}:json-repair"
+        invariant_payload = {
+            "provider": selected.engine,
+            "model": selected.model,
+            "source_stage": source_stage.value,
+            "source_role": source_role,
+            "source_invocation_id": source_invocation_id,
+            "source_attempt": source_attempt,
+            "required_schema_sha256": _payload_hash(required_schema),
+            "allow_tools": False,
+            "allow_side_effects": False,
+            "workzone": self.workzone_ref or None,
+        }
+        source_invariant_hash = _payload_hash(invariant_payload)
+        current_rejected = rejected_response
+        current_error: StageInvocationError = validation_error
+        provider_retry_count = 0
+        repair_attempt = 0
+
+        while True:
+            repair_attempt += 1
+            if state.control.stopped:
+                raise TurnStopped(state.control.reason)
+            repair_input = render_json_repair_input(
+                rejected_output=_rejected_output(current_rejected),
+                required_schema=required_schema,
+                validation_error=str(current_error),
+            )
+            retry_invariant_hash = _payload_hash(
+                {
+                    "source_invariant_hash": source_invariant_hash,
+                    "repair_input_sha256": hashlib.sha256(
+                        repair_input.encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+            tracker = ProviderActivityTracker()
+            request = StageRequest(
+                turn_id=state.ledger.turn_id,
+                request_ref=state.request_ref,
+                stage=Stage.JSON_REPAIR,
+                role=role,
+                attempt=repair_attempt,
+                goal=repair_input,
+                classification=None,
+                effort=state.effort,
+                context={
+                    "json_repair_input": repair_input,
+                    "source_stage": source_stage.value,
+                    "source_invocation_id": source_invocation_id,
+                },
+                request_content=None,
+                attachment_manifest=(),
+                allow_tools=False,
+                allow_side_effects=False,
+                invocation_id=invocation_id,
+                retry_invariant_hash=retry_invariant_hash,
+                provider_activity_callback=self._provider_activity_callback(
+                    state, tracker
+                ),
+            )
+            attempt_prefix = f"{invocation_id}:attempt:{repair_attempt}"
+            start_ref = self._audit(
+                state,
+                stage=Stage.JSON_REPAIR.value,
+                role=role,
+                event="stage_started",
+                event_id=f"{attempt_prefix}:start",
+                provider=selected.engine,
+                model=selected.model,
+                attempt=repair_attempt,
+                payload={
+                    "source_stage": source_stage.value,
+                    "source_role": source_role,
+                    "source_invocation_id": source_invocation_id,
+                    "source_attempt": source_attempt,
+                    "allow_tools": False,
+                    "allow_side_effects": False,
+                    "retry_invariant_hash": retry_invariant_hash,
+                    "source_invariant_hash": source_invariant_hash,
+                    "retry_invariants": invariant_payload,
+                },
+            )
+            state.ledger.add_log_ref(start_ref)
+            self.ledger_store.save(state.ledger)
+            response: StageResponse | None = None
+            try:
+                response = await state.control.run_cancellable(
+                    self.provider.invoke(selected, request)
+                )
+                response_ref = self._audit(
+                    state,
+                    stage=Stage.JSON_REPAIR.value,
+                    role=role,
+                    event="provider_response_received",
+                    event_id=f"{attempt_prefix}:provider-response",
+                    provider=response.provider or selected.engine,
+                    model=response.model or selected.model,
+                    attempt=repair_attempt,
+                    payload={
+                        "text": response.text,
+                        "data": dict(response.data),
+                        "usage": dict(response.usage),
+                        "validation_pending": True,
+                        "provider_activity": tracker.snapshot(),
+                    },
+                )
+                state.ledger.add_log_ref(response_ref)
+                reasoning_ref = self.audit_log.record_reasoning(
+                    event_id=f"{attempt_prefix}:reasoning",
+                    turn_id=state.ledger.turn_id,
+                    request_ref=state.request_ref,
+                    stage=Stage.JSON_REPAIR.value,
+                    role=role,
+                    provider=response.provider or selected.engine,
+                    model=response.model or selected.model,
+                    attempt=repair_attempt,
+                    plan_id=state.ledger.plan_id,
+                    trace=response.reasoning_trace,
+                )
+                state.ledger.add_log_ref(reasoning_ref)
+                self.ledger_store.save(state.ledger)
+
+                candidate = replace(
+                    preserved_response,
+                    text=response.text,
+                    data=response.data,
+                    validation_source="specialist_json_repair",
+                )
+                resolution = resolve_stage_response(candidate, validator)
+                effective = replace(
+                    resolution.response,
+                    validation_source="specialist_json_repair",
+                )
+                complete_ref = self._audit(
+                    state,
+                    stage=Stage.JSON_REPAIR.value,
+                    role=role,
+                    event="stage_completed",
+                    event_id=f"{attempt_prefix}:complete",
+                    provider=response.provider or selected.engine,
+                    model=response.model or selected.model,
+                    attempt=repair_attempt,
+                    payload={
+                        "source_stage": source_stage.value,
+                        "source_stage_replayed": False,
+                        "output": (
+                            dict(effective.data)
+                            if effective.data
+                            else effective.text
+                        ),
+                        "preserved_evidence_refs": list(
+                            preserved_response.evidence_refs
+                        ),
+                        "retry_invariant_hash": retry_invariant_hash,
+                        "provider_activity": tracker.snapshot(),
+                    },
+                )
+                state.ledger.add_log_ref(complete_ref)
+                self.ledger_store.save(state.ledger)
+                return effective, resolution.parsed
+            except (TurnStopped, AuditPersistenceError):
+                raise
+            except StructuredOutputError as exc:
+                current_error = exc
+                if response is not None:
+                    current_rejected = response
+                retry_kind = "structured_repair"
+                retry_reason = (
+                    "user_meaningful_progress_idle_expired"
+                    if state.progress.expired(self.config.user_idle_timeout_s)
+                    else "eligible"
+                )
+            except StageInvocationError as exc:
+                current_error = exc
+                replay_safe = tracker.replay_safe(allow_side_effects=False)
+                if not exc.retryable:
+                    retry_reason = "failure_non_retryable"
+                elif not replay_safe:
+                    retry_reason = "replay_safety_unproven"
+                elif provider_retry_count >= self.retry_policy.max_provider_retries:
+                    retry_reason = "provider_recovery_already_used"
+                else:
+                    retry_reason = "eligible"
+                retry_kind = "provider_recovery"
+            except Exception as exc:
+                current_error = StageInvocationError(
+                    "JSON repair provider failure: "
+                    f"{type(exc).__name__}: {exc}",
+                    code=ProviderFailureCode.PROVIDER_UNKNOWN,
+                    human_description=(
+                        "The JSON repair provider failed unexpectedly."
+                    ),
+                )
+                retry_kind = "provider_recovery"
+                retry_reason = (
+                    "eligible"
+                    if provider_retry_count < self.retry_policy.max_provider_retries
+                    else "provider_recovery_already_used"
+                )
+
+            will_retry = retry_reason == "eligible"
+            retry_delay = 0.0
+            if will_retry:
+                retry_delay = (
+                    current_error.retry_after_s
+                    if current_error.retry_after_s is not None
+                    else min(
+                        5.0,
+                        0.25 * (2 ** min(max(0, repair_attempt - 1), 5)),
+                    )
+                )
+            self._audit(
+                state,
+                stage=Stage.JSON_REPAIR.value,
+                role=role,
+                event="stage_attempt_failed",
+                event_id=f"{attempt_prefix}:failed",
+                provider=selected.engine,
+                model=selected.model,
+                attempt=repair_attempt,
+                payload={
+                    **current_error.audit_payload(),
+                    "source_stage": source_stage.value,
+                    "source_stage_replayed": False,
+                    "will_retry": will_retry,
+                    "retry_kind": retry_kind,
+                    "retry_reason": retry_reason,
+                    "retry_delay_s": retry_delay if will_retry else None,
+                    "fresh_connection_on_retry": will_retry,
+                    "retry_invariant_hash": retry_invariant_hash,
+                    "provider_response_received": response is not None,
+                    "provider_activity": tracker.snapshot(),
+                },
+            )
+            if not will_retry:
+                raise current_error.terminal_copy(
+                    "JSON repair failed after "
+                    f"{repair_attempt} attempt(s): {current_error}",
+                    attempts=repair_attempt,
+                    details={
+                        "source_stage": source_stage.value,
+                        "source_stage_replayed": False,
+                    },
+                ) from current_error
+            if retry_kind == "provider_recovery":
+                provider_retry_count += 1
+            await self._wait_for_stage_retry(
+                state,
+                stage=Stage.JSON_REPAIR,
+                attempt=repair_attempt,
+                role=role,
+                provider=selected.engine,
+                model=selected.model,
+                retry_kind=retry_kind,
+                retry_delay=retry_delay,
+                retry_invariant_hash=retry_invariant_hash,
+                invocation_id=invocation_id,
+                same_goal=retry_kind != "structured_repair",
             )
 
     async def _publish_stage_commentary(
@@ -736,6 +1048,7 @@ class RuntimeInvocationMixin:
         retry_delay: float,
         retry_invariant_hash: str,
         invocation_id: str,
+        same_goal: bool = True,
     ) -> None:
         """Audit and wait for a same-route fresh-connection recovery."""
 
@@ -772,7 +1085,7 @@ class RuntimeInvocationMixin:
                 "fresh_connection": True,
                 "same_provider": True,
                 "same_model": True,
-                "same_goal": True,
+                "same_goal": same_goal,
                 "same_classification": True,
                 "same_permissions": True,
                 "same_workzone": True,

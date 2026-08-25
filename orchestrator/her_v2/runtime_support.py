@@ -303,7 +303,7 @@ class RuntimeSupportMixin:
         )
         if accepted:
             state.deliveries.append(DeliveryRecord(kind, text, event_id))
-            if kind in {"acknowledgement", "clarification", "final"}:
+            if kind in {"acknowledgement", "draft", "clarification", "final"}:
                 progress_kind = "delivery" if delivered else "delivery_deferred"
                 state.progress.record(f"{progress_kind}:{kind}", text)
         return accepted
@@ -566,11 +566,7 @@ class RuntimeSupportMixin:
             review_count=state.review_count,
             verification_count=state.verification_count,
             checkpoint_count=state.checkpoint_count,
-            assurance_status=(
-                state.last_verification.outcome.value
-                if state.last_verification is not None
-                else ""
-            ),
+            assurance_status="",
             replan_count=state.replan_count,
         )
 

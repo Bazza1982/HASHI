@@ -13,10 +13,13 @@ from orchestrator.her_v2.models import (
 )
 from orchestrator.her_v2.prompt_catalog import PromptAssetError
 from orchestrator.her_v2.prompts import (
+    json_repair_schema_for_stage,
+    render_execution_system_prompt,
     render_finalisation_system_prompt,
     render_immediate_response_system_prompt,
     render_internal_stage_system_prompt,
     render_persona_commentary_system_prompt,
+    render_review_system_prompt,
     render_stage_prompt,
 )
 
@@ -46,6 +49,56 @@ def test_external_prompt_inventory_is_complete_and_cwd_independent(
     assert "triage classifier" in prompt_catalog.load_prompt_asset("system_triage")
 
 
+def test_json_repair_prompt_is_generic_tool_free_and_data_driven() -> None:
+    prompt = prompt_catalog.load_prompt_asset("system_json_repair")
+
+    assert "JSON Repair Agent" in prompt
+    assert "rejected_output" in prompt
+    assert "required_schema" in prompt
+    assert "validation_error" in prompt
+    assert "Do not call tools" in prompt
+    assert "Do not introduce facts" in prompt
+    assert "Return only the repaired JSON" in prompt
+
+    request = _request(
+        Stage.JSON_REPAIR,
+        json_repair_input=(
+            '{"rejected_output":"bad","required_schema":{"value":"string"},'
+            '"validation_error":"missing value"}'
+        ),
+    )
+    assert render_stage_prompt(request) == request.context["json_repair_input"]
+    assert render_internal_stage_system_prompt(request) == prompt
+
+
+def test_every_live_json_contract_routes_to_specialist_schema() -> None:
+    for stage in (
+        Stage.TRIAGE,
+        Stage.PLANNING,
+        Stage.REPLANNING,
+        Stage.REVIEW,
+        Stage.VERIFICATION,
+    ):
+        assert json_repair_schema_for_stage(stage, role="primary") is not None
+
+    assert (
+        json_repair_schema_for_stage(
+            Stage.EXECUTION,
+            role="sub_agent:worker",
+        )
+        is not None
+    )
+    for stage in (
+        Stage.IMMEDIATE_RESPONSE,
+        Stage.EXECUTION,
+        Stage.FINALISATION,
+        Stage.MEDITATION,
+        Stage.DREAM,
+        Stage.JSON_REPAIR,
+    ):
+        assert json_repair_schema_for_stage(stage, role="primary") is None
+
+
 def test_external_prompt_placeholder_drift_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -64,8 +117,10 @@ def test_external_prompt_placeholder_drift_fails_closed(
 @pytest.mark.parametrize("stage", list(Stage))
 def test_every_stage_prompt_renders_from_validated_assets(stage: Stage) -> None:
     context: dict[str, object] = {}
-    if stage in {Stage.MEDITATION, Stage.DREAM}:
-        context["maintenance_prompt"] = "Maintain quoted evidence only."
+    if stage is Stage.MEDITATION:
+        context["meditation_input"] = '{"mode":"initial"}'
+    if stage is Stage.DREAM:
+        context["dream_input"] = '{"mode":"initial"}'
     if stage is Stage.TRIAGE:
         context["previous_structure_error"] = {
             "attempt": 1,
@@ -99,44 +154,179 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
         "persona_block_begin": "[persona]",
         "persona_block_end": "[persona_end]",
     }
-    assert "Speak plainly." in render_finalisation_system_prompt(**common)
-    assert "no tool access" in render_immediate_response_system_prompt(**common)
+    finalisation = render_finalisation_system_prompt(
+        goal="Complete the requested work.",
+        draft_response="The requested work is complete.",
+        reviewer_findings={
+            "status": "CONDITIONAL_PASS",
+            "reason": "The result is substantially complete.",
+            "conditions": "One limitation remains.",
+        },
+        completion_evidence={"evidence_refs": ["receipt:42"]},
+        **common,
+    )
+    assert "Speak plainly." in finalisation
+    assert "The requested work is complete." in finalisation
+    assert finalisation.count("The requested work is complete.") == 1
+    assert '"status": "CONDITIONAL_PASS"' in finalisation
+    assert '"evidence_refs"' in finalisation
+    assert "Return only the final user-facing response" in finalisation
+    assert "Return exactly one JSON object" not in finalisation
+    assert "$draft_response" not in finalisation
+    immediate = render_immediate_response_system_prompt(
+        goal="Explain the supplied result.", **common
+    )
+    assert "Speak plainly." in immediate
+    assert "Explain the supplied result." in immediate
+    assert "Choose exactly one" in immediate
+    assert "$goal" not in immediate
     assert "Speak plainly." in render_persona_commentary_system_prompt(
         persona_guidance="Speak plainly.",
         persona_block_begin="[persona]",
         persona_block_end="[persona_end]",
     )
 
+    execution = render_execution_system_prompt(
+        goal="Inspect and report the current state.",
+        active_plan={"plan": ["inspect", "report"]},
+        tool_catalogue=[{"function": {"name": "file_read"}}],
+        **common,
+    )
+    assert "Inspect and report the current state." in execution
+    assert '"inspect"' in execution
+    assert '"name": "file_read"' in execution
+    assert "Speak plainly." in execution
+    assert "Return exactly one JSON object" not in execution
+    assert "$goal" not in execution
 
-def test_review_and_verification_prompts_enforce_tool_backed_bounded_evidence() -> None:
-    review_system = render_internal_stage_system_prompt(_request(Stage.REVIEW))
-    verification_system = render_internal_stage_system_prompt(
-        _request(Stage.VERIFICATION)
-    )
-    review_request = render_stage_prompt(_request(Stage.REVIEW))
-    verification_request = render_stage_prompt(_request(Stage.VERIFICATION))
 
-    assert "delegated read-only" in review_system
-    assert "workspace_inspect operation=snapshot" in review_system
-    assert "UNAVAILABLE, never CONDITIONAL_PASS" in review_system
-    assert "HASHI_EVIDENCE_RECEIPT" in review_request
-    assert "PASS | CONDITIONAL_PASS | FAIL | INCONCLUSIVE | UNAVAILABLE" in (
-        review_request
+def test_meditation_uses_complete_system_contract_and_data_only_user_input() -> None:
+    meditation_input = '{"mode":"initial","max_actions":3}'
+    request = _request(Stage.MEDITATION, meditation_input=meditation_input)
+
+    assert render_stage_prompt(request) == meditation_input
+    system_prompt = render_internal_stage_system_prompt(request)
+    assert system_prompt is not None
+    assert "agent task reflection agent" in system_prompt
+    assert "JSON Repair Agent" not in system_prompt
+    assert '"actions"' in system_prompt
+    assert "$maintenance_prompt" not in system_prompt
+
+
+def test_dream_uses_separate_maintenance_and_persona_report_contracts() -> None:
+    maintenance_input = '{"mode":"initial"}'
+    maintenance = _request(
+        Stage.DREAM,
+        dream_input=maintenance_input,
+        dream_role="maintenance",
+    )
+    report_input = '{"mode":"persona_report"}'
+    report = _request(
+        Stage.DREAM,
+        dream_input=report_input,
+        dream_role="report",
     )
 
-    assert "Assured Verifier" in verification_system
-    assert "authoritative current workspace" in verification_system
-    assert "inherits HASHI's process identity" in verification_system
-    assert "automatically grows from the cumulative Execution duration" in (
-        verification_system
+    assert render_stage_prompt(maintenance) == maintenance_input
+    maintenance_system = render_internal_stage_system_prompt(maintenance)
+    report_system = render_internal_stage_system_prompt(report)
+    assert maintenance_system is not None
+    assert report_system is not None
+    assert "Habit Maintenance Agent" in maintenance_system
+    assert '"groups"' in maintenance_system
+    assert "Persona Report Renderer" not in maintenance_system
+    assert "Persona Report Renderer" in report_system
+    assert "Return only the message" in report_system
+    assert '"groups"' not in report_system
+
+
+def test_primary_execution_uses_natural_language_prompt_while_subagent_keeps_json() -> (
+    None
+):
+    primary = _request(
+        Stage.EXECUTION,
+        active_plan={"plan": ["inspect"]},
     )
-    assert "workspace_test" in verification_system
-    assert "Fabricated, stale, or prior-invocation references are forbidden" in (
-        verification_system
+    subagent = _request(
+        Stage.EXECUTION,
+        sub_agent=True,
+        assignment_id="worker",
+        assigned_task="Inspect one target",
+        delegated_tools=["file_read"],
     )
-    assert "verification_run operation=run" in verification_system
-    assert "PARTIALLY_VERIFIED" in verification_request
-    assert "NOT_AI_VERIFIABLE" in verification_request
+
+    assert render_stage_prompt(primary) == primary.goal
+    assert render_internal_stage_system_prompt(primary) is None
+    assert "Return exactly one JSON object" in render_stage_prompt(subagent)
+    assert "bounded HER v2 sub-agent" in render_internal_stage_system_prompt(subagent)
+
+
+def test_immediate_response_uses_filtered_goal_without_a_second_prompt_contract() -> (
+    None
+):
+    request = StageRequest(
+        turn_id="turn-1",
+        request_ref="hashi-request:req-1",
+        stage=Stage.IMMEDIATE_RESPONSE,
+        role="primary",
+        attempt=1,
+        goal="""Bridge-managed context follows.
+
+--- ADDITIONAL SYSTEM CONTEXT ---
+
+GLOBAL SYS CONTENT
+
+--- RECENT CONTEXT ---
+
+USER: Earlier context remains available.
+
+--- CURRENT USER REQUEST — AUTHORITATIVE ---
+
+Please inspect the request.""",
+        classification=None,
+        effort=Effort.LOW,
+    )
+
+    user_prompt = render_stage_prompt(request)
+    system_prompt = render_immediate_response_system_prompt(
+        goal=request.goal,
+        guidance="Address the user as Captain.",
+        display_name="Agent",
+        usable=True,
+        persona_block_begin="[persona]",
+        persona_block_end="[persona_end]",
+    )
+
+    assert "GLOBAL SYS CONTENT" not in user_prompt
+    assert "GLOBAL SYS CONTENT" not in system_prompt
+    assert "Earlier context remains available." in user_prompt
+    assert "Earlier context remains available." in system_prompt
+    assert "Please inspect the request." in user_prompt
+    assert "Please inspect the request." in system_prompt
+    assert "Return exactly one JSON object" not in user_prompt
+    assert "Return exactly one JSON object" not in system_prompt
+
+
+def test_review_uses_one_complete_prompt_with_draft_plan_and_actual_tools() -> None:
+    request = _request(Stage.REVIEW)
+    review_system = render_review_system_prompt(
+        goal=request.goal,
+        active_plan={"plan": ["implement"], "success_criteria": ["tests pass"]},
+        draft_response="Implemented the requested change.",
+        available_review_tools=[{"function": {"name": "workspace_inspect"}}],
+    )
+
+    assert render_internal_stage_system_prompt(request) is None
+    assert "Implemented the requested change." in review_system
+    assert '"tests pass"' in review_system
+    assert '"name": "workspace_inspect"' in review_system
+    assert "PASS" in review_system
+    assert "CONDITIONAL_PASS" in review_system
+    assert "FAIL" in review_system
+    assert "INCONCLUSIVE" not in review_system
+    assert "UNAVAILABLE" not in review_system
+    assert "$goal" not in review_system
+    assert "$draft_response" not in review_system
 
 
 def test_triage_uses_one_complete_prompt_without_checkpoint_risk_metadata() -> None:
