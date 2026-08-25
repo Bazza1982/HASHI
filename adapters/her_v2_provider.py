@@ -685,15 +685,25 @@ def _review_system_prompt(
     *,
     goal: str,
     relevant_habits: Sequence[str],
+    active_plan_id: str | None,
     active_plan: Mapping[str, Any] | None,
     draft_response: str,
+    execution_record: Mapping[str, Any] | None,
+    evidence_refs: Sequence[str],
+    review_kind: str,
+    findings_to_close: Sequence[str],
     available_review_tools: list[Mapping[str, Any]],
 ) -> str:
     return render_review_system_prompt(
         goal=goal,
         relevant_habits=relevant_habits,
+        active_plan_id=active_plan_id,
         active_plan=active_plan,
         draft_response=draft_response,
+        execution_record=execution_record,
+        evidence_refs=evidence_refs,
+        review_kind=review_kind,
+        findings_to_close=findings_to_close,
         available_review_tools=available_review_tools,
     )
 
@@ -2113,6 +2123,12 @@ class HashiStageProvider(StageProvider):
                 and not request.role.startswith("sub_agent:")
             )
             if primary_review:
+                raw_execution_record = request.context.get("execution")
+                execution_record = (
+                    dict(raw_execution_record)
+                    if isinstance(raw_execution_record, Mapping)
+                    else None
+                )
                 definitions_getter = getattr(
                     selected_registry, "get_tool_definitions", None
                 )
@@ -2129,12 +2145,31 @@ class HashiStageProvider(StageProvider):
                         for item in (request.context.get("relevant_habits") or [])
                         if str(item).strip()
                     ],
+                    active_plan_id=request.plan_id,
                     active_plan=(
                         request.context.get("active_plan")
                         if isinstance(request.context.get("active_plan"), Mapping)
                         else None
                     ),
-                    draft_response=str(request.context.get("draft_response") or ""),
+                    draft_response=str(
+                        request.context.get("draft_response")
+                        or (execution_record or {}).get("summary")
+                        or ""
+                    ),
+                    execution_record=execution_record,
+                    evidence_refs=[
+                        str(item)
+                        for item in (request.context.get("evidence_refs") or [])
+                        if str(item).strip()
+                    ],
+                    review_kind=str(
+                        request.context.get("review_kind") or "independent"
+                    ),
+                    findings_to_close=[
+                        str(item)
+                        for item in (request.context.get("findings_to_close") or [])
+                        if str(item).strip()
+                    ],
                     available_review_tools=review_tools,
                 )
                 if not _install_system_prompt(backend, system_prompt):

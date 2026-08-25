@@ -182,15 +182,15 @@ def render_stage_prompt(request: StageRequest) -> str:
     if request.stage is Stage.JSON_REPAIR:
         return json_repair_input if isinstance(json_repair_input, str) else request.goal
     meditation_input = request.context.get("meditation_input")
-    if request.stage is Stage.MEDITATION and isinstance(meditation_input, str):
+    if request.stage is Stage.MEDITATION:
         # All Meditation instructions live in its isolated system prompt.
         # The provider-facing user turn contains data only.
-        return meditation_input
+        return meditation_input if isinstance(meditation_input, str) else request.goal
     dream_input = request.context.get("dream_input")
-    if request.stage is Stage.DREAM and isinstance(dream_input, str):
+    if request.stage is Stage.DREAM:
         # Dream maintenance and Persona reporting use separate isolated system
         # contracts.  Their provider-facing user turns contain data only.
-        return dream_input
+        return dream_input if isinstance(dream_input, str) else request.goal
     if request.stage is Stage.IMMEDIATE_RESPONSE:
         # The complete Immediate Response contract, including this same filtered
         # goal, is installed as its isolated system prompt.  Keep a non-empty
@@ -291,47 +291,15 @@ def render_stage_prompt(request: StageRequest) -> str:
         # Keep the user turn as data only so there is a single prompt document
         # defining sub-agent behaviour.
         return request.goal
+    if request.stage is Stage.REVIEW:
+        # system_review.txt owns the complete Reviewer contract and every
+        # invocation-specific Review input.  The user turn is data only.
+        return request.goal
     if request.stage is Stage.FINALISATION:
         # The complete Finalisation contract and all evidence are rendered in
         # the isolated system prompt.  The raw goal is the backend's user turn.
         return request.goal
-    context = {
-        "turn_id": request.turn_id,
-        "request_ref": request.request_ref,
-        "stage": request.stage.value,
-        "invocation_role": request.role,
-        "attempt": request.attempt,
-        "authoritative_user_goal": request.goal,
-        "immutable_classification": (
-            request.classification.value if request.classification else None
-        ),
-        "her_effort": request.effort.value,
-        "active_plan_id": request.plan_id,
-        "tools_authorised_for_this_stage": request.allow_tools,
-        "external_side_effects_authorised_for_this_stage": request.allow_side_effects,
-        "stage_context": dict(request.context),
-    }
-    reviewer_rule = ""
-    if request.stage is Stage.REVIEW:
-        reviewer_rule = (
-            "You are an independent read-only assessor. You may call only the delegated "
-            "read-only tools. Begin and end every evidence-backed assessment with "
-            "workspace_inspect operation=snapshot. Cite only exact "
-            "HASHI_EVIDENCE_RECEIPT values returned during this invocation. A tool start "
-            "without a completed receipt is not evidence; a failed receipt can support "
-            "only a failing (FAIL/FAILED) or INCONCLUSIVE outcome. If the before/after "
-            "snapshot digests differ, "
-            "return INCONCLUSIVE. Never contact the user, change the goal or "
-            "classification, activate a plan, authorise side effects, mutate state, or "
-            "write the final answer."
-        )
-    output_schema = _SCHEMAS[request.stage]
-    return render_prompt_asset(
-        "stage_request",
-        reviewer_rule=reviewer_rule,
-        context=json.dumps(context, ensure_ascii=False, sort_keys=True),
-        schema=json.dumps(output_schema, ensure_ascii=False, sort_keys=True),
-    )
+    raise ValueError(f"unsupported HER v2 stage: {request.stage!r}")
 
 
 _SYSTEM_PROMPT_ASSETS = {
@@ -606,31 +574,51 @@ def render_review_system_prompt(
     *,
     goal: str,
     relevant_habits: Sequence[str],
+    active_plan_id: str | None,
     active_plan: Mapping[str, Any] | None,
     draft_response: str,
+    execution_record: Mapping[str, Any] | None,
+    evidence_refs: Sequence[str],
+    review_kind: str,
+    findings_to_close: Sequence[str],
     available_review_tools: Sequence[Mapping[str, Any]],
 ) -> str:
     """Render the complete independent Review contract as one system prompt."""
 
     return render_prompt_asset(
         "system_review",
-        relevant_habits=json.dumps(
-            list(relevant_habits), ensure_ascii=False, indent=2
-        ),
         available_review_tools=(
             json.dumps(list(available_review_tools), ensure_ascii=False, indent=2)
             if available_review_tools
             else "No review tools are available for this invocation."
         ),
-        goal=goal,
-        active_plan=(
-            json.dumps(active_plan, ensure_ascii=False, indent=2)
-            if active_plan is not None
-            else "No active plan was supplied."
+        review_context=json.dumps(
+            {
+                "review_kind": str(review_kind or "").strip() or "independent",
+                "active_plan_id": str(active_plan_id or "").strip() or None,
+                "findings_to_close": [
+                    str(item) for item in findings_to_close if str(item).strip()
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
         ),
+        goal=goal,
         draft_response=(
             str(draft_response).strip()
             or "The execution agent returned no draft response."
+        ),
+        execution_evidence=json.dumps(
+            {
+                "execution_record": (
+                    dict(execution_record) if execution_record is not None else None
+                ),
+                "evidence_refs": [
+                    str(item) for item in evidence_refs if str(item).strip()
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
         ),
     )
 

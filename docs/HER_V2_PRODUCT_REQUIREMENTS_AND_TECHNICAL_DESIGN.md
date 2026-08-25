@@ -844,12 +844,20 @@ inspection and validation, but cannot modify or remediate the work.
 
 The reviewer receives:
 
-- the original request;
-- the authoritative `real_goal`;
-- the Triage-selected `relevant_habits`;
-- the active plan and its success criteria when one exists;
-- the natural-language `draft_response` and resulting deliverables;
+- the authoritative resolved goal (`real_goal`);
+- the Review kind, active `plan_id`, and any prior findings that a closure
+  Review must independently reassess;
+- the natural-language `draft_response`, structured Execution record, existing
+  evidence references, and resulting deliverables;
 - the exact Registry-approved Review tool catalogue.
+
+`system_review.txt` is the sole normative prompt asset for the Reviewer model.
+Runtime renders all of the inputs above into that one asset, installs it as the
+isolated system prompt, and sends the authoritative goal as the data-only user
+turn required by the provider. There is no generic `stage_request.txt` wrapper,
+catalogue key, renderer, or call-site. Invocation serials, HER effort, and other
+runtime metadata that do not affect Review judgement remain in audit records
+rather than becoming a second Reviewer instruction source.
 
 The reviewer independently inspects, tests, or verifies the result where
 appropriate. It reports only evidence established from supplied context or its
@@ -1611,12 +1619,15 @@ The following decisions are authoritative for HER v2:
     prompt asset or wiring exists.
 26. No Verification prompt asset or runtime prompt wiring exists; independent
     Review owns validation.
-27. Review never rewrites the authorised goal or truthful Execution record;
+27. Review uses only `system_review.txt`; no generic `stage_request.txt` asset,
+    catalogue entry, renderer, or call-site exists, and all required Review
+    context is rendered explicitly into the single system prompt.
+28. Review never rewrites the authorised goal or truthful Execution record;
     Finalisation preserves the Review status, reasons, and conditions.
-28. Runtime deterministically discloses material conditional, unavailable,
+29. Runtime deterministically discloses material conditional, unavailable,
     inconclusive, or unresolved Review state when Finalisation omits it, without
     misreporting a repaired or Replanning-resolved prior `FAIL` as current.
-29. Auto Compact is HASHI-owned, tool-free, atomically reversible capacity
+30. Auto Compact is HASHI-owned, tool-free, atomically reversible capacity
     maintenance; its dedicated Tier 2/Tier 3 call watchdog never becomes an
     ordinary HER stage, provider, tool-loop, or execution deadline.
 

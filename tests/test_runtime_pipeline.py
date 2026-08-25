@@ -271,9 +271,18 @@ def _runtime():
     runtime._escalating_placeholder_loop = _escalating_placeholder_loop
 
     async def _streaming_display_loop(
-        chat_id, placeholder, request_id, stop_typing, stream_queue, *, backend
+        chat_id,
+        placeholder,
+        request_id,
+        stop_typing,
+        stream_queue,
+        *,
+        backend,
+        display_state=None,
     ):
-        runtime.streaming_loops.append((request_id, stream_queue is not None))
+        runtime.streaming_loops.append(
+            (request_id, stream_queue is not None, display_state is not None)
+        )
         await stop_typing.wait()
 
     runtime._streaming_display_loop = _streaming_display_loop
@@ -875,6 +884,31 @@ async def test_cleanup_interactive_feedback_can_leave_stream_owned_placeholder()
 
     assert typing_task.done()
     assert runtime.app.bot.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_verbose_rollover_deletes_only_active_message():
+    runtime = _runtime()
+    placeholder = SimpleNamespace(message_id=77)
+    active_message = SimpleNamespace(message_id=78)
+    display_state = runtime_pipeline.VerboseDisplayState(
+        current_message=active_message,
+        message_ids=[77, 78],
+        rollover_count=1,
+    )
+
+    await runtime_pipeline.cleanup_interactive_feedback(
+        runtime,
+        _item(),
+        stop_typing=None,
+        typing_task=None,
+        escalation_task=None,
+        think_flush_task=None,
+        placeholder=placeholder,
+        verbose_display_state=display_state,
+    )
+
+    assert runtime.app.bot.deleted == [{"chat_id": 123, "message_id": 78}]
 
 
 @pytest.mark.asyncio
@@ -2127,7 +2161,7 @@ async def test_verbose_takes_precedence_over_retired_preview_flag():
     feedback.stop_typing.set()
     await feedback.typing_task
     await feedback.escalation_task
-    assert runtime.streaming_loops == [("req-1", True)]
+    assert runtime.streaming_loops == [("req-1", True, True)]
 
 
 @pytest.mark.asyncio
@@ -2155,7 +2189,7 @@ async def test_verbose_backend_without_reasoning_still_uses_progress_events():
     feedback.stop_typing.set()
     await feedback.typing_task
     await feedback.escalation_task
-    assert runtime.streaming_loops == [("req-1", True)]
+    assert runtime.streaming_loops == [("req-1", True, True)]
     assert runtime.escalating_loops == []
 
 
@@ -2181,7 +2215,7 @@ async def test_verbose_streaming_backend_uses_streaming_display():
     feedback.stop_typing.set()
     await feedback.typing_task
     await feedback.escalation_task
-    assert runtime.streaming_loops == [("req-1", True)]
+    assert runtime.streaming_loops == [("req-1", True, True)]
     assert runtime.escalating_loops == []
 
 
@@ -2205,7 +2239,7 @@ async def test_verbose_alone_forces_placeholder_and_progress_stream():
     feedback.stop_typing.set()
     await feedback.typing_task
     await feedback.escalation_task
-    assert runtime.streaming_loops == [("req-1", True)]
+    assert runtime.streaming_loops == [("req-1", True, True)]
 
 
 @pytest.mark.asyncio

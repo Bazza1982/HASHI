@@ -479,6 +479,15 @@ Tests must prove:
 - Review can use its delegated inspection and validation tools when
   appropriate, while subjective or inherently non-verifiable work can receive
   `CONDITIONAL_PASS` without a synthetic evidence gate;
+- `system_review.txt` is the only Reviewer prompt asset and receives the
+  authoritative resolved goal, Review kind, active plan reference, findings to
+  close, latest draft, structured Execution record, evidence references, and
+  exact delegated tool catalogue, without relevant Habits or active plan
+  content;
+- the provider user turn for Review is the authoritative goal as data, not a
+  second instruction wrapper;
+- no `stage_request.txt` file, prompt-catalogue entry, generic Review renderer,
+  or call-site survives;
 - tool activity and receipts remain independently audited and cannot be
   rewritten as successful validation by the reviewer;
 - a technical provider or tool failure is runtime state, never a model-authored

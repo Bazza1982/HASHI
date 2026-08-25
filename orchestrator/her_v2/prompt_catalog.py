@@ -18,7 +18,6 @@ PROMPT_ASSET_ROOT = Path(__file__).with_name("prompt_assets")
 # prompt fails during import/hot reload instead of silently changing a model
 # invocation.
 PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
-    "stage_request": frozenset({"context", "reviewer_rule", "schema"}),
     "system_direct": frozenset(
         {
             "goal",
@@ -89,11 +88,11 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
     ),
     "system_review": frozenset(
         {
-            "active_plan",
             "available_review_tools",
             "draft_response",
+            "execution_evidence",
             "goal",
-            "relevant_habits",
+            "review_context",
         }
     ),
     "system_sub_agent": frozenset(

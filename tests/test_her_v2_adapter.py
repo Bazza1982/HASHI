@@ -2026,7 +2026,7 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
 
 
 @pytest.mark.asyncio
-async def test_review_system_prompt_receives_latest_draft_plan_and_real_tools():
+async def test_review_system_prompt_receives_resolved_goal_evidence_and_real_tools():
     class ReviewToolRegistry(_BaseToolRegistry):
         def is_allowed(self, name):
             return name in {"file_read", "verification_run"}
@@ -2063,6 +2063,13 @@ async def test_review_system_prompt_receives_latest_draft_plan_and_real_tools():
                     "success_criteria": ["tests pass"],
                 },
                 "draft_response": "Implemented the requested change.",
+                "execution": {
+                    "disposition": "COMPLETED",
+                    "summary": "Implemented the requested change.",
+                },
+                "evidence_refs": ["receipt:execution:42"],
+                "review_kind": "closure",
+                "findings_to_close": ["The original test evidence was incomplete."],
                 "delegated_tools": ["file_read", "verification_run"],
                 "verification_run_policy": {
                     "workspace": "authoritative_current_workspace"
@@ -2080,7 +2087,13 @@ async def test_review_system_prompt_receives_latest_draft_plan_and_real_tools():
     backend = manager.backends[-1]
     assert backend.prompt == request.goal
     assert "Implemented the requested change." in backend.sys_prompt
-    assert '"tests pass"' in backend.sys_prompt
+    assert "authoritative resolved goal" in backend.sys_prompt
+    assert "original request" not in backend.sys_prompt
+    assert '"tests pass"' not in backend.sys_prompt
+    assert '"review_kind": "closure"' in backend.sys_prompt
+    assert "The original test evidence was incomplete." in backend.sys_prompt
+    assert '"disposition": "COMPLETED"' in backend.sys_prompt
+    assert '"receipt:execution:42"' in backend.sys_prompt
     assert '"name": "file_read"' in backend.sys_prompt
     assert '"name": "verification_run"' in backend.sys_prompt
     assert "configured agent persona" not in backend.sys_prompt

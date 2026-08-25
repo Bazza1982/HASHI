@@ -335,6 +335,8 @@ async def process_queue(runtime: Any) -> None:
                 setattr(item, "_audit_collector", audit_collector)
                 setattr(item, "_her_message_router", feedback.her_message_router)
                 status_placeholder = feedback.placeholder
+                if feedback.verbose_display_state is not None:
+                    status_placeholder = feedback.verbose_display_state.current_message
                 if (
                     feedback.answer_stream_state is not None
                     and feedback.answer_stream_state.has_text
@@ -384,6 +386,7 @@ async def process_queue(runtime: Any) -> None:
                 answer_preview_task=feedback.answer_preview_task,
                 think_flush_task=feedback.think_flush_task,
                 placeholder=feedback.placeholder,
+                verbose_display_state=feedback.verbose_display_state,
                 delete_placeholder=not (
                     response.is_success
                     and bool(response.text)

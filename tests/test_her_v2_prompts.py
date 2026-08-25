@@ -116,7 +116,7 @@ def test_external_prompt_placeholder_drift_fails_closed(
 
 
 @pytest.mark.parametrize("stage", list(Stage))
-def test_every_stage_prompt_renders_from_validated_assets(stage: Stage) -> None:
+def test_every_stage_has_a_non_empty_provider_user_turn(stage: Stage) -> None:
     context: dict[str, object] = {}
     if stage is Stage.MEDITATION:
         context["meditation_input"] = '{"mode":"initial"}'
@@ -454,23 +454,51 @@ def test_review_uses_one_complete_prompt_with_draft_plan_and_actual_tools() -> N
     review_system = render_review_system_prompt(
         goal=request.goal,
         relevant_habits=["Inspect current state before reporting."],
+        active_plan_id="turn-1:plan:v2",
         active_plan={"plan": ["implement"], "success_criteria": ["tests pass"]},
         draft_response="Implemented the requested change.",
+        execution_record={
+            "disposition": "COMPLETED",
+            "summary": "Implemented the requested change.",
+        },
+        evidence_refs=["receipt:execution:42"],
+        review_kind="closure",
+        findings_to_close=["The original test evidence was incomplete."],
         available_review_tools=[{"function": {"name": "workspace_inspect"}}],
     )
 
+    assert render_stage_prompt(request) == request.goal
     assert render_internal_stage_system_prompt(request) is None
+    review_assets = {
+        name for name in prompt_catalog.PROMPT_ASSET_FIELDS if "review" in name
+    }
+    assert review_assets == {"system_review"}
+    assert "stage_request" not in prompt_catalog.PROMPT_ASSET_FIELDS
     assert "Implemented the requested change." in review_system
-    assert '"tests pass"' in review_system
+    assert '"active_plan_id": "turn-1:plan:v2"' in review_system
+    assert '"review_kind": "closure"' in review_system
+    assert "The original test evidence was incomplete." in review_system
+    assert '"disposition": "COMPLETED"' in review_system
+    assert '"receipt:execution:42"' in review_system
     assert '"name": "workspace_inspect"' in review_system
-    assert "Inspect current state before reporting." in review_system
+    assert "authoritative resolved goal" in review_system
+    assert "original request" not in review_system
+    assert "Inspect current state before reporting." not in review_system
+    assert '"tests pass"' not in review_system
     assert "PASS" in review_system
     assert "CONDITIONAL_PASS" in review_system
     assert "FAIL" in review_system
+    assert "Do not contact the user" in review_system
+    assert "change the immutable Triage classification" in review_system
+    assert "write the final user-facing answer" in review_system
     assert "INCONCLUSIVE" not in review_system
     assert "UNAVAILABLE" not in review_system
     assert "$goal" not in review_system
     assert "$draft_response" not in review_system
+    assert "$review_context" not in review_system
+    assert "$execution_evidence" not in review_system
+    assert "$relevant_habits" not in review_system
+    assert "$active_plan" not in review_system
 
 
 def test_triage_uses_schema_v2_with_goal_resolution_and_habit_catalogue() -> None:

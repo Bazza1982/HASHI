@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator import telegram_stream_policy
+from orchestrator import runtime_pipeline, telegram_stream_policy
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from adapters.stream_events import (
     DELIVERY_USER_COMMENTARY,
@@ -374,13 +374,18 @@ async def test_typing_inline_callback_updates_preference_and_renders_menu(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_verbose_stream_display_obeys_shared_edit_budget(tmp_path):
+async def test_verbose_stream_display_rolls_over_after_each_message_edit_budget(tmp_path):
     edits = []
+    sends = []
     log_messages = []
 
     class Bot:
         async def edit_message_text(self, **kwargs):
             edits.append(kwargs)
+
+        async def send_message(self, **kwargs):
+            sends.append(kwargs)
+            return SimpleNamespace(message_id=77 + len(sends))
 
     runtime = SimpleNamespace(
         name="zelda",
@@ -403,14 +408,19 @@ async def test_verbose_stream_display_obeys_shared_edit_budget(tmp_path):
     runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
     event_queue = asyncio.Queue()
     stop_event = asyncio.Event()
+    display_state = runtime_pipeline.VerboseDisplayState(
+        current_message=SimpleNamespace(message_id=77),
+        message_ids=[77],
+    )
     task = asyncio.create_task(
         FlexibleAgentRuntime._streaming_display_loop(
             runtime,
             123,
-            SimpleNamespace(message_id=77),
+            display_state.current_message,
             "req-1",
             stop_event,
             event_queue,
+            display_state=display_state,
         )
     )
 
@@ -418,7 +428,7 @@ async def test_verbose_stream_display_obeys_shared_edit_budget(tmp_path):
         summary = "step **zero** with `details`" if index == 0 else f"step {index}"
         await event_queue.put(StreamEvent(kind=KIND_PROGRESS, summary=summary))
         for _ in range(20):
-            if len(edits) >= min(index + 1, 2):
+            if len(edits) + len(sends) >= index + 1:
                 break
             await asyncio.sleep(0.01)
         await asyncio.sleep(0.02)
@@ -426,11 +436,17 @@ async def test_verbose_stream_display_obeys_shared_edit_budget(tmp_path):
     stop_event.set()
     await task
 
-    assert len(edits) == 2
+    assert len(sends) == 1
+    assert sends[0]["disable_notification"] is True
+    assert display_state.message_ids == [77, 78]
+    assert display_state.current_message.message_id == 78
+    assert display_state.rollover_count == 1
+    assert len(edits) == 3
+    assert [edit["message_id"] for edit in edits] == [77, 77, 78]
     assert any("<b>zero</b>" in edit["text"] for edit in edits)
     assert any("<code>details</code>" in edit["text"] for edit in edits)
     assert all(edit["parse_mode"] == "HTML" for edit in edits)
-    assert any("Streaming display budget exhausted" in message for message in log_messages)
+    assert any("Rolled over streaming display" in message for message in log_messages)
 
 
 @pytest.mark.asyncio

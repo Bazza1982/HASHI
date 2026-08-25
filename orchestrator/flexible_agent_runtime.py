@@ -57,6 +57,7 @@ from orchestrator import runtime_retry
 from orchestrator import runtime_scheduler_recovery
 from orchestrator import telegram_delivery_failover
 from orchestrator import telegram_stream_policy
+from orchestrator.telegram_notifications import disable_notification
 from orchestrator.source_policy import source_requires_manual_remote_api_permission
 from remote.local_http import local_http_hosts
 from remote.runtime_identity import read_runtime_claim
@@ -7278,6 +7279,7 @@ class FlexibleAgentRuntime:
         stop_event: asyncio.Event,
         event_queue: asyncio.Queue,
         backend=None,
+        display_state=None,
     ):
         """
         Temporary verbose progress card.  It consumes progress and tool events
@@ -7306,6 +7308,7 @@ class FlexibleAgentRuntime:
         dirty = False
         edit_attempts = 0
         display_disabled = False
+        current_message = placeholder
         engine = getattr(self.config, "active_backend", "unknown")
 
         ICONS = {
@@ -7331,25 +7334,66 @@ class FlexibleAgentRuntime:
                 max_message_len=MAX_MSG_LEN,
             )
 
+        async def _rollover_placeholder(text: str) -> bool:
+            nonlocal current_message, last_edit_at, dirty, edit_attempts, display_disabled
+            try:
+                current_message = await self.app.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode="HTML",
+                    disable_notification=disable_notification(self),
+                )
+                if display_state is not None:
+                    display_state.current_message = current_message
+                    display_state.message_ids.append(current_message.message_id)
+                    display_state.rollover_count += 1
+                edit_attempts = 0
+                last_edit_at = time.monotonic()
+                dirty = False
+                self.telegram_logger.info(
+                    f"Rolled over streaming display for {request_id} "
+                    f"(messages={len(display_state.message_ids) if display_state is not None else 'unknown'}, "
+                    f"max_edits_per_message={MAX_EDITS})"
+                )
+                return True
+            except Exception as exc:
+                display_disabled = True
+                dirty = False
+                if isinstance(exc, RetryAfter):
+                    await telegram_delivery_failover.handle_retry_after(
+                        self,
+                        exc=exc,
+                        chat_id=chat_id,
+                        request_id=request_id,
+                        purpose="streaming_display_rollover",
+                    )
+                self.telegram_logger.warning(
+                    f"Streaming display rollover failed for {request_id}: {exc}"
+                )
+                return False
+
         async def _edit_placeholder():
             nonlocal last_edit_at, dirty, edit_attempts, display_disabled
             if display_disabled:
                 dirty = False
                 return
-            if MAX_EDITS <= 0 or edit_attempts >= MAX_EDITS:
+            if MAX_EDITS <= 0:
                 display_disabled = True
                 dirty = False
                 self.telegram_logger.info(
-                    f"Streaming display budget exhausted for {request_id} "
+                    f"Streaming display disabled by edit budget for {request_id} "
                     f"(attempts={edit_attempts}, max_edits={MAX_EDITS})"
                 )
                 return
             text = _build_display()
+            if edit_attempts >= MAX_EDITS:
+                await _rollover_placeholder(text)
+                return
             edit_attempts += 1
             try:
                 await self.app.bot.edit_message_text(
                     chat_id=chat_id,
-                    message_id=placeholder.message_id,
+                    message_id=current_message.message_id,
                     text=text,
                     parse_mode="HTML",
                 )

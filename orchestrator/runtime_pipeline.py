@@ -516,6 +516,15 @@ class StreamedAnswerState:
         return self.delta_count > 0 and bool("".join(self.buffer))
 
 
+@dataclass
+class VerboseDisplayState:
+    """Mutable Telegram message ownership for a rolling verbose display."""
+
+    current_message: Any
+    message_ids: list[int]
+    rollover_count: int = 0
+
+
 @dataclass(frozen=True)
 class StreamFinalization:
     streamed: bool
@@ -537,6 +546,7 @@ class InteractiveFeedback:
     think_flush_task: asyncio.Task | None
     on_stream_event: Any | None
     her_message_router: Any | None
+    verbose_display_state: VerboseDisplayState | None = None
 
 
 def begin_queue_item(runtime, item) -> QueueItemStart:
@@ -961,6 +971,7 @@ async def cleanup_interactive_feedback(
     think_flush_task,
     placeholder,
     delete_placeholder: bool = True,
+    verbose_display_state: VerboseDisplayState | None = None,
 ) -> None:
     if stop_typing:
         stop_typing.set()
@@ -985,13 +996,18 @@ async def cleanup_interactive_feedback(
             label="thinking-flush-final",
         )
 
-    if placeholder and delete_placeholder:
+    active_placeholder = (
+        verbose_display_state.current_message
+        if verbose_display_state is not None
+        else placeholder
+    )
+    if active_placeholder and delete_placeholder:
         delete_started = time.monotonic()
         deleted = await _run_interactive_feedback_cleanup_step(
             runtime,
             runtime.app.bot.delete_message(
                 chat_id=item.chat_id,
-                message_id=placeholder.message_id,
+                message_id=active_placeholder.message_id,
             ),
             label="placeholder-delete",
         )
@@ -1512,6 +1528,7 @@ async def setup_interactive_feedback(
     think_flush_task = None
     answer_preview_task = None
     answer_stream_state = None
+    verbose_display_state = None
     delivery_requested = not item.silent and item.deliver_to_telegram
     display_policy = telegram_stream_policy.get_display_policy(runtime)
     delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
@@ -1594,6 +1611,10 @@ async def setup_interactive_feedback(
             f"tools={bool(getattr(capabilities, 'supports_tool_stream', False))}"
         )
         if verbose_delivery_enabled and placeholder is not None and stop_typing is not None:
+            verbose_display_state = VerboseDisplayState(
+                current_message=placeholder,
+                message_ids=[placeholder.message_id],
+            )
             stream_queue = asyncio.Queue(maxsize=200)
             stream_callback = runtime._make_stream_callback(
                 event_queue=stream_queue,
@@ -1608,6 +1629,7 @@ async def setup_interactive_feedback(
                     stop_typing,
                     stream_queue,
                     backend=backend,
+                    display_state=verbose_display_state,
                 )
             )
 
@@ -1669,6 +1691,7 @@ async def setup_interactive_feedback(
         think_flush_task=think_flush_task,
         on_stream_event=on_stream_event,
         her_message_router=her_message_router,
+        verbose_display_state=verbose_display_state,
     )
 
 
