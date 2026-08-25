@@ -22,6 +22,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 CANONICAL_REQUEST_CONTENT_VERSION = 1
+HASHI_API_MAX_REQUEST_BYTES = 256 * 1024 * 1024
+HASHI_API_MAX_IMAGE_BYTES = 50 * 1024 * 1024
 INPUT_MODALITIES = frozenset({"text", "image", "audio", "video", "document"})
 MEDIA_MODALITIES = INPUT_MODALITIES - {"text"}
 INPUT_TRANSPORTS = frozenset(
@@ -514,16 +516,25 @@ def _registry_capability(provider: str, model: str) -> InputCapability | None:
         if provider == "codex-cli"
         else ("data_url", "remote_url")
     )
+    limits = {
+        "item_count": 20,
+        "item_bytes": 20 * 1024 * 1024,
+        "total_bytes": 50 * 1024 * 1024,
+    }
+    if provider == "hashi-api":
+        # HASHI's serialized 256 MiB request limit is the aggregate boundary.
+        # Keeping no lower decoded-total cap lets a 50 MiB current image coexist
+        # with conversation history and earlier screenshots in the same body.
+        limits = {
+            "item_count": 20,
+            "item_bytes": HASHI_API_MAX_IMAGE_BYTES,
+        }
     return InputCapability(
         provider=provider,
         model=model,
         input_modalities=frozenset({"text", "image"}),
         input_transports={"image": image_transports},
-        limits={
-            "item_count": 20,
-            "item_bytes": 20 * 1024 * 1024,
-            "total_bytes": 50 * 1024 * 1024,
-        },
+        limits=limits,
         source="registry",
     )
 

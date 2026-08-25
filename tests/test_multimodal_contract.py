@@ -126,6 +126,13 @@ def test_native_image_support_does_not_imply_audio_video_or_pdf():
     assert capability.supports("document") is False
 
 
+def test_hashi_api_path_accepts_one_50_mib_original_image():
+    capability = resolve_input_capability("hashi-api", "gpt-5.6-luna")
+
+    assert capability.limits["item_bytes"] == 50 * 1024 * 1024
+    assert "total_bytes" not in capability.limits
+
+
 def test_mixed_modalities_are_routed_per_attachment(tmp_path):
     image = tmp_path / "one.png"
     _write_png(image)

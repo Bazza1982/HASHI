@@ -1,3 +1,4 @@
+import base64
 import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -191,6 +192,8 @@ async def test_hashi_api_preserves_multipart_messages_and_reasoning_effort(tmp_p
     assert [
         part["type"] for part in request_payload["messages"][1]["content"]
     ] == ["text", "image_url"]
+    image_url = request_payload["messages"][1]["content"][1]["image_url"]["url"]
+    assert base64.b64decode(image_url.partition(",")[2]) == payload
     _payload, headers, _callback = adapter._call_api_once.await_args.args
     assert headers == {
         "Content-Type": "application/json",

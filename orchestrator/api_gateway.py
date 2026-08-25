@@ -49,6 +49,8 @@ from orchestrator.api_gateway_config import load_api_gateway_config
 from orchestrator.api_gateway_preflight import check_gateway_engines
 from orchestrator.flexible_backend_registry import get_available_efforts
 from orchestrator.multimodal_contract import (
+    HASHI_API_MAX_IMAGE_BYTES,
+    HASHI_API_MAX_REQUEST_BYTES,
     MultimodalContractError,
     contains_persistent_inline_media,
     resolve_input_capability,
@@ -63,7 +65,8 @@ logger = logging.getLogger("BridgeU.APIGateway")
 SESSION_TTL_SEC = 1800  # 30 minutes
 MAX_EXTERNAL_TOOLS = 128
 MAX_EXTERNAL_TOOL_BYTES = 1024 * 1024
-MAX_INLINE_MEDIA_BYTES = 50 * 1024 * 1024
+MAX_INLINE_MEDIA_BYTES = HASHI_API_MAX_IMAGE_BYTES
+API_GATEWAY_MAX_REQUEST_BYTES = HASHI_API_MAX_REQUEST_BYTES
 API_GATEWAY_DRAIN_TIMEOUT_SEC = 10.0
 API_GATEWAY_CANCEL_TIMEOUT_SEC = 2.0
 _EXTERNAL_TOOL_ENGINES = frozenset({"codex-cli", "xai-api"})
@@ -314,7 +317,15 @@ def _validate_structured_conversation(
             if error is not None:
                 return error
             if url.casefold().startswith("data:"):
-                item_limit = int(capability.limits.get("item_bytes") or 0)
+                # The public HASHI API owns a 50 MiB per-image contract even
+                # though the pooled Codex adapter keeps a smaller direct-use
+                # default. The serialized HTTP body is the aggregate limit, so
+                # historical screenshots do not hit a lower decoded-total cap.
+                item_limit = (
+                    MAX_INLINE_MEDIA_BYTES
+                    if engine == "codex-cli"
+                    else int(capability.limits.get("item_bytes") or 0)
+                )
                 if item_limit and decoded_bytes > item_limit:
                     return _external_tool_error(
                         f"{param} exceeds the model item-size limit",
@@ -329,7 +340,11 @@ def _validate_structured_conversation(
             code="too_many_media_items",
             param="messages",
         )
-    total_limit = int(capability.limits.get("total_bytes") or 0)
+    total_limit = (
+        0
+        if engine == "codex-cli"
+        else int(capability.limits.get("total_bytes") or 0)
+    )
     if total_limit and inline_total_bytes > total_limit:
         return _external_tool_error(
             "multimodal input exceeds the model total-size limit",
@@ -792,7 +807,7 @@ class APIGatewayServer:
         self.refresh_engine_status()
 
         self.app = web.Application(
-            client_max_size=8 * 1024 * 1024,
+            client_max_size=API_GATEWAY_MAX_REQUEST_BYTES,
             middlewares=[_gateway_request_lifecycle_middleware],
         )
         self.app[_GATEWAY_SERVER_APP_KEY] = self

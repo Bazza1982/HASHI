@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,9 +12,12 @@ from aiohttp.test_utils import TestClient, TestServer
 from adapters.base import BackendResponse, TokenUsage
 from adapters.stream_events import KIND_TEXT_DELTA, KIND_TOOL_END, StreamEvent
 from orchestrator.api_gateway import (
+    API_GATEWAY_MAX_REQUEST_BYTES,
     APIGatewayServer,
+    MAX_INLINE_MEDIA_BYTES,
     _AdapterPool,
     _contains_inline_media,
+    _validate_structured_conversation,
     _uses_external_tool_protocol,
     _uses_structured_conversation,
 )
@@ -62,6 +66,62 @@ def test_multipart_messages_use_structured_path_independently_from_tools():
     assert _uses_external_tool_protocol({"tools": []}, messages) is False
     assert _uses_structured_conversation(messages) is True
     assert _contains_inline_media(messages) is True
+
+
+def test_gateway_body_budget_fits_one_50_mib_image_with_189_mib_headroom(
+    tmp_path,
+):
+    server = _server(tmp_path, _StructuredAdapter())
+    encoded_image_bytes = 4 * ((MAX_INLINE_MEDIA_BYTES + 2) // 3)
+
+    assert MAX_INLINE_MEDIA_BYTES == 50 * 1024 * 1024
+    assert API_GATEWAY_MAX_REQUEST_BYTES == 256 * 1024 * 1024
+    assert server.app._client_max_size == API_GATEWAY_MAX_REQUEST_BYTES
+    assert encoded_image_bytes == pytest.approx(
+        66.7 * 1024 * 1024,
+        abs=0.1 * 1024 * 1024,
+    )
+    assert API_GATEWAY_MAX_REQUEST_BYTES - encoded_image_bytes > 189 * 1024 * 1024
+
+
+def test_gateway_codex_path_allows_50_mib_image_plus_historical_screenshot(
+    monkeypatch,
+):
+    decoded_sizes = iter((50 * 1024 * 1024, 1024 * 1024))
+
+    def validate_without_allocating(_value, *, max_bytes):
+        decoded_size = next(decoded_sizes)
+        assert max_bytes == 50 * 1024 * 1024
+        return "image/png", decoded_size
+
+    monkeypatch.setattr(
+        "orchestrator.api_gateway.validate_inline_image_data_url",
+        validate_without_allocating,
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,current"},
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,history"},
+                },
+            ],
+        }
+    ]
+
+    assert (
+        _validate_structured_conversation(
+            messages,
+            engine="codex-cli",
+            model="gpt-5.5",
+        )
+        is None
+    )
 
 
 class _ExternalAdapter:
@@ -220,6 +280,30 @@ def _server(tmp_path: Path, adapter: _ExternalAdapter) -> APIGatewayServer:
 
 
 @pytest.mark.asyncio
+async def test_gateway_accepts_json_body_over_legacy_8_mib_limit(tmp_path):
+    adapter = _ExternalAdapter()
+    server = _server(tmp_path, adapter)
+    legacy_limit = 8 * 1024 * 1024
+    body = {
+        "model": "gpt-5.5",
+        "messages": [
+            {
+                "role": "user",
+                "content": "x" * (legacy_limit + 1),
+            }
+        ],
+    }
+
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+        payload = await response.json()
+
+    assert response.status == 200
+    assert payload["choices"][0]["message"]["content"] == "done"
+    assert adapter.calls[0]["prompt"].endswith("x" * 32)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("tools_field", [None, []])
 async def test_gateway_multimodal_without_external_tools_preserves_all_parts(
     tmp_path, tools_field
@@ -254,6 +338,8 @@ async def test_gateway_multimodal_without_external_tools_preserves_all_parts(
     assert response.status == 200
     assert payload["choices"][0]["message"]["content"] == "I saw both images."
     assert adapter.calls[0]["messages"][0]["content"] == content
+    first_image_url = adapter.calls[0]["messages"][0]["content"][1]["image_url"]["url"]
+    assert base64.b64decode(first_image_url.partition(",")[2]) == b"\x89PNG\r\n\x1a\n"
     assert adapter.calls[0]["request_options"]["reasoning_effort"] == "high"
     assert adapter.calls[0]["use_streaming"] is False
 

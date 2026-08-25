@@ -63,6 +63,20 @@ serve aiohttp traffic reliably. Confirm the live address with Workbench
 | POST | `/v1/images/generations` | xAI Imagine image generation |
 | POST | `/v1/videos/generations` | xAI Imagine video generation request |
 
+### Request and original-image limits
+
+- The API Gateway accepts a serialized request body up to `256 MiB`.
+- Each inline Base64 image may decode to at most `50 MiB`. A `50 MiB` image
+  occupies about `66.7 MiB` after Base64 encoding, leaving about `189 MiB` for
+  JSON, conversation history, tool definitions, and earlier screenshots.
+- HASHI validates the declared MIME type and file signature, then forwards the
+  original image bytes as a data URL. This path does not compress, resize, or
+  replace the image with OCR text. Any caller-supplied image `detail` value is
+  preserved.
+- The `256 MiB` serialized-body boundary is the aggregate limit for HASHI API
+  Codex image requests; there is no lower decoded-total cap that would reject a
+  valid current image merely because earlier screenshots are also present.
+
 The HASHI API itself is separate from the API Gateway and listens on
 `global.workbench_port`. Use `GET /api/health` on the HASHI API port to confirm
 instance ownership, online agents, and the configured API Gateway port.
