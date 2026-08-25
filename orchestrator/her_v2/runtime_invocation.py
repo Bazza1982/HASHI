@@ -9,10 +9,7 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
-from orchestrator.her_json_repair import (
-    render_json_repair_input,
-    render_verification_report_repair_input,
-)
+from orchestrator.her_json_repair import render_json_repair_input
 from orchestrator.multimodal_contract import (
     attachment_manifest,
     canonical_request_content,
@@ -120,6 +117,15 @@ class RuntimeInvocationMixin:
             else self.config.stage_roles.get(stage, selected.name)
         )
         base_context = copy.deepcopy(dict(context or {}))
+        if stage in {
+            Stage.PLANNING,
+            Stage.EXECUTION,
+            Stage.REPLANNING,
+            Stage.REVIEW,
+            Stage.FINALISATION,
+        }:
+            base_context["real_goal"] = state.goal
+            base_context["relevant_habits"] = list(state.relevant_habits)
         stage_request_content = copy.deepcopy(state.request_content)
         authorised_attachment_ids = base_context.get("authorized_attachment_ids")
         if isinstance(authorised_attachment_ids, list):
@@ -671,27 +677,7 @@ class RuntimeInvocationMixin:
 
         role = "json_repair_specialist"
         invocation_id = f"{source_invocation_id}:json-repair"
-        verification_report_repair = bool(
-            source_stage is Stage.VERIFICATION and preserved_response.tool_receipts
-        )
-        frozen_tool_receipts = [
-            _tool_receipt_payload(receipt)
-            for receipt in preserved_response.tool_receipts
-        ]
-        frozen_evidence_refs = list(
-            dict.fromkeys(
-                (
-                    *preserved_response.evidence_refs,
-                    *(
-                        receipt.evidence_ref
-                        for receipt in preserved_response.tool_receipts
-                    ),
-                )
-            )
-        )
-        repair_mode = (
-            "verification_report" if verification_report_repair else "json_schema"
-        )
+        repair_mode = "json_schema"
         invariant_payload = {
             "provider": selected.engine,
             "model": selected.model,
@@ -701,16 +687,6 @@ class RuntimeInvocationMixin:
             "source_attempt": source_attempt,
             "required_schema_sha256": _payload_hash(required_schema),
             "repair_mode": repair_mode,
-            "frozen_evidence_sha256": (
-                _payload_hash(
-                    {
-                        "tool_receipts": frozen_tool_receipts,
-                        "evidence_refs": frozen_evidence_refs,
-                    }
-                )
-                if verification_report_repair
-                else None
-            ),
             "allow_tools": False,
             "allow_side_effects": False,
             "workzone": self.workzone_ref or None,
@@ -725,20 +701,11 @@ class RuntimeInvocationMixin:
             repair_attempt += 1
             if state.control.stopped:
                 raise TurnStopped(state.control.reason)
-            if verification_report_repair:
-                repair_input = render_verification_report_repair_input(
-                    rejected_output=_rejected_output(current_rejected),
-                    required_schema=required_schema,
-                    validation_error=str(current_error),
-                    frozen_tool_receipts=frozen_tool_receipts,
-                    frozen_evidence_refs=frozen_evidence_refs,
-                )
-            else:
-                repair_input = render_json_repair_input(
-                    rejected_output=_rejected_output(current_rejected),
-                    required_schema=required_schema,
-                    validation_error=str(current_error),
-                )
+            repair_input = render_json_repair_input(
+                rejected_output=_rejected_output(current_rejected),
+                required_schema=required_schema,
+                validation_error=str(current_error),
+            )
             retry_invariant_hash = _payload_hash(
                 {
                     "source_invariant_hash": source_invariant_hash,
@@ -791,7 +758,6 @@ class RuntimeInvocationMixin:
                     "source_invocation_id": source_invocation_id,
                     "source_attempt": source_attempt,
                     "repair_mode": repair_mode,
-                    "frozen_receipt_count": len(frozen_tool_receipts),
                     "allow_tools": False,
                     "allow_side_effects": False,
                     "retry_invariant_hash": retry_invariant_hash,

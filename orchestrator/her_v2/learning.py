@@ -119,25 +119,25 @@ class HERv2Learning:
         if not config.enabled:
             return ()
         active_habits = self.store.load()
-        context = her_habits.render_habit_advisory_context(active_habits)
+        catalogue = her_habits.render_habit_advisory_entries(active_habits)
         ref = self._audit(
-            event_id=f"{turn_id}:habits:planning-retrieval",
+            event_id=f"{turn_id}:habits:triage-retrieval",
             turn_id=turn_id,
             request_ref=f"hashi-turn:{turn_id}",
-            stage=Stage.PLANNING.value,
-            event="habit_planning_retrieval",
+            stage=Stage.TRIAGE.value,
+            event="habit_triage_retrieval",
             payload={
                 "active_habit_ids": [habit.habit_id for habit in active_habits],
                 "active_count": len(active_habits),
-                "planning_only": True,
+                "triage_input": True,
                 "authority": "advisory",
-                "selection": "all_active_habits",
+                "selection": "triage_selects_relevant_habits",
             },
         )
         # The runtime stores only a compact log reference in its Ledger.  The
         # retrieval itself remains independently auditable here.
         del ref
-        return (context,) if context else ()
+        return catalogue
 
     async def enqueue_meditation(
         self,

@@ -258,7 +258,7 @@ async def test_habit_retrieval_is_disabled_without_reading_catalogue(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_planning_receives_all_active_habits_for_semantic_selection(tmp_path):
+async def test_triage_receives_complete_habit_catalogue_as_separate_entries(tmp_path):
     service, _root = _service(tmp_path, ScriptedMaintenance([]))
     outcomes = service.store.apply_actions(
         [
@@ -288,11 +288,11 @@ async def test_planning_receives_all_active_habits_for_semantic_selection(tmp_pa
         turn_id="turn-current-request-only",
     )
 
-    assert len(advisory) == 1
-    assert current_id in advisory[0]
-    assert background_id in advisory[0]
-    assert "violetcinder" in advisory[0]
-    assert "amberquartz" in advisory[0]
+    assert len(advisory) == 2
+    assert sum(current_id in entry for entry in advisory) == 1
+    assert sum(background_id in entry for entry in advisory) == 1
+    assert any("violetcinder" in entry for entry in advisory)
+    assert any("amberquartz" in entry for entry in advisory)
 
 
 @pytest.mark.asyncio

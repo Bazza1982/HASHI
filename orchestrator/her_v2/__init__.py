@@ -33,8 +33,6 @@ from .models import (
     TerminalState,
     TriageClassification,
     TurnResult,
-    VerificationOutcome,
-    Verifiability,
     effort_display_label,
     parse_effort,
 )
@@ -93,8 +91,6 @@ __all__ = [
     "TerminalState",
     "TriageClassification",
     "TurnResult",
-    "VerificationOutcome",
-    "Verifiability",
     "effort_display_label",
     "parse_effort",
 ]

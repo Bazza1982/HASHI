@@ -195,6 +195,8 @@ class _TurnState:
     control: TurnControl
     request_content: Mapping[str, Any] | None = None
     attachment_manifest: tuple[Mapping[str, Any], ...] = ()
+    habit_catalogue: tuple[str, ...] = ()
+    relevant_habits: tuple[str, ...] = ()
     media_routing_by_stage: dict[str, list[Mapping[str, Any]]] = field(
         default_factory=dict
     )
@@ -210,7 +212,6 @@ class _TurnState:
     sub_agent_batches: dict[str, _SubAgentBatch] = field(default_factory=dict)
     replan_count: int = 0
     review_count: int = 0
-    verification_count: int = 0
     checkpoint_count: int = 0
     execution_cycle_serial: int = 0
     stage_invocation_serial: int = 0
@@ -435,6 +436,17 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         if state.effort is Effort.ZERO:
             return await self._run_direct(state)
 
+        habit_catalogue: Sequence[str] = ()
+        if self.config.meditation_enabled:
+            with suppress(Exception):
+                habit_catalogue = await self.habits.retrieve(
+                    goal=state.goal,
+                    turn_id=state.ledger.turn_id,
+                )
+        state.habit_catalogue = tuple(
+            str(item).strip() for item in habit_catalogue if str(item).strip()
+        )
+
         immediate_task = asyncio.create_task(
             self._invoke_stage(
                 state,
@@ -449,6 +461,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 Stage.TRIAGE,
                 parse_triage,
                 allow_tools=False,
+                context={"habit_catalogue": list(state.habit_catalogue)},
             )
         )
         immediate_pair = None
@@ -557,25 +570,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     },
                 )
 
-        # Triage's model-authored goal is evidence, not authority.  Every
-        # downstream request continues to receive the immutable user request.
-        if triage.goal and _normalise_text(triage.goal) != _normalise_text(state.goal):
-            self._audit(
-                state,
-                stage=Stage.TRIAGE.value,
-                role=self.config.stage_roles[Stage.TRIAGE],
-                event="triage_goal_interpretation_recorded",
-                event_id=f"{state.ledger.turn_id}:triage:goal-interpretation",
-                payload={
-                    "authoritative_goal_ref": state.ledger.goal_ref,
-                    "triage_interpretation": triage.goal,
-                    "authority_changed": False,
-                },
-            )
-        self._record_triage(
-            state,
-            triage.classification,
-        )
+        self._record_triage(state, triage)
         state.progress.record("classification", triage.classification.value)
 
         # Triage is authoritative, but winning this race does not cancel a
@@ -967,6 +962,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
 
             planning_context: dict[str, Any] = {
                 "classification": classification.value,
+                "relevant_habits": list(state.relevant_habits),
                 "available_execution_tools": [
                     dict(item) for item in execution_tool_catalogue
                 ],
@@ -975,20 +971,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             if classification is TriageClassification.HIGH_VOLUME_TASK:
                 planning_context["available_sub_agent_profiles"] = list(
                     self.config.sub_agent_execution_profile_names()
-                )
-            # ``meditation_enabled`` is the compatibility switch for the
-            # whole Habit–Meditation loop, matching /habit off semantics.
-            if self.config.meditation_enabled:
-                habits: Sequence[str] = ()
-                with suppress(Exception):
-                    habits = await self.habits.retrieve(
-                        goal=state.goal, turn_id=state.ledger.turn_id
-                    )
-                planning_context.update(
-                    {
-                        "habits": list(habits),
-                        "habits_are_advisory": True,
-                    }
                 )
             _response, plan = await self._invoke_stage(
                 state,
@@ -2318,7 +2300,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 "checkpoint_id": checkpoint_id,
                 "cadence_triggered": bool(checkpoint_id),
                 "cadence": dict(cadence_context or {}),
-                "reviewer_or_verifier_findings": list(reviewer_findings),
+                "reviewer_findings": list(reviewer_findings),
             },
             "ledger": state.ledger.to_dict(),
             "execution": {
@@ -2812,7 +2794,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                         "network": "inherited",
                         "timeout_basis": "cumulative_execution_elapsed",
                     },
-                    "habits_included": False,
                 },
             )
             assert isinstance(finding, ReviewFinding)

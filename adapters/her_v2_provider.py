@@ -603,12 +603,14 @@ def _finalisation_system_prompt(
     source: her_persona.HERPersonaPackagingSource,
     *,
     goal: str,
+    relevant_habits: Sequence[str],
     draft_response: str,
     reviewer_findings: Mapping[str, Any] | None,
     completion_evidence: Mapping[str, Any],
 ) -> str:
     return render_finalisation_system_prompt(
         goal=goal,
+        relevant_habits=relevant_habits,
         draft_response=draft_response,
         reviewer_findings=reviewer_findings,
         completion_evidence=completion_evidence,
@@ -639,12 +641,14 @@ def _execution_system_prompt(
     source: her_persona.HERPersonaPackagingSource,
     *,
     goal: str,
+    relevant_habits: Sequence[str],
     active_plan: Mapping[str, Any] | None,
     delegated_execution: Mapping[str, Any] | None,
     tool_catalogue: list[Mapping[str, Any]],
 ) -> str:
     return render_execution_system_prompt(
         goal=goal,
+        relevant_habits=relevant_habits,
         active_plan=active_plan,
         delegated_execution=delegated_execution,
         tool_catalogue=tool_catalogue,
@@ -680,12 +684,14 @@ def _direct_system_prompt(
 def _review_system_prompt(
     *,
     goal: str,
+    relevant_habits: Sequence[str],
     active_plan: Mapping[str, Any] | None,
     draft_response: str,
     available_review_tools: list[Mapping[str, Any]],
 ) -> str:
     return render_review_system_prompt(
         goal=goal,
+        relevant_habits=relevant_habits,
         active_plan=active_plan,
         draft_response=draft_response,
         available_review_tools=available_review_tools,
@@ -2118,6 +2124,11 @@ class HashiStageProvider(StageProvider):
                 ]
                 system_prompt = _review_system_prompt(
                     goal=request.goal,
+                    relevant_habits=[
+                        str(item)
+                        for item in (request.context.get("relevant_habits") or [])
+                        if str(item).strip()
+                    ],
                     active_plan=(
                         request.context.get("active_plan")
                         if isinstance(request.context.get("active_plan"), Mapping)
@@ -2211,6 +2222,13 @@ class HashiStageProvider(StageProvider):
                         system_prompt = _execution_system_prompt(
                             source,
                             goal=request.goal,
+                            relevant_habits=[
+                                str(item)
+                                for item in (
+                                    request.context.get("relevant_habits") or []
+                                )
+                                if str(item).strip()
+                            ],
                             active_plan=(
                                 request.context.get("active_plan")
                                 if isinstance(
@@ -2232,6 +2250,11 @@ class HashiStageProvider(StageProvider):
                     system_prompt = _finalisation_system_prompt(
                         source,
                         goal=request.goal,
+                        relevant_habits=[
+                            str(item)
+                            for item in (request.context.get("relevant_habits") or [])
+                            if str(item).strip()
+                        ],
                         draft_response=str(request.context.get("draft_response") or ""),
                         reviewer_findings=(
                             request.context.get("reviewer_findings")
@@ -2284,7 +2307,10 @@ class HashiStageProvider(StageProvider):
                                 "the required system prompt."
                             ),
                         )
-                    if installed and uses_complete_system_prompt(request.stage):
+                    if installed and (
+                        uses_complete_system_prompt(request.stage)
+                        or request.role.startswith("sub_agent:")
+                    ):
                         # The complete, dynamically rendered stage contract is now
                         # isolated from the configured Agent Persona.  The raw goal
                         # provides the non-empty user turn required by every backend;

@@ -287,7 +287,12 @@ async def test_allow_tools_false_still_passes_native_media_to_stage_backend():
             BackendResponse(
                 text="",
                 duration_ms=1,
-                structured_data={"classification": "DIRECT_RESPONSE"},
+                structured_data={
+                    "classification": "DIRECT_RESPONSE",
+                    "real_goal": "Inspect the attachments.",
+                    "relevant_habits": [],
+                    "clarification": None,
+                },
             )
         ]
     )
@@ -455,7 +460,12 @@ async def test_typed_modality_failure_gets_one_safe_text_only_replay():
             BackendResponse(
                 text="",
                 duration_ms=1,
-                structured_data={"classification": "SIMPLE_TASK"},
+                structured_data={
+                    "classification": "SIMPLE_TASK",
+                    "real_goal": "Inspect the attachments.",
+                    "relevant_habits": [],
+                    "clarification": None,
+                },
             ),
         ],
         supports_tools=True,
@@ -618,7 +628,12 @@ async def test_retry_after_typed_drift_stays_on_local_route_without_resending_me
             BackendResponse(
                 text="",
                 duration_ms=1,
-                structured_data={"classification": "SIMPLE_TASK"},
+                structured_data={
+                    "classification": "SIMPLE_TASK",
+                    "real_goal": "Inspect the attachments.",
+                    "relevant_habits": [],
+                    "clarification": None,
+                },
             )
         ],
         supports_tools=True,

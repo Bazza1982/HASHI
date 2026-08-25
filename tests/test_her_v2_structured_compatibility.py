@@ -6,12 +6,8 @@ from orchestrator.her_v2.interfaces import StructuredOutputError
 from orchestrator.her_v2.models import (
     ExecutionDisposition,
     ReviewOutcome,
-    Stage,
     StageResponse,
-    ToolEvidenceReceipt,
-    ToolReceiptStatus,
     TriageClassification,
-    VerificationOutcome,
 )
 from orchestrator.her_v2.structured import (
     parse_direct_message,
@@ -22,7 +18,6 @@ from orchestrator.her_v2.structured import (
     parse_triage,
     resolve_stage_response,
     validate_review_response,
-    validate_verification_response,
 )
 
 
@@ -35,48 +30,14 @@ def test_direct_preserves_json_looking_user_output_as_natural_language():
     ) == "Please provide the account ID."
 
 
-def _receipt(
-    evidence_ref,
-    *,
-    stage,
-    invocation="invocation-1",
-    attempt=1,
-    tool_name="workspace_inspect",
-    status=ToolReceiptStatus.SUCCESS,
-    completed=True,
-    details=None,
-):
-    return ToolEvidenceReceipt(
-        evidence_ref=evidence_ref,
-        stage=stage,
-        invocation_id=invocation,
-        attempt=attempt,
-        tool_call_id=evidence_ref,
-        tool_name=tool_name,
-        status=status,
-        read_only=True,
-        completed=completed,
-        output_sha256=f"sha256-{evidence_ref}",
-        details=details or {},
-    )
-
-
-def _snapshot(ref, *, stage, digest="stable", **kwargs):
-    return _receipt(
-        ref,
-        stage=stage,
-        details={"operation": "snapshot", "snapshot_sha256": digest},
-        **kwargs,
-    )
-
-
 @pytest.mark.parametrize(
     ("response", "expected_source", "expected_classification"),
     [
         (
             StageResponse(
                 text=(
-                    '{"classification":"SIMPLE_TASK"}'
+                    '{"classification":"SIMPLE_TASK","real_goal":"inspect",'
+                    '"relevant_habits":[],"clarification":null}'
                 ),
                 data={"provider_note": "formal field was incomplete"},
             ),
@@ -88,7 +49,8 @@ def _snapshot(ref, *, stage, digest="stable", **kwargs):
                 text="",
                 reasoning_trace=(
                     "classification follows "
-                    '{"classification":"COMPLEX_TASK","goal":"inspect"}'
+                    '{"classification":"COMPLEX_TASK","real_goal":"inspect",'
+                    '"relevant_habits":[],"clarification":null}'
                 ),
             ),
             "reasoning_recovery",
@@ -97,7 +59,9 @@ def _snapshot(ref, *, stage, digest="stable", **kwargs):
         (
             StageResponse(
                 text=(
-                    '{"response":{"classification":"HIGH_VOLUME_TASK"}}'
+                    '{"response":{"classification":"HIGH_VOLUME_TASK",'
+                    '"real_goal":"process all items","relevant_habits":[],'
+                    '"clarification":null}}'
                 )
             ),
             "provider_text",
@@ -105,7 +69,11 @@ def _snapshot(ref, *, stage, digest="stable", **kwargs):
         ),
         (
             StageResponse(
-                text='"{\\"classification\\":\\"DIRECT_RESPONSE\\"}"'
+                text=(
+                    '"{\\"classification\\":\\"DIRECT_RESPONSE\\",'
+                    '\\"real_goal\\":\\"answer\\",'
+                    '\\"relevant_habits\\":[],\\"clarification\\":null}"'
+                )
             ),
             "provider_text",
             TriageClassification.DIRECT_RESPONSE,
@@ -121,6 +89,36 @@ def test_registered_carriers_recover_one_unambiguous_triage_result(
 
     assert resolution.source == expected_source
     assert resolution.parsed.classification is expected_classification
+
+
+def test_triage_schema_v2_rejects_the_retired_goal_only_shape():
+    with pytest.raises(StructuredOutputError, match="requires real_goal"):
+        parse_triage(
+            StageResponse(
+                data={
+                    "classification": "SIMPLE_TASK",
+                    "goal": "Inspect the target",
+                }
+            )
+        )
+
+
+def test_triage_schema_v2_preserves_resolved_goal_and_selected_habits():
+    decision = parse_triage(
+        StageResponse(
+            data={
+                "classification": "COMPLEX_TASK",
+                "real_goal": "Inspect and repair the target",
+                "relevant_habits": ["[inspect-first] Inspect current state."],
+                "clarification": None,
+            }
+        )
+    )
+
+    assert decision.real_goal == "Inspect and repair the target"
+    assert decision.relevant_habits == (
+        "[inspect-first] Inspect current state.",
+    )
 
 
 def test_compatible_field_shapes_normalise_without_silent_data_damage():
@@ -270,37 +268,55 @@ def test_registered_wrapper_does_not_turn_a_nested_object_into_display_text():
 
 def test_conflicting_valid_carriers_remain_a_hard_error():
     response = StageResponse(
-        data={"classification": "SIMPLE_TASK"},
-        text='{"classification":"COMPLEX_TASK"}',
+        data={
+            "classification": "SIMPLE_TASK",
+            "real_goal": "inspect one item",
+            "relevant_habits": [],
+            "clarification": None,
+        },
+        text=(
+            '{"classification":"COMPLEX_TASK","real_goal":"inspect all items",'
+            '"relevant_habits":[],"clarification":null}'
+        ),
     )
 
     with pytest.raises(StructuredOutputError, match="conflicting valid"):
         parse_triage(response)
 
 
-def test_non_authoritative_triage_interpretations_do_not_create_false_conflict():
-    resolution = resolve_stage_response(
-        StageResponse(
-            data={
-                "classification": "SIMPLE_TASK",
-                "goal": "short wording",
-            },
-            text=(
-                '{"classification":"SIMPLE_TASK",'
-                '"goal":"a different but non-authoritative wording"}'
+def test_conflicting_triage_real_goals_remain_a_hard_error():
+    with pytest.raises(StructuredOutputError, match="conflicting valid"):
+        resolve_stage_response(
+            StageResponse(
+                data={
+                    "classification": "SIMPLE_TASK",
+                    "real_goal": "short wording",
+                    "relevant_habits": [],
+                    "clarification": None,
+                },
+                text=(
+                    '{"classification":"SIMPLE_TASK",'
+                    '"real_goal":"a different authoritative wording",'
+                    '"relevant_habits":[],"clarification":null}'
+                ),
             ),
-        ),
-        parse_triage,
-    )
-
-    assert resolution.parsed.classification is TriageClassification.SIMPLE_TASK
+            parse_triage,
+        )
 
 
 def test_reasoning_is_not_used_when_a_formal_carrier_is_valid():
     response = StageResponse(
         text="",
-        data={"classification": "SIMPLE_TASK"},
-        reasoning_trace='{"classification":"COMPLEX_TASK"}',
+        data={
+            "classification": "SIMPLE_TASK",
+            "real_goal": "inspect",
+            "relevant_habits": [],
+            "clarification": None,
+        },
+        reasoning_trace=(
+            '{"classification":"COMPLEX_TASK","real_goal":"other",'
+            '"relevant_habits":[],"clarification":null}'
+        ),
     )
 
     resolution = resolve_stage_response(response, parse_triage)
@@ -399,207 +415,3 @@ def test_review_technical_unavailability_is_not_a_conditional_pass():
     )
 
     assert finding.outcome is ReviewOutcome.UNAVAILABLE
-
-
-def _workspace_verification_response(*, result="VERIFIED", status=None, exit_code=0):
-    receipt_status = status or (
-        ToolReceiptStatus.SUCCESS
-        if exit_code == 0
-        else ToolReceiptStatus.FAILED
-    )
-    return StageResponse(
-        data={
-            "outcome": result,
-            "summary": "The workspace core recipe was assessed.",
-            "checks": [
-                {
-                    "claim": "The core recipe passes",
-                    "verifiability": "VERIFIABLE",
-                    "result": result,
-                    "method": "workspace_test",
-                    "evidence_refs": ["test-run"],
-                    "observed": f"exit code {exit_code}",
-                }
-            ],
-            "evidence_refs": ["test-run"],
-        },
-        provider_attempt=1,
-        tool_receipts=(
-            _snapshot("before", stage=Stage.VERIFICATION),
-            _receipt(
-                "test-run",
-                stage=Stage.VERIFICATION,
-                tool_name="verification_run",
-                status=receipt_status,
-                details={
-                    "operation": "run",
-                    "recipe": "pytest_core",
-                    "exit_code": exit_code,
-                    "execution_scope": "workspace",
-                    "workspace_copied": False,
-                    "process_isolated": False,
-                    "process_authority": "inherited",
-                    "identity_policy": "inherited",
-                    "filesystem_policy": "inherited",
-                    "environment_policy": "inherited",
-                    "network_policy": "inherited",
-                    "home_policy": "inherited",
-                    "workspace_access": {
-                        "read": True,
-                        "write": True,
-                        "execute": True,
-                    },
-                    "timeout_s": 1800.0,
-                    "timeout_policy": {
-                        "execution_floor_s": 300.0,
-                        "effective_timeout_s": 1800.0,
-                    },
-                },
-            ),
-            _snapshot("after", stage=Stage.VERIFICATION),
-        ),
-    )
-
-
-def test_assured_verification_binds_success_and_failure_to_real_run_receipts():
-    verified = validate_verification_response(_workspace_verification_response())
-    failed = validate_verification_response(
-        _workspace_verification_response(result="FAILED", exit_code=1)
-    )
-
-    assert verified.outcome is VerificationOutcome.VERIFIED
-    assert failed.outcome is VerificationOutcome.FAILED
-
-
-def test_assured_verification_rejects_false_success_and_cross_stage_receipts():
-    with pytest.raises(StructuredOutputError, match="successful current receipts"):
-        validate_verification_response(
-            _workspace_verification_response(result="VERIFIED", exit_code=1)
-        )
-
-    response = _workspace_verification_response()
-    stale = tuple(
-        ToolEvidenceReceipt(
-            **{
-                **receipt.__dict__,
-                "stage": Stage.REVIEW if receipt.evidence_ref == "test-run" else receipt.stage,
-            }
-        )
-        for receipt in response.tool_receipts
-    )
-    with pytest.raises(StructuredOutputError, match="another stage"):
-        validate_verification_response(
-            StageResponse(**{**response.__dict__, "tool_receipts": stale})
-        )
-
-
-@pytest.mark.parametrize(
-    "detail_updates",
-    [
-        {"network_policy": "disabled"},
-        {"filesystem_policy": "read_only"},
-        {"workspace_access": {"read": True, "write": False, "execute": True}},
-        {
-            "timeout_s": 60.0,
-            "timeout_policy": {
-                "execution_floor_s": 5700.0,
-                "effective_timeout_s": 60.0,
-            },
-        },
-    ],
-)
-def test_assured_verification_rejects_crippled_authority_or_short_timeout(
-    detail_updates,
-):
-    response = _workspace_verification_response()
-    receipts = tuple(
-        ToolEvidenceReceipt(
-            **{
-                **receipt.__dict__,
-                "details": {**dict(receipt.details), **detail_updates},
-            }
-        )
-        if receipt.evidence_ref == "test-run"
-        else receipt
-        for receipt in response.tool_receipts
-    )
-
-    with pytest.raises(
-        StructuredOutputError,
-        match="inherited authority and a runtime-derived timeout",
-    ):
-        validate_verification_response(
-            StageResponse(**{**response.__dict__, "tool_receipts": receipts})
-        )
-
-
-def test_assured_verification_rejects_an_invented_verification_method():
-    response = _workspace_verification_response()
-    data = dict(response.data)
-    data["checks"] = [
-        {**dict(response.data["checks"][0]), "method": "trust_the_model"}
-    ]
-
-    with pytest.raises(StructuredOutputError, match="unsupported verification method"):
-        validate_verification_response(
-            StageResponse(**{**response.__dict__, "data": data})
-        )
-
-
-def test_artifact_inspection_accepts_file_list_receipts():
-    response = _workspace_verification_response()
-    data = dict(response.data)
-    data["checks"] = [
-        {
-            **dict(response.data["checks"][0]),
-            "method": "artifact_inspection",
-            "evidence_refs": ["file-list"],
-            "observed": "The requested workbook files were listed.",
-        }
-    ]
-    data["evidence_refs"] = ["file-list"]
-    receipts = (
-        response.tool_receipts[0],
-        _receipt(
-            "file-list",
-            stage=Stage.VERIFICATION,
-            tool_name="file_list",
-            details={"operation": "list", "path": "workspace"},
-        ),
-        response.tool_receipts[-1],
-    )
-
-    finding = validate_verification_response(
-        StageResponse(
-            **{
-                **response.__dict__,
-                "data": data,
-                "tool_receipts": receipts,
-            }
-        )
-    )
-
-    assert finding.outcome is VerificationOutcome.VERIFIED
-
-
-def test_not_ai_verifiable_is_reported_without_invented_tool_evidence():
-    finding = validate_verification_response(
-        StageResponse(
-            data={
-                "outcome": "NOT_AI_VERIFIABLE",
-                "summary": "A human must judge the physical result.",
-                "checks": [
-                    {
-                        "claim": "The physical installation is comfortable",
-                        "verifiability": "NOT_AI_VERIFIABLE",
-                        "result": "NOT_AI_VERIFIABLE",
-                        "method": "visual_inspection",
-                        "evidence_refs": [],
-                        "observed": "No physical sensor is available.",
-                    }
-                ],
-            }
-        )
-    )
-
-    assert finding.outcome is VerificationOutcome.NOT_AI_VERIFIABLE

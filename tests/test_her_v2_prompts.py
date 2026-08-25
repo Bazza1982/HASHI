@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
-from orchestrator.her_json_repair import render_verification_report_repair_input
 from orchestrator.her_v2 import prompt_catalog
 from orchestrator.her_v2.models import (
     Effort,
@@ -74,47 +72,12 @@ def test_json_repair_prompt_is_generic_tool_free_and_data_driven() -> None:
     assert render_internal_stage_system_prompt(request) == prompt
 
 
-def test_verification_report_repair_receives_frozen_evidence_without_tools() -> None:
-    repair_input = render_verification_report_repair_input(
-        rejected_output='{"outcome":"VERIFIED"}',
-        required_schema={"outcome": "VERIFIED | PARTIALLY_VERIFIED"},
-        validation_error=(
-            "verification method 'read_only_api' lacks a matching tool receipt"
-        ),
-        frozen_tool_receipts=[
-            {
-                "evidence_ref": "receipt:file-list",
-                "tool_name": "file_list",
-                "status": "SUCCESS",
-                "completed": True,
-            }
-        ],
-        frozen_evidence_refs=["receipt:file-list"],
-    )
-    request = _request(
-        Stage.JSON_REPAIR,
-        json_repair_input=repair_input,
-        repair_mode="verification_report",
-    )
-
-    payload = json.loads(render_stage_prompt(request))
-    system_prompt = render_internal_stage_system_prompt(request)
-
-    assert payload["frozen_tool_receipts"][0]["tool_name"] == "file_list"
-    assert payload["frozen_evidence_refs"] == ["receipt:file-list"]
-    assert system_prompt is not None
-    assert "Verification Report Repair Agent" in system_prompt
-    assert "Do not call tools" in system_prompt
-    assert "Do not convert successful evidence into `UNAVAILABLE`" in system_prompt
-
-
 def test_every_live_json_contract_routes_to_specialist_schema() -> None:
     for stage in (
         Stage.TRIAGE,
         Stage.PLANNING,
         Stage.REPLANNING,
         Stage.REVIEW,
-        Stage.VERIFICATION,
     ):
         assert json_repair_schema_for_stage(stage, role="primary") is not None
 
@@ -182,10 +145,19 @@ def test_every_stage_prompt_renders_from_validated_assets(stage: Stage) -> None:
 
 
 def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> None:
-    request = _request(Stage.EXECUTION, sub_agent=True)
-    assert render_internal_stage_system_prompt(request) == (
-        "Follow the supplied assignment and authority envelope exactly."
+    request = _request(
+        Stage.EXECUTION,
+        sub_agent=True,
+        real_goal="Inspect the assigned target.",
+        relevant_habits=["Inspect current state before reporting."],
+        assignment_id="worker",
+        assigned_task="Inspect one target",
     )
+    subagent_system = render_internal_stage_system_prompt(request)
+    assert subagent_system is not None
+    assert "bounded HER v2 sub-agent" in subagent_system
+    assert "Inspect the assigned target." in subagent_system
+    assert "Inspect current state before reporting." in subagent_system
 
     common = {
         "guidance": "Speak plainly.",
@@ -196,6 +168,7 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
     }
     finalisation = render_finalisation_system_prompt(
         goal="Complete the requested work.",
+        relevant_habits=["Preserve evidence."],
         draft_response="The requested work is complete.",
         reviewer_findings={
             "status": "CONDITIONAL_PASS",
@@ -228,6 +201,7 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
 
     execution = render_execution_system_prompt(
         goal="Inspect and report the current state.",
+        relevant_habits=["Inspect current state before reporting."],
         active_plan={"plan": ["inspect", "report"]},
         delegated_execution={
             "plan_id": "turn-1:plan:v1",
@@ -241,6 +215,7 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
     assert '"name": "file_read"' in execution
     assert '"plan_id": "turn-1:plan:v1"' in execution
     assert '"assignment_id": "worker"' in execution
+    assert "Inspect current state before reporting." in execution
     assert "Speak plainly." in execution
     assert "Return exactly one JSON object" not in execution
     assert "$goal" not in execution
@@ -299,17 +274,25 @@ def test_primary_execution_uses_natural_language_prompt_while_subagent_keeps_jso
         assignment_id="worker",
         assigned_task="Inspect one target",
         delegated_tools=["file_read"],
+        real_goal="Inspect the authorised target.",
+        relevant_habits=["Use current workspace evidence."],
     )
 
     assert render_stage_prompt(primary) == primary.goal
     assert render_internal_stage_system_prompt(primary) is None
     subagent_prompt = render_stage_prompt(subagent)
-    assert "Return exactly one JSON object" in subagent_prompt
-    assert "Bounded assignment and authority envelope" in subagent_prompt
-    assert '"may_replan": false' in subagent_prompt
-    assert render_internal_stage_system_prompt(subagent) == (
-        "Follow the supplied assignment and authority envelope exactly."
-    )
+    subagent_system = render_internal_stage_system_prompt(subagent)
+    assert subagent_prompt == subagent.goal
+    assert subagent_system is not None
+    assert "Return exactly one valid JSON object" in subagent_system
+    assert "Bounded assignment and authority envelope" in subagent_system
+    assert '"may_replan": false' in subagent_system
+    assert "Inspect the authorised target." in subagent_system
+    assert "Use current workspace evidence." in subagent_system
+    subagent_assets = {
+        name for name in prompt_catalog.PROMPT_ASSET_FIELDS if "sub_agent" in name
+    }
+    assert subagent_assets == {"system_sub_agent"}
 
 
 def test_planning_binds_high_volume_assignments_to_runtime_plan_snapshot() -> None:
@@ -470,6 +453,7 @@ def test_review_uses_one_complete_prompt_with_draft_plan_and_actual_tools() -> N
     request = _request(Stage.REVIEW)
     review_system = render_review_system_prompt(
         goal=request.goal,
+        relevant_habits=["Inspect current state before reporting."],
         active_plan={"plan": ["implement"], "success_criteria": ["tests pass"]},
         draft_response="Implemented the requested change.",
         available_review_tools=[{"function": {"name": "workspace_inspect"}}],
@@ -479,6 +463,7 @@ def test_review_uses_one_complete_prompt_with_draft_plan_and_actual_tools() -> N
     assert "Implemented the requested change." in review_system
     assert '"tests pass"' in review_system
     assert '"name": "workspace_inspect"' in review_system
+    assert "Inspect current state before reporting." in review_system
     assert "PASS" in review_system
     assert "CONDITIONAL_PASS" in review_system
     assert "FAIL" in review_system
@@ -488,13 +473,22 @@ def test_review_uses_one_complete_prompt_with_draft_plan_and_actual_tools() -> N
     assert "$draft_response" not in review_system
 
 
-def test_triage_uses_one_complete_prompt_without_checkpoint_risk_metadata() -> None:
-    system_prompt = render_internal_stage_system_prompt(_request(Stage.TRIAGE))
-    stage_prompt = render_stage_prompt(_request(Stage.TRIAGE))
+def test_triage_uses_schema_v2_with_goal_resolution_and_habit_catalogue() -> None:
+    request = _request(
+        Stage.TRIAGE,
+        habit_catalogue=["[inspect-first] Inspect current state before reporting."],
+    )
+    system_prompt = render_internal_stage_system_prompt(request)
+    stage_prompt = render_stage_prompt(request)
 
     assert system_prompt == stage_prompt
-    assert "TRIAGE AGENT" in stage_prompt or "TRAIGE AGENT" in stage_prompt
-    assert "User request and context:" in stage_prompt
+    assert "triage classifier and context preparation agent" in stage_prompt
+    assert "Original user request and context" in stage_prompt
+    assert '"real_goal"' in stage_prompt
+    assert '"relevant_habits"' in stage_prompt
+    assert "[inspect-first] Inspect current state before reporting." in stage_prompt
+    assert "$schema_v2" not in stage_prompt
+    assert "$habit_catalogue" not in stage_prompt
     assert "checkpoint_policy" not in stage_prompt
     assert "checkpoint_reason" not in stage_prompt
 
@@ -509,18 +503,19 @@ def test_planning_uses_one_complete_prompt_with_all_runtime_inputs() -> None:
         goal="Complete the supplied goal.",
         classification=TriageClassification.COMPLEX_TASK,
         effort=Effort.MEDIUM,
-        context={"habits": ["Habit one", "Habit two"]},
+        context={"relevant_habits": ["Habit one", "Habit two"]},
     )
 
     rendered = render_stage_prompt(request)
     assert render_internal_stage_system_prompt(request) == rendered
     assert "Complete the supplied goal." in rendered
     assert "`COMPLEX_TASK`" in rendered
-    assert "Habit one\n\nHabit two" in rendered
+    assert '"Habit one"' in rendered
+    assert '"Habit two"' in rendered
     assert '"success_criteria"' in rendered
     assert "$goal" not in rendered
     assert "$classification" not in rendered
-    assert "$all_active_habits" not in rendered
+    assert "$relevant_habits" not in rendered
     assert "$schema" not in rendered
 
 

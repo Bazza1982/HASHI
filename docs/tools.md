@@ -85,7 +85,7 @@ Five execution modes:
 - `/compact [status|cancel]` — HER v2-only context maintenance through the active Quick/Light provider and model at fixed high HER effort. Below 64,000 effective tokens the manual command reports the exact not-needed reason; from 64,000 tokens upward it executes. Above 128,000 tokens HER v2 schedules automatic Compact when main Execution starts, targets 64,000 tokens in a detached task, and never waits for it. Any automatic failure sends a mandatory warning even with `/verbose off` and cannot block or fail the foreground task.
 - `/model compact inherit_quick [auto|tier_2|tier_3]` or `/model compact off` — enable the approved inherited Quick/Light Compact policy, choose its isolated watchdog tier, or turn it off. Legacy inherited-Pro and explicit Compact records migrate to `inherit_quick`.
 - Non-HER backend/model selection continues to the existing optional effort step when supported. HER v2 keeps backend, provider, models/reasoning, and effort as independent controls.
-- `/effort [level]` — HER v2 opens the **HER execution mode** control: Direct (`zero`), Fast path (`low`), Planned (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`). Direct invokes one fully capable Quick agent at default provider reasoning `high`, never upgrades itself, skips Immediate Response, Triage, Planning, Replanning, delegation, Review, Verification, and Finalisation, and treats any successful natural-language return—including a request for missing information—as completed. It still exposes normal `/verbose` provider/tool progress and uses the existing local attachment fallback. Descriptive aliases are accepted and persisted as their canonical wire values. Reviewed adds independent read-only Review and closure; Assured adds latest-state Verification with at most three attempts. HER effort never reads or writes provider reasoning. Other backends retain their model-aware effort behaviour.
+- `/effort [level]` — HER v2 opens the **HER execution mode** control: Direct (`zero`), Fast path (`low`), Planned (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`). Direct invokes one fully capable Quick agent at default provider reasoning `high`, never upgrades itself, skips Immediate Response, Triage, Planning, Replanning, delegation, Review, and Finalisation, and treats any successful natural-language return—including a request for missing information—as completed. It still exposes normal `/verbose` provider/tool progress and uses the existing local attachment fallback. Descriptive aliases are accepted and persisted as their canonical wire values. Reviewed adds one independent Review and closure; Assured repeats Review-driven remediation against the latest execution state until Review passes or reports a conditional pass. HER effort never reads or writes provider reasoning. Other backends retain their model-aware effort behaviour.
 
 ### HER v2 provider and model configuration
 
@@ -141,7 +141,6 @@ selection. API-key values stay in `secrets.json`.
           "effort": "high",
           "her_v2": {
             "review_limits": {"xhigh": 1, "max": 1},
-            "verification_limits": {"max": 3},
             "profiles": {
               "lightweight": {
                 "engine": "deepseek-api",
@@ -191,10 +190,10 @@ unconditionally enters tool-free Replanning at the next safe boundary after 10
 completed tool results or 300 seconds. Each Replan sends one fact-preserving
 progress message. This does not cancel active work or cap the tool loop,
 Replans, or whole workflow; ordinary denial, approval, permissions, `/stop`,
-Review, Verification, and Finalisation keep their existing authority.
+Review, and Finalisation keep their existing authority.
 
-Assured Verification also follows the reviewer/Pro route by default. Review is
-read-only. Verification receives validation-only side-effect authority.
+Independent Review follows the reviewer/Pro route by default and receives only
+the validation capabilities needed to assess the latest Execution result.
 `workspace_inspect`
 provides read-only snapshots, status, diff, search, and artifact hashes.
 Its search operation uses ripgrep when available and falls back to the system
@@ -207,7 +206,7 @@ identity, filesystem access, environment, `HOME`, and network. Its effective
 timeout is the maximum of its configured/requested values, five minutes, and
 cumulative Execution time multiplied by 1.5 plus five minutes; requested values
 can raise but never shorten that budget.
-Passing claims require exact completed receipts from the current stage
+Passing claims require exact completed receipts from the current Review
 invocation and matching before/after snapshots.
 
 Runtime selections persist in the agent workspace as a dedicated

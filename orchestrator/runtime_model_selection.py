@@ -30,7 +30,6 @@ HER_V2_ROUTE_LABELS = {
     Route.EXECUTION_HIGH_VOLUME: "High-volume execution",
     Route.REPLANNING: "Replanning",
     Route.REVIEW: "Review",
-    Route.VERIFICATION: "Assured verification",
     Route.FINALISATION: "Finalisation",
     Route.MEDITATION: "Meditation",
     Route.DREAM: "Dream",

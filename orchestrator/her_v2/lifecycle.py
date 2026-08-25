@@ -46,7 +46,6 @@ _PRINCIPAL_EDGES: dict[LifecycleState, frozenset[LifecycleState]] = {
     LifecycleState.EXECUTION_COMPLETED: frozenset(
         {
             LifecycleState.REVIEWING,
-            LifecycleState.VERIFYING,
             LifecycleState.FINALISING,
             LifecycleState.COMPLETED,
             LifecycleState.ERROR,
@@ -55,12 +54,8 @@ _PRINCIPAL_EDGES: dict[LifecycleState, frozenset[LifecycleState]] = {
     LifecycleState.REVIEWING: frozenset(
         {
             LifecycleState.REPLANNING,
-            LifecycleState.VERIFYING,
             LifecycleState.FINALISING,
         }
-    ),
-    LifecycleState.VERIFYING: frozenset(
-        {LifecycleState.REPLANNING, LifecycleState.FINALISING}
     ),
     LifecycleState.FINALISING: frozenset(
         {

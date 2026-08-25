@@ -149,27 +149,27 @@ self.kernel.runtimes[:] = [
 
 HER v2 Reviewed and Assured execution is implemented in hot-reloadable adapter,
 runtime, prompt, policy, and Tool Registry modules. Reviewed (`xhigh`) performs
-one read-only independent Review, optional Primary-Agent remediation, and one
-closure Review. Assured (`max`) adds a `VERIFYING` lifecycle state and at most
-three latest-state Verification attempts.
+one independent Review and permits at most one Primary-Agent remediation, with
+no closure Review. Assured (`max`) repeats fresh Review after each
+Review-driven Replanning and remediation until `PASS` or `CONDITIONAL_PASS`;
+there is no separate validation stage or fixed Review/fix round limit.
 
-Reviewers remain read-only. Verifiers receive only the additional authority to
-run validation commands in the authoritative workspace; they cannot remediate
-or widen delegation. Claims are accepted only when they cite exact completed
-receipts bound to the current stage, provider attempt, invocation, and tool
-call. Configured recipes or direct argv checks inherit the HASHI process's
-filesystem, environment, `HOME`, and network authority. Their timeout grows
-from cumulative Execution duration and cannot be shortened by the verifier.
+Review is non-remediating and receives only its delegated inspection and
+validation tools. Configured `verification_run` recipes or direct argv checks
+run in the authoritative workspace and inherit the HASHI process's filesystem,
+environment, `HOME`, and network authority. Their timeout grows from cumulative
+Execution duration and cannot be shortened by the reviewer.
 
-Triage also records immutable `STANDARD`/`HIGH_RISK` risk metadata for each work
-turn. Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) Execution,
-regardless of that label, install a request-local provider-neutral cadence
+Triage schema v2 resolves `real_goal` and selects `relevant_habits` from the
+complete candidate Habit catalogue before downstream work begins. Adaptive
+(`high`), Reviewed (`xhigh`), and Assured (`max`) Execution install a
+request-local provider-neutral cadence
 coordinator shared by the Primary Agent and bounded sub-agents. At the next
 safe boundary after 10 completed Tool Gateway receipts or 300 monotonic
 seconds, it unconditionally enters the principal tool-free `REPLANNING` state,
 activates a plan version, and sends one Persona-rendered or deterministic
 fallback progress update. It never cancels an active tool, limits total work or
-Replans, replaces Review/Verification, or fabricates provider resume state.
+Replans, replaces Review, or fabricates provider resume state.
 
 These modules and schemas are adopted through the ordinary targeted reboot
 flow. Adding lifecycle states, routes, response fields, or public helper

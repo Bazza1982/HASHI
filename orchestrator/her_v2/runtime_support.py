@@ -20,7 +20,7 @@ from .models import (
     LifecycleState,
     Stage,
     TerminalState,
-    TriageClassification,
+    TriageDecision,
     TurnResult,
 )
 from .presentation import (
@@ -37,8 +37,13 @@ class RuntimeSupportMixin:
     def _record_triage(
         self,
         state: _TurnState,
-        classification: TriageClassification,
+        decision: TriageDecision,
     ) -> None:
+        state.goal = decision.real_goal
+        state.relevant_habits = tuple(decision.relevant_habits)
+        goal_ref = "sha256:" + hashlib.sha256(
+            state.goal.encode("utf-8")
+        ).hexdigest()
         ref = self._audit(
             state,
             stage=Stage.TRIAGE.value,
@@ -46,11 +51,13 @@ class RuntimeSupportMixin:
             event="classification_recorded",
             event_id=f"{state.ledger.turn_id}:classification",
             payload={
-                "classification": classification.value,
+                "classification": decision.classification.value,
+                "real_goal": state.goal,
+                "relevant_habits": list(state.relevant_habits),
             },
         )
         state.ledger.add_log_ref(ref)
-        state.ledger.record_triage(classification)
+        state.ledger.record_triage(decision.classification, goal_ref=goal_ref)
         self.ledger_store.save(state.ledger)
 
     async def _transition(
@@ -73,7 +80,7 @@ class RuntimeSupportMixin:
             event="transition",
             event_id=(
                 f"{state.ledger.turn_id}:lifecycle:{previous.value}:{requested.value}:"
-                f"{state.replan_count}:{state.review_count}:{state.verification_count}"
+                f"{state.replan_count}:{state.review_count}"
             ),
             payload={
                 "from": previous.value,
@@ -572,7 +579,6 @@ class RuntimeSupportMixin:
             delivery_kind=state.delivery_kind,
             delivery_event_id=state.delivery_event_id,
             review_count=state.review_count,
-            verification_count=state.verification_count,
             checkpoint_count=state.checkpoint_count,
             assurance_status="",
             replan_count=state.replan_count,

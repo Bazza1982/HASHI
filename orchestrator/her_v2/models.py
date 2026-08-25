@@ -91,7 +91,6 @@ class LifecycleState(StrEnum):
     REPLANNING = "REPLANNING"
     EXECUTION_COMPLETED = "EXECUTION_COMPLETED"
     REVIEWING = "REVIEWING"
-    VERIFYING = "VERIFYING"
     FINALISING = "FINALISING"
     COMPLETED = "COMPLETED"
     COMPLETED_WITH_LIMITATIONS = "COMPLETED_WITH_LIMITATIONS"
@@ -121,7 +120,6 @@ class Stage(StrEnum):
     EXECUTION = "execution"
     REPLANNING = "replanning"
     REVIEW = "review"
-    VERIFICATION = "verification"
     FINALISATION = "finalisation"
     MEDITATION = "meditation"
     DREAM = "dream"
@@ -148,7 +146,6 @@ class Route(StrEnum):
     EXECUTION_HIGH_VOLUME = "execution_high_volume"
     REPLANNING = "replanning"
     REVIEW = "review"
-    VERIFICATION = "verification"
     FINALISATION = "finalisation"
     MEDITATION = "meditation"
     DREAM = "dream"
@@ -164,7 +161,6 @@ ROUTE_STAGES: Mapping[Route, Stage] = {
     Route.EXECUTION_HIGH_VOLUME: Stage.EXECUTION,
     Route.REPLANNING: Stage.REPLANNING,
     Route.REVIEW: Stage.REVIEW,
-    Route.VERIFICATION: Stage.VERIFICATION,
     Route.FINALISATION: Stage.FINALISATION,
     Route.MEDITATION: Stage.MEDITATION,
     Route.DREAM: Stage.DREAM,
@@ -179,7 +175,6 @@ DEFAULT_ROUTES_BY_STAGE: Mapping[Stage, Route] = {
     Stage.EXECUTION: Route.EXECUTION_COMPLEX,
     Stage.REPLANNING: Route.REPLANNING,
     Stage.REVIEW: Route.REVIEW,
-    Stage.VERIFICATION: Route.VERIFICATION,
     Stage.FINALISATION: Route.FINALISATION,
     Stage.MEDITATION: Route.MEDITATION,
     Stage.DREAM: Route.DREAM,
@@ -198,22 +193,6 @@ class ReviewOutcome(StrEnum):
     CONDITIONAL_PASS = "CONDITIONAL_PASS"
     FAIL = "FAIL"
     INCONCLUSIVE = "INCONCLUSIVE"
-    UNAVAILABLE = "UNAVAILABLE"
-
-
-class VerificationOutcome(StrEnum):
-    VERIFIED = "VERIFIED"
-    PARTIALLY_VERIFIED = "PARTIALLY_VERIFIED"
-    FAILED = "FAILED"
-    NOT_AI_VERIFIABLE = "NOT_AI_VERIFIABLE"
-    UNAVAILABLE = "UNAVAILABLE"
-    INCONCLUSIVE = "INCONCLUSIVE"
-
-
-class Verifiability(StrEnum):
-    VERIFIABLE = "VERIFIABLE"
-    PARTIALLY_VERIFIABLE = "PARTIALLY_VERIFIABLE"
-    NOT_AI_VERIFIABLE = "NOT_AI_VERIFIABLE"
     UNAVAILABLE = "UNAVAILABLE"
 
 
@@ -281,7 +260,8 @@ class StageResponse:
 @dataclass(frozen=True)
 class TriageDecision:
     classification: TriageClassification
-    goal: str
+    real_goal: str
+    relevant_habits: tuple[str, ...] = ()
     clarification: str = ""
 
 
@@ -325,26 +305,6 @@ class ReviewFinding:
     summary: str
     findings: tuple[str, ...] = ()
     evidence_refs: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class VerificationCheck:
-    claim: str
-    verifiability: Verifiability
-    result: VerificationOutcome
-    method: str
-    evidence_refs: tuple[str, ...] = ()
-    observed: str = ""
-    required: bool = True
-
-
-@dataclass(frozen=True)
-class VerificationFinding:
-    outcome: VerificationOutcome
-    summary: str
-    checks: tuple[VerificationCheck, ...] = ()
-    evidence_refs: tuple[str, ...] = ()
-    limitations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -418,7 +378,6 @@ class TurnResult:
     delivery_event_id: str = ""
     review_count: int = 0
     replan_count: int = 0
-    verification_count: int = 0
     checkpoint_count: int = 0
     assurance_status: str = ""
 

@@ -632,6 +632,9 @@ class ReplanJourneyProvider:
             return StageResponse(
                 data={
                     "classification": "COMPLEX_TASK",
+                    "real_goal": request.goal,
+                    "relevant_habits": [],
+                    "clarification": None,
                 }
             )
         if request.stage is Stage.PLANNING:
@@ -747,76 +750,7 @@ async def test_low_and_medium_never_install_compulsory_replan(tmp_path, effort):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("effort", ["high", "xhigh", "max"])
 async def test_high_and_above_install_by_effort(tmp_path, effort):
-    class AssuranceProvider(ReplanJourneyProvider):
-        async def invoke(self, profile, request):
-            if request.stage is Stage.REVIEW:
-                return _review_pass(request)
-            if request.stage is Stage.VERIFICATION:
-                prefix = request.invocation_id
-                receipts = (
-                    ToolEvidenceReceipt(
-                        f"{prefix}:before",
-                        Stage.VERIFICATION,
-                        prefix,
-                        request.attempt,
-                        "before",
-                        "workspace_inspect",
-                        ToolReceiptStatus.SUCCESS,
-                        True,
-                        True,
-                        "before",
-                        {"operation": "snapshot", "snapshot_sha256": "stable"},
-                    ),
-                    ToolEvidenceReceipt(
-                        f"{prefix}:check",
-                        Stage.VERIFICATION,
-                        prefix,
-                        request.attempt,
-                        "check",
-                        "workspace_inspect",
-                        ToolReceiptStatus.SUCCESS,
-                        True,
-                        True,
-                        "check",
-                        {"operation": "diff", "exit_code": 0},
-                    ),
-                    ToolEvidenceReceipt(
-                        f"{prefix}:after",
-                        Stage.VERIFICATION,
-                        prefix,
-                        request.attempt,
-                        "after",
-                        "workspace_inspect",
-                        ToolReceiptStatus.SUCCESS,
-                        True,
-                        True,
-                        "after",
-                        {"operation": "snapshot", "snapshot_sha256": "stable"},
-                    ),
-                )
-                return StageResponse(
-                    data={
-                        "outcome": "VERIFIED",
-                        "summary": "Verified.",
-                        "checks": [
-                            {
-                                "claim": "Current result",
-                                "verifiability": "VERIFIABLE",
-                                "result": "VERIFIED",
-                                "method": "workspace_diff",
-                                "evidence_refs": [receipts[1].evidence_ref],
-                                "observed": "Current evidence passed.",
-                                "required": True,
-                            }
-                        ],
-                        "evidence_refs": [receipts[1].evidence_ref],
-                    },
-                    evidence_refs=tuple(item.evidence_ref for item in receipts),
-                    tool_receipts=receipts,
-                )
-            return await super().invoke(profile, request)
-
-    provider = AssuranceProvider(tool_results=0)
+    provider = ReplanJourneyProvider(tool_results=0, review=True)
     result = await _journey_runtime(tmp_path, provider).run_turn(
         "Complete the authorised task", f"eligible-{effort}", effort=effort
     )
@@ -829,7 +763,7 @@ async def test_high_and_above_install_by_effort(tmp_path, effort):
 
 
 @pytest.mark.asyncio
-async def test_tenth_result_forces_lifecycle_replan_plan_version_and_commentary(
+async def test_tenth_result_forces_replan_without_churning_unchanged_plan(
     tmp_path,
 ):
     replan = _valid_replan_data()
@@ -845,7 +779,7 @@ async def test_tenth_result_forces_lifecycle_replan_plan_version_and_commentary(
     assert result.terminal_state.value == "COMPLETED"
     assert result.replan_count == 1
     assert result.checkpoint_count == 1
-    assert result.ledger["plan_id"].endswith(":plan:v2")
+    assert result.ledger["plan_id"].endswith(":plan:v1")
     assert provider.execution_calls == 1
     assert provider.executed_tools == 10
     assert len(provider.control_directives) == 1
@@ -874,6 +808,8 @@ async def test_tenth_result_forces_lifecycle_replan_plan_version_and_commentary(
         "available_execution_tools",
         "execution_allow_side_effects",
         "plan_edit_history",
+        "real_goal",
+        "relevant_habits",
         "workflow_state_and_evidence",
     }
     assert replan_request.context["available_execution_tools"] == [

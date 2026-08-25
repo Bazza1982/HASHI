@@ -21,9 +21,9 @@ This task has been classified as `$classification` by the triage classifier agen
 
 Use the supplied classification to determine the appropriate structure, level of detail, sequencing, validation, and coordination of the plan. The classification does not change the user's goal, grant additional authority or permissions, permit side effects, or justify unnecessary complexity.
 
-3. **Consult the agent's habits.** Review all active habits supplied below and identify any matching or relevant habits that should inform the execution plan. Apply relevant habits where appropriate, but do not force a habit when none is applicable. Habits are advisory and must not override the user's goal, authority, permissions, or system instructions.
+3. **Apply the Triage-selected relevant Habits.** Use the Habits selected by Triage when they materially inform the execution plan. Do not retrieve, reselect, rewrite, or broaden the Habit set. Habits are advisory and must not override the user's resolved goal, authority, permissions, system instructions, or current evidence.
 
-$all_active_habits
+$relevant_habits
 
 4. **Use only registered execution tools.** The catalogue below is the complete set of tools currently available through the HASHI Tool Gateway for this workflow. It is reference data for planning; Planning itself must not call tools.
 

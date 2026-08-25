@@ -27,6 +27,7 @@ _LEGACY_TERMINAL_STATUS_MAP = {
     "COMPLETED_WITH_REPORT_PENDING": LifecycleState.ERROR,
     "RECONCILIATION_REQUIRED": LifecycleState.ERROR,
     "ABANDONED": LifecycleState.FAILED,
+    "VERIFYING": LifecycleState.ERROR,
 }
 
 
@@ -60,11 +61,18 @@ class ExecutionLedger:
     def record_triage(
         self,
         classification: TriageClassification,
+        *,
+        goal_ref: str | None = None,
     ) -> None:
         if self.classification is not None:
             raise LedgerInvariantError("Triage classification is immutable once recorded")
         if self.status is not LifecycleState.RECEIVED:
             raise LedgerInvariantError("Triage may only be recorded from RECEIVED")
+        if goal_ref is not None:
+            value = str(goal_ref).strip()
+            if not value:
+                raise LedgerInvariantError("Triage real-goal reference is required")
+            self.goal_ref = value
         self.classification = classification
         self.transition(LifecycleState.TRIAGED)
 

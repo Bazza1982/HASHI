@@ -29,7 +29,6 @@ from orchestrator.her_v2.models import (
     ToolEvidenceReceipt,
     ToolReceiptStatus,
     TriageClassification,
-    VerificationOutcome,
 )
 from orchestrator.her_v2.presentation import (
     RenderedRequiredMessage,
@@ -37,7 +36,6 @@ from orchestrator.her_v2.presentation import (
 )
 from orchestrator.her_v2.progress import ProviderActivityTracker
 from orchestrator.her_v2.runtime import HERv2Runtime
-from orchestrator.her_v2.structured import validate_verification_response
 from orchestrator.multimodal_contract import canonical_request_content
 
 
@@ -57,113 +55,6 @@ def _config(**overrides):
     }
     raw.update(overrides)
     return HERv2Config.from_mapping(raw)
-
-
-def _scripted_verification_response(profile, request, value):
-    data = dict(value)
-    prefix = request.invocation_id or (
-        f"{request.turn_id}:{request.stage.value}:{request.attempt}"
-    )
-    before_ref = f"test-tool:{prefix}:snapshot-before"
-    after_ref = f"test-tool:{prefix}:snapshot-after"
-    receipts = [
-        ToolEvidenceReceipt(
-            before_ref,
-            Stage.VERIFICATION,
-            prefix,
-            request.attempt,
-            "snapshot-before",
-            "workspace_inspect",
-            ToolReceiptStatus.SUCCESS,
-            True,
-            True,
-            "before-output",
-            {"operation": "snapshot", "snapshot_sha256": "stable"},
-        )
-    ]
-    checks = []
-    for index, raw_check in enumerate(data.get("checks") or [], start=1):
-        check = dict(raw_check)
-        result = str(check.get("result") or check.get("status") or "").upper()
-        method = str(check.get("method") or "workspace_diff")
-        if result in {"VERIFIED", "PARTIALLY_VERIFIED", "FAILED"}:
-            evidence_ref = f"test-tool:{prefix}:check-{index}"
-            check.setdefault("evidence_refs", [evidence_ref])
-            workspace_test = method == "workspace_test"
-            failed = result == "FAILED" and workspace_test
-            receipts.append(
-                ToolEvidenceReceipt(
-                    evidence_ref,
-                    Stage.VERIFICATION,
-                    prefix,
-                    request.attempt,
-                    f"check-{index}",
-                    "verification_run" if workspace_test else "workspace_inspect",
-                    ToolReceiptStatus.FAILED if failed else ToolReceiptStatus.SUCCESS,
-                    True,
-                    True,
-                    f"check-{index}-output",
-                    (
-                        {
-                            "operation": "run",
-                            "recipe": "pytest_core",
-                            "exit_code": 1 if failed else 0,
-                            "execution_scope": "workspace",
-                            "workspace_copied": False,
-                            "process_isolated": False,
-                            "process_authority": "inherited",
-                            "identity_policy": "inherited",
-                            "filesystem_policy": "inherited",
-                            "environment_policy": "inherited",
-                            "network_policy": "inherited",
-                            "home_policy": "inherited",
-                            "workspace_access": {
-                                "read": True,
-                                "write": True,
-                                "execute": True,
-                            },
-                            "timeout_s": 1800.0,
-                            "timeout_policy": {
-                                "execution_floor_s": 300.0,
-                                "effective_timeout_s": 1800.0,
-                            },
-                        }
-                        if workspace_test
-                        else {"operation": "diff", "exit_code": 0}
-                    ),
-                )
-            )
-        checks.append(check)
-    data["checks"] = checks
-    receipts.append(
-        ToolEvidenceReceipt(
-            after_ref,
-            Stage.VERIFICATION,
-            prefix,
-            request.attempt,
-            "snapshot-after",
-            "workspace_inspect",
-            ToolReceiptStatus.SUCCESS,
-            True,
-            True,
-            "after-output",
-            {"operation": "snapshot", "snapshot_sha256": "stable"},
-        )
-    )
-    data.setdefault(
-        "evidence_refs",
-        [receipt.evidence_ref for receipt in receipts[1:-1] if receipt.completed],
-    )
-    return StageResponse(
-        text="",
-        data=data,
-        reasoning_trace=f"trace:{request.stage.value}",
-        provider=profile.engine,
-        model=profile.model,
-        provider_attempt=request.attempt,
-        evidence_refs=tuple(item.evidence_ref for item in receipts),
-        tool_receipts=tuple(receipts),
-    )
 
 
 class ScriptedProvider:
@@ -242,8 +133,6 @@ class ScriptedProvider:
                     raw_assignment.setdefault("allow_side_effects", False)
         if isinstance(value, StageResponse):
             return value
-        if request.stage is Stage.VERIFICATION and isinstance(value, dict):
-            return _scripted_verification_response(profile, request, value)
         if request.stage is Stage.REVIEW and isinstance(value, dict):
             value = dict(value)
             if "status" in value:
@@ -441,15 +330,39 @@ def _runtime(
     )
 
 
-def _initial(classification, *, triage_goal="interpreted goal", clarification=""):
+def _triage(
+    classification: str,
+    *,
+    real_goal: str | None,
+    clarification: str | None = None,
+    relevant_habits: tuple[str, ...] = (),
+):
+    return {
+        "classification": classification,
+        "real_goal": real_goal,
+        "relevant_habits": list(relevant_habits),
+        "clarification": clarification,
+    }
+
+
+def _initial(
+    classification,
+    *,
+    real_goal="resolved goal",
+    clarification="",
+    relevant_habits=(),
+):
+    if classification == "CONFIRMATION_REQUIRED":
+        real_goal = None
     return {
         Stage.IMMEDIATE_RESPONSE: [{"message": "I have it."}],
         Stage.TRIAGE: [
-            {
-                "classification": classification,
-                "goal": triage_goal,
-                "clarification": clarification,
-            }
+            _triage(
+                classification,
+                real_goal=real_goal,
+                clarification=clarification or None,
+                relevant_habits=tuple(relevant_habits),
+            )
         ],
     }
 
@@ -518,7 +431,6 @@ async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_
     assert result.ledger["plan_id"] is None
     assert result.review_count == 0
     assert result.replan_count == 0
-    assert result.verification_count == 0
     assert result.checkpoint_count == 0
     assert result.evidence_refs == (receipt.evidence_ref,)
     assert [(item.kind, item.text) for item in result.delivery_records] == [
@@ -551,7 +463,6 @@ async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_
         Stage.EXECUTION,
         Stage.REPLANNING,
         Stage.REVIEW,
-        Stage.VERIFICATION,
         Stage.FINALISATION,
     }.isdisjoint(request.stage for _profile, request in provider.requests)
 
@@ -658,7 +569,10 @@ async def test_direct_response_and_triage_receive_same_ordered_images(tmp_path):
             ],
             Stage.TRIAGE: [
                 StageResponse(
-                    data={"classification": "DIRECT_RESPONSE"},
+                    data=_triage(
+                        "DIRECT_RESPONSE",
+                        real_goal="Compare both images.",
+                    ),
                     media_routing=routes,
                 )
             ],
@@ -698,7 +612,14 @@ async def test_unfulfillable_multimodal_direct_response_uses_work_path(tmp_path)
                 code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
             )
         ],
-        Stage.TRIAGE: [StageResponse(data={"classification": "DIRECT_RESPONSE"})],
+        Stage.TRIAGE: [
+            StageResponse(
+                data=_triage(
+                    "DIRECT_RESPONSE",
+                    real_goal="Compare both images.",
+                )
+            )
+        ],
         Stage.EXECUTION: [
             StageResponse(
                 data={"disposition": "COMPLETED", "summary": "Inspected both."},
@@ -873,7 +794,9 @@ async def test_direct_response_promotes_repaired_immediate_content_without_fallb
                 model="model-lightweight",
             )
         ],
-        Stage.TRIAGE: [{"classification": "DIRECT_RESPONSE"}],
+        Stage.TRIAGE: [
+            _triage("DIRECT_RESPONSE", real_goal="Answer directly.")
+        ],
     }
     provider = ScriptedProvider(
         scripts,
@@ -954,7 +877,7 @@ async def test_triage_first_work_starts_without_waiting_and_repairs_late_immedia
 
     scripts = {
         Stage.IMMEDIATE_RESPONSE: [delayed_immediate],
-        Stage.TRIAGE: [{"classification": "SIMPLE_TASK"}],
+        Stage.TRIAGE: [_triage("SIMPLE_TASK", real_goal="Check the request.")],
         Stage.EXECUTION: [blocked_execution],
         Stage.FINALISATION: [{"report": "Checked and complete."}],
     }
@@ -1014,7 +937,9 @@ async def test_unrepairable_immediate_text_remains_visible_for_work(tmp_path):
                 model="model-lightweight",
             )
         ],
-        Stage.TRIAGE: [{"classification": "SIMPLE_TASK"}],
+        Stage.TRIAGE: [
+            _triage("SIMPLE_TASK", real_goal="Complete the requested work.")
+        ],
         Stage.EXECUTION: [{"disposition": "COMPLETED", "summary": "Done."}],
         Stage.FINALISATION: [{"report": "Done."}],
     }
@@ -1055,7 +980,7 @@ async def test_final_completion_supersedes_a_still_pending_immediate_response(tm
 
     scripts = {
         Stage.IMMEDIATE_RESPONSE: [blocked_immediate],
-        Stage.TRIAGE: [{"classification": "SIMPLE_TASK"}],
+        Stage.TRIAGE: [_triage("SIMPLE_TASK", real_goal="Do the requested work.")],
         Stage.EXECUTION: [{"disposition": "COMPLETED", "summary": "Done."}],
         Stage.FINALISATION: [{"report": "Done."}],
     }
@@ -1164,10 +1089,15 @@ async def test_optional_immediate_failure_does_not_block_authoritative_triage(
             StageInvocationError("invalid Immediate envelope", retryable=False)
         ],
         Stage.TRIAGE: [
-            {
-                "classification": classification,
-                "clarification": clarification,
-            }
+            _triage(
+                classification,
+                real_goal=(
+                    "Continue through the authoritative path."
+                    if classification == "SIMPLE_TASK"
+                    else None
+                ),
+                clarification=clarification or None,
+            )
         ],
     }
     if classification == "SIMPLE_TASK":
@@ -1206,7 +1136,7 @@ async def test_direct_response_still_requires_valid_immediate_content(tmp_path):
             Stage.IMMEDIATE_RESPONSE: [
                 StageInvocationError("empty direct answer", retryable=False)
             ],
-            Stage.TRIAGE: [{"classification": "DIRECT_RESPONSE"}],
+            Stage.TRIAGE: [_triage("DIRECT_RESPONSE", real_goal="Reply hello.")],
         }
     )
 
@@ -1242,8 +1172,11 @@ async def test_early_immediate_is_promoted_to_clarification_without_duplication(
 
 
 @pytest.mark.asyncio
-async def test_medium_turn_preserves_goal_and_routes_tools_only_to_execution(tmp_path):
-    scripts = _initial("COMPLEX_TASK", triage_goal="a tempting replacement goal")
+async def test_medium_turn_uses_triage_real_goal_and_routes_tools_only_to_execution(
+    tmp_path,
+):
+    real_goal = "Implement and test the requested feature."
+    scripts = _initial("COMPLEX_TASK", real_goal=real_goal)
     scripts.update(
         {
             Stage.PLANNING: [{"plan": ["inspect", "change", "test"]}],
@@ -1268,7 +1201,20 @@ async def test_medium_turn_preserves_goal_and_routes_tools_only_to_execution(tmp
     assert result.text == "Implemented and tested."
     assert result.evidence_refs == ()
     assert result.ledger["plan_id"].endswith(":plan:v1")
-    assert all(call.goal == request for _profile, call in provider.requests)
+    initial_calls = [
+        call
+        for _profile, call in provider.requests
+        if call.stage in {Stage.IMMEDIATE_RESPONSE, Stage.TRIAGE}
+    ]
+    downstream_calls = [
+        call
+        for _profile, call in provider.requests
+        if call.stage not in {Stage.IMMEDIATE_RESPONSE, Stage.TRIAGE}
+    ]
+    assert all(call.goal == request for call in initial_calls)
+    assert all(call.goal == real_goal for call in downstream_calls)
+    assert all(call.context["real_goal"] == real_goal for call in downstream_calls)
+    assert all(call.context["relevant_habits"] == [] for call in downstream_calls)
     execution_calls = [
         call for _profile, call in provider.requests if call.stage is Stage.EXECUTION
     ]
@@ -1440,7 +1386,7 @@ async def test_execution_receives_the_same_complete_request_context_as_planning(
         "Cross-session receipt evidence\n"
         "CURRENT USER REQUEST"
     )
-    scripts = _initial("COMPLEX_TASK")
+    scripts = _initial("COMPLEX_TASK", real_goal=complete_context)
     scripts.update(
         {
             Stage.PLANNING: [{"plan": ["inspect", "change", "verify"]}],
@@ -1511,15 +1457,25 @@ async def test_normal_mode_enables_external_side_effect_authority(tmp_path):
         for _profile, request in provider.requests
         if request.stage is Stage.EXECUTION
     )
-    assert set(execution.context) == {"active_plan", "sub_agent_results"}
+    assert set(execution.context) == {
+        "active_plan",
+        "real_goal",
+        "relevant_habits",
+        "sub_agent_results",
+    }
+    assert execution.context["real_goal"] == "resolved goal"
+    assert execution.context["relevant_habits"] == []
     assert execution.allow_tools is True
     assert execution.allow_side_effects is True
     assert result.terminal_state is TerminalState.COMPLETED
 
 
 @pytest.mark.asyncio
-async def test_review_imposed_replanning_does_not_reconsult_habits(tmp_path):
-    scripts = _initial("COMPLEX_TASK")
+async def test_review_imposed_replanning_reuses_triage_selected_habits(tmp_path):
+    scripts = _initial(
+        "COMPLEX_TASK",
+        relevant_habits=("advisory habit",),
+    )
     scripts.update(
         {
             Stage.PLANNING: [{"plan": ["old approach"]}],
@@ -1582,9 +1538,11 @@ async def test_review_imposed_replanning_does_not_reconsult_habits(tmp_path):
         "available_execution_tools",
         "execution_allow_side_effects",
         "plan_edit_history",
+        "real_goal",
+        "relevant_habits",
         "workflow_state_and_evidence",
     }
-    assert "habits" not in replan_request.context
+    assert replan_request.context["relevant_habits"] == ["advisory habit"]
     workflow_evidence = replan_request.context["workflow_state_and_evidence"]
     assert workflow_evidence["evidence_refs"] == []
     assert workflow_evidence["ledger"]["status"] == "REPLANNING"
@@ -1727,8 +1685,11 @@ async def test_max_solidifies_old_draft_and_publishes_each_remediation_draft(
 
 
 @pytest.mark.asyncio
-async def test_review_never_receives_habits_or_retrieves_them_again(tmp_path):
-    scripts = _initial("COMPLEX_TASK")
+async def test_triage_selected_habits_reach_every_downstream_stage(tmp_path):
+    scripts = _initial(
+        "COMPLEX_TASK",
+        relevant_habits=("advisory habit",),
+    )
     scripts.update(
         {
             Stage.PLANNING: [{"plan": ["complete the requested work"]}],
@@ -1753,19 +1714,23 @@ async def test_review_never_receives_habits_or_retrieves_them_again(tmp_path):
 
     assert result.terminal_state is TerminalState.COMPLETED
     assert len(habits.retrievals) == 1
-    planning_request = next(
+    downstream = [
         request
         for _profile, request in provider.requests
-        if request.stage is Stage.PLANNING
+        if request.stage
+        in {Stage.PLANNING, Stage.EXECUTION, Stage.REVIEW, Stage.FINALISATION}
+    ]
+    assert {request.stage for request in downstream} == {
+        Stage.PLANNING,
+        Stage.EXECUTION,
+        Stage.REVIEW,
+        Stage.FINALISATION,
+    }
+    assert all(
+        request.context["relevant_habits"] == ["advisory habit"]
+        for request in downstream
     )
-    assert planning_request.context["habits"] == ["advisory habit"]
-    review_request = next(
-        request
-        for _profile, request in provider.requests
-        if request.stage is Stage.REVIEW
-    )
-    assert review_request.context["habits_included"] is False
-    assert "habits" not in review_request.context
+    assert all("habits" not in request.context for request in downstream)
 
 
 @pytest.mark.asyncio
@@ -1969,35 +1934,19 @@ async def test_max_repeats_review_and_remediation_until_conditional_pass(
                     "conditions": "One disclosed limitation remains.",
                 },
             ],
-            Stage.VERIFICATION: [
-                {
-                    "outcome": "FAILED",
-                    "summary": f"Verification {index} failed.",
-                    "checks": [
-                        {
-                            "claim": "Core tests pass",
-                            "verifiability": "VERIFIABLE",
-                            "result": "FAILED",
-                            "method": "workspace_test",
-                            "observed": f"Core tests failed on attempt {index}.",
-                        }
-                    ],
-                }
-                for index in range(1, 4)
-            ],
             Stage.REPLANNING: [
                 {
                     "plan": [f"remediation {index}"],
-                    "success_criteria": [f"Verification failure {index} is remediated"],
+                    "success_criteria": [f"Review failure {index} is remediated"],
                     "completion_percent": 60 + index * 10,
                     "completion_basis": (
-                        f"Verification attempt {index} found a required failure."
+                        f"Review attempt {index} found a required failure."
                     ),
                     "plan_changed": True,
                     "change_reason": (
-                        f"Verification attempt {index} failed a required check."
+                        f"Review attempt {index} found a material defect."
                     ),
-                    "next_step": f"Apply remediation {index} and verify again.",
+                    "next_step": f"Apply remediation {index} and review again.",
                 }
                 for index in range(1, 3)
             ],
@@ -2011,7 +1960,6 @@ async def test_max_repeats_review_and_remediation_until_conditional_pass(
     )
 
     assert result.review_count == 3
-    assert result.verification_count == 0
     assert result.assurance_status == ""
     assert result.replan_count == 2
     assert "One disclosed limitation remains." in result.limitations
@@ -2029,15 +1977,11 @@ async def test_max_repeats_review_and_remediation_until_conditional_pass(
         == "FAIL"
     )
     assert sum(call.stage is Stage.REVIEW for _profile, call in provider.requests) == 3
-    assert (
-        sum(call.stage is Stage.VERIFICATION for _profile, call in provider.requests)
-        == 0
-    )
     assert result.terminal_state is TerminalState.COMPLETED
 
 
 @pytest.mark.asyncio
-async def test_max_passes_review_then_finalises_without_verification(tmp_path):
+async def test_max_passes_review_validation_then_finalises(tmp_path):
     def finalisation(request):
         assert "assurance" not in request.context
         assert request.context["review"]["status"] == "PASS"
@@ -2056,21 +2000,6 @@ async def test_max_passes_review_then_finalises_without_verification(tmp_path):
                 {"disposition": "COMPLETED", "summary": "Implementation completed."}
             ],
             Stage.REVIEW: [{"outcome": "PASS", "summary": "Review passed."}],
-            Stage.VERIFICATION: [
-                {
-                    "outcome": "VERIFIED",
-                    "summary": "Every required claim is verified.",
-                    "checks": [
-                        {
-                            "claim": "Core tests pass",
-                            "verifiability": "VERIFIABLE",
-                            "result": "VERIFIED",
-                            "method": "workspace_test",
-                            "observed": "The workspace core recipe exited 0.",
-                        }
-                    ],
-                }
-            ],
             Stage.FINALISATION: [finalisation],
         }
     )
@@ -2082,7 +2011,6 @@ async def test_max_passes_review_then_finalises_without_verification(tmp_path):
 
     assert result.terminal_state is TerminalState.COMPLETED
     assert result.review_count == 1
-    assert result.verification_count == 0
     assert result.assurance_status == ""
     stages = [
         request.stage
@@ -2127,43 +2055,15 @@ async def test_max_failed_review_remediates_then_reviews_latest_draft(
                     "conditions": None,
                 },
             ],
-            Stage.VERIFICATION: [
-                {
-                    "outcome": "FAILED",
-                    "summary": "The workspace recipe failed.",
-                    "checks": [
-                        {
-                            "claim": "Core tests pass",
-                            "verifiability": "VERIFIABLE",
-                            "result": "FAILED",
-                            "method": "workspace_test",
-                            "observed": "The workspace recipe exited 1.",
-                        }
-                    ],
-                },
-                {
-                    "outcome": "VERIFIED",
-                    "summary": "The remediated state passed.",
-                    "checks": [
-                        {
-                            "claim": "Core tests pass",
-                            "verifiability": "VERIFIABLE",
-                            "result": "VERIFIED",
-                            "method": "workspace_test",
-                            "observed": "The workspace recipe exited 0.",
-                        }
-                    ],
-                },
-            ],
             Stage.REPLANNING: [
                 {
                     "plan": ["repair failing core test"],
                     "success_criteria": ["The core test passes on the latest state"],
                     "completion_percent": 70,
-                    "completion_basis": "Verification found one failing core test.",
+                    "completion_basis": "Review found one failing core test.",
                     "plan_changed": True,
                     "change_reason": "The workspace recipe exited 1.",
-                    "next_step": "Repair the core test and verify the latest state.",
+                    "next_step": "Repair the core test and review the latest state.",
                 }
             ],
             Stage.FINALISATION: [{"report": "Remediated and verified."}],
@@ -2177,7 +2077,6 @@ async def test_max_failed_review_remediates_then_reviews_latest_draft(
 
     assert result.terminal_state is TerminalState.COMPLETED
     assert result.review_count == 2
-    assert result.verification_count == 0
     assert result.replan_count == 1
     assert result.assurance_status == ""
     review_requests = [
@@ -2187,13 +2086,6 @@ async def test_max_failed_review_remediates_then_reviews_latest_draft(
     ]
     assert review_requests[0].context["draft_response"] == "Initial implementation."
     assert review_requests[1].context["draft_response"] == "Remediated implementation."
-    assert (
-        sum(
-            request.stage is Stage.VERIFICATION
-            for _profile, request in provider.requests
-        )
-        == 0
-    )
 
 
 @pytest.mark.asyncio
@@ -2221,7 +2113,6 @@ async def test_max_review_technical_failure_does_not_enter_an_endless_loop(
     assert result.terminal_state is TerminalState.COMPLETED
     assert result.assurance_status == ""
     assert result.review_count == 1
-    assert result.verification_count == 0
     assert any("Review unavailable" in item for item in result.limitations)
 
 
@@ -2329,7 +2220,7 @@ async def test_xhigh_repaired_draft_does_not_restate_pre_repair_fail(tmp_path):
 async def test_high_volume_subagents_are_bounded_and_cannot_replan_or_finalise(
     tmp_path,
 ):
-    scripts = _initial("HIGH_VOLUME_TASK")
+    scripts = _initial("HIGH_VOLUME_TASK", real_goal="Process the batch")
     scripts.update(
         {
             Stage.PLANNING: [
@@ -2390,6 +2281,11 @@ async def test_high_volume_subagents_are_bounded_and_cannot_replan_or_finalise(
     }
     assert all(request.context["may_replan"] is False for request in sub_requests)
     assert all(request.context["may_finalise"] is False for request in sub_requests)
+    assert all(
+        request.context["real_goal"] == "Process the batch"
+        for request in sub_requests
+    )
+    assert all(request.context["relevant_habits"] == [] for request in sub_requests)
     assert all(
         request.context["may_create_subagents"] is False for request in sub_requests
     )
@@ -3438,7 +3334,7 @@ async def test_retry_after_is_not_rejected_by_a_fabricated_recovery_window(tmp_p
                 code=ProviderFailureCode.PROVIDER_RATE_LIMITED,
                 retry_after_s=601,
             ),
-            {"classification": "DIRECT_RESPONSE", "goal": "Reply"},
+            _triage("DIRECT_RESPONSE", real_goal="Reply"),
         ],
     }
     runtime = _runtime(tmp_path, ScriptedProvider(scripts))
@@ -3471,7 +3367,9 @@ async def test_nonretryable_auth_failure_keeps_typed_code_and_single_attempt(tmp
                 http_status=401,
             )
         ],
-        Stage.TRIAGE: [{"classification": "DIRECT_RESPONSE", "goal": "Reply directly"}],
+        Stage.TRIAGE: [
+            _triage("DIRECT_RESPONSE", real_goal="Reply directly")
+        ],
     }
     provider = ScriptedProvider(scripts)
 
@@ -3517,7 +3415,7 @@ async def test_rate_limit_retry_honours_retry_after_and_preserves_route(tmp_path
                 provider_request_id="provider-request-429",
                 retry_after_s=0.001,
             ),
-            {"classification": "DIRECT_RESPONSE", "goal": "Reply"},
+            _triage("DIRECT_RESPONSE", real_goal="Reply"),
         ],
     }
     provider = ScriptedProvider(scripts)
@@ -3885,7 +3783,8 @@ async def test_triage_recovers_unambiguous_control_json_from_reasoning(tmp_path)
                 reasoning_trace=(
                     "The task requires work.\n"
                     '{"classification":"COMPLEX_TASK",'
-                    '"goal":"Diagnose the fault"}'
+                    '"real_goal":"Diagnose the fault",'
+                    '"relevant_habits":[],"clarification":null}'
                 ),
                 provider="fake-api",
                 model="model-triage",
@@ -4059,6 +3958,8 @@ async def test_simple_classification_can_escalate_execution_capability_without_m
     assert set(second_execution.context) == {
         "active_plan",
         "continuation_rules",
+        "real_goal",
+        "relevant_habits",
         "replan_continuation",
         "sub_agent_results",
     }
@@ -4262,8 +4163,8 @@ async def test_specialist_json_repair_has_no_attempt_cap_and_preserves_classific
         StageResponse(text="not json on the fourth attempt"),
         StageResponse(
             text=(
-                'prefix {"classification":"simple-task","goal":"Do it",'
-                '"clarification":null} suffix'
+                'prefix {"classification":"SIMPLE_TASK","real_goal":"Do it",'
+                '"relevant_habits":[],"clarification":null} suffix'
             ),
             reasoning_trace=None,
             provider="fake-api",
@@ -4390,253 +4291,6 @@ async def test_review_json_repair_preserves_receipts_without_replaying_review(
 
 
 @pytest.mark.asyncio
-async def test_verification_report_repair_uses_frozen_receipts_without_replay(
-    tmp_path,
-):
-    captured_finding = None
-
-    def invalid_verification(request):
-        callback = request.provider_activity_callback
-        assert callback is not None
-        callback(
-            {
-                "kind": "tool_start",
-                "content": "verification_run started",
-                "tool_name": "verification_run",
-                "tool_read_only": False,
-            }
-        )
-        callback(
-            {
-                "kind": "tool_end",
-                "content": "verification_run completed",
-                "tool_name": "verification_run",
-            }
-        )
-        before_ref = "verification:snapshot:before"
-        test_ref = "verification:test:success"
-        file_list_ref = "verification:file-list:success"
-        after_ref = "verification:snapshot:after"
-        receipts = (
-            ToolEvidenceReceipt(
-                before_ref,
-                Stage.VERIFICATION,
-                request.invocation_id,
-                request.attempt,
-                "snapshot-before",
-                "workspace_inspect",
-                ToolReceiptStatus.SUCCESS,
-                True,
-                True,
-                "before-output",
-                {"operation": "snapshot", "snapshot_sha256": "stable"},
-            ),
-            ToolEvidenceReceipt(
-                test_ref,
-                Stage.VERIFICATION,
-                request.invocation_id,
-                request.attempt,
-                "verification-run",
-                "verification_run",
-                ToolReceiptStatus.SUCCESS,
-                False,
-                True,
-                "test-output",
-                {
-                    "operation": "run",
-                    "recipe": "pytest_core",
-                    "exit_code": 0,
-                    "execution_scope": "workspace",
-                    "workspace_copied": False,
-                    "process_isolated": False,
-                    "process_authority": "inherited",
-                    "identity_policy": "inherited",
-                    "filesystem_policy": "inherited",
-                    "environment_policy": "inherited",
-                    "network_policy": "inherited",
-                    "home_policy": "inherited",
-                    "workspace_access": {
-                        "read": True,
-                        "write": True,
-                        "execute": True,
-                    },
-                    "timeout_s": 1800.0,
-                    "timeout_policy": {
-                        "execution_floor_s": 300.0,
-                        "effective_timeout_s": 1800.0,
-                    },
-                },
-            ),
-            ToolEvidenceReceipt(
-                file_list_ref,
-                Stage.VERIFICATION,
-                request.invocation_id,
-                request.attempt,
-                "file-list",
-                "file_list",
-                ToolReceiptStatus.SUCCESS,
-                True,
-                True,
-                "file-list-output",
-                {"operation": "list", "path": "workspace"},
-            ),
-            ToolEvidenceReceipt(
-                after_ref,
-                Stage.VERIFICATION,
-                request.invocation_id,
-                request.attempt,
-                "snapshot-after",
-                "workspace_inspect",
-                ToolReceiptStatus.SUCCESS,
-                True,
-                True,
-                "after-output",
-                {"operation": "snapshot", "snapshot_sha256": "stable"},
-            ),
-        )
-        return StageResponse(
-            data={
-                "outcome": "VERIFIED",
-                "summary": "The checks ran, with one remaining evidence gap.",
-                "checks": [
-                    {
-                        "claim": "Core tests pass",
-                        "verifiability": "VERIFIABLE",
-                        "result": "VERIFIED",
-                        "method": "artifact_inspection",
-                        "evidence_refs": [test_ref],
-                        "observed": "The core recipe exited 0.",
-                        "required": True,
-                    },
-                    {
-                        "claim": "The requested files establish the full business purpose",
-                        "verifiability": "PARTIALLY_VERIFIABLE",
-                        "result": "PARTIALLY_VERIFIED",
-                        "method": "read_only_api",
-                        "evidence_refs": [file_list_ref],
-                        "observed": "The files establish only part of the purpose.",
-                        "required": True,
-                    },
-                ],
-                "evidence_refs": [test_ref, file_list_ref],
-                "limitations": ["The business purpose is only partly evidenced."],
-            },
-            provider="fake-api",
-            model="model-reviewer",
-            evidence_refs=tuple(receipt.evidence_ref for receipt in receipts),
-            tool_receipts=receipts,
-        )
-
-    def repaired_verification(request):
-        repair_payload = json.loads(request.goal)
-        receipts = repair_payload["frozen_tool_receipts"]
-        assert {receipt["tool_name"] for receipt in receipts} == {
-            "workspace_inspect",
-            "verification_run",
-            "file_list",
-        }
-        assert request.context["repair_mode"] == "verification_report"
-        assert request.allow_tools is False
-        assert request.allow_side_effects is False
-        return {
-            "outcome": "PARTIALLY_VERIFIED",
-            "summary": "The core tests passed; the business purpose is partly evidenced.",
-            "checks": [
-                {
-                    "claim": "Core tests pass",
-                    "verifiability": "VERIFIABLE",
-                    "result": "VERIFIED",
-                    "method": "workspace_test",
-                    "evidence_refs": ["verification:test:success"],
-                    "observed": "The core recipe exited 0.",
-                    "required": True,
-                },
-                {
-                    "claim": "The requested files establish the full business purpose",
-                    "verifiability": "PARTIALLY_VERIFIABLE",
-                    "result": "PARTIALLY_VERIFIED",
-                    "method": "artifact_inspection",
-                    "evidence_refs": ["verification:file-list:success"],
-                    "observed": "The files establish only part of the purpose.",
-                    "required": True,
-                },
-            ],
-            "evidence_refs": [
-                "verification:test:success",
-                "verification:file-list:success",
-            ],
-            "limitations": ["The business purpose is only partly evidenced."],
-        }
-
-    scripts = _initial("COMPLEX_TASK")
-    scripts.update(
-        {
-            Stage.PLANNING: [{"plan": ["implement", "verify"]}],
-            Stage.EXECUTION: [
-                {"disposition": "COMPLETED", "summary": "Implementation completed."}
-            ],
-            Stage.VERIFICATION: [invalid_verification],
-            Stage.JSON_REPAIR: [repaired_verification],
-            Stage.REVIEW: [
-                {
-                    "status": "PASS",
-                    "reason": "The latest result satisfies the request.",
-                    "conditions": None,
-                }
-            ],
-            Stage.FINALISATION: [{"report": "Implementation completed."}],
-        }
-    )
-    provider = ScriptedProvider(scripts)
-    runtime = _runtime(tmp_path, provider)
-    original_review = runtime._review_and_remediate
-
-    async def verify_then_review(state, classification, execution, max_reviews):
-        nonlocal captured_finding
-        _response, captured_finding = await runtime._invoke_stage(
-            state,
-            Stage.VERIFICATION,
-            validate_verification_response,
-            allow_tools=True,
-            allow_side_effects=True,
-        )
-        return await original_review(
-            state,
-            classification,
-            execution,
-            max_reviews,
-        )
-
-    runtime._review_and_remediate = verify_then_review
-    result = await runtime.run_turn(
-        "Implement and verify the result",
-        "request-verification-frozen-report-repair",
-        effort=Effort.MAX,
-    )
-
-    verification_requests = [
-        request
-        for _profile, request in provider.requests
-        if request.stage is Stage.VERIFICATION
-    ]
-    repair_requests = [
-        request
-        for _profile, request in provider.requests
-        if request.stage is Stage.JSON_REPAIR
-    ]
-    audit_text = (tmp_path / "her-v2" / "audit.jsonl").read_text()
-
-    assert result.terminal_state is TerminalState.COMPLETED
-    assert captured_finding is not None
-    assert captured_finding.outcome is VerificationOutcome.PARTIALLY_VERIFIED
-    assert len(verification_requests) == 1
-    assert len(repair_requests) == 1
-    assert "SIDE_EFFECT_REPLAY_BLOCKED" not in audit_text
-    assert '"source_stage_replayed": false' in audit_text
-    assert '"repair_mode": "verification_report"' in audit_text
-
-
-@pytest.mark.asyncio
 async def test_stop_cancels_active_execution_and_records_stopped(tmp_path):
     execution_started = asyncio.Event()
 
@@ -4748,11 +4402,8 @@ async def test_steer_stops_old_turn_and_new_turn_gets_fresh_triage(tmp_path):
             {"message": "New answer."},
         ],
         Stage.TRIAGE: [
-            {
-                "classification": "COMPLEX_TASK",
-                "goal": "old",
-            },
-            {"classification": "DIRECT_RESPONSE", "goal": "new"},
+            _triage("COMPLEX_TASK", real_goal="old"),
+            _triage("DIRECT_RESPONSE", real_goal="new"),
         ],
         Stage.EXECUTION: [blocking_execution],
     }
@@ -5007,7 +4658,13 @@ async def test_habit_retrieval_error_fails_open_without_skip_audit(tmp_path):
     )
     assert result.terminal_state is TerminalState.COMPLETED
     assert broken.calls == 1
-    assert planning_request.context["habits"] == []
+    assert planning_request.context["relevant_habits"] == []
+    triage_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.stage is Stage.TRIAGE
+    )
+    assert triage_request.context["habit_catalogue"] == []
     audit_events = {
         json.loads(line)["event"]
         for line in (tmp_path / "her-v2" / "audit.jsonl")
@@ -5080,7 +4737,7 @@ async def test_audit_records_trace_or_explicit_unavailability_with_correlation(
     scripts[Stage.TRIAGE] = [
         StageResponse(
             text="",
-            data={"classification": "DIRECT_RESPONSE", "goal": "Hello"},
+            data=_triage("DIRECT_RESPONSE", real_goal="Hello"),
             reasoning_trace=None,
             provider="fake-api",
             model="model-triage",

@@ -15,10 +15,13 @@ _SCHEMAS = {
             "DIRECT_RESPONSE | SIMPLE_TASK | COMPLEX_TASK | "
             "HIGH_VOLUME_TASK | CONFIRMATION_REQUIRED"
         ),
-        "goal": (
-            "optional concise interpretation of the current request, or null when "
-            "unnecessary"
+        "real_goal": (
+            "concise resolved operational goal; null only when "
+            "CONFIRMATION_REQUIRED because the goal cannot be resolved reliably"
         ),
+        "relevant_habits": [
+            "exact unchanged entry selected from the supplied habit_catalogue"
+        ],
         "clarification": (
             "a concrete question required only for CONFIRMATION_REQUIRED; otherwise "
             "null"
@@ -108,43 +111,6 @@ _SCHEMAS = {
             "material conditions for CONDITIONAL_PASS; null for PASS or FAIL"
         ),
     },
-    Stage.VERIFICATION: {
-        "outcome": (
-            "VERIFIED | PARTIALLY_VERIFIED | FAILED | NOT_AI_VERIFIABLE | "
-            "UNAVAILABLE | INCONCLUSIVE"
-        ),
-        "summary": "comprehensive assurance result without changing Execution status",
-        "checks": [
-            {
-                "claim": "one concrete result claim or success criterion",
-                "verifiability": (
-                    "VERIFIABLE | PARTIALLY_VERIFIABLE | NOT_AI_VERIFIABLE | "
-                    "UNAVAILABLE"
-                ),
-                "result": (
-                    "VERIFIED | PARTIALLY_VERIFIED | FAILED | "
-                    "NOT_AI_VERIFIABLE | UNAVAILABLE | INCONCLUSIVE"
-                ),
-                "method": (
-                    "workspace_test | workspace_snapshot | workspace_status | "
-                    "workspace_diff | workspace_search | file_hash | "
-                    "artifact_inspection | process_health | read_only_api | "
-                    "visual_inspection"
-                ),
-                "evidence_refs": [
-                    "exact HASHI_EVIDENCE_RECEIPT values from this Verification invocation"
-                ],
-                "observed": "what the current evidence actually established",
-                "required": True,
-            }
-        ],
-        "evidence_refs": [],
-        "limitations": [],
-        "commentary": (
-            "optional concise neutral user-facing update based only on this "
-            "completed stage result; omit when no useful update exists"
-        ),
-    },
     Stage.MEDITATION: {"actions": []},
     Stage.DREAM: {"groups": []},
 }
@@ -156,7 +122,6 @@ _JSON_REPAIR_STAGES = frozenset(
         Stage.PLANNING,
         Stage.REPLANNING,
         Stage.REVIEW,
-        Stage.VERIFICATION,
     }
 )
 
@@ -237,13 +202,24 @@ def render_stage_prompt(request: StageRequest) -> str:
         # authoritative goal live in one isolated system prompt.
         return request.goal
     if request.stage is Stage.TRIAGE:
+        raw_catalogue = request.context.get("habit_catalogue")
+        habit_catalogue = (
+            [str(item) for item in raw_catalogue if str(item).strip()]
+            if isinstance(raw_catalogue, (list, tuple))
+            else []
+        )
         return render_prompt_asset(
             "system_triage",
             goal=request.goal,
-            schema=json.dumps(_SCHEMAS[Stage.TRIAGE], ensure_ascii=False, indent=2),
+            habit_catalogue=json.dumps(
+                habit_catalogue, ensure_ascii=False, indent=2
+            ),
+            schema_v2=json.dumps(
+                _SCHEMAS[Stage.TRIAGE], ensure_ascii=False, indent=2
+            ),
         )
     if request.stage is Stage.PLANNING:
-        raw_habits = request.context.get("habits")
+        raw_habits = request.context.get("relevant_habits")
         habits = (
             [str(item) for item in raw_habits if str(item).strip()]
             if isinstance(raw_habits, (list, tuple))
@@ -255,7 +231,7 @@ def render_stage_prompt(request: StageRequest) -> str:
             classification=(
                 request.classification.value if request.classification else ""
             ),
-            all_active_habits="\n\n".join(habits) if habits else "[]",
+            relevant_habits=json.dumps(habits, ensure_ascii=False, indent=2),
             available_execution_tools=json.dumps(
                 request.context.get("available_execution_tools") or [],
                 ensure_ascii=False,
@@ -289,6 +265,11 @@ def render_stage_prompt(request: StageRequest) -> str:
                 ensure_ascii=False,
                 indent=2,
             ),
+            relevant_habits=json.dumps(
+                request.context.get("relevant_habits") or [],
+                ensure_ascii=False,
+                indent=2,
+            ),
             available_execution_tools=json.dumps(
                 request.context.get("available_execution_tools") or [],
                 ensure_ascii=False,
@@ -306,86 +287,10 @@ def render_stage_prompt(request: StageRequest) -> str:
             # complete contract, plan, tools, Persona, and goal are installed
             # as one isolated system prompt by the provider adapter.
             return request.goal
-        active_plan = request.context.get("active_plan")
-        sub_agent_results = request.context.get("sub_agent_results")
-        active_plan_section = ""
-        if active_plan is not None:
-            active_plan_section = "\n\nHER v2 execution plan:\n" + json.dumps(
-                active_plan, ensure_ascii=False, indent=2
-            )
-        sub_agent_results_section = ""
-        if sub_agent_results:
-            sub_agent_results_section = (
-                "\n\nCompleted delegated execution inputs:\n"
-                + json.dumps(sub_agent_results, ensure_ascii=False, indent=2)
-            )
-        assignment_section = ""
-        if request.role.startswith("sub_agent:"):
-            raw_definition = request.context.get("assignment_definition")
-            definition = (
-                dict(raw_definition)
-                if isinstance(raw_definition, Mapping)
-                else {
-                    "id": request.context.get("assignment_id"),
-                    "task": request.context.get("assigned_task"),
-                    "profile": request.context.get("profile"),
-                    "tools": request.context.get("delegated_tools") or [],
-                    "attachment_ids": (
-                        request.context.get("authorized_attachment_ids") or []
-                    ),
-                    "allow_side_effects": request.allow_side_effects,
-                }
-            )
-            authority = request.context.get("authority")
-            envelope: dict[str, Any] = {
-                "plan_id": request.plan_id,
-                "immutable_classification": (
-                    request.classification.value if request.classification else None
-                ),
-                "assignment": definition,
-                "delegated_capabilities": {
-                    "tools": request.context.get("delegated_tools") or [],
-                    "attachment_ids": (
-                        request.context.get("authorized_attachment_ids") or []
-                    ),
-                    "attachment_manifest": (
-                        request.context.get("authorized_attachment_manifest") or []
-                    ),
-                    "allow_tools": request.allow_tools,
-                    "allow_side_effects": request.allow_side_effects,
-                },
-                "authority": (
-                    dict(authority)
-                    if isinstance(authority, Mapping)
-                    else {
-                        "scope": "bounded_execution_only",
-                        "may_replan": False,
-                        "may_contact_user": False,
-                        "may_finalise": False,
-                        "may_create_subagents": False,
-                    }
-                ),
-            }
-            continuation = request.context.get("replan_continuation")
-            if isinstance(continuation, Mapping) and continuation:
-                envelope["replan_continuation"] = dict(continuation)
-                envelope["continuation_rules"] = dict(
-                    request.context.get("continuation_rules")
-                    if isinstance(request.context.get("continuation_rules"), Mapping)
-                    else {}
-                )
-            assignment_section = (
-                "\n\nBounded assignment and authority envelope:\n"
-                + json.dumps(envelope, ensure_ascii=False, indent=2)
-            )
-        return render_prompt_asset(
-            "execution_request",
-            goal=request.goal,
-            active_plan_section=active_plan_section,
-            sub_agent_results_section=sub_agent_results_section,
-            assignment_section=assignment_section,
-            schema=json.dumps(_SCHEMAS[Stage.EXECUTION], ensure_ascii=False, indent=2),
-        )
+        # The complete bounded contract is installed from system_sub_agent.txt.
+        # Keep the user turn as data only so there is a single prompt document
+        # defining sub-agent behaviour.
+        return request.goal
     if request.stage is Stage.FINALISATION:
         # The complete Finalisation contract and all evidence are rendered in
         # the isolated system prompt.  The raw goal is the backend's user turn.
@@ -420,36 +325,10 @@ def render_stage_prompt(request: StageRequest) -> str:
             "classification, activate a plan, authorise side effects, mutate state, or "
             "write the final answer."
         )
-    elif request.stage is Stage.VERIFICATION:
-        reviewer_rule = (
-            "You are an independent assessor. You may call only the delegated tools. "
-            "verification_run is the sole mutating-capable tool and may run only a "
-            "configured recipe or direct argv validation command in the authoritative "
-            "current workspace; never perform remediation. It inherits HASHI's process "
-            "identity, filesystem access, environment, HOME, and network, and HASHI "
-            "automatically grows its timeout from cumulative Execution duration. Begin and "
-            "end every evidence-backed assessment with workspace_inspect "
-            "operation=snapshot. Cite only exact "
-            "HASHI_EVIDENCE_RECEIPT values returned during this invocation. A tool start "
-            "without a completed receipt is not evidence; a failed receipt can support "
-            "only FAILED or INCONCLUSIVE. If the before/after snapshot digests differ, "
-            "return INCONCLUSIVE. Never contact the user, change the goal or "
-            "classification, activate a plan, authorise any other side effect, or write "
-            "the final answer."
-        )
-    sub_agent_rule = (
-        "You are a bounded sub-agent. Execute only the assigned task. You may not change "
-        "the user goal, classification, or active plan; request Replanning; contact the "
-        "user; create sub-agents; or author a final user response. Return evidence to the "
-        "primary orchestrator only."
-        if request.role.startswith("sub_agent:")
-        else ""
-    )
     output_schema = _SCHEMAS[request.stage]
     return render_prompt_asset(
         "stage_request",
         reviewer_rule=reviewer_rule,
-        sub_agent_rule=sub_agent_rule,
         context=json.dumps(context, ensure_ascii=False, sort_keys=True),
         schema=json.dumps(output_schema, ensure_ascii=False, sort_keys=True),
     )
@@ -484,12 +363,80 @@ def render_internal_stage_system_prompt(request: StageRequest) -> str | None:
     """Render the tool/authority envelope for one internal HER v2 role."""
 
     if request.role.startswith("sub_agent:"):
-        return load_prompt_asset("system_sub_agent")
-    if (
-        request.stage is Stage.JSON_REPAIR
-        and request.context.get("repair_mode") == "verification_report"
-    ):
-        return load_prompt_asset("system_verification_report_repair")
+        raw_definition = request.context.get("assignment_definition")
+        definition = (
+            dict(raw_definition)
+            if isinstance(raw_definition, Mapping)
+            else {
+                "id": request.context.get("assignment_id"),
+                "task": request.context.get("assigned_task"),
+                "profile": request.context.get("profile"),
+                "tools": request.context.get("delegated_tools") or [],
+                "attachment_ids": (
+                    request.context.get("authorized_attachment_ids") or []
+                ),
+                "allow_side_effects": request.allow_side_effects,
+            }
+        )
+        authority = request.context.get("authority")
+        envelope: dict[str, Any] = {
+            "plan_id": request.plan_id,
+            "immutable_classification": (
+                request.classification.value if request.classification else None
+            ),
+            "assignment": definition,
+            "delegated_capabilities": {
+                "tools": request.context.get("delegated_tools") or [],
+                "attachment_ids": (
+                    request.context.get("authorized_attachment_ids") or []
+                ),
+                "attachment_manifest": (
+                    request.context.get("authorized_attachment_manifest") or []
+                ),
+                "allow_tools": request.allow_tools,
+                "allow_side_effects": request.allow_side_effects,
+            },
+            "authority": (
+                dict(authority)
+                if isinstance(authority, Mapping)
+                else {
+                    "scope": "bounded_execution_only",
+                    "may_replan": False,
+                    "may_contact_user": False,
+                    "may_finalise": False,
+                    "may_create_subagents": False,
+                }
+            ),
+        }
+        continuation = request.context.get("replan_continuation")
+        if isinstance(continuation, Mapping) and continuation:
+            envelope["replan_continuation"] = dict(continuation)
+            envelope["continuation_rules"] = dict(
+                request.context.get("continuation_rules")
+                if isinstance(request.context.get("continuation_rules"), Mapping)
+                else {}
+            )
+        return render_prompt_asset(
+            "system_sub_agent",
+            real_goal=str(request.context.get("real_goal") or request.goal),
+            relevant_habits=json.dumps(
+                request.context.get("relevant_habits") or [],
+                ensure_ascii=False,
+                indent=2,
+            ),
+            active_plan=json.dumps(
+                request.context.get("active_plan") or {},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            sub_agent_results=json.dumps(
+                request.context.get("sub_agent_results") or [],
+                ensure_ascii=False,
+                indent=2,
+            ),
+            assignment=json.dumps(envelope, ensure_ascii=False, indent=2),
+            schema=json.dumps(_SCHEMAS[Stage.EXECUTION], ensure_ascii=False, indent=2),
+        )
     if request.stage is Stage.DREAM and request.context.get("dream_role") == "report":
         return load_prompt_asset("system_dream_report")
     if request.stage in {
@@ -516,6 +463,7 @@ def _persona_guidance(*, guidance: str, display_name: str, usable: bool) -> str:
 def render_finalisation_system_prompt(
     *,
     goal: str,
+    relevant_habits: Sequence[str],
     draft_response: str,
     reviewer_findings: Mapping[str, Any] | None,
     completion_evidence: Mapping[str, Any],
@@ -528,6 +476,9 @@ def render_finalisation_system_prompt(
     return render_prompt_asset(
         "system_finalisation",
         goal=goal,
+        relevant_habits=json.dumps(
+            list(relevant_habits), ensure_ascii=False, indent=2
+        ),
         draft_response=(
             str(draft_response).strip() or "No execution draft response was produced."
         ),
@@ -610,6 +561,7 @@ def render_immediate_response_system_prompt(
 def render_execution_system_prompt(
     *,
     goal: str,
+    relevant_habits: Sequence[str],
     active_plan: Mapping[str, Any] | None,
     delegated_execution: Mapping[str, Any] | None,
     tool_catalogue: Sequence[Mapping[str, Any]],
@@ -623,6 +575,9 @@ def render_execution_system_prompt(
 
     return render_prompt_asset(
         "system_execution",
+        relevant_habits=json.dumps(
+            list(relevant_habits), ensure_ascii=False, indent=2
+        ),
         active_plan=(
             json.dumps(active_plan, ensure_ascii=False, indent=2)
             if active_plan is not None
@@ -650,6 +605,7 @@ def render_execution_system_prompt(
 def render_review_system_prompt(
     *,
     goal: str,
+    relevant_habits: Sequence[str],
     active_plan: Mapping[str, Any] | None,
     draft_response: str,
     available_review_tools: Sequence[Mapping[str, Any]],
@@ -658,6 +614,9 @@ def render_review_system_prompt(
 
     return render_prompt_asset(
         "system_review",
+        relevant_habits=json.dumps(
+            list(relevant_habits), ensure_ascii=False, indent=2
+        ),
         available_review_tools=(
             json.dumps(list(available_review_tools), ensure_ascii=False, indent=2)
             if available_review_tools

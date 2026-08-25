@@ -18,18 +18,7 @@ PROMPT_ASSET_ROOT = Path(__file__).with_name("prompt_assets")
 # prompt fails during import/hot reload instead of silently changing a model
 # invocation.
 PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
-    "execution_request": frozenset(
-        {
-            "active_plan_section",
-            "assignment_section",
-            "goal",
-            "schema",
-            "sub_agent_results_section",
-        }
-    ),
-    "stage_request": frozenset(
-        {"context", "reviewer_rule", "schema", "sub_agent_rule"}
-    ),
+    "stage_request": frozenset({"context", "reviewer_rule", "schema"}),
     "system_direct": frozenset(
         {
             "goal",
@@ -51,6 +40,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "persona_block_begin",
             "persona_block_end",
             "persona_guidance",
+            "relevant_habits",
             "tool_catalogue",
         }
     ),
@@ -62,6 +52,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "persona_block_begin",
             "persona_block_end",
             "persona_guidance",
+            "relevant_habits",
             "reviewer_findings",
         }
     ),
@@ -75,11 +66,11 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
     ),
     "system_planning": frozenset(
         {
-            "all_active_habits",
             "available_execution_tools",
             "available_sub_agent_profiles",
             "classification",
             "goal",
+            "relevant_habits",
             "schema",
         }
     ),
@@ -91,16 +82,31 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "classification",
             "goal",
             "plan_edit_history",
+            "relevant_habits",
             "schema",
             "workflow_state_and_evidence",
         }
     ),
     "system_review": frozenset(
-        {"active_plan", "available_review_tools", "draft_response", "goal"}
+        {
+            "active_plan",
+            "available_review_tools",
+            "draft_response",
+            "goal",
+            "relevant_habits",
+        }
     ),
-    "system_sub_agent": frozenset(),
-    "system_triage": frozenset({"goal", "schema"}),
-    "system_verification_report_repair": frozenset(),
+    "system_sub_agent": frozenset(
+        {
+            "active_plan",
+            "assignment",
+            "real_goal",
+            "relevant_habits",
+            "schema",
+            "sub_agent_results",
+        }
+    ),
+    "system_triage": frozenset({"goal", "habit_catalogue", "schema_v2"}),
 }
 
 

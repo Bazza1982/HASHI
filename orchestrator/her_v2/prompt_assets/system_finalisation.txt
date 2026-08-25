@@ -38,6 +38,14 @@ Original task and context:
 
 $goal
 
+Triage-selected relevant Habits:
+
+$relevant_habits
+
+Habits are advisory context only. Do not retrieve or reselect them, and never
+let them override the resolved goal, completed evidence, or current Review
+findings.
+
 Execution draft response, when available:
 
 $draft_response

@@ -148,7 +148,19 @@ Removing or replacing one optional capability must not break unrelated stages. I
 
 ### 3.4 Goal fidelity
 
-The active user's goal is the highest authority for a turn. Planning, execution, replanning, and review exist only to fulfil that goal.
+Triage derives `real_goal` from the current request and relevant conversation
+context according to the existing Triage prompt rules. `real_goal` is not the
+legacy raw `$goal`: it is the authoritative operational goal for the turn.
+After Triage validation, `state.goal` stores `real_goal`, and audit, permission,
+Planning, Execution, Replanning, Review, Finalisation, and every other
+downstream decision use that value. The raw request remains request evidence,
+not the runtime goal.
+
+The active `real_goal` is the highest authority for a turn. Planning,
+execution, replanning, and review exist only to fulfil that goal. This design
+does not add a separate rule that `real_goal` may not expand user authority;
+the existing Triage derivation rules remain authoritative and are not narrowed
+by a new post-hoc restriction.
 
 No stage may intentionally substitute a different objective. If intent is unclear or material authority is missing, Triage must classify the request as `CONFIRMATION_REQUIRED`. If execution later discovers information or authority that Triage could not have known was missing, Execution must ask the concrete question truthfully in its natural-language response without changing the recorded classification.
 
@@ -236,9 +248,10 @@ HER v2 keeps five boundaries distinct:
    typed `PackagedCommentary`, while clarification retains its typed required
    message identity and must be delivered.
 5. Direct and Primary Execution render their own natural-language user response
-   with the extracted Persona block. `zero` returns the sole Direct response;
-   `low`, `medium`, and ordinary `high` deliver the Primary Execution
-   response directly. `xhigh` and `max` expose it provisionally as a labelled
+   with the extracted Persona block. Direct (`zero`) returns the sole Direct
+   response; Fast path (`low`), Planned (`medium`), and ordinary Adaptive
+   (`high`) deliver the Primary Execution response directly. Reviewed (`xhigh`)
+   and Assured (`max`) expose it provisionally as a labelled
    `DRAFT RESPONSE`, then Review and Finalisation replace that
    exact placeholder. A pre-execution Triage clarification uses the shared
    Persona Commentary Agent and then returns to its required-message delivery
@@ -294,7 +307,8 @@ This immutability is intentional. Triage quality is improved through prompt refi
 There is one active plan version at a time.
 
 - Initial planning creates the first plan version.
-- Replanning creates a new plan version.
+- Replanning creates a new plan version only when `plan_changed=true`; an
+  unchanged progress calibration preserves the active plan version.
 - Earlier versions remain historical evidence in HASHI logs.
 - Only the Replanning stage may replace the active plan.
 - Sub-agents may not change or replace the plan.
@@ -366,6 +380,22 @@ Direct route. User interfaces show the descriptive names below.
 | Reviewed | `xhigh` | Adaptive behaviour plus one independent Review; a failed Review permits exactly one Primary-Agent remediation, whose latest draft proceeds directly to Finalisation without another Review |
 | Assured | `max` | Adaptive behaviour plus an unbounded Review/Replan/Execution loop against the latest draft until Review returns `PASS` or `CONDITIONAL_PASS` |
 
+### Execution-mode terminology convention
+
+The descriptive execution-mode name and its canonical wire value are two names
+for the same policy, not separate settings. Normative prose uses both together:
+Direct (`zero`), Fast path (`low`), Planned (`medium`), Adaptive (`high`),
+Reviewed (`xhigh`), and Assured (`max`). A bare wire value is reserved for
+schemas, configuration examples, persistence, commands, and code-level tests
+where the serialized value itself is the subject. A bare descriptive name is
+reserved for user-interface copy where exposing the wire value would be noise.
+
+Terms such as "medium-or-above", "high-or-above", and "xhigh path" are legacy
+shorthand. In product behaviour and acceptance criteria they mean,
+respectively, Planned (`medium`) through Assured (`max`), Adaptive (`high`)
+through Assured (`max`), and Reviewed (`xhigh`). They must not be interpreted as
+task risk, classification, model capability, or provider reasoning.
+
 HER v2 does not impose a tool-call round or turn ceiling on tool-enabled
 Execution or delegated sub-agent invocations. Once tools are authorised for a
 stage, the provider loop continues until the model completes, the invocation
@@ -375,9 +405,10 @@ HER v2 termination condition. Effort never changes this rule.
 
 Execution mode determines the maximum orchestration path available. Triage classifications `DIRECT_RESPONSE` and `CONFIRMATION_REQUIRED` terminate through their dedicated paths without unnecessary planning, regardless of the selected mode.
 
-`zero` is a distinct pre-Triage route, not a simpler classification and not an
-alias for `low`. Task difficulty never upgrades it. The Direct agent receives
-the full Primary Execution Tool Registry, including side-effect-capable tools,
+Direct (`zero`) is a distinct pre-Triage route, not a simpler classification
+and not an alias for Fast path (`low`). Task difficulty never upgrades it. The
+Direct agent receives the full Primary Execution Tool Registry, including
+side-effect-capable tools,
 while remaining bound by the user's actual authority and scope. It inspects and
 checks its own work as useful, may use relevant Habits and Skills, and returns
 natural language directly. A successful provider return always closes as
@@ -423,7 +454,8 @@ Non-HER backends retain their established `/model` behaviour.
 
 ### 5.2 Scheduled-job execution policy
 
-Cron and heartbeat prompt work defaults to HER v2 `low` effort. These jobs
+Cron and heartbeat prompt work defaults to HER v2 Fast path (`low`) execution
+mode. These jobs
 already persist their execution specification, so repeating formal Planning or
 independent Review on every routine occurrence is unnecessary by default.
 
@@ -446,9 +478,9 @@ must not be silently coerced to `low` or allowed to change global Agent state.
 
 ## 6. Stage 1: Initial Processing
 
-Initial processing applies to every non-zero HER turn. `zero` completes through
-the single Direct route before this stage. For all other efforts, two processes
-begin promptly and independently.
+Initial processing applies to every non-Direct HER turn. Direct (`zero`)
+completes through the single Direct route before this stage. For all other
+execution modes, two processes begin promptly and independently.
 
 ### 6.1 Immediate user response
 
@@ -479,7 +511,17 @@ The Immediate Response is a real user-facing message, not merely an internal eve
 
 ### 6.2 Triage
 
-Triage uses a lightweight model with a high provider reasoning setting. It produces exactly one validated classification:
+Before Triage, Runtime retrieves the complete candidate Habit catalogue and
+renders it as `$habit_catalogue`. This restores the earlier Habit retrieval
+boundary: Triage derives `real_goal` and selects `relevant_habits` from that
+complete catalogue. Runtime must identify and remove any override or broken
+connection that bypasses this retrieval rather than inventing a replacement
+selection design.
+
+Triage uses schema v2. Its request and validated result explicitly carry
+`real_goal`, `habit_catalogue`, and `relevant_habits`; an interface that accepts
+only the legacy `$goal` is invalid. Triage also produces exactly one validated
+classification:
 
 #### `DIRECT_RESPONSE`
 
@@ -537,12 +579,16 @@ The Immediate Response and Triage may finish in either order. HER must enforce t
 
 ## 7. Stage 2: Planning
 
-Planning is mandatory for `medium`, `high`, `xhigh`, and `max` work turns. It is not used for `DIRECT_RESPONSE`, `CONFIRMATION_REQUIRED`, or ordinary `low` execution.
+Planning is mandatory for Planned (`medium`), Adaptive (`high`), Reviewed
+(`xhigh`), and Assured (`max`) work turns. It is not used for
+`DIRECT_RESPONSE`, `CONFIRMATION_REQUIRED`, or ordinary Fast path (`low`)
+execution.
 
 Planning uses a premium model with a high provider reasoning setting and considers:
 
 - the immutable Triage result;
-- the authoritative user goal;
+- the authoritative `real_goal`;
+- the Triage-selected `relevant_habits`;
 - scope and constraints;
 - success criteria;
 - current conversation context;
@@ -570,11 +616,14 @@ Planning failures are technical failures. Valid examples include:
 
 ## 8. Stage 3: Execution
 
-Execution follows the active plan when a formal plan exists. Low-effort execution follows a minimal execution directive derived from the immutable Triage result.
+Execution follows the active plan when a formal plan exists. Fast path (`low`)
+execution follows a minimal execution directive derived from the immutable
+Triage result.
 
 Primary Execution uses one dedicated, dynamically rendered HER v2 system
 prompt. It receives the complete request context, optional active plan, the
-actual narrowed tool catalogue, and only the explicit Persona guidance. It
+authoritative `real_goal`, Triage-selected `relevant_habits`, actual narrowed
+tool catalogue, and only the explicit Persona guidance. It
 performs the work and returns a non-empty natural-language user response. It
 must distinguish completed, incomplete, failed, blocked, and unverified work
 truthfully, but it does not return a machine disposition or JSON envelope.
@@ -607,6 +656,13 @@ through the configured execution-mode assurance policy.
 - The orchestrator owns task decomposition, assignment, monitoring, result aggregation, and compliance with the active plan.
 - Sub-agents may execute and return evidence but may not replan or alter the goal.
 
+Every bounded sub-agent receives `real_goal` and `relevant_habits` in its
+handoff. Its prompt contract is defined by the single asset
+`system_sub_agent.txt`. That asset owns the bounded assignment, authority,
+goal, plan, relevant Habits, prior delegated results, and output schema; no
+second sub-agent prompt asset, catalogue entry, loader, renderer, or call-site
+wiring exists.
+
 ### 8.4 Execution-discovered user input
 
 When Execution discovers missing user input, its natural-language response must
@@ -638,9 +694,11 @@ preserved, and the 11th action cannot start first. Crossing 300 seconds never
 cancels an active tool or provider operation. A completion candidate cannot
 bypass a Replan that became due before that safe boundary.
 
-Each Replanning call performs the three-question calibration in section 9,
-activates a new plan version even when the plan content remains unchanged, and
-publishes exactly one Persona-rendered commentary with a stable checkpoint ID.
+Each Replanning call performs the three-question calibration in section 9.
+A materially changed plan activates a new plan version; an unchanged progress
+calibration preserves the active version and its in-flight work bindings. Every
+call publishes exactly one Persona-rendered commentary with a stable checkpoint
+ID.
 If completion is below 100%, HER returns to `EXECUTING`, starts a fresh
 10-result/300-second window, and continues from current evidence without
 replaying completed side effects. If completion is 100%, HER stops adding work
@@ -659,8 +717,9 @@ detailed contract is the
 
 ## 9. Stage 4: Replanning
 
-Replanning is available only for `high`, `xhigh`, and `max`. Eligibility is an
-effort policy, not a second classification or risk gate. Once Execution has
+Replanning is available only for Adaptive (`high`), Reviewed (`xhigh`), and
+Assured (`max`). Eligibility is an execution-mode policy, not a second
+classification or risk gate. Once Execution has
 started, every 10-result/300-second threshold unconditionally invokes this
 stage at the next safe boundary. A `SIMPLE_TASK` remains immutably classified
 as simple while Replanning may adjust its approach.
@@ -675,9 +734,9 @@ Every compulsory Replanning call answers and validates three questions:
    Finalisation. Never under-do, over-do, or perform work outside authority.
 2. **Is the current plan still suitable?** Compare the active plan with recent
    results, failures, constraints, and changed conditions. Return the complete
-   plan, `plan_changed`, and a concrete `change_reason` only when changed. Even
-   an unchanged calibration activates a new plan version. The immutable user
-   goal remains authoritative.
+   plan, `plan_changed`, and a concrete `change_reason` only when changed. A
+   changed plan activates a new version; an unchanged calibration preserves the
+   active version. The immutable user goal remains authoritative.
 3. **What should the user be told now?** Return a concise commentary containing
    the completion percentage, whether the plan changed, why when it changed,
    and the next step. Persona packaging must preserve protected facts; model or
@@ -711,15 +770,16 @@ Habits contain accumulated operational experience such as:
 - preferred approaches;
 - known pitfalls.
 
-Habits are advisory inputs to initial Planning. They are never user intent, execution evidence, or authority.
+Habits are advisory inputs selected by Triage. They are never user intent,
+execution evidence, or authority.
 
-Habit loading is enabled by the single Habit–Meditation switch. Initial
-Planning receives every valid active Habit and decides semantically which, if
-any, apply to the complete authoritative goal and supplied context.
-The active Habit bodies may be disclosed to initial Planning only; Execution,
-Replanning, Review, and Finalisation do not receive or re-read them. Because
-`low` effort omits Planning, it omits Habit loading while retaining eligible
-post-execution Meditation.
+Habit loading is enabled by the single Habit–Meditation switch. Before Triage,
+Runtime retrieves the complete valid candidate catalogue as
+`habit_catalogue`; Triage selects `relevant_habits` against `real_goal`.
+`real_goal` and the selected `relevant_habits` then remain explicit in the
+prompts, runtime state, and handoffs for Planning, Execution, Replanning,
+Review, and Finalisation. Downstream stages do not redo catalogue retrieval or
+selection. This also applies to Fast path (`low`) when it bypasses Planning.
 
 When the capability is disabled, or the request is marked
 `habit_learning_eligible=false` or ephemeral, the runtime does not read the
@@ -773,7 +833,8 @@ catalogue fingerprint check, journal, and atomic commit boundary.
 
 ## 11. Stage 5: Review and Remediation
 
-Independent Review applies to `xhigh` and `max` after execution has produced candidate deliverables.
+Independent Review applies to Reviewed (`xhigh`) and Assured (`max`) after
+Execution has produced candidate deliverables.
 
 The reviewer uses a premium model with the maximum appropriate provider
 reasoning setting and an independent reviewer role. Review independence is
@@ -784,6 +845,8 @@ inspection and validation, but cannot modify or remediate the work.
 The reviewer receives:
 
 - the original request;
+- the authoritative `real_goal`;
+- the Triage-selected `relevant_habits`;
 - the active plan and its success criteria when one exists;
 - the natural-language `draft_response` and resulting deliverables;
 - the exact Registry-approved Review tool catalogue.
@@ -839,6 +902,13 @@ own tool set. Its delegated catalogue may include:
   They inherit the HASHI process identity, filesystem access, environment,
   `HOME`, and network access. `argv` is executed without an implicit shell.
 
+All former Verification prompt assets are deleted. Runtime must not catalogue,
+load, render, assemble, repair, or invoke a Verification prompt. All call sites,
+schemas, tests, configuration, and documentation that imply such prompt wiring
+must be removed or migrated to the Review contract above; deleting only the
+files is insufficient. The validation tool name `verification_run` does not
+denote a Verification model stage or prompt.
+
 Runtime records cumulative wall-clock time across all authoritative Execution
 attempts, including high-volume sub-agents and remediation. The default
 effective timeout for a Review `verification_run` call is:
@@ -860,10 +930,12 @@ verification alone is not a `FAIL`.
 
 ## 13. Stage 6: Finalisation and Reporting
 
-Finalisation applies to `xhigh` and `max`, plus the exceptional `high` boundary
+Finalisation applies to Reviewed (`xhigh`) and Assured (`max`), plus the
+exceptional Adaptive (`high`) boundary
 where compulsory Replanning proves 100% completion before Execution has
-produced a natural-language response. It does not run for ordinary `low`,
-`medium`, or `high`; those modes deliver Primary Execution directly.
+produced a natural-language response. It does not run for ordinary Fast path
+(`low`), Planned (`medium`), or Adaptive (`high`); those modes deliver Primary
+Execution directly.
 
 ### 13.1 Exit assessment
 
@@ -876,6 +948,7 @@ response exists.
 Finalisation considers:
 
 - the current request and its complete supplied context;
+- the authoritative `real_goal` and Triage-selected `relevant_habits`;
 - the complete raw Execution output;
 - the natural-language `draft_response`, or the exceptional deterministic
   completion record when applicable;
@@ -923,7 +996,8 @@ a concise user-facing validation note and audits the append. It does not revive
 an xhigh pre-repair `FAIL` after the permitted remediation produced a newer
 draft, nor a `FAIL` whose completion question Replanning resolved at 100%.
 
-For `xhigh` and `max`, Runtime first sends `DRAFT RESPONSE` plus the exact
+For Reviewed (`xhigh`) and Assured (`max`), Runtime first sends `DRAFT RESPONSE`
+plus the exact
 Primary Execution text through the user Commentary lane only when transport
 proves that exact message can later be edited. After an xhigh Review failure,
 the one permitted repair Execution replaces the internal draft used by
@@ -1392,9 +1466,9 @@ The migration sequence is:
 1. freeze this specification and canonical state-transition tests;
 2. implement lifecycle types, Ledger, and transition validation without model calls;
 3. implement Provider Profile and stage interfaces;
-4. deliver `low` Direct Response and Simple Task paths;
-5. add `medium` Planning;
-6. add `high` Replanning;
+4. deliver Fast path (`low`) Direct Response and Simple Task paths;
+5. add Planned (`medium`) Planning;
+6. add Adaptive (`high`) Replanning;
 7. add Reviewed (`xhigh`) one-round Review remediation and Assured (`max`)
    unbounded Review/remediation;
 8. integrate sub-agents;
@@ -1416,27 +1490,34 @@ HER v2 is ready for production rollout only when:
 - a recorded Triage classification cannot be mutated within the turn;
 - Direct Response produces exactly one user-facing response;
 - `/steer` terminates the old turn and starts a separately classified new turn;
-- zero, low, medium, high, xhigh, and max policies follow the required stage matrix;
-- zero performs exactly one Direct call on Quick with default provider reasoning
+- Direct (`zero`), Fast path (`low`), Planned (`medium`), Adaptive (`high`),
+  Reviewed (`xhigh`), and Assured (`max`) policies follow the required stage matrix;
+- Direct (`zero`) performs exactly one Direct call on Quick with default
+  provider reasoning
   `high`, never auto-upgrades, exposes full Primary Execution tool authority and
   existing attachment fallback, invokes none of the ordinary HER stages, and
   records every successful natural-language return as completed;
-- high, xhigh, and max unconditionally enter Replanning at each inclusive
-  10-result or 300-second safe boundary after Execution begins, while low and
-  medium never install the cadence;
+- Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) unconditionally
+  enter Replanning at each inclusive 10-result or 300-second safe boundary
+  after Execution begins, while Fast path (`low`) and Planned (`medium`) never
+  install the cadence;
 - every compulsory Replan validates completion, plan suitability/change, and
-  mandatory commentary fields; activates a new plan version; delivers exactly
-  one Persona-rendered or deterministic fallback update; and resumes or stops
-  additional work according to whether completion is below or equal to 100%;
+  mandatory commentary fields; activates a new plan version only when the plan
+  materially changes; preserves the active version when unchanged; delivers
+  exactly one Persona-rendered or deterministic fallback update; and resumes or
+  stops additional work according to whether completion is below or equal to
+  100%;
 - no risk label, checkpoint decision, Replan count, time/token/turn/loop limit,
   provider option, or test fixture can suppress a due compulsory Replan or cap
   the whole workflow;
-- cron and heartbeat prompt work defaults to request-local `low` effort across
+- cron and heartbeat prompt work defaults to request-local Fast path (`low`)
+  execution mode across
   scheduled, manual, and recovery triggers; valid job overrides win without
   changing provider reasoning or leaking into later ordinary turns;
 - Replanning and Review loops cannot violate lifecycle order;
-- xhigh performs no more than one Review-driven remediation round before
-  Finalisation, while max repeats Review/Replan/Execution until `PASS` or
+- Reviewed (`xhigh`) performs no more than one Review-driven remediation round
+  before Finalisation, while Assured (`max`) repeats Review/Replan/Execution
+  until `PASS` or
   `CONDITIONAL_PASS` without a fixed round ceiling;
 - Review may run configured validation recipes or direct argv checks in the
   authoritative workspace with inherited execution authority; its effective
@@ -1480,7 +1561,8 @@ HER v2 is ready for production rollout only when:
 
 The following decisions are authoritative for HER v2:
 
-1. User intent is the highest authority for the active turn.
+1. Triage-derived `real_goal`, stored as `state.goal`, is the authoritative
+   operational expression of user intent for the active turn.
 2. Triage is authoritative and immutable for that turn.
 3. Planning and Replanning may not change classification or goal.
 4. `/steer` stops the old turn and starts a newly triaged turn with new instructions.
@@ -1498,8 +1580,12 @@ The following decisions are authoritative for HER v2:
 10. The Ledger is minimal operational state; HASHI logs are audit truth.
 11. All available reasoning traces must be logged.
 12. Execution evidence outweighs Habits.
-13. Replanning does not consult Habits again.
-14. Every high-or-above 10-result/300-second boundary forces Replanning; the
+13. Runtime retrieves the complete Habit catalogue before Triage; Triage
+    selects `relevant_habits` against `real_goal`, and both values propagate
+    through Planning, Execution, Replanning, Review, and Finalisation without
+    downstream catalogue retrieval or reselection.
+14. Every Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`)
+    10-result/300-second boundary forces Replanning; the
     detector has no `CONTINUE`, ask, or halt decision.
 15. Compulsory Replanning commentary is mandatory and exactly once. Missing or
     semantically damaged model/Persona prose uses the existing Agent
@@ -1519,12 +1605,18 @@ The following decisions are authoritative for HER v2:
 23. Review reports only what supplied context or its own independent checks can
     establish; lack of objective verification alone may justify
     `CONDITIONAL_PASS` but not `FAIL`.
-24. Review never rewrites the authorised goal or truthful Execution record;
+24. Triage uses schema v2 carrying `real_goal`, `habit_catalogue`, and
+    `relevant_habits`; the legacy goal-only interface is invalid.
+25. Bounded sub-agents use only `system_sub_agent.txt`; no second sub-agent
+    prompt asset or wiring exists.
+26. No Verification prompt asset or runtime prompt wiring exists; independent
+    Review owns validation.
+27. Review never rewrites the authorised goal or truthful Execution record;
     Finalisation preserves the Review status, reasons, and conditions.
-25. Runtime deterministically discloses material conditional, unavailable,
+28. Runtime deterministically discloses material conditional, unavailable,
     inconclusive, or unresolved Review state when Finalisation omits it, without
     misreporting a repaired or Replanning-resolved prior `FAIL` as current.
-26. Auto Compact is HASHI-owned, tool-free, atomically reversible capacity
+29. Auto Compact is HASHI-owned, tool-free, atomically reversible capacity
     maintenance; its dedicated Tier 2/Tier 3 call watchdog never becomes an
     ordinary HER stage, provider, tool-loop, or execution deadline.
 

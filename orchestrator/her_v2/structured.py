@@ -15,15 +15,9 @@ from .models import (
     ReplanningOutcome,
     ReviewFinding,
     ReviewOutcome,
-    Stage,
     StageResponse,
-    ToolEvidenceReceipt,
     TriageClassification,
     TriageDecision,
-    Verifiability,
-    VerificationCheck,
-    VerificationFinding,
-    VerificationOutcome,
 )
 
 ParsedT = TypeVar("ParsedT")
@@ -72,9 +66,10 @@ def _mapping_key(value: Mapping[str, Any]) -> str:
 
 def _semantic_key(value: Any) -> str:
     if isinstance(value, TriageDecision):
-        # Goal interpretation is audit evidence, not turn authority.
         value = {
             "classification": value.classification.value,
+            "real_goal": value.real_goal,
+            "relevant_habits": value.relevant_habits,
             "clarification": value.clarification,
         }
     elif isinstance(value, ReplanningOutcome):
@@ -421,24 +416,27 @@ def parse_direct_message(response: StageResponse) -> str:
 
 @_stage_parser()
 def parse_triage(data: Mapping[str, Any]) -> TriageDecision:
+    if "real_goal" not in data or "relevant_habits" not in data:
+        raise StructuredOutputError(
+            "Triage schema v2 requires real_goal and relevant_habits"
+        )
     classification = _enum_value(
         TriageClassification,
-        data.get("classification") or data.get("task_type") or data.get("route"),
-        aliases={
-            "CHAT": "DIRECT_RESPONSE",
-            "DIRECT": "DIRECT_RESPONSE",
-            "DIRECT_ANSWER": "DIRECT_RESPONSE",
-            "SIMPLE": "SIMPLE_TASK",
-            "COMPLEX": "COMPLEX_TASK",
-            "HIGH_VOLUME": "HIGH_VOLUME_TASK",
-            "CONFIRM": "CONFIRMATION_REQUIRED",
-            "NEEDS_CONFIRMATION": "CONFIRMATION_REQUIRED",
-        },
+        data.get("classification"),
     )
-    # This interpretation is useful audit evidence, but the original user
-    # request remains the sole authoritative goal throughout the turn.
-    goal = _text_value(data.get("goal"), data.get("interpreted_goal"))
-    clarification = _text_value(data.get("clarification"), data.get("question"))
+    real_goal = _text_value(data.get("real_goal"))
+    raw_relevant_habits = data.get("relevant_habits")
+    if not isinstance(raw_relevant_habits, list) or any(
+        not isinstance(item, str) or not item.strip()
+        for item in raw_relevant_habits
+    ):
+        raise StructuredOutputError(
+            "Triage relevant_habits must be a list of non-empty strings"
+        )
+    relevant_habits = tuple(item.strip() for item in raw_relevant_habits)
+    if len(set(relevant_habits)) != len(relevant_habits):
+        raise StructuredOutputError("Triage relevant_habits must not contain duplicates")
+    clarification = _text_value(data.get("clarification"))
     if (
         classification is TriageClassification.CONFIRMATION_REQUIRED
         and not clarification
@@ -446,7 +444,16 @@ def parse_triage(data: Mapping[str, Any]) -> TriageDecision:
         raise StructuredOutputError(
             "CONFIRMATION_REQUIRED requires a clarification question"
         )
-    return TriageDecision(classification, goal, clarification)
+    if classification is TriageClassification.CONFIRMATION_REQUIRED:
+        if relevant_habits:
+            raise StructuredOutputError(
+                "CONFIRMATION_REQUIRED must not speculate about relevant Habits"
+            )
+    elif not real_goal:
+        raise StructuredOutputError(
+            "Triage schema v2 requires a non-empty real_goal for resolved requests"
+        )
+    return TriageDecision(classification, real_goal, relevant_habits, clarification)
 
 
 def _validated_delegation_plan_fields(
@@ -819,175 +826,6 @@ def parse_review(data: Mapping[str, Any]) -> ReviewFinding:
     return ReviewFinding(outcome, summary, findings, evidence)
 
 
-def _strict_bool(raw: Any, *, field: str, default: bool) -> bool:
-    if raw is None:
-        return default
-    if not isinstance(raw, bool):
-        raise StructuredOutputError(f"{field} must be a boolean")
-    return raw
-
-
-def _parse_verification_check(raw: Any, *, index: int) -> VerificationCheck:
-    if not isinstance(raw, Mapping):
-        raise StructuredOutputError(f"checks[{index}] must be an object")
-    claim = _text_value(raw.get("claim"))
-    if not claim:
-        raise StructuredOutputError(f"checks[{index}] requires a claim")
-    verifiability = _enum_value(
-        Verifiability,
-        raw.get("verifiability"),
-        aliases={
-            "PARTIAL": "PARTIALLY_VERIFIABLE",
-            "NOT_VERIFIABLE": "NOT_AI_VERIFIABLE",
-            "BLOCKED": "UNAVAILABLE",
-        },
-    )
-    result = _enum_value(
-        VerificationOutcome,
-        raw.get("result") or raw.get("status"),
-        aliases={
-            "PASS": "VERIFIED",
-            "PARTIAL": "PARTIALLY_VERIFIED",
-            "FAIL": "FAILED",
-            "BLOCKED": "UNAVAILABLE",
-            "UNKNOWN": "INCONCLUSIVE",
-        },
-    )
-    method = _text_value(raw.get("method"))
-    if not method:
-        raise StructuredOutputError(f"checks[{index}] requires a method")
-    evidence_refs = _string_items(
-        raw.get("evidence_refs"), field=f"checks[{index}].evidence_refs"
-    )
-    observed = _text_value(raw.get("observed"))
-    return VerificationCheck(
-        claim=claim,
-        verifiability=verifiability,
-        result=result,
-        method=method,
-        evidence_refs=evidence_refs,
-        observed=observed,
-        required=_strict_bool(
-            raw.get("required"), field=f"checks[{index}].required", default=True
-        ),
-    )
-
-
-@_stage_parser()
-def parse_verification(data: Mapping[str, Any]) -> VerificationFinding:
-    outcome = _enum_value(
-        VerificationOutcome,
-        data.get("outcome") or data.get("status"),
-        aliases={
-            "PASS": "VERIFIED",
-            "PARTIAL": "PARTIALLY_VERIFIED",
-            "FAIL": "FAILED",
-            "BLOCKED": "UNAVAILABLE",
-            "UNKNOWN": "INCONCLUSIVE",
-        },
-    )
-    summary = _text_value(data.get("summary"), data.get("reason"))
-    if not summary:
-        raise StructuredOutputError("Verification requires a summary")
-    raw_checks = data.get("checks")
-    if not isinstance(raw_checks, list) or not raw_checks:
-        raise StructuredOutputError("Verification requires a non-empty checks list")
-    checks = tuple(
-        _parse_verification_check(item, index=index)
-        for index, item in enumerate(raw_checks)
-    )
-    evidence_refs = _string_items(data.get("evidence_refs"), field="evidence_refs")
-    limitations = _string_items(data.get("limitations"), field="limitations")
-    return VerificationFinding(
-        outcome=outcome,
-        summary=summary,
-        checks=checks,
-        evidence_refs=evidence_refs,
-        limitations=limitations,
-    )
-
-
-def _receipt_index(
-    response: StageResponse, *, expected_stage: Stage
-) -> dict[str, ToolEvidenceReceipt]:
-    receipts = tuple(response.tool_receipts)
-    if any(receipt.stage is not expected_stage for receipt in receipts):
-        raise StructuredOutputError(
-            f"{expected_stage.value} received evidence from another stage"
-        )
-    if any(receipt.attempt != response.provider_attempt for receipt in receipts):
-        raise StructuredOutputError(
-            f"{expected_stage.value} received evidence from another provider attempt"
-        )
-    invocations = {receipt.invocation_id for receipt in receipts}
-    if len(invocations) > 1:
-        raise StructuredOutputError(
-            f"{expected_stage.value} mixed evidence from multiple invocations"
-        )
-    result = {receipt.evidence_ref: receipt for receipt in receipts}
-    if len(result) != len(receipts):
-        raise StructuredOutputError("tool evidence references must be unique")
-    return result
-
-
-def _validated_receipts(
-    response: StageResponse,
-    refs: tuple[str, ...],
-    *,
-    field: str,
-    expected_stage: Stage,
-) -> tuple[ToolEvidenceReceipt, ...]:
-    known = _receipt_index(response, expected_stage=expected_stage)
-    if len(set(refs)) != len(refs):
-        raise StructuredOutputError(f"{field} contains duplicate tool evidence")
-    unknown = [ref for ref in refs if ref not in known]
-    if unknown:
-        raise StructuredOutputError(
-            f"{field} references unknown or stale tool evidence: {', '.join(unknown)}"
-        )
-    receipts = tuple(known[ref] for ref in refs)
-    if any(not receipt.completed for receipt in receipts):
-        raise StructuredOutputError(f"{field} cites a tool call that did not complete")
-    return receipts
-
-
-def _snapshot_receipts(
-    response: StageResponse,
-) -> tuple[ToolEvidenceReceipt, ToolEvidenceReceipt] | None:
-    receipts = tuple(response.tool_receipts)
-    if len(receipts) < 2:
-        return None
-    first, last = receipts[0], receipts[-1]
-    if (
-        first.tool_name != "workspace_inspect"
-        or last.tool_name != "workspace_inspect"
-        or first.details.get("operation") != "snapshot"
-        or last.details.get("operation") != "snapshot"
-        or not first.successful
-        or not last.successful
-    ):
-        return None
-    return first, last
-
-
-def _require_stable_snapshot(response: StageResponse) -> None:
-    pair = _snapshot_receipts(response)
-    if pair is None:
-        raise StructuredOutputError(
-            "evidence-backed assessment must begin and end with successful "
-            "workspace_inspect snapshot calls"
-        )
-    before, after = pair
-    before_digest = str(before.details.get("snapshot_sha256") or "")
-    after_digest = str(after.details.get("snapshot_sha256") or "")
-    if not before_digest or not after_digest:
-        raise StructuredOutputError("workspace snapshot receipts require digests")
-    if before_digest != after_digest:
-        raise StructuredOutputError(
-            "the reviewed workspace drifted during assessment; outcome must be INCONCLUSIVE"
-        )
-
-
 def validate_review_response(response: StageResponse) -> ReviewFinding:
     """Validate the three-state Review decision contract.
 
@@ -998,197 +836,6 @@ def validate_review_response(response: StageResponse) -> ReviewFinding:
 
     finding = parse_review(response)
     assert isinstance(finding, ReviewFinding)
-    return finding
-
-
-_METHOD_TOOLS: Mapping[str, frozenset[str]] = {
-    "workspace_test": frozenset({"verification_run"}),
-    "workspace_snapshot": frozenset({"workspace_inspect"}),
-    "workspace_status": frozenset({"workspace_inspect"}),
-    "workspace_diff": frozenset({"workspace_inspect"}),
-    "workspace_search": frozenset({"workspace_inspect"}),
-    "file_hash": frozenset({"workspace_inspect"}),
-    "artifact_inspection": frozenset(
-        {"workspace_inspect", "file_read", "file_list", "media_read"}
-    ),
-    "process_health": frozenset({"process_list"}),
-    "read_only_api": frozenset({"web_fetch", "hashi_scheduler_status"}),
-    "visual_inspection": frozenset(
-        {"media_read", "vision_inspect", "browser_screenshot", "desktop_screenshot"}
-    ),
-}
-
-
-def _successful_workspace_test_receipt(receipt: ToolEvidenceReceipt) -> bool:
-    details = receipt.details
-    timeout_policy = details.get("timeout_policy")
-    workspace_access = details.get("workspace_access")
-    if not isinstance(timeout_policy, Mapping) or not isinstance(
-        workspace_access, Mapping
-    ):
-        return False
-    try:
-        exit_code = int(details.get("exit_code", 1))
-        effective_timeout_s = float(timeout_policy.get("effective_timeout_s", 0))
-        execution_floor_s = float(timeout_policy.get("execution_floor_s", 0))
-        receipt_timeout_s = float(details.get("timeout_s", 0))
-    except (TypeError, ValueError):
-        return False
-    return bool(
-        receipt.tool_name == "verification_run"
-        and details.get("operation") == "run"
-        and exit_code == 0
-        and details.get("execution_scope") == "workspace"
-        and details.get("workspace_copied") is False
-        and details.get("process_isolated") is False
-        and details.get("process_authority") == "inherited"
-        and details.get("identity_policy") == "inherited"
-        and details.get("filesystem_policy") == "inherited"
-        and details.get("environment_policy") == "inherited"
-        and details.get("network_policy") == "inherited"
-        and details.get("home_policy") == "inherited"
-        and workspace_access.get("read") is True
-        and workspace_access.get("write") is True
-        and workspace_access.get("execute") is True
-        and effective_timeout_s > 0
-        and receipt_timeout_s == effective_timeout_s
-        and effective_timeout_s >= execution_floor_s
-    )
-
-
-def _validate_verification_check(
-    response: StageResponse,
-    check: VerificationCheck,
-) -> None:
-    receipts = _validated_receipts(
-        response,
-        check.evidence_refs,
-        field=f"Verification evidence for {check.claim!r}",
-        expected_stage=Stage.VERIFICATION,
-    )
-    allowed_tools = _METHOD_TOOLS.get(check.method)
-    if allowed_tools is None:
-        raise StructuredOutputError(
-            f"unsupported verification method: {check.method!r}"
-        )
-    if check.result in {
-        VerificationOutcome.VERIFIED,
-        VerificationOutcome.PARTIALLY_VERIFIED,
-    }:
-        if check.verifiability not in {
-            Verifiability.VERIFIABLE,
-            Verifiability.PARTIALLY_VERIFIABLE,
-        }:
-            raise StructuredOutputError(
-                "verified checks must be classified as verifiable"
-            )
-        if not receipts or any(not receipt.successful for receipt in receipts):
-            raise StructuredOutputError(
-                "VERIFIED and PARTIALLY_VERIFIED checks require successful current receipts"
-            )
-        if not any(receipt.tool_name in allowed_tools for receipt in receipts):
-            raise StructuredOutputError(
-                f"verification method {check.method!r} lacks a matching tool receipt"
-            )
-        if check.method == "workspace_test" and not any(
-            _successful_workspace_test_receipt(receipt) for receipt in receipts
-        ):
-            raise StructuredOutputError(
-                "workspace_test verification requires a successful direct-workspace "
-                "verification_run receipt with inherited authority and a runtime-derived "
-                "timeout"
-            )
-    elif check.result is VerificationOutcome.FAILED:
-        if check.verifiability not in {
-            Verifiability.VERIFIABLE,
-            Verifiability.PARTIALLY_VERIFIABLE,
-        }:
-            raise StructuredOutputError(
-                "FAILED checks must be classified as verifiable"
-            )
-        if not receipts:
-            raise StructuredOutputError(
-                "FAILED checks require concrete current evidence"
-            )
-    elif check.result is VerificationOutcome.NOT_AI_VERIFIABLE:
-        if check.verifiability is not Verifiability.NOT_AI_VERIFIABLE:
-            raise StructuredOutputError(
-                "NOT_AI_VERIFIABLE results require matching verifiability"
-            )
-    elif check.result is VerificationOutcome.UNAVAILABLE:
-        if check.verifiability is not Verifiability.UNAVAILABLE:
-            raise StructuredOutputError(
-                "UNAVAILABLE results require matching verifiability"
-            )
-        if any(not receipt.successful for receipt in receipts):
-            raise StructuredOutputError(
-                "failed tools can support only FAILED or INCONCLUSIVE checks"
-            )
-
-
-def validate_verification_response(response: StageResponse) -> VerificationFinding:
-    """Bind every verification claim to completed current-invocation receipts."""
-
-    finding = parse_verification(response)
-    assert isinstance(finding, VerificationFinding)
-    _receipt_index(response, expected_stage=Stage.VERIFICATION)
-    for check in finding.checks:
-        _validate_verification_check(response, check)
-    if finding.evidence_refs:
-        overall_receipts = _validated_receipts(
-            response,
-            finding.evidence_refs,
-            field="Verification evidence_refs",
-            expected_stage=Stage.VERIFICATION,
-        )
-        if finding.outcome is VerificationOutcome.UNAVAILABLE and any(
-            not receipt.successful for receipt in overall_receipts
-        ):
-            raise StructuredOutputError(
-                "failed tools can support only FAILED or INCONCLUSIVE Verification outcomes"
-            )
-
-    required = tuple(check for check in finding.checks if check.required)
-    results = {check.result for check in required}
-    if finding.outcome is VerificationOutcome.VERIFIED:
-        if not required or results != {VerificationOutcome.VERIFIED}:
-            raise StructuredOutputError(
-                "overall VERIFIED requires every required check to be VERIFIED"
-            )
-    elif finding.outcome is VerificationOutcome.PARTIALLY_VERIFIED:
-        if not results.intersection(
-            {VerificationOutcome.VERIFIED, VerificationOutcome.PARTIALLY_VERIFIED}
-        ) or results <= {VerificationOutcome.VERIFIED}:
-            raise StructuredOutputError(
-                "PARTIALLY_VERIFIED requires both verified evidence and a stated gap"
-            )
-    elif finding.outcome is VerificationOutcome.FAILED:
-        if VerificationOutcome.FAILED not in results:
-            raise StructuredOutputError(
-                "overall FAILED requires a failed required check"
-            )
-    elif finding.outcome is VerificationOutcome.NOT_AI_VERIFIABLE:
-        if not required or results != {VerificationOutcome.NOT_AI_VERIFIABLE}:
-            raise StructuredOutputError(
-                "overall NOT_AI_VERIFIABLE requires every required check to match"
-            )
-    elif finding.outcome is VerificationOutcome.UNAVAILABLE:
-        if VerificationOutcome.UNAVAILABLE not in results:
-            raise StructuredOutputError(
-                "overall UNAVAILABLE requires an unavailable required check"
-            )
-    elif finding.outcome is VerificationOutcome.INCONCLUSIVE:
-        if VerificationOutcome.INCONCLUSIVE not in results:
-            raise StructuredOutputError(
-                "overall INCONCLUSIVE requires an inconclusive required check"
-            )
-
-    if finding.outcome in {
-        VerificationOutcome.VERIFIED,
-        VerificationOutcome.PARTIALLY_VERIFIED,
-        VerificationOutcome.FAILED,
-    }:
-        _require_stable_snapshot(response)
     return finding
 
 

@@ -174,7 +174,12 @@ class _DirectProvider:
         if request.stage is Stage.IMMEDIATE_RESPONSE:
             data = {"message": "Hello from HER v2."}
         elif request.stage is Stage.TRIAGE:
-            data = {"classification": "DIRECT_RESPONSE", "goal": request.goal}
+            data = {
+                "classification": "DIRECT_RESPONSE",
+                "real_goal": request.goal,
+                "relevant_habits": [],
+                "clarification": None,
+            }
         else:
             raise AssertionError(f"unexpected stage: {request.stage}")
         return StageResponse(
@@ -249,7 +254,9 @@ class _WorkAndMeditationProvider(_DirectProvider):
             Stage.IMMEDIATE_RESPONSE: {"message": "I have it."},
             Stage.TRIAGE: {
                 "classification": "SIMPLE_TASK",
-                "goal": request.goal,
+                "real_goal": request.goal,
+                "relevant_habits": [],
+                "clarification": None,
             },
             Stage.EXECUTION: {
                 "disposition": "COMPLETED",
@@ -303,7 +310,9 @@ class _SideEffectFailureProvider(_DirectProvider):
         elif request.stage is Stage.TRIAGE:
             payload = {
                 "classification": "SIMPLE_TASK",
-                "goal": request.goal,
+                "real_goal": request.goal,
+                "relevant_habits": [],
+                "clarification": None,
             }
         elif request.stage is Stage.EXECUTION:
             request.provider_activity_callback(
@@ -378,7 +387,9 @@ class _EffortPolicyProvider:
             Stage.IMMEDIATE_RESPONSE: {"message": "I have it."},
             Stage.TRIAGE: {
                 "classification": "SIMPLE_TASK",
-                "goal": request.goal,
+                "real_goal": request.goal,
+                "relevant_habits": [],
+                "clarification": None,
             },
             Stage.PLANNING: {
                 "plan": ["Execute the scheduled specification"],
@@ -392,20 +403,6 @@ class _EffortPolicyProvider:
             Stage.REVIEW: {
                 "outcome": "UNAVAILABLE",
                 "summary": "Tool-backed Review is unavailable in this policy stub.",
-            },
-            Stage.VERIFICATION: {
-                "outcome": "NOT_AI_VERIFIABLE",
-                "summary": "This policy stub has no verification tools.",
-                "checks": [
-                    {
-                        "claim": "The external result is correct",
-                        "verifiability": "NOT_AI_VERIFIABLE",
-                        "result": "NOT_AI_VERIFIABLE",
-                        "method": "artifact_inspection",
-                        "evidence_refs": [],
-                        "observed": "No external artifact is attached to the stub.",
-                    }
-                ],
             },
             Stage.FINALISATION: {
                 "execution_result": {
@@ -700,7 +697,6 @@ async def test_scheduler_effort_is_request_scoped_and_provider_reasoning_is_unch
     ordinary_stages = [request.stage for _profile, request in provider.requests]
     assert Stage.PLANNING in ordinary_stages
     assert Stage.REVIEW in ordinary_stages
-    assert Stage.VERIFICATION not in ordinary_stages
     assert ordinary.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
         "effective": "max",
@@ -789,7 +785,9 @@ async def test_adapter_accepts_primary_execution_natural_language_without_finali
             elif request.stage is Stage.TRIAGE:
                 payload = {
                     "classification": "SIMPLE_TASK",
-                    "goal": request.goal,
+                    "real_goal": request.goal,
+                    "relevant_habits": [],
+                    "clarification": None,
                 }
             elif request.stage is Stage.EXECUTION:
                 return StageResponse(
@@ -1774,9 +1772,9 @@ async def test_triage_receives_complete_policy_and_minimal_turn_prompt():
     await provider.invoke(profile, request)
 
     backend = manager.backends[-1]
-    assert "triage classifier agent" in backend.sys_prompt
+    assert "triage classifier and context preparation agent" in backend.sys_prompt
     assert "configured agent persona" not in backend.sys_prompt
-    assert "User request and context:" in backend.sys_prompt
+    assert "Original user request and context" in backend.sys_prompt
     assert "Earlier context already contains the result. Please check it." in (
         backend.sys_prompt
     )
@@ -1798,6 +1796,8 @@ async def test_triage_receives_complete_policy_and_minimal_turn_prompt():
     ):
         assert decision_boundary in backend.sys_prompt
     assert "Return exactly one valid JSON object" in backend.sys_prompt
+    assert '"real_goal"' in backend.sys_prompt
+    assert '"relevant_habits"' in backend.sys_prompt
     assert "checkpoint_policy" not in backend.sys_prompt
     assert "checkpoint_reason" not in backend.sys_prompt
     assert "For Planning, Execution, Replanning, and Review" not in backend.sys_prompt
@@ -1851,7 +1851,8 @@ async def test_json_repair_uses_isolated_specialist_prompt_and_no_tools():
                     "DIRECT_RESPONSE | SIMPLE_TASK | COMPLEX_TASK | "
                     "HIGH_VOLUME_TASK | CONFIRMATION_REQUIRED"
                 ),
-                "goal": "optional string or null",
+                "real_goal": "resolved operative goal or null",
+                "relevant_habits": [],
                 "clarification": "required question or null",
             },
             "validation_error": "classification is invalid",
@@ -1884,71 +1885,6 @@ async def test_json_repair_uses_isolated_specialist_prompt_and_no_tools():
     assert backend.sys_prompt.startswith("You are the JSON Repair Agent")
     assert "configured agent persona" not in backend.sys_prompt
     assert "Do the requested work" not in backend.prompt
-    assert "Do not call tools" in backend.sys_prompt
-
-
-@pytest.mark.asyncio
-async def test_verification_report_repair_uses_evidence_aware_tool_free_prompt():
-    manager = _FakeManager()
-    provider = HashiStageProvider(
-        backend_manager=manager,
-        tool_registry=_BaseToolRegistry(),
-    )
-    profile = ProviderProfile(
-        "reviewer",
-        "openrouter-api",
-        "configured/model",
-        reasoning="provider-high",
-    )
-    repair_input = json.dumps(
-        {
-            "rejected_output": '{"outcome":"VERIFIED"}',
-            "required_schema": {
-                "outcome": "VERIFIED | PARTIALLY_VERIFIED",
-            },
-            "validation_error": (
-                "verification method 'read_only_api' lacks a matching tool receipt"
-            ),
-            "frozen_tool_receipts": [
-                {
-                    "evidence_ref": "receipt:file-list",
-                    "tool_name": "file_list",
-                    "status": "SUCCESS",
-                    "completed": True,
-                }
-            ],
-            "frozen_evidence_refs": ["receipt:file-list"],
-        },
-        sort_keys=True,
-    )
-    base = _stage_request(
-        Stage.JSON_REPAIR,
-        allow_tools=False,
-        allow_side_effects=False,
-    )
-    request = StageRequest(
-        **{
-            **base.__dict__,
-            "role": "json_repair_specialist",
-            "goal": repair_input,
-            "classification": None,
-            "plan_id": None,
-            "context": {
-                "json_repair_input": repair_input,
-                "repair_mode": "verification_report",
-            },
-            "request_content": None,
-            "attachment_manifest": (),
-        }
-    )
-
-    await provider.invoke(profile, request)
-
-    backend = manager.backends[-1]
-    assert backend.prompt == repair_input
-    assert backend.tool_registry is None
-    assert backend.sys_prompt.startswith("You are the Verification Report Repair Agent")
-    assert "frozen receipts" in backend.sys_prompt
     assert "Do not call tools" in backend.sys_prompt
 
 
@@ -3230,12 +3166,15 @@ async def test_subagent_receives_only_explicitly_delegated_tools():
     await provider.invoke(profile, request)
 
     delegated = manager.backends[-1].tool_registry
-    assert manager.backends[-1].sys_prompt == (
-        "Follow the supplied assignment and authority envelope exactly."
+    assert manager.backends[-1].sys_prompt.startswith(
+        "You are a bounded HER v2 sub-agent."
     )
-    assert "Bounded assignment and authority envelope" in manager.backends[-1].prompt
-    assert '"plan_id": "plan-v1"' in manager.backends[-1].prompt
-    assert '"may_replan": false' in manager.backends[-1].prompt
+    assert "Bounded assignment and authority envelope" in (
+        manager.backends[-1].sys_prompt
+    )
+    assert '"plan_id": "plan-v1"' in manager.backends[-1].sys_prompt
+    assert '"may_replan": false' in manager.backends[-1].sys_prompt
+    assert manager.backends[-1].prompt == request.goal
     assert delegated.max_loops is None
     names = {item["function"]["name"] for item in delegated.get_tool_definitions()}
     assert names == {"file_read"}

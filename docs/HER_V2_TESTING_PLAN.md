@@ -77,7 +77,7 @@ This plan covers:
 - sub-agent orchestration and authority;
 - compulsory Replanning cadence, three-question calibration, and absence of a
   Replan ceiling;
-- Review, closure, Verification, and remediation limits;
+- Review validation and remediation behaviour;
 - Finalisation and reporting;
 - lifecycle and terminal-state selection;
 - Ledger minimality and log references;
@@ -141,16 +141,19 @@ The tests in this section form the HER Architecture Acceptance Suite. Any failur
 
 Tests must prove:
 
+- Triage derives `real_goal` from the current request and context under the
+  existing prompt rules, rather than copying the legacy raw `$goal`;
+- validated `real_goal` is stored in `state.goal` and is used by audit,
+  permission checks, and every downstream decision;
 - the active goal is established or clarification is requested through Triage;
-- Planning, Execution, Replanning, Review, Verification, Habits, and sub-agents do not replace the goal;
+- Planning, Execution, Replanning, Review, Habits, and sub-agents do not replace the goal;
 - related or apparently better tasks are not substituted for the requested goal;
-- reviewer and verifier findings cannot change the goal;
+- reviewer findings cannot change the goal;
 - all plan versions continue to reference the same turn goal.
 
 Prohibited behaviour includes:
 
 - rewriting the goal during Planning;
-- silently broadening scope;
 - treating a related objective as equivalent;
 - allowing a sub-agent or reviewer to become goal authority.
 
@@ -160,7 +163,7 @@ Tests must prove:
 
 - Triage records exactly one valid classification;
 - the classification is immutable once recorded;
-- Planning, Execution, Replanning, Review, Verification, and sub-agents cannot reclassify;
+- Planning, Execution, Replanning, Review, Finalisation, and sub-agents cannot reclassify;
 - later evidence suggesting a classification error does not mutate the current turn;
 - a future turn may use prior evidence, but receives a new Triage decision.
 
@@ -170,7 +173,7 @@ Tests must include an intentionally incorrect classifier result. The expected be
 
 Tests must prove that `/steer`:
 
-1. stops the old Primary Agent, tools, sub-agents, Replanning, Review, and Verification;
+1. stops the old Primary Agent, tools, sub-agents, Replanning, and Review;
 2. records the old turn as `STOPPED` with reason `STEERED`;
 3. prevents any new old-turn work from starting;
 4. creates a new turn identifier;
@@ -189,7 +192,7 @@ For `DIRECT_RESPONSE`, tests must prove:
 
 - exactly one user-facing response is delivered;
 - the Immediate Response becomes the completed answer;
-- no Planning, tools, Execution, Review, Verification, or second final message occurs;
+- no Planning, tools, Execution, Review, or second final message occurs;
 - the turn reaches `COMPLETED`.
 
 For work classifications, tests must prove that the Immediate Response acts as
@@ -227,6 +230,14 @@ Tests must prove that classification and effort remain separate concerns:
 - provider reasoning settings come from provider-role configuration;
 - effort labels are never passed as provider reasoning settings merely because their names appear similar.
 
+Throughout this plan, an execution mode is named with both its descriptive
+label and canonical wire value: Direct (`zero`), Fast path (`low`), Planned
+(`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`). Bare
+wire values are used only when a test specifically exercises serialization,
+configuration, commands, or persistence. Range shorthand such as
+"medium-or-above" must be read and asserted as the named set of execution
+modes, never as task risk or provider reasoning.
+
 Command, Telegram, Workbench, job, and status tests must also prove that HER
 shows Direct, Fast path, Planned, Adaptive, Reviewed, and Assured while preserving the
 canonical `zero`, `low`, `medium`, `high`, `xhigh`, and `max` wire values. Direct
@@ -263,21 +274,21 @@ Compact.
 
 Representative policy combinations must cover:
 
-| Classification | Effort | Required path |
+| Classification | Execution mode | Required path |
 |---|---|---|
 | `DIRECT_RESPONSE` | any | Immediate Response only |
 | `CONFIRMATION_REQUIRED` | any | Clarification only |
-| `SIMPLE_TASK` | `low` | Direct execution, no formal Planning |
-| `SIMPLE_TASK` | `high` | Planning, then lightweight-preferred execution; classification unchanged |
-| `COMPLEX_TASK` | `low` | Premium-preferred execution without mandatory Planning |
-| `COMPLEX_TASK` | `medium` | Planning then execution |
-| `COMPLEX_TASK` | `high` | Planning and compulsory Replanning at every 10-result/300-second safe boundary |
-| `COMPLEX_TASK` | Reviewed (`xhigh`) | Planning, Replanning, one tool-backed Review, at most one remediation, and one closure Review after remediation |
-| `HIGH_VOLUME_TASK` | Assured (`max`) | Premium orchestration, sub-agents, one tool-backed Review, and up to three latest-state Verification attempts |
+| `SIMPLE_TASK` | Fast path (`low`) | Direct execution, no formal Planning |
+| `SIMPLE_TASK` | Adaptive (`high`) | Planning, then lightweight-preferred execution; classification unchanged |
+| `COMPLEX_TASK` | Fast path (`low`) | Premium-preferred execution without mandatory Planning |
+| `COMPLEX_TASK` | Planned (`medium`) | Planning then execution |
+| `COMPLEX_TASK` | Adaptive (`high`) | Planning and compulsory Replanning at every 10-result/300-second safe boundary |
+| `COMPLEX_TASK` | Reviewed (`xhigh`) | Planning, Replanning, one tool-backed Review, and at most one remediation without a closure Review |
+| `HIGH_VOLUME_TASK` | Assured (`max`) | Premium orchestration, sub-agents, and fresh tool-backed Review after each Review-driven remediation until `PASS` or `CONDITIONAL_PASS` |
 
 This representative matrix replaces a full classification-by-effort Cartesian product unless a production defect justifies an additional combination.
 
-One focused case must make a high-effort `SIMPLE_TASK` request Replanning,
+One focused case must make an Adaptive (`high`) `SIMPLE_TASK` request Replanning,
 prove that the second execution may use the configured primary execution
 profile, and prove that the recorded classification remains `SIMPLE_TASK`.
 
@@ -285,7 +296,7 @@ profile, and prove that the recorded classification remains `SIMPLE_TASK`.
 
 Cron and heartbeat regressions must prove that:
 
-- a prompt job without an override resolves to HER v2 `low` for scheduled,
+- a prompt job without an override resolves to HER v2 Fast path (`low`) for scheduled,
   manual Run, and recovery replay paths;
 - every valid `her_v2_effort` override is preserved and wins for that request;
 - the Agent's configured effort remains unchanged and is used by the next
@@ -327,7 +338,6 @@ The canonical lifecycle states are exactly:
 - `REPLANNING`
 - `EXECUTION_COMPLETED`
 - `REVIEWING`
-- `VERIFYING`
 - `FINALISING`
 - terminal states
 
@@ -362,22 +372,15 @@ EXECUTING
 EXECUTION_COMPLETED [XHIGH/MAX]
   -> REVIEWING
 
-REVIEWING [FAIL and remediation available]
+REVIEWING [FAIL and remediation required]
   -> REPLANNING
   -> EXECUTING
   -> EXECUTION_COMPLETED
+
+EXECUTION_COMPLETED [Assured (`max`) after remediation]
   -> REVIEWING
 
-REVIEWING [ASSURED]
-  -> VERIFYING
-
-VERIFYING [failed required check and remediation available]
-  -> REPLANNING
-  -> EXECUTING
-  -> EXECUTION_COMPLETED
-  -> VERIFYING
-
-EXECUTION_COMPLETED, REVIEWING, or VERIFYING
+EXECUTION_COMPLETED or REVIEWING
   -> FINALISING
   -> TERMINAL
 
@@ -392,8 +395,9 @@ Tests must prove that HER never:
 - silently repairs an invalid transition;
 - synthesises a missing predecessor;
 - reviews before execution produces a candidate;
-- finalises while mandatory execution, Review, or Verification handling remains active;
-- bypasses mandatory Planning at `medium` or above;
+- finalises while mandatory execution or Review handling remains active;
+- bypasses mandatory Planning in Planned (`medium`), Adaptive (`high`),
+  Reviewed (`xhigh`), or Assured (`max`);
 - changes the active plan outside `REPLANNING`.
 
 An invalid authoritative transition produces terminal `ERROR`.
@@ -419,19 +423,21 @@ Tests must prove that:
 - Execution cannot request Replanning, while HER may impose Replanning through
   its effort/review policy;
 - a valid Execution disposition is the source of terminal truth and cannot be
-  changed by Review, Verification, or Finalisation.
+  changed by Review or Finalisation.
 
 ### 7.7 Plan authority and versioning
 
 Tests must prove:
 
-- `medium`, `high`, `xhigh`, and `max` work turns create a plan before Execution;
-- `low` may execute without a formal plan;
+- Planned (`medium`), Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`)
+  work turns create a plan before Execution;
+- Fast path (`low`) may execute without a formal plan;
 - exactly one plan version is active;
-- Replanning creates a new version;
+- Replanning creates a new version only when the plan materially changes;
+- an unchanged Replan preserves the active version and in-flight bindings;
 - the earlier version remains referenced in logs but is not accumulated into the active plan;
 - only the primary HER workflow may enter `REPLANNING`;
-- sub-agents, reviewers, and verifiers cannot activate a plan version.
+- sub-agents and reviewers cannot activate a plan version.
 
 ### 7.8 Replanning purpose, compulsory cadence, and no ceiling
 
@@ -440,87 +446,68 @@ Tests must prove that Replanning:
 - uses the immutable goal, classification, active plan, and current execution evidence;
 - corrects execution drift without redefining the goal;
 - does not consult Habits again;
-- records a new plan version;
+- records a new plan version only for a materially changed plan and preserves
+  the active version for an unchanged calibration;
 - returns to Execution below 100% completion and stops adding work for
   assurance/Finalisation at 100%;
 - is controlled by effort policy rather than excluding an immutable
   `SIMPLE_TASK` classification;
 - may escalate execution capability without mutating classification; and
-- runs unconditionally for `high`, `xhigh`, and `max` at each inclusive
+- runs unconditionally for Adaptive (`high`), Reviewed (`xhigh`), and Assured
+  (`max`) at each inclusive
   10-result or 300-second safe boundary.
 
 There is no Replan ceiling. Structural tests reject `max_replans`,
 `replan_limit`, and `replan_limits`; controlled tests must complete more than
-the retired 50/100/200 values without suppressing Replanning, assurance, or
-Finalisation. Review and Verification retain only their separately authorised
-mode-specific limits.
+the retired 50/100/200 values without suppressing Replanning, Review, or
+Finalisation. Reviewed (`xhigh`) retains its one-remediation boundary; Assured
+(`max`) has no fixed Review/fix round limit.
 
 ### 7.9 Review independence, evidence, and limits
 
 Tests must prove:
 
-- Review applies only to `xhigh` and `max` work turns;
+- Review applies only to Reviewed (`xhigh`) and Assured (`max`) work turns;
 - the Strict Reviewer is contextually independent from the task performer;
 - the reviewer communicates only with the Primary Agent;
 - the reviewer cannot contact the user, reopen Triage, change goal or classification, activate a plan, authorise side effects, or finalise;
 - Review calls have tools enabled but side effects disabled;
-- Review outcomes are `PASS`, `CONDITIONAL_PASS`, `FAIL`, `INCONCLUSIVE`, or
-  `UNAVAILABLE`;
-- Review cannot change the valid Execution disposition.
-- `PASS`, `CONDITIONAL_PASS`, and `FAIL` require exact completed tool receipts
-  from the current Review invocation plus matching opening and closing
-  workspace snapshots;
-- paper-only, fabricated, stale, cross-stage, cross-attempt, duplicate,
-  incomplete, and failed passing evidence is rejected;
-- workspace drift forces `INCONCLUSIVE`;
-- technical Review failure becomes `UNAVAILABLE`, never
-  `CONDITIONAL_PASS`.
+- the model-authored Review contract accepts exactly `PASS`,
+  `CONDITIONAL_PASS`, or `FAIL`, with a non-empty reason and conditions only
+  for `CONDITIONAL_PASS`;
+- Review cannot change the valid Execution disposition;
+- Review can use its delegated inspection and validation tools when
+  appropriate, while subjective or inherently non-verifiable work can receive
+  `CONDITIONAL_PASS` without a synthetic evidence gate;
+- tool activity and receipts remain independently audited and cannot be
+  rewritten as successful validation by the reviewer;
+- a technical provider or tool failure is runtime state, never a model-authored
+  `CONDITIONAL_PASS` or invented Review decision.
 
 Limit tests must prove:
 
-- Reviewed (`xhigh`): one independent Review and at most one remediation; a
-  remediation is followed by exactly one read-only closure Review and no
-  further remediation;
-- Assured (`max`): one Review and at most one immediate remediation before
-  Verification;
+- Reviewed (`xhigh`): one independent Review and at most one remediation, with
+  no closure Review after that remediation;
+- Assured (`max`): each `FAIL` causes Replanning and remediation followed by a
+  fresh Review of the latest state, with no fixed Review/fix round limit;
 - unavailable Review after bounded retries does not discard completed Execution or remain stuck indefinitely;
 - Review technical failure is logged and Finalisation proceeds from Execution evidence.
 
-### 7.9.1 Assured Verification and hard evidence
+### 7.9.1 Review validation and removal of Verification prompt wiring
 
-Tests must prove that Assured (`max`) alone enters `VERIFYING` after Review and
-any Review-triggered remediation. The verifier has tools enabled,
-validation-only side effects, and evaluates the latest Execution result and
-authoritative workspace state. It cannot remediate or broaden delegation.
-
-The accepted outcomes are `VERIFIED`, `PARTIALLY_VERIFIED`, `FAILED`,
-`NOT_AI_VERIFIABLE`, `UNAVAILABLE`, and `INCONCLUSIVE`. Tests must prove:
-
-- every verified or partly verified check cites a successful completed receipt
-  from the exact current Verification invocation;
-- a `workspace_test` claim cites a successful direct-workspace
-  `verification_run` receipt with exit code zero, inherited process/filesystem/
-  environment/`HOME`/network authority, and a runtime-derived timeout;
-- failed or incomplete tools cannot support a passing claim, and failed tools
-  support only `FAILED` or `INCONCLUSIVE`;
-- `VERIFIED`, `PARTIALLY_VERIFIED`, and `FAILED` require matching opening and
-  closing workspace snapshots;
-- a failed required check may trigger Primary-Agent remediation followed by a
-  fresh Verification of the new state;
-- an inconclusive assessment may retry, but no fourth Verification begins;
-- partial evidence without a failed required check, not-AI-verifiable work, and
-  unavailable verification proceed with explicit limitations;
-- Verification never changes the valid Execution disposition.
+Tests must prove that validation occurs through Independent Review and that no
+separate Verification model stage or prompt remains. Repository-wide checks
+must find no former Verification prompt asset and no catalogue, loader,
+renderer, assembly, repair, invocation, schema, configuration, or test wiring
+that refers to one. Deleting prompt files without removing runtime wiring fails
+acceptance. The Review tool named `verification_run` remains a validation tool,
+not a Verification prompt or stage.
 
 `workspace_inspect` tests cover status, diff, bounded search, hashes, artifacts,
-path escape rejection, and snapshot drift. `verification_run` tests prove that
-configured recipes and direct argv commands run in the current workspace
-without a copy or implicit shell; large workspaces are not rejected merely for
-copy size; and process identity, filesystem access, environment, `HOME`, and
-network are inherited. Timeout tests prove the effective value is the maximum
-of configured, requested, minimum, and cumulative-Execution-derived values,
-including a one-hour Execution case where a 60-second request becomes 5,700
-seconds.
+path escape rejection, and snapshot drift. Review `verification_run` tests
+prove configured recipes and direct argv commands run in the current workspace
+without a copy or implicit shell, with the documented timeout and inherited
+runtime authority.
 
 ### 7.9.2 Compulsory safe-boundary Replanning
 
@@ -529,8 +516,8 @@ The complete oracle is the
 Deterministic tests use an injected monotonic clock and exact Tool Gateway
 receipts to prove:
 
-- `low` and `medium` never install the cadence, while `high`, `xhigh`, and
-  `max` always install it;
+- Fast path (`low`) and Planned (`medium`) never install the cadence, while
+  Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) always install it;
 - nine results and `299.999` seconds are not due; result 10 or exactly `300.0`
   seconds is due inclusively and forces Replanning at the next safe boundary;
 - no checkpoint model chooses `CONTINUE`, ask, or halt; count and time becoming
@@ -542,9 +529,9 @@ receipts to prove:
   calls settle, new admission waits, and one single-flight leader Replans;
 - each Replan validates `completion_percent`, `completion_basis`, the full plan,
   `plan_changed`, conditional `change_reason`, `next_step`, and commentary;
-- every Replan activates the next plan version even when unchanged, resets its
-  count/time window once without catch-up, and never replays a completed side
-  effect;
+- every changed Replan activates the next plan version, while an unchanged
+  Replan preserves the active version; either result resets its count/time
+  window once without catch-up and never replays a completed side effect;
 - a due completion candidate cannot bypass Replanning; below 100% starts a
   continuation Execution from current evidence, while 100% stops new work and
   routes through Review or Finalisation;
@@ -571,14 +558,14 @@ Tests must prove:
 
 - HER invokes tools only through the HASHI Tool Gateway;
 - an unregistered or disallowed tool cannot be executed;
-- HER, reviewers, verifiers, and sub-agents cannot elevate their own permission mode;
+- HER, reviewers, and sub-agents cannot elevate their own permission mode;
 - path-addressed inspection tools retain workzone/access-root checks;
 - `verification_run` fixes its working directory to the authoritative
   workspace but deliberately inherits the HASHI process's filesystem authority
   for runtimes, dependencies, services, and credentials outside that directory;
-- reviewer calls remain side-effect-free; verifier mutation is restricted to
-  delegated validation commands in the authoritative workspace and cannot be
-  represented as read-only;
+- reviewer authority remains non-remediating; validation commands may create
+  ordinary test caches or artifacts in the authoritative workspace but cannot
+  be represented as general corrective side effects;
 - sub-agent authority is no greater than the authority delegated by the Primary Agent and orchestrator;
 - tool denial becomes evidence and cannot be rewritten as successful execution.
 - read-only delegation consumes Tool Registry capability metadata, so an
@@ -589,7 +576,7 @@ Tests must prove:
 
 Tests must prove that `/stop`:
 
-- stops Planning, Execution, tool calls, Replanning, Review, Verification, and high-volume orchestration;
+- stops Planning, Execution, tool calls, Replanning, Review, and high-volume orchestration;
 - propagates cancellation to all controlled sub-agents;
 - prevents new work and new sub-agents from starting;
 - preserves already completed evidence in logs;
@@ -602,7 +589,7 @@ Cancellation should be table-driven across lifecycle states, with full concurren
 
 Tests must prove:
 
-- an unexpected process interruption does not resume the old planner, executor, reviewer, verifier, tool call, or sub-agent graph;
+- an unexpected process interruption does not resume the old planner, executor, reviewer, tool call, or sub-agent graph;
 - startup reconciliation records the incomplete old turn as `ERROR`;
 - the incomplete Ledger and logs remain available;
 - no external side effect is repeated automatically after restart;
@@ -630,11 +617,11 @@ Tests must prove:
 
 - an unsuccessful but technically correct search is `FAILED`, not `ERROR`;
 - non-retryable provider unavailability is `ERROR`, not `FAILED`;
-- Review `FAIL` or Verification `FAILED` does not automatically become terminal `FAILED`;
+- Review `FAIL` does not automatically become terminal `FAILED`;
 - intentional stop is `STOPPED`, not `ERROR`;
 - unexpected interruption is `ERROR`, not a separate `INTERRUPTED` state;
 - rejection of a request after correct execution judgement is `FAILED` unless a higher policy defines a different terminal category.
-- execution-discovered user input skips Review and Verification, enters the combined
+- execution-discovered user input skips Review, enters the combined
   Finalisation call, preserves evidence and classification, and terminates as
   `PENDING_USER_INPUT` with a Persona-rendered clarification.
 
@@ -670,7 +657,7 @@ Tests must prove that HASHI records every reasoning trace made available to HER,
 - Planning reasoning;
 - execution reasoning events;
 - Replanning reasoning;
-- reviewer and verifier reasoning;
+- Review reasoning;
 - Finalisation reasoning;
 - provider-exposed reasoning streams or structured reasoning artefacts.
 
@@ -701,12 +688,16 @@ Tests must prove:
 
 - user intent overrides conflicting Habit guidance;
 - Execution evidence overrides Habits;
-- Replanning does not read Habits again;
-- initial Planning receives every valid active Habit and decides which, if any,
-  apply to the complete authoritative goal and supplied context;
+- the complete candidate `habit_catalogue` is retrieved before Triage;
+- Triage schema v2 receives `habit_catalogue`, derives `real_goal`, and returns
+  `relevant_habits` selected against that goal;
+- `real_goal` and `relevant_habits` are explicit in prompts, runtime state, and
+  handoffs for Planning, Execution, Replanning, Review, and Finalisation;
+- Replanning and other downstream stages do not retrieve or select Habits again;
 - disabled and request-ineligible turns neither read the catalogue nor add
-  Habit-specific Planning context;
-- `low` effort skips Habit loading but still schedules eligible Meditation
+  Habit-specific workflow context;
+- Fast path (`low`) retains the Triage retrieval and selection path even though it
+  skips Planning, and still schedules eligible Meditation
   only after final-delivery-boundary acceptance and terminal persistence;
 - repeated Meditation scheduling for one turn produces one durable job, one
   model decision, and one idempotent Write;
@@ -720,6 +711,10 @@ Tests must prove:
 - Dream failure or unavailability does not block a user turn;
 - Habits are advisory and cannot become goal, classification, plan, or tool authority.
 
+Sub-agent contract tests must also prove that only `system_sub_agent.txt`
+exists and is loaded, that it receives `real_goal` and `relevant_habits`, and
+that no second sub-agent prompt asset or catalogue key exists.
+
 ## 8. Essential End-to-End Journeys
 
 The suite should use a small number of complete journeys. Variants should be expressed as parameters or injected disturbances where they protect the same intention.
@@ -732,7 +727,7 @@ Required:
 
 - exactly one user-facing answer;
 - immutable `DIRECT_RESPONSE` classification;
-- no Planning, tools, Execution, Review, or Verification;
+- no Planning, tools, Execution, or Review;
 - terminal `COMPLETED`.
 
 ### Journey B: Confirmation Required
@@ -773,13 +768,14 @@ Required:
 
 Cover:
 
-- Reviewed (`xhigh`) Review `FAIL`, one remediation, then one closure Review;
-- Assured (`max`) Review `FAIL`, one remediation, then Verification against the
-  remediated latest state;
-- Assured Verification `FAILED`, remediation, and a fresh successful
-  Verification, plus the three-attempt hard stop;
-- honest partly verified, not AI-verifiable, inconclusive, and unavailable
-  final reporting;
+- Reviewed (`xhigh`) Review `FAIL`, one remediation, then Finalisation of the
+  latest draft without a closure Review;
+- Assured (`max`) Review `FAIL`, Replanning and remediation, then a fresh Review
+  against the remediated latest state;
+- more than three Assured Review/fix rounds followed by a fresh successful
+  Review, proving the retired attempt ceiling is absent;
+- honest conditional, subjective, and technically unavailable validation
+  reporting;
 - unavailable reviewer after a non-retryable failure or no-progress idle
   boundary, with completed work preserved.
 
@@ -812,9 +808,9 @@ Exercise primary log, fallback spool, total audit-persistence failure, and repla
 ### Journey K: Tool authority denial
 
 Attempt an unregistered tool, permission escalation, an out-of-workzone path
-through an inspection tool, reviewer side effect, verifier remediation, and any
-verifier mutation outside `verification_run`. Prove all are blocked and
-audited. Separately prove that a validation child process retains its inherited
+through an inspection tool, Review remediation, and validation activity beyond
+the delegated `verification_run` contract. Prove all are blocked and audited.
+Separately prove that a validation child process retains its inherited
 filesystem authority.
 
 ### Journey L: Terminal truth
@@ -867,7 +863,7 @@ Tolerance must never:
 - synthesise lifecycle predecessors;
 - invent a successful tool result;
 - fabricate mandatory Planning completion;
-- turn reviewer or verifier output into Primary Agent authority;
+- turn reviewer output into Primary Agent authority;
 - silently accept unknown protocol drift.
 - expose reasoning recovery text to the user;
 - choose between semantically conflicting valid carriers.
@@ -1085,9 +1081,9 @@ must prove the following boundaries.
 
 Tests must prove:
 
-- a successful Planning, Execution, Review, or Verification result may carry
-  one optional neutral commentary field, while every Replanning invocation
-  produces one required progress commentary;
+- a successful Planning or Execution result may carry one optional neutral
+  commentary field, while every Replanning invocation produces one required
+  progress commentary;
 - lifecycle transitions, stage-start events, failures, retries, tool telemetry,
   and finalisation do not synthesise ordinary commentary; only a successful
   validated Replan may invoke its deterministic required-field fallback;
@@ -1176,7 +1172,7 @@ Use table-driven tests for:
 - lifecycle edges;
 - terminal-state decisions;
 - effort-policy selection;
-- compulsory Replan/cadence, Review, and Verification counters;
+- compulsory Replan/cadence and Review behaviour;
 - retry/no-progress behaviour;
 - structured normalisation rules;
 - compatible response-carrier selection and ambiguity rejection;
@@ -1194,7 +1190,7 @@ Use contract tests for:
 - Ledger/log separation;
 - reasoning-trace correlation;
 - fallback-spool durability and deduplication;
-- sub-agent, reviewer, and verifier permissions.
+- sub-agent and reviewer permissions.
 
 ### 12.3 Fault-injection integration tests
 
@@ -1204,12 +1200,12 @@ Use controlled providers, tools, clocks, log sinks, and process boundaries to in
 
 Reserve E2E tests for behaviour that crosses meaningful boundaries, such as
 Immediate Response races, complete lifecycle paths, concurrent cancellation,
-restart reconciliation, Review/Verification remediation, and audit failure.
+restart reconciliation, Review remediation, and audit failure.
 
 ### 12.5 Live observations
 
 Use live canaries to observe model-dependent qualities such as Triage accuracy,
-plan usefulness, reviewer/verifier value, latency, cost, and user-facing style.
+plan usefulness, reviewer value, latency, cost, and user-facing style.
 These observations do not replace deterministic invariant tests.
 
 ## 13. Tests That Should Generally Not Be Created
@@ -1302,8 +1298,8 @@ Release must not proceed if any of the following is possible:
 - a plan changes outside Replanning;
 - Replanning changes goal or classification;
 - a due compulsory Replan is suppressed, any Replan ceiling exists, or the
-  separately authorised Review/Verification limits are exceeded;
-- Review or Verification contacts the user or becomes workflow authority;
+  Reviewed (`xhigh`) remediation boundary is exceeded;
+- Review contacts the user or becomes workflow authority;
 - sub-agents replan, finalise, or exceed delegated authority;
 - HER bypasses Tool Gateway, permission, or workzone controls;
 - `/stop` or `/steer` leaves controlled work running;
@@ -1311,7 +1307,7 @@ Release must not proceed if any of the following is possible:
 - required available reasoning traces are not durably audited;
 - total audit-persistence failure permits external side effects to continue;
 - Ledger becomes a duplicate audit log;
-- completed work is discarded because Review, Verification, commentary, or Reporting failed;
+- completed work is discarded because Review, commentary, or Reporting failed;
 - a workflow or lifecycle event synthesises Persona content without a validated
   eligible source message, or authors Persona commentary directly;
 - commentary or Triage-clarification packaging can observe unmarked Agent
@@ -1343,7 +1339,7 @@ The following should be measured but are not deterministic release gates by them
 - Triage accuracy on ambiguous prompts;
 - average plan usefulness;
 - average Replan value;
-- reviewer and verifier usefulness;
+- reviewer usefulness;
 - commentary quality;
 - Habit usefulness;
 - latency and provider cost;
@@ -1376,7 +1372,7 @@ Examples include:
 - missing reasoning audit;
 - audit fallback duplication;
 - restart repeating a side effect;
-- reviewer or verifier authority breach;
+- reviewer authority breach;
 - completed work discarded because of malformed output;
 - valid structured control output trapped in an alternate provider carrier;
 - optional presentation failure blocking authoritative execution;
@@ -1401,8 +1397,8 @@ The release report should state:
 - realistic fault classes exercised;
 - concurrency races exercised;
 - audit paths exercised;
-- compulsory Replan cadence and lack of a Replan ceiling, plus separate Review
-  and Verification limits, verified;
+- compulsory Replan cadence and lack of a Replan ceiling, plus the distinct
+  Reviewed (`xhigh`) and Assured (`max`) Review behaviours, verified;
 - production defects converted into regression scenarios;
 - scenarios where useful work survives non-critical imperfections;
 - scenarios where HER correctly stops at authority, non-retryable, explicit
@@ -1423,12 +1419,12 @@ Before HER v2 is accepted, the suite must contain logically complete coverage of
 6. Immediate Response/Triage race ordering;
 7. `/stop` and `/steer` authority;
 8. process-restart no-resume behaviour;
-9. Tool Gateway, permission, workzone, reviewer, verifier, and sub-agent boundaries;
+9. Tool Gateway, permission, workzone, reviewer, and sub-agent boundaries;
 10. primary and fallback reasoning-audit persistence;
 11. meaningful-progress and false-progress Timeout behaviour;
 12. unbounded retry with non-retryable and no-progress idle termination;
-13. unbounded compulsory Replanning plus the separately authorised Review and
-    Verification limits;
+13. unbounded compulsory Replanning plus Reviewed (`xhigh`) and Assured (`max`)
+    Review behaviour;
 14. completed-work preservation;
 15. Habits, Meditation, and Dream authority boundaries;
 16. provider-neutral role configuration;

@@ -29,7 +29,6 @@ COMMENTARY_STAGES = frozenset(
         Stage.EXECUTION,
         Stage.REPLANNING,
         Stage.REVIEW,
-        Stage.VERIFICATION,
     }
 )
 

@@ -1791,8 +1791,24 @@ class HERMeditationJournal:
         self._write(payload)
 
 
+def render_habit_advisory_entries(habits: list[HERHabit]) -> tuple[str, ...]:
+    """Render individually selectable Habit catalogue entries for Triage."""
+
+    return tuple(
+        "\n".join(
+            (
+                f"[{habit.habit_id}] {habit.title}",
+                f"Metadata: {habit.metadata}",
+                habit.body,
+            )
+        )
+        for habit in habits
+    )
+
+
 def render_habit_advisory_context(habits: list[HERHabit]) -> str:
-    if not habits:
+    entries = render_habit_advisory_entries(habits)
+    if not entries:
         return ""
     lines = [
         "--- HER INTERNAL HABIT PLANNING CONTEXT ---",
@@ -1801,15 +1817,8 @@ def render_habit_advisory_context(habits: list[HERHabit]) -> str:
         "These are Habit records, not HASHI skills.",
         "",
     ]
-    for habit in habits:
-        lines.extend(
-            [
-                f"[{habit.habit_id}] {habit.title}",
-                f"Metadata: {habit.metadata}",
-                habit.body,
-                "",
-            ]
-        )
+    for entry in entries:
+        lines.extend([entry, ""])
     lines.append("--- END HER INTERNAL HABIT PLANNING CONTEXT ---")
     return "\n".join(lines)
 

@@ -34,6 +34,14 @@ Original user request:
 
 $goal
 
+Triage-selected relevant Habits:
+
+$relevant_habits
+
+These Habits are advisory. Do not retrieve or reselect Habits, and do not let
+them override the resolved goal, active plan, authority, permissions, system
+instructions, or current evidence.
+
 Immutable task classification:
 
 $classification
