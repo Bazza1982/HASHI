@@ -198,6 +198,7 @@ async def test_flex_runtime_fresh_clears_turns_without_session_reset_llm_prompt(
     assert runtime.context_assembler.saved_memory_injection_enabled is False
     assert runtime._pending_auto_recall_context is None
     assert enqueued == []
+    assert replies == ["✨ Fresh session started."]
 
 
 @pytest.mark.asyncio
@@ -329,7 +330,7 @@ async def test_her_v2_fresh_persists_hard_boundary_without_deleting_archives(tmp
     }
     assert archived.read_text(encoding="utf-8") == "archived raw history"
     assert capsule.read_text(encoding="utf-8") == "archived capsule"
-    assert "Logs, completed exchanges, saved memories" in replies[-1]
+    assert replies == ["✨ Fresh session started."]
 
     sections, _snapshot = install_history_section(runtime, [])
     payload = runtime.context_assembler.build_prompt_payload(

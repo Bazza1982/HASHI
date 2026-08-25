@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 from orchestrator.flexible_backend_registry import is_cli_backend
-from orchestrator.memory_plus_mode import is_memory_plus_enabled
 
 
 def _active_engine(runtime: Any) -> str:
@@ -178,22 +177,4 @@ async def cmd_fresh(runtime: Any, update: Any, context: Any) -> None:
             clear_session_primer=True,
         )
 
-    workspace_dir = getattr(runtime, "workspace_dir", None)
-    continuity_enabled = bool(workspace_dir and is_memory_plus_enabled(workspace_dir))
-    await runtime._reply_text(
-        update,
-        (
-            "HER v2 fresh context established. All pre-/fresh turn context is now behind a persistent boundary, regardless of source. "
-            "Logs, completed exchanges, saved memories, Memory+ files, Habits, and Compact archives were preserved, but are not automatically injected. "
-            "The next turn starts from the Agent instructions and /sys prompts, then new post-/fresh turns accumulate normally. "
-            "Use `/memory on`, `/memory plus on`, or `/habit on` only when you intentionally want those automatic context sources again."
-            if is_her_v2
-            else "Starting a fresh API context. Recent turns were cleared; saved memories are preserved but will not be auto-injected."
-        )
-        + (
-            " Memory+ continuity remains enabled; use `/memory plus off` if a turn must exclude the work card."
-            if continuity_enabled and not is_her_v2
-            else ""
-        ),
-        parse_mode="Markdown",
-    )
+    await runtime._reply_text(update, "✨ Fresh session started.")
