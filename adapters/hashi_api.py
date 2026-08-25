@@ -137,8 +137,20 @@ class HashiApiAdapter(OpenRouterAdapter):
         payload["reasoning_effort"] = self._hashi_reasoning_effort()
         return payload
 
-    def _hashi_headers(self) -> dict:
-        return {"Content-Type": "application/json"}
+    def _hashi_headers(
+        self,
+        *,
+        request_id: str | None = None,
+        provider_call: int | None = None,
+        after_tool_end: bool = False,
+    ) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if request_id:
+            headers["X-Hashi-Correlation-ID"] = str(request_id)[:200]
+        if provider_call is not None:
+            headers["X-Hashi-Provider-Call"] = str(provider_call)
+        headers["X-Hashi-After-Tool-End"] = "true" if after_tool_end else "false"
+        return headers
 
     async def initialize(self) -> bool:
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -316,8 +328,6 @@ class HashiApiAdapter(OpenRouterAdapter):
         self._ensure_client()
 
         use_streaming = on_stream_event is not None
-        headers = self._hashi_headers()
-
         last_text = ""
         last_structured_data = None
         total_prompt = 0
@@ -331,6 +341,7 @@ class HashiApiAdapter(OpenRouterAdapter):
         tool_loop_count = 0
         media_routing: tuple[dict[str, Any], ...] = ()
         media_fallback_attempted = False
+        provider_attempt_count = 0
 
         try:
             self._touch_activity()
@@ -353,6 +364,12 @@ class HashiApiAdapter(OpenRouterAdapter):
 
             for loop_idx in count():
                 while True:
+                    provider_attempt_count += 1
+                    headers = self._hashi_headers(
+                        request_id=request_id,
+                        provider_call=provider_attempt_count,
+                        after_tool_end=tool_loop_count > 0,
+                    )
                     payload = self._build_payload(
                         messages,
                         use_streaming=use_streaming,
@@ -364,6 +381,16 @@ class HashiApiAdapter(OpenRouterAdapter):
                     )
 
                     try:
+                        self.logger.info(
+                            "HASHI_API_TRACE provider_call_started "
+                            "request_id=%s provider_call=%s after_tool_end=%s "
+                            "streaming=%s model=%s",
+                            request_id,
+                            provider_attempt_count,
+                            tool_loop_count > 0,
+                            use_streaming,
+                            self.config.model,
+                        )
                         if use_streaming:
                             result = await self._stream_api_once(
                                 payload,
@@ -402,6 +429,17 @@ class HashiApiAdapter(OpenRouterAdapter):
                         all_media_native = False
                         continue
                     break
+
+                self.logger.info(
+                    "HASHI_API_TRACE provider_call_completed "
+                    "request_id=%s provider_call=%s after_tool_end=%s "
+                    "finish_reason=%s tool_calls=%s",
+                    request_id,
+                    provider_attempt_count,
+                    tool_loop_count > 0,
+                    result.finish_reason,
+                    len(result.tool_calls or ()),
+                )
 
                 total_prompt += result.prompt_tokens
                 total_completion += result.completion_tokens
@@ -444,6 +482,13 @@ class HashiApiAdapter(OpenRouterAdapter):
                     native_attachment_ids=native_attachment_ids,
                     native_local_refs=native_local_refs,
                     all_media_native=all_media_native,
+                )
+                self.logger.info(
+                    "HASHI_API_TRACE tool_round_completed "
+                    "request_id=%s tool_round=%s tool_calls=%s",
+                    request_id,
+                    tool_loop_count,
+                    len(result.tool_calls),
                 )
 
             duration_ms = round((time.perf_counter() - started) * 1000, 2)

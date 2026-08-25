@@ -16,9 +16,10 @@ session cache (in-memory, TTL-based) for clients that don't resend full history.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
+import os
 import re
 import socket
 import time
@@ -68,6 +69,7 @@ API_GATEWAY_CANCEL_TIMEOUT_SEC = 2.0
 _EXTERNAL_TOOL_ENGINES = frozenset({"codex-cli", "xai-api"})
 _EXTERNAL_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _GATEWAY_SERVER_APP_KEY = web.AppKey("hashi-api-gateway-server", object)
+_CORRELATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
 
 _ENGINE_FOR_MODEL = {
     model: engine
@@ -769,6 +771,11 @@ class APIGatewayServer:
         selected_default = str(default_model or gateway_config.get("default_model") or "").strip()
         self.default_model = selected_default if selected_default in _ENGINE_FOR_MODEL else DEFAULT_API_MODEL
         self._pool = _AdapterPool(global_config, secrets, workspace_root)
+        self.gateway_instance_id = f"gateway-{uuid.uuid4().hex[:12]}"
+        logs_root = Path(
+            getattr(global_config, "base_logs_dir", workspace_root / "logs")
+        )
+        self.observability_path = logs_root / "api_gateway_observability.jsonl"
         self._sessions = _SessionCache()
         self._engine_status: dict[str, dict] = {}
         self._runner = None
@@ -794,6 +801,30 @@ class APIGatewayServer:
         self.app.router.add_post("/v1/images/generations", self.handle_image_generations)
         self.app.router.add_post("/v1/videos/generations", self.handle_video_generations)
         self.app.router.add_get("/health", self.handle_health)
+
+    def _observe(self, event: str, **fields: Any) -> None:
+        """Persist content-free request lifecycle evidence for postmortems."""
+        record = {
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            "gateway_instance_id": self.gateway_instance_id,
+            "process_id": os.getpid(),
+            **fields,
+        }
+        encoded = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        logger.info("API_GATEWAY_TRACE %s", encoded)
+        try:
+            self.observability_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.observability_path.open("a", encoding="utf-8") as handle:
+                handle.write(encoded + "\n")
+        except OSError as exc:
+            logger.warning("API Gateway observability write failed: %s", exc)
+
+    @staticmethod
+    def _upstream_request_id(request: web.Request) -> str | None:
+        headers = getattr(request, "headers", {})
+        candidate = str(headers.get("X-Hashi-Correlation-ID") or "").strip()
+        return candidate if _CORRELATION_ID_RE.fullmatch(candidate) else None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -834,6 +865,11 @@ class APIGatewayServer:
         await self._site.start()
         self.enabled = True
         self._accepting_requests = True
+        self._observe(
+            "gateway_started",
+            bind_host=self.bind_host,
+            port=self.port,
+        )
         available = [e for e, s in self._engine_status.items() if s.get("available")]
         unavailable = [e for e, s in self._engine_status.items() if not s.get("available")]
         logger.info(
@@ -844,6 +880,14 @@ class APIGatewayServer:
 
     async def _run_tracked_request(self, request, handler):
         if not self._accepting_requests:
+            self._observe(
+                "request_rejected_not_accepting",
+                upstream_request_id=self._upstream_request_id(request),
+                request_path=str(getattr(request, "path", "") or ""),
+                draining=self._draining,
+                transport_closed=self._transport_closed,
+                active_requests=len(self._active_requests),
+            )
             return web.json_response(
                 {
                     "error": {
@@ -917,6 +961,11 @@ class APIGatewayServer:
         if self._transport_closed:
             return
 
+        self._observe(
+            "gateway_shutdown_started",
+            active_requests=len(self._active_requests),
+        )
+
         self._accepting_requests = False
         self._draining = True
         self.enabled = False
@@ -933,6 +982,10 @@ class APIGatewayServer:
             await runner.cleanup()
             self._runner = None
         self._transport_closed = True
+        self._observe(
+            "gateway_transport_closed",
+            active_requests=len(self._active_requests),
+        )
 
     async def stop(self):
         async with self._stop_lock:
@@ -950,6 +1003,7 @@ class APIGatewayServer:
                 self._draining = False
                 self._site = None
                 self._runner = None
+                self._observe("gateway_stopped")
 
     def set_default_model(self, model: str) -> None:
         normalized = str(model or "").strip()
@@ -1158,6 +1212,28 @@ class APIGatewayServer:
         _print_api_in(model, user_preview)
 
         request_id = f"apireq-{uuid.uuid4().hex[:8]}"
+        upstream_request_id = self._upstream_request_id(request)
+        request_headers = getattr(request, "headers", {})
+        self._observe(
+            "request_received",
+            gateway_request_id=request_id,
+            upstream_request_id=upstream_request_id,
+            provider_call=request_headers.get("X-Hashi-Provider-Call"),
+            after_tool_end=(
+                request_headers.get("X-Hashi-After-Tool-End", "false").casefold()
+                == "true"
+            ),
+            model=model,
+            engine=engine,
+            streaming=stream,
+            request_mode=(
+                "external_tool"
+                if external_tool_mode
+                else "structured"
+                if structured_conversation_mode
+                else "text"
+            ),
+        )
 
         try:
             adapter = await self._pool.get(engine, model)
@@ -1497,6 +1573,7 @@ class APIGatewayServer:
                 "Content-Type": "text/event-stream",
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
+                "X-Hashi-Gateway-Request-ID": request_id,
             },
         )
         try:
@@ -1694,6 +1771,7 @@ class APIGatewayServer:
                 "Content-Type": "text/event-stream",
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
+                "X-Hashi-Gateway-Request-ID": request_id,
             },
         )
         try:
@@ -1864,18 +1942,55 @@ class APIGatewayServer:
                 "Content-Type": "text/event-stream",
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
+                "X-Hashi-Gateway-Request-ID": request_id,
             },
         )
         try:
             await resp.prepare(request)
         except Exception as e:
+            self._observe(
+                "stream_prepare_failed",
+                gateway_request_id=request_id,
+                error_type=type(e).__name__,
+            )
             logger.debug(f"Stream prepare failed for {request_id} (client disconnected?): {e}")
             return resp
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         collected_text: list[str] = []
+        event_count = 0
+        last_event_kind: str | None = None
+        tool_end_count = 0
+        self._observe(
+            "stream_prepared",
+            gateway_request_id=request_id,
+            model=model,
+        )
 
         async def on_event(event: StreamEvent):
+            nonlocal event_count, last_event_kind, tool_end_count
+            event_count += 1
+            last_event_kind = event.kind
+            if event.kind == "tool_end":
+                tool_end_count += 1
+            # Persist the first activity and state-changing tool events. Text
+            # and reasoning deltas can number in the thousands; their totals
+            # and final kind are captured by the terminal lifecycle record.
+            if event_count == 1 or event.kind in {
+                "tool_start",
+                "tool_end",
+                "shell_exec",
+                "file_read",
+                "file_edit",
+            }:
+                self._observe(
+                    "backend_stream_event",
+                    gateway_request_id=request_id,
+                    event_index=event_count,
+                    event_kind=event.kind,
+                    tool_name=event.tool_name or None,
+                    elapsed_ms=round((time.time() - t_start) * 1000, 2),
+                )
             if event.kind == KIND_TEXT_DELTA and event.summary:
                 collected_text.append(event.summary)
                 chunk = {
@@ -1893,10 +2008,21 @@ class APIGatewayServer:
                 }
                 try:
                     await resp.write(f"data: {json.dumps(chunk)}\n\n".encode())
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._observe(
+                        "stream_chunk_write_failed",
+                        gateway_request_id=request_id,
+                        event_index=event_count,
+                        error_type=type(exc).__name__,
+                        elapsed_ms=round((time.time() - t_start) * 1000, 2),
+                    )
 
         try:
+            self._observe(
+                "backend_invocation_started",
+                gateway_request_id=request_id,
+                model=model,
+            )
             request_options = {}
             if reasoning_effort is not None:
                 request_options["reasoning_effort"] = reasoning_effort
@@ -1905,7 +2031,26 @@ class APIGatewayServer:
                 on_stream_event=on_event,
                 **request_options,
             )
+        except asyncio.CancelledError:
+            self._observe(
+                "backend_invocation_cancelled",
+                gateway_request_id=request_id,
+                event_count=event_count,
+                last_event_kind=last_event_kind,
+                tool_end_count=tool_end_count,
+                elapsed_ms=round((time.time() - t_start) * 1000, 2),
+            )
+            raise
         except Exception as e:
+            self._observe(
+                "backend_invocation_raised",
+                gateway_request_id=request_id,
+                error_type=type(e).__name__,
+                event_count=event_count,
+                last_event_kind=last_event_kind,
+                tool_end_count=tool_end_count,
+                elapsed_ms=round((time.time() - t_start) * 1000, 2),
+            )
             logger.error(f"Streaming backend error for {request_id}: {e}")
             try:
                 await resp.write(b"data: [DONE]\n\n")
@@ -1913,6 +2058,17 @@ class APIGatewayServer:
             except Exception:
                 pass
             return resp
+
+        self._observe(
+            "backend_invocation_completed",
+            gateway_request_id=request_id,
+            success=bool(getattr(response, "is_success", False)),
+            error_code=getattr(response, "error_code", None),
+            event_count=event_count,
+            last_event_kind=last_event_kind,
+            tool_end_count=tool_end_count,
+            elapsed_ms=round((time.time() - t_start) * 1000, 2),
+        )
 
         elapsed = time.time() - t_start
 
@@ -1957,6 +2113,20 @@ class APIGatewayServer:
             await resp.write(f"data: {json.dumps(final_chunk)}\n\n".encode())
             await resp.write(b"data: [DONE]\n\n")
             await resp.write_eof()
-        except Exception:
-            pass
+        except Exception as exc:
+            self._observe(
+                "stream_terminal_write_failed",
+                gateway_request_id=request_id,
+                error_type=type(exc).__name__,
+                elapsed_ms=round((time.time() - t_start) * 1000, 2),
+            )
+        else:
+            self._observe(
+                "stream_terminal_sent",
+                gateway_request_id=request_id,
+                event_count=event_count,
+                last_event_kind=last_event_kind,
+                tool_end_count=tool_end_count,
+                elapsed_ms=round((time.time() - t_start) * 1000, 2),
+            )
         return resp

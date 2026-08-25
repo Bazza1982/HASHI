@@ -116,7 +116,10 @@ async def test_hashi_api_initializes_without_a_provider_secret(tmp_path):
 
     assert await adapter.initialize() is True
     assert adapter.hashi_url == "http://127.0.0.1:18801/v1/chat/completions"
-    assert adapter._hashi_headers() == {"Content-Type": "application/json"}
+    assert adapter._hashi_headers() == {
+        "Content-Type": "application/json",
+        "X-Hashi-After-Tool-End": "false",
+    }
 
     await adapter.shutdown()
 
@@ -189,7 +192,12 @@ async def test_hashi_api_preserves_multipart_messages_and_reasoning_effort(tmp_p
         part["type"] for part in request_payload["messages"][1]["content"]
     ] == ["text", "image_url"]
     _payload, headers, _callback = adapter._call_api_once.await_args.args
-    assert headers == {"Content-Type": "application/json"}
+    assert headers == {
+        "Content-Type": "application/json",
+        "X-Hashi-Correlation-ID": "request-multimodal",
+        "X-Hashi-Provider-Call": "1",
+        "X-Hashi-After-Tool-End": "false",
+    }
     assert "Authorization" not in headers
 
     await adapter.shutdown()

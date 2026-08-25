@@ -9,7 +9,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from adapters.base import BackendResponse, TokenUsage
-from adapters.stream_events import KIND_TEXT_DELTA, StreamEvent
+from adapters.stream_events import KIND_TEXT_DELTA, KIND_TOOL_END, StreamEvent
 from orchestrator.api_gateway import (
     APIGatewayServer,
     _AdapterPool,
@@ -73,6 +73,36 @@ class _ExternalAdapter:
     def supports_external_tool_passthrough(self, model=None):
         self.capability_model = model
         return self.supports
+
+    async def generate_response(
+        self,
+        prompt,
+        request_id,
+        *,
+        is_retry=False,
+        silent=True,
+        on_stream_event=None,
+        **request_options,
+    ):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "request_id": request_id,
+                "is_retry": is_retry,
+                "silent": silent,
+                "request_options": request_options,
+            }
+        )
+        text = self.stream_text or "done"
+        if on_stream_event is not None:
+            await on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary=text))
+        return BackendResponse(
+            text=text,
+            duration_ms=1,
+            is_success=True,
+            stop_reason="stop",
+            usage=TokenUsage(input_tokens=5, output_tokens=1),
+        )
 
     async def generate_external_tool_response(
         self,
@@ -170,6 +200,7 @@ class _Pool:
 class _Request:
     def __init__(self, body):
         self.body = body
+        self.headers = {}
 
     async def json(self):
         return self.body
@@ -950,3 +981,63 @@ async def test_streaming_external_tools_emit_openai_tool_delta_and_finish_reason
     assert events[-1]["choices"][0]["finish_reason"] == "tool_calls"
     assert raw.rstrip().endswith("data: [DONE]")
     assert adapter.calls[0]["use_streaming"] is True
+
+
+@pytest.mark.asyncio
+async def test_text_stream_persists_correlated_lifecycle_events(tmp_path):
+    class _ToolThenTextAdapter(_ExternalAdapter):
+        async def generate_response(self, *args, on_stream_event=None, **kwargs):
+            if on_stream_event is not None:
+                await on_stream_event(
+                    StreamEvent(
+                        kind=KIND_TOOL_END,
+                        summary="completed",
+                        tool_name="Bash",
+                    )
+                )
+            return await super().generate_response(
+                *args,
+                on_stream_event=on_stream_event,
+                **kwargs,
+            )
+
+    adapter = _ToolThenTextAdapter(stream_text="observable")
+    server = _server(tmp_path, adapter)
+
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={
+                "X-Hashi-Correlation-ID": "req-review-1",
+                "X-Hashi-Provider-Call": "2",
+                "X-Hashi-After-Tool-End": "true",
+            },
+            json={
+                "model": "grok-4.3",
+                "messages": [{"role": "user", "content": "observe"}],
+                "stream": True,
+            },
+        )
+        await response.text()
+
+    records = [
+        json.loads(line)
+        for line in server.observability_path.read_text(encoding="utf-8").splitlines()
+    ]
+    received = next(item for item in records if item["event"] == "request_received")
+    assert received["upstream_request_id"] == "req-review-1"
+    assert received["provider_call"] == "2"
+    assert received["after_tool_end"] is True
+    assert any(item["event"] == "backend_invocation_started" for item in records)
+    completed = next(
+        item for item in records if item["event"] == "backend_invocation_completed"
+    )
+    assert completed["tool_end_count"] == 1
+    assert any(
+        item["event"] == "backend_stream_event"
+        and item["event_kind"] == "tool_end"
+        and item["tool_name"] == "Bash"
+        for item in records
+    )
+    assert any(item["event"] == "stream_terminal_sent" for item in records)
+    assert response.headers["X-Hashi-Gateway-Request-ID"].startswith("apireq-")
