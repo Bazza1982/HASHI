@@ -35,6 +35,10 @@ FOUNDATION_PHASES = {
     "adapters.stream_events": 0,
     "adapters.stream_io": 0,
     "orchestrator.flexible_backend_registry": 0,
+    # API Gateway and provider adapters import multimodal constants and value
+    # types at module scope. Reload the contract first so the first hot reboot
+    # across a newly added symbol cannot bind consumers to the old dictionary.
+    "orchestrator.multimodal_contract": 0,
     "orchestrator.command_specs": 0,
     # QueuedRequest is imported at module scope by both agent runtimes and
     # request-pipeline consumers. Reload it first so a hot reboot cannot bind

@@ -94,7 +94,9 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
         "adapters.stream_io",
         "adapters.stream_events",
         "adapters.deepseek_api",
+        "orchestrator.api_gateway",
         "orchestrator.flexible_backend_manager",
+        "orchestrator.multimodal_contract",
         "orchestrator.her_v2.config",
         "orchestrator.her_v2.prompt_catalog",
         "orchestrator.her_v2.prompts",
@@ -115,6 +117,12 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
 
     assert ordered.index("adapters.stream_events") < ordered.index("adapters.base")
     assert ordered.index("adapters.stream_io") < ordered.index("adapters.her_v2")
+    assert ordered.index("orchestrator.multimodal_contract") < ordered.index(
+        "orchestrator.api_gateway"
+    )
+    assert ordered.index("orchestrator.multimodal_contract") < ordered.index(
+        "adapters.openrouter_api"
+    )
     assert ordered.index("adapters.base") < ordered.index("adapters.her_v2")
     assert ordered.index("adapters.her_persona") < ordered.index("adapters.her_v2")
     assert ordered.index("orchestrator.her_v2.models") < ordered.index(

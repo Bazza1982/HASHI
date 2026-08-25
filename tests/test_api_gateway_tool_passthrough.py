@@ -17,9 +17,14 @@ from orchestrator.api_gateway import (
     MAX_INLINE_MEDIA_BYTES,
     _AdapterPool,
     _contains_inline_media,
+    _validate_inline_image_url,
     _validate_structured_conversation,
     _uses_external_tool_protocol,
     _uses_structured_conversation,
+)
+from orchestrator.multimodal_contract import (
+    HASHI_API_MAX_IMAGE_BYTES,
+    HASHI_API_MAX_REQUEST_BYTES,
 )
 from orchestrator.service_manager import ServiceManager
 
@@ -76,6 +81,8 @@ def test_gateway_body_budget_fits_one_50_mib_image_with_189_mib_headroom(
 
     assert MAX_INLINE_MEDIA_BYTES == 50 * 1024 * 1024
     assert API_GATEWAY_MAX_REQUEST_BYTES == 256 * 1024 * 1024
+    assert MAX_INLINE_MEDIA_BYTES == HASHI_API_MAX_IMAGE_BYTES
+    assert API_GATEWAY_MAX_REQUEST_BYTES == HASHI_API_MAX_REQUEST_BYTES
     assert server.app._client_max_size == API_GATEWAY_MAX_REQUEST_BYTES
     assert encoded_image_bytes == pytest.approx(
         66.7 * 1024 * 1024,
@@ -95,7 +102,7 @@ def test_gateway_codex_path_allows_50_mib_image_plus_historical_screenshot(
         return "image/png", decoded_size
 
     monkeypatch.setattr(
-        "orchestrator.api_gateway.validate_inline_image_data_url",
+        "orchestrator.multimodal_contract.validate_inline_image_data_url",
         validate_without_allocating,
     )
     messages = [
@@ -122,6 +129,34 @@ def test_gateway_codex_path_allows_50_mib_image_plus_historical_screenshot(
         )
         is None
     )
+
+
+def test_gateway_uses_current_multimodal_error_generation(monkeypatch):
+    class ReloadedContractError(ValueError):
+        code = "MEDIA_LIMIT_EXCEEDED"
+
+    def reject_current_generation(_value, *, max_bytes):
+        assert max_bytes == 50 * 1024 * 1024
+        raise ReloadedContractError("current-generation limit")
+
+    monkeypatch.setattr(
+        "orchestrator.multimodal_contract.MultimodalContractError",
+        ReloadedContractError,
+    )
+    monkeypatch.setattr(
+        "orchestrator.multimodal_contract.validate_inline_image_data_url",
+        reject_current_generation,
+    )
+
+    response, decoded_bytes = _validate_inline_image_url(
+        "data:image/png;base64,AAAA",
+        param="messages[0].content[0].image_url",
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 400
+    assert decoded_bytes == 0
+    assert payload["error"]["code"] == "media_too_large"
 
 
 class _ExternalAdapter:

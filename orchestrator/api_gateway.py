@@ -30,6 +30,7 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
+from orchestrator import multimodal_contract
 from adapters.xai_imagine import (
     DEFAULT_IMAGINE_MODEL,
     DEFAULT_IMAGINE_VIDEO_MODEL,
@@ -49,12 +50,8 @@ from orchestrator.api_gateway_config import load_api_gateway_config
 from orchestrator.api_gateway_preflight import check_gateway_engines
 from orchestrator.flexible_backend_registry import get_available_efforts
 from orchestrator.multimodal_contract import (
-    HASHI_API_MAX_IMAGE_BYTES,
-    HASHI_API_MAX_REQUEST_BYTES,
-    MultimodalContractError,
     contains_persistent_inline_media,
     resolve_input_capability,
-    validate_inline_image_data_url,
 )
 from adapters.stream_events import StreamEvent, KIND_TEXT_DELTA
 
@@ -65,8 +62,11 @@ logger = logging.getLogger("BridgeU.APIGateway")
 SESSION_TTL_SEC = 1800  # 30 minutes
 MAX_EXTERNAL_TOOLS = 128
 MAX_EXTERNAL_TOOL_BYTES = 1024 * 1024
-MAX_INLINE_MEDIA_BYTES = HASHI_API_MAX_IMAGE_BYTES
-API_GATEWAY_MAX_REQUEST_BYTES = HASHI_API_MAX_REQUEST_BYTES
+# Keep the server boundary bootstrappable from a live generation that predates
+# the shared multimodal constants. Contract tests pin these values together;
+# once that first hot reload succeeds, the dependency ordering is also current.
+MAX_INLINE_MEDIA_BYTES = 50 * 1024 * 1024
+API_GATEWAY_MAX_REQUEST_BYTES = 256 * 1024 * 1024
 API_GATEWAY_DRAIN_TIMEOUT_SEC = 10.0
 API_GATEWAY_CANCEL_TIMEOUT_SEC = 2.0
 _EXTERNAL_TOOL_ENGINES = frozenset({"codex-cli", "xai-api"})
@@ -208,11 +208,11 @@ def _validate_inline_image_url(
 ) -> tuple[web.Response | None, int]:
     if url.casefold().startswith("data:"):
         try:
-            _mime_type, decoded_bytes = validate_inline_image_data_url(
+            _mime_type, decoded_bytes = multimodal_contract.validate_inline_image_data_url(
                 url,
                 max_bytes=MAX_INLINE_MEDIA_BYTES,
             )
-        except MultimodalContractError as exc:
+        except multimodal_contract.MultimodalContractError as exc:
             error_code = (
                 "media_too_large"
                 if exc.code == "MEDIA_LIMIT_EXCEEDED"
