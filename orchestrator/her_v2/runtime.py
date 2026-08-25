@@ -2390,7 +2390,13 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         )
         assert isinstance(outcome, ReplanningOutcome)
         state.replan_count += 1
-        self._activate_plan(state, outcome.plan, replacement=True)
+        if outcome.plan_changed:
+            self._activate_plan(state, outcome.plan, replacement=True)
+        else:
+            # An unchanged Replan is a progress calibration against the current
+            # authoritative snapshot, not a plan replacement.  Preserve its ID
+            # and version so in-flight work remains bound to the same plan.
+            outcome = replace(outcome, plan=prior_plan)
         state.plan_edit_history.append(
             {
                 "revision": state.replan_count,

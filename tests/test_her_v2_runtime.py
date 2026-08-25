@@ -2573,7 +2573,7 @@ async def test_replan_replaces_subagent_batch_without_attaching_old_plan_results
 
 
 @pytest.mark.asyncio
-async def test_unchanged_replan_rebinds_successful_preserved_assignment_once(tmp_path):
+async def test_unchanged_replan_preserves_active_plan_and_running_assignment(tmp_path):
     async def trigger_replan(request):
         coordinator = request.checkpoint_coordinator
         assert coordinator is not None
@@ -2658,23 +2658,27 @@ async def test_unchanged_replan_rebinds_successful_preserved_assignment_once(tmp
     )
 
     assert result.terminal_state is TerminalState.COMPLETED
+    assert result.replan_count == 1
+    assert result.ledger["plan_id"].endswith(":plan:v1")
     sub_requests = [
         request
         for _profile, request in provider.requests
         if request.role.startswith("sub_agent:")
     ]
     assert len(sub_requests) == 1
+    assert sub_requests[0].plan_id.endswith(":plan:v1")
     primary = next(
         request
         for _profile, request in provider.requests
         if request.stage is Stage.EXECUTION
         and not request.role.startswith("sub_agent:")
     )
+    assert primary.plan_id.endswith(":plan:v1")
     rebound = primary.context["sub_agent_results"]
     assert len(rebound) == 1
-    assert rebound[0]["plan_id"].endswith(":plan:v2")
+    assert rebound[0]["plan_id"].endswith(":plan:v1")
     assert rebound[0]["source_plan_id"].endswith(":plan:v1")
-    assert rebound[0]["reused"] is True
+    assert rebound[0]["reused"] is False
 
 
 @pytest.mark.asyncio
