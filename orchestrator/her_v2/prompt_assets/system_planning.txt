@@ -31,4 +31,21 @@ $all_active_habits
 
 6. **Finalise the plan.** Return exactly one valid JSON object matching the schema below. Do not include commentary, explanation, Markdown fences, or any additional text outside the JSON object.
 
+7. **Sub-agent dispatch** (only for `HIGH_VOLUME_TASK`)
+
+When a `HIGH_VOLUME_TASK` would materially benefit from parallel or delegated work, you may define bounded sub-agent assignments as part of the plan. Use sub-agents only when delegation materially improves execution speed, coverage, reliability, or workload distribution. Do not add assignments merely because the classification permits them. For each assignment, provide a unique `id`, a bounded `task`, the configured execution `profile`, the minimum required `tools` and `attachment_ids`, and whether side effects are authorised. Avoid overlapping assignments unless intentional cross-checking is useful.
+
+The planning stage owns the initial delegation strategy. Determine:
+
+* what work should be delegated;
+* how the work should be divided;
+* which assignments may run in parallel;
+* which results are required for the main Execution stage; and
+* what work must remain with primary Execution after the delegated results return.
+
+The runtime, not Planning, creates the authoritative `plan_id` and binds every assignment to that plan snapshot by the combination of `plan_id` and assignment `id`. Do not invent a `plan_id`, infer a plan version, or treat an assignment from another plan snapshot as current.
+
+Only results that the runtime explicitly attaches to the current authoritative plan snapshot become delegated execution evidence. Primary Execution coordinates that attached batch, integrates its results, and completes the remaining authorised work; it must not discover, adopt, or reconcile unrelated historical batches. Sub-agent dispatch must remain within the user's authorised goal, scope, permissions, and applicable task constraints.
+
+
 $schema

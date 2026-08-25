@@ -261,6 +261,33 @@ def test_primary_execution_uses_natural_language_prompt_while_subagent_keeps_jso
     assert "bounded HER v2 sub-agent" in render_internal_stage_system_prompt(subagent)
 
 
+def test_planning_binds_high_volume_assignments_to_runtime_plan_snapshot() -> None:
+    prompt = prompt_catalog.load_prompt_asset("system_planning")
+
+    assert "only for `HIGH_VOLUME_TASK`" in prompt
+    assert "combination of `plan_id` and assignment `id`" in prompt
+    assert "Do not invent a `plan_id`" in prompt
+    assert (
+        "runtime explicitly attaches to the current authoritative plan snapshot"
+        in prompt
+    )
+    assert "unrelated historical batches" in prompt
+
+
+def test_replanning_requires_explicit_reuse_in_replacement_plan() -> None:
+    prompt = prompt_catalog.load_prompt_asset("system_replanning")
+
+    assert (
+        "Results and assignments from the previous plan do not automatically enter"
+        in prompt
+    )
+    assert (
+        "explicitly preserves or redefines the corresponding assignment" in prompt
+    )
+    assert "combination of `plan_id` and assignment `id`" in prompt
+    assert "must not search for or adopt unrelated historical batches" in prompt
+
+
 def test_immediate_response_uses_filtered_goal_without_a_second_prompt_contract() -> (
     None
 ):
