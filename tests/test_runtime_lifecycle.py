@@ -138,3 +138,62 @@ async def test_shutdown_treats_already_stopped_telegram_actions_as_idempotent():
 
     assert shutdown_states == [True]
     assert len(runtime.error_logger.messages) == 3
+
+
+@pytest.mark.asyncio
+async def test_shutdown_gives_telegram_updater_request_timeout_headroom(monkeypatch):
+    shutdown_states = []
+    calls = []
+
+    async def _shutdown_backend():
+        calls.append("backend")
+
+    async def _slow_updater_stop():
+        await asyncio.sleep(0.03)
+        calls.append("telegram-updater")
+
+    async def _stop_app():
+        calls.append("telegram-app-stop")
+
+    async def _shutdown_app():
+        calls.append("telegram-app-shutdown")
+
+    runtime = SimpleNamespace(
+        name="sunny",
+        logger=_Logger(),
+        error_logger=_Logger(),
+        is_shutting_down=False,
+        _scheduled_retry_tasks=set(),
+        _persona_background_status_tasks=set(),
+        _background_tasks=set(),
+        process_task=None,
+        backend_manager=SimpleNamespace(shutdown=_shutdown_backend),
+        startup_success=True,
+        app=SimpleNamespace(
+            updater=SimpleNamespace(stop=_slow_updater_stop),
+            stop=_stop_app,
+            shutdown=_shutdown_app,
+        ),
+        _mark_runtime_shutdown=lambda clean: shutdown_states.append(clean),
+    )
+    monkeypatch.setattr(
+        runtime_lifecycle,
+        "RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        runtime_lifecycle,
+        "RUNTIME_TELEGRAM_UPDATER_SHUTDOWN_TIMEOUT_SECONDS",
+        0.1,
+    )
+
+    await runtime_lifecycle.shutdown(runtime)
+
+    assert calls == [
+        "backend",
+        "telegram-updater",
+        "telegram-app-stop",
+        "telegram-app-shutdown",
+    ]
+    assert shutdown_states == [True]
+    assert runtime.error_logger.messages == []

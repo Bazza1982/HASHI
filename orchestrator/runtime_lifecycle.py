@@ -20,6 +20,13 @@ from orchestrator.wrapper_mode import SESSION_RESET_SOURCE
 
 RUNTIME_TASK_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+# python-telegram-bot's default getUpdates request timeout is also 5 seconds.
+# Updater.stop() performs one final, non-long-polling getUpdates request, so a
+# matching outer deadline can cancel an otherwise healthy shutdown at the exact
+# moment the request layer is about to return (for example during a transient
+# Telegram 502).  Keep enough headroom for that cleanup request to settle while
+# remaining inside the per-runtime teardown deadline.
+RUNTIME_TELEGRAM_UPDATER_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 
 def _consume_shutdown_task_result(task: asyncio.Future) -> None:
@@ -71,14 +78,17 @@ async def _run_shutdown_step(
     awaitable,
     *,
     label: str,
+    timeout_s: float | None = None,
     allow_exception: bool = False,
 ) -> bool:
+    if timeout_s is None:
+        timeout_s = RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS
     task = asyncio.create_task(awaitable, name=f"shutdown-{runtime.name}-{label}")
     return await _settle_shutdown_task(
         runtime,
         task,
         label=label,
-        timeout_s=RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS,
+        timeout_s=timeout_s,
         cancel_first=False,
         allow_exception=allow_exception,
     )
@@ -201,16 +211,29 @@ async def shutdown(runtime: Any) -> None:
     )
 
     if runtime.startup_success:
-        for label, action in (
-            ("telegram-updater", runtime.app.updater.stop),
-            ("telegram-app-stop", runtime.app.stop),
-            ("telegram-app-shutdown", runtime.app.shutdown),
+        for label, action, timeout_s in (
+            (
+                "telegram-updater",
+                runtime.app.updater.stop,
+                RUNTIME_TELEGRAM_UPDATER_SHUTDOWN_TIMEOUT_SECONDS,
+            ),
+            (
+                "telegram-app-stop",
+                runtime.app.stop,
+                RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS,
+            ),
+            (
+                "telegram-app-shutdown",
+                runtime.app.shutdown,
+                RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS,
+            ),
         ):
             clean = (
                 await _run_shutdown_step(
                     runtime,
                     action(),
                     label=label,
+                    timeout_s=timeout_s,
                     allow_exception=True,
                 )
                 and clean
