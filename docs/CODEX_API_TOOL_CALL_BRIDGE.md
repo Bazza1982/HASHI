@@ -99,8 +99,11 @@ enforces the following invariants for every Codex tool request:
   command line with complete disabled inert transports;
 - only internal aliases derived from names declared in the current request are
   accepted from `item/tool/call`, then mapped back to the caller's exact name;
-- duplicate/missing call IDs, undeclared tools, local tool items, unknown host
-  callbacks, and policy violations interrupt the turn and fail closed;
+- duplicate/missing call IDs, undeclared caller tools, and policy violations
+  interrupt the turn and fail closed;
+- native/local tool lifecycle events are observed without aborting the API turn;
+  unavailable host callbacks receive a structured method-not-found response so
+  Codex can recover, continue directly, or choose a caller-provided dynamic tool;
 - active app-server and MCP-inventory subprocesses tracked and killed during
   cancellation or adapter shutdown.
 

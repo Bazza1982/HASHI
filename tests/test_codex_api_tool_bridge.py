@@ -92,6 +92,7 @@ class _FakeAppServerProcess:
         tool_calls=None,
         final_text="",
         forbidden_item_type=None,
+        host_method=None,
         fail_after_tools=False,
     ):
         self.pid = 4321
@@ -103,6 +104,7 @@ class _FakeAppServerProcess:
         self.tool_calls = list(tool_calls or [])
         self.final_text = final_text
         self.forbidden_item_type = forbidden_item_type
+        self.host_method = host_method
         self.fail_after_tools = fail_after_tools
         self.received = []
         self.thread_params = None
@@ -214,15 +216,49 @@ class _FakeAppServerProcess:
             if self.forbidden_item_type:
                 self.stdout.emit(
                     {
-                        "method": "item/started",
+                        "method": "item/completed",
                         "params": {
                             "threadId": self.thread_id,
                             "turnId": self.turn_id,
                             "item": {
                                 "type": self.forbidden_item_type,
                                 "id": "forbidden-local-tool",
+                                "status": "failed",
+                                "error": {"message": "native tool unavailable"},
                             },
                         },
+                    }
+                )
+                self.stdout.emit(
+                    {
+                        "method": "item/completed",
+                        "params": {
+                            "threadId": self.thread_id,
+                            "turnId": self.turn_id,
+                            "item": {
+                                "type": "agentMessage",
+                                "id": "answer-after-native-tool",
+                                "phase": "final_answer",
+                                "text": self.final_text,
+                            },
+                        },
+                    }
+                )
+                self.stdout.emit(
+                    {
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": self.thread_id,
+                            "turn": {"id": self.turn_id, "status": "completed"},
+                        },
+                    }
+                )
+            elif self.host_method:
+                self.stdout.emit(
+                    {
+                        "method": self.host_method,
+                        "id": "unsupported-host-call",
+                        "params": {"threadId": self.thread_id},
                     }
                 )
             elif self.tool_calls:
@@ -276,6 +312,31 @@ class _FakeAppServerProcess:
                     "params": {
                         "threadId": self.thread_id,
                         "turn": {"id": self.turn_id, "status": "interrupted"},
+                    },
+                }
+            )
+        elif request_id == "unsupported-host-call":
+            self.stdout.emit(
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": self.thread_id,
+                        "turnId": self.turn_id,
+                        "item": {
+                            "type": "agentMessage",
+                            "id": "answer-after-host-error",
+                            "phase": "final_answer",
+                            "text": self.final_text,
+                        },
+                    },
+                }
+            )
+            self.stdout.emit(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": self.thread_id,
+                        "turn": {"id": self.turn_id, "status": "completed"},
                     },
                 }
             )
@@ -835,8 +896,11 @@ async def test_codex_app_server_rejects_public_name_instead_of_internal_alias(
 
 
 @pytest.mark.asyncio
-async def test_codex_app_server_fails_closed_on_local_tool_item(monkeypatch):
-    fake = _FakeAppServerProcess(forbidden_item_type="commandExecution")
+async def test_codex_app_server_allows_recovery_from_native_tool_item(monkeypatch):
+    fake = _FakeAppServerProcess(
+        forbidden_item_type="collabAgentToolCall",
+        final_text="Continued without native collaboration.",
+    )
 
     async def create_subprocess(*_args, **_kwargs):
         return fake
@@ -855,6 +919,42 @@ async def test_codex_app_server_fails_closed_on_local_tool_item(monkeypatch):
         "req-local-tool",
     )
 
-    assert response.is_success is False
-    assert "disabled local tool item 'commandExecution'" in response.error
-    assert any(item.get("method") == "turn/interrupt" for item in fake.received)
+    assert response.is_success is True
+    assert response.text == "Continued without native collaboration."
+    assert not any(item.get("method") == "turn/interrupt" for item in fake.received)
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_returns_recoverable_error_for_unknown_host_method(
+    monkeypatch,
+):
+    fake = _FakeAppServerProcess(
+        host_method="collaboration/spawn",
+        final_text="Continued after the host method was unavailable.",
+    )
+
+    async def create_subprocess(*_args, **_kwargs):
+        return fake
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    bridge = CodexAppServerToolBridge(
+        command="codex",
+        model="gpt-5.6-luna",
+        effort="medium",
+        idle_timeout_sec=5,
+    )
+
+    response = await bridge.run(
+        [{"role": "user", "content": "Delegate this if possible"}],
+        [WEATHER_TOOL],
+        "req-unknown-host-method",
+    )
+
+    assert response.is_success is True
+    assert response.text == "Continued after the host method was unavailable."
+    host_response = next(
+        item for item in fake.received if item.get("id") == "unsupported-host-call"
+    )
+    assert host_response["error"]["code"] == -32601
+    assert "Continue without it" in host_response["error"]["message"]
+    assert not any(item.get("method") == "turn/interrupt" for item in fake.received)

@@ -324,9 +324,12 @@ directory. HASHI disables Codex shell, filesystem mutation, Web, app, plugin,
 image, computer-use, multi-agent, and configured MCP access for that thread.
 Configured MCP servers are inventoried again for every request and replaced by
 disabled inert transports, so a server added after adapter startup cannot leak
-into this path. If isolation cannot be proven, an undeclared/local tool appears,
-or the experimental app-server protocol is unavailable, the request fails
-closed with an `external_tool_backend_error` rather than running a tool.
+into this path. Native/local tool lifecycle events do not abort the API turn;
+Codex can observe its tool failure and continue directly. Unsupported host
+callbacks receive a recoverable method-not-found response. If isolation cannot
+be proven, an undeclared caller-owned dynamic tool appears, or the experimental
+app-server protocol is unavailable, the request still fails with an
+`external_tool_backend_error`.
 
 The installed Codex CLI must support the experimental app-server
 `dynamicTools`, `item/tool/call`, and `thread/inject_items` protocol. HASHI does

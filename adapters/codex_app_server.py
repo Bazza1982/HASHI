@@ -33,16 +33,6 @@ with valid JSON arguments and wait for its result."""
 _CONTINUE_AFTER_TOOL_RESULTS = (
     "Continue the conversation using the supplied function-call results."
 )
-_LOCAL_TOOL_ITEM_TYPES = frozenset(
-    {
-        "collabToolCall",
-        "commandExecution",
-        "fileChange",
-        "imageView",
-        "mcpToolCall",
-        "webSearch",
-    }
-)
 _TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _CODEX_DYNAMIC_TOOL_PREFIX = "hashi_ext_"
 _CODEX_DYNAMIC_TOOL_MAX_LENGTH = 64
@@ -814,25 +804,13 @@ class CodexAppServerToolBridge:
                     if method == "item/started":
                         item = params.get("item") or {}
                         item_type = str(item.get("type") or "")
-                        local_tool_started = item_type in _LOCAL_TOOL_ITEM_TYPES or (
-                            item_type.endswith("ToolCall")
-                            and item_type != "dynamicToolCall"
-                        )
                         should_stop_after_dynamic_calls = (
                             external_calls
                             and not interrupt_sent
                             and completed_call_ids.issuperset(external_call_ids)
                             and item_type not in {"dynamicToolCall", "userMessage"}
                         )
-                        if local_tool_started:
-                            protocol_error = (
-                                "Codex attempted disabled local tool item "
-                                f"{item_type!r} during an API tool turn"
-                            )
-                        if (
-                            (local_tool_started or should_stop_after_dynamic_calls)
-                            and not interrupt_sent
-                        ):
+                        if should_stop_after_dynamic_calls and not interrupt_sent:
                             await self._send(
                                 proc,
                                 {
@@ -863,33 +841,20 @@ class CodexAppServerToolBridge:
                         break
 
                     if message.get("id") is not None and method:
-                        protocol_error = (
-                            "Codex requested unsupported host method "
-                            f"{method!r} during an API tool turn"
-                        )
                         await self._send(
                             proc,
                             {
                                 "id": message["id"],
                                 "error": {
                                     "code": -32601,
-                                    "message": "only caller-owned dynamic tools are enabled",
+                                    "message": (
+                                        "This host method is unavailable in the current "
+                                        "API execution context. Continue without it or use "
+                                        "a caller-provided dynamic tool."
+                                    ),
                                 },
                             },
                         )
-                        if not interrupt_sent:
-                            await self._send(
-                                proc,
-                                {
-                                    "method": "turn/interrupt",
-                                    "id": f"{request_id}:interrupt",
-                                    "params": {
-                                        "threadId": thread_id,
-                                        "turnId": turn_id,
-                                    },
-                                },
-                            )
-                            interrupt_sent = True
 
                 if protocol_error:
                     raise CodexAppServerError(protocol_error)
