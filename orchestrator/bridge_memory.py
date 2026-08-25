@@ -511,21 +511,45 @@ class BridgeMemoryStore:
             conn.commit()
         return exchange_id
 
-    def get_completed_exchanges(self, limit: int = 10) -> list[dict[str, Any]]:
+    def get_completed_exchanges(
+        self,
+        limit: int = 10,
+        *,
+        after_epoch: float | None = None,
+    ) -> list[dict[str, Any]]:
+        requested_limit = max(1, int(limit or 10))
+        cutoff = max(0.0, float(after_epoch or 0.0))
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, user_turn_id, assistant_turn_id,
-                       user_ts, assistant_ts, completed_at,
-                       user_source, assistant_source,
-                       user_text, assistant_text, origin, origin_ref
-                FROM conversation_exchanges
-                ORDER BY completed_at DESC, id DESC
-                LIMIT ?
-                """,
-                (max(1, int(limit or 10)),),
-            ).fetchall()
-        ordered_rows = list(reversed(rows))
+            eligible_rows: list[sqlite3.Row] = []
+            offset = 0
+            batch_size = max(64, requested_limit)
+            while len(eligible_rows) < requested_limit:
+                rows = conn.execute(
+                    """
+                    SELECT id, user_turn_id, assistant_turn_id,
+                           user_ts, assistant_ts, completed_at,
+                           user_source, assistant_source,
+                           user_text, assistant_text, origin, origin_ref
+                    FROM conversation_exchanges
+                    WHERE completed_at >= ?
+                    ORDER BY completed_at DESC, id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (cutoff, batch_size, offset),
+                ).fetchall()
+                if not rows:
+                    break
+                eligible_rows.extend(
+                    row
+                    for row in rows
+                    if cutoff <= 0
+                    or self._timestamp_epoch(row["user_ts"]) >= cutoff
+                )
+                offset += len(rows)
+                if len(rows) < batch_size:
+                    break
+            eligible_rows = eligible_rows[:requested_limit]
+        ordered_rows = list(reversed(eligible_rows))
         result: list[dict[str, Any]] = []
         for row in ordered_rows:
             item = dict(row)

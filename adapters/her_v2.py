@@ -1035,6 +1035,18 @@ class HERv2Adapter(BaseBackend):
             provider,
             lambda: self._schedule_execution_stage_compaction(request_id),
         )
+        habit_advisor = (
+            turn_learning
+            if not habit_request_eligible
+            else (
+                getattr(self.config, "_her_v2_habit_advisor", None)
+                or turn_learning
+            )
+        )
+        from orchestrator.fresh_context import habit_context_suppressed
+
+        if habit_context_suppressed(self._runtime_context()):
+            habit_advisor = None
         runtime = HERv2Runtime(
             config=runtime_config,
             provider=execution_provider,
@@ -1043,13 +1055,7 @@ class HERv2Adapter(BaseBackend):
             delivery=delivery,
             commentary=commentary,
             required_persona=required_persona,
-            habits=(
-                turn_learning
-                if not habit_request_eligible
-                else (
-                    getattr(self.config, "_her_v2_habit_advisor", None) or turn_learning
-                )
-            ),
+            habits=habit_advisor,
             meditation=(
                 turn_learning
                 if not habit_request_eligible

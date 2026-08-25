@@ -40,6 +40,11 @@
 - [ ] Non-CLI backends use `/fresh` for a clean API context
 - [ ] `/fresh` clears recent turns but preserves saved memories
 - [ ] `/fresh` disables saved-memory auto-injection until `/memory saved on` or `/memory on`
+- [ ] On HER v2, `/fresh` persists a cutoff that excludes every pre-command
+  timeline/receipt source, detaches the active Compact capsule without deleting
+  its archive, and pauses Memory+, scheduler/observer context, and Habit advice
+- [ ] A HER v2 post-`/fresh` prompt contains no pre-boundary turn context; new
+  turns accumulate normally and retained history remains explicitly searchable
 
 ### /reboot semantics
 - [ ] `/reboot min` reloads current code/config, restarts only the requester,

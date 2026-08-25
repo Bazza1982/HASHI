@@ -671,7 +671,7 @@ HASHI agents respond to both natural language and structured commands:
 | Command | Description |
 |---------|-------------|
 | `/new` | Start a fresh CLI session |
-| `/fresh` | Start a clean API context without deleting saved memories |
+| `/fresh` | Start a clean API context; HER v2 fences every pre-command history source without deleting logs or memories |
 | `/stop` | Cancel current processing |
 | `/steer <direction>` | Interrupt the current turn, preserve progress, and continue with an added direction |
 | `/focus` | Narrow execution back to the original task and keep working until it is complete or genuinely blocked |
@@ -725,6 +725,16 @@ stored separately, so failed turns and Bridge-only outputs remain recoverable
 after a runtime restart. Use `/resend` when no new inference or context reset is
 wanted. See [Recovery commands](docs/RETRY_RESEND_COMMANDS.md) for the reset
 sequence, persistence, and failure boundaries.
+
+On HER v2, `/fresh` is a durable context boundary rather than a history-delete
+operation. Working turns are cleared and pre-boundary completed exchanges,
+cross-session receipts, Compact capsules, Memory+ continuity, saved-memory
+search, scheduler recovery, and Habit advice stop entering prompts. Raw logs,
+the completed-exchange ledger, long-term memory, Memory+ files, Habit files,
+and immutable Compact archives remain available for explicit inspection or
+search. New post-boundary turns accumulate normally. `/memory on`,
+`/memory plus on`, and `/habit on` explicitly restore their corresponding
+automatic context sources; they do not remove the turn-history boundary.
 
 For Codex GPT-5.6, HASHI exposes the smoke-tested `gpt-5.6-sol`,
 `gpt-5.6-terra`, and `gpt-5.6-luna` variants. `/effort` is model-aware:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime
 
 from orchestrator.bridge_memory import BridgeMemoryStore
 
@@ -100,3 +101,34 @@ def test_transcript_reconciliation_deduplicates_live_completed_exchange(tmp_path
             "SELECT COUNT(*) FROM conversation_exchanges"
         ).fetchone()[0]
     assert count == 1
+
+
+def test_completed_exchange_query_keeps_logs_but_excludes_pre_fresh_requests(tmp_path):
+    store = BridgeMemoryStore(tmp_path)
+    store.record_completed_exchange(
+        "old request",
+        "old answer completed late",
+        "text",
+        user_ts="2026-08-25T10:00:00+10:00",
+        assistant_ts="2026-08-25T10:30:05+10:00",
+        origin_ref="old",
+    )
+    store.record_completed_exchange(
+        "new request",
+        "new answer",
+        "text",
+        user_ts="2026-08-25T10:30:01+10:00",
+        assistant_ts="2026-08-25T10:30:06+10:00",
+        origin_ref="new",
+    )
+    cutoff = datetime.fromisoformat("2026-08-25T10:30:00+10:00").timestamp()
+
+    assert [
+        row["user_text"]
+        for row in store.get_completed_exchanges(limit=10, after_epoch=cutoff)
+    ] == ["new request"]
+
+    # The boundary is a read filter, not deletion.
+    assert [
+        row["user_text"] for row in store.get_completed_exchanges(limit=10)
+    ] == ["old request", "new request"]

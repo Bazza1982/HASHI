@@ -23,7 +23,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 ## Important Commands
 - `/help`: command list for this agent.
 - `/new`: fresh CLI session reset. Use this for CLI-backed agents (`claude-cli`, `gemini-cli`, `codex-cli`).
-- `/fresh`: clean API context for non-CLI backends (`openrouter-api`, `deepseek-api`, `ollama-api`). Clears recent turns and stops saved memories from being auto-injected without deleting them.
+- `/fresh`: clean API context for non-CLI backends. On HER v2 it creates a persistent boundary across normal turns, completed exchanges, cross-session receipts, Compact capsules, and auxiliary continuity sources. Logs and memories remain stored but are not automatically injected.
 - `/handoff`: fresh continuity restore from recent chat history.
 - `/fyi [prompt]`: explicit bridge environment awareness refresh.
 - `/bg <task>`: queue a background-capable task. Treat `/bg <task>` as `/bg run <task>`; preserve the user's task text exactly and use HASHI BackgroundJobManager for long OS/process work instead of blocking the chat. If model-facing `background_job_*` tools are unavailable, use the live local Workbench `/api/background-jobs` endpoints instead of starting a temporary standalone manager. Start managed jobs with success/failure notification and completion/failure agent-event routing enabled when possible.
@@ -164,7 +164,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   today card, short carryover, and archive pointers across every execution mode.
 - `/new` starts a fresh CLI session and re-primes the agent with this FYI
   catalog. If Memory+ is enabled, its compact card is preserved and reloaded.
-- `/fresh` starts a clean API context. It clears recent turns, preserves saved memories, and disables saved-memory auto-injection until `/memory saved on` or `/memory on` restores it.
+- `/fresh` starts a clean API context. For HER v2 it fences every pre-command context source, preserves logs/memories/archives, pauses Memory+, saved-memory search, and Habit advice, and lets only new post-boundary turns accumulate. Explicit memory/Habit commands can restore their automatic sources without reopening pre-boundary turn history.
 - `/handoff` restores recent continuity from bridge transcript, not CLI resume state.
 - `/fyi` explicitly refreshes awareness of this bridge environment and can carry a follow-up prompt.
 - Memory+ never injects archived prompts or full answers. `/notepad history` and

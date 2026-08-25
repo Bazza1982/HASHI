@@ -394,6 +394,48 @@ def test_repeated_stop_of_continuation_keeps_original_task_and_success_clears_it
     assert "unfinished_task" not in state
 
 
+def test_fresh_boundary_prevents_old_interrupted_task_from_rebinding(tmp_path):
+    from orchestrator.fresh_context import start_boundary
+
+    runtime = SimpleNamespace(
+        workspace_dir=tmp_path,
+        logger=_Logger(),
+        current_request_meta={},
+    )
+    saved = runtime_retry.remember_interrupted_task(
+        runtime,
+        {
+            "request_id": "req-before-fresh",
+            "chat_id": 42,
+            "prompt": "Old unfinished task",
+            "source": "text",
+            "summary": "Old task",
+        },
+        backend="her-v2",
+    )
+    assert saved is not None
+    start_boundary(runtime, now_epoch=saved.interrupted_at + 0.001)
+    item = SimpleNamespace(
+        request_id="req-after-fresh",
+        chat_id=42,
+        prompt="continue",
+        source="text",
+        summary="Continue",
+        silent=False,
+    )
+
+    prepared = runtime_retry.prepare_interrupted_task_continuation(
+        runtime,
+        item,
+        item.prompt,
+        backend="her-v2",
+    )
+
+    assert prepared == "continue"
+    assert not hasattr(item, "_resumed_interrupted_task")
+    assert runtime_retry.capture_interrupted_task(runtime) == saved
+
+
 @pytest.mark.asyncio
 async def test_resend_replays_exact_output_in_current_chat_without_model_work(tmp_path):
     runtime, replies, enqueued, _store, _backend = _runtime(

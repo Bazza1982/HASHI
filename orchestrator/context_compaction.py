@@ -559,6 +559,51 @@ class CompactionStore:
             )
             return generation
 
+    def reset_active_pointer(self) -> int:
+        """Detach historical capsules without deleting immutable archives.
+
+        Incrementing the generation also fences an in-flight compactor: a
+        candidate frozen before ``/fresh`` can no longer win its later CAS and
+        reattach pre-boundary history.
+        """
+
+        with self._lock:
+            current = self.read_state()
+            generation = int(current.get("generation") or 0) + 1
+            _atomic_json_write(
+                self.state_path,
+                {
+                    "format": POINTER_FORMAT,
+                    "generation": generation,
+                    "active_capsule": None,
+                },
+            )
+            return generation
+
+
+def reset_for_fresh_context(
+    runtime: Any,
+    *,
+    boundary_generation: int,
+    cutoff_epoch: float,
+) -> int:
+    """Start a clean HER-v2 history generation while retaining its archive."""
+
+    store = coordinator_for(runtime).store
+    generation = store.reset_active_pointer()
+    store.append_audit(
+        "fresh_context_boundary",
+        compaction_id=f"fresh-context-{boundary_generation}",
+        payload={
+            "boundary_generation": int(boundary_generation),
+            "cutoff_epoch": float(cutoff_epoch),
+            "pointer_generation": generation,
+            "raw_history_deleted": False,
+            "immutable_capsules_deleted": False,
+        },
+    )
+    return generation
+
 
 def _workspace_state(runtime: Any) -> dict[str, Any]:
     manager = getattr(runtime, "backend_manager", None)
@@ -1389,9 +1434,26 @@ def install_history_section(
         )
         if callable(get_completed_exchanges):
             try:
-                primary_timeline_entries = get_completed_exchanges(
-                    limit=snapshot.recent_exchanges
-                )
+                from orchestrator.fresh_context import cutoff_epoch
+
+                boundary = cutoff_epoch(runtime)
+                try:
+                    primary_timeline_entries = get_completed_exchanges(
+                        limit=snapshot.recent_exchanges,
+                        after_epoch=boundary,
+                    )
+                except TypeError:
+                    # Compatibility for injected/test memory stores that
+                    # predate the optional boundary-aware query contract.
+                    primary_timeline_entries = get_completed_exchanges(
+                        limit=snapshot.recent_exchanges
+                    )
+                    if boundary > 0:
+                        primary_timeline_entries = [
+                            row
+                            for row in primary_timeline_entries
+                            if _timeline_epoch(row.get("user_ts")) >= boundary
+                        ]
             except Exception as exc:
                 logger.warning(
                     "Completed-exchange timeline unavailable; using working turns: %s",

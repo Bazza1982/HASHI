@@ -2070,17 +2070,23 @@ def persist_success_memory(
     if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker", "multimodal"}:
         memory_user_text = f"[{item.source}] {item.summary}"
     if item.source not in {"startup", "system", session_reset_source} and not is_bridge_request:
+        from orchestrator.fresh_context import item_predates_boundary
+
+        eligible_for_working_context = not item_predates_boundary(runtime, item)
         memory_assistant_text = runtime._core_memory_assistant_text(
             response.text,
             visible_text,
             wrapper_result,
         )
-        user_turn_id = runtime.memory_store.record_turn(
-            "user", item.source, memory_user_text
-        )
-        assistant_turn_id = runtime.memory_store.record_turn(
-            "assistant", runtime.config.active_backend, memory_assistant_text
-        )
+        user_turn_id = None
+        assistant_turn_id = None
+        if eligible_for_working_context:
+            user_turn_id = runtime.memory_store.record_turn(
+                "user", item.source, memory_user_text
+            )
+            assistant_turn_id = runtime.memory_store.record_turn(
+                "assistant", runtime.config.active_backend, memory_assistant_text
+            )
         record_completed_exchange = getattr(
             runtime.memory_store,
             "record_completed_exchange",
@@ -2103,12 +2109,13 @@ def persist_success_memory(
                 ),
             )
         runtime.memory_store.record_exchange(memory_user_text, memory_assistant_text, item.source)
-        runtime._schedule_post_turn_observers(
-            item,
-            memory_user_text,
-            memory_assistant_text,
-            is_bridge_request=is_bridge_request,
-        )
+        if eligible_for_working_context:
+            runtime._schedule_post_turn_observers(
+                item,
+                memory_user_text,
+                memory_assistant_text,
+                is_bridge_request=is_bridge_request,
+            )
         try:
             from orchestrator.context_compaction import (
                 estimate_tokens,
@@ -2117,7 +2124,7 @@ def persist_success_memory(
 
             request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", {})
             prompt_tokens = int(request_tokens.get(item.request_id) or 0)
-            if prompt_tokens > 0:
+            if eligible_for_working_context and prompt_tokens > 0:
                 schedule_post_turn(
                     runtime,
                     request_ref=item.request_id,

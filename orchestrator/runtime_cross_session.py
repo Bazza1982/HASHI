@@ -159,6 +159,15 @@ def _chat_matches(receipt: Mapping[str, Any], chat_id: Any) -> bool:
     return str(receipt.get("chat_id")) == str(chat_id)
 
 
+def _after_fresh_boundary(runtime: Any, receipt: Mapping[str, Any]) -> bool:
+    from orchestrator.fresh_context import entry_is_after_boundary
+
+    return entry_is_after_boundary(
+        runtime,
+        receipt.get("request_created_at") or receipt.get("created_at"),
+    )
+
+
 def _request_meta(runtime: Any, request_id: str) -> dict[str, Any]:
     registry = getattr(runtime, "_request_meta_by_id", None)
     if isinstance(registry, dict):
@@ -393,6 +402,7 @@ def record_turn_result(
             "task_prompt": _bounded_text(
                 _value(item, "prompt", ""), MAX_STORED_PROMPT_CHARS
             ),
+            "request_created_at": str(_value(item, "created_at", "") or ""),
             "created_at": now,
         }
         receipts.append(receipt)
@@ -511,6 +521,7 @@ def _matching_receipt(runtime: Any, item: Any) -> tuple[dict[str, Any] | None, s
         for receipt in state["receipts"]
         if bool(receipt.get("active"))
         and bool(receipt.get("delivered"))
+        and _after_fresh_boundary(runtime, receipt)
         and _chat_matches(receipt, _value(item, "chat_id", None))
         and isinstance(receipt.get("pending_interaction"), Mapping)
     ]
@@ -566,7 +577,11 @@ def prepare_reply_binding(runtime: Any, item: Any, effective_prompt: str) -> str
         capture_reply_target(runtime, item)
     binding = _value(item, "_cross_session_receipt", None)
     receipt = _value(item, "_cross_session_receipt_snapshot", None)
-    if not isinstance(binding, Mapping) or not isinstance(receipt, Mapping):
+    if (
+        not isinstance(binding, Mapping)
+        or not isinstance(receipt, Mapping)
+        or not _after_fresh_boundary(runtime, receipt)
+    ):
         return effective_prompt
     binding = dict(binding)
     reply_kind = str(binding.get("reply_kind") or "")
@@ -621,6 +636,7 @@ def context_section(runtime: Any, item: Any) -> list[tuple[str, str]]:
         receipt
         for receipt in state["receipts"]
         if _chat_matches(receipt, _value(item, "chat_id", None))
+        and _after_fresh_boundary(runtime, receipt)
     ]
     if not receipts:
         return []
@@ -692,6 +708,8 @@ def timeline_entries(runtime: Any, item: Any) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for receipt in _read_state(runtime)["receipts"]:
         if not _chat_matches(receipt, _value(item, "chat_id", None)):
+            continue
+        if not _after_fresh_boundary(runtime, receipt):
             continue
         delivery = receipt.get("delivery_receipt")
         last_attempt = receipt.get("last_attempt")

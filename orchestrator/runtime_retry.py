@@ -444,6 +444,10 @@ def prepare_interrupted_task_continuation(
     snapshot = capture_interrupted_task(runtime)
     if snapshot is None:
         return effective_prompt
+    from orchestrator.fresh_context import entry_is_after_boundary
+
+    if not entry_is_after_boundary(runtime, snapshot.interrupted_at):
+        return effective_prompt
     metadata = asdict(snapshot)
     current_meta = getattr(runtime, "current_request_meta", None)
     if isinstance(current_meta, dict):

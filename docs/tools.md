@@ -38,7 +38,7 @@ Five execution modes:
 **Common (all agents):**
 - `/help` — list available commands
 - `/new` — fresh CLI session reset; non-CLI backends should use `/fresh`
-- `/fresh` — clean API context for non-CLI backends; clears recent turns and preserves saved memories without auto-injecting them
+- `/fresh` — clean API context for non-CLI backends; HER v2 persists a boundary across every prior turn source while preserving logs, searchable memory, and archives
 - `/memory [status|on|pause|saved on|saved off|plus on|plus off]` — inspect or change normal memory injection and independent Memory+ continuity
 - `/notepad [today|carryover|history|find <query>|edit <text>|replace <text>|compact|clear]` — inspect or maintain the compact Memory+ work card and archive index
 - `/clear` — clear workspace context files

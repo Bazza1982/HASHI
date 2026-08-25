@@ -854,6 +854,9 @@ async def _set_control(
     cancelled = 0
     resumed = 0
     if after.effective:
+        from orchestrator.fresh_context import resume_habit_context
+
+        resume_habit_context(runtime)
         resume = getattr(adapter, "_resume_pending_habit_meditations", None)
         if callable(resume):
             resumed = int(resume() or 0)

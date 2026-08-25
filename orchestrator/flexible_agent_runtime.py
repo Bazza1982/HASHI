@@ -925,14 +925,23 @@ class FlexibleAgentRuntime:
         is_bridge_request: bool,
         metadata: dict[str, Any] | None = None,
     ) -> list[tuple[str, str]]:
-        sections = await runtime_observers.build_pre_turn_context_sections(
-            self,
-            item,
-            user_text,
-            is_bridge_request=is_bridge_request,
-            metadata=metadata,
+        from orchestrator.fresh_context import automatic_context_suppressed
+
+        fresh_suppressed = (
+            str((metadata or {}).get("engine") or "") == HER_V2_ENGINE
+            and automatic_context_suppressed(self)
         )
-        sections += runtime_scheduler_recovery.context_section(self, item.source)
+        if fresh_suppressed:
+            sections = []
+        else:
+            sections = await runtime_observers.build_pre_turn_context_sections(
+                self,
+                item,
+                user_text,
+                is_bridge_request=is_bridge_request,
+                metadata=metadata,
+            )
+            sections += runtime_scheduler_recovery.context_section(self, item.source)
         if (
             str((metadata or {}).get("engine") or "") == HER_V2_ENGINE
             and str(
@@ -943,6 +952,8 @@ class FlexibleAgentRuntime:
             # HER-v2 receipts are merged into the managed conversation timeline
             # by actual completion time.  A second standalone section would
             # duplicate history and make old receipts look artificially recent.
+            return sections
+        if fresh_suppressed:
             return sections
         return sections + runtime_cross_session.context_section(self, item)
 
@@ -6683,7 +6694,10 @@ class FlexibleAgentRuntime:
                 reply_markup=markup,
             )
         elif action == "memory_on":
+            from orchestrator.fresh_context import resume_automatic_context
+
             set_memory_plus_enabled(self.workspace_dir, True)
+            resume_automatic_context(self)
             self.reload_post_turn_observers()
             text, markup = self._notepad_view_payload()
             await query.edit_message_text(

@@ -64,6 +64,11 @@ def test_current_grok_cli_models_are_available_to_flex_backend_registry():
     assert is_cli_backend("grok-cli") is True
 
 
+def test_her_v2_is_a_stateless_runtime_not_a_cli_session_backend():
+    assert is_cli_backend("her-v2") is False
+    assert is_cli_backend("her") is False
+
+
 def test_grok_cli_exposes_reasoning_effort_with_medium_default():
     expected = ["low", "medium", "high"]
     assert get_available_efforts("grok-cli", "grok-4.5") == expected

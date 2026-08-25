@@ -8,7 +8,6 @@ CLI_ENGINES = frozenset(
         "gemini-cli",
         "claude-cli",
         "codex-cli",
-        HER_V2_ENGINE,
         "grok-cli",
     }
 )

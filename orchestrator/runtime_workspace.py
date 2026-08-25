@@ -53,6 +53,11 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
     assembler = getattr(runtime, "context_assembler", None)
 
     if args in ("", "status"):
+        from orchestrator.fresh_context import (
+            automatic_context_suppressed,
+            habit_context_suppressed,
+        )
+
         search_enabled = is_memory_search_enabled(runtime.workspace_dir)
         if assembler:
             turns_state = "ON ✅" if assembler.turns_injection_enabled else "PAUSED ⏸️"
@@ -66,7 +71,15 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         sync_on = runtime._get_skill_state().get("memory_sync", False)
         sync_state = "ON 🔄" if sync_on else "OFF ⬜"
         continuity = get_memory_plus_status(runtime.workspace_dir)
-        continuity_state = "ON ✅" if continuity["enabled"] else "OFF ⬜"
+        fresh_aux_paused = automatic_context_suppressed(runtime)
+        continuity_state = (
+            "ON · FRESH-FENCED ⏸️"
+            if continuity["enabled"] and fresh_aux_paused
+            else ("ON ✅" if continuity["enabled"] else "OFF ⬜")
+        )
+        habit_fence_state = (
+            "ACTIVE ⏸️" if habit_context_suppressed(runtime) else "CLEAR ✅"
+        )
         carryover = continuity.get("carryover_from") or "none"
         await runtime._reply_text(
             update,
@@ -76,6 +89,9 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
             f"<code>{continuity['open_items']}</code> open\n"
             f"<b>Carryover</b> · <code>{carryover}</code>\n"
             f"<b>Context injection</b> · {state}\n"
+            f"<b>Fresh fences</b> · auxiliary context "
+            f"{'ACTIVE ⏸️' if fresh_aux_paused else 'CLEAR ✅'} · "
+            f"Habit advice {habit_fence_state}\n"
             f"<b>Stored</b> · <code>{turns}</code> turns · <code>{memories}</code> memories\n"
             f"<b>BGE sync</b> · <code>{sync_state}</code>\n\n"
             "Changes apply immediately and preserve stored data unless <code>wipe</code> is explicitly used.\n\n"
@@ -85,7 +101,10 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
             reply_markup=memory_plus_keyboard(bool(continuity["enabled"])),
         )
     elif args in {"plus", "plus on", "continuity", "continuity on"}:
+        from orchestrator.fresh_context import resume_automatic_context
+
         set_memory_plus_enabled(runtime.workspace_dir, True)
+        resume_automatic_context(runtime)
         ensure_memory_plus_observer(runtime.workspace_dir)
         ensure_memory_plus_notepad(runtime.workspace_dir)
         runtime.reload_post_turn_observers()
@@ -104,7 +123,10 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
             "⏸️ Memory+ continuity OFF. Today, carryover, and history files were preserved.",
         )
     elif args == "on":
+        from orchestrator.fresh_context import resume_automatic_context
+
         set_memory_search_enabled(runtime.workspace_dir, True)
+        resume_automatic_context(runtime)
         if assembler:
             assembler.turns_injection_enabled = True
             assembler.saved_memory_injection_enabled = True

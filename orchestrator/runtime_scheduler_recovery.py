@@ -22,6 +22,14 @@ def context_section(runtime: Any, source: str) -> list[tuple[str, str]]:
 
 async def handle_reply(runtime: Any, *, text: str, chat_id: int) -> bool:
     """Resolve an unambiguous recovery choice before invoking an agent."""
+    from orchestrator.fresh_context import automatic_context_suppressed
+
+    if (
+        str(getattr(getattr(runtime, "config", None), "active_backend", ""))
+        == "her-v2"
+        and automatic_context_suppressed(runtime)
+    ):
+        return False
     scheduler = _scheduler(runtime)
     handler = getattr(scheduler, "handle_recovery_reply", None)
     if not callable(handler):

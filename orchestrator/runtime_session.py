@@ -22,6 +22,13 @@ def _active_backend(runtime: Any) -> Any:
     return getattr(runtime, "backend", None)
 
 
+def _uses_cli_session_semantics(engine: str) -> bool:
+    # HER v2 may route individual stage calls through CLI-capable providers,
+    # but the HASHI-owned runtime itself is stateless across user turns.  Its
+    # context reset contract is therefore /fresh, never /new.
+    return str(engine or "").strip().lower() != "her-v2" and is_cli_backend(engine)
+
+
 def _prepare_clean_context(
     runtime: Any,
     *,
@@ -78,7 +85,7 @@ async def _reset_cli_backend(runtime: Any, *, reason: str) -> str:
 async def reset_for_retry(runtime: Any) -> str:
     """Apply /new or /fresh context semantics without queuing a visible reset turn."""
     engine = _active_engine(runtime)
-    if is_cli_backend(engine):
+    if _uses_cli_session_semantics(engine):
         _prepare_clean_context(
             runtime,
             disable_saved_memory=False,
@@ -100,7 +107,7 @@ async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
         return
     if not runtime.backend_manager.current_backend:
         return
-    if not is_cli_backend(runtime.config.active_backend):
+    if not _uses_cli_session_semantics(runtime.config.active_backend):
         await runtime._reply_text(
             update,
             "This agent is using a non-CLI backend. Use /fresh for a clean API context; /new is reserved for CLI session reset.",
@@ -121,23 +128,71 @@ async def cmd_fresh(runtime: Any, update: Any, context: Any) -> None:
         return
     if not runtime.backend_manager.current_backend:
         return
-    if is_cli_backend(runtime.config.active_backend):
+    if _uses_cli_session_semantics(runtime.config.active_backend):
         await runtime._reply_text(
             update,
             "This agent is using a CLI backend. Use /new to reset the CLI session.",
         )
         return
 
-    _prepare_clean_context(runtime, disable_saved_memory=True)
+    is_her_v2 = _active_engine(runtime) == "her-v2"
+    if is_her_v2:
+        try:
+            from orchestrator.context_compaction import (
+                cancel_runtime_compaction,
+                reset_for_fresh_context,
+            )
+            from orchestrator.fresh_context import start_boundary
+            from orchestrator.memory_search_mode import set_memory_search_enabled
+
+            boundary = start_boundary(runtime)
+            _prepare_clean_context(
+                runtime,
+                disable_saved_memory=True,
+                clear_session_primer=True,
+            )
+            reset_for_fresh_context(
+                runtime,
+                boundary_generation=int(boundary["generation"]),
+                cutoff_epoch=float(boundary["cutoff_epoch"]),
+            )
+            await cancel_runtime_compaction(runtime)
+
+            workspace_dir = getattr(runtime, "workspace_dir", None)
+            if workspace_dir is not None:
+                set_memory_search_enabled(workspace_dir, False)
+        except Exception as exc:
+            logger = getattr(runtime, "logger", None)
+            if logger is not None:
+                logger.exception("Could not establish HER v2 /fresh boundary: %s", exc)
+            await runtime._reply_text(
+                update,
+                "HER v2 could not establish a verified fresh-context boundary. "
+                "No clean-context guarantee is being reported; stored logs and memories were not deleted.",
+            )
+            return
+    else:
+        _prepare_clean_context(
+            runtime,
+            disable_saved_memory=True,
+            clear_session_primer=True,
+        )
 
     workspace_dir = getattr(runtime, "workspace_dir", None)
     continuity_enabled = bool(workspace_dir and is_memory_plus_enabled(workspace_dir))
     await runtime._reply_text(
         update,
-        "Starting a fresh API context. Recent turns were cleared; saved memories are preserved but will not be auto-injected."
+        (
+            "HER v2 fresh context established. All pre-/fresh turn context is now behind a persistent boundary, regardless of source. "
+            "Logs, completed exchanges, saved memories, Memory+ files, Habits, and Compact archives were preserved, but are not automatically injected. "
+            "The next turn starts from the Agent instructions and /sys prompts, then new post-/fresh turns accumulate normally. "
+            "Use `/memory on`, `/memory plus on`, or `/habit on` only when you intentionally want those automatic context sources again."
+            if is_her_v2
+            else "Starting a fresh API context. Recent turns were cleared; saved memories are preserved but will not be auto-injected."
+        )
         + (
             " Memory+ continuity remains enabled; use `/memory plus off` if a turn must exclude the work card."
-            if continuity_enabled
+            if continuity_enabled and not is_her_v2
             else ""
         ),
         parse_mode="Markdown",
