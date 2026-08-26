@@ -33,6 +33,7 @@ class _Runtime:
 
     def __init__(self):
         self.server = None
+        self.last_request_metadata = None
 
     def get_display_name(self):
         return "Lily"
@@ -51,6 +52,7 @@ class _Runtime:
         request_metadata,
         **_kwargs,
     ):
+        self.last_request_metadata = dict(request_metadata)
         request_id = "req-api"
         accepted = self.server.session_store.accept_run(
             session_id=request_metadata["session_id"],
@@ -116,6 +118,7 @@ async def test_session_api_run_event_ack_and_fresh_contract(tmp_path):
         _Request(
             {
                 "idempotency_key": "api-key",
+                "surface": "desktop-client",
                 "message": {
                     "content": [{"type": "text", "text": "hello Session"}]
                 },
@@ -128,6 +131,7 @@ async def test_session_api_run_event_ack_and_fresh_contract(tmp_path):
     assert run_response.status == 202
     assert run_payload["session_id"] == session_id
     assert run_payload["message_id"].startswith("msg_")
+    assert _runtime.last_request_metadata["session_surface"] == "desktop-client"
 
     server.session_store.mark_request_running(
         run_payload["request_id"], worker_id="test"

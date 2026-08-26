@@ -1036,10 +1036,29 @@ class SessionStore:
             raise SessionNotFound(str(run_id))
         return self._run_dict(row)
 
-    def get_run_by_request(self, request_id: str) -> dict[str, Any]:
+    def get_run_by_request(
+        self,
+        request_id: str,
+        *,
+        owner_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        clauses = ["r.request_id = ?", "s.instance_id = ?"]
+        params: list[Any] = [str(request_id), self.instance_id]
+        if owner_id is not None:
+            clauses.append("s.owner_id = ?")
+            params.append(str(owner_id))
+        if agent_id is not None:
+            clauses.append("r.agent_id = ?")
+            params.append(str(agent_id).lower())
         with self._lock, self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM runs WHERE request_id = ?", (str(request_id),)
+                f"""
+                SELECT r.* FROM runs AS r
+                JOIN sessions AS s ON s.session_id = r.session_id
+                WHERE {' AND '.join(clauses)}
+                """,
+                params,
             ).fetchone()
         if row is None:
             raise SessionNotFound(str(request_id))

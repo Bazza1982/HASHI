@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from orchestrator.request_activity import RequestActivityStore
+from orchestrator.session_store import SessionStore
 from orchestrator.workbench_api import WorkbenchApiServer
 
 
@@ -131,14 +133,62 @@ def test_request_activity_is_bounded_and_missing_request_is_explicit() -> None:
     assert store.poll("req-0009")["ok"] is True
 
 
+def test_request_activity_covers_display_kinds_and_rejects_duplicate_unknown_and_late_events() -> None:
+    store = RequestActivityStore()
+    store.start("req-owned")
+    for kind, event_id in (
+        ("commentary", "commentary-1"),
+        ("progress", "progress-1"),
+        ("tool_start", "tool-1"),
+        ("tool_end", "tool-2"),
+    ):
+        event = SimpleNamespace(kind=kind, event_id=event_id, summary=kind)
+        store.publish_stream("req-owned", event)
+        store.publish_stream("req-owned", event)
+    store.publish_stream(
+        "req-unknown",
+        SimpleNamespace(kind="progress", event_id="unknown-1", summary="unknown"),
+    )
+    store.complete("req-owned", success=True)
+    store.publish_stream(
+        "req-owned",
+        SimpleNamespace(kind="progress", event_id="late-1", summary="late"),
+    )
+
+    result = store.poll("req-owned")
+    assert [event["kind"] for event in result["events"]] == [
+        "queued",
+        "commentary",
+        "progress",
+        "tool_start",
+        "tool_end",
+        "completed",
+    ]
+    assert store.poll("req-unknown")["error_code"] == "request_activity_not_found"
+
+
 @pytest.mark.asyncio
-async def test_workbench_request_activity_handler_returns_cursor_stream() -> None:
+async def test_workbench_request_activity_handler_returns_cursor_stream(tmp_path: Path) -> None:
     store = RequestActivityStore()
     store.start("req-0042")
     store.mark_running("req-0042")
     runtime = SimpleNamespace(request_activity=store)
     server = WorkbenchApiServer.__new__(WorkbenchApiServer)
     server._runtime_map = lambda: {"akane": runtime}
+    server.global_config = SimpleNamespace(
+        instance_id="HASHI1", authorized_id=7, deployment_profile="personal"
+    )
+    server.session_store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI1")
+    session = server.session_store.ensure_default_session(owner_id="user:7", agent_id="akane")
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="akane",
+        request_id="req-0042",
+        text="hello",
+        source="api",
+        idempotency_key="activity-live",
+    )
     request = SimpleNamespace(
         match_info={"name": "akane", "request_id": "req-0042"},
         query={"after_sequence": "1", "limit": "20"},
@@ -149,4 +199,79 @@ async def test_workbench_request_activity_handler_returns_cursor_stream() -> Non
 
     assert response.status == 200
     assert payload["request_id"] == "req-0042"
+    assert payload["session_id"] == session["session_id"]
+    assert payload["run_id"] == accepted.run_id
     assert [event["kind"] for event in payload["events"]] == ["started"]
+
+
+@pytest.mark.asyncio
+async def test_workbench_request_activity_recovers_terminal_run_after_store_loss(tmp_path: Path) -> None:
+    server = WorkbenchApiServer.__new__(WorkbenchApiServer)
+    server.global_config = SimpleNamespace(
+        instance_id="HASHI1", authorized_id=7, deployment_profile="personal"
+    )
+    server.session_store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI1")
+    session = server.session_store.ensure_default_session(owner_id="user:7", agent_id="akane")
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="akane",
+        request_id="req-recovered",
+        text="hello",
+        source="api",
+        idempotency_key="activity-recovered",
+    )
+    server.session_store.finish_request(
+        "req-recovered", success=True, assistant_text="done", assistant_source="test"
+    )
+    server._runtime_map = lambda: {
+        "akane": SimpleNamespace(request_activity=RequestActivityStore())
+    }
+    request = SimpleNamespace(
+        match_info={"name": "akane", "request_id": "req-recovered"},
+        query={"after_sequence": "9", "limit": "20"},
+    )
+
+    response = await server.handle_request_activity(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["terminal"] is True
+    assert payload["success"] is True
+    assert payload["recovered_from"] == "session_store"
+    assert payload["session_id"] == session["session_id"]
+    assert payload["run_id"] == accepted.run_id
+    assert payload["latest_sequence"] == 9
+
+
+@pytest.mark.asyncio
+async def test_workbench_request_activity_hides_cross_owner_and_cross_agent_runs(tmp_path: Path) -> None:
+    server = WorkbenchApiServer.__new__(WorkbenchApiServer)
+    server.global_config = SimpleNamespace(
+        instance_id="HASHI1", authorized_id=7, deployment_profile="personal"
+    )
+    server.session_store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI1")
+    session = server.session_store.ensure_default_session(owner_id="user:8", agent_id="akane")
+    server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:8",
+        agent_id="akane",
+        request_id="req-private",
+        text="private",
+        source="api",
+        idempotency_key="activity-private",
+    )
+    server._runtime_map = lambda: {
+        "akane": SimpleNamespace(request_activity=RequestActivityStore()),
+        "lily": SimpleNamespace(request_activity=RequestActivityStore()),
+    }
+
+    for agent in ("akane", "lily"):
+        response = await server.handle_request_activity(
+            SimpleNamespace(
+                match_info={"name": agent, "request_id": "req-private"},
+                query={},
+            )
+        )
+        assert response.status == 404
+        assert json.loads(response.text)["error_code"] == "request_activity_not_found"

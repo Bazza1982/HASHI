@@ -69,6 +69,7 @@ from orchestrator.enterprise.scim import (
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
 from orchestrator.pathing import resolve_path_value
 from orchestrator.session_store import (
+    TERMINAL_RUN_STATES,
     IdempotencyConflict,
     SessionConflict,
     SessionNotFound,
@@ -2682,7 +2683,7 @@ class WorkbenchApiServer:
         return web.json_response(_read_jsonl_increment(transcript_path, offset=offset))
 
     async def handle_request_activity(self, request):
-        """Return a bounded, presentation-only stream for one live request."""
+        """Return an owner-scoped live stream with a durable Run fallback."""
 
         name = str(request.match_info.get("name") or "").strip()
         request_id = str(request.match_info.get("request_id") or "").strip()
@@ -2710,9 +2711,64 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "invalid activity cursor", "error_code": "invalid_activity_cursor"},
                 status=400,
             )
+        owner_id = self._v1_owner_id(request)
+        if owner_id is None:
+            return web.json_response(
+                {"ok": False, "error": "not authenticated", "error_code": "not_authenticated"},
+                status=401,
+            )
+        try:
+            run = self.session_store.get_run_by_request(
+                request_id,
+                owner_id=owner_id,
+                agent_id=name,
+            )
+        except SessionNotFound:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "request activity not found",
+                    "error_code": "request_activity_not_found",
+                },
+                status=404,
+            )
         result = store.poll(request_id, after_sequence=after_sequence, limit=limit)
-        status = 200 if result.get("ok") else 404
-        return web.json_response(result, status=status)
+        identity = {
+            "session_id": run["session_id"],
+            "run_id": run["run_id"],
+            "request_id": run["request_id"],
+            "agent_id": run["agent_id"],
+            "context_generation": int(run["context_generation"]),
+        }
+        if result.get("ok"):
+            result.update(identity)
+            return web.json_response(result)
+
+        def _epoch(value: object) -> float | None:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            try:
+                return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return None
+
+        state = str(run.get("state") or "queued")
+        terminal = state in TERMINAL_RUN_STATES
+        recovered = {
+            "ok": True,
+            **identity,
+            "state": state,
+            "terminal": terminal,
+            "success": state == "completed" if terminal else None,
+            "created_at": _epoch(run.get("created_at")),
+            "started_at": _epoch(run.get("started_at")),
+            "completed_at": _epoch(run.get("completed_at")),
+            "latest_sequence": after_sequence,
+            "events": [],
+            "recovered_from": "session_store",
+        }
+        return web.json_response(recovered)
 
     async def handle_project_chat_log(self, request):
         name = request.match_info["name"]
@@ -2981,6 +3037,12 @@ class WorkbenchApiServer:
             client_id = str(
                 request.headers.get("X-Client-Id") or payload.get("client_id") or "default"
             )
+            surface = str(payload.get("surface") or "session-api").strip().lower()
+            if not surface or len(surface) > 80 or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789._-"
+                for character in surface
+            ):
+                raise ValueError("surface must be a lowercase protocol identifier")
             request_id = await runtime.enqueue_request(
                 runtime._primary_chat_id(),
                 text,
@@ -2991,7 +3053,7 @@ class WorkbenchApiServer:
                 request_metadata={
                     "session_id": session["session_id"],
                     "owner_id": owner,
-                    "session_surface": "aptenra",
+                    "session_surface": surface,
                     "session_channel_key": client_id,
                     "execution_mode": payload.get("execution_mode"),
                     "parent_run_id": payload.get("parent_run_id"),

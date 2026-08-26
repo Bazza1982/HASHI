@@ -1335,7 +1335,7 @@ async def test_build_turn_prompt_only_measures_context_before_execution(
 
 
 @pytest.mark.asyncio
-async def test_unknown_capacity_over_128k_still_waits_for_execution_stage(
+async def test_unknown_capacity_over_128k_compacts_before_triage(
     tmp_path,
     monkeypatch,
 ):
@@ -1409,14 +1409,15 @@ async def test_unknown_capacity_over_128k_still_waits_for_execution_stage(
     )
 
     assert "CURRENT-UNKNOWN-CAPACITY-AUTHORITY" in result.final_prompt
-    assert "COMPACTED HISTORY CAPSULE" not in result.final_prompt
-    assert calls == []
-    assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 0
+    assert result.final_prompt.count("CURRENT-UNKNOWN-CAPACITY-AUTHORITY") == 1
+    assert "COMPACTED HISTORY CAPSULE" in result.final_prompt
+    assert calls
+    assert runtime._context_compaction_coordinator.store.read_state()["generation"] == 1
     assert (
         resolve_trigger_budget(runtime).is_unknown_capacity_guard
         is True
     )
-    assert estimate_tokens(result.final_prompt) > DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
+    assert estimate_tokens(result.final_prompt) < DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
 
 
 @pytest.mark.asyncio
@@ -1605,7 +1606,7 @@ async def test_execution_stage_retry_exhaustion_warns_and_does_not_block_model(
     )
 
     assert estimate_tokens(result.final_prompt) > DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
-    assert compact_calls == []
+    assert len(compact_calls) == 2
     assert "CURRENT-REQUEST-MUST-CONTINUE-AFTER-RETRIES" in result.final_prompt
     assert "user-0:" in result.final_prompt
     assert result.context_warnings == ()
@@ -1618,7 +1619,7 @@ async def test_execution_stage_retry_exhaustion_warns_and_does_not_block_model(
         deliver_to_telegram=True,
     )
     assert scheduled is True
-    assert compact_calls == []
+    assert len(compact_calls) == 2
 
     model_calls = []
 
@@ -1642,7 +1643,7 @@ async def test_execution_stage_retry_exhaustion_warns_and_does_not_block_model(
     assert len(model_calls) == 1
     assert model_calls[0][0] == result.final_prompt
     await asyncio.gather(*tuple(runtime._context_compaction_tasks))
-    assert len(compact_calls) == 2
+    assert len(compact_calls) == 4
     assert sent
     assert "warning" in sent[0][1].lower()
     assert "continued without waiting" in sent[0][1]

@@ -199,7 +199,9 @@ class RequestActivityStore:
 
     def mark_running(self, request_id: str, *, timestamp: float | None = None) -> None:
         with self._lock:
-            record = self._ensure_unlocked(request_id)
+            record = self._requests.get(str(request_id or ""))
+            if record is None:
+                return
             if record.get("terminal"):
                 return
             now = float(timestamp if timestamp is not None else time.time())
@@ -221,8 +223,16 @@ class RequestActivityStore:
                 "error": "failed",
             }.get(kind, "running")
             with self._lock:
-                record = self._ensure_unlocked(request_id)
+                record = self._requests.get(str(request_id or ""))
+                if record is None:
+                    return
                 if record.get("terminal"):
+                    return
+                event_id = _safe_text(getattr(event, "event_id", ""), limit=240)
+                if event_id and any(
+                    existing.get("event_id") == event_id
+                    for existing in record.get("events") or ()
+                ):
                     return
                 self._append_unlocked(
                     record,
@@ -234,7 +244,7 @@ class RequestActivityStore:
                     current=getattr(event, "current", None),
                     total=getattr(event, "total", None),
                     unit=getattr(event, "unit", ""),
-                    event_id=getattr(event, "event_id", ""),
+                    event_id=event_id,
                     delivery_class=getattr(event, "delivery_class", ""),
                     origin=getattr(event, "origin", ""),
                     phase=getattr(event, "phase", ""),
@@ -260,7 +270,9 @@ class RequestActivityStore:
         timestamp: float | None = None,
     ) -> None:
         with self._lock:
-            record = self._ensure_unlocked(request_id)
+            record = self._requests.get(str(request_id or ""))
+            if record is None:
+                return
             if record.get("terminal"):
                 return
             now = float(timestamp if timestamp is not None else time.time())

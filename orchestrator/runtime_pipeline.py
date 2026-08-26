@@ -796,6 +796,72 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         )
 
     prompt_payload = assemble(extra_sections)
+    context_warnings: list[str] = []
+    if runtime.config.active_backend == "her-v2" and not incremental:
+        from orchestrator.context_compaction import (
+            coordinator_for,
+            estimate_effective_context_tokens,
+            estimate_tokens,
+            load_policy,
+            resolve_trigger_budget,
+        )
+
+        prompt_tokens = estimate_tokens(prompt_payload["final_prompt"])
+        if history_compaction_enabled:
+            budget = resolve_trigger_budget(runtime, policy=load_policy(runtime))
+            effective_tokens = estimate_effective_context_tokens(
+                runtime,
+                prompt_tokens=prompt_tokens,
+                coordinator=coordinator_for(
+                    runtime,
+                    request_ref=item.request_id,
+                    workspace_dir=session_workspace if session_scoped else None,
+                    memory_store=(
+                        runtime_session.session_memory_store(runtime, item)
+                        if session_scoped
+                        else None
+                    ),
+                ),
+            )
+            if effective_tokens > budget.high_projected_tokens:
+                coordinator = coordinator_for(
+                    runtime,
+                    request_ref=item.request_id,
+                    workspace_dir=session_workspace if session_scoped else None,
+                    memory_store=(
+                        runtime_session.session_memory_store(runtime, item)
+                        if session_scoped
+                        else None
+                    ),
+                )
+                outcome = await coordinator.compact(
+                    trigger="pre_triage_context_pressure",
+                    request_ref=item.request_id,
+                    force=True,
+                )
+                if outcome.changed:
+                    from orchestrator.context_compaction import install_history_section
+
+                    extra_sections, compaction_snapshot = install_history_section(
+                        runtime,
+                        base_extra_sections,
+                        cross_session_entries=cross_session_timeline_entries,
+                        primary_timeline_entries=session_history,
+                        workspace_dir=session_workspace if session_scoped else None,
+                        memory_store=(
+                            runtime_session.session_memory_store(runtime, item)
+                            if session_scoped
+                            else None
+                        ),
+                    )
+                    prompt_payload = assemble(extra_sections)
+                    prompt_tokens = estimate_tokens(prompt_payload["final_prompt"])
+        request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", None)
+        if not isinstance(request_tokens, dict):
+            request_tokens = {}
+            runtime._context_compaction_prompt_tokens = request_tokens
+        request_tokens[item.request_id] = prompt_tokens
+        runtime._last_full_prompt_tokens = prompt_tokens
     _canonical_record(
         runtime,
         "provider_request",
@@ -810,19 +876,6 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         request_id=item.request_id,
         provenance={"source": "hashi_pcm_assembler"},
     )
-    context_warnings: list[str] = []
-    if runtime.config.active_backend == "her-v2" and not incremental:
-        from orchestrator.context_compaction import estimate_tokens
-
-        # Automatic Compact is owned by HER v2 Execution. Prompt assembly only
-        # records the immutable input size; it never waits for maintenance.
-        prompt_tokens = estimate_tokens(prompt_payload["final_prompt"])
-        request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", None)
-        if not isinstance(request_tokens, dict):
-            request_tokens = {}
-            runtime._context_compaction_prompt_tokens = request_tokens
-        request_tokens[item.request_id] = prompt_tokens
-        runtime._last_full_prompt_tokens = prompt_tokens
     final_prompt = prompt_payload["final_prompt"]
     prompt_audit = prompt_payload.get("audit", {})
     runtime._last_prompt_audit = prompt_audit

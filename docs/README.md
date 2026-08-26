@@ -1,5 +1,7 @@
 # HASHI Documentation
 
+- [Aptenra 插入前计划](APTENRA_PRE_INSERTION_PLAN.md) — D-021 intake responsibilities, gates, rollback points, and Lane C qualification boundary.
+
 - [HASHI command UI style guide](HASHI_COMMAND_UI_STYLE_GUIDE.md) — display contract for slash commands, Telegram cards, help text, and inline buttons
 
 This directory contains developer documentation and operational notes for HASHI.
