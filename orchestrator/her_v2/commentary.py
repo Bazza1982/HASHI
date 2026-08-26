@@ -47,7 +47,6 @@ class NeutralCommentary:
     attempt: int
     text: str
     required_facts: tuple[str, ...] = ()
-    minimal_persona_fallback_reason: str = ""
 
     def __post_init__(self) -> None:
         event_id = str(self.event_id or "").strip()
@@ -82,11 +81,6 @@ class NeutralCommentary:
         object.__setattr__(self, "turn_id", turn_id)
         object.__setattr__(self, "text", text)
         object.__setattr__(self, "required_facts", required_facts)
-        object.__setattr__(
-            self,
-            "minimal_persona_fallback_reason",
-            str(self.minimal_persona_fallback_reason or "").strip()[:120],
-        )
 
 
 @dataclass(frozen=True)

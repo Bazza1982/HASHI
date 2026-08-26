@@ -34,6 +34,11 @@ status here.
 | [HERV2-002](#herv2-002-tool-activity-counts-can-diverge-from-authoritative-receipts) | Tool activity counts can diverge from authoritative receipts | Moderate | Open | 2026-08-26 |
 | [HERV2-003](#herv2-003-non-zero-bash-exits-can-be-recorded-as-successful-receipts) | Non-zero Bash exits can be recorded as successful receipts | Major | Open | 2026-08-26 |
 | [HERV2-004](#herv2-004-immediate-response-claims-lack-a-deterministic-performed-action-guard) | Immediate Response claims lack a deterministic performed-action guard | Untriaged | Open | 2026-08-24 |
+| [HERV2-005](#herv2-005-triage-habit-selections-are-not-catalogue-bound) | Triage Habit selections are not catalogue-bound | Minor | Open | 2026-08-26 |
+| [HERV2-006](#herv2-006-plan-capability-availability-is-validated-after-structured-acceptance) | Plan capability availability is validated after structured acceptance | Moderate | Open | 2026-08-26 |
+| [HERV2-007](#herv2-007-sub-agent-outcome-fields-are-not-cross-checked-for-semantic-completeness) | Sub-agent outcome fields are not cross-checked for semantic completeness | Minor | Open | 2026-08-26 |
+| [HERV2-008](#herv2-008-model-authored-evidence-references-are-merged-with-authoritative-receipts) | Model-authored evidence references are merged with authoritative receipts | Major | Open | 2026-08-26 |
+| [HERV2-009](#herv2-009-finalisation-disclosure-is-checked-for-presence-not-canonical-state-coverage) | Finalisation disclosure is checked for presence, not canonical state coverage | Major | Open | 2026-08-26 |
 
 ## HERV2-001: Long provisional draft is not replaced after multi-message delivery
 
@@ -255,6 +260,161 @@ and did not claim that prompt wording made the case impossible.
 
 - `HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md`: "Known limits and unclaimed
   evidence"
+
+## HERV2-005: Triage Habit selections are not catalogue-bound
+
+| Field | Value |
+|---|---|
+| Severity | Minor |
+| Status | Open |
+| Affected flow | Triage output propagated into Planning and Execution prompts |
+| Disposition | Future consideration; no new validation gate is currently authorised |
+
+### Open design gap
+
+`relevant_habits` is validated as a duplicate-free list of non-empty strings,
+but each value is not checked against the retrieved Habit catalogue. These are
+complete Habit strings rather than IDs, and accepted values are passed onward
+as advisory prompt content. No tool permission or direct execution authority is
+derived from the field.
+
+### Future consideration
+
+If observed model behaviour makes this material, compare selected values with
+the exact retrieved catalogue at the existing Triage boundary. Do not add a
+separate stage or recovery path solely for this advisory field.
+
+### Code pointers
+
+- `orchestrator/her_v2/structured.py`: `parse_triage()`
+- `orchestrator/her_v2/runtime_support.py`: `_record_triage()`
+- `orchestrator/her_v2/prompts.py`: Planning and Execution prompt rendering
+
+## HERV2-006: Plan capability availability is validated after structured acceptance
+
+| Field | Value |
+|---|---|
+| Severity | Moderate |
+| Status | Open |
+| Affected flow | High-volume Planning and Replanning delegation |
+| Disposition | Future consideration; runtime authority enforcement remains active |
+
+### Open design gap
+
+Planning and Replanning validate the shape of sub-agent profiles, tools, and
+attachment IDs before accepting the structured plan. Availability is checked
+later while Runtime builds or invokes the sub-agent batch. An unavailable
+profile or attachment can therefore fail after JSON Repair is no longer
+available, while unknown tool names are narrowed out by the delegated registry.
+
+The observed mechanism does not grant unavailable tools or attachments. Its
+impact is late failure or silent capability reduction rather than authority
+expansion.
+
+### Future consideration
+
+If this becomes operationally frequent, move the existing availability checks
+into the current context-aware Planning/Replanning validator. Do not create a
+new lifecycle stage or a second planning gate.
+
+### Code pointers
+
+- `orchestrator/her_v2/structured.py`: `_validated_delegation_plan_fields()`
+- `orchestrator/her_v2/runtime.py`: `_subagent_batch()`
+- `adapters/her_v2_provider.py`: `_DelegatedToolRegistry`
+
+## HERV2-007: Sub-agent outcome fields are not cross-checked for semantic completeness
+
+| Field | Value |
+|---|---|
+| Severity | Minor |
+| Status | Open |
+| Affected flow | Structured sub-agent Execution results |
+| Disposition | Future consideration; avoid adding semantic gates without observed harm |
+
+### Open design gap
+
+The sub-agent Execution parser requires a valid disposition and summary, and a
+clarification for `USER_INPUT_REQUIRED`. It does not require a non-empty
+`limitations` field for `COMPLETED_WITH_LIMITATIONS`, require `remaining_work`
+for `FAILED`, or reject a clarification attached to a completed result. The
+summary may already carry that meaning, so enforcing field combinations would
+be a new semantic gate rather than a straightforward parser correction.
+
+### Future consideration
+
+Keep this as an evidence-driven design item. Add deterministic cross-field
+requirements only if real executions show that Review and aggregation cannot
+reliably interpret the accepted outcomes.
+
+### Code pointer
+
+- `orchestrator/her_v2/structured.py`: `_parse_execution_data()`
+
+## HERV2-008: Model-authored evidence references are merged with authoritative receipts
+
+| Field | Value |
+|---|---|
+| Severity | Major |
+| Status | Open |
+| Affected flow | Sub-agent result evidence aggregation |
+
+### Expected behaviour
+
+Only references already known to the request ledger, Tool Gateway, or another
+explicitly authoritative evidence source should be represented as established
+evidence. Model-authored references may be retained as claims but must not gain
+authority merely by appearing in JSON.
+
+### Current behaviour
+
+The structured sub-agent outcome accepts arbitrary string `evidence_refs`.
+Runtime merges those strings with the provider response's authoritative receipt
+references without reconciling their provenance.
+
+### Future consideration
+
+Filter model-authored references against the known evidence ledger, or keep
+them in a separately labelled claim field. Unknown references should be
+ignored or audited rather than merged as authoritative evidence. This can be a
+provenance normalisation and does not require another model gate.
+
+### Code pointers
+
+- `orchestrator/her_v2/structured.py`: `_parse_execution_data()`
+- `orchestrator/her_v2/runtime.py`: `_invoke_subagent()`
+
+## HERV2-009: Finalisation disclosure is checked for presence, not canonical state coverage
+
+| Field | Value |
+|---|---|
+| Severity | Major |
+| Status | Open |
+| Affected flow | Reviewed/Assured Finalisation and user-visible closure |
+
+### Expected behaviour
+
+Finalisation should not contradict or omit material canonical Execution,
+Review, assurance, limitation, or technical-unavailability state supplied by
+Runtime.
+
+### Current behaviour
+
+The parser requires a non-empty final message and validates an optional legacy
+execution envelope. It does not deterministically establish that the visible
+message covers every material canonical state. A fluent but incomplete message
+can therefore pass.
+
+### Future consideration
+
+Prefer deterministic runtime composition of a concise canonical status footer
+over rejecting and replaying a completed Finalisation model call. Any change
+should avoid another semantic wording gate or another model stage.
+
+### Code pointers
+
+- `orchestrator/her_v2/structured.py`: `parse_finalisation()`
+- `orchestrator/her_v2/runtime.py`: Finalisation terminal-state resolution
 
 ## Migration note
 

@@ -244,7 +244,7 @@ async def test_declared_persona_commentary_agent_failure_logs_reason_and_falls_b
     assert packaged.fallback is True
     assert packaged.provenance == "minimal_persona_fallback"
     assert packaged.error_type == "persona_commentary_agent_failed"
-    assert packaged.text.startswith("Public Navigator 向您汇报：")
+    assert packaged.text.startswith("Public Navigator: ")
     assert packaged.text.endswith(_neutral().text)
     assert failure_reason in caplog.text
     assert len(provider.calls) == 1
@@ -323,7 +323,7 @@ async def test_missing_block_or_packaging_failure_uses_deterministic_minimal_fal
     assert packaged.fallback is True
     assert packaged.provenance == "minimal_persona_fallback"
     assert packaged.error_type == reason
-    assert packaged.text.startswith("Navigator 向您汇报：")
+    assert packaged.text.startswith("Navigator: ")
     assert packaged.text.endswith(_neutral().text)
     assert len(provider.calls) == (0 if not source.usable else 1)
 
@@ -369,7 +369,7 @@ async def test_non_sentinel_persona_response_is_not_classified_as_failure():
 
 
 @pytest.mark.asyncio
-async def test_model_commentary_fallback_uses_display_name_without_persona_call():
+async def test_replan_commentary_always_uses_persona_packager_when_available():
     provider = _PackagingProvider()
     resolved_display_name = "Public Navigator"
     packager = _ConfiguredPersonaPackager(
@@ -392,18 +392,15 @@ async def test_model_commentary_fallback_uses_display_name_without_persona_call(
             "Next: continue from verified evidence."
         ),
         required_facts=("60%", "plan is unchanged", "Next:"),
-        minimal_persona_fallback_reason="replan_model_commentary_fallback",
     )
 
     packaged = await packager.package(commentary)
 
-    assert packaged.fallback is True
-    assert packaged.provenance == "minimal_persona_fallback"
-    assert packaged.error_type == "replan_model_commentary_fallback"
-    assert packaged.text.startswith(f"{resolved_display_name} 向您汇报：")
-    assert not packaged.text.startswith("agent 向您汇报：")
-    assert all(fact in packaged.text for fact in commentary.required_facts)
-    assert provider.calls == []
+    assert packaged.fallback is False
+    assert packaged.provenance == "persona_packager"
+    assert packaged.error_type == ""
+    assert packaged.text == "Captain, three checks passed; final verification is running."
+    assert len(provider.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -482,7 +479,7 @@ async def test_required_message_rendering_has_deterministic_persona_fallback(
     assert rendered.fallback is True
     assert rendered.provenance == "minimal_persona_fallback"
     assert rendered.error_type == reason
-    assert rendered.text == f"Navigator 想请您确认：{message.text}"
+    assert rendered.text == f"Navigator: {message.text}"
     assert len(provider.calls) == (0 if not source.usable else 1)
 
 
@@ -526,9 +523,7 @@ async def test_required_clarification_declared_failure_logs_full_reason_and_fall
     assert rendered.fallback is True
     assert rendered.provenance == "minimal_persona_fallback"
     assert rendered.error_type == "persona_commentary_agent_failed"
-    assert rendered.text == (
-        "Public Navigator 想请您确认：Which account should be changed?"
-    )
+    assert rendered.text == "Public Navigator: Which account should be changed?"
     assert failure_reason in caplog.text
     assert len(provider.calls) == 1
 

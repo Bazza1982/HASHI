@@ -3032,7 +3032,8 @@ Please scan Outlook.""",
 
     fallback_backend = manager.backends[-1]
     assert (
-        "Agent display name: agent. Use a polite tone and address the user as 您."
+        "Agent display name: agent. Use the configured default language and a "
+        "respectful tone."
         in fallback_backend.sys_prompt
     )
     assert "FULL AGENT CONTENT WITHOUT A PERSONA BLOCK" not in (

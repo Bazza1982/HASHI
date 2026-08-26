@@ -722,7 +722,9 @@ async def test_subagent_receives_only_authorized_attachment_subset(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_compare_all_subagent_receives_every_image_in_original_order(tmp_path):
+async def test_explicit_attachment_wildcard_receives_every_image_in_original_order(
+    tmp_path,
+):
     scripts = _initial("HIGH_VOLUME_TASK")
     scripts.update(
         {
@@ -735,6 +737,7 @@ async def test_compare_all_subagent_receives_every_image_in_original_order(tmp_p
                             "task": "Compare all images and report their differences",
                             "profile": "lightweight",
                             "tools": [],
+                            "attachment_ids": ["*"],
                         }
                     ],
                 }
@@ -783,13 +786,64 @@ async def test_compare_all_subagent_receives_every_image_in_original_order(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_direct_response_promotes_repaired_immediate_content_without_fallback(
+async def test_subagent_task_text_never_infers_attachment_authority(tmp_path):
+    scripts = _initial("HIGH_VOLUME_TASK")
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["compare all images", "synthesise"],
+                    "sub_agents": [
+                        {
+                            "id": "no-media-authority",
+                            "task": "Compare all images and report their differences",
+                            "profile": "lightweight",
+                            "tools": [],
+                        }
+                    ],
+                }
+            ],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Compared no delegated media.",
+                },
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Primary synthesis completed.",
+                },
+            ],
+            Stage.REVIEW: [{"outcome": "PASS", "summary": "Acceptable."}],
+            Stage.FINALISATION: [{"report": "Completed."}],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Compare every image.",
+        "request-no-inferred-media",
+        effort=Effort.MAX,
+        request_content=_multimodal_request_content(tmp_path),
+    )
+
+    sub_request = next(
+        request
+        for _profile, request in provider.requests
+        if request.role == "sub_agent:no-media-authority"
+    )
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert sub_request.attachment_manifest == ()
+    assert sub_request.context["authorized_attachment_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_direct_response_preserves_visible_immediate_content_without_fallback(
     tmp_path,
 ):
     scripts = {
         Stage.IMMEDIATE_RESPONSE: [
             StageResponse(
-                text='{"message":"First answer line.\n\nSecond answer line."}',
+                text="First answer line.\n\nSecond answer line.",
                 provider="fake-api",
                 model="model-lightweight",
             )
@@ -805,7 +859,7 @@ async def test_direct_response_promotes_repaired_immediate_content_without_fallb
 
     result = await _runtime(tmp_path, provider).run_turn(
         "Answer directly",
-        "request-direct-control-char-repair",
+        "request-direct-visible-content",
         effort="low",
     )
 
@@ -826,10 +880,7 @@ async def test_direct_response_promotes_repaired_immediate_content_without_fallb
         if row["event"] == "structured_response_compatibility_applied"
         and row["stage"] == Stage.IMMEDIATE_RESPONSE.value
     )
-    assert (
-        compatibility["payload"]["validation_source"]
-        == "provider_json_control_char_repair"
-    )
+    assert compatibility["payload"]["validation_source"] == "provider_plain_text"
 
 
 @pytest.mark.asyncio
@@ -847,7 +898,7 @@ async def test_direct_response_is_not_repackaged_by_required_persona_renderer(tm
 
 
 @pytest.mark.asyncio
-async def test_triage_first_work_starts_without_waiting_and_repairs_late_immediate(
+async def test_triage_first_work_starts_without_waiting_and_preserves_late_immediate(
     tmp_path,
 ):
     release_immediate = asyncio.Event()
@@ -858,7 +909,7 @@ async def test_triage_first_work_starts_without_waiting_and_repairs_late_immedia
     async def delayed_immediate(_request):
         await release_immediate.wait()
         return StageResponse(
-            text='{"message":"I have it.\n\nI will check now."}',
+            text="I have it.\n\nI will check now.",
             provider="fake-api",
             model="model-lightweight",
         )
@@ -919,10 +970,7 @@ async def test_triage_first_work_starts_without_waiting_and_repairs_late_immedia
         if row["event"] == "structured_response_compatibility_applied"
         and row["stage"] == Stage.IMMEDIATE_RESPONSE.value
     )
-    assert (
-        compatibility["payload"]["validation_source"]
-        == "provider_json_control_char_repair"
-    )
+    assert compatibility["payload"]["validation_source"] == "provider_plain_text"
     assert not any(row["event"] == "optional_stage_degraded" for row in rows)
 
 
@@ -1149,6 +1197,56 @@ async def test_direct_response_still_requires_valid_immediate_content(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_invalid_presentation_data_keeps_structured_output_error_code(tmp_path):
+    provider = ScriptedProvider(
+        {
+            Stage.IMMEDIATE_RESPONSE: [
+                StageResponse(data={"unexpected": "value"}),
+                StageResponse(data={"unexpected": "value"}),
+            ],
+            Stage.TRIAGE: [_triage("DIRECT_RESPONSE", real_goal="Reply hello.")],
+        }
+    )
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Hello", "request-direct-invalid-structured-data", effort="low"
+    )
+
+    assert result.terminal_state is TerminalState.ERROR
+    assert ProviderFailureCode.STRUCTURED_OUTPUT_INVALID.value in result.error
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    failures = [
+        row
+        for row in rows
+        if row["event"] == "stage_attempt_failed"
+        and row["stage"] == Stage.IMMEDIATE_RESPONSE.value
+    ]
+    assert failures[-1]["payload"]["error_code"] == (
+        ProviderFailureCode.STRUCTURED_OUTPUT_INVALID.value
+    )
+
+
+@pytest.mark.asyncio
+async def test_truly_empty_presentation_keeps_provider_empty_response_code(tmp_path):
+    provider = ScriptedProvider(
+        {
+            Stage.IMMEDIATE_RESPONSE: [StageResponse(), StageResponse()],
+            Stage.TRIAGE: [_triage("DIRECT_RESPONSE", real_goal="Reply hello.")],
+        }
+    )
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Hello", "request-direct-empty-presentation", effort="low"
+    )
+
+    assert result.terminal_state is TerminalState.ERROR
+    assert ProviderFailureCode.PROVIDER_EMPTY_RESPONSE.value in result.error
+
+
+@pytest.mark.asyncio
 async def test_early_immediate_is_promoted_to_clarification_without_duplication(
     tmp_path,
 ):
@@ -1166,6 +1264,43 @@ async def test_early_immediate_is_promoted_to_clarification_without_duplication(
 
     assert result.terminal_state is TerminalState.PENDING_USER_INPUT
     assert result.final_already_delivered is True
+    assert [(item.kind, item.text) for item in result.delivery_records] == [
+        ("clarification", "Which account should be changed?")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deferred_clarification_resolution_is_deduplicated_by_delivery_state(
+    tmp_path,
+):
+    class DeferredResolutionDelivery(RecordingDelivery):
+        async def resolve_initial(self, **kwargs):
+            receipt = await super().resolve_initial(**kwargs)
+            return type(receipt)(
+                receipt.accepted,
+                False,
+                "provisional_clarification_deferred",
+            )
+
+    scripts = _initial(
+        "CONFIRMATION_REQUIRED", clarification="Which account should be changed?"
+    )
+    provider = ScriptedProvider(
+        scripts,
+        delays={Stage.IMMEDIATE_RESPONSE: 0.005, Stage.TRIAGE: 0.03},
+    )
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        delivery=DeferredResolutionDelivery(),
+    ).run_turn(
+        "Change the account",
+        "request-confirm-deferred",
+        effort=Effort.HIGH,
+    )
+
+    assert result.terminal_state is TerminalState.PENDING_USER_INPUT
     assert [(item.kind, item.text) for item in result.delivery_records] == [
         ("clarification", "Which account should be changed?")
     ]
@@ -2114,6 +2249,8 @@ async def test_max_review_technical_failure_does_not_enter_an_endless_loop(
     assert result.assurance_status == ""
     assert result.review_count == 1
     assert any("Review unavailable" in item for item in result.limitations)
+    assert "Validation note:" in result.text
+    assert "Independent validation was unavailable" in result.text
 
 
 @pytest.mark.asyncio
@@ -2574,7 +2711,9 @@ async def test_replan_replaces_subagent_batch_without_attaching_old_plan_results
 
 
 @pytest.mark.asyncio
-async def test_unchanged_replan_preserves_active_plan_and_running_assignment(tmp_path):
+async def test_unchanged_replan_ignores_reworded_plan_and_preserves_active_assignment(
+    tmp_path,
+):
     async def trigger_replan(request):
         coordinator = request.checkpoint_coordinator
         assert coordinator is not None
@@ -2626,10 +2765,10 @@ async def test_unchanged_replan_preserves_active_plan_and_running_assignment(tmp
             ],
             Stage.REPLANNING: [
                 {
-                    "plan": ["delegate preserved route", "synthesise"],
-                    "success_criteria": ["The preserved route is complete"],
+                    "plan": ["Harmlessly reworded plan that Runtime must ignore"],
+                    "success_criteria": ["Harmlessly reworded criterion"],
                     "parallel_groups": [],
-                    "sub_agents": [dict(assignment)],
+                    "sub_agents": [],
                     "completion_percent": 70,
                     "completion_basis": "The delegated result is completing.",
                     "plan_changed": False,
@@ -3781,7 +3920,6 @@ async def test_triage_recovers_unambiguous_control_json_from_reasoning(tmp_path)
             StageResponse(
                 text="",
                 reasoning_trace=(
-                    "The task requires work.\n"
                     '{"classification":"COMPLEX_TASK",'
                     '"real_goal":"Diagnose the fault",'
                     '"relevant_habits":[],"clarification":null}'
@@ -4163,8 +4301,8 @@ async def test_specialist_json_repair_has_no_attempt_cap_and_preserves_classific
         StageResponse(text="not json on the fourth attempt"),
         StageResponse(
             text=(
-                'prefix {"classification":"SIMPLE_TASK","real_goal":"Do it",'
-                '"relevant_habits":[],"clarification":null} suffix'
+                '{"classification":"SIMPLE_TASK","real_goal":"Do it",'
+                '"relevant_habits":[],"clarification":null}'
             ),
             reasoning_trace=None,
             provider="fake-api",

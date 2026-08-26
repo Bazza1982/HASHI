@@ -1,88 +1,234 @@
 # HASHI PCM Upgrade Test Plan
 
-Status: accepted implementation contract for `HASHI_PCM_SYSTEM_DESIGN.md`.
+*Accepted assertion migration and minimum acceptance gate for the HASHI PCM upgrade*
 
-## 1. Assertions retired or replaced
+| **Document information** | **Value** |
+| ------------------------ | --------- |
+| Status | Accepted and implemented test contract |
+| Accepted | 26 August 2026 |
+| Governing design | [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) |
+| Scope | Backend-neutral HASHI Persona-Context-Memory infrastructure; HER-V2 is one consumer, not the owner of this contract |
 
-The upgrade does not delete broad test areas. It replaces assertions that
-encoded the retired behaviour:
+## 1. Purpose
 
-| Retired assertion | Replacement contract |
-| --- | --- |
-| `system_md` may point to `agent.md`, `AGENT.md`, or an arbitrary file | HASHI reads exactly the lower-case workspace `agent.md`; persisted `system_md` is accepted only as one-time migration input and is then removed. |
-| Unmarked identity prose is ignored or used as a fallback | Substantive text outside recognised PCM blocks invalidates the whole document. |
-| Missing, repeated, empty, or malformed Persona blocks select a valid Agent fallback | Configuration/startup fails closed; a presentation renderer may retain an internal defensive fallback, but it never validates the Agent. |
-| Recent history is a backend-specific number of individual messages | Recent history is at most ten completed user-assistant exchanges. Incomplete exchanges never count. |
-| Fixed incremental turns contain no PCM background | Every Fixed turn carries delta PCM; recent history appears only at bootstrap or an explicit continuation. |
-| A flat prompt position proves authority | A typed authority envelope records system, current user, Persona, memory, history, and runtime-context ranks independently of display order. |
-| Character or word caps may cut through one exchange | Caps remove the oldest whole exchanges first, preserve the newest history, current request, and higher-authority PCM, and audit omissions. |
-| A handoff file implies the new backend received context | `/backend +` and `/handoff` must enqueue exactly one real continuation delivery when applicable. |
+This plan records which existing assertions become invalid under the accepted
+PCM design, which existing tests remain valuable, and the smallest additional
+contract suite needed before the upgrade can be declared complete.
 
-External systems such as Hermes and Nagare retain their own `AGENT.md`
-conventions. They are not HASHI PCM files.
+Tests should be replaced in the same change that retires an old assertion. No
+test should disappear without equivalent or stronger coverage of the accepted
+product contract. Every materially new or rewritten behavioural test must also
+follow the red/green failure-proof rule in [TESTING_POLICY.md](TESTING_POLICY.md).
 
-## 2. Existing assertions retained
+## 2. Assertions to retire or replace
 
-- Completed-exchange ledger, transcript reconciliation, and `/fresh` boundary.
-- Instance-global `/sys` precedence over Agent-local `/sys`, with Agent isolation.
-- Workzone, backend sandbox, `access_root`, Tool Registry, and Gateway admission.
-- Deterministic Memory+ date rollover, archives, carryover, and concurrent writes.
-- Sanitised and truncated operational Tool audit and reasoning views.
-- Enterprise audit hash chain, immutable anchors, and tamper detection.
-- Delegated Tool permission filtering.
-- Ordinary transcript/memory clearing by `/reset` and workspace `/wipe`.
+| **Old assertion** | **Required action** | **Replacement assertion** |
+| ----------------- | ------------------- | ------------------------- |
+| A HASHI Agent may select `agent.md`, `AGENT.md` or an arbitrary `system_md` path as its persona source. | Replace the assertion and its parameterisation. | HASHI reads exactly the lower-case `agent.md` in the Agent workspace. |
+| Missing, empty or unreadable identity files are reported only as `system_md_*` source failures. | Replace. | The PCM document validator reports structured `agent.md` validation failures. |
+| Substantive text outside recognised PCM blocks can be silently ignored while a valid `[persona]` block is extracted. | Replace. | Substantive unmarked content invalidates the complete PCM document. |
+| Missing, empty, duplicate or ambiguous persona blocks select a valid minimal runtime fallback. | Replace as a configuration contract. | Invalid PCM fails closed during validation. A renderer fallback may remain only as defence in depth and must not make the Agent configuration valid. |
+| Normal `agents.json` configuration persists a `system_md` field. | Remove from normal fixtures and assertions. | A one-time migration may accept legacy `system_md` as input, then removes it after producing and validating canonical `agent.md`. |
+| HASHI import/export may create an unstructured Markdown identity such as `# Zelda`. | Replace. | HASHI-side import/export produces or consumes valid `[persona]`, `[sys]` and optional `[memory]` blocks. |
+| Recent context is measured as backend-specific counts of individual message rows, such as 4, 8 or 10 messages. | Replace. | Recent history is measured as at most ten completed user-assistant exchanges. |
+| A Fixed incremental request contains only the current user text and no PCM background. | Replace. | Fixed mode omits repeated recent history after bootstrap but sends current delta PCM on every external user turn. |
+| Flat string position alone establishes PCM authority. | Replace. | A typed authority envelope separates system instructions, the current user request, memory, runtime context and persona; adapter rendering must preserve those semantics. |
+| A history cap may retain older chats while clipping or discarding newer chats. | Replace wherever present. | Capacity pruning removes the oldest complete exchanges first, preserves newer complete exchanges, protects the current request and higher-authority PCM, and audits omissions. |
 
-Sanitised operational views remain. Canonical raw evidence is an additional
-lossless, restricted layer outside the mutable workspace.
+### 2.1 Exact tests that need semantic rewrites
 
-## 3. Minimal contract gate
+The following current tests contain the clearest obsolete assertions and should
+be renamed or rewritten rather than merely patched until green:
 
-The implementation gate contains 24 backend-neutral contracts. Parameterised
-cases may produce more collected tests without expanding the conceptual gate.
+- `test_configured_system_md_is_the_only_persona_source`
+- `test_missing_empty_and_invalid_utf8_sources_fail_closed_without_creation`
+- `test_v2_packaging_source_exposes_only_the_explicit_persona_block`
+- `test_invalid_v2_persona_blocks_select_minimal_fallback`
+- `test_bridge_context_assembler_splits_turn_and_saved_memory_flags`
+- `test_managed_prompt_orders_policy_then_old_memory_then_recent_then_request`
+- `test_context_profiles_separate_persistent_cli_and_stateless_api_memory`
+- `test_incremental_memory_plus_prompt_keeps_authoritative_request_marker_without_background`
+- `test_fixed_session_backend_uses_incremental_prompt`
+- HASHI-side transfer assertions that expect a persisted `system_md` field or an unstructured identity document
 
-### A. PCM document and migration (4)
+Configuration tests that merely use `system_md` as unrelated fixture data
+should be mechanically migrated to canonical `agent.md`. Legacy `system_md`
+must remain only in the dedicated one-time migration tests.
 
-1. A valid `agent.md` isolates exactly one Persona, System, and optional Memory block.
-2. Missing, duplicate, mismatched, empty, unmarked, or invalid-UTF-8 PCM fails closed.
-3. Only the exact lower-case workspace `agent.md` is accepted.
-4. Legacy migration is validated, atomic, idempotent, conflict-safe, and removes `system_md`.
+External products retain their own conventions. In particular, Hermes and
+Nagare tests that intentionally exercise an external `AGENT.md` format must not
+be changed by a repository-wide filename replacement.
 
-### B. Assembly, history, handoff, and time (7)
+## 3. Existing assertions to retain
 
-5. The typed envelope preserves permanent System, global `/sys`, local `/sys`, current user, Persona, Memory, history, and runtime-context authority.
-6. Fixed bootstrap includes at most the latest ten completed exchanges once.
-7. Fixed continuation sends current delta PCM without repeating recent history.
-8. Flex sends the latest ten completed exchanges each external turn with sequence and timestamp; incomplete exchanges are excluded.
-9. A size cap removes oldest complete exchanges first, preserves newer exchanges and protected PCM, and records omission evidence.
-10. `/backend +` and `/handoff` perform one continuation delivery rather than merely writing a file.
-11. External turns include date, seconds, timezone name, and numeric offset; internal HER stages do not add another automatic timestamp.
+The upgrade reuses, rather than replaces, the following coverage:
 
-### C. Skills, Tools, and Fixed CLI (3)
+- completed-exchange ledger persistence, transcript reconciliation and fresh-boundary filtering;
+- global `/sys` state isolation, concurrency and precedence over Agent-local `/sys`;
+- Workzone on/off behaviour, effective working directory, Tool Registry `access_root` and Gateway admission checks;
+- deterministic Memory+ date rollover, bounded carryover, archive preservation and concurrent update serialisation;
+- Tool audit redaction and truncation in sanitised operational views;
+- HER-V2 sanitised reasoning/audit views and explicit reasoning-unavailable records;
+- Enterprise audit hash chains, tamper detection and WORM anchors;
+- Tool Gateway/MCP schema, permission and delegated-tool enforcement;
+- context compaction tests that retain raw turns while changing only the active context view; and
+- reset/wipe tests that remove ordinary transcript, working memory or session state.
 
-12. The Skills catalogue contains only enabled, currently invocable metadata and never full `SKILL.md`; `memory-search` appears only with its Tool.
-13. The Tools catalogue exactly matches Agent/backend/stage/permission-filtered definitions; metadata grants no authority.
-14. Supported Fixed CLIs connect to the HASHI Gateway per invocation; Gateway and Workzone use the same effective workspace, `access_root`, and permission set. The initial supported set is Codex CLI and Claude CLI because both accept an isolated per-invocation MCP configuration. Grok CLI must not advertise HASHI Registry tools until an equally isolated injection path exists; its user/project MCP configuration is not mutated by this upgrade.
+Sanitised operational logs and canonical raw evidence are different layers.
+Existing redaction tests must not be inverted to require secrets in normal
+logs. The new canonical evidence path must preserve complete values under
+separate access controls while the existing operational view remains safe.
 
-### D. Canonical raw audit (5)
+Likewise, ordinary transcripts may still be cleared. The new canonical raw
+audit store must survive that cleanup.
 
-15. One request correlates full chat, provider, Tool, lifecycle, and delivery evidence.
-16. Provider reasoning is retained verbatim when exposed and recorded as unavailable—not fabricated—when absent.
-17. Large or binary evidence becomes an immutable content-addressed artifact with digest, size, media type, and provenance.
-18. Raw evidence survives `/reset`, `/new`, backend changes, process reload, ordinary workspace `/wipe`, and maintenance; it has no TTL or pruner.
-19. Reads require explicit authority; configured encryption leaves no plaintext; only separately confirmed audit-wipe deletes a selected scope and records that deletion.
+## 4. Minimum PCM acceptance suite
 
-### E. Memory and Wiki (5)
+The minimum new gate is 24 backend-neutral contract-test functions. A function
+may be parameterised across invalid forms, lifecycle operations or backend
+families. Parameterisation must not be replaced by duplicated test bodies.
 
-20. Frozen-clock tests prove monotonic recency decay and expose vector, text, importance, and recency components.
-21. `memory-search` catalogue visibility and invocation use the same effective Tool permission.
-22. Central consolidated search defaults to exact current instance and Agent; ingestion/sync does not expand reads.
-23. Cross-Agent raw search requires explicit user authority, an auditable purpose, exact target, and provenance. Authority is HASHI-bound request metadata from the explicit `/memory raw` command; a model-supplied Tool argument cannot self-authorise or change the bound target.
-24. `/wiki` is always a generic core command, exposes no private path/data/credential, and fails clearly without a configured provider or authorised capability.
+### 4.1 PCM document and migration — 4 tests
 
-## 4. Relevant verification only
+1. A valid lower-case `agent.md` isolates exactly one `[persona]`, one `[sys]`
+   and zero or one `[memory]` block without cross-contamination.
+2. A parameterised invalid-document test rejects missing required blocks,
+   duplicate or mismatched markers, empty required blocks, substantive unmarked
+   content and invalid UTF-8.
+3. HASHI resolves only the exact lower-case workspace `agent.md`; uppercase and
+   arbitrary custom paths do not become alternative PCM sources.
+4. Legacy `system_md` migration is validated, atomic and idempotent. Ambiguous,
+   conflicting or invalid input leaves the old configuration recoverable and
+   never commits a partial migration.
 
-Run the new PCM contract files and directly affected focused regression files.
-Do not use the full repository suite as this upgrade's default gate. The final
-gate must report exact selections and results, including any deliberate test
-replacement. A live load check may use only an explicitly authorised minimal
+### 4.2 Assembly, history and time — 7 tests
+
+5. The adapter-neutral authority envelope preserves permanent `[sys]`, global
+   `/sys`, local `/sys`, current-user, persona, memory and context semantics.
+6. A Fixed backend bootstrap receives the newest ten completed exchanges once.
+7. A continuing Fixed session receives complete delta PCM on every external
+   user turn without replaying recent history.
+8. A Flex backend receives the current request and newest ten completed
+   exchanges on every external turn. Incomplete exchanges are excluded and
+   each included exchange has sequence and timestamp metadata.
+9. When a non-HER or handoff budget is exceeded, HASHI removes the oldest whole
+   exchanges first, preserves newer whole exchanges, protects the current
+   request and higher-authority PCM, and records an omission audit event.
+10. `/backend +` continuation and `/handoff` each deliver the selected context
+    to the Fixed backend exactly once rather than only preparing a file or
+    pending prompt.
+11. Every top-level external user request contains date, seconds, time-zone name
+    and UTC offset. Internal HER-V2 stages do not receive an independently
+    fabricated top-level time injection.
+
+History pruning is exchange-atomic. If all older exchanges have been removed
+and one remaining historical exchange still cannot fit, that historical
+exchange is omitted whole and audited; it is not clipped into a partial chat.
+The current user request is never treated as historical content and remains
+protected.
+
+### 4.3 Skills, Tools and Fixed CLI access — 3 tests
+
+12. The Skills catalogue lists only Skills the Agent can invoke in the current
+    request scope, does not inline full `SKILL.md` instructions, and includes
+    local memory search only when that Skill is authorised and callable.
+13. The Tools catalogue exactly matches definitions remaining after Agent,
+    backend, stage, permission and Tool Registry/Gateway filtering. Catalogue
+    metadata alone never authorises execution.
+14. Each supported Fixed CLI can invoke an advertised HASHI Tool through MCP or
+    its equivalent native bridge. The catalogue, Gateway inventory, Workzone
+    and effective admission scope agree; a capability is absent until the
+    bridge is both available and authorised.
+
+The initial supported Fixed set is Codex CLI and Claude CLI because both accept
+isolated per-invocation MCP configuration. Grok CLI must not advertise HASHI
+Registry Tools until an equally isolated injection path exists; this upgrade
+does not mutate its user or project MCP configuration.
+
+### 4.4 Canonical raw audit evidence — 5 tests
+
+15. One end-to-end request produces a correlated raw evidence chain covering
+    user/model chat, provider activity, complete Tool identifiers, names,
+    arguments and results, operation/lifecycle events and delivery events.
+16. Provider-exposed reasoning is preserved exactly. When reasoning is not
+    exposed, HASHI records explicit unavailability and never reconstructs it.
+17. Large or binary evidence is retained as an immutable content-addressed
+    artifact with a verifiable digest and provenance. The corresponding
+    operational view remains redacted and bounded while the canonical evidence
+    remains lossless.
+18. A lifecycle-parameterised test proves that canonical evidence survives
+    `/reset`, `/new`, backend switching, process reload, ordinary `/wipe` and
+    workspace maintenance. No automatic TTL or retention pruner may remove it.
+19. Unauthorised raw-evidence reads are denied; configured encryption-at-rest
+    prevents plaintext storage; and only a separately scoped, explicitly
+    confirmed audit-wipe operation deletes its exact target and records that
+    destructive action.
+
+Indefinite retention cannot be demonstrated by waiting forever. The executable
+contract is the absence of automatic expiry, survival across every ordinary
+lifecycle path, and exclusive deletion through the separately authorised
+audit-wipe boundary. Archive or tier changes may move evidence but must preserve
+content and provenance.
+
+### 4.5 Memory retrieval and Wiki — 5 tests
+
+20. With a frozen clock, otherwise comparable local memories receive a
+    monotonically smaller recency component as they age. Diagnostics expose
+    vector similarity, text relevance, importance and recency as distinct
+    components.
+21. The local memory-search Skill has identical catalogue visibility and
+    runtime invocation scope; an unadvertised or unauthorised Agent cannot call
+    it through metadata alone.
+22. Central BGE-M3 search defaults to the current HASHI instance and Agent.
+    Enabling `memory_sync` permits ingestion but does not widen read scope.
+23. Cross-Agent raw consolidated-memory search requires explicit user
+    authorisation, an auditable purpose and provenance-preserving results. Wiki
+    retrieval cannot bypass this boundary or expose the raw cross-Agent store.
+    HASHI binds the exact target and purpose to trusted request metadata created
+    by the explicit `/memory raw <instance> <agent> <query>` command; model
+    arguments cannot manufacture authority or change that target.
+24. `/wiki` is registered by HASHI core even when no private command package is
+    installed. Its standard prompt and provider interface contain no
+    deployment-specific data, paths or credentials; an absent provider or
+    insufficient retrieval capability produces a clear unavailable result.
+
+## 5. Implementation and test sequence
+
+1. Add or rewrite the contract tests first and record their credible pre-fix
+   red state.
+2. Implement the PCM parser, strict migration and adapter-neutral authority
+   envelope.
+3. Implement completed-exchange budgeting, Fixed delta PCM, handoff delivery,
+   time context and capability catalogues.
+4. Implement the canonical raw evidence store and its separate authorisation,
+   encryption, retention and destruction boundaries.
+5. Implement local recency decay, the local/central search interfaces and the
+   generic core `/wiki` provider contract.
+6. Run owning tests after each coherent change, then the core gate for shared
+   runtime/configuration changes, and finally the explicit PCM contract scope.
+
+The `/new` automatic-continuity gap remains governed by the separate session
+lifecycle design identified in the PCM system design. It must not be silently
+claimed as completed merely because Fixed bootstrap and handoff tests pass.
+
+## 6. Completion gate
+
+The PCM upgrade is complete only when:
+
+- all 24 contract-test functions pass across their required parameter sets;
+- all retained directly affected tests pass without weakening their security,
+  authority or recovery assertions;
+- each rewritten or new behavioural test has a recorded red/green reason;
+- no supported backend advertises an unavailable Skill or Tool;
+- canonical raw evidence is complete, access-controlled and protected from
+  ordinary cleanup; and
+- the implementation no longer depends on HER-V2 to provide HASHI-owned PCM
+  behaviour.
+
+## 7. Relevant verification scope
+
+Run the PCM contract files and directly affected focused regression files; a
+full repository suite is not the default gate for this upgrade. The final gate
+must report the exact selection and results, including deliberate assertion
+replacements. A live load check may use only an explicitly authorised minimal
 Agent reboot; a hard restart is outside this plan.

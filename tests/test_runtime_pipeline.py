@@ -1073,7 +1073,8 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
     assert feedback.escalation_task is None
     assert feedback.answer_preview_task is None
     assert feedback.answer_stream_state is None
-    assert feedback.on_stream_event is None
+    assert feedback.stream_callback is None
+    assert callable(feedback.on_stream_event)
     feedback.stop_typing.set()
     await feedback.typing_task
 
@@ -1782,7 +1783,8 @@ async def test_typing_off_skips_typing_ui_and_uses_final_delivery_once():
     assert feedback.escalation_task is None
     assert feedback.answer_preview_task is None
     assert feedback.placeholder is None
-    assert feedback.on_stream_event is None
+    assert feedback.stream_callback is None
+    assert callable(feedback.on_stream_event)
     assert runtime.app.bot.sent == []
     assert runtime.app.bot.edits == []
 
@@ -1882,7 +1884,8 @@ async def test_typing_only_does_not_route_answer_deltas_or_edit_placeholder():
         audit_collector=None,
     )
 
-    assert feedback.on_stream_event is None
+    assert feedback.stream_callback is None
+    assert callable(feedback.on_stream_event)
     assert feedback.answer_preview_task is None
     assert feedback.answer_stream_state is None
     feedback.stop_typing.set()
@@ -2195,7 +2198,8 @@ async def test_legacy_preview_flag_stays_inactive_without_verbose():
     assert feedback.answer_preview_task is None
     assert feedback.answer_stream_state is None
     assert feedback.escalation_task is None
-    assert feedback.on_stream_event is None
+    assert feedback.stream_callback is None
+    assert callable(feedback.on_stream_event)
     feedback.stop_typing.set()
     await feedback.typing_task
 
@@ -2243,7 +2247,7 @@ async def test_verbose_backend_without_reasoning_still_uses_progress_events():
         audit_collector=None,
     )
 
-    assert feedback.on_stream_event[0] == "stream"
+    assert feedback.stream_callback[0] == "stream"
     assert runtime.stream_callbacks[0]["event_queue"] is not None
     feedback.stop_typing.set()
     await feedback.typing_task
@@ -2269,7 +2273,7 @@ async def test_verbose_streaming_backend_uses_streaming_display():
         audit_collector=None,
     )
 
-    assert feedback.on_stream_event[0] == "stream"
+    assert feedback.stream_callback[0] == "stream"
     assert runtime.stream_callbacks[0]["event_queue"] is not None
     feedback.stop_typing.set()
     await feedback.typing_task
@@ -2293,7 +2297,7 @@ async def test_verbose_alone_forces_placeholder_and_progress_stream():
 
     assert feedback.placeholder is not None
     assert runtime.app.bot.sent
-    assert feedback.on_stream_event[0] == "stream"
+    assert feedback.stream_callback[0] == "stream"
     assert runtime.stream_callbacks[0]["event_queue"] is not None
     feedback.stop_typing.set()
     await feedback.typing_task
@@ -2313,7 +2317,7 @@ async def test_setup_interactive_feedback_creates_audit_stream_for_silent_item()
     )
 
     assert feedback.placeholder is None
-    assert feedback.on_stream_event[0] == "stream"
+    assert feedback.stream_callback[0] == "stream"
     assert runtime.stream_callbacks == [{"audit_collector": "audit"}]
 
 

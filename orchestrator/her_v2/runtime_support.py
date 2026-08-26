@@ -694,10 +694,6 @@ def _technical_error_message_from_failure(
     )
 
 
-def _normalise_text(value: str) -> str:
-    return " ".join(str(value or "").casefold().split()).rstrip(".?!。？！")
-
-
 def _terminal_reason(state: TerminalState) -> str:
     return {
         TerminalState.COMPLETED: "goal_achieved",

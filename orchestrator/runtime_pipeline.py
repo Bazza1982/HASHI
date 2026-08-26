@@ -1799,6 +1799,29 @@ async def setup_interactive_feedback(
             return result
         return None
 
+    # The canonical collector is a transparent transport wrapper.  HER and
+    # other backends may attach capability metadata to their callback (for
+    # example ``supports_initial_resolution``); losing those attributes while
+    # adding audit collection changes provider behaviour.  Preserve arbitrary
+    # callback metadata as well as the known protocol attributes while keeping
+    # the unwrapped presentation callback separately observable on
+    # ``InteractiveFeedback.stream_callback``.
+    if presentation_callback is not None:
+        try:
+            callback_metadata = vars(presentation_callback)
+        except TypeError:
+            callback_metadata = {}
+        for attribute, value in callback_metadata.items():
+            setattr(_canonical_stream_callback, attribute, value)
+        for attribute in ("supports_initial_resolution", "her_message_router"):
+            if hasattr(presentation_callback, attribute):
+                setattr(
+                    _canonical_stream_callback,
+                    attribute,
+                    getattr(presentation_callback, attribute),
+                )
+    setattr(_canonical_stream_callback, "presentation_callback", presentation_callback)
+
     # Canonical evidence collection is independent of Telegram visibility and
     # the sanitised operational audit toggle.
     on_stream_event = _canonical_stream_callback
