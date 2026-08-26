@@ -99,6 +99,7 @@ deployment validation continues.
 - [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) — historical native-HER integration and release-preparation evidence
 - [HER_HABIT_MEDITATION.md](HER_HABIT_MEDITATION.md) — default-off adapter-direct HER Habit controls, JSON persistence, recovery, audit, and change notifications
 - [her_multimedia_multimodal_plan.md](her_multimedia_multimodal_plan.md) — implemented HER media bridge, security limits, compatibility paths, and remaining live rollout matrix
+- [her-v2-issues.md](her-v2-issues.md) — canonical HER v2-only defect and open-design-gap register
 - [HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) — authoritative HER v2 lifecycle, provider, delivery, and compatibility contract
 - [HER_V2_TESTING_PLAN.md](HER_V2_TESTING_PLAN.md) — consolidated HER v2 behavioral and integration test contract
 - [HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md) — authoritative fixed 10-result/5-minute compulsory Adaptive-or-above Replanning contract, tests, and limit audit
