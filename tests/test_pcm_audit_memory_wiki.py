@@ -45,6 +45,18 @@ def test_canonical_audit_keeps_complete_chain_and_content_addressed_artifact(tmp
         agent_id="rika",
         config={"artifact_threshold_bytes": 1024},
     )
+    for legacy_directory in (
+        store.base,
+        store.instance_root,
+        store.artifacts_root,
+    ):
+        legacy_directory.chmod(0o755)
+    store = CanonicalAuditStore(
+        tmp_path,
+        instance_id="HASHI2",
+        agent_id="rika",
+        config={"artifact_threshold_bytes": 1024},
+    )
     first = store.record(
         "provider_request",
         {"secret": "raw-secret", "large": "z" * 2048},
@@ -64,6 +76,16 @@ def test_canonical_audit_keeps_complete_chain_and_content_addressed_artifact(tmp
     assert artifact_path.read_bytes() == b"z" * 2048
     assert events[1]["previous_record_digest"]
     assert events[1]["payload"]["arguments"]["token"] == "unredacted"
+    for private_directory in (
+        store.base,
+        store.instance_root,
+        store.root,
+        store.artifacts_root,
+        store.artifact_dir,
+        artifact_path.parent,
+    ):
+        assert private_directory.stat().st_mode & 0o777 == 0o700
+    assert artifact_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_canonical_audit_encryption_hides_plaintext_and_preserves_reasoning_semantics(

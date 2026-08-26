@@ -114,7 +114,10 @@ class CanonicalAuditStore:
             )
         else:
             base = self.bridge_home / "state" / "canonical_audit"
-        self.root = base / self.instance_id / self.agent_id
+        self.base = base
+        self.instance_root = self.base / self.instance_id
+        self.root = self.instance_root / self.agent_id
+        self.artifacts_root = self.root / "artifacts"
         self.artifact_dir = self.root / "artifacts" / "sha256"
         self.events_path = self.root / "events.jsonl"
         self.lock_path = self.root / ".chain.lock"
@@ -124,10 +127,21 @@ class CanonicalAuditStore:
         )
         self._lock = threading.RLock()
         self._key = self._load_encryption_key()
-        self.root.mkdir(parents=True, exist_ok=True)
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.root, 0o700)
-        os.chmod(self.artifact_dir, 0o700)
+        # ``mkdir(parents=True)`` applies the process umask to intermediate
+        # directories, which can leave an existing canonical root or the
+        # instance/artifact namespace world-readable.  Tighten every
+        # audit-owned directory on every open, including directories created
+        # by an older HASHI build.  Do not chmod ``bridge_home`` or ``state``:
+        # they contain unrelated operator-managed data.
+        for private_directory in (
+            self.base,
+            self.instance_root,
+            self.root,
+            self.artifacts_root,
+            self.artifact_dir,
+        ):
+            os.chmod(private_directory, 0o700)
         if self.events_path.exists():
             os.chmod(self.events_path, 0o600)
 
