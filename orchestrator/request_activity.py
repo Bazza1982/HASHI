@@ -2,7 +2,7 @@
 
 The request activity surface is deliberately not a transcript, audit ledger,
 or scheduler.  It retains a small in-memory projection of backend stream
-events so local clients such as Aptenra can show that work is still active.
+events so authorized local frontends can show that work is still active.
 Restarting HASHI clears this projection; durable task and audit state continue
 to be owned by their existing stores.
 """

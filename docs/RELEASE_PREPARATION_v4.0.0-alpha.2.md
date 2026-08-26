@@ -91,7 +91,7 @@ cross-platform recertification.
 - no Git tag was created;
 - no branch or release artifact was pushed to GitHub;
 - no remote history was rewritten;
-- no Aptenra file, branch, worktree, or runtime was modified;
+- no downstream frontend file, branch, worktree, or runtime was modified;
 - no ignored local operator data was deleted.
 
 Before publication, review the final `main` tip and exact

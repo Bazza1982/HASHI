@@ -8,7 +8,7 @@ compilation, immutable packaging, save/reload/import/export, Nagare execution,
 Minato observation and control, approvals, artefact return, recovery, security,
 and real Electron UI behavior.
 
-It explicitly excludes Aptenra MSI, Setup, packaging, voice, chat, and general
+It explicitly excludes the conforming frontend MSI, Setup, packaging, voice, chat, and general
 desktop acceptance unless one of those boundaries directly prevents the
 Workbench workflow path from running.
 
@@ -16,7 +16,7 @@ Workbench workflow path from running.
 
 - The execution and repair branch is `Lenovo-debug`.
 - The Lenovo checkout is
-  `C:\Users\apten\projects\Aptenra-Lenovo-debug`.
+  `C:\Users\apten\projects\the conforming frontend-Lenovo-debug`.
 - During the loop, all product fixes and regression tests are committed only to
   `Lenovo-debug`; the mother-machine `main` remains unchanged.
 - Each repair round is reloaded and tested in the Lenovo Developer Runtime.

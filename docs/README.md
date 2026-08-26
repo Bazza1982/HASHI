@@ -1,6 +1,6 @@
 # HASHI Documentation
 
-- [Aptenra 插入前计划](APTENRA_PRE_INSERTION_PLAN.md) — D-021 intake responsibilities, gates, rollback points, and Lane C qualification boundary.
+- [多会话前台插入计划](MULTI_SESSION_FRONTEND_INSERTION_PLAN.md) — generic frontend responsibilities, capability and size gates, rollback points, and black-box qualification boundary.
 
 - [HASHI command UI style guide](HASHI_COMMAND_UI_STYLE_GUIDE.md) — display contract for slash commands, Telegram cards, help text, and inline buttons
 
@@ -61,7 +61,7 @@ deployment validation continues.
 
 ### Core references
 - [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) — authoritative target design for backend-neutral HASHI Persona-Context-Memory ownership, assembly, retrieval and migration
-- [HASHI_SESSION_ARCHITECTURE_AND_APTENRA_THIN_CLIENT_DESIGN.md](HASHI_SESSION_ARCHITECTURE_AND_APTENRA_THIN_CLIENT_DESIGN.md) — Founder-approved persistent Session, Run, Message and Event architecture that makes HASHI the sole agent-chat state owner and Aptenra a thin client
+- [HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md](HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md) — client-neutral persistent Session, Run, Message and Event architecture for agentic frontends
 - [HASHI_PCM_UPGRADE_TEST_PLAN.md](HASHI_PCM_UPGRADE_TEST_PLAN.md) — accepted assertion migration and minimum 24-contract backend-neutral PCM verification gate
 - [AGENT_FYI.md](AGENT_FYI.md) — Bridge environment FYI (operational reference)
 - [AGENT_PERSONA_SPEC.md](AGENT_PERSONA_SPEC.md) — persona block format and authoring guidance for new agents

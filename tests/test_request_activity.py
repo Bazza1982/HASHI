@@ -22,7 +22,7 @@ def test_request_activity_tracks_lifecycle_and_stream_events() -> None:
             summary="Checking the project",
             detail="Looking at requirements",
             tool_name="",
-            file_path="C:/Projects/Aptenra/readme.md",
+            file_path="C:/Projects/frontend-client/readme.md",
             current=12,
             total=20,
             unit="pages",

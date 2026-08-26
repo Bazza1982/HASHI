@@ -3660,6 +3660,7 @@ class WorkbenchApiServer:
                     "attachment_schema_version": "1.0",
                     "approval_schema_version": "1.0",
                     "fencing_schema_version": "1.0",
+                    "compatibility_policy": "capabilities-and-advertised-limits",
                     "durability": "sqlite-wal",
                     "controls": [
                         "fresh",
@@ -3674,6 +3675,12 @@ class WorkbenchApiServer:
                     ],
                     "event_delivery": "cursor-polling-at-least-once",
                     "max_message_chars": 200000,
+                    "limits": {
+                        "max_message_chars": 200000,
+                        "max_sessions_page_size": 100,
+                        "max_messages_page_size": 200,
+                        "max_events_page_size": 2000,
+                    },
                 }
             )
         return web.json_response(capabilities)

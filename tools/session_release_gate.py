@@ -123,40 +123,41 @@ def verify_package(
     }
 
 
-def lane_c_receipt(capture: Path, output: Path) -> dict[str, Any]:
+def qualification_receipt(capture: Path, output: Path) -> dict[str, Any]:
     data = json.loads(capture.read_text(encoding="utf-8"))
     required = (
         "hashi_revision",
-        "aptenra_revision",
-        "profile",
-        "runtime_lock_sha256",
-        "matrix_row",
+        "client_revision",
+        "client_profile",
+        "deployment_lock_sha256",
+        "compatibility_record",
         "session_id",
         "run_id",
         "request_id",
         "event_consumer_id",
         "acknowledged_sequence",
         "provider_envelope_sha256",
-        "long_chat_messages",
+        "history_messages",
+        "required_history_messages",
         "current_request_occurrences",
         "cross_session_sentinel_occurrences",
         "terminal_state",
     )
     missing = [name for name in required if data.get(name) in (None, "")]
     if missing:
-        raise RuntimeError("Lane C capture is incomplete: " + ", ".join(missing))
+        raise RuntimeError("qualification capture is incomplete: " + ", ".join(missing))
     if (
-        int(data["long_chat_messages"]) < 20
+        int(data["history_messages"]) < int(data["required_history_messages"])
         or int(data["current_request_occurrences"]) != 1
     ):
-        raise RuntimeError("Lane C long-chat/current-request qualification failed")
+        raise RuntimeError("history-size/current-request qualification failed")
     if (
         int(data["cross_session_sentinel_occurrences"]) != 0
         or data["terminal_state"] != "completed"
     ):
-        raise RuntimeError("Lane C isolation/terminal qualification failed")
+        raise RuntimeError("isolation/terminal qualification failed")
     receipt = {
-        "format": "hashi-lane-c-receipt-v1",
+        "format": "hashi-qualify-receipt-v1",
         "result": "passed",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "capture": data,
@@ -177,7 +178,7 @@ def main() -> int:
     verify.add_argument("--package", type=Path, required=True)
     verify.add_argument("--public-key", type=Path)
     verify.add_argument("--signature", type=Path)
-    lane = sub.add_parser("lane-c")
+    lane = sub.add_parser("qualify")
     lane.add_argument("--capture", type=Path, required=True)
     lane.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -193,7 +194,7 @@ def main() -> int:
                 signature=args.signature,
             )
             if args.command == "verify"
-            else lane_c_receipt(args.capture.resolve(), args.output.resolve())
+            else qualification_receipt(args.capture.resolve(), args.output.resolve())
         )
     )
     print(json.dumps(result, indent=2, sort_keys=True))

@@ -33,7 +33,7 @@ TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "local_read",
-        "description": "Read a local Aptenra file",
+        "description": "Read a local frontend file",
         "parameters": {
             "type": "object",
             "properties": {"path": {"type": "string"}},

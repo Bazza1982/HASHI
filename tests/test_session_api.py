@@ -102,6 +102,31 @@ async def test_unqualified_session_api_is_not_advertised(tmp_path):
     assert json.loads(unavailable.text)["code"] == "session_api_not_ready"
 
 
+@pytest.mark.asyncio
+async def test_qualified_capability_is_client_neutral_and_limit_driven(
+    tmp_path, monkeypatch
+):
+    from orchestrator import workbench_api
+
+    server, _runtime = _server(tmp_path)
+    monkeypatch.setattr(workbench_api, "PERSISTENT_SESSION_V1_QUALIFIED", True)
+    server.global_config.persistent_session_v1 = True
+
+    capabilities = json.loads((await server.handle_v1_capabilities(_Request())).text)
+
+    assert capabilities["compatibility_policy"] == "capabilities-and-advertised-limits"
+    assert capabilities["limits"] == {
+        "max_message_chars": 200000,
+        "max_sessions_page_size": 100,
+        "max_messages_page_size": 200,
+        "max_events_page_size": 2000,
+    }
+    assert not any(
+        "client" in str(value).lower() and "specific" in str(value).lower()
+        for value in capabilities.values()
+    )
+
+
 def test_workbench_startup_reconciles_lost_session_runs(tmp_path):
     server, _runtime = _server(tmp_path)
     session = server.session_store.ensure_default_session(
@@ -148,7 +173,7 @@ async def test_session_api_run_event_ack_and_fresh_contract(tmp_path):
                 "message": {"content": [{"type": "text", "text": "hello Session"}]},
             },
             match_info={"session_id": session_id},
-            headers={"X-Client-Id": "aptenra-test"},
+            headers={"X-Client-Id": "frontend-test"},
         )
     )
     run_payload = json.loads(run_response.text)

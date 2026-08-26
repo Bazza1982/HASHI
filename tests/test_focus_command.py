@@ -26,7 +26,7 @@ def test_focus_is_registered_and_prompt_enforces_user_scope():
     assert focus_binding.description == "Narrow scope and continue the original task"
 
     prompt = runtime_control.build_focus_prompt(
-        original_prompt="Import the specified update into Aptenra HASHI",
+        original_prompt="Import the specified update into the downstream HASHI runtime",
         backend="codex-cli",
     )
     assert "[HASHI /focus" in prompt
