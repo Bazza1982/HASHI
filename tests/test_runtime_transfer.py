@@ -147,3 +147,5 @@ def test_build_handoff_payload_adds_runtime_metadata(tmp_path):
     assert package["source_runtime"] == {"name": "zelda"}
     assert package["source_workspace_dir"].endswith("workspace")
     assert package["source_transcript_path"].endswith("transcript.jsonl")
+    assert package["max_rounds"] == 10
+    assert package["max_words"] == 6000

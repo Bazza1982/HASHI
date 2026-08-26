@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, Any, List
@@ -11,6 +12,14 @@ from orchestrator.enterprise.profile import (
     validate_profile_context,
 )
 from orchestrator.pathing import resolve_command_value, resolve_path_value
+from orchestrator.pcm import (
+    PCMValidationError,
+    atomic_write_pcm,
+    canonical_agent_md,
+    convert_legacy_pcm_text,
+    load_pcm_document,
+    parse_pcm_text,
+)
 from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
 from orchestrator.flexible_backend_registry import (
     canonical_backend_engine,
@@ -24,6 +33,7 @@ from orchestrator.flexible_backend_registry import (
 VALID_ACCESS_SCOPES = {"workspace", "project", "drive"}
 SESSION_MODE_BACKENDS = frozenset({"claude-cli", "codex-cli", "grok-cli"})
 LEGACY_FIXED_CONFIG_BACKUP_SUFFIX = ".pre-flex-migration.bak"
+LEGACY_PCM_CONFIG_BACKUP_SUFFIX = ".pre-pcm-migration.bak"
 config_logger = logging.getLogger("BridgeU.Config")
 
 
@@ -86,6 +96,9 @@ class GlobalConfig:
     enterprise_scheduler_lease_pool_enabled: bool = False
     enterprise_scheduler_lease_pool_min_size: int = 1
     enterprise_scheduler_lease_pool_max_size: int = 4
+    wiki_provider: Dict[str, Any] = field(default_factory=dict)
+    central_memory: Dict[str, Any] = field(default_factory=dict)
+    canonical_audit: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class AgentConfig:
@@ -104,6 +117,12 @@ class AgentConfig:
     def resolve_access_root(self) -> Path:
         return resolve_access_root(self.access_scope, self.workspace_dir, self.project_root)
 
+    @property
+    def agent_md(self) -> Path:
+        """Canonical PCM path; ``system_md`` is a runtime compatibility alias."""
+
+        return canonical_agent_md(self.workspace_dir)
+
 @dataclass
 class FlexibleAgentConfig:
     name: str
@@ -121,6 +140,12 @@ class FlexibleAgentConfig:
 
     def resolve_access_root(self) -> Path:
         return resolve_access_root(self.access_scope, self.workspace_dir, self.project_root)
+
+    @property
+    def agent_md(self) -> Path:
+        """Canonical PCM path; ``system_md`` is a runtime compatibility alias."""
+
+        return canonical_agent_md(self.workspace_dir)
 
 class ConfigManager:
     def __init__(self, config_path: Path, secrets_path: Path, bridge_home: Path | None = None):
@@ -194,12 +219,248 @@ class ConfigManager:
         )
         temp_path.replace(self.config_path)
 
+    def _validate_pcm_migration_preconditions(self, raw_cfg: dict) -> None:
+        """Reject invalid configuration before any one-time PCM write."""
+
+        g_raw = raw_cfg.get("global")
+        if not isinstance(g_raw, dict):
+            raise ValueError("global configuration must be an object")
+        profile_ctx = parse_profile_context(g_raw)
+        validate_profile_context(profile_ctx)
+        if "claw_providers" in g_raw:
+            raise ValueError(
+                "global.claw_providers has been removed; rename the active provider "
+                "configuration to global.her_providers."
+            )
+        agents = raw_cfg.get("agents", [])
+        if not isinstance(agents, list):
+            raise ValueError("agents configuration must be a list")
+        configured_audit = g_raw.get("canonical_audit") or {}
+        configured_audit_root = (
+            configured_audit.get("root")
+            if isinstance(configured_audit, dict)
+            else None
+        )
+        audit_root = (
+            resolve_path_value(
+                configured_audit_root,
+                config_dir=self.config_path.parent,
+                bridge_home=self.bridge_home,
+            ).resolve(strict=False)
+            if configured_audit_root
+            else (self.bridge_home / "state" / "canonical_audit").resolve(
+                strict=False
+            )
+        )
+        for index, row in enumerate(agents):
+            if not isinstance(row, dict):
+                raise ValueError(f"Agent row {index} must be an object.")
+            name = str(row.get("name") or f"agent-{index}")
+            agent_type = row.get("type")
+            if agent_type is None:
+                raise ValueError(
+                    f"Agent '{name}' has no explicit type. Set type='flex' for active agents; "
+                    "legacy fixed runtime no longer accepts accidental fallback."
+                )
+            if agent_type not in {"flex", "limited"}:
+                raise ValueError(
+                    f"Agent '{name}' has unsupported type '{agent_type}'. Expected 'flex' or 'limited'."
+                )
+            if not row.get("workspace_dir"):
+                raise ValueError(f"Agent '{name}' has no workspace_dir.")
+            workspace = resolve_path_value(
+                row["workspace_dir"],
+                config_dir=self.config_path.parent,
+                bridge_home=self.bridge_home,
+            ).resolve(strict=False)
+            try:
+                audit_root.relative_to(workspace)
+            except ValueError:
+                pass
+            else:
+                raise ValueError(
+                    "global.canonical_audit.root must be outside every mutable "
+                    f"Agent workspace; it is inside Agent '{name}'."
+                )
+            allowed = normalize_allowed_backends(row.get("allowed_backends"))
+            active = canonical_backend_engine(row.get("active_backend"))
+            if active == "claw-cli" or any(
+                item.get("engine") == "claw-cli" for item in allowed
+            ):
+                raise ValueError(f"Agent '{name}' uses removed backend 'claw-cli'.")
+            if active not in {item.get("engine") for item in allowed}:
+                raise ValueError(
+                    f"Agent '{name}' active_backend '{active}' is not allowed."
+                )
+            default_mode = str(row.get("default_mode", "flex") or "flex").lower()
+            if default_mode not in {"flex", "fixed"}:
+                raise ValueError(
+                    f"Agent '{name}' has unsupported default_mode '{default_mode}'."
+                )
+            if default_mode == "fixed" and active not in SESSION_MODE_BACKENDS:
+                raise ValueError(
+                    f"Agent '{name}' requests fixed mode with stateless backend '{active}'."
+                )
+
+    def _write_config_atomic(self, raw_cfg: dict, *, label: str) -> None:
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{self.config_path.name}.{label}-",
+            suffix=".tmp",
+            dir=self.config_path.parent,
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(raw_cfg, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.config_path)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            temporary.unlink(missing_ok=True)
+            raise
+
+    def _migrate_pcm_agents(self, raw_cfg: dict) -> list[str]:
+        """Validate and atomically migrate every configured Agent to ``agent.md``.
+
+        All source documents are converted in memory before the first write.
+        Files already written are restored if any later filesystem or config
+        operation fails, so a rejected migration cannot leave mixed authority.
+        """
+
+        config_dir = self.config_path.parent
+        staged: list[tuple[str, Path, str]] = []
+        migrated_names: list[str] = []
+
+        for index, original in enumerate(raw_cfg.get("agents", [])):
+            if not isinstance(original, dict):
+                raise ValueError(f"Agent row {index} must be an object.")
+            name = str(original.get("name") or f"agent-{index}")
+            workspace_raw = original.get("workspace_dir")
+            if not workspace_raw:
+                raise ValueError(f"Agent '{name}' has no workspace_dir.")
+            workspace = resolve_path_value(
+                workspace_raw,
+                config_dir=config_dir,
+                bridge_home=self.bridge_home,
+            )
+            target = canonical_agent_md(workspace)
+            legacy_raw = original.get("system_md")
+            source = (
+                resolve_path_value(
+                    legacy_raw,
+                    config_dir=config_dir,
+                    bridge_home=self.bridge_home,
+                )
+                if legacy_raw
+                else target
+            )
+
+            try:
+                raw_bytes = source.read_bytes()
+            except FileNotFoundError as exc:
+                raise PCMValidationError(
+                    "pcm_migration_source_missing",
+                    f"Agent '{name}' PCM source does not exist",
+                    path=source,
+                ) from exc
+            try:
+                source_text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise PCMValidationError(
+                    "pcm_invalid_utf8",
+                    f"Agent '{name}' PCM source is not valid UTF-8",
+                    path=source,
+                ) from exc
+
+            if legacy_raw is None:
+                # The migration flag is the retired config field itself. Once
+                # it is gone, malformed canonical PCM must fail closed rather
+                # than being silently normalised on every process load.
+                load_pcm_document(target, workspace_dir=workspace)
+                converted = source_text if source_text.endswith("\n") else source_text + "\n"
+            else:
+                converted = convert_legacy_pcm_text(source_text)
+            if target.exists() and source.resolve(strict=False) != target.resolve(strict=False):
+                existing = target.read_text(encoding="utf-8")
+                try:
+                    load_pcm_document(target, workspace_dir=workspace)
+                except PCMValidationError as exc:
+                    raise PCMValidationError(
+                        "pcm_migration_target_invalid",
+                        f"Agent '{name}' already has an invalid canonical agent.md",
+                        path=target,
+                    ) from exc
+                if existing.rstrip("\n") != converted.rstrip("\n"):
+                    raise PCMValidationError(
+                        "pcm_migration_conflict",
+                        f"Agent '{name}' legacy source conflicts with canonical agent.md",
+                        path=target,
+                    )
+
+            # Validates the converted target and its required blocks now.
+            parse_pcm_text(converted, path=target)
+            needs_write = not target.exists() or target.read_bytes() != converted.encode("utf-8")
+            if needs_write:
+                staged.append((name, target, converted))
+            if legacy_raw is not None:
+                original.pop("system_md", None)
+                migrated_names.append(name)
+
+        config_changed = bool(migrated_names)
+        if not staged and not config_changed:
+            return []
+
+        backup_path = self.config_path.with_name(
+            self.config_path.name + LEGACY_PCM_CONFIG_BACKUP_SUFFIX
+        )
+        original_config = self.config_path.read_bytes()
+        originals: dict[Path, tuple[bool, bytes, int]] = {}
+        try:
+            if not backup_path.exists():
+                backup_path.write_bytes(original_config)
+            for _name, target, converted in staged:
+                existed = target.exists()
+                originals[target] = (
+                    existed,
+                    target.read_bytes() if existed else b"",
+                    target.stat().st_mode if existed else 0,
+                )
+                atomic_write_pcm(target, converted)
+            self._write_config_atomic(raw_cfg, label="pcm-migration")
+        except Exception:
+            for target, (existed, content, mode) in reversed(list(originals.items())):
+                if existed:
+                    target.write_bytes(content)
+                    os.chmod(target, mode)
+                else:
+                    target.unlink(missing_ok=True)
+            self.config_path.write_bytes(original_config)
+            raise
+
+        for name, _target, _converted in staged:
+            if name not in migrated_names:
+                migrated_names.append(name)
+        return migrated_names
+
     def load(self) -> tuple[GlobalConfig, list[FlexibleAgentConfig], dict]:
         with open(self.config_path, "r", encoding="utf-8-sig") as f:
             raw_cfg = json.load(f)
 
         migrated_fixed_agents = self._migrate_legacy_fixed_agents(raw_cfg)
-        if migrated_fixed_agents:
+        self._validate_pcm_migration_preconditions(raw_cfg)
+        migrated_pcm_agents = self._migrate_pcm_agents(raw_cfg)
+        if migrated_pcm_agents:
+            config_logger.warning(
+                "Migrated HASHI PCM for configured Agent(s): %s",
+                ", ".join(migrated_pcm_agents),
+            )
+        elif migrated_fixed_agents:
             try:
                 self._persist_legacy_fixed_migration(raw_cfg)
             except OSError as exc:
@@ -316,6 +577,16 @@ class ConfigManager:
                 "configuration to global.her_providers."
             )
 
+        canonical_audit_config = dict(g_raw.get("canonical_audit") or {})
+        if canonical_audit_config.get("root"):
+            canonical_audit_config["root"] = str(
+                resolve_path_value(
+                    canonical_audit_config["root"],
+                    config_dir=config_dir,
+                    bridge_home=bridge_home,
+                )
+            )
+
         global_cfg = GlobalConfig(
             authorized_id=_auth_id,
             deployment_profile=profile_ctx.profile.value,
@@ -384,6 +655,9 @@ class ConfigManager:
             enterprise_scheduler_lease_pool_enabled=enterprise_scheduler_lease_pool_enabled,
             enterprise_scheduler_lease_pool_min_size=enterprise_scheduler_lease_pool_min_size,
             enterprise_scheduler_lease_pool_max_size=enterprise_scheduler_lease_pool_max_size,
+            wiki_provider=dict(g_raw.get("wiki_provider") or {}),
+            central_memory=dict(g_raw.get("central_memory") or {}),
+            canonical_audit=canonical_audit_config,
         )
 
         agents = []
@@ -410,11 +684,12 @@ class ConfigManager:
                 config_dir=config_dir,
                 bridge_home=bridge_home,
             )
-            system_md = resolve_path_value(
-                a_raw.pop("system_md"),
-                config_dir=config_dir,
-                bridge_home=bridge_home,
-            )
+            # ``system_md`` is retired from persisted configuration.  Keep the
+            # attribute as an internal compatibility alias while adapters move
+            # to the canonical lower-case PCM path.
+            a_raw.pop("system_md", None)
+            system_md = canonical_agent_md(workspace_dir)
+            load_pcm_document(system_md, workspace_dir=workspace_dir)
             telegram_token_key = a_raw.pop("telegram_token_key", name)
             allowed_backends = normalize_allowed_backends(a_raw.pop("allowed_backends"))
             active_backend = canonical_backend_engine(a_raw.pop("active_backend"))

@@ -37,6 +37,10 @@ _GATEWAY_EXPOSED_TOOL_NAMES = {
 _GATEWAY_INTERNAL_TOOL_NAMES = {
     exposed: internal for internal, exposed in _GATEWAY_EXPOSED_TOOL_NAMES.items()
 }
+
+
+def exposed_tool_name(internal_name: str) -> str:
+    return _GATEWAY_EXPOSED_TOOL_NAMES.get(internal_name, internal_name)
 _LEGACY_SCREENSHOT_PATTERN = re.compile(
     r"(?P<data_url>data:(?P<mime>image/[a-z0-9.+-]+);base64,"
     r"(?P<data_payload>[A-Za-z0-9+/=]*))|"
@@ -157,7 +161,7 @@ class ToolGateway:
         for definition in self.registry.get_tool_definitions():
             function = definition["function"]
             internal_name = function["name"]
-            exposed_name = _GATEWAY_EXPOSED_TOOL_NAMES.get(internal_name, internal_name)
+            exposed_name = exposed_tool_name(internal_name)
             description = function.get("description", "")
             if internal_name in _GATEWAY_EXPOSED_TOOL_NAMES:
                 description = (
@@ -174,7 +178,7 @@ class ToolGateway:
 
     async def call(self, name: str, arguments: dict[str, Any], call_id: str) -> dict[str, Any]:
         self.call_count += 1
-        if self.call_count > self.context.max_calls:
+        if self.context.enforce_legacy_limits and self.call_count > self.context.max_calls:
             return self._result(
                 f"Error: legacy HER v1 tool gateway stopped after {self.context.max_calls} calls; report partial progress.",
                 True,
@@ -198,13 +202,19 @@ class ToolGateway:
         fingerprint = hashlib.sha256(
             json.dumps([name, arguments], ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
-        if self.fingerprints[fingerprint] >= self.context.max_identical_calls:
+        if (
+            self.context.enforce_legacy_limits
+            and self.fingerprints[fingerprint] >= self.context.max_identical_calls
+        ):
             return self._result(
                 f"Error: legacy HER v1 gateway repeated identical call to '{name}' stopped after "
                 f"{self.context.max_identical_calls} attempts; inspect state and report partial progress.",
                 True,
             )
-        if self.consecutive_errors >= self.context.max_consecutive_errors:
+        if (
+            self.context.enforce_legacy_limits
+            and self.consecutive_errors >= self.context.max_consecutive_errors
+        ):
             return self._result(
                 f"Error: legacy HER v1 tool circuit breaker opened after {self.context.max_consecutive_errors} consecutive failures; "
                 "stop retrying and report the failures.",
@@ -270,6 +280,12 @@ def _read_frame(stream: BinaryIO) -> dict[str, Any] | None:
         if not line:
             return None if not saw_header else None
         saw_header = True
+        if line.lstrip().startswith(b"{"):
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise ValueError("MCP request must be a JSON object")
+            value["_hashi_stdio_transport"] = "jsonl"
+            return value
         if line in {b"\r\n", b"\n"}:
             break
         name, separator, value = line.decode("ascii", errors="replace").partition(":")
@@ -286,8 +302,17 @@ def _read_frame(stream: BinaryIO) -> dict[str, Any] | None:
     return value
 
 
-def _write_frame(stream: BinaryIO, payload: dict[str, Any]) -> None:
+def _write_frame(
+    stream: BinaryIO,
+    payload: dict[str, Any],
+    *,
+    transport: str = "content_length",
+) -> None:
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if transport == "jsonl":
+        stream.write(body + b"\n")
+        stream.flush()
+        return
     stream.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
     stream.write(body)
     stream.flush()
@@ -332,12 +357,15 @@ async def serve(context_path: Path, stdin: BinaryIO, stdout: BinaryIO) -> None:
             return
         if request is None:
             return
+        transport = str(request.pop("_hashi_stdio_transport", "content_length"))
         try:
             response = await _dispatch(gateway, request)
         except Exception as exc:
             response = _error(request.get("id"), -32603, f"internal gateway error: {exc}")
         if response is not None:
-            await asyncio.to_thread(_write_frame, stdout, response)
+            await asyncio.to_thread(
+                _write_frame, stdout, response, transport=transport
+            )
 
 
 def main() -> int:

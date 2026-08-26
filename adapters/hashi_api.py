@@ -45,6 +45,7 @@ from orchestrator.multimodal_contract import (
     native_attachment_reference_aliases,
     normalize_request_content,
 )
+from orchestrator.pcm import load_pcm_document
 
 _DEFAULT_HASHI_API_BASE_URL = "http://10.255.255.254:18801/v1"
 _HASHI_REASONING_EFFORTS = frozenset(
@@ -169,7 +170,10 @@ class HashiApiAdapter(OpenRouterAdapter):
         self._ensure_client()
         try:
             if self.config.system_md and Path(self.config.system_md).exists():
-                self.sys_prompt = Path(self.config.system_md).read_text(encoding="utf-8")
+                self.sys_prompt = load_pcm_document(
+                    self.config.system_md,
+                    workspace_dir=self.config.workspace_dir,
+                ).system
         except (OSError, UnicodeError) as e:
             self.logger.warning(f"Could not read system_md: {e}")
         self.logger.info("HASHI API adapter initialized in stateless mode.")

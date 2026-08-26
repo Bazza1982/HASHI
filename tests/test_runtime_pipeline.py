@@ -32,6 +32,7 @@ from orchestrator import (
     telegram_stream_policy,
 )
 from orchestrator import telegram_delivery_failover as failover
+from orchestrator.canonical_audit import CanonicalAuditStore
 
 
 class _Logger:
@@ -398,6 +399,64 @@ def test_begin_queue_item_records_processing_metadata():
     assert runtime.current_request_meta["habit_learning_eligible"] is True
     assert runtime.is_generating is True
     assert runtime.maintenance_events[0][0] == "processing"
+
+
+@pytest.mark.asyncio
+async def test_canonical_audit_correlates_complete_foreground_request_chain(tmp_path):
+    runtime = _runtime()
+    runtime.canonical_audit = CanonicalAuditStore(
+        tmp_path,
+        instance_id="HASHI2",
+        agent_id="zelda",
+    )
+    item = _item(request_id="req-audit")
+
+    start = runtime_pipeline.begin_queue_item(runtime, item)
+    turn = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=start.is_bridge_request,
+    )
+    response = SimpleNamespace(
+        is_success=True,
+        text="provider raw answer",
+        error="",
+    )
+    runtime_pipeline.log_backend_finished(
+        runtime,
+        item,
+        response,
+        backend_elapsed_s=0.25,
+        final_prompt=turn.final_prompt,
+    )
+    runtime_pipeline.persist_success_memory(
+        runtime,
+        item,
+        response,
+        visible_text="delivered answer",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="startup",
+    )
+
+    events = runtime.canonical_audit.read_events(
+        {
+            "allow_raw_audit": True,
+            "actor": "test-auditor",
+            "purpose": "verify request correlation",
+        }
+    )
+    event_types = [event["event_type"] for event in events]
+    assert event_types == [
+        "request_received",
+        "provider_request",
+        "provider_response",
+        "provider_reasoning",
+        "chat_exchange",
+    ]
+    assert {event["request_id"] for event in events} == {"req-audit"}
+    assert events[-1]["payload"]["assistant_provider_text"] == "provider raw answer"
+    assert events[-1]["payload"]["assistant_delivered_text"] == "delivered answer"
 
 
 def test_begin_queue_item_preserves_explicit_habit_ineligibility():

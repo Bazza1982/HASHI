@@ -78,7 +78,7 @@ def test_gateway_context_uses_running_workbench_bind_host(tmp_path):
     )
     loaded = load_gateway_context(context_path)
     rebuilt = loaded.build_registry()
-    assert loaded.schema_version == 4
+    assert loaded.schema_version == 5
     assert loaded.workbench_api_base_url == base_url
     assert rebuilt.audit_context["workbench_api_base_url"] == base_url
     assert "_runtime" not in loaded.audit

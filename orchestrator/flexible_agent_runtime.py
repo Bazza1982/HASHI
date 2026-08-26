@@ -109,6 +109,7 @@ from orchestrator.memory_search_mode import apply_memory_search_preference
 from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
+from orchestrator.pcm import load_pcm_document
 from orchestrator.post_turn_observer import (
     PostTurnObserver,
     PreTurnContextProvider,
@@ -311,6 +312,14 @@ class FlexibleAgentRuntime:
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.backend_state_dir.mkdir(parents=True, exist_ok=True)
+        from orchestrator.canonical_audit import CanonicalAuditStore
+
+        self.canonical_audit = CanonicalAuditStore(
+            self.global_config.bridge_home,
+            instance_id=self.global_config.instance_id,
+            agent_id=self.config.name,
+            config=getattr(self.global_config, "canonical_audit", None),
+        )
         if self.transfer_state_path.exists():
             try:
                 self._transfer_state = json.loads(self.transfer_state_path.read_text(encoding="utf-8"))
@@ -319,7 +328,10 @@ class FlexibleAgentRuntime:
 
         # Initialize Memory and Handoff Subsystems
         self.memory_index = MemoryIndex(self.workspace_dir / "memory_index.sqlite")
-        self.handoff_builder = HandoffBuilder(self.workspace_dir)
+        self.handoff_builder = HandoffBuilder(
+            self.workspace_dir,
+            canonical_audit=self.canonical_audit,
+        )
         self.parked_topics = ParkedTopicStore(self.workspace_dir)
         self.memory_store = BridgeMemoryStore(self.workspace_dir)
         self.context_assembler = BridgeContextAssembler(
@@ -328,6 +340,8 @@ class FlexibleAgentRuntime:
             active_skill_provider=self._get_active_skill_sections,
             sys_prompt_manager=self.sys_prompt_manager,
             global_sys_prompt_manager=self.global_sys_prompt_manager,
+            skill_catalog_provider=self._get_available_skill_catalogue,
+            tool_catalog_provider=self._get_available_tool_catalogue,
         )
         apply_memory_search_preference(self.context_assembler, self.workspace_dir)
         # Initialize FlexibleBackendManager
@@ -877,6 +891,26 @@ class FlexibleAgentRuntime:
         return match.group(1) if match else None
 
     def _log_maintenance(self, item: QueuedRequest, stage: str, **fields):
+        canonical = getattr(self, "canonical_audit", None)
+        if canonical is not None:
+            try:
+                canonical.record(
+                    "operation_lifecycle",
+                    {
+                        "stage": stage,
+                        "source": item.source,
+                        "summary": item.summary,
+                        "fields": fields,
+                    },
+                    request_id=item.request_id,
+                    provenance={"source": "runtime_maintenance"},
+                )
+            except Exception as exc:
+                self.error_logger.error(
+                    "Canonical lifecycle audit failed for %s: %s",
+                    item.request_id,
+                    exc,
+                )
         if not item.source.startswith("scheduler"):
             return
         task_id = self._extract_task_id(item.summary) or "<none>"
@@ -1034,7 +1068,12 @@ class FlexibleAgentRuntime:
         try:
             md_path = getattr(self.config, "system_md", None)
             if md_path and Path(md_path).exists():
-                parts.append(Path(md_path).read_text(encoding="utf-8"))
+                parts.append(
+                    load_pcm_document(
+                        md_path,
+                        workspace_dir=self.workspace_dir,
+                    ).system
+                )
         except Exception:
             pass
         try:
@@ -1099,6 +1138,101 @@ class FlexibleAgentRuntime:
         if not self.skill_manager:
             return []
         return self.skill_manager.build_toggle_sections(self.workspace_dir)
+
+    def _get_available_tool_catalogue(self) -> list[dict[str, str]]:
+        """Describe only tools attached to the active backend for this turn."""
+
+        manager = getattr(self, "backend_manager", None)
+        backend = getattr(manager, "current_backend", None)
+        registry = getattr(backend, "tool_registry", None)
+        if registry is None:
+            return []
+        active_backend = str(getattr(self.config, "active_backend", ""))
+        if active_backend == "grok-cli":
+            # Grok currently exposes only persistent user/project MCP config.
+            # HASHI will not mutate that shared state or advertise Registry
+            # tools until Grok provides an isolated per-invocation bridge.
+            return []
+        fixed_mcp = active_backend in {
+            "codex-cli",
+            "claude-cli",
+        }
+        if fixed_mcp and not bool(getattr(backend, "_hashi_mcp_enabled", False)):
+            return []
+        exposed_names = {
+            str(name)
+            for name in (
+                (getattr(backend, "_hashi_mcp_descriptor", None) or {}).get(
+                    "exposed_tools", []
+                )
+            )
+        }
+        definitions = registry.get_tool_definitions()
+        catalogue: list[dict[str, str]] = []
+        for definition in definitions:
+            function = definition.get("function", {}) if isinstance(definition, dict) else {}
+            name = str(function.get("name") or "").strip()
+            if fixed_mcp:
+                from tools.gateway.mcp_stdio import exposed_tool_name
+
+                name = exposed_tool_name(name)
+                if name not in exposed_names:
+                    continue
+            if not name:
+                continue
+            catalogue.append(
+                {
+                    "name": name,
+                    "description": str(function.get("description") or "").strip(),
+                }
+            )
+        return catalogue
+
+    def _is_hashi_tool_connected(self, name: str) -> bool:
+        """Check baseline Tool connectivity without inheriting a prior request scope."""
+
+        manager = getattr(self, "backend_manager", None)
+        backend = getattr(manager, "current_backend", None)
+        registry = getattr(backend, "tool_registry", None)
+        tool_name = str(name or "").strip()
+        if registry is None or not tool_name or not registry.is_allowed(tool_name):
+            return False
+        active_backend = str(getattr(self.config, "active_backend", ""))
+        if active_backend == "grok-cli":
+            return False
+        if active_backend in {"codex-cli", "claude-cli"}:
+            if not bool(getattr(backend, "_hashi_mcp_enabled", False)):
+                return False
+            from tools.gateway.mcp_stdio import exposed_tool_name
+
+            return exposed_tool_name(tool_name) in set(
+                (getattr(backend, "_hashi_mcp_descriptor", None) or {}).get(
+                    "exposed_tools", []
+                )
+            )
+        return True
+
+    def _get_available_skill_catalogue(self) -> list[dict[str, str]]:
+        """Describe enabled Skills without injecting their instruction bodies."""
+
+        manager = self.skill_manager
+        if manager is None:
+            return []
+        tool_names = {
+            item["name"] for item in self._get_available_tool_catalogue()
+        }
+        catalogue: list[dict[str, str]] = []
+        for skill in manager.list_skills():
+            if skill.id in manager.RUNTIME_TOGGLE_IDS:
+                continue
+            if not manager.is_skill_enabled(self.workspace_dir, skill.id):
+                continue
+            if skill.id == "memory-search" and "memory_search" not in tool_names:
+                continue
+            catalogue.append(
+                {"name": skill.id, "description": skill.description}
+            )
+        return catalogue
 
     def _arm_session_primer(self, context_line: str):
         primer = build_agent_fyi_primer(self.agent_fyi_path, context_line=context_line)
@@ -4454,7 +4588,6 @@ class FlexibleAgentRuntime:
         )
         if self.backend_manager.current_backend and getattr(self.backend_manager.current_backend.capabilities, "supports_sessions", False):
             await self.backend_manager.current_backend.handle_new_session()
-            await self.enqueue_startup_bootstrap(update.effective_chat.id)
 
         await self._send_text(
             update.effective_chat.id,
@@ -4465,6 +4598,7 @@ class FlexibleAgentRuntime:
             prompt,
             "handoff",
             f"Handoff restore [{exchange_count} exchanges]",
+            skip_memory_injection=True,
         )
 
     async def cmd_ticket(self, update: Update, context: Any):
@@ -5053,6 +5187,27 @@ class FlexibleAgentRuntime:
             else f"Backend switched to {target_engine}. Review AGENT FYI before the next task."
         )
         self._arm_session_primer(primer_note)
+
+        # A continuation request is an actual one-time backend delivery, not a
+        # handoff file that merely waits for a future user message. Stateless
+        # Flex targets already receive history every turn and need no package.
+        if with_context and supports_sessions:
+            restore_prompt, exchange_count, _word_count = (
+                self.handoff_builder.build_session_restore_prompt(
+                    max_rounds=10,
+                    max_words=6000,
+                )
+            )
+            if exchange_count:
+                await self.enqueue_request(
+                    chat_id,
+                    restore_prompt,
+                    "handoff",
+                    f"Backend continuation [{exchange_count} exchanges]",
+                    silent=True,
+                    deliver_to_telegram=False,
+                    skip_memory_injection=True,
+                )
 
         model = self.get_current_model()
         provider = self.get_current_provider()

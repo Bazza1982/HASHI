@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orchestrator.pcm import atomic_write_pcm, convert_legacy_pcm_text
+
 from .package import TransferPackage, read_transfer_package
 from .schema import DryRunReport, PlannedWrite
 
@@ -124,7 +126,10 @@ def import_hashi_agent(
             ["identity/agent.md", "identity/hermes_instructions.md"],
             fallback=f"# {plan.target_agent_id}\n\nImported from Hermes.\n",
         )
-        (plan.workspace_dir / "agent.md").write_text(identity, encoding="utf-8")
+        atomic_write_pcm(
+            plan.workspace_dir / "agent.md",
+            convert_legacy_pcm_text(identity),
+        )
         _write_hermes_import_files(archive, plan.workspace_dir / "hermes_import")
 
     _upsert_agent(plan.root / "agents.json", plan.agent_config)
@@ -142,8 +147,12 @@ def _build_hashi_agent_config(normalized_agent: dict[str, Any], agent_id: str, *
         "emoji": normalized_agent.get("emoji") or "",
         "type": "flex",
         "active_backend": engine,
-        "engine": engine,
-        "system_md": f"workspaces/{agent_id}/agent.md",
+        "allowed_backends": [
+            {
+                "engine": engine,
+                **({"model": preferred["model"]} if preferred.get("model") else {}),
+            }
+        ],
         "workspace_dir": f"workspaces/{agent_id}",
         "is_active": bool(enable),
         "access_scope": "project",
@@ -153,8 +162,6 @@ def _build_hashi_agent_config(normalized_agent: dict[str, Any], agent_id: str, *
         "imported_from": "hermes",
         "import_review_required": not enable,
     }
-    if preferred.get("model"):
-        config["model"] = preferred["model"]
     return config
 
 

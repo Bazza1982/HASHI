@@ -15,6 +15,7 @@ from adapters.her_habits import HERHabitStore
 from orchestrator import runtime_her_dream
 from orchestrator import scheduler as scheduler_module
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.pcm import render_pcm_document
 from orchestrator.scheduler import TaskScheduler
 from orchestrator.skill_manager import SkillManager
 
@@ -99,6 +100,14 @@ class FakeDreamAdapter:
         return SimpleNamespace(text='{"groups":[]}')
 
 
+def _write_pcm(path: Path, persona: str, *, system: str = "Follow HASHI policy.") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        render_pcm_document(persona=persona, system=system),
+        encoding="utf-8",
+    )
+
+
 class FakeDreamRuntime:
     def __init__(
         self,
@@ -112,9 +121,10 @@ class FakeDreamRuntime:
         self.transcript_log_path = workspace / "transcript.jsonl"
         self.logger = logging.getLogger(f"test.dream.{engine}")
         self.error_logger = self.logger
+        _write_pcm(workspace / "agent.md", "Use a warm reporting voice.")
         self.config = SimpleNamespace(
             active_backend=engine,
-            system_md=workspace / "AGENT.md",
+            system_md=workspace / "agent.md",
         )
         if engine == "her":
             adapter: Any = FakeDreamAdapter(workspace)
@@ -315,9 +325,9 @@ async def test_dream_no_change_delivers_persona_text_without_contract_validation
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
     _seed_habit(adapter._store)
-    (tmp_path / "AGENT.md").write_text(
+    _write_pcm(
+        runtime.config.system_md,
         "Use a warm persona. api_key=persona-secret-value-123456",
-        encoding="utf-8",
     )
     runtime.transcript_log_path.write_text(
         json.dumps(
@@ -356,7 +366,7 @@ async def test_dream_repairs_beyond_removed_validation_attempt_cap(tmp_path):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
     habit_id = _seed_habit(adapter._store, title="Obsolete Habit")
-    runtime.config.system_md.write_text("Use a warm voice.", encoding="utf-8")
+    _write_pcm(runtime.config.system_md, "Use a warm voice.")
     invalid = json.dumps(
         {
             "groups": [
@@ -419,13 +429,12 @@ async def test_dream_repairs_beyond_removed_validation_attempt_cap(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_dream_uses_exact_configured_system_md_and_keeps_sys_separate(tmp_path):
+async def test_dream_uses_exact_canonical_pcm_persona_and_keeps_sys_separate(tmp_path):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
     _seed_habit(adapter._store)
-    configured = tmp_path / "nested" / "voice.md"
-    configured.parent.mkdir(parents=True)
-    configured.write_text("Persona only: 星砂守望者，使用温柔中文。", encoding="utf-8")
+    configured = tmp_path / "agent.md"
+    _write_pcm(configured, "Persona only: 星砂守望者，使用温柔中文。")
     conflicting = tmp_path / "AGENT.md"
     conflicting.write_text("WRONG CONVENTIONAL PERSONA", encoding="utf-8")
     runtime.config.system_md = configured
@@ -450,7 +459,7 @@ async def test_dream_uses_exact_configured_system_md_and_keeps_sys_separate(tmp_
     assert "WRONG CONVENTIONAL PERSONA" not in analysis_prompt + renderer_prompt
     assert "WRONG SYS PERSONA" in analysis_prompt
     assert "WRONG SYS PERSONA" not in renderer_prompt
-    assert '"agent_guidance_from_system_md"' in analysis_prompt
+    assert '"agent_guidance_from_pcm_persona"' in analysis_prompt
     assert '"active_operating_constraints"' in analysis_prompt
     assert configured.read_bytes() == before_configured
     assert conflicting.read_bytes() == before_conflicting
@@ -461,9 +470,9 @@ async def test_dream_complete_body_can_be_rendered_in_configured_persona(tmp_pat
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
     _seed_habit(adapter._store)
-    runtime.config.system_md.write_text(
+    _write_pcm(
+        runtime.config.system_md,
         "自称昭君，称呼用户为陛下，只用温柔中文回应。",
-        encoding="utf-8",
     )
 
     def persona_response(prompt: str, _request_id: str) -> str:
@@ -497,7 +506,7 @@ async def test_missing_configured_persona_surfaces_exact_local_error_without_fal
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
     _seed_habit(adapter._store)
-    runtime.config.system_md = tmp_path / "missing" / "custom-persona.md"
+    runtime.config.system_md.unlink()
     conflicting = tmp_path / "AGENT.md"
     conflicting.write_text("MUST NOT BE USED", encoding="utf-8")
 
@@ -507,10 +516,10 @@ async def test_missing_configured_persona_surfaces_exact_local_error_without_fal
     )
 
     assert ok is False
-    assert report == "system_md_missing"
+    assert report == "pcm_missing"
     assert adapter.calls == []
     audit = adapter._journal.audit_path.read_text(encoding="utf-8")
-    assert "system_md_missing" in audit
+    assert "pcm_missing" in audit
     assert "dream_persona_unavailable" in audit
 
 
@@ -521,7 +530,7 @@ async def test_dream_persona_provider_failure_surfaces_exact_error_without_fallb
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
     _seed_habit(adapter._store)
-    runtime.config.system_md.write_text("Use the Zelda persona.", encoding="utf-8")
+    _write_pcm(runtime.config.system_md, "Use the Zelda persona.")
     provider_error = "429 Too Many Requests\nrequest_id=req_dream_exact_123"
     adapter.responses = ['{"groups":[]}', RuntimeError(provider_error)]
 
@@ -540,12 +549,12 @@ async def test_dream_persona_provider_failure_surfaces_exact_error_without_fallb
 
 
 @pytest.mark.asyncio
-async def test_dream_undo_uses_same_configured_system_md_without_editing_it(tmp_path):
+async def test_dream_undo_uses_same_canonical_pcm_without_editing_it(tmp_path):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
     habit_id = _seed_habit(adapter._store, title="Temporary Habit")
     configured = tmp_path / "agent.md"
-    configured.write_text("Fictional Persona: 月桂司书。", encoding="utf-8")
+    _write_pcm(configured, "Fictional Persona: 月桂司书。")
     (tmp_path / "AGENT.md").write_text("WRONG PERSONA", encoding="utf-8")
     runtime.config.system_md = configured
     before = configured.read_bytes()
@@ -585,8 +594,8 @@ async def test_dream_undo_uses_same_configured_system_md_without_editing_it(tmp_
 async def test_persona_report_accepts_natural_message_without_exact_echo(tmp_path):
     adapter = FakeDreamAdapter(tmp_path)
     adapter.responses = ["A warm, straightforward Persona report."]
-    persona_file = tmp_path / "AGENT.md"
-    persona_file.write_text("Use a warm voice.", encoding="utf-8")
+    persona_file = tmp_path / "agent.md"
+    _write_pcm(persona_file, "Use a warm voice.")
 
     report = await runtime_her_dream._persona_report(
         adapter,
@@ -608,7 +617,7 @@ async def test_dream_retries_beyond_removed_stale_catalogue_cap(tmp_path):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
     habit_id = _seed_habit(adapter._store)
-    runtime.config.system_md.write_text("Use a calm voice.", encoding="utf-8")
+    _write_pcm(runtime.config.system_md, "Use a calm voice.")
 
     mutation = 0
 
@@ -666,7 +675,7 @@ async def test_dream_retries_beyond_removed_stale_catalogue_cap(tmp_path):
 async def test_cancelled_dream_is_tracked_and_journalled(tmp_path):
     runtime = FakeDreamRuntime(tmp_path)
     adapter: FakeDreamAdapter = runtime.backend_manager.current_backend
-    runtime.config.system_md.write_text("Use the Zelda persona.", encoding="utf-8")
+    _write_pcm(runtime.config.system_md, "Use the Zelda persona.")
     adapter._habit_dream_tasks = set()
     _seed_habit(adapter._store)
     started = asyncio.Event()

@@ -43,9 +43,9 @@ class TransferTests(unittest.TestCase):
                 created_at="2026-03-27T14:20:00",
             )
             self.assertEqual(package["transfer_id"], "trf-123")
-            self.assertEqual(package["last_user_message"], "Move this to hashiko if needed")
+            self.assertEqual(package["last_user_message"], "Please continue the parser refactor")
             self.assertEqual(package["last_assistant_message"], "I updated the tokenizer and was about to fix tests.")
-            self.assertGreaterEqual(package["exchange_count"], 1)
+            self.assertEqual(package["exchange_count"], 1)
             self.assertIn("RECENT CONVERSATION HANDOFF", package["recent_context_block"])
             self.assertIn("transfer_guidance", package)
             self.assertIn("task_state", package)

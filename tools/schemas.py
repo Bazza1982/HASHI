@@ -1725,6 +1725,39 @@ TOOL_SCHEMAS.extend(
         {
             "type": "function",
             "function": {
+                "name": "memory_search",
+                "description": (
+                    "Search authorised HASHI memory with provenance. Defaults to the current "
+                    "instance and Agent. Cross-Agent raw search requires explicit user "
+                    "authorization, an exact target, and an auditable purpose."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1},
+                        "source": {
+                            "type": "string",
+                            "enum": ["local", "central", "all"],
+                            "default": "all",
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["current_agent", "cross_agent"],
+                            "default": "current_agent",
+                        },
+                        "instance_id": {"type": "string"},
+                        "agent_id": {"type": "string"},
+                        "purpose": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "workspace_inspect",
                 "description": (
                     "Read-only HER review tool for workspace snapshots, git status/diff, "

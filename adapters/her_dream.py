@@ -166,7 +166,7 @@ def build_dream_input(
             )
         catalogue.append(payload)
     authority = {
-        "agent_guidance_from_system_md": redact_authority_text(
+        "agent_guidance_from_pcm_persona": redact_authority_text(
             agent_guidance,
             limit=MAX_AGENT_GUIDANCE_CHARS,
         ),

@@ -7,7 +7,6 @@
       "type": "flex",
       "engine": "gemini-cli",
       "workspace_dir": "workspaces/sakura",
-      "system_md": "workspaces/sakura/AGENT.md",
       "model": "gemini-2.5-flash",
       "is_active": false,
       "allowed_backends": [
@@ -33,7 +32,6 @@
       "type": "flex",
       "engine": "gemini-cli",
       "workspace_dir": "workspaces/pikachu",
-      "system_md": "workspaces/pikachu/AGENT.md",
       "model": "gemini-2.5-flash",
       "is_active": false,
       "allowed_backends": [
@@ -59,7 +57,6 @@
       "type": "flex",
       "engine": "gemini-cli",
       "workspace_dir": "workspaces/xiao_yao",
-      "system_md": "workspaces/xiao_yao/AGENT.md",
       "model": "gemini-2.5-flash",
       "is_active": false,
       "allowed_backends": [
@@ -85,7 +82,6 @@
       "type": "flex",
       "engine": "gemini-cli",
       "workspace_dir": "workspaces/levi",
-      "system_md": "workspaces/levi/AGENT.md",
       "model": "gemini-2.5-flash",
       "is_active": false,
       "allowed_backends": [
@@ -111,7 +107,6 @@
       "type": "flex",
       "engine": "gemini-cli",
       "workspace_dir": "workspaces/jarvis",
-      "system_md": "workspaces/jarvis/AGENT.md",
       "model": "gemini-2.5-flash",
       "is_active": false,
       "allowed_backends": [
@@ -137,7 +132,6 @@
       "type": "flex",
       "engine": "gemini-cli",
       "workspace_dir": "workspaces/samantha",
-      "system_md": "workspaces/samantha/AGENT.md",
       "model": "gemini-2.5-flash",
       "is_active": false,
       "allowed_backends": [
@@ -163,7 +157,6 @@
       "type": "flex",
       "engine": "gemini-cli",
       "workspace_dir": "workspaces/baymax",
-      "system_md": "workspaces/baymax/AGENT.md",
       "model": "gemini-2.5-flash",
       "is_active": false,
       "allowed_backends": [
@@ -189,7 +182,6 @@
       "type": "flex",
       "engine": "gemini-cli",
       "workspace_dir": "workspaces/doraemon",
-      "system_md": "workspaces/doraemon/AGENT.md",
       "model": "gemini-2.5-flash",
       "is_active": false,
       "allowed_backends": [
@@ -215,7 +207,6 @@
       "type": "flex",
       "engine": "gemini-cli",
       "workspace_dir": "workspaces/zelda",
-      "system_md": "workspaces/zelda/AGENT.md",
       "model": "gemini-2.5-flash",
       "is_active": false,
       "allowed_backends": [
@@ -241,7 +232,6 @@
       "type": "flex",
       "engine": "gemini-cli",
       "workspace_dir": "workspaces/tom_nook",
-      "system_md": "workspaces/tom_nook/AGENT.md",
       "model": "gemini-2.5-flash",
       "is_active": false,
       "allowed_backends": [

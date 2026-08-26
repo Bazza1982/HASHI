@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from itertools import count
+from pathlib import Path
 from typing import Any
 
 from adapters.base import BackendResponse, TokenUsage
@@ -19,6 +20,7 @@ from adapters.xai_oauth_credentials import (
     XaiOAuthCredentialError,
     resolve_xai_credentials,
 )
+from orchestrator.pcm import load_pcm_document
 
 _RESPONSES_MODEL_PREFIXES = ("grok-build", "grok-4.5")
 _AUTH_RETRY_STATUSES = {401, 403}
@@ -107,10 +109,11 @@ class XaiApiAdapter(OpenRouterAdapter):
         self._ensure_client()
         try:
             if self.config.system_md:
-                from pathlib import Path
-
                 if Path(self.config.system_md).exists():
-                    self.sys_prompt = Path(self.config.system_md).read_text(encoding="utf-8")
+                    self.sys_prompt = load_pcm_document(
+                        self.config.system_md,
+                        workspace_dir=self.config.workspace_dir,
+                    ).system
         except Exception as exc:
             self.logger.warning("Could not read system_md: %s", exc)
         self.logger.info("xAI API adapter initialized (source=%s)", self._credential_source)

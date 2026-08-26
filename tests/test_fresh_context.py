@@ -26,6 +26,7 @@ from orchestrator.fresh_context import (
 from orchestrator.fresh_context import state as fresh_context_state
 from orchestrator.memory_plus_mode import is_memory_plus_enabled, set_memory_plus_enabled
 from orchestrator.memory_search_mode import is_memory_search_enabled
+from orchestrator.pcm import render_pcm_document
 from orchestrator.workspace_state import WorkspaceStateStore
 
 
@@ -38,9 +39,18 @@ class FakeMemoryStore:
     def get_last_user_turn_ts(self):
         return None
 
-    def get_recent_turns(self, limit=10):
+    def get_completed_exchanges(self, limit=10):
         self.recent_calls += 1
-        return [{"role": "user", "text": "old turn"}]
+        return [
+            {
+                "sequence": 1,
+                "exchange_id": 1,
+                "user_ts": "2026-08-26T00:00:00+00:00",
+                "assistant_ts": "2026-08-26T00:00:01+00:00",
+                "user_text": "old turn",
+                "assistant_text": "old answer",
+            }
+        ]
 
     def retrieve_memories(self, query, limit=6):
         self.memory_calls += 1
@@ -81,8 +91,8 @@ def test_bridge_context_assembler_splits_turn_and_saved_memory_flags():
     assembler = BridgeContextAssembler(store, system_md=None)
 
     prompt = assembler.build_prompt("hello", "deepseek-api")
-    assert "RECENT CONTEXT" in prompt
-    assert "OPTIONAL LONG-TERM MEMORY SEARCH RESULTS" not in prompt
+    assert "RECENT COMPLETED EXCHANGES" in prompt
+    assert "OPTIONAL SEARCHED LONG-TERM MEMORY" not in prompt
     assert store.recent_calls == 1
     assert store.memory_calls == 0
 
@@ -90,8 +100,8 @@ def test_bridge_context_assembler_splits_turn_and_saved_memory_flags():
     store.memory_calls = 0
     assembler.saved_memory_injection_enabled = True
     prompt = assembler.build_prompt("hello", "deepseek-api")
-    assert "RECENT CONTEXT" in prompt
-    assert "OPTIONAL LONG-TERM MEMORY SEARCH RESULTS" in prompt
+    assert "RECENT COMPLETED EXCHANGES" in prompt
+    assert "OPTIONAL SEARCHED LONG-TERM MEMORY" in prompt
     assert store.recent_calls == 1
     assert store.memory_calls == 1
 
@@ -100,22 +110,25 @@ def test_bridge_context_assembler_splits_turn_and_saved_memory_flags():
     assembler.saved_memory_injection_enabled = False
     assembler.turns_injection_enabled = False
     prompt = assembler.build_prompt("hello", "deepseek-api")
-    assert "RECENT CONTEXT" not in prompt
-    assert "OPTIONAL LONG-TERM MEMORY SEARCH RESULTS" not in prompt
+    assert "RECENT COMPLETED EXCHANGES" not in prompt
+    assert "OPTIONAL SEARCHED LONG-TERM MEMORY" not in prompt
     assert store.recent_calls == 0
     assert store.memory_calls == 0
 
 
-def test_managed_prompt_orders_policy_then_old_memory_then_recent_then_request(tmp_path):
+def test_managed_prompt_preserves_typed_authority_without_flat_position_assertions(tmp_path):
     from orchestrator.context_compaction import MANAGED_HISTORY_TITLE
 
-    system_md = tmp_path / "AGENT.md"
-    system_md.write_text("SYSTEM-POLICY", encoding="utf-8")
+    system_md = tmp_path / "agent.md"
+    system_md.write_text(
+        render_pcm_document(persona="PERSONA", system="SYSTEM-POLICY"),
+        encoding="utf-8",
+    )
     store = FakeMemoryStore()
     assembler = BridgeContextAssembler(store, system_md=system_md)
     assembler.saved_memory_injection_enabled = True
 
-    prompt = assembler.build_prompt(
+    payload = assembler.build_prompt_payload(
         "CURRENT-REQUEST",
         "her-v2",
         extra_sections=[
@@ -124,11 +137,23 @@ def test_managed_prompt_orders_policy_then_old_memory_then_recent_then_request(t
         ],
     )
 
-    assert prompt.index("SYSTEM-POLICY") < prompt.index("WORKZONE-POLICY")
-    assert prompt.index("WORKZONE-POLICY") < prompt.index("saved memory")
-    assert prompt.index("saved memory") < prompt.index("OLD-CAPSULE")
-    assert prompt.index("OLD-CAPSULE") < prompt.index("RECENT-TIMELINE")
-    assert prompt.index("RECENT-TIMELINE") < prompt.index("CURRENT-REQUEST")
+    prompt = payload["final_prompt"]
+    assert all(
+        value in prompt
+        for value in (
+            "SYSTEM-POLICY",
+            "WORKZONE-POLICY",
+            "saved memory",
+            "OLD-CAPSULE",
+            "RECENT-TIMELINE",
+            "CURRENT-REQUEST",
+        )
+    )
+    ranks = {item["key"]: item["rank"] for item in payload["envelope"]["sections"]}
+    assert ranks["permanent_system"] > ranks["current_user_request"]
+    assert ranks["current_user_request"] > ranks[
+        "extra:hashi_managed_conversation_history"
+    ]
 
 
 @pytest.mark.asyncio
@@ -273,8 +298,11 @@ async def test_her_v2_fresh_persists_hard_boundary_without_deleting_archives(tmp
         assistant_ts="2026-08-24T10:01:00+10:00",
         origin_ref="old-completed",
     )
-    agent_md = tmp_path / "AGENT.md"
-    agent_md.write_text("AGENT POLICY ONLY", encoding="utf-8")
+    agent_md = tmp_path / "agent.md"
+    agent_md.write_text(
+        render_pcm_document(persona="TEST PERSONA", system="AGENT POLICY ONLY"),
+        encoding="utf-8",
+    )
     runtime.context_assembler = BridgeContextAssembler(
         runtime.memory_store,
         system_md=agent_md,

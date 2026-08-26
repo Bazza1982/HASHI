@@ -15,10 +15,12 @@
       "emoji": "🤖",
       "typing_message": "_🤖 My Agent is typing..._",
       "typing_parse_mode": "Markdown",
-      "engine": "claude-cli",
-      "system_md": "workspaces/my-agent/agent.md",
+      "type": "flex",
       "workspace_dir": "workspaces/my-agent",
-      "model": "claude-sonnet-4-6",
+      "allowed_backends": [
+        {"engine": "claude-cli", "model": "claude-sonnet-4-6"}
+      ],
+      "active_backend": "claude-cli",
       "is_active": true,
       "access_scope": "workspace",
       "idle_timeout_sec": 120

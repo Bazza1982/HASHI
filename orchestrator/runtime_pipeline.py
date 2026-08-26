@@ -55,6 +55,33 @@ _DANGLING_TOOL_MARKERS = (
 )
 
 
+def _canonical_record(
+    runtime,
+    event_type: str,
+    payload: Any,
+    *,
+    request_id: str = "",
+    provenance: dict[str, Any] | None = None,
+) -> None:
+    store = getattr(runtime, "canonical_audit", None)
+    if store is None:
+        return
+    try:
+        store.record(
+            event_type,
+            payload,
+            request_id=request_id,
+            provenance=provenance,
+        )
+    except Exception as exc:
+        runtime.error_logger.error(
+            "Canonical audit write failed for %s/%s: %s",
+            request_id or "<none>",
+            event_type,
+            exc,
+        )
+
+
 @dataclass
 class _ProvisionalTelegramMessage:
     """Telegram state needed to resolve one provisional HER message."""
@@ -600,6 +627,13 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
             copy.deepcopy(entry) for entry in manifest
         ]
     runtime.current_request_meta = request_meta
+    _canonical_record(
+        runtime,
+        "request_received",
+        request_meta,
+        request_id=item.request_id,
+        provenance={"source": item.source, "queue": "flex_runtime"},
+    )
     registry = getattr(runtime, "_request_meta_by_id", None)
     if not isinstance(registry, dict):
         registry = {}
@@ -627,6 +661,13 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
 
 
 async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPrompt:
+    refresh_tool_context = getattr(
+        getattr(runtime, "backend_manager", None),
+        "_refresh_tool_runtime_context",
+        None,
+    )
+    if callable(refresh_tool_context):
+        refresh_tool_context(item.request_id)
     effective_prompt = runtime._consume_session_primer(item)
     backend = runtime.backend_manager.current_backend
     effective_prompt = runtime_cross_session.prepare_reply_binding(
@@ -717,6 +758,20 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         )
 
     prompt_payload = assemble(extra_sections)
+    _canonical_record(
+        runtime,
+        "provider_request",
+        {
+            "engine": runtime.config.active_backend,
+            "effective_user_prompt": effective_prompt,
+            "final_prompt": prompt_payload.get("final_prompt"),
+            "pcm_envelope": prompt_payload.get("envelope"),
+            "prompt_audit": prompt_payload.get("audit"),
+            "incremental": incremental,
+        },
+        request_id=item.request_id,
+        provenance={"source": "hashi_pcm_assembler"},
+    )
     context_warnings: list[str] = []
     if runtime.config.active_backend == "her-v2" and not incremental:
         from orchestrator.context_compaction import estimate_tokens
@@ -884,6 +939,28 @@ def log_backend_finished(
         final_prompt_len=len(final_prompt),
         result_excerpt=_safe_excerpt(response.text or response.error or "", 200),
     )
+    response_payload = dict(vars(response)) if hasattr(response, "__dict__") else {"repr": repr(response)}
+    response_payload["engine"] = runtime.config.active_backend
+    response_payload["backend_elapsed_s"] = backend_elapsed_s
+    response_payload["final_prompt"] = final_prompt
+    _canonical_record(
+        runtime,
+        "provider_response",
+        response_payload,
+        request_id=item.request_id,
+        provenance={"source": "active_backend"},
+    )
+    reasoning_seen = getattr(runtime, "_canonical_reasoning_seen", set())
+    if item.request_id not in reasoning_seen:
+        _canonical_record(
+            runtime,
+            "provider_reasoning",
+            {"availability": "unavailable", "reason": "provider_exposed_no_reasoning_event"},
+            request_id=item.request_id,
+            provenance={"source": "active_backend", "fabricated": False},
+        )
+    if isinstance(reasoning_seen, set):
+        reasoning_seen.discard(item.request_id)
 
 
 def _consume_feedback_task_result(task: asyncio.Future) -> None:
@@ -1679,7 +1756,52 @@ async def setup_interactive_feedback(
 
         stream_callback = _activity_callback
 
-    on_stream_event = stream_callback if (not item.silent or audit_active or activity_store is not None) else None
+    presentation_callback = stream_callback
+
+    async def _canonical_stream_callback(event):
+        payload = dict(vars(event)) if hasattr(event, "__dict__") else {"repr": repr(event)}
+        _canonical_record(
+            runtime,
+            "provider_stream_event",
+            payload,
+            request_id=item.request_id,
+            provenance={
+                "source": str(getattr(event, "origin", "") or "active_backend"),
+                "provider_provenance": str(getattr(event, "provenance", "") or ""),
+            },
+        )
+        if str(getattr(event, "kind", "") or "") == "thinking":
+            seen = getattr(runtime, "_canonical_reasoning_seen", None)
+            if not isinstance(seen, set):
+                seen = set()
+                runtime._canonical_reasoning_seen = seen
+            seen.add(item.request_id)
+            _canonical_record(
+                runtime,
+                "provider_reasoning",
+                {
+                    "availability": "available",
+                    "raw_delta": str(getattr(event, "raw_delta", "") or ""),
+                    "summary": str(getattr(event, "summary", "") or ""),
+                    "detail": str(getattr(event, "detail", "") or ""),
+                },
+                request_id=item.request_id,
+                provenance={
+                    "source": str(getattr(event, "origin", "") or "active_backend"),
+                    "provider_provenance": str(getattr(event, "provenance", "") or ""),
+                    "fabricated": False,
+                },
+            )
+        if presentation_callback is not None:
+            result = presentation_callback(event)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        return None
+
+    # Canonical evidence collection is independent of Telegram visibility and
+    # the sanitised operational audit toggle.
+    on_stream_event = _canonical_stream_callback
     return InteractiveFeedback(
         stop_typing=stop_typing,
         typing_task=typing_task,
@@ -2066,6 +2188,19 @@ def persist_success_memory(
     is_bridge_request: bool,
     session_reset_source: str,
 ) -> None:
+    _canonical_record(
+        runtime,
+        "chat_exchange",
+        {
+            "user": item.prompt,
+            "assistant_provider_text": response.text,
+            "assistant_delivered_text": visible_text,
+            "source": item.source,
+            "response": dict(vars(response)) if hasattr(response, "__dict__") else repr(response),
+        },
+        request_id=item.request_id,
+        provenance={"source": "completed_external_exchange"},
+    )
     memory_user_text = item.prompt
     if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker", "multimodal"}:
         memory_user_text = f"[{item.source}] {item.summary}"
@@ -2296,6 +2431,26 @@ async def recover_typed_context_capacity_rejection(
         outcome.compaction_id,
         previous_tokens,
         retry_tokens,
+    )
+    _canonical_record(
+        runtime,
+        "provider_request",
+        {
+            "engine": runtime.config.active_backend,
+            "effective_user_prompt": str(state.get("effective_prompt") or item.prompt),
+            "final_prompt": retry_prompt,
+            "pcm_envelope": payload.get("envelope"),
+            "prompt_audit": payload.get("audit"),
+            "incremental": False,
+            "retry": {
+                "kind": "typed_context_capacity_recovery",
+                "compaction_id": outcome.compaction_id,
+                "previous_tokens": previous_tokens,
+                "retry_tokens": retry_tokens,
+            },
+        },
+        request_id=item.request_id,
+        provenance={"source": "hashi_pcm_assembler", "retry": True},
     )
     runtime.is_generating = True
     try:

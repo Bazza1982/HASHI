@@ -122,7 +122,7 @@ def test_import_hashi_agent_creates_disabled_agent_workspace_and_rollback(tmp_pa
     plan = import_hashi_agent(root, package)
 
     agent_md = root / "workspaces" / "xiaoye" / "agent.md"
-    assert agent_md.read_text(encoding="utf-8").startswith("# Xiaoye")
+    assert agent_md.read_text(encoding="utf-8").startswith("[persona]")
     imported = root / "workspaces" / "xiaoye" / "hermes_import"
     assert (imported / "source" / "hermes_profile_config.yaml").exists()
     assert (imported / "normalized_agent.json").exists()
@@ -135,7 +135,7 @@ def test_import_hashi_agent_creates_disabled_agent_workspace_and_rollback(tmp_pa
     [agent] = agents["agents"]
     assert agent["name"] == "xiaoye"
     assert agent["is_active"] is False
-    assert agent["system_md"] == "workspaces/xiaoye/agent.md"
+    assert "system_md" not in agent
 
 
 def test_import_hashi_agent_imports_schedule_drafts_disabled(tmp_path):

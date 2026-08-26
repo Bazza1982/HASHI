@@ -7,6 +7,7 @@ when the backend config contains a `tools` key.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from contextvars import ContextVar
@@ -31,6 +32,7 @@ TOOL_TIERS: dict[str, list[str]] = {
     ],
     "web": ["web_search", "web_fetch", "http_request", "xai_imagine"],
     "communication": ["telegram_send"],
+    "memory": ["memory_search"],
     "scheduler": [
         "hashi_scheduler_list",
         "hashi_scheduler_status",
@@ -76,6 +78,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "hashi_scheduler_run_history",
         "hashi_scheduler_status",
         "media_read",
+        "memory_search",
         "process_list",
         "web_fetch",
         "web_search",
@@ -159,6 +162,7 @@ class ToolRegistry:
         agents_config: Optional[list] = None,
         audit_context: Optional[dict] = None,
         media_roots: Optional[list[Path]] = None,
+        canonical_audit: Any = None,
     ):
         self.logger = logging.getLogger("Tools.Registry")
         self.access_root = Path(access_root)
@@ -169,6 +173,7 @@ class ToolRegistry:
         self.max_loops = None
         self.agents_config = agents_config or []
         self.audit_context = audit_context or {}
+        self.canonical_audit = canonical_audit
         self._audit_context_override: ContextVar[dict | None] = ContextVar(
             f"tool_registry_audit_context_{id(self)}",
             default=None,
@@ -277,12 +282,18 @@ class ToolRegistry:
         (intersected with allowed). Pass None to include all allowed tools
         (backwards-compatible default).
         """
+        available = set(self._allowed)
+        request_allowlist = self._effective_audit_context().get(
+            "request_tool_allowlist"
+        )
+        if isinstance(request_allowlist, list):
+            available.intersection_update(str(name) for name in request_allowlist)
         if tiers is not None:
             tier_tools = set(resolve_tiers(tiers))
-            subset = self._allowed & tier_tools
+            subset = available & tier_tools
             return [TOOL_SCHEMA_MAP[name] for name in ALL_TOOL_NAMES
                     if name in subset]
-        return [TOOL_SCHEMA_MAP[name] for name in ALL_TOOL_NAMES if name in self._allowed]
+        return [TOOL_SCHEMA_MAP[name] for name in ALL_TOOL_NAMES if name in available]
 
     def evaluate_admission(
         self, tool_name: str, arguments: dict, tool_call_id: str = ""
@@ -293,6 +304,19 @@ class ToolRegistry:
             return ToolResult(
                 tool_call_id=tool_call_id,
                 output=f"Error: tool '{tool_name}' is not in your allowed tools list",
+                is_error=True,
+                details={"control_disposition": "denied"},
+            )
+        request_allowlist = self._effective_audit_context().get(
+            "request_tool_allowlist"
+        )
+        if isinstance(request_allowlist, list) and tool_name not in request_allowlist:
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output=(
+                    f"Error: tool '{tool_name}' is outside the current request's "
+                    "HASHI capability scope"
+                ),
                 is_error=True,
                 details={"control_disposition": "denied"},
             )
@@ -534,6 +558,33 @@ class ToolRegistry:
         result: ToolResult,
         started: float,
     ) -> None:
+        canonical = self.canonical_audit
+        if canonical is not None:
+            try:
+                context = dict(self._effective_audit_context())
+                canonical.record(
+                    "tool_call",
+                    {
+                        "tool_name": tool_name,
+                        "tool_call_id": result.tool_call_id,
+                        "arguments": arguments,
+                        "output": result.output,
+                        "content": result.content,
+                        "details": result.details,
+                        "is_error": result.is_error,
+                        "duration_ms": int((time.monotonic() - started) * 1000),
+                    },
+                    request_id=str(context.get("request_id") or ""),
+                    provenance={
+                        "source": "hashi_tool_registry",
+                        "workspace_dir": str(self.workspace_dir),
+                        "access_root": str(self.access_root),
+                    },
+                )
+            except Exception as exc:
+                self.logger.error(
+                    "Failed to persist canonical Tool audit evidence: %s", exc
+                )
         try:
             from tools.tool_audit import record_tool_action
 
@@ -767,6 +818,29 @@ class ToolRegistry:
 
         if tool_name == "web_fetch":
             return await execute_web_fetch(arguments)
+
+        if tool_name == "memory_search":
+            from orchestrator.central_memory import (
+                MemorySearchAuthorizationError,
+                MemorySearchService,
+            )
+
+            context = self._effective_audit_context()
+            global_config = context.get("global_config")
+            if global_config is None:
+                return "Error: memory_search is unavailable without HASHI global context"
+            service = MemorySearchService(
+                workspace_dir=self.workspace_dir,
+                global_config=global_config,
+                agent_id=str(context.get("agent_name") or self.workspace_dir.name),
+                trusted_authorization=context.get("memory_search_authorization"),
+            )
+            try:
+                return json.dumps(
+                    service.search(arguments), ensure_ascii=False, sort_keys=True
+                )
+            except (ValueError, MemorySearchAuthorizationError) as exc:
+                return f"Error: {exc}"
 
         if tool_name.startswith("hashi_scheduler_"):
             from tools.hashi_scheduler import execute_hashi_scheduler_tool

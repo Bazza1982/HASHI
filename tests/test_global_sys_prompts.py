@@ -16,7 +16,7 @@ from orchestrator.bridge_memory import (
 
 
 class _EmptyMemoryStore:
-    def get_recent_turns(self, *, limit: int):
+    def get_completed_exchanges(self, *, limit: int):
         return []
 
     def retrieve_memories(self, _query: str, *, limit: int):
@@ -156,14 +156,16 @@ def test_prompt_assembler_injects_global_before_agent_local_sys(tmp_path: Path) 
     )
     prompt = payload["final_prompt"]
 
-    assert prompt.count("--- ADDITIONAL SYSTEM CONTEXT ---") == 1
-    assert "INSTANCE-GLOBAL /sys rules apply" in prompt
+    assert prompt.count("--- INSTANCE-GLOBAL /sys ---") == 1
     assert "[Global /sys slot 1]\nAlways answer in Chinese." in prompt
-    assert "AGENT-LOCAL /sys rules follow:" in prompt
+    assert "--- AGENT-LOCAL /sys ---" in prompt
     assert prompt.index("Always answer in Chinese.") < prompt.index(
         "Zelda local reporting style"
     )
-    assert payload["audit"]["sections"][0]["item_count"] == 2
+    sections = {item["key"]: item for item in payload["envelope"]["sections"]}
+    assert sections["instance_global_sys"]["rank"] > sections["agent_local_sys"]["rank"]
+    assert sections["instance_global_sys"]["protected"] is True
+    assert sections["agent_local_sys"]["protected"] is True
 
 
 def test_same_global_rule_reaches_two_agents_but_local_rules_do_not_cross(

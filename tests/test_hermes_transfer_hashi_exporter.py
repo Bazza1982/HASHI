@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from orchestrator.pcm import render_pcm_document
+
 from orchestrator.hermes_transfer import (
     HashiExportError,
     HashiExportOptions,
@@ -22,7 +24,13 @@ def _fixture_hashi_root(tmp_path):
     root.mkdir()
     workspace = root / "workspaces" / "zelda"
     (workspace / "memory").mkdir(parents=True)
-    (workspace / "agent.md").write_text("# Zelda\n\nA careful HASHI agent.\n", encoding="utf-8")
+    (workspace / "agent.md").write_text(
+        render_pcm_document(
+            persona="Zelda is a careful HASHI agent.",
+            system="Follow HASHI policy and the current request.",
+        ),
+        encoding="utf-8",
+    )
     (workspace / "state.json").write_text('{"mode":"ready"}\n', encoding="utf-8")
     (workspace / "MEMORY.md").write_text("stable memory\n", encoding="utf-8")
     (workspace / "memory" / "project.md").write_text("project memory\n", encoding="utf-8")
@@ -40,7 +48,6 @@ def _fixture_hashi_root(tmp_path):
                     "type": "flex",
                     "active_backend": "codex-cli",
                     "model": "gpt-5.5",
-                    "system_md": "workspaces/zelda/agent.md",
                     "workspace_dir": "workspaces/zelda",
                     "access_scope": "project",
                     "is_active": True,
@@ -89,7 +96,7 @@ def test_plan_hashi_export_builds_dry_run_without_package(tmp_path):
     assert plan.manifest["source_runtime"] == "hashi"
     assert plan.manifest["target_runtime"] == "hermes"
     assert plan.normalized_agent["preferred_backend"]["engine"] == "codex-cli"
-    assert plan.files["identity/agent.md"].startswith("# Zelda")
+    assert plan.files["identity/agent.md"].startswith("[persona]")
     assert "source/hashi_agent_config.json" in plan.files
     assert "memory/files/MEMORY.md" in plan.files
     assert "workspace/state.json" in plan.files

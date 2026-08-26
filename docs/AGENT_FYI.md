@@ -9,10 +9,10 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - **Deployment Procedure**:
   1. Read the character's seed `.md` file from `agent_seeds/`.
   2. Create a dedicated directory in `workspaces/<agent_id>/`.
-  3. Write the seed content into `workspaces/<agent_id>/AGENT.md`.
-  4. Update `agents.json` by adding a new entry to the `agents` list. Refer to `agents.json.samples` for the standard Flex Agent schema. The Agent's `system_md` must point to its explicit Persona file; filenames such as `agent.md`, `AGENT.md`, and custom configured paths are all valid.
+  3. Convert the seed into strict `[persona]`, `[sys]`, and optional `[memory]` blocks, then write it to the exact lower-case `workspaces/<agent_id>/agent.md` path. Do not leave substantive text outside these blocks.
+  4. Update `agents.json` by adding a new entry to the `agents` list. Refer to `agents.json.samples` for the standard Flex Agent schema. Do not add the retired `system_md` field.
   5. Configure credentials in `secrets.json`. Use `WORKBENCH_ONLY_NO_TOKEN` if a Telegram token is not yet available.
-  6. Ask the user to restart.
+  6. Ask the user to authorise the appropriate `/reboot` scope so the validated configuration can be loaded.
 
 ## Agent Types and Runtime Modes
 - Flex agent: one bot, one workspace, switchable backend via `/backend`.

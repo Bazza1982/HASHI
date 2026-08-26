@@ -45,6 +45,7 @@ from orchestrator.memory_plus_mode import (  # noqa: E402
     write_memory_plus_update,
     write_memory_plus_diagnostic,
 )
+from orchestrator.pcm import render_pcm_document  # noqa: E402
 from orchestrator.bridge_memory import BridgeContextAssembler  # noqa: E402
 from orchestrator.post_turn_observer import TurnContextRequest  # noqa: E402
 from orchestrator.runtime_mode import mode_keyboard  # noqa: E402
@@ -502,11 +503,17 @@ def test_context_profiles_separate_persistent_cli_and_stateless_api_memory(
             self.recent_limits: list[int] = []
             self.memory_limits: list[int] = []
 
-        def get_recent_turns(self, *, limit: int):
+        def get_completed_exchanges(self, *, limit: int):
             self.recent_limits.append(limit)
             return [
-                {"role": "user", "text": "recent one"},
-                {"role": "assistant", "text": "recent two"},
+                {
+                    "sequence": 1,
+                    "exchange_id": 1,
+                    "user_ts": "2026-08-26T00:00:00+00:00",
+                    "assistant_ts": "2026-08-26T00:00:01+00:00",
+                    "user_text": "recent one",
+                    "assistant_text": "recent two",
+                },
             ]
 
         def retrieve_memories(self, _query: str, *, limit: int):
@@ -516,8 +523,11 @@ def test_context_profiles_separate_persistent_cli_and_stateless_api_memory(
         def get_last_user_turn_ts(self):
             return None
 
-    system_md = tmp_path / "AGENT.md"
-    system_md.write_text("Agent identity", encoding="utf-8")
+    system_md = tmp_path / "agent.md"
+    system_md.write_text(
+        render_pcm_document(persona="Agent identity", system="System policy"),
+        encoding="utf-8",
+    )
     store = MemoryStore()
     assembler = BridgeContextAssembler(store, system_md)
 
@@ -527,13 +537,13 @@ def test_context_profiles_separate_persistent_cli_and_stateless_api_memory(
         extra_sections=[("Memory+ Continuity", "brief card")],
         context_profile="memory_plus_session",
     )
-    assert store.recent_limits == []
+    assert store.recent_limits == [10]
     assert store.memory_limits == []
     assert session_payload["final_prompt"].count(
         "--- CURRENT USER REQUEST — AUTHORITATIVE ---"
     ) == 1
     assert "brief card" in session_payload["final_prompt"]
-    assert "recent one" not in session_payload["final_prompt"]
+    assert "recent one" in session_payload["final_prompt"]
     assert "long-term" not in session_payload["final_prompt"]
 
     api_payload = assembler.build_prompt_payload(
@@ -542,7 +552,7 @@ def test_context_profiles_separate_persistent_cli_and_stateless_api_memory(
         extra_sections=[("Memory+ Continuity", "brief card")],
         context_profile="memory_plus_stateless",
     )
-    assert store.recent_limits == [4]
+    assert store.recent_limits == [10, 10]
     assert store.memory_limits == []
     assert "recent one" in api_payload["final_prompt"]
     assert "long-term" not in api_payload["final_prompt"]
@@ -556,7 +566,7 @@ def test_incremental_memory_plus_prompt_keeps_authoritative_request_marker_witho
     tmp_path: Path,
 ) -> None:
     class EmptyMemoryStore:
-        def get_recent_turns(self, *, limit: int):
+        def get_completed_exchanges(self, *, limit: int):
             raise AssertionError(f"recent turns should not be loaded: {limit}")
 
         def retrieve_memories(self, _query: str, *, limit: int):
@@ -577,8 +587,11 @@ def test_incremental_memory_plus_prompt_keeps_authoritative_request_marker_witho
     assert payload["final_prompt"].count(
         "--- CURRENT USER REQUEST — AUTHORITATIVE ---"
     ) == 1
-    assert payload["final_prompt"].endswith("do this now")
-    assert payload["audit"]["sections"] == []
+    assert "do this now" in payload["final_prompt"]
+    assert {item["key"] for item in payload["audit"]["sections"]} == {
+        "current_user_request",
+        "time",
+    }
 
 
 def test_concurrent_memory_plus_updates_are_serialized(tmp_path: Path) -> None:

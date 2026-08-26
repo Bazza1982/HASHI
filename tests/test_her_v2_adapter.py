@@ -63,6 +63,7 @@ from orchestrator.her_v2.presentation import (
     RenderedRequiredMessage,
     RequiredUserMessage,
 )
+from orchestrator.pcm import render_pcm_document
 
 
 def _profiles():
@@ -140,11 +141,21 @@ def test_untyped_legacy_backend_failures_receive_safe_provider_types(
 
 
 def _agent_config(tmp_path, *, her_v2=None, effort="low"):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    agent_md = workspace / "agent.md"
+    agent_md.write_text(
+        render_pcm_document(
+            persona="Use a concise, friendly reporting voice.",
+            system="Follow HASHI policy.",
+        ),
+        encoding="utf-8",
+    )
     config = AgentConfig(
         name="agent",
         engine="her-v2",
-        workspace_dir=tmp_path / "workspace",
-        system_md=tmp_path / "SYSTEM.md",
+        workspace_dir=workspace,
+        system_md=agent_md,
         model="role-configured",
         is_active=True,
         extra={
@@ -1305,7 +1316,10 @@ async def test_dream_command_path_runs_outside_live_turn_with_v2_audit(tmp_path)
     provider = _DreamProvider()
     config = _agent_config(tmp_path)
     config.system_md.write_text(
-        "[persona]\nUse a concise, friendly reporting voice.\n[persona_end]\n",
+        render_pcm_document(
+            persona="Use a concise, friendly reporting voice.",
+            system="Follow HASHI policy.",
+        ),
         encoding="utf-8",
     )
     setattr(config, "_her_v2_stage_provider", provider)
@@ -2860,11 +2874,13 @@ async def test_persona_presentation_lanes_receive_only_block_and_minimal_inputs(
 ):
     system_md = tmp_path / "agent.md"
     system_md.write_text(
-        """FULL AGENT OPERATIONAL CONTENT
-[persona]
-Use a warm voice and address the user as Captain.
-[persona_end]
-PRIVATE WORKFLOW INSTRUCTIONS""",
+        render_pcm_document(
+            persona="Use a warm voice and address the user as Captain.",
+            system=(
+                "FULL AGENT OPERATIONAL CONTENT\n"
+                "PRIVATE WORKFLOW INSTRUCTIONS"
+            ),
+        ),
         encoding="utf-8",
     )
     manager = _FakeManager(system_md)

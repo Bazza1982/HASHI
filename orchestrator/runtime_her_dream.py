@@ -419,7 +419,7 @@ async def _persona_report(
     undo_commands: list[str] | None = None,
 ) -> str:
     if not persona_source.usable:
-        raise ValueError(persona_source.unavailable_reason or "system_md_unavailable")
+        raise ValueError(persona_source.unavailable_reason or "pcm_persona_unavailable")
     changed_group_numbers = list(changed_group_numbers or [])
     undo_commands = list(undo_commands or [])
     prompt = her_dream.build_dream_report_input(
@@ -479,7 +479,7 @@ async def execute_dream(
         **persona_source.audit_fields(),
     )
     if not persona_source.usable:
-        reason = persona_source.unavailable_reason or "system_md_unavailable"
+        reason = persona_source.unavailable_reason or "pcm_persona_unavailable"
         journal.append_audit(
             "dream_persona_unavailable",
             run_id=run_id,
@@ -768,7 +768,7 @@ async def execute_undo(
         getattr(config, "system_md", None)
     )
     if not persona_source.usable:
-        reason = persona_source.unavailable_reason or "system_md_unavailable"
+        reason = persona_source.unavailable_reason or "pcm_persona_unavailable"
         journal.append_audit(
             "dream_undo_persona_unavailable",
             run_id=run_id,

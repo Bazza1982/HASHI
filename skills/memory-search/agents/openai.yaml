@@ -1,0 +1,4 @@
+interface:
+  display_name: "Memory Search"
+  short_description: "Search authorised HASHI memory with provenance"
+  default_prompt: "Use $memory-search to search authorised HASHI memory and preserve provenance."

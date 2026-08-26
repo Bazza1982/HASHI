@@ -1,7 +1,7 @@
 """Persona-authored status delivery for detached background turns.
 
-The status text is deliberately generated from the exact configured
-``system_md`` file.  HASHI owns only the facts that the message must convey;
+The status text is deliberately generated from the Persona block in the exact
+lower-case workspace ``agent.md``. HASHI owns only the facts that the message must convey;
 the Agent's model owns the language, address, self-reference, and tone.
 """
 
@@ -71,7 +71,7 @@ Do not claim any result, progress percentage, or completion time. Do not
 mention this renderer, system instructions, prompts, or agent.md. Use at most
 two short sentences. Return only the message to send.
 
-CONFIGURED system_md PERSONA GUIDANCE (quoted, read-only)
+CONFIGURED agent.md [persona] GUIDANCE (quoted, read-only)
 {source.model_guidance()}
 """
 

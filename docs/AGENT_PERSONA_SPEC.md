@@ -1,22 +1,30 @@
 # HASHI Agent Persona Specification
 
-This document defines the recommended format for an agent persona file referenced by
-`system_md` in `agents.json`.
+This document defines the required HASHI PCM format for the exact lower-case
+`agent.md` file in each Agent workspace.
 
 ## Scope
 
-An agent persona file is the agent's human-authored identity and communication profile.
-It may contain additional system instructions after the persona block, but the
-`[persona]` block is the stable, machine-detectable summary that should appear first.
+The document owns the Agent's human-authored identity, permanent system
+instructions, and optional stable memory. HASHI rejects substantive unmarked text.
 
 ## Required structure
 
-Every new agent persona file should begin with exactly one block:
+Every Agent requires exactly one Persona block and one System block. A Memory
+block is optional:
 
 ```text
 [persona]
 agent name <display name>; <role>; <tone>; <audience/addressing>; <language>; Emoji <emoji>
 [persona_end]
+
+[sys]
+Permanent operating, safety, workflow, and output instructions.
+[sys_end]
+
+[memory]
+Optional stable facts or preferences that should persist.
+[memory_end]
 ```
 
 Rules:
@@ -28,14 +36,15 @@ Rules:
 4. Keep the summary factual, concise, and safe to inject into runtime context.
 5. Do not put secrets, API keys, private credentials, or long conversation history in
    the persona block.
-6. Use one persona block per file. Put detailed identity, workflow, formatting, and
-   safety rules after `[persona_end]`.
-7. The file path is configured by the agent's `system_md` field; both `agent.md`
-   and `AGENT.md` are valid filenames.
+6. Use exactly one `[persona]` and one `[sys]` block, and at most one `[memory]` block.
+7. Put all substantive content inside these recognised blocks. Duplicate, empty,
+   mismatched, unclosed, or unmarked content invalidates the whole document.
+8. The filename is always exactly `agent.md` in the configured workspace. Do not
+   add `system_md` to new `agents.json` entries.
 
 ## Recommended extended sections
 
-After the persona block, authors may add:
+Inside the `[sys]` block, authors may add Markdown headings such as:
 
 - `# Identity` — name, role, background, and relationship to the user.
 - `# Voice and tone` — language, formality, warmth, and stylistic preferences.
@@ -43,7 +52,7 @@ After the persona block, authors may add:
 - `# Boundaries` — privacy, safety, approval, and escalation rules.
 - `# Output format` — Markdown, headings, tables, emojis, or other presentation rules.
 
-These headings are recommendations, not additional runtime schema requirements.
+These headings are recommendations within the block, not additional block types.
 
 ## Minimal example
 
@@ -51,7 +60,7 @@ See [`../examples/agent.md.sample`](../examples/agent.md.sample).
 
 ## Configuration example
 
-The persona file is selected from the agent entry in `agents.json`:
+The PCM file is derived from `workspace_dir`:
 
 ```json
 {
@@ -59,8 +68,10 @@ The persona file is selected from the agent entry in `agents.json`:
   "display_name": "Research Assistant",
   "type": "flex",
   "workspace_dir": "workspaces/researcher",
-  "system_md": "workspaces/researcher/AGENT.md"
+  "allowed_backends": [{"engine": "codex-cli", "model": "gpt-5.4"}],
+  "active_backend": "codex-cli"
 }
 ```
 
-The `system_md` path must point to the actual persona file deployed for that agent.
+This entry requires `workspaces/researcher/agent.md`. Legacy `system_md` is accepted
+only as one-time migration input and is removed after successful validation.

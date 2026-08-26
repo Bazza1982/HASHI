@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from orchestrator import runtime_background_status
+from orchestrator.pcm import render_pcm_document
 from orchestrator.privacy_levels import PrivacyLevel
 
 
@@ -43,6 +44,14 @@ def _item(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _write_pcm(path: Path, persona: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        render_pcm_document(persona=persona, system="Follow HASHI policy."),
+        encoding="utf-8",
+    )
 
 
 def _runtime(persona_path: Path, renderer: AsyncMock):
@@ -88,7 +97,7 @@ async def test_status_is_model_authored_from_exact_persona_and_invalidates_on_ch
     tmp_path,
 ):
     persona_path = tmp_path / "agent.md"
-    persona_path.write_text("Address the user as Captain. Sign as Nova.", encoding="utf-8")
+    _write_pcm(persona_path, "Address the user as Captain. Sign as Nova.")
     renderer = AsyncMock(
         side_effect=[
             SimpleNamespace(is_success=True, text="Captain, Nova is still on it. ✨"),
@@ -111,7 +120,7 @@ async def test_status_is_model_authored_from_exact_persona_and_invalidates_on_ch
         "legacy hard-coded status" not in renderer.await_args_list[0].kwargs["prompt"]
     )
 
-    persona_path.write_text("Address the user as Doctor. Sign as Iris.", encoding="utf-8")
+    _write_pcm(persona_path, "Address the user as Doctor. Sign as Iris.")
     second = runtime_background_status.prepare(runtime, item)
     assert second is not None
     await second
@@ -126,7 +135,7 @@ async def test_status_is_model_authored_from_exact_persona_and_invalidates_on_ch
 @pytest.mark.asyncio
 async def test_her_status_never_uses_dream_maintenance_renderer(tmp_path):
     persona_path = tmp_path / "agent.md"
-    persona_path.write_text("Address the user as Captain.", encoding="utf-8")
+    _write_pcm(persona_path, "Address the user as Captain.")
     dream_renderer = AsyncMock(
         return_value=SimpleNamespace(is_success=True, text='{"groups":[]}')
     )
@@ -156,7 +165,7 @@ async def test_her_status_never_uses_dream_maintenance_renderer(tmp_path):
 @pytest.mark.asyncio
 async def test_status_edits_placeholder_once_and_final_wait_can_join_it(tmp_path):
     persona_path = tmp_path / "agent.md"
-    persona_path.write_text("Warm Persona", encoding="utf-8")
+    _write_pcm(persona_path, "Warm Persona")
     renderer = AsyncMock(
         return_value=SimpleNamespace(
             is_success=True,
@@ -209,7 +218,7 @@ async def test_status_edits_placeholder_once_and_final_wait_can_join_it(tmp_path
 @pytest.mark.asyncio
 async def test_status_uses_one_off_send_without_placeholder(tmp_path):
     persona_path = tmp_path / "agent.md"
-    persona_path.write_text("Concise Persona", encoding="utf-8")
+    _write_pcm(persona_path, "Concise Persona")
     renderer = AsyncMock(
         return_value=SimpleNamespace(is_success=True, text="Still working backstage. 🎭")
     )
@@ -242,7 +251,7 @@ async def test_status_uses_one_off_send_without_placeholder(tmp_path):
 @pytest.mark.asyncio
 async def test_completed_generation_wins_race_and_no_late_status_is_sent(tmp_path):
     persona_path = tmp_path / "agent.md"
-    persona_path.write_text("Slow Persona", encoding="utf-8")
+    _write_pcm(persona_path, "Slow Persona")
     release_renderer = asyncio.Event()
 
     async def render(*args, **kwargs):
@@ -273,7 +282,7 @@ async def test_completed_generation_wins_race_and_no_late_status_is_sent(tmp_pat
 @pytest.mark.asyncio
 async def test_persona_edit_during_render_never_delivers_stale_voice(tmp_path):
     persona_path = tmp_path / "agent.md"
-    persona_path.write_text("Old Persona Voice", encoding="utf-8")
+    _write_pcm(persona_path, "Old Persona Voice")
     release_old = asyncio.Event()
 
     async def render(prompt, **kwargs):
@@ -287,7 +296,7 @@ async def test_persona_edit_during_render_never_delivers_stale_voice(tmp_path):
     old_render = runtime_background_status.prepare(runtime, item)
     assert old_render is not None
     await asyncio.sleep(0)
-    persona_path.write_text("New Persona Voice", encoding="utf-8")
+    _write_pcm(persona_path, "New Persona Voice")
     generation_blocker = asyncio.Event()
     generation_task = asyncio.create_task(generation_blocker.wait())
 
@@ -310,7 +319,7 @@ async def test_persona_edit_during_render_never_delivers_stale_voice(tmp_path):
 @pytest.mark.asyncio
 async def test_non_her_agent_uses_allowed_tool_free_api_renderer(tmp_path):
     persona_path = tmp_path / "agent.md"
-    persona_path.write_text("Call the user Commander.", encoding="utf-8")
+    _write_pcm(persona_path, "Call the user Commander.")
     tool_free_renderer = AsyncMock(
         return_value=SimpleNamespace(is_success=True, text="Commander, I'll return soon. 🛰️")
     )

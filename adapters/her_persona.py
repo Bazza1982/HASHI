@@ -1,9 +1,8 @@
 """Canonical read-only Persona source handling for HER.
 
-HER never guesses identity from a prompt, a workspace filename, conversation
-history, or an Agent catalogue.  The resolved ``system_md`` configuration value
-is the sole Persona source.  This module deliberately owns no fallback filename
-policy.
+HER reads the Persona block from the exact lower-case workspace ``agent.md``.
+Strict PCM validation belongs to HASHI; presentation fallbacks remain an
+internal defensive lane and never make an invalid Agent configuration valid.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from adapters import her_habits
+from orchestrator.pcm import PCMValidationError, load_pcm_document
 
 MAX_PERSONA_RENDER_CHARS = 24_000
 MAX_PERSONA_PACKAGING_CHARS = 12_000
@@ -86,11 +86,7 @@ class HERPersonaSource:
 
 
 def load_configured_persona(system_md: str | Path | None) -> HERPersonaSource:
-    """Read only the concrete configured ``system_md`` path as UTF-8.
-
-    Missing, unreadable and empty sources are explicit results.  No conventional
-    filename is searched and the configured file is never created or modified.
-    """
+    """Read only the Persona block of canonical, strictly valid PCM."""
 
     if system_md is None or not str(system_md).strip():
         return HERPersonaSource(
@@ -99,40 +95,31 @@ def load_configured_persona(system_md: str | Path | None) -> HERPersonaSource:
             available=False,
             nonempty=False,
             content_sha256=None,
-            unavailable_reason="system_md_not_configured",
+            unavailable_reason="pcm_not_configured",
         )
 
     path = Path(system_md).expanduser()
     try:
-        content = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+        document = load_pcm_document(path, workspace_dir=path.parent)
+    except PCMValidationError as exc:
         return HERPersonaSource(
             path=path,
             content="",
             available=False,
             nonempty=False,
             content_sha256=None,
-            unavailable_reason="system_md_missing",
-        )
-    except (OSError, UnicodeError) as exc:
-        return HERPersonaSource(
-            path=path,
-            content="",
-            available=False,
-            nonempty=False,
-            content_sha256=None,
-            unavailable_reason=f"system_md_unreadable:{type(exc).__name__}",
+            unavailable_reason=exc.code,
         )
 
+    content = document.persona
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    nonempty = bool(content.strip())
     return HERPersonaSource(
         path=path,
         content=content,
         available=True,
-        nonempty=nonempty,
+        nonempty=True,
         content_sha256=digest,
-        unavailable_reason=None if nonempty else "system_md_empty",
+        unavailable_reason=None,
     )
 
 
@@ -141,12 +128,7 @@ def load_persona_packaging_source(
     *,
     display_name: str | None,
 ) -> HERPersonaPackagingSource:
-    """Extract one explicit Persona block without exposing the rest of agent.md.
-
-    Missing, repeated, reversed, empty, or oversized markers select the
-    deterministic minimal fallback.  Content outside the markers is never
-    returned to an HER v2 presentation lane.
-    """
+    """Package the already-isolated Persona block for a presentation lane."""
 
     source = load_configured_persona(system_md)
     safe_display_name = str(display_name or "").strip()[:120] or "HASHI"
@@ -159,38 +141,23 @@ def load_persona_packaging_source(
             content_sha256=None,
         )
 
-    begin_count = source.content.count(PERSONA_BLOCK_BEGIN)
-    end_count = source.content.count(PERSONA_BLOCK_END)
-    if begin_count == 0 and end_count == 0:
-        reason = "persona_block_missing"
-    elif begin_count != 1 or end_count != 1:
-        reason = "persona_block_ambiguous"
+    guidance = source.content.strip()
+    if len(guidance) > MAX_PERSONA_PACKAGING_CHARS:
+        reason = "persona_block_oversized"
     else:
-        begin = source.content.find(PERSONA_BLOCK_BEGIN) + len(PERSONA_BLOCK_BEGIN)
-        end = source.content.find(PERSONA_BLOCK_END)
-        reason = "persona_block_reversed" if end < begin else ""
-        if not reason:
-            guidance = source.content[begin:end].strip()
-            if not guidance:
-                reason = "persona_block_empty"
-            elif len(guidance) > MAX_PERSONA_PACKAGING_CHARS:
-                reason = "persona_block_oversized"
-            else:
-                guidance = her_habits.redact_bounded_text(
-                    guidance,
-                    limit=MAX_PERSONA_PACKAGING_CHARS,
-                ).strip()
-                if guidance:
-                    return HERPersonaPackagingSource(
-                        guidance=guidance,
-                        display_name=safe_display_name,
-                        usable=True,
-                        unavailable_reason=None,
-                        content_sha256=hashlib.sha256(
-                            guidance.encode("utf-8")
-                        ).hexdigest(),
-                    )
-                reason = "persona_block_empty_after_redaction"
+        guidance = her_habits.redact_bounded_text(
+            guidance,
+            limit=MAX_PERSONA_PACKAGING_CHARS,
+        ).strip()
+        if guidance:
+            return HERPersonaPackagingSource(
+                guidance=guidance,
+                display_name=safe_display_name,
+                usable=True,
+                unavailable_reason=None,
+                content_sha256=hashlib.sha256(guidance.encode("utf-8")).hexdigest(),
+            )
+        reason = "persona_block_empty_after_redaction"
 
     return HERPersonaPackagingSource(
         guidance="",

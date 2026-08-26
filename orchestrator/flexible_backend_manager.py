@@ -1185,6 +1185,8 @@ class FlexibleBackendManager:
                 "ollama-api",
                 "xai-api",
                 "her-v2",
+                "codex-cli",
+                "claude-cli",
             ):
                 tools_cfg = self._resolve_tools_config(backend_cfg_raw)
                 if tools_cfg:
@@ -1289,6 +1291,9 @@ class FlexibleBackendManager:
                     "_runtime": getattr(self, "runtime", None),
                 },
                 media_roots=self._vision_media_roots(adapter_cfg),
+                canonical_audit=getattr(
+                    getattr(self, "runtime", None), "canonical_audit", None
+                ),
             )
             self.current_backend.tool_registry = registry
             self.logger.info(
@@ -1524,4 +1529,33 @@ class FlexibleBackendManager:
                 "request_summary": request_meta.get("summary"),
             }
         )
+        request_metadata = request_meta.get("request_metadata")
+        context.pop("memory_search_authorization", None)
+        context.pop("request_tool_allowlist", None)
+        if isinstance(request_metadata, dict):
+            raw_allowlist = request_metadata.get("tool_allowlist")
+            if isinstance(raw_allowlist, list):
+                context["request_tool_allowlist"] = sorted(
+                    {
+                        str(name).strip()
+                        for name in raw_allowlist
+                        if str(name).strip() and registry.is_allowed(str(name).strip())
+                    }
+                )
+            authorization = request_metadata.get("memory_search_authorization")
+            if isinstance(authorization, dict):
+                context["memory_search_authorization"] = dict(authorization)
         registry.audit_context = context
+        if str(getattr(self.config, "active_backend", "")) in {
+            "codex-cli",
+            "claude-cli",
+        } and bool(getattr(self.current_backend, "_hashi_mcp_enabled", False)):
+            # Fixed CLI gateways are subprocesses. Refresh their owner-only
+            # request snapshot immediately before launch so request id and
+            # scoped authority cannot be stale from backend initialisation.
+            from adapters.hashi_mcp import prepare_hashi_mcp
+
+            prepare_hashi_mcp(
+                self.current_backend,
+                backend=str(self.config.active_backend),
+            )

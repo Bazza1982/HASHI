@@ -35,7 +35,13 @@ class HandoffBuilder:
         "**Handoff Summary**",
     )
 
-    def __init__(self, workspace_dir: Path, transcript_filename: str = "transcript.jsonl"):
+    def __init__(
+        self,
+        workspace_dir: Path,
+        transcript_filename: str = "transcript.jsonl",
+        *,
+        canonical_audit: Any = None,
+    ):
         self.workspace_dir = workspace_dir
         self.transcript_path = workspace_dir / transcript_filename
         self.recent_context_path = workspace_dir / "recent_context.jsonl"
@@ -43,6 +49,8 @@ class HandoffBuilder:
         self.memory_dir = workspace_dir / "memory"
         
         self.max_recent_rounds = 15
+        self.last_omission_audit: dict[str, Any] = {}
+        self.canonical_audit = canonical_audit
 
     def append_transcript(self, role: str, text: str, source: str = "text"):
         entry = {
@@ -86,7 +94,24 @@ class HandoffBuilder:
 
         if current_round:
             rounds.append(current_round)
-        return rounds
+
+        completed: List[List[Dict[str, Any]]] = []
+        for entries in rounds:
+            user_indexes = [
+                index for index, entry in enumerate(entries) if entry.get("role") == "user"
+            ]
+            if not user_indexes:
+                continue
+            user_index = user_indexes[-1]
+            assistant_entries = [
+                entry
+                for entry in entries[user_index + 1 :]
+                if entry.get("role") == "assistant" and str(entry.get("text") or "").strip()
+            ]
+            if not assistant_entries:
+                continue
+            completed.append([entries[user_index], assistant_entries[-1]])
+        return completed
 
     @staticmethod
     def _word_count(text: str) -> int:
@@ -101,37 +126,75 @@ class HandoffBuilder:
             logger.error(f"Failed to read handoff context from {path}: {e}")
             return ""
 
-    def build_recent_context_block(self, max_rounds: int = 10, max_words: int = 6000) -> tuple[str, int, int]:
+    def _bounded_recent_rounds(
+        self,
+        *,
+        max_rounds: int,
+        max_words: int,
+    ) -> tuple[list[tuple[int, List[Dict[str, Any]]]], int]:
         rounds = self._load_rounds()
-        selected = rounds[-max_rounds:] if max_rounds > 0 else rounds
+        selected_rounds = rounds[-max_rounds:] if max_rounds > 0 else rounds
+        first_sequence = len(rounds) - len(selected_rounds) + 1
+        selected = list(
+            zip(
+                range(first_sequence, first_sequence + len(selected_rounds)),
+                selected_rounds,
+            )
+        )
         total_words = 0
-        kept: List[List[Dict[str, Any]]] = []
+        kept: list[tuple[int, List[Dict[str, Any]]]] = []
 
-        for round_entries in reversed(selected):
+        for sequence, round_entries in reversed(selected):
             round_text = "\n".join((entry.get("text") or "") for entry in round_entries).strip()
             round_words = self._word_count(round_text)
-            if kept and total_words + round_words > max_words:
+            if total_words + round_words > max_words:
                 break
-            if not kept and round_words > max_words:
-                clipped_words = " ".join(round_text.split()[:max_words]).strip()
-                kept.append([{"role": "system", "text": clipped_words, "source": "handoff-clipped"}])
-                total_words = self._word_count(clipped_words)
-                break
-            kept.append(round_entries)
+            kept.append((sequence, round_entries))
             total_words += round_words
 
         kept.reverse()
+        omitted_count = len(selected) - len(kept)
+        self.last_omission_audit = {
+            "requested_exchanges": len(selected),
+            "included_exchanges": len(kept),
+            "omitted_oldest_exchanges": omitted_count,
+            "max_words": max_words,
+            "reason": "handoff_word_cap" if omitted_count else "",
+        }
+        if omitted_count:
+            logger.warning(
+                "Handoff omitted %s oldest complete exchange(s) at max_words=%s",
+                omitted_count,
+                max_words,
+            )
+            if self.canonical_audit is not None:
+                self.canonical_audit.record(
+                    "history_omission",
+                    dict(self.last_omission_audit),
+                    provenance={
+                        "source": "handoff_builder",
+                        "transcript": self.transcript_path.name,
+                    },
+                )
+        return kept, total_words
+
+    @staticmethod
+    def _render_recent_context(
+        kept: list[tuple[int, List[Dict[str, Any]]]],
+    ) -> str:
         if not kept:
-            return "", 0, 0
+            return ""
 
         lines = [
             "--- RECENT CONVERSATION HANDOFF ---",
         ]
 
-        exchange_count = 0
-        for index, round_entries in enumerate(kept, start=1):
-            exchange_count += 1
-            lines.append(f"Exchange {index}:")
+        for sequence, round_entries in kept:
+            user_ts = str(round_entries[0].get("ts") or "unknown-time")
+            assistant_ts = str(round_entries[-1].get("ts") or "unknown-time")
+            lines.append(
+                f"Exchange sequence={sequence}; user_ts={user_ts}; assistant_ts={assistant_ts}:"
+            )
             for entry in round_entries:
                 role = str(entry.get("role", "unknown")).upper()
                 text = (entry.get("text") or "").strip()
@@ -139,7 +202,14 @@ class HandoffBuilder:
                     lines.append(f"{role}: {text}")
             lines.append("")
 
-        return "\n".join(lines).strip(), exchange_count, total_words
+        return "\n".join(lines).strip()
+
+    def build_recent_context_block(self, max_rounds: int = 10, max_words: int = 6000) -> tuple[str, int, int]:
+        kept, total_words = self._bounded_recent_rounds(
+            max_rounds=max_rounds,
+            max_words=max_words,
+        )
+        return self._render_recent_context(kept), len(kept), total_words
 
     def get_recent_rounds(self, max_rounds: int = 10) -> List[List[Dict[str, Any]]]:
         rounds = self._load_rounds()
@@ -154,14 +224,16 @@ class HandoffBuilder:
         target_agent: str,
         target_instance: str,
         created_at: str,
-        max_rounds: int = 30,
-        max_words: int = 18000,
+        max_rounds: int = 10,
+        max_words: int = 6000,
     ) -> dict[str, Any]:
-        context_block, exchange_count, word_count = self.build_recent_context_block(
+        bounded_rounds, word_count = self._bounded_recent_rounds(
             max_rounds=max_rounds,
             max_words=max_words,
         )
-        recent_rounds = self.get_recent_rounds(max_rounds=max_rounds)
+        context_block = self._render_recent_context(bounded_rounds)
+        exchange_count = len(bounded_rounds)
+        recent_rounds = [round_entries for _sequence, round_entries in bounded_rounds]
         last_user_text = ""
         last_assistant_text = ""
         rendered_rounds: list[dict[str, Any]] = []
@@ -216,6 +288,7 @@ class HandoffBuilder:
             "created_at": created_at,
             "exchange_count": exchange_count,
             "word_count": word_count,
+            "omission_audit": dict(self.last_omission_audit),
             "recent_context_block": context_block,
             "recent_rounds": rendered_rounds,
             "last_user_message": last_user_text,

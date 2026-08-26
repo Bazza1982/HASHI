@@ -14,6 +14,7 @@ from adapters.stream_events import (
     KIND_FILE_READ, KIND_FILE_EDIT, KIND_SHELL_EXEC,
     KIND_TEXT_DELTA, KIND_PROGRESS,
 )
+from adapters.hashi_mcp import prepare_hashi_mcp, write_claude_mcp_config
 
 
 class ClaudeCLIAdapter(BaseBackend):
@@ -47,16 +48,14 @@ class ClaudeCLIAdapter(BaseBackend):
         # Real token usage captured from CLI result events
         self._last_usage: TokenUsage | None = None
         self._last_cost_usd: float | None = None
+        self.tool_registry = None
+        self._hashi_mcp_enabled = False
+        self._hashi_mcp_descriptor = None
+        self._hashi_mcp_config_path: Path | None = None
 
     def _resolve_system_prompt_source(self) -> Path | None:
-        candidates = []
-        if self.config.system_md:
-            candidates.append(Path(self.config.system_md))
-        candidates.append(self.config.workspace_dir / "CLAUDE.md")
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
-        return None
+        candidate = self.config.workspace_dir / "agent.md"
+        return candidate if candidate.is_file() else None
 
     async def initialize(self) -> bool:
         self.logger.info("Initializing Claude CLI backend...")
@@ -79,6 +78,11 @@ class ClaudeCLIAdapter(BaseBackend):
                 return False
             version = stdout.decode(errors="replace").strip()
             self.logger.info(f"Claude CLI version: {version}")
+            descriptor = prepare_hashi_mcp(self, backend="claude-cli")
+            if descriptor:
+                self._hashi_mcp_config_path = write_claude_mcp_config(
+                    self, descriptor
+                )
             return True
         except Exception as e:
             self.logger.error(f"Claude CLI not accessible: {e}")
@@ -290,6 +294,14 @@ class ClaudeCLIAdapter(BaseBackend):
             "--add-dir",
             self.effective_add_dir,
         ]
+        if self._hashi_mcp_enabled and self._hashi_mcp_config_path is not None:
+            cmd.extend(
+                [
+                    "--mcp-config",
+                    str(self._hashi_mcp_config_path),
+                    "--strict-mcp-config",
+                ]
+            )
         # Session persistence: use --resume when in session mode with an active session
         if self._session_mode and self._session_id:
             cmd.extend(["--resume", self._session_id])

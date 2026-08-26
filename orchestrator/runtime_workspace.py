@@ -49,8 +49,61 @@ def memory_plus_keyboard(enabled: bool) -> InlineKeyboardMarkup:
 async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
-    args = " ".join(context.args).strip().lower() if context.args else ""
+    raw_args = [str(value).strip() for value in (context.args or []) if str(value).strip()]
+    args = " ".join(raw_args).strip().lower()
     assembler = getattr(runtime, "context_assembler", None)
+
+    if raw_args and raw_args[0].casefold() == "raw":
+        if len(raw_args) < 4:
+            await runtime._reply_text(
+                update,
+                "Usage: <code>/memory raw &lt;instance_id&gt; &lt;agent_id&gt; &lt;query&gt;</code>",
+                parse_mode="HTML",
+            )
+            return
+        connectivity_check = getattr(runtime, "_is_hashi_tool_connected", None)
+        connected = (
+            bool(connectivity_check("memory_search"))
+            if callable(connectivity_check)
+            else "memory_search"
+            in {
+                item.get("name")
+                for item in runtime._get_available_tool_catalogue()
+                if isinstance(item, dict)
+            }
+        )
+        if not connected:
+            await runtime._reply_text(
+                update,
+                "❌ Cross-Agent raw memory search is unavailable for the active backend or current Tool policy.",
+            )
+            return
+        instance_id, agent_id = raw_args[1], raw_args[2]
+        query = " ".join(raw_args[3:]).strip()
+        purpose = f"User invoked /memory raw for {instance_id}/{agent_id}"
+        request_id = await runtime.enqueue_request(
+            chat_id=update.effective_chat.id,
+            prompt=(
+                "Use the authorised memory_search Tool exactly once with "
+                f"scope=cross_agent, instance_id={instance_id!r}, agent_id={agent_id!r}, "
+                f"purpose={purpose!r}, and query={query!r}. Preserve provenance in the answer."
+            ),
+            source="memory:raw-search",
+            summary=f"Authorised raw memory search: {instance_id}/{agent_id}",
+            request_metadata={
+                "tool_allowlist": ["memory_search"],
+                "memory_search_authorization": {
+                    "authorization": "explicit_user_authorization",
+                    "instance_id": instance_id,
+                    "agent_id": agent_id,
+                    "purpose": purpose,
+                    "authorizing_user_id": update.effective_user.id,
+                }
+            },
+        )
+        if not request_id:
+            await runtime._reply_text(update, "❌ Raw memory search request could not be queued.")
+        return
 
     if args in ("", "status"):
         from orchestrator.fresh_context import (
@@ -195,7 +248,7 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         await runtime._reply_text(
             update,
             "Usage: /memory [plus on | plus off | on | pause | search on | search off | "
-            "search status | wipe | sync on | sync off | status]",
+            "search status | raw <instance_id> <agent_id> <query> | wipe | sync on | sync off | status]",
         )
 
 
@@ -232,7 +285,7 @@ async def cmd_wipe(runtime: Any, update: Any, context: Any) -> None:
         )
         return
 
-    keep_names = {"agent.md", "AGENT.md", "post_turn_observers.json"} | runtime._observer_workspace_keep_names()
+    keep_names = {"agent.md", "post_turn_observers.json"} | runtime._observer_workspace_keep_names()
     removed_files, removed_dirs = await _wipe_workspace(runtime, keep_names)
     _reinitialize_workspace_runtime(runtime)
     _reset_pending_context(runtime)
@@ -281,7 +334,7 @@ async def cmd_reset(runtime: Any, update: Any, context: Any) -> None:
         )
         return
 
-    keep_names = {"agent.md", "AGENT.md", "sys_prompts.json", "post_turn_observers.json"} | runtime._observer_workspace_keep_names()
+    keep_names = {"agent.md", "sys_prompts.json", "post_turn_observers.json"} | runtime._observer_workspace_keep_names()
     preserved_state = _preserve_backend_state(runtime)
     removed_files, removed_dirs = await _wipe_workspace(runtime, keep_names)
     _reinitialize_workspace_runtime(runtime)
@@ -358,6 +411,8 @@ def _reinitialize_workspace_runtime(runtime: Any) -> None:
         active_skill_provider=runtime._get_active_skill_sections,
         sys_prompt_manager=runtime.sys_prompt_manager,
         global_sys_prompt_manager=getattr(runtime, "global_sys_prompt_manager", None),
+        skill_catalog_provider=runtime._get_available_skill_catalogue,
+        tool_catalog_provider=runtime._get_available_tool_catalogue,
     )
     apply_memory_search_preference(runtime.context_assembler, runtime.workspace_dir)
     runtime.reload_post_turn_observers()

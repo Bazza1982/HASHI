@@ -267,6 +267,7 @@ async def test_codex_mcp_inventory_starts_in_an_isolated_session(
 
     assert discovered == ("github",)
     assert captured_kwargs["start_new_session"] is True
+    assert captured_kwargs["cwd"] == str(adapter.effective_workdir)
     assert adapter._external_tool_processes == set()
 
 

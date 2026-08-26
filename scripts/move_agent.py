@@ -521,7 +521,7 @@ def _upsert_agent_config(agent_config: dict, root: Path, agent_id: str):
     # Update workspace_dir to match target layout
     new_config = dict(agent_config)
     new_config["workspace_dir"] = f"workspaces/{agent_id}"
-    new_config["system_md"] = f"workspaces/{agent_id}/agent.md"
+    new_config.pop("system_md", None)
     # Ensure active on target
     new_config["is_active"] = True
 

@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from orchestrator.pcm import canonical_agent_md, load_pcm_document
+
 from .package import PackageBuildResult, create_transfer_package
 from .schema import (
     PACKAGE_EXT,
@@ -194,22 +196,14 @@ def _workspace_dir(root: Path, agent_config: dict[str, Any]) -> Path | None:
 
 
 def _system_md_path(root: Path, agent_config: dict[str, Any], workspace: Path | None) -> Path | None:
-    raw = agent_config.get("system_md")
-    candidates: list[Path] = []
-    if raw:
-        p = Path(str(raw))
-        candidates.append(p if p.is_absolute() else root / p)
-    if workspace:
-        candidates.append(workspace / "agent.md")
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0] if candidates else None
+    del root, agent_config
+    return canonical_agent_md(workspace) if workspace else None
 
 
 def _read_identity(system_md: Path | None, agent_id: str, warnings: list[str]) -> str:
     if system_md and system_md.exists():
-        return system_md.read_text(encoding="utf-8", errors="replace")
+        load_pcm_document(system_md, workspace_dir=system_md.parent)
+        return system_md.read_text(encoding="utf-8")
     warnings.append(f"identity file missing for {agent_id}; placeholder generated")
     return f"# {agent_id}\n\nIdentity file was not found during HASHI export.\n"
 

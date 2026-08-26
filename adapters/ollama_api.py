@@ -14,6 +14,7 @@ import json
 import logging
 import time
 from itertools import count
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -31,6 +32,7 @@ from adapters.stream_events import (
     StreamCallback,
     StreamEvent,
 )
+from orchestrator.pcm import load_pcm_document
 
 _DEFAULT_OLLAMA_URL = "http://localhost:11434/v1/chat/completions"
 
@@ -71,9 +73,11 @@ class OllamaAdapter(OpenRouterAdapter):
 
         # Load system prompt
         try:
-            from pathlib import Path
             if self.config.system_md and Path(self.config.system_md).exists():
-                self.sys_prompt = Path(self.config.system_md).read_text(encoding="utf-8")
+                self.sys_prompt = load_pcm_document(
+                    self.config.system_md,
+                    workspace_dir=self.config.workspace_dir,
+                ).system
         except Exception as e:
             self.logger.warning(f"Could not read system_md: {e}")
 

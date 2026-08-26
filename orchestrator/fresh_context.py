@@ -70,6 +70,16 @@ def cutoff_epoch(runtime: Any) -> float:
     return _timestamp_epoch(state(runtime).get("cutoff_epoch"))
 
 
+def workspace_cutoff_epoch(workspace_dir: str | Path) -> float:
+    """Read the durable cutoff without requiring a fully constructed runtime."""
+
+    payload = WorkspaceStateStore(Path(workspace_dir)).read()
+    block = payload.get(STATE_KEY) if isinstance(payload, Mapping) else None
+    if not isinstance(block, Mapping) or int(block.get("version") or 0) != STATE_VERSION:
+        return 0.0
+    return _timestamp_epoch(block.get("cutoff_epoch"))
+
+
 def automatic_context_suppressed(runtime: Any) -> bool:
     return bool(state(runtime).get("automatic_context_suppressed"))
 
@@ -188,4 +198,5 @@ __all__ = [
     "resume_habit_context",
     "start_boundary",
     "state",
+    "workspace_cutoff_epoch",
 ]

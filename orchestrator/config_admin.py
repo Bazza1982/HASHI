@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from orchestrator.pathing import BridgePaths
+from orchestrator.pcm import atomic_write_pcm, render_pcm_document
 
 
 class ConfigAdmin:
@@ -70,9 +71,18 @@ class ConfigAdmin:
         ws_dir = self.paths.workspaces_root / agent_name
         ws_dir.mkdir(parents=True, exist_ok=True)
 
-        agent_md = ws_dir / "AGENT.md"
+        agent_md = ws_dir / "agent.md"
         if not agent_md.exists():
-            agent_md.write_text(f"# {agent_name}\n\nNew HASHI agent.\n", encoding="utf-8")
+            atomic_write_pcm(
+                agent_md,
+                render_pcm_document(
+                    persona=f"You are {display_name}, a HASHI agent.",
+                    system=(
+                        "Follow HASHI infrastructure policy, active /sys rules, "
+                        "and the authoritative current user request."
+                    ),
+                ),
+            )
 
         if isinstance(agent_cfg, dict):
             new_entry = dict(agent_cfg)
@@ -83,9 +93,42 @@ class ConfigAdmin:
             }
         new_entry.setdefault("name", agent_name)
         new_entry.setdefault("workspace_dir", f"workspaces/{agent_name}")
-        new_entry.setdefault("system_md", f"workspaces/{agent_name}/AGENT.md")
+        new_entry.pop("system_md", None)
         new_entry.setdefault("is_active", True)
         new_entry.setdefault("type", "flex")
+        if not new_entry.get("allowed_backends") or not new_entry.get("active_backend"):
+            template = next(
+                (
+                    row
+                    for row in raw.get("agents", [])
+                    if isinstance(row, dict)
+                    and row.get("active_backend")
+                    and row.get("allowed_backends")
+                ),
+                None,
+            )
+            active_backend = str(
+                (template or {}).get("active_backend") or "codex-cli"
+            )
+            template_row = next(
+                (
+                    item
+                    for item in (template or {}).get("allowed_backends", [])
+                    if isinstance(item, dict) and item.get("engine") == active_backend
+                ),
+                {"engine": active_backend},
+            )
+            # Agent creation never inherits Tool grants. Copy only backend/model
+            # selection fields needed for a valid, least-privilege scaffold.
+            safe_backend = {
+                key: value
+                for key, value in template_row.items()
+                if key in {"engine", "model", "default_model", "models", "provider"}
+            }
+            safe_backend["engine"] = active_backend
+            new_entry.setdefault("allowed_backends", [safe_backend])
+            new_entry.setdefault("active_backend", active_backend)
+        new_entry.setdefault("default_mode", "flex")
 
         raw.setdefault("agents", []).append(new_entry)
         self.write_raw_config(raw)

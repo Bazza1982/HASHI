@@ -23,6 +23,7 @@ from adapters.stream_events import (
     StreamEvent,
 )
 from orchestrator.enterprise.policy import evaluate_governance_policy
+from orchestrator.pcm import load_pcm_document
 from orchestrator.multimodal_contract import (
     InputCapability,
     MultimodalContractError,
@@ -487,7 +488,10 @@ class OpenRouterAdapter(BaseBackend):
 
         try:
             if self.config.system_md and Path(self.config.system_md).exists():
-                self.sys_prompt = Path(self.config.system_md).read_text(encoding="utf-8")
+                self.sys_prompt = load_pcm_document(
+                    self.config.system_md,
+                    workspace_dir=self.config.workspace_dir,
+                ).system
         except Exception as e:
             self.logger.warning(f"Could not read system_md: {e}")
 

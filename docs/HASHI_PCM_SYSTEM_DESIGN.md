@@ -294,7 +294,7 @@ The user may enter /wiki or explicitly ask an agent to search the Wiki. The gene
 
 ##### Raw transcript and log search
 
-An appropriately authorised agent or audit workflow may search canonical raw evidence through an explicit retrieval path. General file or shell access is not by itself permission to disclose sensitive audit evidence. Raw audit records are not a normal long-term-memory source and are never automatically published to the Wiki or embedding stores.
+An appropriately authorised agent or audit workflow may search canonical raw evidence through an explicit retrieval path. General file or shell access is not by itself permission to disclose sensitive audit evidence. Raw audit records are not a normal long-term-memory source and are never automatically published to the Wiki or embedding stores. Cross-Agent consolidated-memory search is initiated through the explicit `/memory raw <instance> <agent> <query>` command; HASHI binds the exact target and purpose to that request, so model-generated Tool arguments cannot manufacture user authorisation.
 
 ## 7. PCM Authority and Conflict Resolution
 

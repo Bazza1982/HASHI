@@ -9,7 +9,7 @@ from pathlib import Path
 
 import adapters.stream_events as stream_event_types
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
-from adapters.codex_app_server import CodexAppServerToolBridge
+from adapters.codex_app_server import CodexAppServerToolBridge, disabled_mcp_override
 from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
@@ -25,6 +25,7 @@ from orchestrator.multimodal_contract import (
     routing_decisions_payload,
     validate_authorized_media_references,
 )
+from adapters.hashi_mcp import prepare_hashi_mcp
 
 _CODEX_REQUEST_REASONING_EFFORTS = frozenset(
     {"none", "low", "medium", "high", "xhigh", "max"}
@@ -67,6 +68,9 @@ class CodexCLIAdapter(BaseBackend):
         self._session_mode: bool = bool((self.config.extra or {}).get("session_mode", False))
         # Real token usage captured from turn.completed events
         self._last_usage: TokenUsage | None = None
+        self.tool_registry = None
+        self._hashi_mcp_enabled = False
+        self._hashi_mcp_descriptor = None
 
     def _should_use_stdin_transport(self, prompt: str) -> bool:
         if (
@@ -101,6 +105,7 @@ class CodexCLIAdapter(BaseBackend):
                 return False
             version = stdout.decode(errors="replace").strip()
             self.logger.info(f"Codex CLI version: {version}")
+            prepare_hashi_mcp(self, backend="codex-cli")
             return True
         except Exception as e:
             self.logger.error(f"Codex CLI not accessible: {e}")
@@ -120,6 +125,7 @@ class CodexCLIAdapter(BaseBackend):
             "--json",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=str(self.effective_workdir),
             **extra_kwargs,
         )
         self._external_tool_processes.add(proc)
@@ -474,6 +480,37 @@ class CodexCLIAdapter(BaseBackend):
             base_flags += ["-c", f'model_reasoning_effort="{selected_effort}"']
         for image_path in image_paths:
             base_flags += ["--image", str(image_path)]
+        descriptor = self._hashi_mcp_descriptor if self._hashi_mcp_enabled else None
+        if descriptor:
+            # A Fixed CLI request must expose exactly the request-scoped HASHI
+            # Gateway plus Codex's ordinary local coding surface. Disable every
+            # MCP server visible through user or project config before enabling
+            # our gateway, and turn off other optional external tool surfaces.
+            for feature in (
+                "apps",
+                "plugins",
+                "multi_agent",
+                "browser_use",
+                "computer_use",
+                "image_generation",
+                "hooks",
+            ):
+                base_flags += ["--disable", feature]
+            base_flags += ["-c", 'web_search="disabled"']
+            for server_name in self._external_mcp_server_names or ():
+                base_flags += ["-c", disabled_mcp_override(server_name)]
+            command_value = json.dumps(str(descriptor["command"]), ensure_ascii=False)
+            args_value = json.dumps(list(descriptor["args"]), ensure_ascii=False)
+            cwd_value = json.dumps(str(descriptor["cwd"]), ensure_ascii=False)
+            server_name = str(descriptor["name"])
+            mcp_value = (
+                f"mcp_servers.{server_name}={{command={command_value},"
+                f"args={args_value},cwd={cwd_value},enabled=true}}"
+            )
+            base_flags += [
+                "-c",
+                mcp_value,
+            ]
 
         if self._session_mode and self._session_id:
             # Resume existing session — access root already set in session, no --add-dir needed
@@ -687,6 +724,24 @@ class CodexCLIAdapter(BaseBackend):
             self.logger.info(
                 f"Prompt for {request_id} requires stdin transport; sending full prompt via stdin."
             )
+
+        if self._hashi_mcp_enabled:
+            try:
+                # Refresh for every invocation so an MCP server added after
+                # adapter initialization cannot escape the request boundary.
+                self._external_mcp_server_names = await self._discover_mcp_servers()
+            except Exception as exc:
+                return with_media_metadata(
+                    BackendResponse(
+                        text="",
+                        duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                        error=(
+                            "Codex Fixed Tool Gateway isolation is unavailable because "
+                            f"configured MCP servers could not be inventoried: {exc}"
+                        ),
+                        is_success=False,
+                    )
+                )
 
         cmd = self._build_cmd(
             prompt_arg,

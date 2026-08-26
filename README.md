@@ -1408,7 +1408,6 @@ duplicate alias `/paswd` has been removed.
       "name": "hashiko",
       "type": "flex",
       "display_name": "Hashiko",
-      "system_md": "workspaces/hashiko/agent.md",
       "workspace_dir": "workspaces/hashiko",
       "is_active": true,
       "telegram_token_key": "hashiko",

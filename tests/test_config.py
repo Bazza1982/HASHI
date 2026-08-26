@@ -5,8 +5,21 @@ import pytest
 
 from orchestrator.config import (
     ConfigManager,
-    LEGACY_FIXED_CONFIG_BACKUP_SUFFIX,
+    LEGACY_PCM_CONFIG_BACKUP_SUFFIX,
 )
+from orchestrator.pcm import load_pcm_document
+
+
+def _materialize_legacy_pcm(config_path, root):
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    for agent in payload.get("agents", []):
+        raw = agent.get("system_md")
+        if not raw:
+            continue
+        path = root / raw
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(f"Legacy Persona for {agent.get('name')}\n", encoding="utf-8")
 
 
 def _write_base_files(tmp_path, agent):
@@ -26,6 +39,7 @@ def _write_base_files(tmp_path, agent):
         encoding="utf-8",
     )
     secrets_path.write_text(json.dumps({"authorized_telegram_id": 0}), encoding="utf-8")
+    _materialize_legacy_pcm(config_path, tmp_path)
     return config_path, secrets_path
 
 
@@ -71,10 +85,11 @@ def test_explicit_fixed_stateless_agent_is_migrated_to_flex(tmp_path, caplog):
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["agents"][0]["type"] == "flex"
     assert persisted["agents"][0]["default_mode"] == "flex"
-    backup_path = config_path.with_name(
-        config_path.name + LEGACY_FIXED_CONFIG_BACKUP_SUFFIX
-    )
+    backup_path = config_path.with_name(config_path.name + LEGACY_PCM_CONFIG_BACKUP_SUFFIX)
     assert backup_path.read_text(encoding="utf-8") == original
+    assert "system_md" not in persisted["agents"][0]
+    document = load_pcm_document(tmp_path / "workspaces/legacy/agent.md")
+    assert "Legacy Persona" in document.persona
     assert "Migrated retired type='fixed'" in caplog.text
 
 
@@ -163,6 +178,7 @@ def test_public_her_configuration_id_resolves_forward_to_v2(tmp_path):
         encoding="utf-8",
     )
     secrets_path.write_text(json.dumps({"authorized_telegram_id": 0}), encoding="utf-8")
+    _materialize_legacy_pcm(config_path, tmp_path)
 
     global_cfg, agents, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
@@ -224,6 +240,7 @@ def test_flex_agent_does_not_receive_an_implicit_her_backend(tmp_path):
         encoding="utf-8",
     )
     secrets_path.write_text(json.dumps({"authorized_telegram_id": 0}), encoding="utf-8")
+    _materialize_legacy_pcm(config_path, tmp_path)
 
     _, agents, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
@@ -268,6 +285,7 @@ def test_enterprise_scheduler_lease_config_is_loaded(tmp_path):
         encoding="utf-8",
     )
     secrets_path.write_text(json.dumps({"authorized_telegram_id": 0}), encoding="utf-8")
+    _materialize_legacy_pcm(config_path, tmp_path)
 
     global_cfg, _, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 

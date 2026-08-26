@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from types import SimpleNamespace
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -11,8 +12,8 @@ from typing import Any
 from tools.registry import ToolRegistry
 from tools.schemas import ALL_TOOL_NAMES
 
-CONTEXT_SCHEMA_VERSION = 4
-_COMPATIBLE_CONTEXT_SCHEMA_VERSIONS = frozenset({3, CONTEXT_SCHEMA_VERSION})
+CONTEXT_SCHEMA_VERSION = 5
+_COMPATIBLE_CONTEXT_SCHEMA_VERSIONS = frozenset({3, 4, CONTEXT_SCHEMA_VERSION})
 
 # LEGACY HER V1 ONLY. The subprocess Tool Gateway is not part of HER v2 or any
 # direct API backend. Its circuit breakers remain solely to contain a retired
@@ -105,6 +106,9 @@ class GatewayContext:
     agents_config: list[dict[str, Any]] = field(default_factory=list)
     audit: dict[str, Any] = field(default_factory=dict)
     vision_enabled: bool = True
+    enforce_legacy_limits: bool = False
+    global_context: dict[str, Any] = field(default_factory=dict)
+    canonical_audit: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_registry(
@@ -137,6 +141,8 @@ class GatewayContext:
             .strip()
             .rstrip("/")
         )
+        global_config = (registry.audit_context or {}).get("global_config")
+        canonical = getattr(registry, "canonical_audit", None)
         return cls(
             schema_version=CONTEXT_SCHEMA_VERSION,
             agent=str(audit.get("agent_name") or registry.workspace_dir.name),
@@ -178,10 +184,31 @@ class GatewayContext:
             agents_config=_json_safe(registry.agents_config) or [],
             audit={**audit, "backend": backend},
             vision_enabled=vision_enabled,
+            enforce_legacy_limits=backend in {"her", "her-v1"},
+            global_context=(
+                {
+                    "instance_id": str(getattr(global_config, "instance_id", "HASHI")),
+                    "central_memory": _json_safe(
+                        getattr(global_config, "central_memory", None) or {}
+                    ),
+                    "wiki_provider": _json_safe(
+                        getattr(global_config, "wiki_provider", None) or {}
+                    ),
+                }
+                if global_config is not None
+                else {}
+            ),
+            canonical_audit=(
+                _json_safe(canonical.descriptor()) or {}
+                if canonical is not None and hasattr(canonical, "descriptor")
+                else {}
+            ),
         )
 
     def build_registry(self) -> ToolRegistry:
         audit = dict(self.audit)
+        if self.global_context:
+            audit["global_config"] = SimpleNamespace(**self.global_context)
         workbench_api_base_url = (
             (self.workbench_api_base_url or self.scheduler_api_base_url)
             .strip()
@@ -190,18 +217,28 @@ class GatewayContext:
         if workbench_api_base_url:
             audit["workbench_api_base_url"] = workbench_api_base_url
             audit["scheduler_api_base_url"] = workbench_api_base_url
+        canonical = None
+        if self.canonical_audit:
+            from orchestrator.canonical_audit import CanonicalAuditStore
+
+            descriptor = dict(self.canonical_audit)
+            canonical = CanonicalAuditStore(
+                descriptor["bridge_home"],
+                instance_id=descriptor["instance_id"],
+                agent_id=descriptor["agent_id"],
+                config=descriptor.get("config"),
+            )
         return ToolRegistry(
             allowed_tools=self.allowed_tools,
             access_root=Path(self.access_root),
             workspace_dir=Path(self.workspace_dir),
             secrets=self.secrets,
             tool_options=self.tool_options,
-            # Kept inside the legacy HER gateway subprocess only. Direct API
-            # adapters and HER v2 always receive ``max_loops=None``.
-            max_loops=max(1, self.max_calls // 4),
+            max_loops=(max(1, self.max_calls // 4) if self.enforce_legacy_limits else None),
             agents_config=self.agents_config,
             audit_context=audit,
             media_roots=[Path(root) for root in self.media_roots],
+            canonical_audit=canonical,
         )
 
 
@@ -214,9 +251,11 @@ def write_gateway_context(
     workbench_api_base_url: str = "",
     scheduler_api_base_url: str = "",
     vision_enabled: bool = True,
+    backend: str = "her",
 ) -> GatewayContext:
     context = GatewayContext.from_registry(
         registry,
+        backend=backend,
         additional_allowed_tools=additional_allowed_tools,
         media_roots=media_roots,
         workbench_api_base_url=workbench_api_base_url,

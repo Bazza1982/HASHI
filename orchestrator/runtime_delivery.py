@@ -87,12 +87,40 @@ async def send_long_message(
     delivery_mode: str = "final_delivery",
 ):
     """Send a message to Telegram with safe chunking."""
+    canonical = getattr(runtime, "canonical_audit", None)
+
+    def record_delivery(stage: str, **fields: Any) -> None:
+        if canonical is None:
+            return
+        try:
+            canonical.record(
+                "delivery_event",
+                {
+                    "stage": stage,
+                    "chat_id": chat_id,
+                    "purpose": purpose,
+                    "delivery_mode": delivery_mode,
+                    "text": text,
+                    **fields,
+                },
+                request_id=str(request_id or ""),
+                provenance={"transport": "telegram"},
+            )
+        except Exception as exc:
+            runtime.error_logger.error(
+                "Canonical delivery audit failed for %s: %s",
+                request_id or "<none>",
+                exc,
+            )
+
+    record_delivery("requested")
     await runtime_delivery_order.wait_for_turn(runtime, request_id)
     if not runtime.telegram_connected:
         runtime.logger.info(
             f"Telegram disconnected — skipping send for {request_id or 'unknown'} "
             f"(purpose={purpose}, text_len={len(text)})"
         )
+        record_delivery("skipped", disposition="telegram_disconnected", chunks=0)
         return 0.0, 0
 
     send_started = monotonic()
@@ -110,6 +138,7 @@ async def send_long_message(
             f"Telegram delivery blocked for {request_id or '<none>'} "
             f"(purpose={purpose}, mode={delivery_mode})"
         )
+        record_delivery("blocked", disposition="delivery_failover", chunks=0)
         return 0.0, 0
 
     async def _send_or_skip(**kwargs) -> bool:
@@ -131,7 +160,18 @@ async def send_long_message(
                     f"Telegram flood control for request_id={request_id or '<none>'} "
                     f"(purpose={purpose}); skipping send, retry_after_s={retry_after}"
                 )
+                record_delivery(
+                    "blocked",
+                    disposition="telegram_retry_after",
+                    retry_after_seconds=retry_after,
+                )
                 return False
+            record_delivery(
+                "failed",
+                disposition="telegram_exception",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             raise
 
     if purpose == "error":
@@ -169,6 +209,7 @@ async def send_long_message(
             f"Sent Telegram message for request_id={request_id or '<none>'} "
             f"(purpose=error, chunks=1, text_len={len(msg)})"
         )
+        record_delivery("completed", disposition="sent", chunks=1)
         return max(0.0, monotonic() - send_started), 1
 
     html = _md_to_html(text)
@@ -227,6 +268,7 @@ async def send_long_message(
             f"Sent Telegram message for request_id={request_id or '<none>'} "
             f"(purpose={purpose}, chunks={chunk_count}, text_len={len(text)})"
         )
+        record_delivery("completed", disposition="sent", chunks=chunk_count)
         return max(0.0, monotonic() - send_started), chunk_count
 
     raw_chunks, html_chunks = [], []
@@ -255,6 +297,7 @@ async def send_long_message(
         f"Sent Telegram message for request_id={request_id or '<none>'} "
         f"(purpose={purpose}, chunks={chunk_count}, text_len={len(text)})"
     )
+    record_delivery("completed", disposition="sent", chunks=chunk_count)
     return max(0.0, monotonic() - send_started), chunk_count
 
 

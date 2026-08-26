@@ -9,6 +9,8 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 
+from orchestrator.pcm import atomic_write_pcm, render_pcm_document
+
 # ── Crash log setup ──────────────────────────────────────────────────────────
 _LOG_PATH = Path(__file__).parent.parent / "onboarding_crash.log"
 
@@ -177,6 +179,14 @@ def run_onboarding():
     _log(f"workspace_dir created: {workspace_dir}")
     shutil.copy(project_root / "docs" / "initial.md", workspace_dir / "initial.md")
     shutil.copy(project_root / "docs" / "AGENT_FYI.md", workspace_dir / "AGENT_FYI.md")
+    initial_guidance = (project_root / "docs" / "initial.md").read_text(encoding="utf-8")
+    atomic_write_pcm(
+        workspace_dir / "agent.md",
+        render_pcm_document(
+            persona="You are Hashiko, the friendly HASHI onboarding agent.",
+            system=initial_guidance,
+        ),
+    )
     _log(f"initial.md and AGENT_FYI.md copied to {workspace_dir}")
 
     # 1. Prime the canonical Flex transcript
@@ -278,7 +288,6 @@ def run_onboarding():
         "emoji": "🐣",
         "type": "flex",
         "engine": current_engine,
-        "system_md": "docs/initial.md",
         "workspace_dir": "workspaces/onboarding_agent",
         "is_active": True,
         "model": default_models.get(current_engine, "default"),

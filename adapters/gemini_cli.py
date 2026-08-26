@@ -53,21 +53,8 @@ class GeminiCLIAdapter(BaseBackend):
         self.access_root = str(self.config.resolve_access_root())
 
     def _resolve_system_md_path(self) -> Path | None:
-        candidates = []
-        if self.config.system_md:
-            candidates.append(Path(self.config.system_md))
-        candidates.extend(
-            [
-                self.config.workspace_dir / "agent.md",
-                self.config.workspace_dir / "AGENT.md",
-                self.config.workspace_dir / "gemini.md",
-                self.config.workspace_dir / "GEMINI.md",
-            ]
-        )
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
-        return None
+        candidate = self.config.workspace_dir / "agent.md"
+        return candidate if candidate.is_file() else None
 
     async def initialize(self) -> bool:
         self.logger.info("Initializing Gemini CLI backend (stateless mode)...")

@@ -140,8 +140,8 @@ def build_handoff_payload(runtime: Any, target_agent: str, target_instance: str,
         target_agent=target_agent,
         target_instance=target_instance,
         created_at=datetime.now().isoformat(),
-        max_rounds=30,
-        max_words=18000,
+        max_rounds=10,
+        max_words=6000,
     )
     package["mode"] = action
     package["source_runtime"] = runtime.get_runtime_metadata()
