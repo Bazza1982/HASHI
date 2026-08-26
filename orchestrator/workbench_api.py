@@ -715,7 +715,12 @@ class WorkbenchApiServer:
         if self.orchestrator is None:
             return False
         wa = getattr(self.orchestrator, "whatsapp", None)
-        return wa is not None and getattr(wa, "_client", None) is not None
+        if wa is None:
+            return False
+        is_connected = getattr(wa, "is_connected", None)
+        if callable(is_connected):
+            return bool(is_connected())
+        return getattr(wa, "_client", None) is not None
 
     async def start(self):
         self.runner = web.AppRunner(self.app)

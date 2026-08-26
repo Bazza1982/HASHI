@@ -65,7 +65,7 @@ test = [
     "tomli>=2.0.0; python_version < '3.11'",
 ]
 whatsapp = [
-    "neonize>=1.0.0",
+    "neonize>=0.4.3.post0,<0.5.0",
     "segno>=1.6.0",
 ]
 browser = ["playwright>=1.40.0"]
@@ -98,7 +98,7 @@ all = [
     "cryptography>=45.0.0",
     "rich>=13.0.0",
     "textual>=0.50.0",
-    "neonize>=1.0.0",
+    "neonize>=0.4.3.post0,<0.5.0",
     "segno>=1.6.0",
     "playwright>=1.40.0",
     "edge-tts>=6.0.0",

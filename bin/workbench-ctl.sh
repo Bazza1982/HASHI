@@ -15,7 +15,7 @@ health(){ curl -sf --max-time 3 "$1" >/dev/null 2>&1; }
 [[ -d "$WORKBENCH_DIR/node_modules" ]] || (cd "$WORKBENCH_DIR" && npm install)
 
 OPEN_BROWSER=0
-if [[ "${2:-}" == "--open" || "${1:-}" == "--open" ]]; then
+if [[ ("${2:-}" == "--open" || "${1:-}" == "--open") && -t 1 ]]; then
   OPEN_BROWSER=1
 fi
 

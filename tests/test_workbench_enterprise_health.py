@@ -64,3 +64,17 @@ async def test_personal_health_keeps_legacy_shape_without_enterprise_block(tmp_p
     assert response.status == 200
     assert payload["ok"] is True
     assert "enterprise" not in payload
+
+
+def test_whatsapp_channel_health_uses_transport_connection_state(tmp_path):
+    server = _server(tmp_path, profile="personal")
+    transport = SimpleNamespace(
+        _client=object(),
+        is_connected=lambda: False,
+    )
+    server.orchestrator = SimpleNamespace(whatsapp=transport)
+
+    assert server._is_whatsapp_available() is False
+
+    transport.is_connected = lambda: True
+    assert server._is_whatsapp_available() is True

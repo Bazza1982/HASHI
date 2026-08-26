@@ -160,6 +160,17 @@ class WhatsAppTransport:
         logger.info("WhatsApp transport shut down.")
         _print_wa_line(_C_WA_SYS, "system", "transport shut down")
 
+    def is_connected(self) -> bool:
+        """Return whether the client has a live, authenticated session."""
+        if self._client is None:
+            return False
+        try:
+            return bool(
+                self._client.is_connected() and self._client.is_logged_in()
+            )
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------
     # Incoming message handler
     # ------------------------------------------------------------------

@@ -38,6 +38,26 @@ def _audit_events(tmp_path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+@pytest.mark.parametrize(
+    ("socket_connected", "logged_in", "expected"),
+    [
+        (True, True, True),
+        (True, False, False),
+        (False, True, False),
+    ],
+)
+def test_whatsapp_connection_state_requires_socket_and_login(
+    socket_connected, logged_in, expected
+):
+    transport = WhatsAppTransport.__new__(WhatsAppTransport)
+    transport._client = SimpleNamespace(
+        is_connected=lambda: socket_connected,
+        is_logged_in=lambda: logged_in,
+    )
+
+    assert transport.is_connected() is expected
+
+
 @pytest.mark.asyncio
 async def test_personal_whatsapp_ingress_gate_allows(tmp_path):
     transport = _transport(tmp_path, profile="personal", org_id=None)

@@ -1370,6 +1370,31 @@ async def test_medium_her_v2_acknowledgement_composes_with_request_activity():
 
 
 @pytest.mark.asyncio
+async def test_non_her_request_activity_callback_does_not_recurse():
+    runtime = _runtime()
+    published = []
+    runtime.request_activity = SimpleNamespace(
+        publish_stream=lambda request_id, event: published.append(
+            (request_id, event.kind)
+        )
+    )
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(),
+        audit_active=False,
+        audit_collector=None,
+    )
+    await feedback.on_stream_event(
+        StreamEvent(kind=KIND_PROGRESS, summary="Task started")
+    )
+
+    assert published == [("req-1", KIND_PROGRESS)]
+    feedback.stop_typing.set()
+    await feedback.typing_task
+
+
+@pytest.mark.asyncio
 async def test_high_her_commentary_delivers_independently_of_think_and_verbose():
     runtime = _runtime()
     runtime.config.active_backend = "her-v2"

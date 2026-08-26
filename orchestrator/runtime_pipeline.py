@@ -1745,12 +1745,12 @@ async def setup_interactive_feedback(
     # ownership even when Telegram presentation is disabled.  The activity
     # store is bounded and credential-redacted by construction.
     if activity_store is not None and not is_her_backend:
-        presentation_callback = stream_callback
+        downstream_callback = stream_callback
 
         async def _activity_callback(event):
             activity_store.publish_stream(item.request_id, event)
-            if presentation_callback is not None:
-                result = presentation_callback(event)
+            if downstream_callback is not None:
+                result = downstream_callback(event)
                 if inspect.isawaitable(result):
                     await result
 

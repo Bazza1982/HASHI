@@ -395,7 +395,10 @@ test('nagare tools expose workflow DAG and run status from real files', async ()
       assert.ok(dag.body.result.steps.some((step) => step.id === 'step_write'));
       assert.ok(dag.body.result.path.endsWith('smoke_test.yaml'));
 
-      const run = await callTool(baseUrl, 'nagare_get_run_status', { workflow_id: 'smoke-test' });
+      const run = await callTool(baseUrl, 'nagare_get_run_status', {
+        workflow_id: 'smoke-test',
+        run_id: 'run-smoke-test-20260403-180224',
+      });
       assert.equal(run.response.status, 200);
       assert.equal(run.body.result.workflow_id, 'smoke-test');
       assert.equal(run.body.result.status, 'completed');

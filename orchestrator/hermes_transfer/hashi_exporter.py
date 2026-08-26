@@ -8,7 +8,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from orchestrator.pcm import canonical_agent_md, load_pcm_document
+from orchestrator.pcm import (
+    PCMValidationError,
+    canonical_agent_md,
+    convert_legacy_pcm_text,
+    load_pcm_document,
+)
 
 from .package import PackageBuildResult, create_transfer_package
 from .schema import (
@@ -202,8 +207,16 @@ def _system_md_path(root: Path, agent_config: dict[str, Any], workspace: Path | 
 
 def _read_identity(system_md: Path | None, agent_id: str, warnings: list[str]) -> str:
     if system_md and system_md.exists():
-        load_pcm_document(system_md, workspace_dir=system_md.parent)
-        return system_md.read_text(encoding="utf-8")
+        raw_identity = system_md.read_text(encoding="utf-8")
+        try:
+            load_pcm_document(system_md, workspace_dir=system_md.parent)
+        except PCMValidationError:
+            converted = convert_legacy_pcm_text(raw_identity)
+            warnings.append(
+                f"legacy identity converted to canonical PCM for {agent_id} export"
+            )
+            return converted
+        return raw_identity
     warnings.append(f"identity file missing for {agent_id}; placeholder generated")
     return f"# {agent_id}\n\nIdentity file was not found during HASHI export.\n"
 

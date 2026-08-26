@@ -7597,8 +7597,29 @@ class FlexibleAgentRuntime:
                     )
 
         while not stop_event.is_set():
+            event_task = asyncio.create_task(event_queue.get())
+            stop_task = asyncio.create_task(stop_event.wait())
+            done = set()
             try:
-                event = await asyncio.wait_for(event_queue.get(), timeout=MIN_EDIT_INTERVAL)
+                done, _pending = await asyncio.wait(
+                    {event_task, stop_task},
+                    timeout=MIN_EDIT_INTERVAL,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                pending = {event_task, stop_task} - done
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+
+            if stop_task in done and stop_task.result():
+                if event_task in done:
+                    event_task.result()
+                break
+
+            if event_task in done:
+                event = event_task.result()
                 icon = ICONS.get(event.kind, "•")
                 if event.kind == KIND_TOOL_START:
                     # Replace last tool_start line if consecutive (avoids fragmented JSON input spam)
@@ -7615,7 +7636,7 @@ class FlexibleAgentRuntime:
                     buffer[:] = buffer[-MAX_LINES:]
 
                 dirty = True
-            except asyncio.TimeoutError:
+            else:
                 now = time.monotonic()
                 if (now - last_heartbeat_at) >= HEARTBEAT_INTERVAL:
                     heartbeat = f"📊 Still working... ({int(now - started)}s)"

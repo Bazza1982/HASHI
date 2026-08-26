@@ -374,6 +374,50 @@ async def test_typing_inline_callback_updates_preference_and_renders_menu(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_verbose_stream_display_stops_before_cleanup_timeout(tmp_path):
+    get_started = asyncio.Event()
+
+    class ObservedQueue(asyncio.Queue):
+        async def get(self):
+            get_started.set()
+            return await super().get()
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        workspace_dir=tmp_path / "workspaces" / "zelda",
+        config=SimpleNamespace(
+            active_backend="codex-cli",
+            extra={
+                "telegram_stream_enabled": True,
+                "answer_stream_edit_interval_s": 10.0,
+            },
+        ),
+        telegram_connected=True,
+        app=SimpleNamespace(bot=SimpleNamespace()),
+        telegram_logger=SimpleNamespace(
+            info=lambda _message: None,
+            warning=lambda _message: None,
+        ),
+    )
+    runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        FlexibleAgentRuntime._streaming_display_loop(
+            runtime,
+            123,
+            SimpleNamespace(message_id=77),
+            "req-1",
+            stop_event,
+            ObservedQueue(),
+        )
+    )
+
+    await asyncio.wait_for(get_started.wait(), timeout=0.5)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=0.5)
+
+
+@pytest.mark.asyncio
 async def test_verbose_stream_display_rolls_over_after_each_message_edit_budget(tmp_path):
     edits = []
     sends = []
