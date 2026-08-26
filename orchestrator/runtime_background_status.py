@@ -18,7 +18,7 @@ from orchestrator.privacy_levels import PrivacyPolicyError, require_backend_comp
 
 _MAX_STATUS_CHARS = 800
 _TOOL_FREE_API_ENGINES = frozenset(
-    {"deepseek-api", "ollama-api", "openrouter-api", "xai-api"}
+    {"deepseek-api", "hashi-api", "ollama-api", "openrouter-api", "xai-api"}
 )
 
 
@@ -88,13 +88,14 @@ def _tool_free_api_context(runtime: Any) -> tuple[str, str] | None:
         str(getattr(config, "active_backend", "") or "")
     )
     rows = list(getattr(config, "allowed_backends", None) or [])
-    ordered_engines = [
-        active_engine,
-        "openrouter-api",
-        "deepseek-api",
-        "xai-api",
-        "ollama-api",
-    ]
+    ordered_engines = [active_engine]
+    if active_engine == "her-v2":
+        # HER is an orchestrator rather than a renderer. Prefer its ordinary
+        # tool-free Hashi API backend when that backend is explicitly allowed.
+        ordered_engines.append("hashi-api")
+    ordered_engines.extend(
+        ["openrouter-api", "deepseek-api", "xai-api", "ollama-api"]
+    )
     seen: set[str] = set()
     for candidate in ordered_engines:
         engine = canonical_backend_engine(candidate)
@@ -122,16 +123,9 @@ def _tool_free_api_context(runtime: Any) -> tuple[str, str] | None:
 
 
 async def _invoke_renderer(runtime: Any, prompt: str, request_id: str) -> Any:
-    current_backend = getattr(
-        getattr(runtime, "backend_manager", None), "current_backend", None
-    )
-    isolated_renderer = getattr(current_backend, "run_habit_dream_model", None)
-    if callable(isolated_renderer):
-        return await isolated_renderer(
-            prompt,
-            request_id=f"{request_id}:background-persona",
-        )
-
+    # A background transition is user-facing prose, not Dream maintenance.
+    # Reusing the Dream route installs its closed ``{"groups": [...]}``
+    # contract and can leak that internal JSON into the Telegram placeholder.
     context = _tool_free_api_context(runtime)
     manager = getattr(runtime, "backend_manager", None)
     tool_free_renderer = getattr(

@@ -56,10 +56,12 @@ def _runtime(persona_path: Path, renderer: AsyncMock):
                 "background_status_text": "legacy hard-coded status",
                 "typing_message": "legacy typing placeholder",
             },
-            allowed_backends=[],
+            allowed_backends=[{"engine": "hashi-api", "model": "gpt-test"}],
         ),
         backend_manager=SimpleNamespace(
-            current_backend=SimpleNamespace(run_habit_dream_model=renderer),
+            current_backend=SimpleNamespace(),
+            privacy_level=PrivacyLevel.PROVIDER_TRUST,
+            generate_tool_free_ephemeral_response=renderer,
         ),
         logger=logger,
         error_logger=logger,
@@ -104,8 +106,10 @@ async def test_status_is_model_authored_from_exact_persona_and_invalidates_on_ch
     )
     assert runtime_background_status.prepare(runtime, item) is None
     assert renderer.await_count == 1
-    assert "Address the user as Captain" in renderer.await_args_list[0].args[0]
-    assert "legacy hard-coded status" not in renderer.await_args_list[0].args[0]
+    assert "Address the user as Captain" in renderer.await_args_list[0].kwargs["prompt"]
+    assert (
+        "legacy hard-coded status" not in renderer.await_args_list[0].kwargs["prompt"]
+    )
 
     persona_path.write_text("Address the user as Doctor. Sign as Iris.", encoding="utf-8")
     second = runtime_background_status.prepare(runtime, item)
@@ -113,10 +117,40 @@ async def test_status_is_model_authored_from_exact_persona_and_invalidates_on_ch
     await second
 
     assert renderer.await_count == 2
-    assert "Address the user as Doctor" in renderer.await_args_list[1].args[0]
+    assert "Address the user as Doctor" in renderer.await_args_list[1].kwargs["prompt"]
     assert runtime._persona_background_status_cache.text == (
         "Doctor, Iris is working backstage. 🌙"
     )
+
+
+@pytest.mark.asyncio
+async def test_her_status_never_uses_dream_maintenance_renderer(tmp_path):
+    persona_path = tmp_path / "agent.md"
+    persona_path.write_text("Address the user as Captain.", encoding="utf-8")
+    dream_renderer = AsyncMock(
+        return_value=SimpleNamespace(is_success=True, text='{"groups":[]}')
+    )
+    tool_free_renderer = AsyncMock(
+        return_value=SimpleNamespace(
+            is_success=True,
+            text="Captain, the work is still running. I'll return here. ✨",
+        )
+    )
+    runtime = _runtime(persona_path, tool_free_renderer)
+    runtime.backend_manager.current_backend.run_habit_dream_model = dream_renderer
+
+    task = runtime_background_status.prepare(runtime, _item())
+    assert task is not None
+    await task
+
+    dream_renderer.assert_not_awaited()
+    tool_free_renderer.assert_awaited_once()
+    assert runtime._persona_background_status_cache.text == (
+        "Captain, the work is still running. I'll return here. ✨"
+    )
+    call = tool_free_renderer.await_args.kwargs
+    assert call["engine"] == "hashi-api"
+    assert call["model"] == "gpt-test"
 
 
 @pytest.mark.asyncio
