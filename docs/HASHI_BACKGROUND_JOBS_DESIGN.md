@@ -224,12 +224,11 @@ records are separate concepts.
 
 HER v2 adds one request policy at this boundary for Agent-backed prompt work:
 
-- cron and heartbeat prompt/skill invocations default to `low` HER execution
-  effort because their persisted job definition already supplies the routine
-  execution specification;
-- an optional per-job `her_v2_effort` value may select `zero`, `low`, `medium`,
-  `high`, `xhigh`, or `max`; matching Direct, Fast path, Planned, Adaptive,
-  Reviewed, and Assured aliases normalize to those canonical values;
+- cron and heartbeat prompt/skill invocations always use Direct (`zero`) HER
+  execution effort so the persisted authoritative instruction reaches one
+  capable Quick-model agent without Triage pre-processing;
+- per-job `her_v2_effort` overrides are retired; legacy fields are ignored at
+  dispatch and removed opportunistically at mutation boundaries;
 - scheduled occurrences, recovery replays, and manual Run actions use the same
   job policy;
 - the scheduler passes explicit nested request metadata instead of changing

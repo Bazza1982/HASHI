@@ -406,14 +406,14 @@ Tools listed in `agents.json` → `global.default_tools.allowed` are automatical
 - Pending and recently resolved recovery batches are injected into later user turns for that agent. The bridge directly handles `run all` / `全部补跑`, `task-id=N` / `补跑 N 次`, and `skip all` / `全部跳过`, and persists the result across restarts.
 - Recovery defaults to one execution per task. Set `"recovery": {"max_replay": N}` on a job to permit bounded repeated catch-up; partial counts select the most recent N occurrences and execute them in chronological order.
 - A single recent job keeps automatic catch-up behavior. A cron missed by more than one hour still waits for user confirmation, and normal heartbeat ticks after startup are not grouped.
-- HER v2 prompt/skill jobs default to `low` execution effort for scheduled,
-  recovery, and manual Run invocations. This controls HER orchestration only;
-  it does not lower provider reasoning and does not change the Agent's saved
-  `/effort` value.
-- Add optional `"her_v2_effort": "medium"` to a cron or heartbeat definition
-  to override that one job. Canonical values are `zero`, `low`, `medium`, `high`,
-  `xhigh`, and `max`; the matching descriptive aliases are accepted and
-  normalized. Invalid values are rejected before prompt work is queued.
+- HER v2 prompt/skill jobs always use Direct (`zero`) for scheduled, recovery,
+  and manual Run invocations. This bypasses Triage so the authoritative job
+  instruction reaches one fully capable Quick-model agent without
+  pre-processing. It does not change provider reasoning settings or the
+  Agent's saved `/effort` value.
+- Per-job HER effort overrides are retired. Older `her_v2_effort` fields remain
+  loadable but are ignored and removed when the job is next updated,
+  transferred, or imported; they cannot bypass the Direct policy.
 - Nudge continuations keep the Agent's configured effort. Built-in automation,
   transcript export, and HER Dream actions bypass this prompt-only policy.
 

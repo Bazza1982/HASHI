@@ -206,7 +206,7 @@ def test_jobs_with_buttons_displays_owner_mismatch(tmp_path):
 
     assert "resource owner mismatch: workspaces/lily" in text
     assert "HER execution mode" in text
-    assert "Fast path (low) · job default" in text
+    assert "Direct (zero) · fixed scheduler policy" in text
     assert markup is not None
 
 

@@ -394,6 +394,13 @@ class _EffortPolicyProvider:
 
     async def invoke(self, profile, request):
         self.requests.append((profile, request))
+        if request.stage is Stage.DIRECT:
+            return StageResponse(
+                text="Completed directly from the original instruction.",
+                provider=profile.engine,
+                model=profile.model,
+                reasoning_trace="trace:direct",
+            )
         payload = {
             Stage.IMMEDIATE_RESPONSE: {"message": "I have it."},
             Stage.TRIAGE: {
@@ -649,13 +656,13 @@ async def test_adapter_zero_effort_is_one_direct_call_and_question_is_completed(
 
 
 @pytest.mark.asyncio
-async def test_scheduler_effort_is_request_scoped_and_provider_reasoning_is_unchanged(
+async def test_scheduler_direct_policy_is_request_scoped_and_preserves_instruction(
     tmp_path,
 ):
     provider = _EffortPolicyProvider()
     runtime_context = SimpleNamespace(
         current_request_meta={
-            "request_id": "request-scheduled-low",
+            "request_id": "request-scheduled-direct",
             "scheduler_context": {
                 "kind": "cron",
                 "task_id": "nightly-report",
@@ -669,30 +676,30 @@ async def test_scheduler_effort_is_request_scoped_and_provider_reasoning_is_unch
     adapter = HERv2Adapter(config, _global_config(tmp_path))
     assert await adapter.initialize() is True
 
+    original_instruction = (
+        "Run the nightly report with sections A, B, and C; preserve every detail."
+    )
     scheduled = await adapter.generate_response(
-        "Run the nightly report",
-        "request-scheduled-low",
+        original_instruction,
+        "request-scheduled-direct",
     )
 
     assert scheduled.is_success is True
     scheduled_stages = [request.stage for _profile, request in provider.requests]
-    assert Stage.PLANNING not in scheduled_stages
-    assert Stage.REVIEW not in scheduled_stages
-    assert Stage.EXECUTION in scheduled_stages
-    assert Stage.FINALISATION not in scheduled_stages
+    assert scheduled_stages == [Stage.DIRECT]
+    scheduled_profile, scheduled_request = provider.requests[0]
+    assert scheduled_request.goal == original_instruction
+    assert scheduled_request.classification is None
     assert scheduled.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
-        "effective": "low",
-        "reason": "scheduled_job_default",
+        "effective": "zero",
+        "reason": "scheduled_direct_policy",
         "scheduler_kind": "cron",
         "scheduler_task_id": "nightly-report",
         "scheduler_trigger": "scheduled",
     }
-    scheduled_execution_profile = next(
-        profile
-        for profile, request in provider.requests
-        if request.stage is Stage.EXECUTION
-    )
+    assert scheduled_profile.model == "configured/lightweight"
+    assert scheduled_profile.reasoning == "high"
 
     provider.requests.clear()
     runtime_context.current_request_meta = {
@@ -718,12 +725,8 @@ async def test_scheduler_effort_is_request_scoped_and_provider_reasoning_is_unch
         for profile, request in provider.requests
         if request.stage is Stage.EXECUTION
     )
-    assert scheduled_execution_profile.model == ordinary_execution_profile.model
-    assert (
-        scheduled_execution_profile.reasoning
-        == ordinary_execution_profile.reasoning
-        == "provider-lightweight"
-    )
+    assert ordinary_execution_profile.model == "configured/lightweight"
+    assert ordinary_execution_profile.reasoning == "provider-lightweight"
     assert adapter.effort == "max"
     await adapter.shutdown()
 

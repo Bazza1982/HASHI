@@ -296,17 +296,20 @@ profile, and prove that the recorded classification remains `SIMPLE_TASK`.
 
 Cron and heartbeat regressions must prove that:
 
-- a prompt job without an override resolves to HER v2 Fast path (`low`) for scheduled,
-  manual Run, and recovery replay paths;
-- every valid `her_v2_effort` override is preserved and wins for that request;
+- every prompt job resolves to HER v2 Direct (`zero`) for scheduled, manual
+  Run, and recovery replay paths;
+- valid, invalid, and stale `her_v2_effort` fields cannot bypass Direct or
+  prevent an otherwise valid job from running;
+- the Direct stage receives the authoritative job instruction without a
+  Triage invocation or a Triage-produced replacement goal;
 - the Agent's configured effort remains unchanged and is used by the next
   ordinary request;
-- provider model and reasoning selection are identical before and after the
-  execution-effort override unless an independent route rule requires a
-  different profile;
+- the policy does not rewrite saved provider/model/reasoning configuration;
+  Direct uses its configured Quick route and later ordinary requests retain
+  their normal route selection;
 - prompt skills preserve the same scheduler context as direct prompt jobs;
-- invalid overrides are rejected on import, enable, manual Run, and scheduled
-  dispatch before the request is queued;
+- legacy overrides are removed on update, import, enable, and transfer mutation
+  boundaries;
 - nudge, delayed, and ordinary requests do not acquire scheduled-job effort
   from a source string or summary heuristic;
 - Workbench and Telegram manual Run preserve the explicit cron/heartbeat kind;
@@ -1447,9 +1450,10 @@ Before HER v2 is accepted, the suite must contain logically complete coverage of
     active Quick/Light Compact policy plus Tier 2-or-3 watchdog; `/effort`
     cannot mutate provider reasoning or Compact, and non-HER `/model` behaviour remains
     unchanged.
-20. scheduled-job policy separation: cron/heartbeat prompt work uses a
-    request-local low default or explicit override across scheduled, manual,
-    and recovery entry points without affecting nudges or later user turns.
+20. scheduled-job policy separation: cron/heartbeat prompt work always uses
+    request-local Direct (`zero`) across scheduled, manual, and recovery entry
+    points; legacy overrides cannot bypass it, while nudges and later user
+    turns remain unaffected.
 21. Auto Compact: typed capacity detection, protected authority, hierarchical
     source coverage, immutable raw retention, atomic commit/concurrency,
     truthful failure, compactor-only deadline isolation, Gemini statelessness,

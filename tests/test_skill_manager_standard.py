@@ -359,7 +359,7 @@ def test_dependency_scan_includes_managed_active_heartbeats(tmp_path: Path):
     ] == ("momo-active-heartbeat")
 
 
-def test_cron_effort_override_is_canonical_and_survives_transfer_and_import(
+def test_retired_cron_effort_is_discarded_on_upsert_transfer_and_import(
     tmp_path: Path,
 ):
     manager = SkillManager(tmp_path, tmp_path / "tasks.json")
@@ -373,7 +373,7 @@ def test_cron_effort_override_is_canonical_and_survives_transfer_and_import(
         her_v2_effort="HIGH",
     )
 
-    assert created["her_v2_effort"] == "high"
+    assert "her_v2_effort" not in created
     transferred, _message, transferred_job = manager.transfer_job(
         "cron",
         "nightly-report",
@@ -381,7 +381,7 @@ def test_cron_effort_override_is_canonical_and_survives_transfer_and_import(
     )
     assert transferred is True
     assert transferred_job is not None
-    assert transferred_job["her_v2_effort"] == "high"
+    assert "her_v2_effort" not in transferred_job
 
     remote_root = tmp_path / "remote"
     remote_manager = SkillManager(remote_root, remote_root / "tasks.json")
@@ -391,12 +391,12 @@ def test_cron_effort_override_is_canonical_and_survives_transfer_and_import(
     )
 
     assert imported is True, import_message
-    assert remote_manager.get_job("cron", transferred_job["id"])[
-        "her_v2_effort"
-    ] == "xhigh"
+    assert "her_v2_effort" not in remote_manager.get_job(
+        "cron", transferred_job["id"]
+    )
 
 
-def test_invalid_job_effort_is_rejected_on_import_and_enable(tmp_path: Path):
+def test_legacy_job_effort_is_removed_on_import_and_enable(tmp_path: Path):
     tasks_path = tmp_path / "tasks.json"
     tasks_path.write_text(
         json.dumps(
@@ -437,27 +437,29 @@ def test_invalid_job_effort_is_rejected_on_import_and_enable(tmp_path: Path):
         },
     )
 
-    assert enabled is False
-    assert "Refusing to enable" in enable_message
-    assert imported is False
-    assert "Invalid imported job" in import_message
-    assert manager.get_job("cron", "broken-cron")["enabled"] is False
-    assert manager.get_job("heartbeat", "broken-heartbeat") is None
+    assert enabled is True, enable_message
+    assert imported is True, import_message
+    enabled_cron = manager.get_job("cron", "broken-cron")
+    imported_heartbeat = manager.get_job("heartbeat", "broken-heartbeat")
+    assert enabled_cron["enabled"] is True
+    assert "her_v2_effort" not in enabled_cron
+    assert imported_heartbeat is not None
+    assert "her_v2_effort" not in imported_heartbeat
 
 
-def test_active_heartbeat_describes_low_default_before_and_after_creation(
+def test_active_heartbeat_describes_fixed_direct_policy_before_and_after_creation(
     tmp_path: Path,
 ):
     manager = SkillManager(tmp_path, tmp_path / "tasks.json")
 
-    assert "HER execution mode: Fast path (low) (scheduled job default)" in (
+    assert "HER execution mode: Direct (zero) (fixed scheduler policy)" in (
         manager.describe_active_heartbeat("momo")
     )
 
     ok, _message = manager.set_active_heartbeat("momo", enabled=True, minutes=15)
 
     assert ok is True
-    assert "HER execution mode: Fast path (low) (scheduled job default)" in (
+    assert "HER execution mode: Direct (zero) (fixed scheduler policy)" in (
         manager.describe_active_heartbeat("momo")
     )
 

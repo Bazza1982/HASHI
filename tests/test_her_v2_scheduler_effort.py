@@ -16,33 +16,47 @@ from orchestrator.her_v2.request_policy import (
 
 
 @pytest.mark.parametrize("kind", ["cron", "heartbeat"])
-def test_scheduled_job_defaults_to_low_execution_effort(kind):
+@pytest.mark.parametrize("trigger", ["scheduled", "manual", "recovery"])
+@pytest.mark.parametrize("configured", list(Effort))
+def test_scheduled_job_is_forced_to_direct_execution_effort(
+    kind,
+    trigger,
+    configured,
+):
     context = build_scheduler_request_context(
         {"id": f"{kind}-1"},
         kind=kind,
-        trigger="scheduled",
+        trigger=trigger,
     )
 
     resolution = resolve_request_effort(
-        Effort.MAX,
+        configured,
         {"scheduler_context": context},
     )
 
-    assert resolution.configured is Effort.MAX
-    assert resolution.effective is Effort.LOW
-    assert resolution.reason == "scheduled_job_default"
+    assert resolution.configured is configured
+    assert resolution.effective is Effort.ZERO
+    assert resolution.reason == "scheduled_direct_policy"
     assert resolution.scheduler_kind == kind
-    assert resolution.scheduler_trigger == "scheduled"
+    assert resolution.scheduler_trigger == trigger
 
 
-@pytest.mark.parametrize("effort", list(Effort))
-def test_job_override_wins_without_changing_configured_effort(effort):
-    job = {"id": "nightly", "her_v2_effort": effort.value}
+@pytest.mark.parametrize("legacy_effort", [item.value for item in Effort] + ["turbo"])
+def test_legacy_job_override_cannot_bypass_direct_policy(legacy_effort):
+    job = {"id": "nightly", "her_v2_effort": legacy_effort}
     context = build_scheduler_request_context(
         job,
         kind="cron",
         trigger="manual",
     )
+    assert context == {
+        "kind": "cron",
+        "task_id": "nightly",
+        "trigger": "manual",
+    }
+
+    # Metadata from a pre-policy scheduler must also be harmless.
+    context["her_v2_effort_override"] = legacy_effort
 
     resolution = resolve_request_effort(
         Effort.MAX,
@@ -50,13 +64,13 @@ def test_job_override_wins_without_changing_configured_effort(effort):
     )
 
     assert resolution.configured is Effort.MAX
-    assert resolution.effective is effort
-    assert resolution.reason == "job_override"
-    assert resolution.job_override is effort
-    assert job == {"id": "nightly", "her_v2_effort": effort.value}
+    assert resolution.effective is Effort.ZERO
+    assert resolution.reason == "scheduled_direct_policy"
+    assert "job_override" not in resolution.metadata()
+    assert job == {"id": "nightly", "her_v2_effort": legacy_effort}
 
 
-def test_recovery_keeps_job_override_and_trigger_identity():
+def test_recovery_keeps_job_identity_but_forces_direct():
     context = build_scheduler_request_context(
         {"id": "replay", "her_v2_effort": "high"},
         kind="heartbeat",
@@ -68,7 +82,7 @@ def test_recovery_keeps_job_override_and_trigger_identity():
         {"scheduler_context": context},
     )
 
-    assert resolution.effective is Effort.HIGH
+    assert resolution.effective is Effort.ZERO
     assert resolution.scheduler_task_id == "replay"
     assert resolution.scheduler_trigger == "recovery"
 
@@ -110,32 +124,35 @@ def test_ordinary_and_delayed_requests_keep_agent_effort():
         assert resolution.reason == "agent_default"
 
 
-def test_invalid_job_override_is_rejected_instead_of_silently_coerced():
-    with pytest.raises(ValueError, match="her_v2_effort must be one of"):
-        build_scheduler_request_context(
-            {"id": "broken", "her_v2_effort": "low-reasoning"},
-            kind="cron",
-            trigger="scheduled",
-        )
+def test_retired_job_override_is_ignored_without_blocking_dispatch():
+    assert build_scheduler_request_context(
+        {"id": "legacy", "her_v2_effort": "low-reasoning"},
+        kind="cron",
+        trigger="scheduled",
+    ) == {
+        "kind": "cron",
+        "task_id": "legacy",
+        "trigger": "scheduled",
+    }
 
 
-def test_job_policy_reports_default_and_override_for_user_surfaces():
+def test_job_policy_reports_fixed_direct_policy_for_user_surfaces():
     assert job_effort_policy({"id": "default"}) == {
-        "effective": "low",
-        "source": "scheduled_job_default",
+        "effective": "zero",
+        "source": "scheduled_direct_policy",
         "applies_to": "her-v2",
     }
     assert job_effort_policy(
         {"id": "override", "her_v2_effort": "medium"}
     ) == {
-        "effective": "medium",
-        "source": "job_override",
+        "effective": "zero",
+        "source": "scheduled_direct_policy",
         "applies_to": "her-v2",
     }
 
 
 @pytest.mark.asyncio
-async def test_manual_run_now_propagates_kind_trigger_and_job_override():
+async def test_manual_run_now_propagates_kind_and_direct_policy_context():
     runtime = SimpleNamespace(
         _primary_chat_id=lambda: 123,
         enqueue_request=AsyncMock(return_value="req-1"),
@@ -163,13 +180,12 @@ async def test_manual_run_now_propagates_kind_trigger_and_job_override():
             "kind": "cron",
             "task_id": "daily-report",
             "trigger": "manual",
-            "her_v2_effort_override": "medium",
         },
     )
 
 
 @pytest.mark.asyncio
-async def test_manual_run_now_rejects_invalid_effort_before_queueing():
+async def test_manual_run_now_ignores_retired_effort_and_queues():
     runtime = SimpleNamespace(
         _primary_chat_id=lambda: 123,
         enqueue_request=AsyncMock(return_value="req-1"),
@@ -187,10 +203,19 @@ async def test_manual_run_now_rejects_invalid_effort_before_queueing():
         kind="heartbeat",
     )
 
-    assert ok is False
-    assert "Invalid scheduler policy" in message
-    assert "her_v2_effort must be one of" in message
-    runtime.enqueue_request.assert_not_awaited()
+    assert ok is True
+    assert message == "Queued heartbeat task [broken-job]"
+    runtime.enqueue_request.assert_awaited_once_with(
+        chat_id=123,
+        prompt="Do work",
+        source="scheduler",
+        summary="Heartbeat Task [broken-job]",
+        scheduler_context={
+            "kind": "heartbeat",
+            "task_id": "broken-job",
+            "trigger": "manual",
+        },
+    )
 
 
 @pytest.mark.asyncio

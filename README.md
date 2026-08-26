@@ -184,8 +184,9 @@ HER v2 is the sole supported HER execution backend:
   control orchestration depth without changing provider reasoning settings or
   limiting ordinary tool-call count. Direct is one fully capable Quick-model
   agent at default provider reasoning `high`; it never upgrades and invokes no
-  other HER stage. Scheduled cron and heartbeat work defaults to Fast path
-  unless the job overrides it.
+  other HER stage. Scheduled cron and heartbeat prompt/skill work always uses
+  Direct so the authoritative job instruction reaches that agent without
+  Triage pre-processing.
 - **Evidence-backed assurance** — Reviewed performs an independent read-only
   Review and one closure check after remediation. Assured adds latest-state
   Verification with exact tool receipts and up to three attempts. Configured

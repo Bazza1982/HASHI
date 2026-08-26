@@ -1,8 +1,10 @@
 """Request-scoped HER v2 effort policy for scheduled work.
 
-HER effort controls orchestration stages only.  It must never be reused as a
-provider reasoning setting or stored back into the owning Agent's global
-configuration.
+Cron and heartbeat prompt work always enters HER v2 through Direct mode so the
+authoritative job instruction reaches the capable Quick agent without Triage
+pre-processing.  This policy controls orchestration stages only.  It must never
+be reused as a provider reasoning setting or stored back into the owning
+Agent's global configuration.
 """
 
 from __future__ import annotations
@@ -15,38 +17,22 @@ from .models import Effort, parse_effort
 
 
 HER_V2_JOB_EFFORT_FIELD = "her_v2_effort"
-HER_V2_SCHEDULED_DEFAULT_EFFORT = Effort.LOW
+HER_V2_SCHEDULED_EFFORT = Effort.ZERO
 SCHEDULED_JOB_KINDS = frozenset({"cron", "heartbeat"})
 SCHEDULER_TRIGGERS = frozenset({"scheduled", "manual", "recovery"})
 
 
-def normalize_job_effort(value: Any) -> Effort | None:
-    """Return a validated optional job override.
+def discard_legacy_job_effort_in_place(job: dict[str, Any]) -> bool:
+    """Remove the retired per-job override and report whether it was present.
 
-    Blank or absent values mean that the scheduled-job default applies.  Bad
-    values are rejected rather than silently changing orchestration policy.
+    Older task files remain loadable, but their override cannot bypass the
+    compulsory Direct policy.  Mutation boundaries use this helper to migrate
+    those records opportunistically.
     """
 
-    if value is None or not str(value).strip():
-        return None
-    try:
-        return parse_effort(str(value))
-    except ValueError as exc:
-        allowed = ", ".join(item.value for item in Effort)
-        raise ValueError(
-            f"{HER_V2_JOB_EFFORT_FIELD} must be one of: {allowed}"
-        ) from exc
-
-
-def normalize_job_effort_in_place(job: dict[str, Any]) -> Effort | None:
-    """Validate and canonicalise an optional persisted job override."""
-
-    effort = normalize_job_effort(job.get(HER_V2_JOB_EFFORT_FIELD))
-    if effort is None:
-        job.pop(HER_V2_JOB_EFFORT_FIELD, None)
-    else:
-        job[HER_V2_JOB_EFFORT_FIELD] = effort.value
-    return effort
+    present = HER_V2_JOB_EFFORT_FIELD in job
+    job.pop(HER_V2_JOB_EFFORT_FIELD, None)
+    return present
 
 
 def infer_scheduler_job_kind(
@@ -80,28 +66,19 @@ def build_scheduler_request_context(
     task_id = str(job.get("id") or "").strip()
     if not task_id:
         raise ValueError("scheduled job id is required")
-    override = normalize_job_effort(job.get(HER_V2_JOB_EFFORT_FIELD))
-    context = {
+    return {
         "kind": normalized_kind,
         "task_id": task_id,
         "trigger": normalized_trigger,
     }
-    if override is not None:
-        context["her_v2_effort_override"] = override.value
-    return context
 
 
 def job_effort_policy(job: Mapping[str, Any]) -> dict[str, str]:
     """Describe the effective HER v2 policy represented by a job record."""
 
-    override = normalize_job_effort(job.get(HER_V2_JOB_EFFORT_FIELD))
     return {
-        "effective": (
-            override.value
-            if override is not None
-            else HER_V2_SCHEDULED_DEFAULT_EFFORT.value
-        ),
-        "source": "job_override" if override is not None else "scheduled_job_default",
+        "effective": HER_V2_SCHEDULED_EFFORT.value,
+        "source": "scheduled_direct_policy",
         "applies_to": "her-v2",
     }
 
@@ -114,7 +91,6 @@ class EffortResolution:
     scheduler_kind: str | None = None
     scheduler_task_id: str | None = None
     scheduler_trigger: str | None = None
-    job_override: Effort | None = None
 
     def metadata(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -128,8 +104,6 @@ class EffortResolution:
             payload["scheduler_task_id"] = self.scheduler_task_id
         if self.scheduler_trigger:
             payload["scheduler_trigger"] = self.scheduler_trigger
-        if self.job_override is not None:
-            payload["job_override"] = self.job_override.value
         return payload
 
 
@@ -167,15 +141,11 @@ def resolve_request_effort(
             reason="agent_default",
         )
 
-    override = normalize_job_effort(
-        raw_context.get("her_v2_effort_override")
-    )
     return EffortResolution(
         configured=configured,
-        effective=override or HER_V2_SCHEDULED_DEFAULT_EFFORT,
-        reason="job_override" if override is not None else "scheduled_job_default",
+        effective=HER_V2_SCHEDULED_EFFORT,
+        reason="scheduled_direct_policy",
         scheduler_kind=kind,
         scheduler_task_id=task_id,
         scheduler_trigger=trigger,
-        job_override=override,
     )

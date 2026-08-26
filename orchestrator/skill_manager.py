@@ -16,10 +16,8 @@ import yaml
 
 from orchestrator.her_v2.models import effort_display_label
 from orchestrator.her_v2.request_policy import (
-    HER_V2_JOB_EFFORT_FIELD,
+    discard_legacy_job_effort_in_place,
     job_effort_policy,
-    normalize_job_effort,
-    normalize_job_effort_in_place,
 )
 from orchestrator.job_ownership import ownership_mismatch_label
 
@@ -956,7 +954,12 @@ class SkillManager:
         note: str,
         her_v2_effort: str | None = None,
     ) -> dict[str, Any]:
-        """Create or update one owned fixed-wall-clock cron definition."""
+        """Create or update one owned fixed-wall-clock cron definition.
+
+        ``her_v2_effort`` is retained as a compatibility keyword for callers
+        from before scheduled Direct became compulsory.  It is intentionally
+        ignored and never persisted.
+        """
 
         tasks = self._load_tasks()
         crons = tasks.setdefault("crons", [])
@@ -974,12 +977,7 @@ class SkillManager:
                 "updated_at": self._now(),
             }
         )
-        if her_v2_effort is not None:
-            normalized_effort = normalize_job_effort(her_v2_effort)
-            if normalized_effort is None:
-                job.pop(HER_V2_JOB_EFFORT_FIELD, None)
-            else:
-                job[HER_V2_JOB_EFFORT_FIELD] = normalized_effort.value
+        discard_legacy_job_effort_in_place(job)
         job.pop("time", None)
         if existing is None:
             job["created_at"] = job["updated_at"]
@@ -1084,15 +1082,12 @@ class SkillManager:
             note = job.get("note") or ""
             lines.append(f"- {job.get('id')} [{enabled}] {schedule} -> {action}")
             if kind in {"cron", "heartbeat"}:
-                try:
-                    effort_policy = job_effort_policy(job)
-                    lines.append(
-                        "  HER execution mode: "
-                        f"{effort_display_label(effort_policy['effective'])} "
-                        f"({effort_policy['source']})"
-                    )
-                except ValueError as exc:
-                    lines.append(f"  HER execution mode: INVALID ({exc})")
+                effort_policy = job_effort_policy(job)
+                lines.append(
+                    "  HER execution mode: "
+                    f"{effort_display_label(effort_policy['effective'])} "
+                    "(fixed scheduler policy)"
+                )
             if note:
                 lines.append(f"  {note}")
         return "\n".join(lines)
@@ -1106,11 +1101,8 @@ class SkillManager:
             for job in jobs:
                 if job.get("id") != task_id:
                     continue
+                discard_legacy_job_effort_in_place(job)
                 if enabled:
-                    try:
-                        normalize_job_effort_in_place(job)
-                    except ValueError as exc:
-                        return False, f"Refusing to enable {task_id}: {exc}."
                     mismatch = ownership_mismatch_label(job)
                     if mismatch:
                         return False, f"Refusing to enable {task_id}: {mismatch}."
@@ -1122,12 +1114,9 @@ class SkillManager:
         for job in tasks.get(key, []):
             if job.get("id") != task_id:
                 continue
+            if kind in {"cron", "heartbeat"}:
+                discard_legacy_job_effort_in_place(job)
             if enabled:
-                if kind in {"cron", "heartbeat"}:
-                    try:
-                        normalize_job_effort_in_place(job)
-                    except ValueError as exc:
-                        return False, f"Refusing to enable {task_id}: {exc}."
                 mismatch = ownership_mismatch_label(job)
                 if mismatch:
                     return False, f"Refusing to enable {task_id}: {mismatch}."
@@ -1209,6 +1198,8 @@ class SkillManager:
         new_job["id"] = f"{new_agent}-{uuid4().hex[:8]}"
         new_job["agent"] = new_agent
         new_job["enabled"] = False
+        if kind in {"cron", "heartbeat"}:
+            discard_legacy_job_effort_in_place(new_job)
         new_job["note"] = (
             job.get("note") or job["id"]
         ) + f" [transferred from {job.get('agent', '?')}]"
@@ -1232,10 +1223,7 @@ class SkillManager:
         key = self._task_key_for_kind(kind)
         job = dict(job)
         if kind in {"cron", "heartbeat"}:
-            try:
-                normalize_job_effort_in_place(job)
-            except ValueError as exc:
-                return False, f"Invalid imported job: {exc}."
+            discard_legacy_job_effort_in_place(job)
         mismatch = ownership_mismatch_label(job)
         if mismatch:
             job["enabled"] = False
@@ -1315,7 +1303,7 @@ class SkillManager:
             return (
                 f"Active mode: OFF\n"
                 f"Interval: {default_minutes} min (default)\n"
-                "HER execution mode: Fast path (low) (scheduled job default)\n"
+                "HER execution mode: Direct (zero) (fixed scheduler policy)\n"
                 f"Usage: /active on [{default_minutes}] | /active off"
             )
         interval_minutes = max(
@@ -1327,19 +1315,11 @@ class SkillManager:
             if not job.get("enabled", False) and interval_minutes == default_minutes
             else ""
         )
-        try:
-            effort_policy = job_effort_policy(job)
-            effort_source = (
-                "job override"
-                if effort_policy["source"] == "job_override"
-                else "scheduled job default"
-            )
-            effort_label = (
-                f"{effort_display_label(effort_policy['effective'])} "
-                f"({effort_source})"
-            )
-        except ValueError as exc:
-            effort_label = f"INVALID ({exc})"
+        effort_policy = job_effort_policy(job)
+        effort_label = (
+            f"{effort_display_label(effort_policy['effective'])} "
+            "(fixed scheduler policy)"
+        )
         return (
             f"Active mode: {state}\n"
             f"Interval: {interval_minutes} min{reset_note}\n"

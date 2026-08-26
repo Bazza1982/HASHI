@@ -477,7 +477,6 @@ def test_begin_queue_item_preserves_explicit_scheduler_context():
         "kind": "cron",
         "task_id": "daily-report",
         "trigger": "manual",
-        "her_v2_effort_override": "medium",
     }
     item = _item(scheduler_context=scheduler_context)
 

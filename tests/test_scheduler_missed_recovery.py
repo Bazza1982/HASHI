@@ -312,7 +312,10 @@ def test_recent_legacy_notice_migrates_to_pending_seven_occurrence_batch(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_recovery_reply_replays_latest_selected_occurrences_and_keeps_context(tmp_path, monkeypatch):
+async def test_recovery_reply_replays_latest_occurrences_with_direct_policy_context(
+    tmp_path,
+    monkeypatch,
+):
     monkeypatch.setattr(scheduler_module, "HAS_CRONITER", True)
     monkeypatch.setattr(scheduler_module, "croniter", _HourlyCroniter, raising=False)
     cron = {
@@ -369,7 +372,6 @@ async def test_recovery_reply_replays_latest_selected_occurrences_and_keeps_cont
             "kind": "cron",
             "task_id": "hourly-hello",
             "trigger": "recovery",
-            "her_v2_effort_override": "high",
         }
     ] * 3
     assert batch["status"] == "resolved"
@@ -380,7 +382,7 @@ async def test_recovery_reply_replays_latest_selected_occurrences_and_keeps_cont
 
 
 @pytest.mark.asyncio
-async def test_scheduled_job_with_invalid_effort_is_not_queued(tmp_path):
+async def test_scheduled_job_with_retired_effort_field_is_still_queued(tmp_path):
     cron = {
         "id": "broken-cron",
         "agent": "zelda",
@@ -404,5 +406,10 @@ async def test_scheduled_job_with_invalid_effort_is_not_queued(tmp_path):
         now_dt=datetime(2026, 8, 21, 12, 0),
     )
 
-    assert ok is False
-    assert runtime.enqueued == []
+    assert ok is True
+    assert len(runtime.enqueued) == 1
+    assert runtime.enqueued[0][1]["scheduler_context"] == {
+        "kind": "cron",
+        "task_id": "broken-cron",
+        "trigger": "scheduled",
+    }
