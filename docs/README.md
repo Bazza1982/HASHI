@@ -59,6 +59,7 @@ deployment validation continues.
 
 ### Core references
 - [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) — authoritative target design for backend-neutral HASHI Persona-Context-Memory ownership, assembly, retrieval and migration
+- [HASHI_PCM_UPGRADE_TEST_PLAN.md](HASHI_PCM_UPGRADE_TEST_PLAN.md) — accepted obsolete-assertion migration and minimum backend-neutral PCM acceptance gate
 - [AGENT_FYI.md](AGENT_FYI.md) — Bridge environment FYI (operational reference)
 - [AGENT_PERSONA_SPEC.md](AGENT_PERSONA_SPEC.md) — persona block format and authoring guidance for new agents
 - [STEER_COMMAND.md](STEER_COMMAND.md) — Telegram `/steer` mid-task course correction (busy wrapper vs idle plain text, error suppression)
