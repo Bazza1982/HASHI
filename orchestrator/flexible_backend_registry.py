@@ -3,6 +3,9 @@ from __future__ import annotations
 HER_V2_ENGINE = "her-v2"
 RETIRED_HER_ENGINE_ALIASES = frozenset({"her"})
 REMOVED_ENGINE_IDS = frozenset({"claw-cli"})
+HER_V2_DEFAULT_PERMISSION_MODE = "danger-full-access"
+HER_V2_DEFAULT_ACCESS_SCOPE = "drive"
+HER_V2_DEFAULT_ALLOWED_TOOLS = ("*",)
 CLI_ENGINES = frozenset(
     {
         "gemini-cli",
@@ -225,13 +228,40 @@ def canonical_backend_engine(engine: str | None) -> str:
     return HER_V2_ENGINE if value in RETIRED_HER_ENGINE_ALIASES else value
 
 
+def apply_backend_policy_defaults(backend: dict) -> dict:
+    """Apply backend-owned defaults without overriding explicit authority.
+
+    HER v2 is intentionally YOLO out of the box for personal HASHI agents:
+    full-drive scope, unrestricted HASHI tools, and the corresponding
+    permission-mode marker.  Every field remains individually overridable in
+    an Agent's explicit ``her-v2`` backend row.
+    """
+
+    item = dict(backend)
+    if canonical_backend_engine(item.get("engine")) != HER_V2_ENGINE:
+        return item
+
+    item.setdefault("permission_mode", HER_V2_DEFAULT_PERMISSION_MODE)
+    item.setdefault("access_scope", HER_V2_DEFAULT_ACCESS_SCOPE)
+    raw_tools = item.get("tools")
+    if raw_tools is None:
+        item["tools"] = {"allowed": list(HER_V2_DEFAULT_ALLOWED_TOOLS)}
+    elif isinstance(raw_tools, dict):
+        tools = dict(raw_tools)
+        tools.setdefault("allowed", list(HER_V2_DEFAULT_ALLOWED_TOOLS))
+        item["tools"] = tools
+    return item
+
+
 def normalize_allowed_backends(backends: list) -> list[dict]:
-    """Normalize backend IDs without silently adding an execution backend.
+    """Normalize backend IDs and apply each explicit backend's default policy.
 
     HER v2 requires explicit provider-role grants, so synthesising a generic
     HER row would be both unusable and an authority expansion.  If an explicit
     ``her-v2`` row is present, obsolete alias rows are discarded rather than
-    allowed to shadow its configuration.
+    allowed to shadow its configuration.  An explicit HER v2 row receives the
+    backend-owned YOLO defaults, while any authority fields supplied by the
+    user remain unchanged.
     """
 
     normalized: list[dict] = []
@@ -255,7 +285,7 @@ def normalize_allowed_backends(backends: list) -> list[dict]:
         if not engine:
             continue
         item["engine"] = engine
-        normalized.append(item)
+        normalized.append(apply_backend_policy_defaults(item))
     return normalized
 
 

@@ -14,7 +14,7 @@
       }
     },
     "her_providers": {
-      "max_permission_mode": "workspace-write",
+      "max_permission_mode": "danger-full-access",
       "providers": {
         "openrouter": {
           "base_url": "https://openrouter.ai/api/v1",
@@ -82,8 +82,13 @@
         },
         {
           "engine": "her-v2",
+          "access_scope": "drive",
           "model": "role-configured",
           "effort": "high",
+          "permission_mode": "danger-full-access",
+          "tools": {
+            "allowed": ["*"]
+          },
           "her_v2": {
             "shadow_mode": false,
             "user_idle_timeout_s": 300,

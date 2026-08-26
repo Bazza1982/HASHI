@@ -1388,7 +1388,7 @@ duplicate alias `/paswd` has been removed.
       "allowed": ["bash", "file_read", "file_write", "file_list"]
     },
     "her_providers": {
-      "max_permission_mode": "workspace-write",
+      "max_permission_mode": "danger-full-access",
       "providers": {
         "openrouter": {
           "base_url": "https://openrouter.ai/api/v1",
@@ -1414,20 +1414,50 @@ duplicate alias `/paswd` has been removed.
       "allowed_backends": [
         {"engine": "gemini-cli", "model": "gemini-3.1-pro-preview"},
         {
-          "engine": "her",
-          "provider": "openrouter",
-          "models": [
-            "deepseek/deepseek-v4-flash",
-            "deepseek/deepseek-v4-pro",
-            "openai/gpt-4.1-mini"
-          ],
-          "default_model": "deepseek/deepseek-v4-flash"
+          "engine": "openrouter-api",
+          "model": "anthropic/claude-sonnet-4.6"
         },
         {
-          "engine": "her",
-          "provider": "deepseek",
+          "engine": "deepseek-api",
           "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
           "default_model": "deepseek-v4-flash"
+        },
+        {
+          "engine": "her-v2",
+          "access_scope": "drive",
+          "model": "role-configured",
+          "effort": "high",
+          "permission_mode": "danger-full-access",
+          "tools": {"allowed": ["*"]},
+          "her_v2": {
+            "profiles": {
+              "lightweight": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-flash",
+                "reasoning": "high"
+              },
+              "triage": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-flash",
+                "reasoning": "high"
+              },
+              "premium": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-pro",
+                "reasoning": "high"
+              },
+              "reviewer": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-pro",
+                "reasoning": "max"
+              },
+              "orchestrator": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-pro",
+                "reasoning": "max"
+              }
+            }
+          }
         }
       ],
       "active_backend": "gemini-cli"
@@ -1444,7 +1474,10 @@ for emergency rollback only and requires `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`.
 HER provider profiles hold instance-level connection details, not secrets. An
 enabled instance provider is enough for HER v2 routing; per-Agent backend rows
 remain optional default/model hints and still govern ordinary direct backend
-selection. The legacy singular `model` field remains a one-model hint.
+selection. Every explicit HER v2 row defaults to YOLO authority when its
+authority fields are omitted; set `permission_mode`, `access_scope`, or
+`tools.allowed` explicitly to narrow one Agent. The legacy singular `model`
+field remains a one-model hint.
 
 ### secrets.json
 ```json
