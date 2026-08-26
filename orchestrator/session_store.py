@@ -1018,6 +1018,115 @@ class SessionStore:
             ).fetchone()
             return self._run_dict(result)
 
+    def reconcile_incomplete_runs(self) -> list[dict[str, Any]]:
+        """Terminalize Runs whose in-memory executor was lost on restart.
+
+        The current runtime has no durable queue or safe execution-stack replay.
+        Leaving either an accepted ``queued`` Run or a claimed ``running`` Run
+        non-terminal would make clients wait forever.  Reconciliation therefore
+        fences every pre-existing non-terminal Run as ``interrupted``, preserves
+        its user Message and evidence, and appends one durable terminal Event.
+        A later user continuation is a new child Run with a new idempotency key.
+        """
+
+        now = _utc_now()
+        reconciled_ids: list[str] = []
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT r.* FROM runs AS r
+                JOIN sessions AS s ON s.session_id = r.session_id
+                WHERE s.instance_id = ? AND r.state IN ('queued', 'running')
+                ORDER BY r.created_at, r.run_id
+                """,
+                (self.instance_id,),
+            ).fetchall()
+            for run in rows:
+                prior_state = str(run["state"])
+                run_id = str(run["run_id"])
+                session_id = str(run["session_id"])
+                reason = (
+                    "HASHI restarted before the accepted Run began"
+                    if prior_state == "queued"
+                    else "HASHI restarted while the Run was executing"
+                )
+                updated = connection.execute(
+                    """
+                    UPDATE runs
+                    SET state = 'interrupted', fencing_token = fencing_token + 1,
+                        worker_id = NULL, error_code = 'runtime_restart_interrupted',
+                        error_text = ?, completed_at = ?, updated_at = ?
+                    WHERE run_id = ? AND state = ?
+                    """,
+                    (reason, now, now, run_id, prior_state),
+                )
+                if updated.rowcount != 1:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE run_attempts
+                    SET state = 'interrupted', finished_at = ?
+                    WHERE run_id = ? AND state = 'running'
+                    """,
+                    (now, run_id),
+                )
+                event = self._append_event(
+                    connection,
+                    session_id=session_id,
+                    run_id=run_id,
+                    kind="run.interrupted",
+                    status="interrupted",
+                    phase="recovery",
+                    summary=reason,
+                    detail={
+                        "error_code": "runtime_restart_interrupted",
+                        "prior_state": prior_state,
+                    },
+                    outbox=True,
+                )
+                projection = {
+                    "run_id": run_id,
+                    "session_id": session_id,
+                    "state": "interrupted",
+                    "user_message_id": str(run["user_message_id"]),
+                    "final_message_id": None,
+                    "error": reason,
+                    "error_code": "runtime_restart_interrupted",
+                    "prior_state": prior_state,
+                    "latest_event_sequence": event["sequence"],
+                }
+                connection.execute(
+                    """
+                    INSERT INTO run_projection_records(
+                        run_id, session_id, projection_json, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                        projection_json = excluded.projection_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (run_id, session_id, _json(projection), now),
+                )
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET updated_at = ?, revision = revision + 1
+                    WHERE session_id = ?
+                    """,
+                    (now, session_id),
+                )
+                reconciled_ids.append(run_id)
+
+            if not reconciled_ids:
+                return []
+            placeholders = ",".join("?" for _ in reconciled_ids)
+            result = connection.execute(
+                f"SELECT * FROM runs WHERE run_id IN ({placeholders}) "
+                "ORDER BY created_at, run_id",
+                reconciled_ids,
+            ).fetchall()
+        return [self._run_dict(row) for row in result]
+
     def get_run(self, run_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
         clauses = ["r.run_id = ?", "s.instance_id = ?"]
         params: list[Any] = [str(run_id), self.instance_id]

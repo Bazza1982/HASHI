@@ -207,6 +207,7 @@ class WorkbenchApiServer:
         self.admin_token = (self.secrets.get("workbench_admin_token") or "").strip()
         self._static_connectors = list(connectors or [])
         self.session_store = SessionStore.from_global_config(self.global_config)
+        self.reconciled_session_runs = self.session_store.reconcile_incomplete_runs()
         self.identity_service = self._build_identity_service()
         self.channel_registry = self._build_channel_registry()
         self.audit_writer = self._build_audit_writer()

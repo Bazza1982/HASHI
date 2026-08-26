@@ -104,6 +104,34 @@ async def test_unqualified_session_api_is_not_advertised(tmp_path):
     assert json.loads(unavailable.text)["code"] == "session_api_not_ready"
 
 
+def test_workbench_startup_reconciles_lost_session_runs(tmp_path):
+    server, _runtime = _server(tmp_path)
+    session = server.session_store.ensure_default_session(
+        owner_id="user:7", agent_id="lily"
+    )
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="lily",
+        request_id="req-before-workbench-restart",
+        text="work in progress",
+        source="test",
+        idempotency_key="workbench-restart",
+    )
+    server.session_store.mark_request_running(
+        accepted.request_id, worker_id="old-workbench"
+    )
+
+    restarted, _runtime = _server(tmp_path)
+
+    run = restarted.session_store.get_run(accepted.run_id, owner_id="user:7")
+    assert run["state"] == "interrupted"
+    assert run["error_code"] == "runtime_restart_interrupted"
+    assert [row["run_id"] for row in restarted.reconciled_session_runs] == [
+        accepted.run_id
+    ]
+
+
 @pytest.mark.asyncio
 async def test_session_api_run_event_ack_and_fresh_contract(tmp_path):
     server, _runtime = _server(tmp_path)

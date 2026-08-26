@@ -375,3 +375,53 @@ def test_fresh_is_blocked_until_active_run_is_terminal(tmp_path):
     assert store.start_fresh_generation(session["session_id"])[
         "context_generation"
     ] == 2
+
+
+def test_restart_reconciliation_terminalizes_queued_and_running_runs_once(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    queued = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-queued-restart",
+        text="accepted before restart",
+        source="test",
+        idempotency_key="queued-restart",
+    )
+    running = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-running-restart",
+        text="running during restart",
+        source="test",
+        idempotency_key="running-restart",
+    )
+    assert store.mark_request_running(
+        running.request_id, worker_id="worker-before-restart"
+    ) == 1
+
+    restarted = _store(tmp_path)
+    reconciled = restarted.reconcile_incomplete_runs()
+
+    assert {row["run_id"] for row in reconciled} == {
+        queued.run_id,
+        running.run_id,
+    }
+    for accepted, prior_state in ((queued, "queued"), (running, "running")):
+        run = restarted.get_run(accepted.run_id, owner_id=owner)
+        assert run["state"] == "interrupted"
+        assert run["error_code"] == "runtime_restart_interrupted"
+        events = restarted.events(session["session_id"], owner_id=owner)
+        terminal = [
+            event
+            for event in events
+            if event["run_id"] == accepted.run_id
+            and event["kind"] == "run.interrupted"
+        ]
+        assert len(terminal) == 1
+        assert terminal[0]["detail"]["prior_state"] == prior_state
+
+    assert restarted.reconcile_incomplete_runs() == []
