@@ -187,6 +187,52 @@ def test_public_her_configuration_id_resolves_forward_to_v2(tmp_path):
     assert agents[0].allowed_backends[0]["engine"] == "her-v2"
 
 
+@pytest.mark.parametrize("provider", ["openrouter-api", "deepseek-api"])
+def test_direct_provider_active_backend_migrates_to_her_v2(tmp_path, provider):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        {
+            "name": "legacy-provider",
+            "type": "flex",
+            "workspace_dir": "workspaces/legacy-provider",
+            "system_md": "workspaces/legacy-provider/agent.md",
+            "allowed_backends": [
+                {"engine": provider, "model": "provider-model"},
+                {"engine": "her-v2", "model": "role-configured"},
+            ],
+            "active_backend": provider,
+        },
+    )
+
+    _, agents, _ = ConfigManager(
+        config_path, secrets_path, bridge_home=tmp_path
+    ).load()
+
+    assert agents[0].active_backend == "her-v2"
+    assert any(
+        backend["engine"] == provider for backend in agents[0].allowed_backends
+    )
+
+
+def test_direct_provider_without_her_v2_grant_is_rejected(tmp_path):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        {
+            "name": "legacy-provider",
+            "type": "flex",
+            "workspace_dir": "workspaces/legacy-provider",
+            "system_md": "workspaces/legacy-provider/agent.md",
+            "allowed_backends": [
+                {"engine": "openrouter-api", "model": "provider-model"}
+            ],
+            "active_backend": "openrouter-api",
+        },
+    )
+
+    with pytest.raises(ValueError, match="provider-only.*her-v2"):
+        ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+
 @pytest.mark.parametrize(
     "legacy_fragment",
     [

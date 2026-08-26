@@ -22,6 +22,7 @@ from orchestrator.backend_timeout import (
 from orchestrator.config import AgentConfig, FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
+    PROVIDER_ONLY_ENGINE_IDS,
     canonical_backend_engine,
     get_secret_lookup_order,
 )
@@ -101,6 +102,12 @@ class FlexibleBackendManager:
                 state_needs_repair = False
                 if "active_backend" in state:
                     persisted_backend = canonical_backend_engine(state["active_backend"])
+                    if (
+                        persisted_backend in PROVIDER_ONLY_ENGINE_IDS
+                        and HER_V2_ENGINE in allowed_engines
+                    ):
+                        state["active_provider"] = persisted_backend
+                        persisted_backend = HER_V2_ENGINE
                     if persisted_backend in allowed_engines:
                         self.config.active_backend = persisted_backend
                         if state.get("active_backend") != persisted_backend:

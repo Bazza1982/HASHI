@@ -1657,6 +1657,48 @@ async def test_backend_her_v2_typed_command_switches_without_role_model(tmp_path
     assert "role-configured" not in messages[-1]
 
 
+def test_backend_menu_hides_her_v2_provider_only_engines(tmp_path):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+
+    callbacks = [
+        button.callback_data
+        for row in runtime._backend_keyboard().inline_keyboard
+        for button in row
+    ]
+
+    assert "backend:her-v2:plain" in callbacks
+    assert not any("openrouter-api" in callback for callback in callbacks)
+    assert not any("deepseek-api" in callback for callback in callbacks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["openrouter-api", "deepseek-api"])
+async def test_backend_typed_command_retires_provider_only_engine(tmp_path, engine):
+    manager = _make_her_v2_manager(tmp_path / engine)
+    runtime, messages = _make_runtime(manager)
+    update, context = _update([engine])
+
+    await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
+
+    assert manager.config.active_backend == "her-v2"
+    assert "HER v2 provider, not a selectable backend" in messages[-1]
+    assert "/backend her-v2" in messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_backend_stale_provider_only_callback_is_rejected(tmp_path):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+    update, edits, answers = _callback_update("backend:openrouter-api:plain")
+
+    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
+
+    assert edits == []
+    assert answers[-1]["show_alert"] is True
+    assert "through HER v2 only" in answers[-1]["text"]
+
+
 @pytest.mark.asyncio
 async def test_backend_her_v2_rejects_single_model_argument(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")

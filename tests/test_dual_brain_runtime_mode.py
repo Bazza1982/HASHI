@@ -124,7 +124,7 @@ def test_dual_brain_menu_uses_backend_then_model_steps() -> None:
     backend_keyboard = runtime._dual_brain_backend_keyboard(cfg, target="left")
     backend_callbacks = [button.callback_data for row in backend_keyboard.inline_keyboard for button in row]
     assert "bcfg:backend:left:codex-cli" in backend_callbacks
-    assert "bcfg:backend:left:openrouter-api" in backend_callbacks
+    assert "bcfg:backend:left:openrouter-api" not in backend_callbacks
 
     model_keyboard = runtime._dual_brain_model_keyboard(cfg, target="right", backend="openrouter-api")
     model_callbacks = [button.callback_data for row in model_keyboard.inline_keyboard for button in row]

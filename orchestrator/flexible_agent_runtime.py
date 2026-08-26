@@ -101,6 +101,7 @@ from orchestrator.flexible_backend_registry import (
     get_available_models,
     allows_custom_models,
     get_backend_label,
+    is_selectable_backend,
     normalize_effort,
     normalize_model,
 )
@@ -4637,6 +4638,14 @@ class FlexibleAgentRuntime:
             else:
                 requested_model = raw_value
 
+        if not is_selectable_backend(target_engine):
+            await self._reply_text(
+                update,
+                f"{target_engine} is a HER v2 provider, not a selectable backend. "
+                "Use /backend her-v2, then choose the provider with /model.",
+            )
+            return
+
         if target_engine not in allowed_engines:
             await self._reply_text(update, f"Backend not allowed: {target_engine}")
             return
@@ -6056,7 +6065,7 @@ class FlexibleAgentRuntime:
         return [
             str(backend.get("engine"))
             for backend in self.config.allowed_backends
-            if backend.get("engine")
+            if backend.get("engine") and is_selectable_backend(backend.get("engine"))
         ]
 
     def _dual_brain_backend_keyboard(self, cfg, *, target: str) -> InlineKeyboardMarkup:

@@ -12,6 +12,7 @@ from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
     HER_V2_ENGINE,
     get_backend_label,
+    is_selectable_backend,
     normalize_effort,
     normalize_model,
 )
@@ -66,7 +67,7 @@ def backend_keyboard(runtime) -> InlineKeyboardMarkup:
     seen: set[str] = set()
     for backend in runtime.config.allowed_backends:
         engine = backend["engine"]
-        if engine in seen:
+        if engine in seen or not is_selectable_backend(engine):
             continue
         seen.add(engine)
         base = get_backend_label(engine)
@@ -1698,6 +1699,12 @@ async def callback_model(runtime, update, context: Any) -> None:
                 await query.answer("Invalid callback data", show_alert=True)
                 return
             _, target_engine, mode = parts
+            if not is_selectable_backend(target_engine):
+                await query.answer(
+                    "This provider is available through HER v2 only.",
+                    show_alert=True,
+                )
+                return
             with_context = mode == "context"
             if target_engine == HER_V2_ENGINE:
                 success, message = await runtime._switch_backend_mode(

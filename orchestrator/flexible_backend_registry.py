@@ -3,6 +3,7 @@ from __future__ import annotations
 HER_V2_ENGINE = "her-v2"
 RETIRED_HER_ENGINE_ALIASES = frozenset({"her"})
 REMOVED_ENGINE_IDS = frozenset({"claw-cli"})
+PROVIDER_ONLY_ENGINE_IDS = frozenset({"openrouter-api", "deepseek-api"})
 CLI_ENGINES = frozenset(
     {
         "gemini-cli",
@@ -261,6 +262,42 @@ def normalize_allowed_backends(backends: list) -> list[dict]:
 
 def is_cli_backend(engine: str | None) -> bool:
     return canonical_backend_engine(engine) in CLI_ENGINES
+
+
+def is_selectable_backend(engine: str | None) -> bool:
+    """Return whether an engine may be selected as a top-level runtime.
+
+    Provider-only engines remain registered because HER v2 profiles and
+    internal renderers still use their adapters.  They are intentionally
+    absent from user-facing backend selection.
+    """
+
+    canonical = canonical_backend_engine(engine)
+    return bool(canonical and canonical not in PROVIDER_ONLY_ENGINE_IDS)
+
+
+def migrate_provider_only_active_backend(engine: str | None, backends: list[dict]) -> str:
+    """Move a legacy direct provider selection onto the HER v2 runtime.
+
+    The provider rows remain in ``allowed_backends`` as HER authorisation and
+    model catalogues.  Migration is safe only when the Agent explicitly grants
+    HER v2; otherwise startup fails with an actionable configuration error.
+    """
+
+    canonical = canonical_backend_engine(engine)
+    if canonical not in PROVIDER_ONLY_ENGINE_IDS:
+        return canonical
+    allowed = {
+        canonical_backend_engine(item.get("engine"))
+        for item in backends
+        if isinstance(item, dict)
+    }
+    if HER_V2_ENGINE not in allowed:
+        raise ValueError(
+            f"Backend '{canonical}' is provider-only; add an explicit "
+            "'her-v2' backend configuration before migrating this Agent."
+        )
+    return HER_V2_ENGINE
 
 
 def get_supported_privacy_levels(engine: str | None) -> tuple[int, ...]:

@@ -24,6 +24,7 @@ from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WOR
 from orchestrator.flexible_backend_registry import (
     canonical_backend_engine,
     normalize_allowed_backends,
+    migrate_provider_only_active_backend,
 )
 
 # Valid access_scope values:
@@ -283,7 +284,9 @@ class ConfigManager:
                     f"Agent workspace; it is inside Agent '{name}'."
                 )
             allowed = normalize_allowed_backends(row.get("allowed_backends"))
-            active = canonical_backend_engine(row.get("active_backend"))
+            active = migrate_provider_only_active_backend(
+                row.get("active_backend"), allowed
+            )
             if active == "claw-cli" or any(
                 item.get("engine") == "claw-cli" for item in allowed
             ):
@@ -692,7 +695,9 @@ class ConfigManager:
             load_pcm_document(system_md, workspace_dir=workspace_dir)
             telegram_token_key = a_raw.pop("telegram_token_key", name)
             allowed_backends = normalize_allowed_backends(a_raw.pop("allowed_backends"))
-            active_backend = canonical_backend_engine(a_raw.pop("active_backend"))
+            active_backend = migrate_provider_only_active_backend(
+                a_raw.pop("active_backend"), allowed_backends
+            )
             if active_backend == "claw-cli":
                 raise ValueError(
                     f"Agent '{name}' uses removed active backend 'claw-cli'; "

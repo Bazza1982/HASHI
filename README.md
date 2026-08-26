@@ -104,14 +104,14 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 **What makes HASHI different:**
 1. **No Token Storage** — Uses CLI backends with local authentication, not stored tokens
-2. **9 Backend Adapters** — Claude CLI, Gemini CLI, Codex CLI, Grok CLI, xAI API, OpenRouter API, DeepSeek API, Ollama (local LLM), and HASHI Engine Runtime (HER)
+2. **Provider-Neutral Runtime** — HER v2 orchestrates OpenRouter and DeepSeek as providers while their adapters remain available internally
 3. **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one account
 4. **Nagare Flow System** — Describe a task in natural language; Nagare designs, executes, and improves a multi-agent workflow automatically
 5. **Self-Improving HER Agents** — Optional `Planning → Execution → Meditation → Write` learning with agent-local files
 6. **SafeVoice** — Voice messages are transcribed and shown for confirmation before execution, preventing accidental commands
 7. **Context Recovery** — `/handoff` command instantly restores project context after compression
-8. **Tool Execution Layer** — API-backed agents can take real local actions: run bash commands, read/write files, browse the web, call external APIs, and more
-9. **Flex/Fixed Mode Switching** — Agents can switch between CLI backends and API backends mid-conversation via `/backend`
+8. **Tool Execution Layer** — HER v2 and tool-capable backends can take real local actions: run commands, read/write files, browse the web, call external APIs, and more
+9. **Flex/Fixed Mode Switching** — Agents can switch among selectable runtimes via `/backend`; OpenRouter and DeepSeek are selected inside HER v2 as providers
 10. **Wrapper Agent Mode** — Pair a strong core model with a stateless persona wrapper so GPT/Codex can do the work while another model controls the final visible voice
 11. **Anatta Live Self-Assembly** — Optional per-agent mode (`off`, `shadow`, `on`) that can observe or inject transient self-state guidance while keeping `agent.md` as the stable identity
 12. **Cross-Instance Messaging** — Agents across different HASHI instances can communicate via HChat and Hashi Remote
@@ -498,7 +498,7 @@ HASHI uses a **Universal Orchestrator** pattern where a single Python process ma
 - **Shared Sessions** — Telegram and Workbench share the same agent queues and memory
 - **Explicit over Automatic** — Skills, jobs, and features are user-activated, never magic
 - **Single Instance** — File-based locking prevents multiple HASHI processes from conflicting
-- **Remote Backend Policy** — API backends (OpenRouter, DeepSeek) are reserved for user-initiated requests; automated flows use CLI backends to prevent runaway costs
+- **Remote Provider Policy** — Remote provider calls are permission-gated for automated flows to prevent runaway costs
 - **Slim Core** — process bootstrap stays small while hot-reloadable managers own feature behavior
 
 ### File Structure
@@ -906,13 +906,15 @@ HASHI's **adapter system** provides a unified interface to multiple AI backends:
 | Grok CLI | `grok-cli` | `grok` CLI installed and logged in | Local auth, streaming JSON |
 | xAI API | `xai-api` | Hermes xAI OAuth profile or `xai_api_key` | Grok chat, responses, Imagine image/video |
 | HER v2 | `her-v2` (`her` migration alias) | At least one configured HER v2 provider profile | Provider-neutral staged orchestration; `claw-cli` is retired |
-| OpenRouter API | `openrouter-api` | API key in `secrets.json` | Multi-model access |
-| DeepSeek API | `deepseek-api` | API key in `secrets.json` | Direct API, cost-effective |
 | Ollama | `ollama-api` | Ollama installed locally | Free, no API key needed |
+
+OpenRouter (`openrouter-api`) and DeepSeek (`deepseek-api`) are provider-only
+engines. Their adapters remain available to HER v2 and internal rendering, but
+they are not selectable as top-level backends in `/backend`.
 
 #### Remote Backend Policy
 
-API backends (OpenRouter, DeepSeek, xAI API) are protected by an automatic cost-control policy:
+Remote provider calls (including OpenRouter, DeepSeek, and xAI API) are protected by an automatic cost-control policy:
 - **User-initiated requests** → allowed on any backend
 - **Automated requests** (scheduler, HChat, transfers) → blocked on remote API backends, must use CLI or local backends
 
@@ -925,7 +927,8 @@ This prevents runaway API costs from automated workflows.
 - Conversation memory managed by CLI
 - Grok CLI uses `--output-format streaming-json`; HASHI treats zero-exit empty answers as failures, retries once only for side-effect-free `thought`/`end` empty output, and refuses retry after side-effect events.
 
-#### API Backends (OpenRouter, DeepSeek, xAI API)
+#### API Providers and Backends
+- OpenRouter and DeepSeek run through HER v2 provider profiles; xAI remains a selectable API backend
 - HTTP API with streaming support
 - Supports tool calls (function calling)
 - Stateless (HASHI manages conversation history)
