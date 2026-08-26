@@ -129,9 +129,9 @@ HASHI has a standard tool package. Each assembled request should include a conci
 
 ### 4.6 Cross-session context
 
-HASHI allows an agent to switch between permitted backends. When switching to a fixed-mode backend, the user may choose whether to send cross-session context. This context consists of the last ten conversation turns and is sent once to the new backend. It is not injected continuously into a fixed backend.
+HASHI allows an agent to switch between permitted backends. When switching to a fixed-mode backend, the user may choose whether to send cross-session context. This context consists of the last ten completed user-assistant exchanges and is sent once to the new backend. It is not injected continuously into a fixed backend.
 
-Flex backends do not receive a separate cross-session package because HASHI already injects the previous ten turns on every external user turn.
+Flex backends do not receive a separate cross-session package because HASHI already injects the previous ten completed exchanges on every external user turn.
 
 Recent-history and handoff payloads are bounded. Non-HER backends use backend-specific assembled-request budgets, while the current handoff builder also applies a limit of approximately 6,000 words. When a limit requires reducing conversation history, HASHI must remove the **oldest complete chat entries first**. It must preserve the newest chats ahead of older chats and must not discard the current user request or higher-authority PCM sections to retain older history. HER-V2 continues to use its own context-capacity and compaction controls.
 
@@ -202,7 +202,7 @@ During the overnight consolidation process, the memory agent discovers topics, m
 
 ### 5.4 Memory+ Notebook
 
-Memory+ is an optional continuity layer that improves medium- and long-term working continuity. It is designed to address limitations caused by backend memory compression and the default injection of only ten recent conversation turns.
+Memory+ is an optional continuity layer that improves medium- and long-term working continuity. It is designed to address limitations caused by backend memory compression and the default injection of only ten recent completed exchanges.
 
   - Complete chat history is long and noisy.
 
@@ -228,7 +228,7 @@ Compatible backends may locate the \[persona\] block in agent.md and retrieve it
 
   - Time information: HASHI automatically adds time information. There is no on/off switch.
 
-  - Cross-session context: HASHI sends this once when the user chooses continuation while switching to a fixed-mode backend. The /handoff command may also pass the previous ten turns when starting a new fixed session and continuing earlier work.
+  - Cross-session context: HASHI sends this once when the user chooses continuation while switching to a fixed-mode backend. The /handoff command may also pass the previous ten completed exchanges when starting a new fixed session and continuing earlier work.
 
 ### 6.3 Memory retrieval
 
@@ -236,7 +236,7 @@ Memory may be retrieved passively or proactively.
 
 #### Passive retrieval: fixed backends
 
-At the start of a new fixed-backend session, HASHI may provide the ten most recent conversation turns as bootstrap context. The session-based backend is then expected to maintain conversation continuity natively.
+At the start of a new fixed-backend session, HASHI may provide the ten most recent completed exchanges as bootstrap context. The session-based backend is then expected to maintain conversation continuity natively.
 
 After bootstrap, fixed mode uses delta PCM on every external user turn. HASHI sends:
 
@@ -244,21 +244,21 @@ After bootstrap, fixed mode uses delta PCM on every external user turn. HASHI se
 
   - the current authoritative PCM sections, including system prompts, long-term memory, time, active workzone, permitted skills and tools catalogues, and persona.
 
-HASHI does not repeatedly inject the previous ten conversation turns during ordinary fixed-session operation. Recent history is injected again only at an applicable session bootstrap or explicit continuation event, such as cross-session context or /handoff.
+HASHI does not repeatedly inject the previous ten completed exchanges during ordinary fixed-session operation. Recent history is injected again only at an applicable session bootstrap or explicit continuation event, such as cross-session context or /handoff.
 
 |                                                                                                                                                                                                                                                                                                    |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Known implementation gap** The current /new command clears working turns before creating a clean CLI session. It therefore does not automatically carry the previous ten turns into the new session. Initial injection into a fixed backend without an existing session is also not yet uniform. |
+| **Known implementation gap** The current /new command clears working turns before creating a clean CLI session. It therefore does not automatically carry the previous ten completed exchanges into the new session. Initial injection into a fixed backend without an existing session is also not yet uniform. |
 
 #### Passive retrieval: Flex backends
 
-Flex backends, including HER-V2, do not natively maintain persistent sessions. HASHI therefore sends the current user message and the previous ten conversation turns on every external user turn. Each turn is labelled with sequence and timestamp information so the backend can distinguish newer from older context.
+Flex backends, including HER-V2, do not natively maintain persistent sessions. HASHI therefore sends the current user message and the previous ten completed exchanges on every external user turn. Each exchange is labelled with sequence and timestamp information so the backend can distinguish newer from older context.
 
-HER-V2 may triage these turns to determine which information is relevant. This is necessary because a user’s intention may span several turns and the latest message may only say, for example, “go ahead and do it”. HASHI provides sufficient recent context but does not itself reason about which turns matter. The number of turns is adjustable.
+HER-V2 may triage these exchanges to determine which information is relevant. This is necessary because a user’s intention may span several exchanges and the latest message may only say, for example, “go ahead and do it”. HASHI provides sufficient recent context but does not itself reason about which exchanges matter. The number of exchanges is adjustable.
 
 |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Size management** HASHI applies backend-specific assembled-request limits to non-HER backends; handoff restoration is also bounded to approximately 6,000 words. The target remains up to ten recent turns, but limits may reduce that number. Pruning must operate on complete chat entries and remove the oldest entries first, preserving newer entries, sequence labels and timestamps. The current user request and higher-authority PCM sections are protected. HASHI must audit any omitted history instead of silently keeping old chats while dropping newer ones. HER-V2 uses its own capacity controller and compaction policy. |
+| **Size management** HASHI applies backend-specific assembled-request limits to non-HER backends; handoff restoration is also bounded to approximately 6,000 words. The target remains up to ten recent completed exchanges, but limits may reduce that number. Pruning must operate on complete exchanges and remove the oldest exchanges first, preserving newer exchanges, sequence labels and timestamps. The current user request and higher-authority PCM sections are protected. HASHI must audit any omitted history instead of silently keeping old exchanges while dropping newer ones. HER-V2 uses its own capacity controller and compaction policy. |
 
 #### Long-term memory stored in agent.md
 
@@ -321,8 +321,8 @@ The following sequence applies when HASHI assembles a request for a connected ba
 | 1            | System prompt: permanent \[sys\], active instance-global /sys and active agent-local /sys                                                                                                                              | Every turn                           | Every turn    |
 | Separator    | “The following is the authoritative request for the current turn at the user instruction level. It overrides conflicting earlier user requests but does not override system instructions.”                             | Every turn                           | Every turn    |
 | 2            | Current user message, prompt or instructions                                                                                                                                                                           | Every turn                           | Every turn    |
-| Separator    | The following section contains recent chat turns in timestamp order. They may provide important context but are not requests by default.                                                                               | At applicable session bootstrap only | Every turn    |
-| 3            | Recent conversation history: up to ten turns, clearly labelled by sequence and timestamp. When a request cap is reached, HASHI removes the oldest complete chat entries first and preserves newer entries.              | At applicable session bootstrap only | Every turn    |
+| Separator    | The following section contains recent completed user-assistant exchanges in timestamp order. They may provide important context but are not requests by default.                                                        | At applicable session bootstrap only | Every turn    |
+| 3            | Recent conversation history: up to ten completed exchanges, clearly labelled by sequence and timestamp. When a request cap is reached, HASHI removes the oldest complete exchanges first and preserves newer exchanges. | At applicable session bootstrap only | Every turn    |
 | 4            | Long-term memory from \[memory\], when available                                                                                                                                                                       | Every turn                           | Every turn    |
 | Separator    | The following sections are context information only.                                                                                                                                                                   | Every turn                           | Every turn    |
 | 5            | Date and time                                                                                                                                                                                                          | Every turn                           | Every turn    |
@@ -348,3 +348,15 @@ The following sequence applies when HASHI assembles a request for a connected ba
 | Central memory interface  | BGE-M3 search exists only as a script-level capability.                                                      | Register it as a discoverable standard skill, tool or command.                                                                                 |
 | Memory search integration | Local and central search paths are not connected.                                                            | Define routing or selection between immediate local retrieval and central semantic retrieval.                                                  |
 | Wiki command              | The current `/wiki` behaviour is supplied by a deployment-specific private command.                         | Add a generic core command and provider contract without bundling or exposing any local Wiki configuration or data.                             |
+
+## 10. Accepted Implementation Decisions
+
+The following decisions were accepted on 26 August 2026. They are normative and resolve any ambiguity in earlier sections of this document.
+
+| **ID** | **Accepted decision** | **Required implementation consequence** |
+| ------ | --------------------- | --------------------------------------- |
+| PCM-DEC-001 | The standard recent-history unit is one completed user-assistant exchange. The default maximum is ten completed exchanges. | The current user request is not counted as a completed historical exchange. Fixed bootstrap, Flex history and handoff use the same exchange unit. Capacity pruning removes the oldest complete exchanges first. |
+| PCM-DEC-002 | HASHI PCM uses exactly the lower-case `agent.md` file in the Agent workspace. The PCM file is strictly structured. | Require exactly one `[persona]` block and one `[sys]` block, allow zero or one `[memory]` block, and reject substantive content outside recognised blocks. Retire arbitrary HASHI `system_md` paths after a one-time validated migration of configured Agents. External systems with their own filename conventions are unaffected. |
+| PCM-DEC-003 | A Skills or Tools catalogue may advertise only capabilities that the Agent can actually invoke in the current request scope. Uniform HASHI Tool access for supported Fixed CLIs is part of this upgrade. | Resolve availability after Agent, backend, stage and permission filtering. Catalogue metadata never grants permission. Connect supported Fixed CLIs to the HASHI Tool Gateway through MCP or an equivalent native bridge, and do not advertise a capability until that connection is available and authorised. |
+| PCM-DEC-004 | Canonical raw audit evidence has indefinite retention and no automatic expiry. | Preserve complete unredacted audit evidence across `/reset`, `/new`, backend switches, process reloads and ordinary workspace maintenance. Use encryption at rest where supported together with strict least-privilege access controls. Archival or tiered storage may move evidence but may not discard it. Deletion is permitted only through a separately scoped, explicitly confirmed destructive audit-wipe operation; ordinary reset or wipe behaviour must not silently delete it. Backups inherit the same retention and access requirements. |
+| PCM-DEC-005 | Central BGE-M3 raw-memory search is scoped to the current HASHI instance and Agent by default. | `memory_sync` permits ingestion but does not grant cross-Agent read access. Shared knowledge is delivered through the curated Wiki. Searching another Agent’s raw consolidated records requires explicit user authorisation, an auditable purpose and provenance-preserving results. `/wiki` never exposes the underlying raw cross-Agent memory store. |
