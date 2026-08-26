@@ -549,12 +549,14 @@ def test_provider_recovery_contract_contains_no_elapsed_limit_fields():
     assert "attempt_timeout_s" not in StageRequest.__dataclass_fields__
 
 
-def test_structured_parser_accepts_prose_wrapper_but_not_missing_object():
-    assert extract_json_object('Result follows: {"classification":"DIRECT_RESPONSE"}.')[
-        "classification"
-    ] == "DIRECT_RESPONSE"
+def test_structured_parser_accepts_only_an_explicit_json_object():
+    assert extract_json_object(
+        '```json\n{"classification":"DIRECT_RESPONSE"}\n```'
+    )["classification"] == "DIRECT_RESPONSE"
     with pytest.raises(Exception, match="no valid JSON"):
-        extract_json_object("classification is direct")
+        extract_json_object(
+            'Result follows: {"classification":"DIRECT_RESPONSE"}.'
+        )
 
 
 class _MemoryWriter:

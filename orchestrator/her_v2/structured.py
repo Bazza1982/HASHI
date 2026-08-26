@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from functools import wraps
 from typing import Any, Callable, Mapping, TypeVar
@@ -25,6 +26,10 @@ MappingParser = Callable[[Mapping[str, Any]], ParsedT]
 
 _MAX_SOURCE_CHARS = 200_000
 _MAX_JSON_CANDIDATES = 8
+_JSON_OBJECT_FENCE = re.compile(
+    r"```(?:json)?\s*(\{.*\})\s*```",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 _REGISTERED_WRAPPERS = frozenset(
     {"data", "output", "parsed", "response", "result", "structured_output"}
 )
@@ -129,8 +134,14 @@ def _extract_json_objects(
     items: list[Mapping[str, Any]] = []
     seen: set[str] = set()
 
-    # First accept a complete object, including one deterministic layer of
-    # JSON-string encoding used by several OpenAI-compatible gateways.
+    fenced = _JSON_OBJECT_FENCE.fullmatch(value)
+    if fenced is not None:
+        value = fenced.group(1).strip()
+
+    # Accept only a complete object, including one deterministic layer of
+    # JSON-string encoding used by several OpenAI-compatible gateways.  Never
+    # scan prose, logs, code examples, or quoted user content for an embedded
+    # object: those objects are content, not stage-control authority.
     try:
         parsed: Any = json.loads(value, strict=strict)
         if isinstance(parsed, str):
@@ -138,18 +149,6 @@ def _extract_json_objects(
         _append_mapping(items, seen, parsed)
     except (json.JSONDecodeError, TypeError):
         pass
-
-    decoder = json.JSONDecoder(strict=strict)
-    for index, character in enumerate(value):
-        if len(items) >= _MAX_JSON_CANDIDATES:
-            break
-        if character != "{":
-            continue
-        try:
-            parsed, _end = decoder.raw_decode(value[index:])
-        except json.JSONDecodeError:
-            continue
-        _append_mapping(items, seen, parsed)
     return tuple(items)
 
 
@@ -186,7 +185,6 @@ def _candidate_group(
     response: StageResponse,
     *,
     include_reasoning: bool,
-    plain_text_field: str | None,
 ) -> tuple[_Candidate, ...]:
     candidates: list[_Candidate] = []
     seen: set[tuple[str, str]] = set()
@@ -210,7 +208,6 @@ def _candidate_group(
     text_candidates = extract_json_objects(response.text)
     for index, data in enumerate(text_candidates):
         add(f"provider_text:{index + 1}", data)
-    text = str(response.text or "").strip()
     strict_keys = {_mapping_key(data) for data in text_candidates}
     repaired_text_candidates = tuple(
         data
@@ -219,13 +216,6 @@ def _candidate_group(
     )
     for index, data in enumerate(repaired_text_candidates):
         add(f"provider_json_control_char_repair:{index + 1}", data)
-    if (
-        plain_text_field
-        and text
-        and not text_candidates
-        and not repaired_text_candidates
-    ):
-        add("provider_plain_text", {plain_text_field: text})
     return tuple(candidates)
 
 
@@ -285,10 +275,42 @@ def resolve_stage_response(
         return StructuredResolution(response, validator(response), "provider_response")
     plain_text_field = getattr(validator, "_plain_text_field", None)
 
+    # Immediate Response, primary Execution, and Finalisation are presentation
+    # stages.  Their visible provider text is the result itself, including any
+    # JSON, Markdown, code, logs, or examples the user requested.  Structured
+    # provider data remains a fallback only when no visible text exists, and
+    # hidden reasoning is never promoted into presentation authority.
+    if plain_text_field:
+        text = str(response.text or "").strip()
+        if text:
+            candidate = {plain_text_field: text}
+            parsed = parser(candidate)
+            return StructuredResolution(
+                response=replace(response, data=candidate),
+                parsed=parsed,
+                source="provider_plain_text",
+            )
+
+        primary = (
+            (_Candidate("provider_data", response.data),)
+            if response.data
+            else ()
+        )
+        resolved, rejected = _resolve_group(response, parser, primary)
+        if resolved is not None:
+            return resolved
+        if rejected:
+            detail = "; ".join(
+                f"{source}: {error}" for source, error in rejected
+            )
+            raise StructuredOutputError(
+                f"provider response has no compatible structured result ({detail})"
+            )
+        raise StructuredOutputError("provider returned an empty structured response")
+
     primary = _candidate_group(
         response,
         include_reasoning=False,
-        plain_text_field=plain_text_field,
     )
     resolved, primary_rejected = _resolve_group(response, parser, primary)
     if resolved is not None:
@@ -297,7 +319,6 @@ def resolve_stage_response(
     reasoning = _candidate_group(
         response,
         include_reasoning=True,
-        plain_text_field=None,
     )
     resolved, reasoning_rejected = _resolve_group(response, parser, reasoning)
     if resolved is not None:
@@ -767,7 +788,7 @@ def parse_execution(data: Mapping[str, Any]) -> ExecutionOutcome:
 
 @_stage_parser()
 def parse_review(data: Mapping[str, Any]) -> ReviewFinding:
-    if any(key in data for key in ("status", "reason", "conditions")):
+    if "status" in data:
         expected = {"status", "reason", "conditions"}
         missing = expected - set(data)
         unexpected = set(data) - expected

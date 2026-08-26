@@ -12,6 +12,7 @@ from orchestrator.her_v2.models import (
 from orchestrator.her_v2.structured import (
     parse_direct_message,
     parse_execution,
+    parse_execution_message,
     parse_finalisation,
     parse_immediate,
     parse_plan,
@@ -48,7 +49,6 @@ def test_direct_preserves_json_looking_user_output_as_natural_language():
             StageResponse(
                 text="",
                 reasoning_trace=(
-                    "classification follows "
                     '{"classification":"COMPLEX_TASK","real_goal":"inspect",'
                     '"relevant_habits":[],"clarification":null}'
                 ),
@@ -234,13 +234,13 @@ def test_execution_rejects_non_execution_dispositions(disposition):
         ),
         (
             '{"message":"First line\\n\\nSecond line."}',
-            "First line\n\nSecond line.",
-            "provider_text",
+            '{"message":"First line\\n\\nSecond line."}',
+            "provider_plain_text",
         ),
         (
             '{"message":"First line\n\nSecond line."}',
-            "First line\n\nSecond line.",
-            "provider_json_control_char_repair",
+            '{"message":"First line\n\nSecond line."}',
+            "provider_plain_text",
         ),
         (
             '{"message":"Visible even though the envelope was truncated."',
@@ -260,10 +260,76 @@ def test_immediate_presentation_compatibility_preserves_visible_content(
     assert resolution.source == source
 
 
-def test_registered_wrapper_does_not_turn_a_nested_object_into_display_text():
-    assert parse_immediate(
-        StageResponse(text='{"response":{"message":"Hello."}}')
-    ) == "Hello."
+def test_presentation_preserves_json_looking_text_without_unwrapping_it():
+    text = '{"response":{"message":"Hello."}}'
+
+    assert parse_immediate(StageResponse(text=text)) == text
+
+
+def test_presentation_prefers_visible_text_and_never_promotes_reasoning():
+    text = (
+        "Full report. Example only: "
+        '{"message":"example, not the answer"}. Final conclusion.'
+    )
+
+    resolution = resolve_stage_response(
+        StageResponse(
+            text=text,
+            data={"message": "structured fallback"},
+            reasoning_trace='{"message":"reasoning draft"}',
+        ),
+        parse_immediate,
+    )
+
+    assert resolution.source == "provider_plain_text"
+    assert resolution.parsed == text
+
+
+def test_execution_preserves_a_full_report_with_embedded_json_examples():
+    text = (
+        "Inspection complete. Example configuration:\n"
+        '```json\n{"message":"example only","background_mode":true}\n```\n'
+        "Final conclusion: keep the foreground flow."
+    )
+
+    assert parse_execution_message(StageResponse(text=text)) == text
+
+
+def test_finalisation_preserves_user_requested_json_as_visible_text():
+    text = '{"status":"ok","files":[]}'
+
+    result = parse_finalisation(StageResponse(text=text))
+
+    assert result.final_message == text
+    assert result.execution_result is None
+
+
+def test_presentation_uses_formal_data_only_when_visible_text_is_empty():
+    resolution = resolve_stage_response(
+        StageResponse(data={"message": "structured fallback"}),
+        parse_immediate,
+    )
+
+    assert resolution.source == "provider_data"
+    assert resolution.parsed == "structured fallback"
+
+
+def test_control_json_must_be_the_complete_response_or_complete_code_block():
+    prose = (
+        "Result follows: "
+        '{"classification":"SIMPLE_TASK","real_goal":"inspect",'
+        '"relevant_habits":[],"clarification":null}'
+    )
+    fenced = (
+        "```json\n"
+        '{"classification":"SIMPLE_TASK","real_goal":"inspect",'
+        '"relevant_habits":[],"clarification":null}'
+        "\n```"
+    )
+
+    with pytest.raises(StructuredOutputError, match="no valid JSON"):
+        parse_triage(StageResponse(text=prose))
+    assert parse_triage(StageResponse(text=fenced)).real_goal == "inspect"
 
 
 def test_conflicting_valid_carriers_remain_a_hard_error():
@@ -415,3 +481,18 @@ def test_review_technical_unavailability_is_not_a_conditional_pass():
     )
 
     assert finding.outcome is ReviewOutcome.UNAVAILABLE
+
+
+def test_review_legacy_envelope_is_selected_by_outcome_not_reason():
+    finding = validate_review_response(
+        StageResponse(
+            data={
+                "outcome": "PASS",
+                "reason": "The legacy result remains valid.",
+                "findings": [],
+            }
+        )
+    )
+
+    assert finding.outcome is ReviewOutcome.PASS
+    assert finding.summary == "The legacy result remains valid."

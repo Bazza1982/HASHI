@@ -942,14 +942,13 @@ async def test_missing_model_commentary_uses_verified_deterministic_fallback_onc
         replan["next_step"],
         "plan is unchanged",
     )
-    assert message.minimal_persona_fallback_reason == (
-        "replan_model_commentary_fallback"
-    )
     assert message.event_id.endswith(":checkpoint:1:commentary")
 
 
 @pytest.mark.asyncio
-async def test_commentary_missing_changed_plan_status_uses_fallback_once(tmp_path):
+async def test_replan_commentary_is_not_rejected_for_paraphrasing_structured_facts(
+    tmp_path,
+):
     replan = _valid_replan_data(
         plan=["Inspect", "Use the supported route", "Verify"],
         plan_changed=True,
@@ -969,16 +968,12 @@ async def test_commentary_missing_changed_plan_status_uses_fallback_once(tmp_pat
     assert result.terminal_state.value == "COMPLETED"
     assert len(commentary.records) == 1
     message = commentary.records[0]
-    assert "The plan changed because" in message.text
-    assert replan["change_reason"] in message.text
+    assert message.text == replan["commentary"]
     assert message.required_facts == (
         "60%",
         replan["next_step"],
         "plan changed",
         replan["change_reason"],
-    )
-    assert message.minimal_persona_fallback_reason == (
-        "replan_model_commentary_fallback"
     )
 
 
@@ -1003,9 +998,6 @@ async def test_oversized_replan_update_uses_bounded_fallback_without_stopping_wo
     message = commentary.records[0]
     assert len(message.text) <= 4_000
     assert all(fact in message.text for fact in message.required_facts)
-    assert message.minimal_persona_fallback_reason == (
-        "replan_model_commentary_fallback"
-    )
 
 
 @pytest.mark.asyncio

@@ -2919,14 +2919,6 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
         self.package_index = 0
 
     async def package(self, commentary: NeutralCommentary) -> PackagedCommentary:
-        if commentary.minimal_persona_fallback_reason:
-            # Reuse the established minimal Persona fallback. Its identity
-            # comes from ``source.display_name``; this boundary does not read
-            # or construct a separate internal Agent-name identity.
-            return self._fallback(
-                commentary,
-                commentary.minimal_persona_fallback_reason,
-            )
         if not self.source.usable:
             return self._fallback(
                 commentary,
@@ -2982,7 +2974,7 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
         return PackagedCommentary(
             source_event_id=commentary.event_id,
             stage=commentary.stage,
-            text=f"{self.source.display_name} 向您汇报：{commentary.text}",
+            text=f"{self.source.display_name}: {commentary.text}",
             provenance="minimal_persona_fallback",
             fallback=True,
             error_type=reason,
@@ -3040,7 +3032,7 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
     def _required_fallback(
         self, message: RequiredUserMessage, reason: str
     ) -> RenderedRequiredMessage:
-        prefix = f"{self.source.display_name} 想请您确认："
+        prefix = f"{self.source.display_name}: "
         return RenderedRequiredMessage(
             source_event_id=message.event_id,
             kind=message.kind,

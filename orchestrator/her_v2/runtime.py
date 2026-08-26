@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import time
 import uuid
@@ -82,7 +81,6 @@ from .runtime_invocation import RuntimeInvocationMixin
 from .runtime_support import (
     RuntimeSupportMixin,
     _execution_payload,
-    _normalise_text,
     _payload_hash,
     _technical_error_message,
     _technical_error_message_from_failure,
@@ -723,9 +721,12 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             )
 
         if triage.classification is TriageClassification.CONFIRMATION_REQUIRED:
-            if not immediate_resolution_delivered and (
-                _normalise_text(triage.clarification) != _normalise_text(immediate_text)
-            ):
+            clarification_already_resolved = immediate_resolution_delivered or any(
+                record.event_id == f"{state.ledger.turn_id}:immediate"
+                and record.kind == "clarification"
+                for record in state.deliveries
+            )
+            if not clarification_already_resolved:
                 await self._deliver(
                     state,
                     kind="clarification",
@@ -1287,10 +1288,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             detail = "persona_rendered_in_finalisation=true"
 
         review_disclosure = self._required_review_disclosure(state)
-        if review_disclosure and not self._report_discloses_review_state(
-            report,
-            state.last_review,
-        ):
+        if review_disclosure:
             report = f"{report.rstrip()}\n\nValidation note: {review_disclosure}"
             detail = f"{detail}; review_disclosure_appended=true"
             self._audit(
@@ -1888,23 +1886,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             unauthorized_attachment_ids: set[str] = set()
             raw_attachment_ids = raw.get("attachment_ids")
             if raw_attachment_ids is None:
-                normalized_task = task.casefold()
-                compare_all = any(
-                    phrase in normalized_task
-                    for phrase in (
-                        "all images",
-                        "every image",
-                        "all attachments",
-                        "every attachment",
-                        "全部图片",
-                        "所有图片",
-                        "全部附件",
-                        "所有附件",
-                    )
-                )
-                selected_attachment_ids = (
-                    ordered_available_attachment_ids if compare_all else ()
-                )
+                selected_attachment_ids = ()
             else:
                 if not isinstance(raw_attachment_ids, list):
                     raise StageInvocationError(
@@ -2379,23 +2361,9 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         def validate_replan(response: StageResponse) -> ReplanningOutcome:
             outcome = parse_replanning(response)
             assert isinstance(outcome, ReplanningOutcome)
-            previous_semantics = self._semantic_plan(prior_plan)
-            replacement_semantics = self._semantic_plan(outcome.plan)
-            if not outcome.plan_changed and replacement_semantics != previous_semantics:
+            if outcome.completion_percent == 100 and outcome.plan_changed:
                 raise StructuredOutputError(
-                    "plan_changed=false requires the replacement plan to remain "
-                    "semantically unchanged"
-                )
-            if outcome.plan_changed and replacement_semantics == previous_semantics:
-                raise StructuredOutputError(
-                    "plan_changed=true requires a materially changed replacement plan"
-                )
-            if outcome.completion_percent == 100 and (
-                outcome.plan_changed or replacement_semantics != previous_semantics
-            ):
-                raise StructuredOutputError(
-                    "completion_percent=100 requires an unchanged active plan and "
-                    "plan_changed=false"
+                    "completion_percent=100 requires plan_changed=false"
                 )
             if (
                 classification is not TriageClassification.HIGH_VOLUME_TASK
@@ -2489,24 +2457,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             )
         return outcome
 
-    @staticmethod
-    def _semantic_plan(plan: Mapping[str, Any]) -> str:
-        semantic = {
-            key: plan.get(key)
-            for key in ("plan", "success_criteria", "parallel_groups", "sub_agents")
-            if key in plan
-        }
-        try:
-            return json.dumps(
-                semantic,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            )
-        except (TypeError, ValueError):
-            return repr(semantic)
-
     async def _publish_mandatory_replan_commentary(
         self,
         state: _TurnState,
@@ -2533,55 +2483,10 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         ].strip()
         deterministic = f"{deterministic_prefix}{next_fact}"
         candidate = str(outcome.commentary or "").strip()
-        normalized_candidate = " ".join(candidate.split()).casefold()
-        required_fragments = [
-            f"{outcome.completion_percent}%".casefold(),
-            " ".join(outcome.next_step.split()).casefold(),
-        ]
         plan_status_fact = (
             "plan changed" if outcome.plan_changed else "plan is unchanged"
         )
-        if outcome.plan_changed:
-            required_fragments.append(
-                " ".join(outcome.change_reason.split()).casefold()
-            )
-            has_plan_status_claim = any(
-                marker in normalized_candidate
-                for marker in (
-                    "plan changed",
-                    "plan has changed",
-                    "plan was changed",
-                    "changed the plan",
-                    "adjusted the plan",
-                    "revised the plan",
-                    "计划改变",
-                    "计划已改变",
-                    "计划有变",
-                    "计划已调整",
-                    "调整了计划",
-                )
-            )
-        else:
-            has_plan_status_claim = any(
-                marker in normalized_candidate
-                for marker in (
-                    "unchanged",
-                    "not changed",
-                    "did not change",
-                    "remains the same",
-                    "计划未改变",
-                    "计划没有改变",
-                    "计划不变",
-                    "计划保持不变",
-                )
-            )
-        if (
-            not has_plan_status_claim
-            or not candidate
-            or any(
-                fragment not in normalized_candidate for fragment in required_fragments
-            )
-        ):
+        if not candidate:
             candidate = deterministic
             fallback_used = True
         else:
@@ -2602,9 +2507,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 attempt=max(1, int(response.provider_attempt or 1)),
                 text=candidate,
                 required_facts=tuple(protected_facts),
-                minimal_persona_fallback_reason=(
-                    "replan_model_commentary_fallback" if fallback_used else ""
-                ),
             )
         except CommentaryValidationError:
             commentary = NeutralCommentary(
@@ -2614,7 +2516,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 attempt=max(1, int(response.provider_attempt or 1)),
                 text=deterministic,
                 required_facts=tuple(protected_facts),
-                minimal_persona_fallback_reason=("replan_model_commentary_fallback"),
             )
             fallback_used = True
 
@@ -2849,44 +2750,3 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         if finding.outcome is ReviewOutcome.FAIL:
             return f"Independent validation found an unresolved issue: {detail}"
         return ""
-
-    @staticmethod
-    def _report_discloses_review_state(
-        report: str,
-        finding: ReviewFinding | None,
-    ) -> bool:
-        if finding is None:
-            return True
-        normalised_report = _normalise_text(report)
-        details = tuple(
-            _normalise_text(item)
-            for item in (finding.findings or (finding.summary,))
-            if _normalise_text(item)
-        )
-        if any(item in normalised_report for item in details):
-            return True
-        if finding.outcome is ReviewOutcome.UNAVAILABLE:
-            return any(
-                marker in normalised_report
-                for marker in (
-                    "review was unavailable",
-                    "review is unavailable",
-                    "validation was unavailable",
-                    "validation is unavailable",
-                    "verification was unavailable",
-                    "verification is unavailable",
-                )
-            )
-        if finding.outcome is ReviewOutcome.INCONCLUSIVE:
-            return any(
-                marker in normalised_report
-                for marker in (
-                    "review was inconclusive",
-                    "review is inconclusive",
-                    "validation was inconclusive",
-                    "validation is inconclusive",
-                    "verification was inconclusive",
-                    "verification is inconclusive",
-                )
-            )
-        return False

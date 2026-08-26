@@ -425,7 +425,10 @@ def render_internal_stage_system_prompt(request: StageRequest) -> str | None:
 def _persona_guidance(*, guidance: str, display_name: str, usable: bool) -> str:
     if usable:
         return guidance
-    return f"Agent display name: {display_name}. Use a polite tone and address the user as 您."
+    return (
+        f"Agent display name: {display_name}. "
+        "Use the configured default language and a respectful tone."
+    )
 
 
 def render_finalisation_system_prompt(

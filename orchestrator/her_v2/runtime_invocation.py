@@ -425,16 +425,20 @@ class RuntimeInvocationMixin:
                         validation_source = "specialist_json_repair"
                     else:
                         if not defer_structured_error:
-                            raise StageInvocationError(
-                                f"{stage.value} returned no usable natural-language "
-                                f"response: {exc}",
-                                code=ProviderFailureCode.PROVIDER_EMPTY_RESPONSE,
-                                human_description=(
-                                    "The provider returned no usable natural-language "
-                                    "response."
-                                ),
-                                details={"validation_error": str(exc)},
-                            ) from exc
+                            if (
+                                not str(response.text or "").strip()
+                                and not response.data
+                            ):
+                                raise StageInvocationError(
+                                    f"{stage.value} returned no usable natural-language "
+                                    "response",
+                                    code=ProviderFailureCode.PROVIDER_EMPTY_RESPONSE,
+                                    human_description=(
+                                        "The provider returned no usable natural-language "
+                                        "response."
+                                    ),
+                                ) from exc
+                            raise exc
                         if stage is not Stage.EXECUTION or role.startswith(
                             "sub_agent:"
                         ):
