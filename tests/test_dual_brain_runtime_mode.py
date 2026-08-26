@@ -264,6 +264,71 @@ def test_dual_brain_preflight_does_not_inject_wiki_unless_requested(tmp_path: Pa
     assert events[-1]["request_id"] == "r1"
 
 
+def test_dual_brain_continuity_and_artifacts_are_session_scoped(tmp_path: Path) -> None:
+    workspace = tmp_path / "sakura"
+    workspace.mkdir()
+    (workspace / "state.json").write_text(
+        json.dumps(
+            {
+                "agent_mode": "dual-brain",
+                "dual_brain": {
+                    "left_brain": {"backend": "codex-cli", "model": "gpt-5.4"},
+                    "right_brain": {"backend": "codex-cli", "model": "gpt-5.4"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    session_a = tmp_path / "sessions" / "a"
+    session_b = tmp_path / "sessions" / "b"
+    for path, marker in ((session_a, "SESSION_A_ONLY"), (session_b, "SESSION_B_ONLY")):
+        memory = path / "memory"
+        memory.mkdir(parents=True)
+        (memory / "left_brain_continuity.jsonl").write_text(
+            json.dumps({"marker": marker}) + "\n", encoding="utf-8"
+        )
+
+    prompts: list[str] = []
+
+    class Response:
+        is_success = True
+        error = ""
+        text = json.dumps({"useful": False, "wiki_needed": False})
+
+    async def invoker(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return Response()
+
+    observer = DualBrainObserver(
+        workspace_dir=workspace,
+        backend_invoker=invoker,
+        backend_context_getter=lambda: {
+            "engine": "codex-cli",
+            "model": "gpt-5.4",
+        },
+    )
+    for request_id, session_workspace in (("a", session_a), ("b", session_b)):
+        asyncio.run(
+            observer.build_context_sections(
+                TurnContextRequest(
+                    request_id=request_id,
+                    source="text",
+                    user_text="hello",
+                    model_name="gpt-5.4",
+                    metadata={"session_workspace": str(session_workspace)},
+                )
+            )
+        )
+
+    assert "SESSION_A_ONLY" in prompts[0]
+    assert "SESSION_B_ONLY" not in prompts[0]
+    assert "SESSION_B_ONLY" in prompts[1]
+    assert "SESSION_A_ONLY" not in prompts[1]
+    assert (session_a / "memory" / "left_brain_artifacts" / "left_brain_preflight_latest.json").exists()
+    assert (session_b / "memory" / "left_brain_artifacts" / "left_brain_preflight_latest.json").exists()
+    assert not (workspace / "memory" / "left_brain_artifacts").exists()
+
+
 def test_dual_brain_after_action_respects_should_write_false(tmp_path: Path) -> None:
     workspace = tmp_path / "sakura"
     workspace.mkdir()

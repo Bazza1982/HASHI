@@ -8,7 +8,7 @@ from orchestrator import runtime_pending, telegram_delivery_failover
 from orchestrator import telegram_stream_policy
 from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
 from orchestrator.command_ui import card_title
-from orchestrator.memory_plus_mode import get_memory_plus_status
+from orchestrator.memory_plus_mode import get_memory_plus_status, is_memory_plus_enabled
 from orchestrator.wrapper_mode import load_wrapper_config, visible_wrapper_slots
 from orchestrator.her_v2.models import effort_display_label
 
@@ -157,7 +157,7 @@ def format_status_mode_block(mode: str, state: Mapping[str, Any], detailed: bool
     return []
 
 
-def build_status_text(runtime, detailed: bool = False) -> str:
+def build_status_text(runtime, detailed: bool = False, *, update: Any | None = None) -> str:
     active_skills = (
         sorted(runtime.skill_manager.get_active_toggle_ids(runtime.workspace_dir))
         if runtime.skill_manager
@@ -195,7 +195,20 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         state_snapshot = runtime.backend_manager.get_state_snapshot()
     except Exception:
         state_snapshot = {}
-    memory_plus = get_memory_plus_status(runtime.workspace_dir)
+    hashi_session = None
+    if update is not None:
+        try:
+            from orchestrator import runtime_session
+
+            hashi_session = runtime_session.current_session_for_update(runtime, update)
+            memory_plus = get_memory_plus_status(
+                runtime_session.current_session_workspace(runtime, update)
+            )
+            memory_plus["enabled"] = is_memory_plus_enabled(runtime.workspace_dir)
+        except Exception:
+            memory_plus = get_memory_plus_status(runtime.workspace_dir)
+    else:
+        memory_plus = get_memory_plus_status(runtime.workspace_dir)
     current_effort = runtime._get_current_effort() or "n/a"
     her_backend = str(runtime.config.active_backend) == "her-v2"
     if her_backend and current_effort != "n/a":
@@ -204,10 +217,11 @@ def build_status_text(runtime, detailed: bool = False) -> str:
         except ValueError:
             pass
     effort_heading = "HER execution mode" if her_backend else "Effort"
-    session_id_short = "none"
-    if mode_str == "fixed" and getattr(runtime.backend_manager, "current_backend", None):
-        sid = getattr(runtime.backend_manager.current_backend, "_session_id", None) or "none"
-        session_id_short = sid[:8] + "…" if sid != "none" and len(sid) > 8 else sid
+    session_id_short = (
+        str(hashi_session["session_id"])
+        if hashi_session is not None
+        else "unresolved"
+    )
     status = (
         compute_status_string(runtime).upper()
         if hasattr(runtime, "backend_ready")
@@ -255,8 +269,14 @@ def build_status_text(runtime, detailed: bool = False) -> str:
             ),
         ]
     )
-    if mode_str == "fixed":
-        lines.append(f"<b>Session</b> · <code>{html.escape(str(session_id_short))}</code>")
+    lines.append(
+        f"<b>Session</b> · <code>{html.escape(str(session_id_short))}</code>"
+        + (
+            f" · generation <code>{int(hashi_session['context_generation'])}</code>"
+            if hashi_session is not None
+            else ""
+        )
+    )
     lines.extend(runtime._format_status_mode_block(mode_str, state_snapshot, detailed))
     lines.extend(
         [
@@ -277,9 +297,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
     if detailed:
         allowed = ", ".join(b["engine"] for b in runtime.config.allowed_backends)
 
-        session_id = "none"
-        if mode_str == "fixed" and getattr(runtime.backend_manager, "current_backend", None):
-            session_id = getattr(runtime.backend_manager.current_backend, "_session_id", "none") or "none"
+        session_id = session_id_short
 
         lines.extend(
             [
@@ -289,7 +307,7 @@ def build_status_text(runtime, detailed: bool = False) -> str:
                 f"<b>Transcript</b> · <code>{html.escape(runtime.transcript_log_path.name)}</code>",
                 f"<b>Started</b> · <code>{html.escape(runtime.session_started_at.isoformat(timespec='seconds'))}</code>",
                 f"<b>Allowed backends</b> · {html.escape(allowed or 'none')}",
-                f"<b>Session ID</b> · <code>{html.escape(str(session_id))}</code>",
+                f"<b>HASHI Session ID</b> · <code>{html.escape(str(session_id))}</code>",
                 f"<b>Retry cache</b> · prompt <code>{'YES' if runtime.last_prompt else 'NO'}</code> · response <code>{'YES' if runtime.last_response else 'NO'}</code>",
                 f"<b>Primers</b> · FYI <code>{'ARMED' if runtime._pending_session_primer else 'CLEAR'}</code> · auto-recall <code>{'ARMED' if runtime._pending_auto_recall_context else 'CLEAR'}</code>",
                 f"<b>Bridge memory</b> · <code>{runtime.memory_store.get_stats()['turns']}</code> turns · <code>{runtime.memory_store.get_stats()['memories']}</code> memories",
@@ -319,6 +337,6 @@ async def cmd_status(runtime, update, context) -> None:
     detailed = bool(context.args and context.args[0].strip().lower() in {"full", "all", "more"})
     await runtime._reply_text(
         update,
-        runtime._build_status_text(detailed=detailed),
+        runtime._build_status_text(detailed=detailed, update=update),
         parse_mode="HTML",
     )

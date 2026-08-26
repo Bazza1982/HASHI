@@ -153,6 +153,8 @@ def estimate_effective_context_tokens(
     runtime: Any,
     *,
     prompt_tokens: int | None = None,
+    coordinator: Any | None = None,
+    use_last_runtime_measurement: bool = True,
 ) -> int:
     """Return HASHI's effective current-context estimate for Compact policy.
 
@@ -163,7 +165,7 @@ def estimate_effective_context_tokens(
     """
 
     measured = _safe_int(prompt_tokens, minimum=1)
-    if measured is None:
+    if measured is None and use_last_runtime_measurement:
         measured = _safe_int(
             getattr(runtime, "_last_full_prompt_tokens", None),
             minimum=1,
@@ -171,7 +173,9 @@ def estimate_effective_context_tokens(
     if measured is None:
         history_tokens = 0
         with contextlib.suppress(Exception):
-            history_tokens = estimate_tokens(render_history(coordinator_for(runtime).snapshot()))
+            history_tokens = estimate_tokens(
+                render_history((coordinator or coordinator_for(runtime)).snapshot())
+            )
         system_tokens = 0
         system_getter = getattr(runtime, "_get_system_prompt_text", None)
         if callable(system_getter):
@@ -1406,13 +1410,19 @@ def install_history_section(
     protected_only: bool = False,
     cross_session_entries: Sequence[Mapping[str, Any]] = (),
     primary_timeline_entries: Sequence[Mapping[str, Any]] | None = None,
+    workspace_dir: Path | None = None,
+    memory_store: Any | None = None,
 ) -> tuple[list[tuple[str, str]], HistorySnapshot | None]:
     if str(getattr(getattr(runtime, "config", None), "active_backend", "")) != HER_V2_ENGINE:
         return list(extra_sections), None
     manager = getattr(runtime, "backend_manager", None)
     if str(getattr(manager, "agent_mode", "flex") or "flex").lower() != "flex":
         return list(extra_sections), None
-    coordinator = coordinator_for(runtime)
+    coordinator = coordinator_for(
+        runtime,
+        workspace_dir=workspace_dir,
+        memory_store=memory_store,
+    )
     try:
         snapshot = coordinator.snapshot()
     except CompactionFailure as exc:
@@ -1422,13 +1432,17 @@ def install_history_section(
             _redact_control_text(exc),
         )
         snapshot = _raw_fallback_snapshot(
-            getattr(runtime, "memory_store", None),
+            memory_store
+            if memory_store is not None
+            else getattr(runtime, "memory_store", None),
             load_policy(runtime),
         )
     if primary_timeline_entries is None:
         primary_timeline_entries = ()
         get_completed_exchanges = getattr(
-            getattr(runtime, "memory_store", None),
+            memory_store
+            if memory_store is not None
+            else getattr(runtime, "memory_store", None),
             "get_completed_exchanges",
             None,
         )
@@ -1792,9 +1806,14 @@ class ContextCompactionCoordinator:
         *,
         invoker: ModelInvoker | None = None,
         store: CompactionStore | None = None,
+        memory_store: Any | None = None,
     ):
         self.runtime = runtime
-        self.memory_store = getattr(runtime, "memory_store", None)
+        self.memory_store = (
+            memory_store
+            if memory_store is not None
+            else getattr(runtime, "memory_store", None)
+        )
         self.store = store or CompactionStore(Path(runtime.workspace_dir))
         self.invoker = invoker or self._invoke_model
         self._operation_lock = asyncio.Lock()
@@ -2602,13 +2621,52 @@ class ContextCompactionCoordinator:
         )
 
 
-def coordinator_for(runtime: Any) -> ContextCompactionCoordinator:
-    current = getattr(runtime, "_context_compaction_coordinator", None)
-    if isinstance(current, ContextCompactionCoordinator):
-        return current
+def _request_session_workspace(runtime: Any, request_ref: str | None) -> Path | None:
+    if not request_ref:
+        return None
+    registry = getattr(runtime, "_request_meta_by_id", None)
+    metadata = registry.get(str(request_ref), {}) if isinstance(registry, dict) else {}
+    value = str(metadata.get("session_workspace") or "")
+    request_metadata = metadata.get("request_metadata")
+    if not value and isinstance(request_metadata, Mapping):
+        value = str(request_metadata.get("session_workspace") or "")
+    return Path(value) if value else None
+
+
+def coordinator_for(
+    runtime: Any,
+    *,
+    request_ref: str | None = None,
+    workspace_dir: Path | None = None,
+    memory_store: Any | None = None,
+) -> ContextCompactionCoordinator:
     injected = getattr(runtime, "_context_compaction_test_coordinator", None)
     if injected is not None:
         return injected
+    workspace_dir = workspace_dir or _request_session_workspace(runtime, request_ref)
+    if workspace_dir is not None:
+        key = str(Path(workspace_dir).resolve())
+        coordinators = getattr(runtime, "_context_compaction_coordinators", None)
+        if not isinstance(coordinators, dict):
+            coordinators = {}
+            runtime._context_compaction_coordinators = coordinators
+        current = coordinators.get(key)
+        if isinstance(current, ContextCompactionCoordinator):
+            return current
+        if memory_store is None:
+            from orchestrator.bridge_memory import BridgeMemoryStore
+
+            memory_store = BridgeMemoryStore(Path(workspace_dir))
+        coordinator = ContextCompactionCoordinator(
+            runtime,
+            store=CompactionStore(Path(workspace_dir)),
+            memory_store=memory_store,
+        )
+        coordinators[key] = coordinator
+        return coordinator
+    current = getattr(runtime, "_context_compaction_coordinator", None)
+    if isinstance(current, ContextCompactionCoordinator):
+        return current
     coordinator = ContextCompactionCoordinator(runtime)
     runtime._context_compaction_coordinator = coordinator
     return coordinator
@@ -2627,11 +2685,17 @@ async def cancel_runtime_compaction(runtime: Any) -> bool:
         task.cancel()
     if scheduled:
         await asyncio.gather(*scheduled, return_exceptions=True)
-    coordinator = getattr(runtime, "_context_compaction_coordinator", None)
-    if coordinator is None:
-        return bool(scheduled)
-    cancel = getattr(coordinator, "cancel", None)
-    active_cancelled = bool(await cancel()) if callable(cancel) else False
+    coordinators = [getattr(runtime, "_context_compaction_coordinator", None)]
+    scoped = getattr(runtime, "_context_compaction_coordinators", None)
+    if isinstance(scoped, dict):
+        coordinators.extend(scoped.values())
+    active_cancelled = False
+    for coordinator in coordinators:
+        if coordinator is None:
+            continue
+        cancel = getattr(coordinator, "cancel", None)
+        if callable(cancel):
+            active_cancelled = bool(await cancel()) or active_cancelled
     return bool(scheduled) or active_cancelled
 
 
@@ -2642,7 +2706,7 @@ def record_capacity_warning(
     error: ContextCapacityError,
 ) -> str:
     event_id = f"capacity-{uuid.uuid4().hex}"
-    coordinator_for(runtime).store.append_audit(
+    coordinator_for(runtime, request_ref=request_ref).store.append_audit(
         "capacity_warning",
         compaction_id=event_id,
         payload={
@@ -2710,7 +2774,7 @@ def schedule_execution_stage(
         # starts only after the context moves outside its upper boundary.
         if effective_tokens <= budget.high_projected_tokens:
             return False
-        coordinator = coordinator_for(runtime)
+        coordinator = coordinator_for(runtime, request_ref=request_ref)
         scheduled_requests = getattr(
             runtime,
             "_context_compaction_execution_requests",
@@ -2886,13 +2950,18 @@ def schedule_post_turn(
     return None
 
 
-def compact_status_text(runtime: Any) -> str:
-    status = coordinator_for(runtime).status()
+def compact_status_text(runtime: Any, *, coordinator: Any | None = None) -> str:
+    coordinator = coordinator or coordinator_for(runtime)
+    status = coordinator.status()
     route: ResolvedCompactRoute = status["route"]
     target: CapacityProfile | None = status["target_capacity"]
     policy = load_policy(runtime)
     trigger_budget = resolve_trigger_budget(runtime, policy=policy)
-    current_tokens = estimate_effective_context_tokens(runtime)
+    current_tokens = estimate_effective_context_tokens(
+        runtime,
+        coordinator=coordinator,
+        use_last_runtime_measurement=False,
+    )
     capacity_text = (
         f"{route.capacity.context_window_tokens:,} tokens ({route.capacity.provenance})"
         if route.capacity

@@ -29,6 +29,7 @@ from orchestrator import (
     runtime_cross_session,
     runtime_pipeline,
     runtime_retry,
+    runtime_session,
     telegram_stream_policy,
 )
 from orchestrator import telegram_delivery_failover as failover
@@ -198,8 +199,11 @@ def _runtime():
     runtime.name = "zelda"
     runtime.config.telegram_token_key = runtime.name
     runtime.global_config = SimpleNamespace(
-        project_root=Path(tempfile.mkdtemp(prefix="hashi-pipeline-test-"))
+        project_root=Path(tempfile.mkdtemp(prefix="hashi-pipeline-test-")),
+        instance_id="HASHI1",
+        authorized_id=123,
     )
+    runtime.global_config.bridge_home = runtime.global_config.project_root
     runtime.workspace_dir = (
         runtime.global_config.project_root / "workspaces" / runtime.name
     )
@@ -2507,9 +2511,16 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
     assert event["wrapper_applied"] is True
 
 
-def test_persist_success_memory_records_human_exchange_and_handoff():
+def test_persist_success_memory_records_session_exchange_and_handoff():
     runtime = _runtime()
-    item = _item(prompt="user text", source="text")
+    session = runtime_session.initialize_runtime_sessions(runtime)
+    item = _item(
+        prompt="user text",
+        source="text",
+        session_id=session["session_id"],
+        context_generation=1,
+        run_id="run-test",
+    )
     response = SimpleNamespace(text="core text")
 
     runtime_pipeline.persist_success_memory(
@@ -2522,76 +2533,32 @@ def test_persist_success_memory_records_human_exchange_and_handoff():
         session_reset_source="session_reset",
     )
 
-    assert runtime.memory_store.turns == [
-        ("user", "text", "user text"),
-        ("assistant", "codex-cli", "memory:visible text"),
-    ]
-    assert runtime.memory_store.exchanges == [
-        ("user text", "memory:visible text", "text")
-    ]
-    completed = runtime.memory_store.completed_exchanges
-    assert len(completed) == 1
-    assert completed[0][:3] == (
+    # Ordinary turns must not enter unified Agent memory before promotion.
+    assert runtime.memory_store.turns == []
+    assert runtime.memory_store.exchanges == []
+    assert runtime.memory_store.completed_exchanges == []
+    session_memory = runtime_session.session_memory_store(runtime, item)
+    assert [row["text"] for row in session_memory.get_recent_turns()] == [
         "user text",
-        "visible text",
-        "text",
-    )
-    assert completed[0][3] | {"origin_ref": "ignored"} == {
-        "assistant_source": "codex-cli",
-        "user_turn_id": 1,
-        "assistant_turn_id": 2,
-        "user_ts": item.created_at,
-        "origin": "primary",
-        "origin_ref": "ignored",
-    }
-    assert completed[0][3]["origin_ref"].startswith(
-        "session-1:req-1:"
-    )
+        "memory:visible text",
+    ]
+    completed = session_memory.get_completed_exchanges()
+    assert len(completed) == 1
+    assert completed[0]["user_text"] == "user text"
+    assert completed[0]["assistant_text"] == "memory:visible text"
     assert runtime.post_turn_calls == [("user text", "memory:visible text", False)]
-    assert runtime.handoff_builder.transcript == [
+    assert runtime.handoff_builder.transcript == []
+    rounds = runtime_session.session_handoff_builder(
+        runtime, item=item
+    ).get_recent_rounds(max_rounds=2)
+    assert [(row["role"], row["text"], row["source"]) for row in rounds[-1]] == [
         ("user", "user text", "text"),
         ("assistant", "visible text", "text"),
     ]
-    assert runtime.handoff_builder.refreshed is True
+    assert runtime.handoff_builder.refreshed is False
     assert runtime.project_chat_logger.exchanges == [
         ("user text", "visible text", "text")
     ]
-
-
-def test_pre_fresh_inflight_completion_is_logged_but_not_reinjected():
-    from orchestrator.fresh_context import start_boundary
-
-    runtime = _runtime()
-    item = _item(
-        prompt="started before fresh",
-        source="text",
-        created_at="2026-08-25T10:00:00+10:00",
-    )
-    start_boundary(
-        runtime,
-        now_epoch=datetime.fromisoformat(
-            "2026-08-25T10:30:00+10:00"
-        ).timestamp(),
-    )
-
-    runtime_pipeline.persist_success_memory(
-        runtime,
-        item,
-        SimpleNamespace(text="completed after fresh"),
-        visible_text="late visible result",
-        wrapper_result=None,
-        is_bridge_request=False,
-        session_reset_source="session_reset",
-    )
-
-    assert runtime.memory_store.turns == []
-    assert runtime.memory_store.exchanges == [
-        ("started before fresh", "memory:late visible result", "text")
-    ]
-    assert len(runtime.memory_store.completed_exchanges) == 1
-    assert runtime.memory_store.completed_exchanges[0][3]["user_turn_id"] is None
-    assert runtime.memory_store.completed_exchanges[0][3]["assistant_turn_id"] is None
-    assert runtime.post_turn_calls == []
 
 
 def test_persist_success_memory_skips_bridge_memory_and_handoff():

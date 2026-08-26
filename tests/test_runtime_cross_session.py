@@ -649,3 +649,53 @@ def test_failed_scheduler_turn_is_context_only(tmp_path):
         "browser bridge unavailable"
         in runtime_cross_session.context_section(runtime, user_item)[0][1]
     )
+
+
+def test_receipts_never_cross_hashi_session_or_context_generation(tmp_path):
+    runtime = _runtime(tmp_path)
+    scheduled = _item(
+        session_id="session-a",
+        context_generation=1,
+    )
+    visible = "Reply with a letter:\nA — Continue Session A"
+    runtime_cross_session.record_turn_result(
+        runtime,
+        scheduled,
+        assistant_text=visible,
+        response=_response(visible),
+        delivered=True,
+        completion_path="foreground",
+    )
+
+    other_session = _item(
+        request_id="req-session-b",
+        source="text",
+        prompt="A",
+        session_id="session-b",
+        context_generation=1,
+    )
+    assert runtime_cross_session.context_section(runtime, other_session) == []
+    assert runtime_cross_session.timeline_entries(runtime, other_session) == []
+    assert runtime_cross_session.capture_reply_target(runtime, other_session) is None
+
+    fresh_generation = _item(
+        request_id="req-session-a-fresh",
+        source="text",
+        prompt="A",
+        session_id="session-a",
+        context_generation=2,
+    )
+    assert runtime_cross_session.context_section(runtime, fresh_generation) == []
+    assert runtime_cross_session.capture_reply_target(runtime, fresh_generation) is None
+
+    same_generation = _item(
+        request_id="req-session-a",
+        source="text",
+        prompt="A",
+        session_id="session-a",
+        context_generation=1,
+    )
+    assert "Continue Session A" in runtime_cross_session.context_section(
+        runtime, same_generation
+    )[0][1]
+    assert runtime_cross_session.capture_reply_target(runtime, same_generation)

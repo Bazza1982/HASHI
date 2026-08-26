@@ -18,8 +18,14 @@ def _runtime(tmp_path):
         tool_registry=SimpleNamespace(workspace_dir=workspace, access_root=project),
     )
     return SimpleNamespace(
+        name="agent",
         config=SimpleNamespace(extra={}),
-        global_config=SimpleNamespace(project_root=project),
+        global_config=SimpleNamespace(
+            project_root=project,
+            bridge_home=project,
+            instance_id="HASHI1",
+            authorized_id=1,
+        ),
         workspace_dir=workspace,
         _workzone_dir=None,
         backend_manager=SimpleNamespace(current_backend=backend),
@@ -37,8 +43,11 @@ async def _reply(replies, text, kwargs):
     replies.append({"text": text, **kwargs})
 
 
-def _update():
-    return SimpleNamespace(effective_user=SimpleNamespace(id=1))
+def _update(chat_id=123):
+    return SimpleNamespace(
+        effective_user=SimpleNamespace(id=1),
+        effective_chat=SimpleNamespace(id=chat_id),
+    )
 
 
 def test_sync_workzone_to_backend_config_updates_registry(tmp_path):
@@ -69,6 +78,31 @@ async def test_cmd_workzone_status_set_and_off(tmp_path):
     await runtime_workzone.cmd_workzone(runtime, _update(), SimpleNamespace(args=["off"]))
     assert "<b>Current</b> · <b>OFF</b>" in runtime.replies[-1]["text"]
     assert runtime._workzone_dir is None
+
+
+@pytest.mark.asyncio
+async def test_workzone_changes_do_not_cross_session_bindings(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime._sync_workzone_to_backend_config = lambda: runtime_workzone.sync_workzone_to_backend_config(runtime)
+
+    await runtime_workzone.cmd_workzone(
+        runtime, _update(123), SimpleNamespace(args=["repo"])
+    )
+    other = runtime.session_store.create_session(
+        owner_id="user:1", agent_id="agent", title="Other"
+    )
+    runtime.session_store.bind_channel(
+        owner_id="user:1",
+        agent_id="agent",
+        surface="telegram",
+        channel_key="456",
+        session_id=other["session_id"],
+    )
+    await runtime_workzone.cmd_workzone(
+        runtime, _update(456), SimpleNamespace(args=[])
+    )
+
+    assert "<b>Current</b> · <b>OFF</b>" in runtime.replies[-1]["text"]
 
 
 def test_workzone_prompt_section_uses_backend_capabilities(tmp_path):

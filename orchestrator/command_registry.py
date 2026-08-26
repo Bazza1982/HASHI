@@ -16,7 +16,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler
 
 logger = logging.getLogger("BridgeU.CommandRegistry")
 DEFAULT_PRIVATE_COMMAND_DIR = Path.home() / ".hashi" / "private_commands"
-NON_OVERRIDABLE_CORE_COMMANDS = frozenset({"wiki"})
+NON_OVERRIDABLE_CORE_COMMANDS = frozenset({"queue", "wiki"})
 
 CommandCallback = Callable[[Any, Any, Any], Awaitable[None]]
 
@@ -142,6 +142,19 @@ def load_runtime_commands() -> list[RuntimeCommand]:
 def load_runtime_callbacks() -> list[RuntimeCallback]:
     callbacks: list[RuntimeCallback] = []
     for module in _iter_runtime_modules():
+        if module.__name__.startswith("_hashi_private_command_"):
+            protected = {
+                command.name
+                for command in _commands_from_module(module)
+                if command.name in NON_OVERRIDABLE_CORE_COMMANDS
+            }
+            if protected:
+                logger.warning(
+                    "Ignoring callbacks from private override of protected core command(s) %s in %s",
+                    ", ".join(sorted(protected)),
+                    module.__name__,
+                )
+                continue
         callbacks.extend(_callbacks_from_module(module))
     return callbacks
 

@@ -197,6 +197,20 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
         self.artifacts_dir = workspace_dir / "memory" / "left_brain_artifacts"
         self.runtime: Any | None = None
 
+    def _request_paths(self, request: Any) -> tuple[Path, Path, Path]:
+        metadata = getattr(request, "metadata", None)
+        value = (
+            str(metadata.get("session_workspace") or "").strip()
+            if isinstance(metadata, Mapping)
+            else ""
+        )
+        workspace = Path(value) if value else self.workspace_dir
+        return (
+            workspace,
+            workspace / "memory" / "left_brain_continuity.jsonl",
+            workspace / "memory" / "left_brain_artifacts",
+        )
+
     def attach_runtime(self, runtime: Any) -> None:
         self.runtime = runtime
 
@@ -207,6 +221,7 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
         return self._enabled() and not self._should_bypass_source(source, is_bridge_request=is_bridge_request)
 
     def on_right_brain_started(self, request: TurnObservationRequest) -> None:
+        _workspace, _continuity_file, artifacts_dir = self._request_paths(request)
         pending = {
             "ts": _now_iso(),
             "stage": "right_brain_started",
@@ -219,13 +234,14 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
             "model_name": request.model_name,
             "final_prompt_chars": len(str(request.metadata.get("final_prompt") or "")),
         }
-        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        _write_json(self._pending_turn_path(request.request_id), pending)
-        _write_json(self.artifacts_dir / "left_brain_right_brain_pending_latest.json", pending)
-        _append_jsonl(self.artifacts_dir / "left_brain_events.jsonl", pending)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(self._pending_turn_path(request.request_id, artifacts_dir), pending)
+        _write_json(artifacts_dir / "left_brain_right_brain_pending_latest.json", pending)
+        _append_jsonl(artifacts_dir / "left_brain_events.jsonl", pending)
 
     def on_right_brain_completed(self, request: TurnObservationRequest) -> None:
-        pending_path = self._pending_turn_path(request.request_id)
+        _workspace, _continuity_file, artifacts_dir = self._request_paths(request)
+        pending_path = self._pending_turn_path(request.request_id, artifacts_dir)
         pending = _read_json_object(pending_path)
         if pending_path.exists():
             pending_path.unlink(missing_ok=True)
@@ -240,12 +256,13 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
             "right_brain_result_chars": len(request.assistant_text or ""),
             "pending_started_at": pending.get("ts", ""),
         }
-        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        _write_json(self.artifacts_dir / "left_brain_right_brain_completed_latest.json", row)
-        _append_jsonl(self.artifacts_dir / "left_brain_events.jsonl", row)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(artifacts_dir / "left_brain_right_brain_completed_latest.json", row)
+        _append_jsonl(artifacts_dir / "left_brain_events.jsonl", row)
 
     def on_right_brain_interrupted(self, request: TurnObservationRequest) -> None:
-        pending_path = self._pending_turn_path(request.request_id)
+        workspace, continuity_file, artifacts_dir = self._request_paths(request)
+        pending_path = self._pending_turn_path(request.request_id, artifacts_dir)
         if not pending_path.exists():
             return
         pending = _read_json_object(pending_path)
@@ -290,13 +307,13 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
             "summary": request.summary,
         }
         event = {**row, "stage": "interrupted_turn"}
-        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        _write_json(self.artifacts_dir / "left_brain_interrupted_turn_latest.json", row)
-        _append_jsonl(self.artifacts_dir / "left_brain_events.jsonl", event)
-        _append_jsonl(self.continuity_file, row)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(artifacts_dir / "left_brain_interrupted_turn_latest.json", row)
+        _append_jsonl(artifacts_dir / "left_brain_events.jsonl", event)
+        _append_jsonl(continuity_file, row)
         if is_memory_plus_enabled(self.workspace_dir):
             write_memory_plus_update(
-                self.workspace_dir,
+                workspace,
                 request_id=request.request_id,
                 source=request.source,
                 prompt="",
@@ -306,7 +323,7 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
                     "open_items": [
                         f"Interrupted request {request.request_id} may need recovery or user confirmation."
                     ],
-                    "pointers": [str(self.artifacts_dir / "left_brain_interrupted_turn_latest.json")],
+                    "pointers": [str(artifacts_dir / "left_brain_interrupted_turn_latest.json")],
                 },
             )
 
@@ -314,16 +331,17 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
         cfg = self._config()
         if not cfg.left_backend or not cfg.left_model:
             return []
+        workspace, continuity_file, artifacts_dir = self._request_paths(request)
         memory_plus = is_memory_plus_enabled(self.workspace_dir)
         continuity = (
-            prepare_memory_plus_store(self.workspace_dir)
+            prepare_memory_plus_store(workspace)
             if memory_plus
-            else _read_jsonl(self.continuity_file, 0)
+            else _read_jsonl(continuity_file, 0)
         )
         continuity_label = "MEMORY_PLUS_CAPSULE" if memory_plus else "CONTINUITY_JSONL"
         left_prompt = cfg.left_prompt.replace(
             "workspaces/<agent>/memory/left_brain_continuity.jsonl",
-            str(self.continuity_file),
+            str(continuity_file),
         )
         schema = {
             "useful": True,
@@ -413,7 +431,7 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
             "wiki_query": wiki_query if wiki_used else "",
             "wiki_candidates_loaded": len(wiki_candidates),
         }
-        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
         preflight_record = {
             "generated_at": _now_iso(),
             "stage": "preflight",
@@ -426,8 +444,8 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
             "meta": fyi_meta,
             "note": "FYI only. This does not override the user's prompt, /sys slots, or higher-priority instructions.",
         }
-        _write_json(self.artifacts_dir / "left_brain_preflight_latest.json", preflight_record)
-        _append_jsonl(self.artifacts_dir / "left_brain_events.jsonl", preflight_record)
+        _write_json(artifacts_dir / "left_brain_preflight_latest.json", preflight_record)
+        _append_jsonl(artifacts_dir / "left_brain_events.jsonl", preflight_record)
         await self._send_visible_left_brain(
             request.chat_id,
             stage="preflight",
@@ -464,26 +482,29 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
     def workspace_files_to_preserve(self) -> frozenset[str]:
         return frozenset({"post_turn_observers.json", "memory"})
 
-    def _pending_turn_path(self, request_id: str) -> Path:
+    def _pending_turn_path(
+        self, request_id: str, artifacts_dir: Path | None = None
+    ) -> Path:
         safe_id = re.sub(r"[^A-Za-z0-9_.:-]+", "_", request_id or "unknown")
-        return self.artifacts_dir / "pending_right_brain" / f"{safe_id}.json"
+        return (artifacts_dir or self.artifacts_dir) / "pending_right_brain" / f"{safe_id}.json"
 
     async def _run_after_action(self, request: TurnObservationRequest) -> None:
         cfg = self._config()
         if not cfg.left_backend or not cfg.left_model:
             return
+        workspace, continuity_file, artifacts_dir = self._request_paths(request)
         result_text = request.assistant_text or ""
         result_for_llm = result_text[: cfg.after_action_result_max_chars]
         memory_plus = is_memory_plus_enabled(self.workspace_dir)
         continuity = (
-            prepare_memory_plus_store(self.workspace_dir)
+            prepare_memory_plus_store(workspace)
             if memory_plus
-            else _read_jsonl(self.continuity_file, 0)
+            else _read_jsonl(continuity_file, 0)
         )
         continuity_label = "MEMORY_PLUS_CAPSULE" if memory_plus else "CONTINUITY_JSONL"
         after_action_prompt = cfg.after_action_prompt.replace(
             "workspaces/<agent>/memory/left_brain_continuity.jsonl",
-            str(self.continuity_file),
+            str(continuity_file),
         )
         schema = {
             "should_write": True,
@@ -525,9 +546,9 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
             "continuity_update": update,
             "written_to_continuity": should_write,
         }
-        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        _write_json(self.artifacts_dir / "left_brain_after_action_latest.json", row)
-        _append_jsonl(self.artifacts_dir / "left_brain_events.jsonl", {**row, "stage": "after_action"})
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(artifacts_dir / "left_brain_after_action_latest.json", row)
+        _append_jsonl(artifacts_dir / "left_brain_events.jsonl", {**row, "stage": "after_action"})
         await self._send_visible_left_brain(
             request.chat_id,
             stage="after_action",
@@ -539,10 +560,10 @@ class DualBrainObserver(PostTurnObserver, PreTurnContextProvider):
             },
         )
         if should_write:
-            _append_jsonl(self.continuity_file, row)
+            _append_jsonl(continuity_file, row)
             if is_memory_plus_enabled(self.workspace_dir):
                 write_memory_plus_update(
-                    self.workspace_dir,
+                    workspace,
                     request_id=request.request_id,
                     source=request.source,
                     prompt="",

@@ -9,6 +9,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from telegram.error import BadRequest, RetryAfter
@@ -17,6 +18,7 @@ from orchestrator import (
     runtime_cross_session,
     runtime_delivery_order,
     runtime_retry,
+    runtime_session,
     telegram_delivery_failover,
     telegram_stream_policy,
 )
@@ -292,7 +294,7 @@ def surface_context_compaction_warnings(runtime, item, warnings: tuple[str, ...]
         try:
             from orchestrator.context_compaction import coordinator_for
 
-            coordinator_for(runtime).store.append_audit(
+            coordinator_for(runtime, request_ref=item.request_id).store.append_audit(
                 event,
                 compaction_id=(
                     "warning-"
@@ -577,6 +579,9 @@ class InteractiveFeedback:
 
 
 def begin_queue_item(runtime, item) -> QueueItemStart:
+    runtime_session.apply_item_workzone(runtime, item)
+    runtime_session.activate_backend_binding(runtime, item)
+    runtime_session.mark_running(runtime, item)
     if not item.silent:
         runtime.last_prompt = item
         runtime_retry.remember_retryable_prompt(runtime, item)
@@ -606,6 +611,17 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         "meter_at_start": bool(getattr(runtime, "_meter", False)),
         "silent": bool(item.silent),
         "deliver_to_telegram": bool(item.deliver_to_telegram),
+        "hashi_session_id": getattr(item, "session_id", None),
+        "hashi_run_id": getattr(item, "run_id", None),
+        "hashi_message_id": getattr(item, "message_id", None),
+        "context_generation": int(getattr(item, "context_generation", 1) or 1),
+        "owner_id": getattr(item, "owner_id", None),
+        "session_surface": getattr(item, "session_surface", None),
+        "session_channel_key": getattr(item, "session_channel_key", None),
+        "session_workspace": str(
+            (getattr(item, "request_metadata", None) or {}).get("session_workspace")
+            or ""
+        ),
         "habit_learning_eligible": bool(
             getattr(item, "habit_learning_eligible", True)
         ),
@@ -685,15 +701,22 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     supports_sessions = bool(
         getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
     )
-    session_id = getattr(backend, "_session_id", None)
+    provider_session_id = getattr(backend, "_session_id", None)
     session_scope = str(request_meta.get("session_scope") or SESSION_SCOPE_PERSISTENT)
     incremental = (
         supports_sessions
-        and session_id is not None
+        and provider_session_id is not None
         and runtime.backend_manager.agent_mode == "fixed"
         and session_scope == SESSION_SCOPE_PERSISTENT
     )
     continuity_enabled = is_memory_plus_enabled(runtime.workspace_dir)
+    session_scoped = bool(str(getattr(item, "session_id", "") or ""))
+    session_workspace = runtime_session.item_session_workspace(runtime, item)
+    session_history = runtime_session.recent_exchanges(
+        runtime,
+        item,
+        limit=int(getattr(runtime.context_assembler, "MAX_RECENT_EXCHANGES", 8)),
+    )
     extra_sections = runtime._workzone_prompt_section()
     pre_turn_builder = runtime._build_pre_turn_context_sections
     pre_turn_kwargs = {"is_bridge_request": is_bridge_request}
@@ -702,7 +725,10 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             "incremental": incremental,
             "continuity_enabled": continuity_enabled,
             "supports_sessions": supports_sessions,
-            "session_id": session_id or "",
+            "session_id": getattr(item, "session_id", None) or "",
+            "backend_session_id": provider_session_id or "",
+            "context_generation": int(getattr(item, "context_generation", 1) or 1),
+            "session_workspace": str(session_workspace),
             "engine": runtime.config.active_backend,
         }
     extra_sections += await pre_turn_builder(item, effective_prompt, **pre_turn_kwargs)
@@ -718,6 +744,11 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     }
     if "context_profile" in inspect.signature(prompt_builder).parameters:
         prompt_kwargs["context_profile"] = context_profile
+    if (
+        session_history is not None
+        and "recent_exchanges" in inspect.signature(prompt_builder).parameters
+    ):
+        prompt_kwargs["recent_exchanges"] = session_history
     compaction_snapshot = None
     history_compaction_enabled = False
     cross_session_timeline_entries: list[dict[str, Any]] = []
@@ -744,6 +775,13 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             runtime,
             base_extra_sections,
             cross_session_entries=cross_session_timeline_entries,
+            primary_timeline_entries=session_history,
+            workspace_dir=session_workspace if session_scoped else None,
+            memory_store=(
+                runtime_session.session_memory_store(runtime, item)
+                if session_scoped
+                else None
+            ),
         )
         history_compaction_enabled = compaction_snapshot is not None
         prompt_kwargs["extra_sections"] = extra_sections
@@ -809,6 +847,10 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             "cross_session_timeline_entries": list(
                 cross_session_timeline_entries
             ),
+            "primary_timeline_entries": (
+                list(session_history) if session_history is not None else None
+            ),
+            "session_workspace": str(session_workspace) if session_scoped else "",
             "context_profile": context_profile,
             "inject_memory": history_compaction_enabled,
             "is_bridge_request": bool(is_bridge_request),
@@ -2219,6 +2261,9 @@ def persist_success_memory(
             "assistant_provider_text": response.text,
             "assistant_delivered_text": visible_text,
             "source": item.source,
+            "session_id": getattr(item, "session_id", None),
+            "run_id": getattr(item, "run_id", None),
+            "message_id": getattr(item, "message_id", None),
             "response": dict(vars(response)) if hasattr(response, "__dict__") else repr(response),
         },
         request_id=item.request_id,
@@ -2228,52 +2273,27 @@ def persist_success_memory(
     if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker", "multimodal"}:
         memory_user_text = f"[{item.source}] {item.summary}"
     if item.source not in {"startup", "system", session_reset_source} and not is_bridge_request:
-        from orchestrator.fresh_context import item_predates_boundary
-
-        eligible_for_working_context = not item_predates_boundary(runtime, item)
         memory_assistant_text = runtime._core_memory_assistant_text(
             response.text,
             visible_text,
             wrapper_result,
         )
-        user_turn_id = None
-        assistant_turn_id = None
-        if eligible_for_working_context:
-            user_turn_id = runtime.memory_store.record_turn(
-                "user", item.source, memory_user_text
-            )
-            assistant_turn_id = runtime.memory_store.record_turn(
-                "assistant", runtime.config.active_backend, memory_assistant_text
-            )
-        record_completed_exchange = getattr(
-            runtime.memory_store,
-            "record_completed_exchange",
-            None,
+        # Ordinary chat is written only to the current Session working store.
+        # Agent-level episodic memory is populated later by /promote or the
+        # configured daily promotion job.
+        runtime_session.record_working_exchange(
+            runtime,
+            item,
+            user_text=memory_user_text,
+            assistant_text=memory_assistant_text,
+            assistant_source=runtime.config.active_backend,
         )
-        if callable(record_completed_exchange):
-            session_ref = str(getattr(runtime, "session_id_dt", "") or "")
-            record_completed_exchange(
-                item.prompt,
-                visible_text,
-                item.source,
-                assistant_source=runtime.config.active_backend,
-                user_turn_id=user_turn_id,
-                assistant_turn_id=assistant_turn_id,
-                user_ts=str(getattr(item, "created_at", "") or ""),
-                origin="primary",
-                origin_ref=(
-                    f"{session_ref}:{item.request_id}:"
-                    f"{_hashlib.sha256((item.prompt + chr(0) + visible_text).encode('utf-8')).hexdigest()[:16]}"
-                ),
-            )
-        runtime.memory_store.record_exchange(memory_user_text, memory_assistant_text, item.source)
-        if eligible_for_working_context:
-            runtime._schedule_post_turn_observers(
-                item,
-                memory_user_text,
-                memory_assistant_text,
-                is_bridge_request=is_bridge_request,
-            )
+        runtime._schedule_post_turn_observers(
+            item,
+            memory_user_text,
+            memory_assistant_text,
+            is_bridge_request=is_bridge_request,
+        )
         try:
             from orchestrator.context_compaction import (
                 estimate_tokens,
@@ -2282,7 +2302,7 @@ def persist_success_memory(
 
             request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", {})
             prompt_tokens = int(request_tokens.get(item.request_id) or 0)
-            if eligible_for_working_context and prompt_tokens > 0:
+            if prompt_tokens > 0:
                 schedule_post_turn(
                     runtime,
                     request_ref=item.request_id,
@@ -2304,9 +2324,10 @@ def persist_success_memory(
             if isinstance(request_tokens, dict):
                 request_tokens.pop(item.request_id, None)
     if not is_bridge_request:
-        runtime.handoff_builder.append_transcript("user", item.prompt, item.source)
-        runtime.handoff_builder.append_transcript("assistant", visible_text, item.source)
-        runtime.handoff_builder.refresh_recent_context()
+        handoff_builder = runtime_session.session_handoff_builder(runtime, item=item)
+        handoff_builder.append_transcript("user", item.prompt, item.source)
+        handoff_builder.append_transcript("assistant", visible_text, item.source)
+        handoff_builder.refresh_recent_context()
         runtime.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
 
 
@@ -2380,7 +2401,15 @@ async def recover_typed_context_capacity_rejection(
         resolve_target_capacity,
     )
 
-    coordinator = coordinator_for(runtime)
+    session_workspace_value = str(state.get("session_workspace") or "").strip()
+    session_workspace = Path(session_workspace_value) if session_workspace_value else None
+    working_memory_store = runtime_session.session_memory_store(runtime, item)
+    coordinator = coordinator_for(
+        runtime,
+        request_ref=item.request_id,
+        workspace_dir=session_workspace,
+        memory_store=working_memory_store,
+    )
     outcome = await coordinator.compact(
         trigger="typed_provider_capacity_rejection",
         request_ref=item.request_id,
@@ -2402,6 +2431,9 @@ async def recover_typed_context_capacity_rejection(
         cross_session_entries=list(
             state.get("cross_session_timeline_entries") or []
         ),
+        primary_timeline_entries=state.get("primary_timeline_entries"),
+        workspace_dir=session_workspace,
+        memory_store=working_memory_store,
     )
     builder = runtime.context_assembler.build_prompt_payload
     kwargs = {
@@ -2411,6 +2443,13 @@ async def recover_typed_context_capacity_rejection(
     }
     if "context_profile" in inspect.signature(builder).parameters:
         kwargs["context_profile"] = state.get("context_profile")
+    if (
+        state.get("primary_timeline_entries") is not None
+        and "recent_exchanges" in inspect.signature(builder).parameters
+    ):
+        kwargs["recent_exchanges"] = list(
+            state.get("primary_timeline_entries") or []
+        )
     payload = builder(
         str(state.get("effective_prompt") or item.prompt),
         runtime.config.active_backend,

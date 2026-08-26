@@ -219,8 +219,14 @@ def audit_status_text(state: dict, criteria: dict) -> str:
     return "\n".join(lines)
 
 
-def audit_visible_context(runtime: Any, context_window: int) -> list[dict[str, str]]:
-    return runtime._wrapper_visible_context(context_window)
+def audit_visible_context(
+    runtime: Any, context_window: int, item: QueuedRequest | None = None
+) -> list[dict[str, str]]:
+    getter = runtime._wrapper_visible_context
+    try:
+        return getter(context_window, item=item)
+    except TypeError:
+        return getter(context_window)
 
 
 def build_audit_telemetry(
@@ -399,7 +405,12 @@ async def run_audit_followup(
     if not isinstance(criteria, dict):
         criteria = None
     telemetry = runtime._build_audit_telemetry(item, response, audit_collector)
-    visible_context = runtime._audit_visible_context(cfg.context_window)
+    try:
+        visible_context = runtime._audit_visible_context(
+            cfg.context_window, item=item
+        )
+    except TypeError:
+        visible_context = runtime._audit_visible_context(cfg.context_window)
     evidence_path = runtime._write_audit_evidence(
         item,
         core_raw=core_raw,

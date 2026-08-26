@@ -18,17 +18,17 @@ class _FakeRuntime:
         self.enqueued: list[dict] = []
         self.transcript: list[tuple[str, str, str]] = []
 
-    async def enqueue_request(self, chat_id, prompt, source, summary):
+    async def enqueue_request(self, chat_id, prompt, source, summary, **kwargs):
         request_id = f"req-{len(self.enqueued) + 1}"
-        self.enqueued.append(
-            {
-                "request_id": request_id,
-                "chat_id": chat_id,
-                "prompt": prompt,
-                "source": source,
-                "summary": summary,
-            }
-        )
+        row = {
+            "request_id": request_id,
+            "chat_id": chat_id,
+            "prompt": prompt,
+            "source": source,
+            "summary": summary,
+        }
+        row.update(kwargs)
+        self.enqueued.append(row)
         return request_id
 
     def append_conversation_entry(self, role, text, source):
@@ -119,6 +119,33 @@ async def test_delay_survives_scheduler_recreation_and_waits_for_offline_agent(
         == 1
     )
     assert runtime.enqueued[0]["prompt"] == "check the build"
+
+
+@pytest.mark.asyncio
+async def test_delayed_message_preserves_session_route_across_restart(tmp_path):
+    metadata = {
+        "session_id": "ses-workbench-a",
+        "owner_id": "user:123",
+        "session_surface": "workbench",
+        "session_channel_key": "window-a",
+    }
+    first = _scheduler(tmp_path)
+    await first.schedule_delayed_message(
+        agent_name="zelda",
+        chat_id=0,
+        prompt="continue this Session later",
+        delay_minutes=1,
+        now_ts=2_000,
+        request_metadata=metadata,
+        deliver_to_telegram=False,
+    )
+
+    recreated = _scheduler(tmp_path)
+    runtime = _FakeRuntime()
+    await recreated.dispatch_due_delayed_messages({"zelda": runtime}, now_ts=2_100)
+
+    assert runtime.enqueued[0]["request_metadata"] == metadata
+    assert runtime.enqueued[0]["deliver_to_telegram"] is False
 
 
 @pytest.mark.asyncio

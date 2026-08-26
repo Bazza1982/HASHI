@@ -159,6 +159,21 @@ def _chat_matches(receipt: Mapping[str, Any], chat_id: Any) -> bool:
     return str(receipt.get("chat_id")) == str(chat_id)
 
 
+def _session_matches(receipt: Mapping[str, Any], item: Any) -> bool:
+    """Keep provider-session receipts inside one HASHI Session generation."""
+
+    session_id = str(_value(item, "session_id", "") or "")
+    if not session_id:
+        # Compatibility for archived receipts and legacy tests created before
+        # HASHI-owned Sessions existed.
+        return True
+    if str(receipt.get("hashi_session_id") or "") != session_id:
+        return False
+    generation = int(_value(item, "context_generation", 0) or 0)
+    receipt_generation = int(receipt.get("context_generation") or 0)
+    return not generation or receipt_generation == generation
+
+
 def _after_fresh_boundary(runtime: Any, receipt: Mapping[str, Any]) -> bool:
     from orchestrator.fresh_context import entry_is_after_boundary
 
@@ -322,7 +337,7 @@ def _should_record(runtime: Any, item: Any, response: Any) -> bool:
 def _supersede_active_receipts(
     receipts: list[dict[str, Any]],
     *,
-    chat_id: Any,
+    item: Any,
     current: Mapping[str, Any] | None,
     now: float,
     resolved_by: str,
@@ -331,7 +346,11 @@ def _supersede_active_receipts(
     for receipt in receipts:
         if receipt is current:
             continue
-        if _chat_matches(receipt, chat_id) and bool(receipt.get("active")):
+        if (
+            _chat_matches(receipt, _value(item, "chat_id", None))
+            and _session_matches(receipt, item)
+            and bool(receipt.get("active"))
+        ):
             receipt["active"] = False
             receipt["resolved_at"] = now
             receipt["resolved_by"] = resolved_by
@@ -363,7 +382,7 @@ def record_turn_result(
         state = _read_state(runtime)
         changed = _supersede_active_receipts(
             state["receipts"],
-            chat_id=_value(item, "chat_id", None),
+            item=item,
             current=None,
             now=time.time(),
             resolved_by=f"newer_primary_interaction:{_value(item, 'request_id', 'unknown')}",
@@ -403,6 +422,10 @@ def record_turn_result(
                 _value(item, "prompt", ""), MAX_STORED_PROMPT_CHARS
             ),
             "request_created_at": str(_value(item, "created_at", "") or ""),
+            "hashi_session_id": str(_value(item, "session_id", "") or ""),
+            "context_generation": int(
+                _value(item, "context_generation", 0) or 0
+            ),
             "created_at": now,
         }
         receipts.append(receipt)
@@ -474,7 +497,7 @@ def record_turn_result(
     if delivered and not bound_id:
         _supersede_active_receipts(
             receipts,
-            chat_id=receipt.get("chat_id"),
+            item=item,
             current=receipt,
             now=now,
             resolved_by=f"superseded_by:{receipt['receipt_id']}",
@@ -521,6 +544,7 @@ def _matching_receipt(runtime: Any, item: Any) -> tuple[dict[str, Any] | None, s
         for receipt in state["receipts"]
         if bool(receipt.get("active"))
         and bool(receipt.get("delivered"))
+        and _session_matches(receipt, item)
         and _after_fresh_boundary(runtime, receipt)
         and _chat_matches(receipt, _value(item, "chat_id", None))
         and isinstance(receipt.get("pending_interaction"), Mapping)
@@ -636,6 +660,7 @@ def context_section(runtime: Any, item: Any) -> list[tuple[str, str]]:
         receipt
         for receipt in state["receipts"]
         if _chat_matches(receipt, _value(item, "chat_id", None))
+        and _session_matches(receipt, item)
         and _after_fresh_boundary(runtime, receipt)
     ]
     if not receipts:
@@ -708,6 +733,8 @@ def timeline_entries(runtime: Any, item: Any) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for receipt in _read_state(runtime)["receipts"]:
         if not _chat_matches(receipt, _value(item, "chat_id", None)):
+            continue
+        if not _session_matches(receipt, item):
             continue
         if not _after_fresh_boundary(runtime, receipt):
             continue

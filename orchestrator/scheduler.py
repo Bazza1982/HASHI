@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -305,6 +306,8 @@ class TaskScheduler:
         delay_minutes: int,
         idempotency_key: str | None = None,
         now_ts: float | None = None,
+        request_metadata: Mapping[str, Any] | None = None,
+        deliver_to_telegram: bool = True,
     ) -> dict[str, Any]:
         message = str(prompt or "").strip()
         if not message:
@@ -358,7 +361,13 @@ class TaskScheduler:
                 "due_at": current + minutes * 60,
                 "delay_minutes": minutes,
                 "attempts": 0,
+                "deliver_to_telegram": bool(deliver_to_telegram),
             }
+            if request_metadata:
+                record["request_metadata"] = dict(request_metadata)
+                session_id = str(request_metadata.get("session_id") or "").strip()
+                if session_id:
+                    record["session_id"] = session_id
             if key:
                 record["idempotency_key"] = key
             records[delay_id] = record
@@ -469,11 +478,18 @@ class TaskScheduler:
                     ):
                         continue
                     try:
+                        enqueue_options: dict[str, Any] = {}
+                        request_metadata = record.get("request_metadata")
+                        if isinstance(request_metadata, dict) and request_metadata:
+                            enqueue_options["request_metadata"] = dict(request_metadata)
+                        if not bool(record.get("deliver_to_telegram", True)):
+                            enqueue_options["deliver_to_telegram"] = False
                         request_id = await runtime.enqueue_request(
-                            int(record["chat_id"]),
+                            record["chat_id"],
                             str(record["prompt"]),
                             "text",
                             str(record.get("summary") or _safe_excerpt(str(record["prompt"]))),
+                            **enqueue_options,
                         )
                     except asyncio.CancelledError:
                         raise

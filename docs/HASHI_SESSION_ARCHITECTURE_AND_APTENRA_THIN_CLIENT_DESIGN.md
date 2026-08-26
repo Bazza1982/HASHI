@@ -3,11 +3,11 @@
 | Document information | Value |
 | --- | --- |
 | Purpose | Define the authoritative persistent Session layer that makes HASHI the sole owner of user-facing agent conversation history, working context, memory, runs, and events, while reducing Aptenra to a packaging and presentation client. |
-| Status | Founder-approved target design; v1.2 contract-freeze candidate; implementation pending. |
-| Version | 1.2 |
-| Date | 26 August 2026 |
+| Status | Final founder-approved design; core HASHI runtime implemented. Aptenra Session API v1 remains fail-closed until the qualification gate passes. |
+| Version | 1.3 |
+| Date | 27 August 2026 |
 | Authority | Founder |
-| Revision | 26 August 2026 — resolved fourteen findings across two independent Zelda architecture reviews, including durable approval continuation, per-attempt authorization refresh, complete snapshot rebuilds, safe Agent transfer, one approval mutation path, and uniform mutation idempotency. |
+| Revision | 27 August 2026 — finalized short-term Session isolation, one permanent default Session per Agent, scheduled/manual memory promotion, non-destructive Session retention, current-Session fixed-backend handoff, and the fail-closed external API qualification boundary. |
 | HASHI assessment baseline | `main@c0e10721711675df9921ca3e8744861c79165a7c` |
 | Aptenra assessment baseline | `mother_debug@07d2e2e9ca1d697aed9487634441786da890878f` |
 | Related specifications | `HASHI_PCM_SYSTEM_DESIGN.md`, `HASHI_PCM_UPGRADE_TEST_PLAN.md`, `HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md`, `HER_V2_AUTO_COMPACTION_DESIGN.md` |
@@ -17,6 +17,12 @@
 HASHI will become the sole authoritative owner of all sent agent-chat state.
 One user-facing Chat maps to one persistent HASHI Session. An Agent participates
 in a Session but is not the Session identity.
+
+Every Agent has one permanent default Session. A client or channel uses that
+Session until the user creates or selects another Session. Sessions are the
+Agent's isolated short-term conversation instances: while work is in progress,
+one Session cannot receive another Session's unpromoted messages, working
+memory, Memory+, capsules, tool state, Workzone, or backend thread.
 
 The canonical hierarchy is:
 
@@ -38,6 +44,14 @@ canonical Session projection from HASHI.
 This design is backend-neutral. HER v2, fixed CLI backends, API backends, and
 future backends all receive the same HASHI-owned Session semantics. No caller
 may need to know which backend HASHI selected.
+
+Session isolation is not a permanent long-term memory silo. At the configured
+local daily promotion time, or when the user invokes `/promote`, terminal
+Session records advance into unified Agent memory. After promotion, every
+Session for that Agent may retrieve the promoted material as Agent memory. Raw
+Session messages are never injected wholesale into another Session prompt;
+they remain completely retained in HASHI logs and become selectively
+retrievable through the Agent memory index.
 
 The initial Aptenra cutover starts with empty HASHI Sessions. Existing Aptenra
 Chat history will not be migrated. Existing local data must not be destroyed
@@ -85,7 +99,8 @@ The implementation must provide all of the following:
 3. Backend-independent request, continuity, cancellation, steering, and result
    semantics.
 4. Session-scoped recent history, fresh boundaries, Memory+, and Auto Compact.
-5. Deliberately governed Agent-level long-term memory with full provenance.
+5. Scheduled and manual promotion into unified Agent-level long-term memory
+   with full provenance and idempotent per-Session watermarks.
 6. Durable at-least-once Event delivery with idempotent exactly-once client
    projection across reconnects and HASHI restarts.
 7. Stable, versioned, authenticated APIs suitable for Aptenra, Workbench,
@@ -117,7 +132,7 @@ This design does not:
 | Recent exchanges, continuity capsule and fresh boundary | HASHI Session layer |
 | Session working memory and Session Memory+ | HASHI Session layer |
 | Persona, system prompts, Agent configuration and Habits | HASHI Agent layer |
-| Governed Agent long-term memory | HASHI Agent memory service |
+| Promoted unified Agent long-term memory | HASHI Agent memory service |
 | HER plan, Ledger, stage execution and review | HER v2 inside HASHI |
 | Provider, model, reasoning, backend and backend thread | HASHI |
 | Tool orchestration and approval challenge state | HASHI |
@@ -148,6 +163,7 @@ Minimum Session fields are:
 - monotonically increasing revision;
 - active context generation;
 - memory policy; and
+- whether this is the Agent's permanent default Session; and
 - optional channel binding metadata.
 
 Version 1 normally has one presentation Agent at a time. Delegated Agents are
@@ -308,6 +324,10 @@ channel_bindings
 attachments
 idempotency_records
 delivery_outbox
+agent_memory_records
+memory_promotion_watermarks
+memory_promotion_jobs
+memory_promotion_schedules
 ```
 
 Critical transaction boundaries are:
@@ -372,10 +392,11 @@ ordinary operational Event compaction. The snapshot allows a new client or an
 expired Event cursor to reconstruct the same user-visible timeline without a
 local Chat archive.
 
-Delete semantics must be explicit. Removing a Session from the conversation
-store does not imply erasure of separately governed canonical raw audit
-evidence. The API must disclose whether audit evidence remains and direct a
-fully destructive audit wipe through its separately confirmed policy.
+Delete semantics are deliberately non-destructive. `DELETE` creates a tombstone
+and removes the Session from ordinary active lists, but Session messages,
+promoted Agent memory, canonical logs, and audit evidence remain. The product
+should normally call this action archive or remove-from-list so it does not
+imply physical erasure. Ordinary Session commands never wipe retained evidence.
 
 ### 8.3 Messages and Runs
 
@@ -417,12 +438,11 @@ execution. Retrying the same key and digest returns the original HTTP status,
 create another message, execution, tool side effect, or final answer.
 
 The same key with a different digest returns `409 idempotency_conflict` and
-neither request is modified. An accepted key remains bound for the lifetime of
-the Session plus its deletion-tombstone retention and is never reused within
-that Session. Failed, stopped, superseded, and interrupted Runs remain bound to
+neither request is modified. An accepted key remains bound permanently to the
+Session and is never reused within that Session. Failed, stopped, superseded, and interrupted Runs remain bound to
 their original key. A deliberate retry or continuation uses a new key and an
 explicit parent Run reference. Because `session_id` values are never reused,
-hard deletion cannot make an old key identify a new Session.
+a tombstone cannot make an old key identify a new Session.
 
 ### 8.4 Durable events
 
@@ -482,6 +502,10 @@ only when the Session has no active foreground Run; otherwise it returns
 revokes every older-generation backend binding, invalidates older compaction
 candidates, and appends the boundary Event before acknowledging success. The
 next Run must establish a new CLI/backend thread or a fresh isolated invocation.
+
+`/new` is the client command for creating and selecting a different HASHI
+Session. `/fresh` never creates a new Session, and backend-thread reset is an
+internal consequence rather than a separate user-facing session concept.
 
 ### 8.6 Attachments
 
@@ -582,6 +606,31 @@ no durable mutation may be retried under policy; once any mutation or Event is
 committed, its idempotency result is durable. Internal deferred-tool invocation
 keys use the stricter Tool Gateway lifecycle in sections 6.4 and 8.7.
 
+### 8.10 Agent memory promotion
+
+```text
+GET  /api/v1/agents/{agent_id}/promotion
+POST /api/v1/agents/{agent_id}/promotion
+```
+
+The command surface is:
+
+```text
+/promote status
+/promote now
+/promote all now
+/promote auto on|off
+/promote time HH:MM [timezone]
+```
+
+Promotion operates on one immutable snapshot per Session and advances a
+`promoted_through_ordinal` watermark only after every derived Agent-memory row
+and its provenance commit atomically. Repeating a job is idempotent. Automatic
+promotion runs once per configured local date and catches up after downtime.
+Only terminal Runs and committed visible Messages enter the snapshot; active
+Runs remain for the next promotion. Manual promotion does not disable or move
+the automatic schedule unless the corresponding schedule command is used.
+
 ## 9. PCM and memory scopes
 
 The existing typed PCM authority model remains intact. Presentation order does
@@ -638,8 +687,9 @@ fenced attempt.
 
 ### 9.3 Session memory
 
-Ordinary messages and episodic work state default to Session scope. They do not
-automatically become cross-Session memory.
+Ordinary messages and episodic work state first enter Session scope. Until the
+Session promotion watermark advances past them, they are unavailable to every
+other Session even when those Sessions use the same Agent.
 
 Session Memory+ tracks decisions, unresolved work, goals, evidence pointers,
 and continuation state for one Session. The current single Agent-wide work card
@@ -647,26 +697,35 @@ must not be injected automatically into unrelated Sessions.
 
 ### 9.4 Agent long-term memory
 
-Agent long-term memory stores stable preferences, identity facts, durable
-decisions, and deliberately promoted knowledge. Promotion from a Session must
-follow an explicit policy and record:
+Agent long-term memory is the unified retrievable history of everything already
+promoted from that Agent's Sessions, together with existing Agent memories.
+Promotion is a time/scope boundary, not a sensitivity-classification or approval
+gate. It records:
 
 - source `session_id`, `run_id`, and `message_id`;
-- promoting actor or rule;
-- memory scope and sensitivity;
-- creation and review timestamps; and
+- promoting actor or schedule;
+- source Session ordinal and context generation;
+- creation and promotion timestamps; and
 - retraction or supersession links.
 
-Retrieval applies owner, tenant, Agent, sensitivity, and scope filters before
-semantic ranking. A semantic match never grants access.
+Retrieval applies owner, tenant, Agent, promotion-watermark, and authorization
+filters before semantic ranking. A semantic match never grants access. Complete
+promoted material remains indexed and retrievable, but ordinary prompt assembly
+selects only a bounded relevant subset rather than injecting the full history.
 
 ### 9.5 Habits, Meditation and Dream
 
-Habits remain Agent-level behavioural guidance. Learning eligibility is decided
-by HASHI policy and retains Session provenance. Meditation and Dream may
-consolidate Agent-level material only from eligible records; they must not turn
-private Session content into shared memory without the approved promotion
-policy.
+Habits remain Agent-level behavioural guidance. Meditation and Dream keep their
+existing learning behaviour and add no content-sensitivity approval gate. Their
+Agent-level inputs and writes may use promoted Agent memory; work derived from
+an unpromoted Session remains staged at Session scope until the same promotion
+boundary advances. Every resulting Agent-level record retains Session
+provenance.
+
+The daily order is deterministic: freeze terminal Session snapshots, commit
+idempotent promotion and watermarks, update local/central Agent-memory indexes,
+then allow Meditation, Dream, and other Agent-level consolidation to consume the
+newly promoted records.
 
 ## 10. Session-scoped Auto Compact
 
@@ -741,6 +800,11 @@ generations must resume the corresponding eligible thread, establish a fresh
 isolated invocation, or rebuild context from HASHI. Reusing one adapter's
 thread across unrelated Sessions or across a `fresh` boundary is forbidden.
 
+Fixed-backend handoff remains supported but is renamed backend handoff to avoid
+confusing a provider thread with a HASHI Session. Its payload contains only the
+current HASHI Session context plus already promoted Agent memory. It never reads
+another Session beyond that Session's promotion watermark.
+
 ### 12.3 Backend changes
 
 Changing backend, provider, model, or HER profile does not change the Session
@@ -761,6 +825,10 @@ On HASHI startup, the Session service reconciles non-terminal Runs:
 - Session messages, capsules, backend bindings, and earlier Events remain; and
 - delivery resumes from the durable outbox.
 
+Startup also evaluates every enabled Agent promotion schedule. If HASHI missed
+the configured local promotion time, it runs one idempotent catch-up job for the
+unprocessed local date before scheduling the next occurrence.
+
 Aptenra reconnects, lists Sessions, reads messages, and resumes the Event cursor.
 It does not restore a local execution owner map.
 
@@ -770,11 +838,10 @@ range. The Session snapshot and canonical Messages remain the rebuild source.
 Expired consumers do not retain Events forever; their next stale cursor receives
 `410 event_cursor_expired` and must bootstrap from a snapshot.
 
-Deleting a Session closes streams and creates a deletion tombstone. Operational
-Events, consumer cursors, undelivered outbox rows, attachments, and Messages are
-purged only under the declared deletion/retention policy. Delivery workers must
-not send an outbox row after its Session deletion fence. Separately governed
-canonical audit evidence follows the PCM audit-wipe contract.
+Removing a Session closes streams and creates a deletion tombstone. Messages,
+attachments, Events, logs, promotion provenance, and promoted Agent memory are
+retained. Delivery workers must not send an outbox row after its Session
+deletion fence. The default Session cannot be removed.
 
 ## 14. Security, identity and privacy
 
@@ -790,17 +857,16 @@ The personal/local profile may use a loopback capability token. Team and
 enterprise profiles use the existing identity and policy services. All profiles
 enforce the same repository contract.
 
-Chat content, memory and attachment data receive encryption-at-rest support,
-backup policy, bounded operational retention, and explicit destructive
-operations. Canonical audit retention remains governed separately by the PCM
-audit specification.
+Chat content, memory and attachment data receive encryption-at-rest support and
+backup policy. Ordinary Session lifecycle operations are non-destructive.
+Canonical logs and audit evidence retain the indefinite PCM retention contract.
 
 ## 15. Aptenra thin-client contract
 
 Aptenra performs only the following agent-chat functions:
 
 1. Discover HASHI capabilities and Agents.
-2. Create, list, open, rename, archive, and explicitly delete HASHI Sessions.
+2. Create, list, open, rename, archive, and tombstone HASHI Sessions.
 3. Submit the current message and optional high-level execution mode.
 4. Stage attachments and commit them through HASHI.
 5. Render durable Events and canonical Messages, deduplicating by HASHI IDs.
@@ -830,10 +896,20 @@ The Session service is channel-neutral. Aptenra, Workbench, Telegram, WhatsApp,
 browser, and future surfaces bind their external conversation identity to a
 HASHI Session through `channel_bindings`.
 
-Default bindings are isolated. Two surfaces share a Session only through an
-explicit authorized link. Channel projections must not maintain a second full
-Chat archive. Delivery receipts and transport metadata remain Events linked to
-the canonical Session message.
+Every Agent has one permanent default Session, and every authorized surface
+initially binds to it. `/new` creates another Session and changes only the
+invoking surface's binding; `/use <session_id>` may deliberately bind multiple
+surfaces to the same Session. Scheduled tasks and proactive messages always
+target the Agent's default Session. Channel projections must not maintain a
+second full Chat archive. Delivery receipts and transport metadata remain Events
+linked to the canonical Session message.
+
+The common interactive command contract is `/new`, `/sessions`, `/use`,
+`/current`, `/archive`, `/fresh`, and `/promote`. The terminal CLI exposes the
+same lifecycle through `hashi session new|list|use|show|rename|archive` and
+`hashi chat --session <session_id>`. Non-interactive requests must name a
+Session or explicitly request a new one; they never fall back to an Agent-global
+conversation timeline.
 
 ## 17. Compatibility and cutover
 
@@ -864,6 +940,11 @@ The first approved Aptenra release creates new empty HASHI Sessions. It does not
 import existing Aptenra Chat history. Old local Chat state may remain as a
 rollback backup during qualification but is not read into the new Session
 system and is not deleted without a separately approved cleanup step.
+
+Existing Agent-global memories remain Agent memory and are immediately eligible
+for retrieval. Existing Agent-global transcripts and logs remain retained
+evidence but are not inserted into a new Session because their Session ownership
+cannot be reconstructed reliably.
 
 ### 17.3 Source convergence
 
@@ -899,7 +980,8 @@ After Session API qualification:
 
 - Replace Agent-global recent-exchange lookup with Session lookup.
 - Add Session context generations and Session Memory+.
-- Add scoped memory provenance and promotion policy.
+- Add per-Session promotion watermarks, per-Agent local-time schedules, `/promote`
+  commands, catch-up jobs, provenance, and unified Agent-memory indexing.
 - Move Auto Compact pointers and capsules to Session scope.
 
 ### Phase 3 — Runtime, HER v2 and backend integration
@@ -941,7 +1023,7 @@ After Session API qualification:
 
 ### 19.1 HASHI Session contract
 
-1. Session create/list/read/update/archive/delete survives a HASHI restart and
+1. Session create/list/read/update/archive/tombstone survives a HASHI restart and
    enforces owner isolation.
 2. Two interleaved Sessions using the same Agent never exchange raw messages,
    Session Memory+, capsules, fresh generations, tool state, or backend threads.
@@ -974,8 +1056,10 @@ After Session API qualification:
    they do not silently disappear because no successful final exists.
 12. Auto Compact capsules and compare-and-swap pointers cannot cross Session or
    context-generation boundaries.
-13. Ordinary episodic work remains Session-scoped; only policy-approved memories
-   become Agent-scoped and every promoted memory retains provenance.
+13. Ordinary episodic work remains Session-scoped until manual or scheduled
+   promotion advances that Session's watermark. Promotion is idempotent, retains
+   complete provenance, and makes the material retrievable by every Session for
+   the same owner and Agent.
 14. An interrupted HER Run becomes terminal without automatic side-effect
    replay, while the Session remains usable for a later continuation Run.
 15. Every newly claimed or resumed attempt re-evaluates mutable authorization;
@@ -995,6 +1079,16 @@ After Session API qualification:
     transition, execution, or side effect.
 19. Session capability remains unavailable through every incomplete Phase 1–4
     state and is published only when the full readiness gate is true.
+20. Every Agent has exactly one permanent default Session. New channels bind to
+    it, `/new` changes only the invoking channel, and scheduled or proactive work
+    always targets it.
+21. Automatic promotion runs once per configured local date, catches up after
+    downtime, skips active Runs, and never exposes another Session beyond its
+    committed promotion watermark.
+22. Fixed-backend handoff includes the current Session and promoted Agent memory
+    only; another Session's unpromoted content never enters the backend thread.
+23. Tombstoning a non-default Session hides it and fences delivery without
+    deleting Messages, logs, attachments, promotion provenance, or Agent memory.
 
 ### 19.2 Backend transparency
 
@@ -1038,6 +1132,8 @@ After the new gates pass, Aptenra retires:
 HASHI retires or confines to compatibility use:
 
 - Agent-global recent conversation as the default user-Chat source;
+- automatic Agent-global episodic-memory writes before promotion;
+- one Agent-workspace Memory+ card, `/fresh` watermark, or compaction pointer;
 - process-local request IDs as external Run identities;
 - the in-memory activity projection as a result source;
 - one shared fixed-backend thread across unrelated Sessions; and
@@ -1056,8 +1152,9 @@ Implementation is complete only when:
   controls, memory scopes, and compaction are verified with fault injection;
 - no incomplete implementation state advertises or accepts Session API v1;
 - Aptenra contains no behavioural HASHI fork and no sent-message archive;
-- the release begins with an empty, valid Session store as approved; and
-- rollback, backup, retention, deletion, and audit boundaries are documented
+- the release begins with one empty default Session per Agent while existing
+  Agent memory remains available; and
+- rollback, backup, non-destructive retention, promotion, and audit boundaries are documented
   and tested.
 
 Until those conditions hold, the current Aptenra bounded-history path remains a
@@ -1106,7 +1203,10 @@ Version 1.2 resolves the six additional findings from the second review:
 14. All externally retryable mutations share one durable key/digest/conflict and
     retention contract.
 
-This resolution records design closure only. Version 1.2 remains a contract-
-freeze candidate until an independent final review confirms these clauses are
-internally consistent. It does not claim that the Session implementation or its
-qualification gates already exist.
+Version 1.3 records the Founder resolution after the reviews: short-term Session
+context is completely isolated, every Agent has a default Session, and manual or
+scheduled promotion later unifies Session experience into Agent memory without
+a content-sensitivity gate. Fixed-backend handoff remains current-Session scoped,
+and ordinary Session removal never destroys logs or memory. This version is the
+final implementation contract; qualification gates still determine whether the
+capability may be advertised.

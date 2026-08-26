@@ -159,6 +159,7 @@ def _make_runtime(manager: FlexibleBackendManager) -> tuple[FlexibleAgentRuntime
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.backend_manager = manager
     runtime.config = manager.config
+    runtime.global_config = manager.global_config
     runtime.workspace_dir = manager.config.workspace_dir
     runtime.name = manager.config.name
     runtime._post_turn_observers = []
@@ -363,7 +364,13 @@ async def test_callback_notepad_clear_uses_confirmation(tmp_path):
     manager = _make_manager(tmp_path)
     manager.agent_mode = "memory+"
     runtime, _messages = _make_runtime(manager)
-    path = tmp_path / "memory" / "memory_plus_notepad.md"
+    from orchestrator import runtime_session
+
+    session = runtime_session.initialize_runtime_sessions(runtime)
+    session_workspace = runtime.session_store.session_workspace(
+        session["session_id"], 1
+    )
+    path = session_workspace / "memory" / "memory_plus_notepad.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("# Memory+ Notepad\n\nDate: 2026-05-18\n\n## Continuity\n\n- keep this\n", encoding="utf-8")
 
@@ -861,6 +868,33 @@ def _queued_request_from(source: str) -> QueuedRequest:
     item = _queued_request()
     item.source = source
     return item
+
+
+def test_wrapper_visible_context_isolated_by_hashi_session(tmp_path):
+    from orchestrator import runtime_session
+
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    default = runtime_session.initialize_runtime_sessions(runtime)
+    other = runtime.session_store.create_session(
+        owner_id="user:0", agent_id=runtime.name, title="Other"
+    )
+    item_a = _queued_request()
+    item_a.session_id = default["session_id"]
+    item_a.context_generation = 1
+    item_b = _queued_request()
+    item_b.session_id = other["session_id"]
+    item_b.context_generation = 1
+    for item, marker in ((item_a, "SESSION_A_ONLY"), (item_b, "SESSION_B_ONLY")):
+        builder = runtime_session.session_handoff_builder(runtime, item=item)
+        builder.append_transcript("user", marker, "text")
+        builder.append_transcript("assistant", f"answer {marker}", "text")
+
+    context = FlexibleAgentRuntime._wrapper_visible_context(
+        runtime, 3, item=item_a
+    )
+    rendered = "\n".join(row["text"] for row in context)
+    assert "SESSION_A_ONLY" in rendered
+    assert "SESSION_B_ONLY" not in rendered
 
 
 async def _completed_task(response):
@@ -2381,7 +2415,7 @@ async def test_cmd_mode_audit_preserves_wrapper_and_unrelated_state(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cmd_new_resets_without_visible_session_reset_llm_turn(tmp_path):
+async def test_cmd_new_creates_session_without_visible_llm_turn(tmp_path):
     manager = _make_manager(tmp_path)
     manager.agent_mode = "wrapper"
     runtime, messages = _make_runtime(manager)
@@ -2398,6 +2432,9 @@ async def test_cmd_new_resets_without_visible_session_reset_llm_turn(tmp_path):
     runtime._clear_transfer_state = lambda: None
     runtime._pending_auto_recall_context = "old"
     runtime.context_assembler = SimpleNamespace(memory_store=SimpleNamespace(clear_turns=lambda: None))
+    from orchestrator import runtime_session
+
+    default = runtime_session.initialize_runtime_sessions(runtime)
 
     async def enqueue_request(chat_id, prompt, source, summary, **kwargs):
         queued.append(
@@ -2416,7 +2453,9 @@ async def test_cmd_new_resets_without_visible_session_reset_llm_turn(tmp_path):
     await FlexibleAgentRuntime.cmd_new(runtime, update, context)
 
     assert handled == [True]
-    assert messages[-1] == "Starting a fresh session..."
+    current = runtime_session.current_session_for_update(runtime, update)
+    assert current["session_id"] != default["session_id"]
+    assert messages[-1].startswith("New Session active:")
     assert queued == []
 
 
@@ -2584,8 +2623,8 @@ async def test_foreground_completion_uses_wrapper_output_for_visible_surfaces(tm
         assert listener_payloads[0]["core_raw"] == "core raw foreground"
         assert listener_payloads[0]["wrapper_used"] is True
         assert runtime.last_response["text"] == "wrapped visible"
-        assert ("assistant", "codex-cli", "core raw foreground") in runtime.memory_store.turns
-        assert ("hello", "core raw foreground", "text") in runtime.memory_store.exchanges
+        assert runtime.memory_store.turns == []
+        assert runtime.memory_store.exchanges == []
         assert ("assistant", "wrapped visible", "text") in runtime.handoff_builder.transcript
         assert runtime.project_chat_logger.exchanges[0] == ("hello", "wrapped visible", "text")
         assert hchat_replies[0]["text"] == "wrapped visible"
@@ -2700,8 +2739,8 @@ async def test_background_completion_uses_wrapper_output_for_visible_surfaces(tm
     assert listener_payloads[0]["core_raw"] == "core raw"
     assert listener_payloads[0]["wrapper_used"] is True
     assert runtime.last_response["text"] == "wrapped visible"
-    assert ("assistant", "codex-cli", "core raw") in runtime.memory_store.turns
-    assert ("hello", "core raw", "text") in runtime.memory_store.exchanges
+    assert runtime.memory_store.turns == []
+    assert runtime.memory_store.exchanges == []
     assert ("assistant", "wrapped visible", "text") in runtime.handoff_builder.transcript
     assert runtime.project_chat_logger.exchanges[0] == ("hello", "wrapped visible", "text")
     assert sent[0]["text"] == "wrapped visible"

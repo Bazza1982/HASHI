@@ -130,7 +130,7 @@ class MemoryPlusObserver(PreTurnContextProvider):
         self.notepad_path = workspace_dir / "memory" / MEMORY_PLUS_NOTEPAD_FILE
         self.archive_dir = workspace_dir / "memory" / MEMORY_PLUS_ARCHIVE_DIR
         self.runtime: Any | None = None
-        self._last_context_fingerprint = ""
+        self._last_context_fingerprints: dict[str, str] = {}
 
     def attach_runtime(self, runtime: Any) -> None:
         self.runtime = runtime
@@ -150,19 +150,23 @@ class MemoryPlusObserver(PreTurnContextProvider):
 
     async def build_context_sections(self, request: TurnContextRequest) -> list[tuple[str, str]]:
         cfg = self._config()
-        state = prepare_memory_plus_store(self.workspace_dir, cfg)
+        requested_workspace = str((request.metadata or {}).get("session_workspace") or "").strip()
+        workspace = Path(requested_workspace) if requested_workspace else self.workspace_dir
+        state = prepare_memory_plus_store(workspace, cfg)
         fingerprint = memory_plus_fingerprint(state)
         incremental = bool((request.metadata or {}).get("incremental"))
-        if incremental and fingerprint == self._last_context_fingerprint:
+        key = str(workspace.resolve())
+        if incremental and fingerprint == self._last_context_fingerprints.get(key):
             return []
-        self._last_context_fingerprint = fingerprint
+        self._last_context_fingerprints[key] = fingerprint
         body = build_memory_plus_context(state, cfg=cfg, include_update_contract=True)
         return [("Memory+ Continuity", body)]
 
-    def mark_session_synced(self) -> None:
-        state = load_memory_plus_state(self.workspace_dir)
+    def mark_session_synced(self, workspace_dir: Path | None = None) -> None:
+        workspace = Path(workspace_dir or self.workspace_dir)
+        state = load_memory_plus_state(workspace)
         if state:
-            self._last_context_fingerprint = memory_plus_fingerprint(state)
+            self._last_context_fingerprints[str(workspace.resolve())] = memory_plus_fingerprint(state)
 
     def workspace_files_to_preserve(self) -> frozenset[str]:
         return frozenset({"post_turn_observers.json", "memory"})
@@ -595,11 +599,14 @@ def memory_plus_fingerprint(state: Mapping[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def mark_memory_plus_session_synced(runtime: Any) -> None:
+def mark_memory_plus_session_synced(runtime: Any, workspace_dir: Path | None = None) -> None:
     for provider in getattr(runtime, "_pre_turn_context_providers", []) or []:
         marker = getattr(provider, "mark_session_synced", None)
         if callable(marker):
-            marker()
+            try:
+                marker(workspace_dir)
+            except TypeError:
+                marker()
 
 
 def _migrate_legacy_notepad(workspace_dir: Path) -> dict[str, Any]:

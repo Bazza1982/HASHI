@@ -106,6 +106,44 @@ def test_memory_plus_provider_injects_notepad_and_protocol(tmp_path: Path) -> No
     assert len(sections[0][1]) <= 4000
 
 
+def test_memory_plus_provider_reads_only_the_request_session(tmp_path: Path) -> None:
+    agent_workspace = tmp_path / "agent"
+    agent_workspace.mkdir()
+    set_memory_plus_enabled(agent_workspace, True)
+    session_a = tmp_path / "sessions" / "a"
+    session_b = tmp_path / "sessions" / "b"
+    write_memory_plus_update(
+        session_a,
+        request_id="a",
+        source="text",
+        prompt="",
+        update={"write": True, "facts": ["SESSION_A_ONLY"]},
+    )
+    write_memory_plus_update(
+        session_b,
+        request_id="b",
+        source="text",
+        prompt="",
+        update={"write": True, "facts": ["SESSION_B_ONLY"]},
+    )
+    observer = MemoryPlusObserver(workspace_dir=agent_workspace)
+
+    sections = asyncio.run(
+        observer.build_context_sections(
+            TurnContextRequest(
+                request_id="request-a",
+                source="text",
+                user_text="hello",
+                model_name="gpt-test",
+                metadata={"session_workspace": str(session_a)},
+            )
+        )
+    )
+
+    assert "SESSION_A_ONLY" in sections[0][1]
+    assert "SESSION_B_ONLY" not in sections[0][1]
+
+
 def test_empty_memory_plus_protocol_stays_under_six_hundred_chars(
     tmp_path: Path,
 ) -> None:

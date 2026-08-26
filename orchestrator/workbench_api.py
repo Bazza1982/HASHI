@@ -68,9 +68,18 @@ from orchestrator.enterprise.scim import (
 )
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
 from orchestrator.pathing import resolve_path_value
+from orchestrator.session_store import (
+    IdempotencyConflict,
+    SessionConflict,
+    SessionNotFound,
+    SessionStore,
+)
 from orchestrator.transfer_store import TransferStore
 
 _SUPPORTED_CONNECTOR_TYPES = frozenset({"github", "slack", "google_chat", "teams", "feishu"})
+# External Session API publication stays fail-closed until the complete
+# qualification gate in the Session architecture contract has passed.
+PERSISTENT_SESSION_V1_QUALIFIED = False
 _CONNECTOR_REQUIRED_SCOPES = {
     "github": frozenset({"repo:read", "repo:write"}),
     "slack": frozenset({"message.send"}),
@@ -196,6 +205,7 @@ class WorkbenchApiServer:
         self.secrets = dict(secrets or {})
         self.admin_token = (self.secrets.get("workbench_admin_token") or "").strip()
         self._static_connectors = list(connectors or [])
+        self.session_store = SessionStore.from_global_config(self.global_config)
         self.identity_service = self._build_identity_service()
         self.channel_registry = self._build_channel_registry()
         self.audit_writer = self._build_audit_writer()
@@ -290,6 +300,71 @@ class WorkbenchApiServer:
             self.handle_enterprise_connector_credential_revoke,
         )
         self.app.router.add_get("/api/agents", self.handle_agents)
+        self.app.router.add_get("/api/v1/capabilities", self.handle_v1_capabilities)
+        self.app.router.add_get("/api/v1/agents", self.handle_v1_agents)
+        session_handler = (
+            lambda handler: handler
+            if self._persistent_session_v1_ready()
+            else self.handle_v1_session_not_ready
+        )
+        for method, path, handler in (
+            ("POST", "/api/v1/sessions", self.handle_v1_sessions_create),
+            ("GET", "/api/v1/sessions", self.handle_v1_sessions_list),
+            ("GET", "/api/v1/sessions/{session_id}", self.handle_v1_session_get),
+            ("PATCH", "/api/v1/sessions/{session_id}", self.handle_v1_session_patch),
+            ("DELETE", "/api/v1/sessions/{session_id}", self.handle_v1_session_delete),
+            (
+                "GET",
+                "/api/v1/sessions/{session_id}/snapshot",
+                self.handle_v1_session_snapshot,
+            ),
+            (
+                "GET",
+                "/api/v1/sessions/{session_id}/messages",
+                self.handle_v1_session_messages,
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/{session_id}/runs",
+                self.handle_v1_session_runs_create,
+            ),
+            (
+                "GET",
+                "/api/v1/sessions/{session_id}/runs/{run_id}",
+                self.handle_v1_session_run_get,
+            ),
+            (
+                "GET",
+                "/api/v1/sessions/{session_id}/events",
+                self.handle_v1_session_events,
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/{session_id}/event-consumers",
+                self.handle_v1_event_consumer_create,
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/{session_id}/event-consumers/{consumer_id}/ack",
+                self.handle_v1_event_consumer_ack,
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/{session_id}/fresh",
+                self.handle_v1_session_fresh,
+            ),
+            (
+                "GET",
+                "/api/v1/agents/{agent_id}/promotion",
+                self.handle_v1_promotion_get,
+            ),
+            (
+                "POST",
+                "/api/v1/agents/{agent_id}/promotion",
+                self.handle_v1_promotion_post,
+            ),
+        ):
+            self.app.router.add_route(method, path, session_handler(handler))
         self.app.router.add_get("/api/agents/{name}/overview", self.handle_agent_overview)
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
@@ -2664,6 +2739,433 @@ class WorkbenchApiServer:
                         pass
         return web.json_response({"entries": entries[-limit:], "count": len(entries)})
 
+    def _v1_owner_id(self, request) -> str | None:
+        if self._is_governed_profile():
+            user = self._enterprise_user_from_request(request)
+            return f"enterprise:{user.id}" if user is not None else None
+        return SessionStore.owner_id_for(self.global_config)
+
+    def _persistent_session_v1_ready(self) -> bool:
+        return bool(
+            PERSISTENT_SESSION_V1_QUALIFIED
+            and getattr(self.global_config, "persistent_session_v1", False)
+        )
+
+    async def handle_v1_session_not_ready(self, request):
+        del request
+        return web.json_response(
+            {
+                "ok": False,
+                "code": "session_api_not_ready",
+                "error": "Persistent Session API v1 has not passed qualification.",
+            },
+            status=503,
+        )
+
+    @staticmethod
+    def _v1_error(error: Exception, *, status: int | None = None):
+        resolved_status = status
+        if resolved_status is None:
+            if isinstance(error, SessionNotFound):
+                resolved_status = 404
+            elif isinstance(error, (SessionConflict, IdempotencyConflict)):
+                resolved_status = 409
+            elif isinstance(error, (ValueError, TypeError)):
+                resolved_status = 400
+            else:
+                resolved_status = 500
+        return web.json_response(
+            {
+                "ok": False,
+                "error": str(error),
+                "code": str(getattr(error, "code", "invalid_request")),
+            },
+            status=resolved_status,
+        )
+
+    async def handle_v1_capabilities(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        capabilities: dict[str, Any] = {"ok": True}
+        if self._persistent_session_v1_ready():
+            capabilities.update(
+                {
+                    "session_api_version": "1.0",
+                    "event_schema_version": "1.0",
+                    "durability": "sqlite-wal",
+                    "controls": [
+                        "fresh",
+                        "archive",
+                        "promotion",
+                        "event_consumer_ack",
+                    ],
+                    "event_delivery": "cursor-polling-at-least-once",
+                    "max_message_chars": 200000,
+                }
+            )
+        return web.json_response(capabilities)
+
+    async def handle_v1_agents(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        agents = [
+            {
+                "agent_id": runtime.name,
+                "display_name": runtime.get_display_name()
+                if hasattr(runtime, "get_display_name")
+                else runtime.name,
+                "available": bool(getattr(runtime, "backend_ready", True)),
+            }
+            for runtime in self._runtime_list()
+        ]
+        return web.json_response({"ok": True, "agents": agents})
+
+    async def handle_v1_sessions_create(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            payload = await request.json()
+            agent_id = str(payload.get("agent_id") or payload.get("agent") or "").strip().lower()
+            if agent_id not in self._runtime_map():
+                raise SessionNotFound("agent not found")
+            session = self.session_store.create_session(
+                owner_id=owner,
+                agent_id=agent_id,
+                title=str(payload.get("title") or "New session"),
+            )
+            surface = str(payload.get("surface") or "").strip().lower()
+            channel_key = str(payload.get("channel_key") or payload.get("client_id") or "").strip()
+            if surface and channel_key:
+                self.session_store.bind_channel(
+                    owner_id=owner,
+                    agent_id=agent_id,
+                    surface=surface,
+                    channel_key=channel_key,
+                    session_id=session["session_id"],
+                )
+            return web.json_response({"ok": True, "session": session}, status=201)
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_sessions_list(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            rows = self.session_store.list_sessions(
+                owner_id=owner,
+                agent_id=str(request.query.get("agent_id") or "") or None,
+                include_archived=str(request.query.get("include_archived") or "").lower()
+                in {"1", "true", "yes"},
+                limit=int(request.query.get("limit") or 100),
+            )
+            return web.json_response({"ok": True, "sessions": rows, "next_cursor": None})
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_get(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            session = self.session_store.get_session(
+                request.match_info["session_id"], owner_id=owner
+            )
+            return web.json_response({"ok": True, "session": session})
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_patch(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            payload = await request.json()
+            expected = payload.get("expected_revision")
+            if expected is None:
+                expected = str(request.headers.get("If-Match") or "").strip('"')
+            if expected in {None, ""}:
+                raise ValueError("expected_revision or If-Match is required")
+            session = self.session_store.update_session(
+                request.match_info["session_id"],
+                owner_id=owner,
+                expected_revision=int(expected),
+                title=payload.get("title"),
+            )
+            response = web.json_response({"ok": True, "session": session})
+            response.headers["ETag"] = f'"{session["revision"]}"'
+            return response
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_delete(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            self.session_store.get_session(request.match_info["session_id"], owner_id=owner)
+            session = self.session_store.archive_session(
+                request.match_info["session_id"], deleted=True
+            )
+            return web.json_response(
+                {"ok": True, "session": session, "records_deleted": False}
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_snapshot(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            return web.json_response(
+                {
+                    "ok": True,
+                    "snapshot": self.session_store.snapshot(
+                        request.match_info["session_id"], owner_id=owner
+                    ),
+                }
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_messages(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            rows = self.session_store.messages(
+                request.match_info["session_id"],
+                owner_id=owner,
+                after_ordinal=int(request.query.get("after_ordinal") or 0),
+                limit=int(request.query.get("limit") or 200),
+            )
+            return web.json_response({"ok": True, "messages": rows, "next_cursor": None})
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_runs_create(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            payload = await request.json()
+            session = self.session_store.get_session(
+                request.match_info["session_id"], owner_id=owner, include_deleted=False
+            )
+            runtime = self._runtime_map().get(session["agent_id"])
+            if runtime is None:
+                raise SessionNotFound("agent runtime not found")
+            message = payload.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, list):
+                raise ValueError("message.content must be a list")
+            text_blocks = [
+                str(block.get("text") or "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+            text = "\n".join(part for part in text_blocks if part).strip()
+            if not text:
+                raise ValueError("a non-empty text content block is required")
+            idempotency_key = str(
+                payload.get("idempotency_key")
+                or request.headers.get("Idempotency-Key")
+                or ""
+            ).strip()
+            if not idempotency_key:
+                raise ValueError("idempotency_key is required")
+            client_id = str(
+                request.headers.get("X-Client-Id") or payload.get("client_id") or "default"
+            )
+            request_id = await runtime.enqueue_request(
+                runtime._primary_chat_id(),
+                text,
+                "session-api",
+                text[:160],
+                deliver_to_telegram=False,
+                idempotency_key=idempotency_key,
+                request_metadata={
+                    "session_id": session["session_id"],
+                    "owner_id": owner,
+                    "session_surface": "aptenra",
+                    "session_channel_key": client_id,
+                    "execution_mode": payload.get("execution_mode"),
+                    "parent_run_id": payload.get("parent_run_id"),
+                },
+            )
+            if not request_id:
+                raise SessionConflict("request was not accepted")
+            run = self.session_store.get_run_by_request(request_id)
+            return web.json_response(
+                {
+                    "ok": True,
+                    "session_id": session["session_id"],
+                    "run_id": run["run_id"],
+                    "message_id": run["user_message_id"],
+                    "request_id": request_id,
+                    "state": run["state"],
+                },
+                status=202,
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_run_get(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            run = self.session_store.get_run(request.match_info["run_id"], owner_id=owner)
+            if run["session_id"] != request.match_info["session_id"]:
+                raise SessionNotFound("run not found in Session")
+            return web.json_response({"ok": True, "run": run})
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_events(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            consumer_id = str(request.query.get("consumer_id") or "").strip()
+            if consumer_id:
+                delivery = self.session_store.poll_event_consumer(
+                    session_id=request.match_info["session_id"],
+                    owner_id=owner,
+                    consumer_id=consumer_id,
+                    limit=int(request.query.get("limit") or 500),
+                )
+                return web.json_response({"ok": True, **delivery})
+            rows = self.session_store.events(
+                request.match_info["session_id"],
+                owner_id=owner,
+                after_sequence=int(request.query.get("after_sequence") or 0),
+                limit=int(request.query.get("limit") or 500),
+            )
+            snapshot = self.session_store.snapshot(
+                request.match_info["session_id"], owner_id=owner
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "events": rows,
+                    "earliest_available_sequence": int(
+                        snapshot["earliest_available_sequence"]
+                    ),
+                    "latest_sequence": int(snapshot["latest_sequence"]),
+                }
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_event_consumer_create(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            payload = await request.json()
+            consumer = self.session_store.create_event_consumer(
+                session_id=request.match_info["session_id"],
+                owner_id=owner,
+                consumer_id=str(payload.get("consumer_id") or "") or None,
+            )
+            return web.json_response({"ok": True, "consumer": consumer}, status=201)
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_event_consumer_ack(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            payload = await request.json()
+            if "sequence" not in payload:
+                raise ValueError("sequence is required")
+            consumer = self.session_store.acknowledge_event_consumer(
+                session_id=request.match_info["session_id"],
+                owner_id=owner,
+                consumer_id=request.match_info["consumer_id"],
+                sequence=int(payload["sequence"]),
+            )
+            return web.json_response({"ok": True, "consumer": consumer})
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_fresh(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            self.session_store.get_session(
+                request.match_info["session_id"], owner_id=owner
+            )
+            session = self.session_store.start_fresh_generation(
+                request.match_info["session_id"], reason="session_api"
+            )
+            return web.json_response({"ok": True, "session": session})
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_promotion_get(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            agent_id = str(request.match_info["agent_id"]).lower()
+            if agent_id not in self._runtime_map():
+                raise SessionNotFound("agent not found")
+            return web.json_response(
+                {
+                    "ok": True,
+                    "promotion": self.session_store.promotion_status(
+                        agent_id=agent_id
+                    ),
+                }
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_promotion_post(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            from orchestrator import runtime_session
+
+            payload = await request.json()
+            agent_id = str(request.match_info["agent_id"]).lower()
+            runtime = self._runtime_map().get(agent_id)
+            if runtime is None:
+                raise SessionNotFound("agent not found")
+            action = str(payload.get("action") or "status").strip().lower()
+            if action in {"now", "all_now"}:
+                session_ids = None
+                if action == "now":
+                    session_id = str(payload.get("session_id") or "").strip()
+                    if not session_id:
+                        raise ValueError("session_id is required for action=now")
+                    self.session_store.get_session(session_id, owner_id=owner)
+                    session_ids = [session_id]
+                result = runtime_session.promote_sessions(
+                    runtime, session_ids=session_ids, trigger="session_api"
+                )
+                return web.json_response({"ok": True, "result": result})
+            if action == "configure":
+                schedule = self.session_store.set_promotion_schedule(
+                    agent_id=agent_id,
+                    enabled=payload.get("enabled"),
+                    local_time=payload.get("local_time"),
+                    timezone_name=payload.get("timezone"),
+                )
+                return web.json_response({"ok": True, "schedule": schedule})
+            raise ValueError("action must be now, all_now, or configure")
+        except Exception as exc:
+            return self._v1_error(exc)
+
     def _classify_upload(self, filename: str, declared_media_type: str = "", content_type: str = "") -> str:
         if declared_media_type:
             return declared_media_type.lower()
@@ -2719,19 +3221,35 @@ class WorkbenchApiServer:
             caption = fields.get("caption", "").strip()
             emoji = fields.get("sticker_emoji", "").strip()
             declared_media_type = fields.get("media_type", "").strip()
+            session_metadata = {
+                "session_id": fields.get("session_id") or None,
+                "owner_id": self._v1_owner_id(request),
+                "session_surface": fields.get("surface") or "workbench",
+                "session_channel_key": fields.get("client_id") or "default",
+            }
+            base_idempotency_key = str(fields.get("idempotency_key") or "").strip() or None
 
             request_ids = []
             if text and not uploads:
-                slash_result = await try_execute_slash_command_text(runtime, text, source_channel="api_chat")
+                slash_result = await try_execute_slash_command_text(
+                    runtime,
+                    text,
+                    source_channel="api_chat",
+                    session_metadata=session_metadata,
+                )
                 if slash_result is not None:
                     slash_result["agent"] = agent_name
                     slash_result["slash_command"] = True
                     status = 200 if slash_result.get("ok") else 400
                     return web.json_response(slash_result, status=status)
-                request_id = await runtime.enqueue_api_text(text)
+                request_id = await runtime.enqueue_api_text(
+                    text,
+                    request_metadata=session_metadata,
+                    idempotency_key=base_idempotency_key,
+                )
                 request_ids.append(request_id)
 
-            for part in uploads:
+            for upload_index, part in enumerate(uploads):
                 local_path, original_name = await self._save_upload(runtime, part)
                 media_kind = self._classify_upload(original_name, declared_media_type, part.headers.get("Content-Type", ""))
                 request_id = await runtime.enqueue_api_media(
@@ -2740,6 +3258,12 @@ class WorkbenchApiServer:
                     filename=original_name,
                     caption=caption or text,
                     emoji=emoji,
+                    request_metadata=session_metadata,
+                    idempotency_key=(
+                        f"{base_idempotency_key}:{upload_index}"
+                        if base_idempotency_key
+                        else None
+                    ),
                 )
                 request_ids.append(request_id)
 
@@ -2762,15 +3286,43 @@ class WorkbenchApiServer:
         if reply_route and isinstance(reply_route, dict):
             self._learn_reply_route(text, reply_route)
 
-        slash_result = await try_execute_slash_command_text(runtime, text, source_channel="api_chat")
+        session_metadata = {
+            "session_id": payload.get("session_id") or None,
+            "owner_id": self._v1_owner_id(request),
+            "session_surface": payload.get("surface") or "workbench",
+            "session_channel_key": payload.get("client_id") or "default",
+        }
+        slash_result = await try_execute_slash_command_text(
+            runtime,
+            text,
+            source_channel="api_chat",
+            session_metadata=session_metadata,
+        )
         if slash_result is not None:
             slash_result["agent"] = agent_name
             slash_result["slash_command"] = True
             status = 200 if slash_result.get("ok") else 400
             return web.json_response(slash_result, status=status)
 
-        request_id = await runtime.enqueue_api_text(text)
-        return web.json_response({"ok": True, "request_id": request_id})
+        request_id = await runtime.enqueue_api_text(
+            text,
+            request_metadata=session_metadata,
+            idempotency_key=str(payload.get("idempotency_key") or "").strip() or None,
+        )
+        response_payload = {"ok": True, "request_id": request_id}
+        if request_id:
+            try:
+                run = self.session_store.get_run_by_request(request_id)
+                response_payload.update(
+                    {
+                        "session_id": run["session_id"],
+                        "run_id": run["run_id"],
+                        "message_id": run["user_message_id"],
+                    }
+                )
+            except SessionNotFound:
+                pass
+        return web.json_response(response_payload)
 
     async def handle_hchat_exchange(self, request):
         payload = await request.json()

@@ -129,11 +129,19 @@ def resolve_bridge_handoff_endpoint(runtime: Any, target_instance: str, mode: st
     raise ValueError(f"unknown instance: {target_instance}")
 
 
-def build_handoff_payload(runtime: Any, target_agent: str, target_instance: str, mode: str) -> dict[str, Any]:
+def build_handoff_payload(
+    runtime: Any,
+    target_agent: str,
+    target_instance: str,
+    mode: str,
+    *,
+    handoff_builder: Any | None = None,
+) -> dict[str, Any]:
     action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"
     transfer_id = f"{'frk' if action == 'fork' else 'trf'}-{uuid4().hex}"
     source_instance = runtime._normalize_instance_name(runtime._detect_instance_name())
-    package = runtime.handoff_builder.build_transfer_package(
+    builder = handoff_builder or runtime.handoff_builder
+    package = builder.build_transfer_package(
         transfer_id=transfer_id,
         source_agent=runtime.name,
         source_instance=source_instance,

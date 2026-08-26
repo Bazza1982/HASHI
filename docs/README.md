@@ -59,6 +59,7 @@ deployment validation continues.
 
 ### Core references
 - [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) — authoritative target design for backend-neutral HASHI Persona-Context-Memory ownership, assembly, retrieval and migration
+- [HASHI_SESSION_ARCHITECTURE_AND_APTENRA_THIN_CLIENT_DESIGN.md](HASHI_SESSION_ARCHITECTURE_AND_APTENRA_THIN_CLIENT_DESIGN.md) — Founder-approved persistent Session, Run, Message and Event architecture that makes HASHI the sole agent-chat state owner and Aptenra a thin client
 - [HASHI_PCM_UPGRADE_TEST_PLAN.md](HASHI_PCM_UPGRADE_TEST_PLAN.md) — accepted assertion migration and minimum 24-contract backend-neutral PCM verification gate
 - [AGENT_FYI.md](AGENT_FYI.md) — Bridge environment FYI (operational reference)
 - [AGENT_PERSONA_SPEC.md](AGENT_PERSONA_SPEC.md) — persona block format and authoring guidance for new agents

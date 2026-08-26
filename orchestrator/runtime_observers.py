@@ -54,7 +54,13 @@ async def build_pre_turn_context_sections(
         model_name=runtime.get_current_model(),
         chat_id=item.chat_id,
         summary=item.summary,
-        metadata=dict(metadata or {}),
+        metadata={
+            **dict(getattr(item, "request_metadata", None) or {}),
+            **dict(metadata or {}),
+            "session_id": getattr(item, "session_id", None),
+            "run_id": getattr(item, "run_id", None),
+            "context_generation": getattr(item, "context_generation", None),
+        },
     )
     sections: list[tuple[str, str]] = []
     for provider in runtime._pre_turn_context_providers:
@@ -90,7 +96,12 @@ def schedule_post_turn_observers(
         model_name=runtime.get_current_model(),
         chat_id=item.chat_id,
         summary=item.summary,
-        metadata={},
+        metadata={
+            **dict(getattr(item, "request_metadata", None) or {}),
+            "session_id": getattr(item, "session_id", None),
+            "run_id": getattr(item, "run_id", None),
+            "context_generation": getattr(item, "context_generation", None),
+        },
     )
     for observer in runtime._post_turn_observers:
         try:
@@ -186,7 +197,13 @@ def _notify_observer_turn_event(
         model_name=runtime.get_current_model(),
         chat_id=item.chat_id,
         summary=item.summary,
-        metadata=metadata,
+        metadata={
+            **dict(getattr(item, "request_metadata", None) or {}),
+            **metadata,
+            "session_id": getattr(item, "session_id", None),
+            "run_id": getattr(item, "run_id", None),
+            "context_generation": getattr(item, "context_generation", None),
+        },
     )
     for observer in runtime._post_turn_observers:
         try:

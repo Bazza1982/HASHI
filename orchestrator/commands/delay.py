@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from orchestrator import runtime_pending
+from orchestrator import runtime_pending, runtime_session
 from orchestrator.command_registry import RuntimeCommand
 from orchestrator.command_ui import card_title
 from orchestrator.scheduler import MAX_DELAY_MINUTES
@@ -144,6 +144,23 @@ def _scheduler(runtime: Any) -> Any | None:
     return runtime_pending.scheduler_for(runtime)
 
 
+def _session_route(
+    runtime: Any, update: Any
+) -> tuple[Any, dict[str, Any], bool] | None:
+    config = getattr(runtime, "global_config", None)
+    has_store_config = bool(
+        getattr(runtime, "session_store", None) is not None
+        or getattr(config, "bridge_home", None)
+        or getattr(config, "project_root", None)
+    )
+    if not has_store_config or not getattr(runtime, "name", None):
+        return None
+    try:
+        return runtime_session.request_route_for_update(runtime, update)
+    except (AttributeError, runtime_session.SessionNotFound):
+        return None
+
+
 def _idempotency_key(update: Any, runtime: Any) -> str | None:
     update_id = getattr(update, "update_id", None)
     if update_id is None:
@@ -169,8 +186,12 @@ async def delay_command(runtime: Any, update: Any, context: Any) -> None:
 
     body = _command_body(update, context)
     normalized = body.strip().lower()
+    route = _session_route(runtime, update)
+    session_id = str(route[1].get("session_id") or "") if route else None
     if not body or normalized in {"list", "ls", "status"}:
-        records = await scheduler.list_delayed_messages(getattr(runtime, "name", ""))
+        records = await runtime_pending.delayed_messages(
+            runtime, session_id=session_id
+        )
         await _send(runtime, update, _list_text(runtime, records))
         return
     if normalized in {"help", "-h", "--help"}:
@@ -179,7 +200,9 @@ async def delay_command(runtime: Any, update: Any, context: Any) -> None:
 
     if normalized.startswith("cancel "):
         requested = body.split(None, 1)[1].strip()
-        records = await scheduler.list_delayed_messages(getattr(runtime, "name", ""))
+        records = await runtime_pending.delayed_messages(
+            runtime, session_id=session_id
+        )
         matches = [
             record
             for record in records
@@ -235,13 +258,18 @@ async def delay_command(runtime: Any, update: Any, context: Any) -> None:
         )
         return
     try:
+        enqueue_chat_id = route[0] if route else int(chat_id)
+        request_metadata = route[1] if route else None
+        deliver_to_telegram = route[2] if route else True
         async with runtime_pending.pending_lock(runtime):
             record = await scheduler.schedule_delayed_message(
                 agent_name=getattr(runtime, "name", ""),
-                chat_id=int(chat_id),
+                chat_id=enqueue_chat_id,
                 prompt=message,
                 delay_minutes=minutes,
                 idempotency_key=_idempotency_key(update, runtime),
+                request_metadata=request_metadata,
+                deliver_to_telegram=deliver_to_telegram,
             )
     except (RuntimeError, ValueError) as exc:
         await _send(

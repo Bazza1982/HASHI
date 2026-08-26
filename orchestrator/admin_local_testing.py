@@ -1,10 +1,11 @@
 from __future__ import annotations
+
 import asyncio
 import shlex
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 from orchestrator.command_registry import runtime_command_map
 from orchestrator.runtime_command_binding import COMMAND_BINDINGS
@@ -65,10 +66,48 @@ class _FakeMessage:
 
 
 class _FakeUpdate:
-    def __init__(self, user_id: int, chat_id: int, store: _CaptureStore, text: str):
+    def __init__(
+        self,
+        user_id: int,
+        chat_id: int | str,
+        store: _CaptureStore,
+        text: str,
+        *,
+        session_metadata: Mapping[str, Any] | None = None,
+    ):
         self.effective_user = SimpleNamespace(id=user_id)
         self.effective_chat = SimpleNamespace(id=chat_id)
         self.message = _FakeMessage(store, text)
+        metadata = dict(session_metadata or {})
+        self._hashi_session_surface = metadata.get("session_surface")
+        self._hashi_session_channel_key = metadata.get("session_channel_key")
+        self._hashi_session_owner_id = metadata.get("owner_id")
+        self._hashi_session_id = metadata.get("session_id")
+
+
+def _local_command_session_metadata(
+    *,
+    source_channel: str,
+    chat_id: int | str | None,
+    session_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    metadata = dict(session_metadata or {})
+    normalized = str(source_channel or "").strip().lower()
+    if not metadata.get("session_surface"):
+        if "whatsapp" in normalized:
+            metadata["session_surface"] = "whatsapp"
+        elif normalized.startswith(("api", "workbench", "browser")):
+            metadata["session_surface"] = "workbench"
+        else:
+            metadata["session_surface"] = "telegram"
+    if not metadata.get("session_channel_key"):
+        surface = str(metadata["session_surface"])
+        metadata["session_channel_key"] = (
+            str(chat_id)
+            if chat_id is not None and surface in {"telegram", "whatsapp"}
+            else "default"
+        )
+    return metadata
 
 
 def _split_command(command_line: str) -> tuple[str, list[str]]:
@@ -125,6 +164,7 @@ async def try_execute_slash_command_text(
     *,
     source_channel: str = "api_chat",
     chat_id: int | str | None = None,
+    session_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not looks_like_slash_command(text):
         return None
@@ -162,17 +202,21 @@ async def try_execute_slash_command_text(
         _format_slash_command_line(command_name, args),
         chat_id=chat_id,
         source_channel=source_channel,
+        session_metadata=session_metadata,
     )
 
 
 async def execute_local_command(
     runtime,
     command_line: str,
-    chat_id: int | None = None,
+    chat_id: int | str | None = None,
     source_channel: str = "workbench_api",
+    session_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     command_name, args = _split_command(command_line)
-    local_chat_id = chat_id or runtime.global_config.authorized_id
+    local_chat_id = (
+        chat_id if chat_id is not None else runtime.global_config.authorized_id
+    )
     actor_id = getattr(runtime.global_config, "authorized_id", None)
     session = SlashCommandAuditSession(
         audit_path=_runtime_audit_path(runtime),
@@ -214,7 +258,17 @@ async def execute_local_command(
             session.handler_kind = "native"
 
         store = _CaptureStore(messages=[])
-        update = _FakeUpdate(runtime.global_config.authorized_id, local_chat_id, store, command_line)
+        update = _FakeUpdate(
+            runtime.global_config.authorized_id,
+            local_chat_id,
+            store,
+            command_line,
+            session_metadata=_local_command_session_metadata(
+                source_channel=source_channel,
+                chat_id=chat_id,
+                session_metadata=session_metadata,
+            ),
+        )
         context = SimpleNamespace(args=args)
 
         lock = getattr(runtime, "_local_admin_lock", None)

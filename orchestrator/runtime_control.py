@@ -236,14 +236,75 @@ async def _shutdown_active_backend(runtime: Any) -> str:
     return "none"
 
 
-async def _clear_request_queue(runtime: Any) -> int:
-    return await runtime_pending.clear_ready(runtime)
+async def _clear_request_queue(
+    runtime: Any,
+    *,
+    session_id: str | None = None,
+) -> int:
+    return await runtime_pending.clear_ready(runtime, session_id=session_id)
 
 
 async def _recall_request_queue(runtime: Any, count: int | None = None) -> int:
     """Compatibility wrapper for recalling READY and FUTURE requests."""
 
     return (await runtime_pending.recall_pending(runtime, count)).total
+
+
+def _command_session_id(runtime: Any, update: Any) -> str | None:
+    config = getattr(runtime, "global_config", None)
+    has_store_config = bool(
+        getattr(runtime, "session_store", None) is not None
+        or getattr(config, "bridge_home", None)
+        or getattr(config, "project_root", None)
+    )
+    if not has_store_config or not getattr(runtime, "name", None):
+        return None
+    try:
+        session = runtime_session.current_session_for_update(runtime, update)
+    except (AttributeError, runtime_session.SessionNotFound):
+        return None
+    return str(session.get("session_id") or "") or None
+
+
+def _meta_session_id(meta: dict[str, Any] | None) -> str:
+    if not isinstance(meta, dict):
+        return ""
+    return str(meta.get("hashi_session_id") or meta.get("session_id") or "")
+
+
+def _command_request_route(
+    runtime: Any, update: Any
+) -> tuple[Any, dict[str, Any], bool] | None:
+    if _command_session_id(runtime, update) is None:
+        return None
+    try:
+        return runtime_session.request_route_for_update(runtime, update)
+    except (AttributeError, runtime_session.SessionNotFound):
+        return None
+
+
+async def _enqueue_command_request(
+    runtime: Any,
+    update: Any,
+    prompt: str,
+    source: str,
+    summary: str,
+    **options: Any,
+) -> Any:
+    route = _command_request_route(runtime, update)
+    if route is not None:
+        chat_id, request_metadata, deliver_to_telegram = route
+        options.setdefault("request_metadata", request_metadata)
+        options.setdefault("deliver_to_telegram", deliver_to_telegram)
+    else:
+        chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+    return await runtime.enqueue_request(
+        chat_id,
+        prompt,
+        source,
+        summary,
+        **options,
+    )
 
 
 async def _notify_interrupted(
@@ -267,6 +328,8 @@ async def _notify_interrupted(
             prompt=str(meta.get("prompt") or ""),
             source=str(meta.get("source") or "text"),
             summary=str(meta.get("summary") or summary),
+            session_id=_meta_session_id(meta),
+            run_id=str(meta.get("hashi_run_id") or meta.get("run_id") or ""),
         )
         is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
         notify(
@@ -284,14 +347,20 @@ def _capture_original_prompt(
     runtime: Any,
     *,
     request_meta: dict[str, Any] | None = None,
+    session_id: str | None = None,
 ) -> str:
     meta = request_meta if isinstance(request_meta, dict) else _active_request_meta(runtime)
-    if isinstance(meta, dict):
+    if isinstance(meta, dict) and (
+        not session_id or not _meta_session_id(meta) or _meta_session_id(meta) == session_id
+    ):
         prompt = str(meta.get("prompt") or "").strip()
         if prompt:
             return prompt
     last_prompt = getattr(runtime, "last_prompt", None)
     if last_prompt is not None:
+        last_session_id = str(getattr(last_prompt, "session_id", "") or "")
+        if session_id and last_session_id and last_session_id != session_id:
+            return ""
         prompt = str(getattr(last_prompt, "prompt", "") or "").strip()
         if prompt:
             return prompt
@@ -309,8 +378,28 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     )
     # Mark before kill so the pipeline can suppress the expected non-zero exit
     # (e.g. Grok CLI code -9 / SIGKILL) instead of showing ❌ Backend error.
+    session_id = _command_session_id(runtime, update)
     active_meta = _active_request_meta(runtime)
-    busy = _agent_is_busy(runtime)
+    active_session_id = _meta_session_id(active_meta)
+    if session_id and active_meta and active_session_id != session_id:
+        dropped = await _clear_request_queue(runtime, session_id=session_id)
+        delayed_preserved = await runtime_pending.delayed_count(
+            runtime, session_id=session_id
+        )
+        await runtime._reply_text(
+            update,
+            f"No active request belongs to this Session. Cleared {dropped} queued "
+            "message(s); work in the other Session continues."
+            + (
+                f" Preserved {delayed_preserved} delayed message(s); use /recall to cancel them."
+                if delayed_preserved
+                else ""
+            ),
+        )
+        return
+    busy = bool(active_meta) or bool(
+        getattr(runtime, "is_generating", False) and not session_id
+    )
     interrupted_task = None
     if busy:
         interrupted_task = runtime_retry.remember_interrupted_task(
@@ -320,27 +409,30 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
             reason="user_stop",
         )
         mark_user_interrupt(runtime, "user_stop", request_meta=active_meta)
-    try:
-        from orchestrator.context_compaction import cancel_runtime_compaction
+    if busy:
+        try:
+            from orchestrator.context_compaction import cancel_runtime_compaction
 
-        await cancel_runtime_compaction(runtime)
-    except Exception as exc:
-        runtime.logger.warning(
-            "Context compaction cancellation warning during /stop: %s: %s",
-            type(exc).__name__,
-            exc,
+            await cancel_runtime_compaction(runtime)
+        except Exception as exc:
+            runtime.logger.warning(
+                "Context compaction cancellation warning during /stop: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+        await _shutdown_active_backend(runtime)
+        await _notify_interrupted(
+            runtime,
+            reason="user_stop",
+            error="/stop received while right brain was running",
+            summary="Manual stop",
+            request_meta=active_meta,
         )
-    await _shutdown_active_backend(runtime)
-    await _notify_interrupted(
-        runtime,
-        reason="user_stop",
-        error="/stop received while right brain was running",
-        summary="Manual stop",
-        request_meta=active_meta,
-    )
 
-    dropped = await _clear_request_queue(runtime)
-    delayed_preserved = await runtime_pending.delayed_count(runtime)
+    dropped = await _clear_request_queue(runtime, session_id=session_id)
+    delayed_preserved = await runtime_pending.delayed_count(
+        runtime, session_id=session_id
+    )
 
     continuation_note = (
         " The unfinished task was saved; send “continue” or “继续” to resume it."
@@ -349,7 +441,11 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     )
     await runtime._reply_text(
         update,
-        f"Stopped execution. Cleared {dropped} queued messages and killed active backend process tree."
+        (
+            f"Stopped execution. Cleared {dropped} queued messages and killed active backend process tree."
+            if busy
+            else f"Cleared {dropped} queued messages in this Session; no request was running."
+        )
         + (
             f" Preserved {delayed_preserved} delayed message(s); use /recall to cancel them."
             if delayed_preserved
@@ -438,9 +534,23 @@ async def cmd_steer(
         or ""
     )
     active_meta = _active_request_meta(runtime)
-    busy = _agent_is_busy(runtime)
+    command_session_id = _command_session_id(runtime, update)
+    active_session_id = _meta_session_id(active_meta)
+    busy = bool(active_meta) or bool(
+        getattr(runtime, "is_generating", False) and not command_session_id
+    )
+    if (
+        busy
+        and command_session_id
+        and active_session_id != command_session_id
+    ):
+        busy = False
     original_prompt = (
-        _capture_original_prompt(runtime, request_meta=active_meta)
+        _capture_original_prompt(
+            runtime,
+            request_meta=active_meta,
+            session_id=command_session_id,
+        )
         if (busy or focus_mode)
         else ""
     )
@@ -465,8 +575,9 @@ async def cmd_steer(
         if not hasattr(runtime, "enqueue_request"):
             await _reply(runtime, update, "Steer aborted: runtime has no enqueue_request path.")
             return
-        request_id = await runtime.enqueue_request(
-            int(chat_id),
+        request_id = await _enqueue_command_request(
+            runtime,
+            update,
             direction,
             "text",
             direction[:80],
@@ -487,8 +598,9 @@ async def cmd_steer(
                 "🎯 Agent is already idle and no recent task was found. Nothing was queued.",
             )
             return
-        request_id = await runtime.enqueue_request(
-            int(chat_id),
+        request_id = await _enqueue_command_request(
+            runtime,
+            update,
             build_focus_prompt(original_prompt=original_prompt, backend=active),
             "focus",
             "Focus: narrow the most recent task to user intent",
@@ -518,8 +630,12 @@ async def cmd_steer(
         ),
         request_meta=active_meta,
     )
-    dropped = await _clear_request_queue(runtime)
-    delayed_preserved = await runtime_pending.delayed_count(runtime)
+    dropped = await _clear_request_queue(
+        runtime, session_id=command_session_id
+    )
+    delayed_preserved = await runtime_pending.delayed_count(
+        runtime, session_id=command_session_id
+    )
 
     # Best-effort re-init so the steered turn can start on all backends.
     backend_manager = getattr(runtime, "backend_manager", None)
@@ -546,8 +662,9 @@ async def cmd_steer(
     if not hasattr(runtime, "enqueue_request"):
         await _reply(runtime, update, "Steer aborted: runtime has no enqueue_request path.")
         return
-    request_id = await runtime.enqueue_request(
-        int(chat_id),
+    request_id = await _enqueue_command_request(
+        runtime,
+        update,
         continuation_prompt,
         "focus" if focus_mode else "steer",
         summary,
@@ -620,7 +737,10 @@ async def cmd_recall(runtime: Any, update: Any, context: Any) -> None:
             delayed = await runtime_pending.delayed_count(runtime)
             count = max(1, (queue.qsize() if queue is not None else 0) + delayed)
 
-    removed = await runtime_pending.recall_pending(runtime, count)
+    session_id = _command_session_id(runtime, update)
+    removed = await runtime_pending.recall_pending(
+        runtime, count, session_id=session_id
+    )
     dropped = removed.total
     runtime.logger.warning(
         "Manual recall requested for agent %s "
@@ -679,9 +799,24 @@ async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
         return
 
     chat_id = update.effective_chat.id
+    session_id = _command_session_id(runtime, update)
+    active_meta = _active_request_meta(runtime)
+    active_session_id = _meta_session_id(active_meta)
+    if (
+        session_id
+        and active_session_id
+        and active_session_id != session_id
+    ):
+        await _reply(
+            runtime,
+            update,
+            "Retry is blocked while another Session is running.",
+        )
+        return
     prompt_snapshot = runtime_retry.capture_retryable_prompt(
         runtime,
         fallback_chat_id=chat_id,
+        session_id=session_id,
     )
     if prompt_snapshot is None:
         await _reply(
@@ -729,8 +864,10 @@ async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
                 error="/retry reset a stuck or stale model context",
                 summary="Recovery retry",
             )
-        dropped = await _clear_request_queue(runtime)
-        delayed_preserved = await runtime_pending.delayed_count(runtime)
+        dropped = await _clear_request_queue(runtime, session_id=session_id)
+        delayed_preserved = await runtime_pending.delayed_count(
+            runtime, session_id=session_id
+        )
 
         try:
             reset_mode = await runtime_session.reset_for_retry(runtime)
@@ -743,16 +880,33 @@ async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
             )
             return
 
-        handoff = runtime_retry.build_retry_handoff(runtime)
+        try:
+            retry_session = runtime_session.current_session_for_update(runtime, update)
+            retry_builder = runtime_session.session_handoff_builder(
+                runtime, update=update
+            )
+        except (AttributeError, runtime_session.SessionNotFound):
+            retry_session = {"session_id": ""}
+            retry_builder = getattr(runtime, "handoff_builder", None)
+        handoff = runtime_retry.build_retry_handoff(
+            runtime, handoff_builder=retry_builder
+        )
         handoff_queued = False
         if handoff is not None:
             try:
                 arm_primer = getattr(runtime, "_arm_session_primer", None)
                 if callable(arm_primer):
-                    arm_primer(
+                    primer_text = (
                         "This is an automatic /retry recovery. Restore only the recent bridge "
                         "history needed for continuity, then process the retried user request."
                     )
+                    try:
+                        arm_primer(
+                            primer_text,
+                            session_id=retry_session["session_id"],
+                        )
+                    except TypeError:
+                        arm_primer(primer_text)
                 enqueue_bootstrap = getattr(runtime, "enqueue_startup_bootstrap", None)
                 backend_manager = getattr(runtime, "backend_manager", None)
                 backend = (
@@ -765,8 +919,9 @@ async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
                 )
                 if supports_sessions and callable(enqueue_bootstrap):
                     await enqueue_bootstrap(chat_id)
-                handoff_request_id = await runtime.enqueue_request(
-                    chat_id,
+                handoff_request_id = await _enqueue_command_request(
+                    runtime,
+                    update,
                     handoff.prompt,
                     runtime_retry.RETRY_HANDOFF_SOURCE,
                     f"Retry handoff restore [{handoff.exchange_count} exchanges]",
@@ -782,8 +937,9 @@ async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
                 )
 
         try:
-            request_id = await runtime.enqueue_request(
-                chat_id,
+            request_id = await _enqueue_command_request(
+                runtime,
+                update,
                 prompt_snapshot.prompt,
                 "retry",
                 f"Recovery retry: {prompt_snapshot.summary}",
@@ -838,7 +994,10 @@ async def cmd_resend(runtime: Any, update: Any, context: Any) -> None:
             "/resend replays the previous model or Bridge output exactly, without model work.",
         )
         return
-    snapshot = runtime_retry.capture_resend_output(runtime)
+    snapshot = runtime_retry.capture_resend_output(
+        runtime,
+        session_id=_command_session_id(runtime, update),
+    )
     if snapshot is None:
         await _reply(runtime, update, "Nothing to resend — no previous model or Bridge output was found.")
         return
@@ -853,7 +1012,14 @@ async def cmd_resend(runtime: Any, update: Any, context: Any) -> None:
 async def callback_retry_toggle(runtime: Any, query: Any, value: str) -> None:
     chat_id = query.message.chat_id
     if value == "response":
-        snapshot = runtime_retry.capture_resend_output(runtime)
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id=chat_id),
+            callback_query=query,
+        )
+        snapshot = runtime_retry.capture_resend_output(
+            runtime,
+            session_id=_command_session_id(runtime, update),
+        )
         if snapshot is None:
             await query.answer("Nothing to resend.", show_alert=True)
             return

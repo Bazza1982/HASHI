@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import html
+from pathlib import Path
 from typing import Any
 
 from orchestrator.command_ui import setting_card
 from orchestrator.workzone import (
     access_root_for_workzone,
     build_workzone_prompt,
-    clear_workzone,
-    load_workzone,
     resolve_workzone_input,
-    save_workzone,
 )
 
 
@@ -70,7 +68,6 @@ def sync_workzone_to_backend_config(runtime: Any) -> None:
 
 
 def workzone_prompt_section(runtime: Any) -> list[tuple[str, str]]:
-    runtime._workzone_dir = load_workzone(runtime.workspace_dir)
     runtime._sync_workzone_to_backend_config()
     backend = getattr(runtime.backend_manager, "current_backend", None)
     can_access_files = bool(
@@ -88,7 +85,11 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     args = context.args or []
-    current = load_workzone(runtime.workspace_dir)
+    from orchestrator import runtime_session
+
+    session = runtime_session.current_session_for_update(runtime, update)
+    current_value = str(session.get("workzone") or "").strip()
+    current = Path(current_value) if current_value else None
     if not args:
         await runtime._reply_text(
             update,
@@ -101,7 +102,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
         await runtime._reply_text(update, "Workzone change is blocked while a request is running or queued.")
         return
     if arg_text.lower() == "off":
-        clear_workzone(runtime.workspace_dir)
+        runtime_session.ensure_store(runtime).set_workzone(session["session_id"], None)
         runtime._workzone_dir = None
         runtime._sync_workzone_to_backend_config()
         backend = runtime.backend_manager.current_backend
@@ -122,7 +123,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
     except ValueError as exc:
         await runtime._reply_text(update, f"Workzone not changed: {html.escape(str(exc))}", parse_mode="HTML")
         return
-    save_workzone(runtime.workspace_dir, zone)
+    runtime_session.ensure_store(runtime).set_workzone(session["session_id"], str(zone))
     runtime._workzone_dir = zone
     runtime._sync_workzone_to_backend_config()
     backend = runtime.backend_manager.current_backend

@@ -274,6 +274,65 @@ def test_internal_retry_handoff_never_replaces_user_retry_or_resend_state(tmp_pa
     assert runtime_retry.capture_resend_output(runtime).text == "Previous visible output"
 
 
+def test_retry_resend_and_interrupted_state_are_isolated_by_hashi_session(tmp_path):
+    runtime = SimpleNamespace(workspace_dir=tmp_path, logger=_Logger(), last_response=None)
+    first = SimpleNamespace(
+        request_id="req-first",
+        chat_id=42,
+        prompt="FIRST SESSION SECRET",
+        source="text",
+        summary="First",
+        silent=False,
+        session_id="session-first",
+        context_generation=1,
+    )
+    second = SimpleNamespace(
+        request_id="req-second",
+        chat_id=42,
+        prompt="SECOND SESSION SECRET",
+        source="text",
+        summary="Second",
+        silent=False,
+        session_id="session-second",
+        context_generation=1,
+    )
+
+    runtime_retry.remember_retryable_prompt(runtime, first)
+    runtime_retry.remember_output(runtime, first, "first output")
+    runtime_retry.remember_interrupted_task(runtime, first)
+    runtime_retry.remember_retryable_prompt(runtime, second)
+    runtime_retry.remember_output(runtime, second, "second output")
+    runtime_retry.remember_interrupted_task(runtime, second)
+
+    restarted = SimpleNamespace(
+        workspace_dir=tmp_path,
+        logger=_Logger(),
+        current_request_meta=None,
+        last_prompt=None,
+        last_response=None,
+        transcript_log_path=tmp_path / "missing.jsonl",
+        core_transcript_log_path=tmp_path / "missing-core.jsonl",
+    )
+    assert runtime_retry.capture_retryable_prompt(
+        restarted, session_id="session-first"
+    ).prompt == "FIRST SESSION SECRET"
+    assert runtime_retry.capture_retryable_prompt(
+        restarted, session_id="session-second"
+    ).prompt == "SECOND SESSION SECRET"
+    assert runtime_retry.capture_resend_output(
+        restarted, session_id="session-first"
+    ).text == "first output"
+    assert runtime_retry.capture_resend_output(
+        restarted, session_id="session-second"
+    ).text == "second output"
+    assert runtime_retry.capture_interrupted_task(
+        restarted, session_id="session-first"
+    ).prompt == "FIRST SESSION SECRET"
+    assert runtime_retry.capture_interrupted_task(
+        restarted, session_id="session-second"
+    ).prompt == "SECOND SESSION SECRET"
+
+
 def test_interrupted_task_survives_restart_and_last_prompt_overwrite(tmp_path):
     runtime = SimpleNamespace(workspace_dir=tmp_path, logger=_Logger())
     original = {
@@ -472,7 +531,7 @@ async def test_retry_stops_resets_handoffs_then_requeues_original_prompt(tmp_pat
 
     backend.shutdown.assert_awaited_once()
     backend.handle_new_session.assert_awaited_once()
-    assert store.clear_count == 1
+    assert store.clear_count == 0
     assert runtime.queue.empty()
     assert runtime.transfer_cleared is True
     assert runtime._user_interrupt["reason"] == "user_retry"
@@ -529,9 +588,9 @@ async def test_retry_uses_fresh_semantics_for_api_backend(tmp_path):
 
     backend.shutdown.assert_awaited_once()
     backend.handle_new_session.assert_not_awaited()
-    assert store.clear_count == 1
+    assert store.clear_count == 0
     assert runtime.context_assembler.turns_injection_enabled is True
-    assert runtime.context_assembler.saved_memory_injection_enabled is False
+    assert runtime.context_assembler.saved_memory_injection_enabled is True
     assert [call[0][2] for call in enqueued] == ["retry"]
     assert "Clean context: /fresh semantics." in replies[-1]
 

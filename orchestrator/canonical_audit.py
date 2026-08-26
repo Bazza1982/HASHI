@@ -24,6 +24,7 @@ from uuid import uuid4
 
 AUDIT_SCHEMA_VERSION: Final = 1
 DEFAULT_ARTIFACT_THRESHOLD: Final = 64 * 1024
+TAIL_READ_CHUNK_SIZE: Final = 64 * 1024
 
 
 class CanonicalAuditAccessError(PermissionError):
@@ -266,10 +267,34 @@ class CanonicalAuditStore:
             return ""
         try:
             with self.events_path.open("rb") as handle:
-                lines = [line for line in handle if line.strip()]
-            if not lines:
-                return ""
-            wrapper = json.loads(lines[-1].decode("utf-8"))
+                handle.seek(0, os.SEEK_END)
+                position = handle.tell()
+                tail = b""
+                # A valid append always ends with a newline.  Walk backwards
+                # only far enough to load that final record; the chain lock
+                # keeps the tail stable while it is verified and extended.
+                while position > 0:
+                    read_size = min(TAIL_READ_CHUNK_SIZE, position)
+                    position -= read_size
+                    handle.seek(position)
+                    tail = handle.read(read_size) + tail
+                    candidate = tail.rstrip()
+                    if not candidate:
+                        continue
+                    if b"\n" not in tail[len(candidate) :]:
+                        raise CanonicalAuditConfigurationError(
+                            "canonical audit chain tail is unreadable"
+                        )
+                    line_start = candidate.rfind(b"\n")
+                    if line_start >= 0:
+                        tail = candidate[line_start + 1 :]
+                        break
+                    if position == 0:
+                        tail = candidate
+                        break
+                else:
+                    return ""
+            wrapper = json.loads(tail.decode("utf-8"))
             self._decode_record(wrapper)
             return str(wrapper.get("record_digest") or "")
         except (OSError, UnicodeError, json.JSONDecodeError):

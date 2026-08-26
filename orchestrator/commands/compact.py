@@ -5,7 +5,6 @@ from typing import Any
 
 from orchestrator.command_registry import RuntimeCommand
 from orchestrator.context_compaction import (
-    cancel_runtime_compaction,
     compact_status_text,
     coordinator_for,
     estimate_effective_context_tokens,
@@ -90,12 +89,23 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
         return
 
     action = str((getattr(context, "args", None) or [""])[0]).strip().lower()
-    coordinator = coordinator_for(runtime)
+    from orchestrator import runtime_session
+    from orchestrator.bridge_memory import BridgeMemoryStore
+
+    session = runtime_session.current_session_for_update(runtime, update)
+    workspace = runtime_session.ensure_store(runtime).session_workspace(
+        session["session_id"], int(session["context_generation"])
+    )
+    coordinator = coordinator_for(
+        runtime,
+        workspace_dir=workspace,
+        memory_store=BridgeMemoryStore(workspace),
+    )
     if action in {"status", "show", "info"}:
-        await _send(runtime, update, compact_status_text(runtime))
+        await _send(runtime, update, compact_status_text(runtime, coordinator=coordinator))
         return
     if action in {"cancel", "stop"}:
-        cancelled = await cancel_runtime_compaction(runtime)
+        cancelled = await coordinator.cancel()
         await _send(
             runtime,
             update,
@@ -126,7 +136,11 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
         return
 
     policy = load_policy(runtime)
-    current_tokens = estimate_effective_context_tokens(runtime)
+    current_tokens = estimate_effective_context_tokens(
+        runtime,
+        coordinator=coordinator,
+        use_last_runtime_measurement=False,
+    )
     if current_tokens < policy.manual_min_tokens:
         outcome = await coordinator.compact(
             trigger="manual_command",

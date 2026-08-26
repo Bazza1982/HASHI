@@ -8,6 +8,7 @@ from orchestrator import (
     runtime_background_status,
     runtime_delivery_order,
     runtime_pipeline,
+    runtime_session,
 )
 from orchestrator.audit_mode import AuditTelemetryCollector, should_audit_source
 from orchestrator.memory_plus_mode import (
@@ -127,12 +128,25 @@ async def initialize(runtime: Any) -> bool:
             runtime.logger.info(
                 f"fixed mode active — session persistence enabled on {runtime.config.active_backend}"
             )
+        runtime_session.start_automatic_promotion(runtime)
     return result
 
 
 async def shutdown(runtime: Any) -> None:
     runtime.logger.info(f"Shutting down flex agent '{runtime.name}'...")
     runtime.is_shutting_down = True
+    promotion_task = getattr(runtime, "_session_promotion_task", None)
+    if isinstance(promotion_task, asyncio.Task):
+        clean_promotion = await _settle_shutdown_task(
+            runtime,
+            promotion_task,
+            label="session-promotion",
+            timeout_s=RUNTIME_TASK_SHUTDOWN_TIMEOUT_SECONDS,
+            cancel_first=True,
+        )
+        runtime._session_promotion_task = None
+    else:
+        clean_promotion = True
     try:
         from orchestrator.context_compaction import cancel_runtime_compaction
 
@@ -143,7 +157,7 @@ async def shutdown(runtime: Any) -> None:
             type(exc).__name__,
             exc,
         )
-    clean = await _cancel_tasks(
+    clean = clean_promotion and await _cancel_tasks(
         runtime,
         runtime._scheduled_retry_tasks,
         label="retry-tasks",

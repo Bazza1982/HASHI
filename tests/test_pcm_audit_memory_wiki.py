@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import sqlite3
 import sys
@@ -74,7 +75,11 @@ def test_canonical_audit_keeps_complete_chain_and_content_addressed_artifact(tmp
     artifact = events[0]["payload"]["large"]["$artifact"]
     artifact_path = store.root / artifact["relative_path"]
     assert artifact_path.read_bytes() == b"z" * 2048
-    assert events[1]["previous_record_digest"]
+    wrappers = [
+        json.loads(line)
+        for line in store.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[1]["previous_record_digest"] == wrappers[0]["record_digest"]
     assert events[1]["payload"]["arguments"]["token"] == "unredacted"
     for private_directory in (
         store.base,
@@ -210,6 +215,54 @@ def test_canonical_audit_rejects_path_traversal_components_and_tampered_chain(tm
 
     with pytest.raises(CanonicalAuditConfigurationError, match="digest mismatch"):
         store.read_events(RAW_AUTH)
+
+
+def test_canonical_audit_tail_lookup_does_not_scan_large_history(tmp_path):
+    store = CanonicalAuditStore(tmp_path, instance_id="HASHI2", agent_id="rika")
+    store.record("tool_call", {"secret": "original"})
+    record_line = store.events_path.read_bytes()
+    expected_digest = json.loads(record_line)["record_digest"]
+    large_history = record_line * 20_000
+
+    class ReadBudgetFile(io.BytesIO):
+        def __init__(self, content: bytes):
+            super().__init__(content)
+            self.bytes_read = 0
+
+        def read(self, size=-1):
+            content = super().read(size)
+            self.bytes_read += len(content)
+            return content
+
+        def __iter__(self):
+            raise AssertionError("tail lookup must not iterate over the full audit log")
+
+    observed_file = ReadBudgetFile(large_history)
+    store.events_path = SimpleNamespace(
+        exists=lambda: True,
+        open=lambda mode: observed_file,
+    )
+
+    assert store._last_digest() == expected_digest
+    assert observed_file.bytes_read <= 128 * 1024
+
+
+@pytest.mark.parametrize("damage", ["partial-record", "missing-newline"])
+def test_canonical_audit_rejects_damaged_tail_before_append(tmp_path, damage):
+    store = CanonicalAuditStore(tmp_path, instance_id="HASHI2", agent_id="rika")
+    store.record("tool_call", {"secret": "original"})
+    original_content = store.events_path.read_bytes()
+    damaged_content = (
+        original_content + b'{"encoding":"json","event":'
+        if damage == "partial-record"
+        else original_content.removesuffix(b"\n")
+    )
+    store.events_path.write_bytes(damaged_content)
+
+    with pytest.raises(CanonicalAuditConfigurationError, match="tail is unreadable"):
+        store.record("tool_call", {"secret": "must-not-append"})
+
+    assert store.events_path.read_bytes() == damaged_content
 
 
 def test_local_recency_decay_is_monotonic_and_components_are_observable(tmp_path):

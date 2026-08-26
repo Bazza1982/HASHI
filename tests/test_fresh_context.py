@@ -1,19 +1,23 @@
-from types import SimpleNamespace
-from datetime import datetime
+import asyncio
 import json
-import logging
 import sys
 import types
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 # ruff: noqa: E402 -- edge_tts must be stubbed before runtime imports.
-
 import pytest
 
 sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
+from orchestrator import (
+    runtime_cross_session,
+    runtime_scheduler_recovery,
+    runtime_session,
+)
+from orchestrator.admin_local_testing import execute_local_command
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
-from orchestrator import runtime_cross_session, runtime_scheduler_recovery
-from orchestrator.context_compaction import CompactionStore, install_history_section
 from orchestrator.dual_brain_mode import DualBrainObserver
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.fresh_context import (
@@ -23,10 +27,8 @@ from orchestrator.fresh_context import (
     resume_habit_context,
     start_boundary,
 )
-from orchestrator.fresh_context import state as fresh_context_state
-from orchestrator.memory_plus_mode import is_memory_plus_enabled, set_memory_plus_enabled
-from orchestrator.memory_search_mode import is_memory_search_enabled
 from orchestrator.pcm import render_pcm_document
+from orchestrator.runtime_common import QueuedRequest
 from orchestrator.workspace_state import WorkspaceStateStore
 
 
@@ -156,220 +158,353 @@ def test_managed_prompt_preserves_typed_authority_without_flat_position_assertio
     ]
 
 
-@pytest.mark.asyncio
-async def test_flex_runtime_new_is_guarded_for_non_cli_backend():
+def _session_command_runtime(tmp_path, *, engine="openrouter-api", supports_sessions=False):
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name = "arale"
+    runtime.workspace_dir = tmp_path / "workspaces" / "arale"
+    runtime.workspace_dir.mkdir(parents=True)
+    runtime.global_config = SimpleNamespace(
+        bridge_home=tmp_path,
+        project_root=tmp_path,
+        instance_id="HASHI1",
+        authorized_id=123,
+    )
+    runtime.config = SimpleNamespace(active_backend=engine)
+    resets = []
+
+    async def reset_backend():
+        resets.append(True)
+
+    runtime.backend_manager = SimpleNamespace(
+        current_backend=SimpleNamespace(
+            capabilities=SimpleNamespace(supports_sessions=supports_sessions),
+            handle_new_session=reset_backend,
+        )
+    )
     runtime._authorized_telegram_ids = {123}
-    runtime.config = SimpleNamespace(active_backend="openrouter-api")
-    runtime.backend_manager = SimpleNamespace(current_backend=object())
+    runtime._backend_busy = lambda: False
+    runtime._workzone_dir = None
+    runtime._sync_workzone_to_backend_config = lambda: None
+    runtime._clear_transfer_state = lambda: None
+    runtime._context_compaction_tasks = set()
+    runtime.context_assembler = SimpleNamespace(
+        turns_injection_enabled=True,
+        saved_memory_injection_enabled=True,
+    )
+    runtime.memory_store = BridgeMemoryStore(runtime.workspace_dir)
     replies = []
 
     async def reply(update, text, **kwargs):
         replies.append(text)
 
     runtime._reply_text = reply
-
-    await runtime.cmd_new(fake_update(), fake_context())
-
-    assert "Use /fresh" in replies[0]
+    default = runtime_session.initialize_runtime_sessions(runtime)
+    return runtime, default, replies, resets
 
 
 @pytest.mark.asyncio
-async def test_her_v2_uses_fresh_not_new_even_with_cli_capable_stage_providers():
-    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
-    runtime._authorized_telegram_ids = {123}
-    runtime.config = SimpleNamespace(active_backend="her-v2")
-    runtime.backend_manager = SimpleNamespace(current_backend=object())
-    replies = []
+async def test_new_creates_and_binds_a_hashi_session_for_any_backend(tmp_path):
+    runtime, default, replies, resets = _session_command_runtime(tmp_path)
+    update = fake_update()
 
-    async def reply(update, text, **kwargs):
-        replies.append(text)
+    await runtime.cmd_new(update, fake_context())
 
-    runtime._reply_text = reply
+    current = runtime_session.current_session_for_update(runtime, update)
+    assert current["session_id"] != default["session_id"]
+    assert current["context_generation"] == 1
+    assert len(runtime.session_store.list_sessions(
+        owner_id="user:123", agent_id="arale"
+    )) == 2
+    assert replies[-1].startswith("New Session active:")
+    assert resets == []
+
+
+@pytest.mark.asyncio
+async def test_new_resets_only_the_new_session_cli_binding(tmp_path):
+    runtime, default, _replies, resets = _session_command_runtime(
+        tmp_path, engine="codex-cli", supports_sessions=True
+    )
 
     await runtime.cmd_new(fake_update(), fake_context())
 
-    assert replies == [
-        "This agent is using a non-CLI backend. Use /fresh for a clean API context; /new is reserved for CLI session reset."
+    assert resets == [True]
+    assert runtime.session_store.get_session(default["session_id"])["is_default"] is True
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_session_command_binds_only_the_originating_chat(tmp_path):
+    runtime, default, _replies, _resets = _session_command_runtime(tmp_path)
+    chat_key = "61400000000@s.whatsapp.net"
+
+    result = await execute_local_command(
+        runtime,
+        "/new",
+        chat_id=chat_key,
+        source_channel="whatsapp_forwarded",
+    )
+
+    assert result["ok"] is True
+    whatsapp = runtime_session.current_session(
+        runtime, surface="whatsapp", channel_key=chat_key
+    )
+    telegram = runtime_session.current_session(
+        runtime, surface="telegram", channel_key=chat_key
+    )
+    assert whatsapp["session_id"] != default["session_id"]
+    assert telegram["session_id"] == default["session_id"]
+
+
+@pytest.mark.asyncio
+async def test_workbench_slash_command_honors_explicit_session(tmp_path):
+    runtime, default, _replies, _resets = _session_command_runtime(tmp_path)
+    target = runtime.session_store.create_session(
+        owner_id="user:123", agent_id="arale", title="Workbench target"
+    )
+
+    result = await execute_local_command(
+        runtime,
+        "/fresh",
+        source_channel="api_chat",
+        session_metadata={
+            "session_id": target["session_id"],
+            "owner_id": "user:123",
+            "session_surface": "workbench",
+            "session_channel_key": "window-a",
+        },
+    )
+
+    assert result["ok"] is True
+    assert runtime.session_store.get_session(target["session_id"])[
+        "context_generation"
+    ] == 2
+    assert runtime.session_store.get_session(default["session_id"])[
+        "context_generation"
+    ] == 1
+
+
+@pytest.mark.asyncio
+async def test_queue_commands_only_show_and_clear_the_current_session(tmp_path):
+    runtime, default, _replies, _resets = _session_command_runtime(tmp_path)
+    other = runtime.session_store.create_session(
+        owner_id="user:123", agent_id="arale", title="Other"
+    )
+    runtime.queue = asyncio.Queue()
+    runtime.is_generating = False
+    runtime.current_request_meta = None
+    runtime.last_prompt = None
+    runtime.last_response = None
+    for request_id, prompt, session in (
+        ("req-current", "CURRENT SESSION TASK", default),
+        ("req-other", "OTHER SESSION SECRET", other),
+    ):
+        await runtime.queue.put(
+            QueuedRequest(
+                request_id=request_id,
+                chat_id=456,
+                prompt=prompt,
+                source="text",
+                summary=prompt,
+                created_at=datetime.now().isoformat(),
+                session_id=session["session_id"],
+            )
+        )
+
+    listed = await execute_local_command(
+        runtime, "/queue", chat_id=456, source_channel="telegram"
+    )
+    text = listed["messages"][0]["text"]
+    assert "CURRENT SESSION TASK" in text
+    assert "OTHER SESSION SECRET" not in text
+
+    await execute_local_command(
+        runtime, "/queue clear", chat_id=456, source_channel="telegram"
+    )
+    assert [item.request_id for item in runtime.queue._queue] == ["req-other"]
+
+
+@pytest.mark.asyncio
+async def test_stop_from_one_session_does_not_interrupt_another_session(tmp_path):
+    runtime, default, replies, _resets = _session_command_runtime(tmp_path)
+    other = runtime.session_store.create_session(
+        owner_id="user:123", agent_id="arale", title="Other"
+    )
+    shutdown = AsyncMock()
+    runtime.queue = asyncio.Queue()
+    runtime.logger = SimpleNamespace(warning=lambda *_args, **_kwargs: None)
+    runtime.is_generating = True
+    runtime.current_request_meta = {
+        "request_id": "req-running-other",
+        "prompt": "OTHER SESSION ACTIVE TASK",
+        "source": "text",
+        "hashi_session_id": other["session_id"],
+    }
+    runtime.backend_manager.current_backend.shutdown = shutdown
+    await runtime.queue.put(
+        QueuedRequest(
+            request_id="req-current-waiting",
+            chat_id=456,
+            prompt="current waiting",
+            source="text",
+            summary="current waiting",
+            created_at=datetime.now().isoformat(),
+            session_id=default["session_id"],
+        )
+    )
+
+    await runtime.cmd_stop(fake_update(), fake_context())
+
+    shutdown.assert_not_awaited()
+    assert runtime.queue.empty()
+    assert runtime.current_request_meta["request_id"] == "req-running-other"
+    assert "other Session continues" in replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_fresh_starts_new_generation_without_deleting_session_or_agent_memory(tmp_path):
+    runtime, session, replies, _resets = _session_command_runtime(tmp_path)
+    store = runtime.session_store
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:123",
+        agent_id="arale",
+        request_id="req-before-fresh",
+        text="OLD SESSION CONTENT",
+        source="text",
+        idempotency_key="before-fresh",
+    )
+    store.mark_request_running("req-before-fresh", worker_id="test")
+    store.finish_request(
+        "req-before-fresh",
+        success=True,
+        assistant_text="OLD SESSION ANSWER",
+        assistant_source="test",
+    )
+    runtime.memory_store.record_memory(
+        "episodic", "promoted", "PROMOTED AGENT MEMORY"
+    )
+
+    await runtime.cmd_fresh(fake_update(), fake_context())
+
+    updated = store.get_session(session["session_id"])
+    assert updated["context_generation"] == 2
+    assert store.recent_exchanges(session["session_id"]) == []
+    assert [row["text"] for row in store.messages(session["session_id"])] == [
+        "OLD SESSION CONTENT",
+        "OLD SESSION ANSWER",
     ]
+    assert runtime.memory_store.retrieve_memories("PROMOTED AGENT MEMORY")
+    assert accepted.context_generation == 1
+    assert replies[-1].startswith("Fresh context generation 2 started")
 
 
-@pytest.mark.asyncio
-async def test_flex_runtime_fresh_clears_turns_without_session_reset_llm_prompt():
-    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
-    runtime._authorized_telegram_ids = {123}
-    runtime.config = SimpleNamespace(active_backend="ollama-api")
-    runtime.backend_manager = SimpleNamespace(current_backend=object())
-    runtime._pending_auto_recall_context = "old"
-    runtime._clear_transfer_state = lambda: None
-    store = FakeMemoryStore()
-    runtime.context_assembler = BridgeContextAssembler(store, system_md=None)
-    replies = []
-    enqueued = []
-
-    async def reply(update, text, **kwargs):
-        replies.append(text)
-
-    async def enqueue_request(*args, **kwargs):
-        enqueued.append((args, kwargs))
-
-    runtime._reply_text = reply
-    runtime.enqueue_request = enqueue_request
-
-    await runtime.cmd_fresh(fake_update(), fake_context())
-
-    assert store.turns_cleared == 1
-    assert runtime.context_assembler.turns_injection_enabled is True
-    assert runtime.context_assembler.saved_memory_injection_enabled is False
-    assert runtime._pending_auto_recall_context is None
-    assert enqueued == []
-    assert replies == ["✨ Fresh session started."]
-
-
-@pytest.mark.asyncio
-async def test_flex_runtime_fresh_keeps_next_api_prompt_dual_brain_eligible(tmp_path):
-    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
-    runtime._authorized_telegram_ids = {123}
-    runtime.config = SimpleNamespace(active_backend="openrouter-api")
-    runtime.backend_manager = SimpleNamespace(current_backend=object())
-    runtime._pending_auto_recall_context = "old"
-    runtime._clear_transfer_state = lambda: None
-    store = FakeMemoryStore()
-    runtime.context_assembler = BridgeContextAssembler(store, system_md=None)
-    replies = []
-    enqueued = []
-
-    async def reply(update, text, **kwargs):
-        replies.append(text)
-
-    async def enqueue_request(*args, **kwargs):
-        enqueued.append((args, kwargs))
-
-    runtime._reply_text = reply
-    runtime.enqueue_request = enqueue_request
-
-    await runtime.cmd_fresh(fake_update(), fake_context())
-
-    assert enqueued == []
-    assert runtime.context_assembler.turns_injection_enabled is True
-    assert runtime.context_assembler.saved_memory_injection_enabled is False
-
+def test_dual_brain_remains_eligible_after_session_commands(tmp_path):
     workspace = tmp_path / "sakura"
     workspace.mkdir()
-    (workspace / "state.json").write_text(json.dumps({"agent_mode": "dual-brain"}), encoding="utf-8")
+    (workspace / "state.json").write_text(
+        json.dumps({"agent_mode": "dual-brain"}), encoding="utf-8"
+    )
     observer = DualBrainObserver(
         workspace_dir=workspace,
         backend_invoker=lambda *args, **kwargs: None,
-        backend_context_getter=lambda: {"engine": "openrouter-api", "model": "test-model"},
+        backend_context_getter=lambda: {
+            "engine": "openrouter-api",
+            "model": "test-model",
+        },
     )
 
     assert not observer.should_provide("session_reset", is_bridge_request=False)
-    assert not observer.should_observe("session_reset", is_bridge_request=False)
     assert observer.should_provide("api", is_bridge_request=False)
-    assert observer.should_observe("api", is_bridge_request=False)
 
 
-@pytest.mark.asyncio
-async def test_her_v2_fresh_persists_hard_boundary_without_deleting_archives(tmp_path):
-    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
-    runtime.name = "arale"
-    runtime.logger = logging.getLogger("test.fresh")
-    runtime.workspace_dir = tmp_path
-    runtime._authorized_telegram_ids = {123}
-    runtime.config = SimpleNamespace(active_backend="her-v2")
-    manager = SimpleNamespace(
-        current_backend=object(),
-        state_store=WorkspaceStateStore(tmp_path),
-        agent_mode="flex",
+def test_pending_primer_is_consumed_only_by_its_session(tmp_path):
+    runtime, default, _replies, _resets = _session_command_runtime(tmp_path)
+    other = runtime.session_store.create_session(
+        owner_id="user:123", agent_id="arale", title="Other"
     )
-    runtime.backend_manager = manager
-    runtime._pending_auto_recall_context = "old recall"
-    runtime._pending_session_primer = "old primer"
-    runtime._clear_transfer_state = lambda: None
-    runtime._context_compaction_tasks = set()
-    runtime.memory_store = BridgeMemoryStore(tmp_path)
-    runtime.memory_store.record_turn("user", "text", "OLD WORKING TURN")
-    runtime.memory_store.record_turn("assistant", "her-v2", "OLD WORKING ANSWER")
-    runtime.memory_store.record_completed_exchange(
-        "OLD COMPLETED REQUEST",
-        "OLD COMPLETED ANSWER",
-        "text",
-        user_ts="2026-08-24T10:00:00+10:00",
-        assistant_ts="2026-08-24T10:01:00+10:00",
-        origin_ref="old-completed",
-    )
-    agent_md = tmp_path / "agent.md"
-    agent_md.write_text(
-        render_pcm_document(persona="TEST PERSONA", system="AGENT POLICY ONLY"),
-        encoding="utf-8",
-    )
-    runtime.context_assembler = BridgeContextAssembler(
-        runtime.memory_store,
-        system_md=agent_md,
-    )
-    runtime.context_assembler.saved_memory_injection_enabled = True
-    runtime.reload_post_turn_observers = lambda: None
-    replies = []
+    runtime._pending_session_primer = "SESSION_A_PRIMER"
+    runtime._pending_session_primer_session_id = default["session_id"]
+    runtime._pending_auto_recall_context = "SESSION_A_RECALL"
+    runtime._pending_auto_recall_session_id = default["session_id"]
 
-    async def reply(update, text, **kwargs):
-        replies.append(text)
+    other_item = SimpleNamespace(
+        source="text", silent=False, prompt="other", session_id=other["session_id"]
+    )
+    assert runtime._consume_session_primer(other_item) == "other"
+    assert runtime._pending_session_primer == "SESSION_A_PRIMER"
 
-    runtime._reply_text = reply
-    set_memory_plus_enabled(tmp_path, True)
-    compaction_store = CompactionStore(tmp_path)
-    compaction_store.archive_dir.mkdir(parents=True)
-    compaction_store.capsule_dir.mkdir(parents=True)
-    archived = compaction_store.archive_dir / "old.json"
-    capsule = compaction_store.capsule_dir / "old.json"
-    archived.write_text("archived raw history", encoding="utf-8")
-    capsule.write_text("archived capsule", encoding="utf-8")
-    compaction_store.state_path.write_text(
-        json.dumps(
-            {
-                "format": "hashi-context-compaction-pointer-v1",
-                "generation": 4,
-                "active_capsule": {
-                    "ref": "capsules/old.json",
-                    "archive_ref": "archives/old.json",
-                },
-            }
-        ),
-        encoding="utf-8",
+    default_item = SimpleNamespace(
+        source="text", silent=False, prompt="default", session_id=default["session_id"]
+    )
+    rendered = runtime._consume_session_primer(default_item)
+    assert "SESSION_A_PRIMER" in rendered
+    assert "SESSION_A_RECALL" in rendered
+
+
+def test_command_sources_follow_telegram_session_and_scheduled_work_uses_default(tmp_path):
+    runtime, default, _replies, _resets = _session_command_runtime(tmp_path)
+    other = runtime.session_store.create_session(
+        owner_id="user:123", agent_id="arale", title="Other"
+    )
+    runtime.session_store.bind_channel(
+        owner_id="user:123",
+        agent_id="arale",
+        surface="telegram",
+        channel_key="456",
+        session_id=other["session_id"],
     )
 
-    await runtime.cmd_fresh(fake_update(), fake_context())
-
-    boundary = fresh_context_state(runtime)
-    assert boundary["generation"] == 1
-    assert boundary["cutoff_epoch"] > 0
-    assert boundary["automatic_context_suppressed"] is True
-    assert boundary["habit_context_suppressed"] is True
-    assert runtime.memory_store.get_stats()["turns"] == 0
-    assert runtime._pending_auto_recall_context is None
-    assert runtime._pending_session_primer is None
-    assert runtime.context_assembler.turns_injection_enabled is True
-    assert runtime.context_assembler.saved_memory_injection_enabled is False
-    assert is_memory_search_enabled(tmp_path) is False
-    assert is_memory_plus_enabled(tmp_path) is True
-    assert CompactionStore(tmp_path).read_state() == {
-        "format": "hashi-context-compaction-pointer-v1",
-        "generation": 5,
-        "active_capsule": None,
-    }
-    assert archived.read_text(encoding="utf-8") == "archived raw history"
-    assert capsule.read_text(encoding="utf-8") == "archived capsule"
-    assert replies == ["✨ Fresh session started."]
-
-    sections, _snapshot = install_history_section(runtime, [])
-    payload = runtime.context_assembler.build_prompt_payload(
-        "CURRENT REQUEST",
-        "her-v2",
-        extra_sections=sections,
+    skill_session, *_ = runtime_session.resolve_request_session(
+        runtime, source="skill:research", chat_id=456
     )
-    assert "AGENT POLICY ONLY" in payload["final_prompt"]
-    assert "CURRENT REQUEST" in payload["final_prompt"]
-    assert "OLD WORKING" not in payload["final_prompt"]
-    assert "OLD COMPLETED" not in payload["final_prompt"]
+    scheduled_session, *_ = runtime_session.resolve_request_session(
+        runtime, source="scheduler-skill", chat_id=456
+    )
+
+    assert skill_session["session_id"] == other["session_id"]
+    assert scheduled_session["session_id"] == default["session_id"]
+
+
+def test_promotion_unifies_completed_session_exchanges_idempotently(tmp_path):
+    runtime, default, _replies, _resets = _session_command_runtime(tmp_path)
+    other = runtime.session_store.create_session(
+        owner_id="user:123", agent_id="arale", title="Other"
+    )
+    origin_refs = []
+    for index, (session, marker) in enumerate(
+        ((default, "DEFAULT_MEMORY"), (other, "OTHER_MEMORY")), start=1
+    ):
+        request_id = f"req-promote-{index}"
+        accepted = runtime.session_store.accept_run(
+            session_id=session["session_id"],
+            owner_id="user:123",
+            agent_id="arale",
+            request_id=request_id,
+            text=marker,
+            source="text",
+            idempotency_key=request_id,
+        )
+        runtime.session_store.mark_request_running(request_id, worker_id="test")
+        runtime.session_store.finish_request(
+            request_id,
+            success=True,
+            assistant_text=f"answer {marker}",
+            assistant_source="test",
+        )
+        origin_refs.append(
+            f"session:{session['session_id']}:run:{accepted.run_id}"
+        )
+
+    first = runtime_session.promote_sessions(runtime, trigger="test")
+    second = runtime_session.promote_sessions(runtime, trigger="test")
+
+    assert first["promoted_count"] == 2
+    assert first["pending_count"] == 0
+    assert second["promoted_count"] == 0
+    assert all(runtime.memory_store.memory_origin_exists(ref) for ref in origin_refs)
+    memories = runtime.memory_store.retrieve_memories("DEFAULT_MEMORY OTHER_MEMORY", limit=10)
+    rendered = "\n".join(row["content"] for row in memories)
+    assert "DEFAULT_MEMORY" in rendered
+    assert "OTHER_MEMORY" in rendered
 
 
 def test_fresh_boundary_filters_cross_session_receipts_by_request_start(tmp_path):

@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 WhatsApp transport for bridge-u-f using neonize (Python Whatsmeow wrapper).
 
@@ -33,10 +34,10 @@ from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
-from orchestrator.pathing import resolve_path_value
 from orchestrator.admin_local_testing import try_execute_slash_command_text
 from orchestrator.enterprise.audit_schema import AuditEventWriter
 from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
+from orchestrator.pathing import resolve_path_value
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
     bridge_audit_path,
@@ -116,7 +117,7 @@ class WhatsAppTransport:
         """Connect the async neonize client and start receiving messages."""
         try:
             from neonize.aioze.client import NewAClient
-            from neonize.aioze.events import MessageEv, ConnectedEv, DisconnectedEv
+            from neonize.aioze.events import ConnectedEv, DisconnectedEv, MessageEv
 
             self._client = NewAClient(self._client_name)
 
@@ -356,6 +357,10 @@ class WhatsAppTransport:
                     prompt,
                     source_channel="whatsapp_forwarded",
                     chat_id=chat_key,
+                    session_metadata={
+                        "session_surface": "whatsapp",
+                        "session_channel_key": chat_key,
+                    },
                 )
                 if slash_result is None:
                     continue
@@ -385,6 +390,10 @@ class WhatsAppTransport:
                     source=source_kind,
                     summary=f"WA[{source_kind}]: {prompt[:60]}",
                     deliver_to_telegram=False,
+                    request_metadata={
+                        "session_surface": "whatsapp",
+                        "session_channel_key": chat_key,
+                    },
                 )
                 if req_id:
                     logger.info("Enqueued WhatsApp request: agent=%s request_id=%s", agent_name, req_id)

@@ -19,7 +19,12 @@ INSTANCE_ID="$("$PYTHON_EXE" "$SCRIPT_DIR/scripts/resolve_instance_runtime.py" \
 QUIET=0
 [[ "${1:-}" == "--quiet" ]] && QUIET=1
 
-log() { [[ "$QUIET" == "0" ]] && echo "$@"; }
+log() {
+    if [[ "$QUIET" == "0" ]]; then
+        echo "$@"
+    fi
+    return 0
+}
 
 log "================================================================"
 log "           KILL BRIDGE-U-F REMAINING SESSIONS"
@@ -56,8 +61,19 @@ fi
 if [[ "$FOUND_ANY" == "0" ]]; then
     log "No running process found for $INSTANCE_ID."
 else
-    sleep 2
-    if kill -0 "$PID" 2>/dev/null; then
+    shutdown_timeout="${HASHI_SHUTDOWN_TIMEOUT_S:-20}"
+    waited=0
+    while kill -0 "$PID" 2>/dev/null && [[ "$waited" -lt "$shutdown_timeout" ]]; do
+        state=$(ps -p "$PID" -o stat= 2>/dev/null || true)
+        if [[ "$state" == Z* ]]; then
+            break
+        fi
+        sleep 1
+        ((waited++)) || true
+    done
+    state=$(ps -p "$PID" -o stat= 2>/dev/null || true)
+    if kill -0 "$PID" 2>/dev/null && [[ "$state" != Z* ]]; then
+        log "Graceful shutdown timed out after ${shutdown_timeout}s; forcing PID $PID."
         pkill -KILL -P "$PID" 2>/dev/null || true
         kill -KILL "$PID" 2>/dev/null || true
     fi

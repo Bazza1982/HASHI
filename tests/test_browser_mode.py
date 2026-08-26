@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from pathlib import Path
 from types import SimpleNamespace
-import sys
+from unittest.mock import patch
 
 sys.modules.setdefault("edge_tts", SimpleNamespace())
 
+from orchestrator import runtime_session
 from orchestrator.admin_local_testing import supported_commands
 from orchestrator.browser_mode import (
     build_browser_task_prompt,
@@ -139,31 +140,43 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime.enqueued[0]["habit_learning_eligible"])
 
     async def test_runtime_enqueue_preserves_browser_habit_eligibility(self):
-        runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
-        runtime.request_seq = 0
-        runtime.config = SimpleNamespace(active_backend="codex-cli")
-        runtime.queue = asyncio.Queue()
-        runtime.error_logger = SimpleNamespace(error=lambda *_args, **_kwargs: None)
-        runtime.message_logger = SimpleNamespace(info=lambda *_args, **_kwargs: None)
-        runtime.request_activity = SimpleNamespace(
-            start=lambda *_args, **_kwargs: None
-        )
-
-        # The first reboot adopting a schema change can still have the former
-        # directly imported class in this module until the new reload order is
-        # itself live. Enqueue must resolve the refreshed module-owned class.
-        with patch("orchestrator.flexible_agent_runtime.QueuedRequest", object()):
-            request_id = await runtime.enqueue_request(
-                456,
-                "Find recent CSR sources",
-                "browser:brave",
-                "Browser task",
-                habit_learning_eligible=True,
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+            runtime.name = "browser-test"
+            runtime.request_seq = 0
+            runtime.session_id_dt = "test"
+            runtime.workspace_dir = root / "workspace"
+            runtime.global_config = SimpleNamespace(
+                bridge_home=root,
+                project_root=root,
+                instance_id="HASHI1",
+                authorized_id=123,
             )
+            runtime.config = SimpleNamespace(active_backend="codex-cli")
+            runtime.queue = asyncio.Queue()
+            runtime.error_logger = SimpleNamespace(error=lambda *_args, **_kwargs: None)
+            runtime.message_logger = SimpleNamespace(info=lambda *_args, **_kwargs: None)
+            runtime.request_activity = SimpleNamespace(
+                start=lambda *_args, **_kwargs: None
+            )
+            runtime_session.initialize_runtime_sessions(runtime)
 
-        item = runtime.queue.get_nowait()
-        self.assertEqual(request_id, "req-0001")
-        self.assertTrue(item.habit_learning_eligible)
+            # Enqueue must resolve the refreshed module-owned request class and
+            # persist the request under the channel's HASHI Session.
+            with patch("orchestrator.flexible_agent_runtime.QueuedRequest", object()):
+                request_id = await runtime.enqueue_request(
+                    456,
+                    "Find recent CSR sources",
+                    "browser:brave",
+                    "Browser task",
+                    habit_learning_eligible=True,
+                )
+
+            item = runtime.queue.get_nowait()
+            self.assertEqual(request_id, "req-browser-test-test-0001")
+            self.assertTrue(item.habit_learning_eligible)
+            self.assertEqual(item.session_id, runtime.default_session_id)
 
     async def test_command_without_args_shows_menu(self):
         runtime = _BrowserRuntime()

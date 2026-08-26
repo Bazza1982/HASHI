@@ -5,9 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.admin_local_testing import execute_local_command, supported_commands
-from orchestrator.command_registry import load_runtime_callbacks, load_runtime_commands, runtime_bot_commands
 from orchestrator import command_registry
+from orchestrator.admin_local_testing import execute_local_command, supported_commands
+from orchestrator.command_registry import (
+    load_runtime_callbacks,
+    load_runtime_commands,
+    runtime_bot_commands,
+)
 
 
 class _FakeRuntime:
@@ -101,11 +105,11 @@ def test_private_command_override_is_debug_not_warning(
 ):
     private_dir = tmp_path / "private_commands"
     private_dir.mkdir()
-    (private_dir / "queue_override.py").write_text(
+    (private_dir / "notify_override.py").write_text(
         "from orchestrator.command_registry import RuntimeCommand\n"
         "async def callback(runtime, update, context):\n"
         "    return None\n"
-        "COMMANDS = [RuntimeCommand(name='queue', description='Private queue', callback=callback)]\n",
+        "COMMANDS = [RuntimeCommand(name='notify', description='Private notify', callback=callback)]\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -118,15 +122,43 @@ def test_private_command_override_is_debug_not_warning(
     with caplog.at_level(logging.DEBUG, logger="BridgeU.CommandRegistry"):
         commands = {command.name: command for command in load_runtime_commands()}
 
-    assert commands["queue"].description == "Private queue"
+    assert commands["notify"].description == "Private notify"
     matching = [
         record
         for record in caplog.records
-        if record.name == "BridgeU.CommandRegistry" and "command queue" in record.message
+        if record.name == "BridgeU.CommandRegistry" and "command notify" in record.message
     ]
     assert matching
     assert all(record.levelno == logging.DEBUG for record in matching)
     assert "intentionally overridden" in matching[-1].message
+
+
+def test_session_scoped_queue_command_rejects_private_override_and_callbacks(
+    monkeypatch,
+    tmp_path,
+):
+    private_dir = tmp_path / "private_commands"
+    private_dir.mkdir()
+    (private_dir / "queue_override.py").write_text(
+        "from orchestrator.command_registry import RuntimeCallback, RuntimeCommand\n"
+        "async def callback(runtime, update, context):\n"
+        "    return None\n"
+        "COMMANDS = [RuntimeCommand(name='queue', description='Unsafe global queue', callback=callback)]\n"
+        "CALLBACKS = [RuntimeCallback(pattern=r'^queue:', callback=callback)]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        command_registry,
+        "DEFAULT_PRIVATE_COMMAND_DIR",
+        tmp_path / "missing-private-commands",
+    )
+    monkeypatch.setenv("HASHI_PRIVATE_COMMAND_DIRS", str(private_dir))
+
+    commands = {command.name: command for command in load_runtime_commands()}
+    callbacks = load_runtime_callbacks()
+
+    assert commands["queue"].description != "Unsafe global queue"
+    assert all(callback.pattern != r"^queue:" for callback in callbacks)
 
 
 def test_runtime_command_registry_loads_external_private_callbacks(monkeypatch, tmp_path):

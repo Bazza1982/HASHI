@@ -5,7 +5,7 @@ import html
 from datetime import datetime
 from typing import Any
 
-from orchestrator import runtime_pending
+from orchestrator import runtime_pending, runtime_session
 from orchestrator.command_registry import RuntimeCommand
 from orchestrator.command_ui import card_title
 
@@ -46,11 +46,33 @@ async def _send(runtime: Any, update: Any, text: str) -> None:
         )
 
 
-def _queue_items(runtime: Any) -> list[Any]:
+def _command_session_id(runtime: Any, update: Any) -> str | None:
+    config = getattr(runtime, "global_config", None)
+    has_store_config = bool(
+        getattr(runtime, "session_store", None) is not None
+        or getattr(config, "bridge_home", None)
+        or getattr(config, "project_root", None)
+    )
+    if not has_store_config or not getattr(runtime, "name", None):
+        return None
+    try:
+        return str(
+            runtime_session.current_session_for_update(runtime, update).get(
+                "session_id", ""
+            )
+            or ""
+        ) or None
+    except (AttributeError, runtime_session.SessionNotFound):
+        return None
+
+
+def _queue_items(runtime: Any, *, session_id: str | None = None) -> list[Any]:
     queue = getattr(runtime, "queue", None)
     raw = getattr(queue, "_queue", None)
     if raw is None:
         return []
+    if session_id:
+        return runtime_pending.ready_items(runtime, session_id=session_id)
     return list(raw)
 
 
@@ -112,10 +134,13 @@ def _item_line(index: int, item: Any) -> str:
     return f"{index}. <code>{rid}</code> [{source}{silent}] {summary} ({age})"
 
 
-def _current_line(runtime: Any) -> str:
+def _current_line(runtime: Any, *, session_id: str | None = None) -> str:
     if not getattr(runtime, "is_generating", False):
         return "<b>Running</b> · <code>0</code>"
     current = getattr(runtime, "current_request_meta", None) or {}
+    current_session_id = str(current.get("hashi_session_id") or "")
+    if session_id and current_session_id and current_session_id != session_id:
+        return "<b>Running</b> · <code>0</code>"
     rid = html.escape(str(current.get("request_id") or "current"))
     source = html.escape(str(current.get("source") or "?"))
     summary = html.escape(_short(current.get("summary") or ""))
@@ -135,10 +160,17 @@ def _delayed_line(index: int, record: dict[str, Any]) -> str:
     return f"{index}. <code>{delay_id}</code> [text] {summary} (due {html.escape(due_text)})"
 
 
-def _build_list(runtime: Any, delayed_items: list[dict[str, Any]] | None = None) -> str:
-    items = _queue_items(runtime)
+def _build_list(
+    runtime: Any,
+    delayed_items: list[dict[str, Any]] | None = None,
+    *,
+    session_id: str | None = None,
+) -> str:
+    items = _queue_items(runtime, session_id=session_id)
     if delayed_items is None:
-        delayed_items = runtime_pending.delayed_messages_now(runtime)
+        delayed_items = runtime_pending.delayed_messages_now(
+            runtime, session_id=session_id
+        )
     else:
         delayed_items = list(delayed_items)
     total = len(items) + len(delayed_items)
@@ -152,9 +184,9 @@ def _build_list(runtime: Any, delayed_items: list[dict[str, Any]] | None = None)
         card_title("📥", "Request queue"),
         "",
         current_line,
-        _current_line(runtime),
+        _current_line(runtime, session_id=session_id),
         f"<b>Agent</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
-        "<b>Scope</b> · READY FIFO plus persistent FUTURE delays for this agent",
+        "<b>Scope</b> · current Session",
     ]
     if items:
         lines.append("")
@@ -186,13 +218,17 @@ def _build_list(runtime: Any, delayed_items: list[dict[str, Any]] | None = None)
     return "\n".join(lines)
 
 
-def _find_item(runtime: Any, request_id: str) -> Any | None:
-    for item in _queue_items(runtime):
+def _find_item(
+    runtime: Any, request_id: str, *, session_id: str | None = None
+) -> Any | None:
+    for item in _queue_items(runtime, session_id=session_id):
         if _matches(item, request_id):
             return item
     delayed_matches = [
         record
-        for record in runtime_pending.delayed_messages_now(runtime)
+        for record in runtime_pending.delayed_messages_now(
+            runtime, session_id=session_id
+        )
         if _matches(record, request_id)
     ]
     if len(delayed_matches) == 1:
@@ -299,8 +335,16 @@ def _format_delayed_detail(record: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def _cancel(runtime: Any, update: Any, request_id: str) -> None:
-    removed = await runtime_pending.cancel_pending_by_id(runtime, request_id)
+async def _cancel(
+    runtime: Any,
+    update: Any,
+    request_id: str,
+    *,
+    session_id: str | None = None,
+) -> None:
+    removed = await runtime_pending.cancel_pending_by_id(
+        runtime, request_id, session_id=session_id
+    )
     if not removed.total:
         await _send(
             runtime,
@@ -317,8 +361,12 @@ async def _cancel(runtime: Any, update: Any, request_id: str) -> None:
     )
 
 
-async def _clear(runtime: Any, update: Any) -> None:
-    removed = await runtime_pending.recall_pending(runtime)
+async def _clear(
+    runtime: Any, update: Any, *, session_id: str | None = None
+) -> None:
+    removed = await runtime_pending.recall_pending(
+        runtime, session_id=session_id
+    )
     detail = ""
     if removed.delayed:
         detail = f" ({removed.ready} ready, {removed.delayed} delayed)"
@@ -329,9 +377,21 @@ async def _clear(runtime: Any, update: Any) -> None:
     )
 
 
-def _history(runtime: Any) -> str:
+def _history(runtime: Any, *, session_id: str | None = None) -> str:
     last_prompt = getattr(runtime, "last_prompt", None)
     last_response = getattr(runtime, "last_response", None)
+    if session_id and last_prompt is not None:
+        prompt_session_id = str(getattr(last_prompt, "session_id", "") or "")
+        if prompt_session_id and prompt_session_id != session_id:
+            last_prompt = None
+    if session_id and isinstance(last_response, dict):
+        response_session_id = str(
+            last_response.get("hashi_session_id")
+            or last_response.get("session_id")
+            or ""
+        )
+        if response_session_id and response_session_id != session_id:
+            last_response = None
     lines = [
         card_title("📥", "Queue history"),
         "",
@@ -364,19 +424,28 @@ async def queue_command(runtime: Any, update: Any, context: Any) -> None:
         if str(arg).strip()
     ]
     sub = args[0].lower() if args else "list"
+    session_id = _command_session_id(runtime, update)
     if sub in {"help", "-h", "--help"}:
         await _send(runtime, update, html.escape(USAGE))
         return
     if sub in {"list", "ls", "status"}:
-        delayed = await runtime_pending.delayed_messages(runtime)
-        await _send(runtime, update, _build_list(runtime, delayed))
+        delayed = await runtime_pending.delayed_messages(
+            runtime, session_id=session_id
+        )
+        await _send(
+            runtime,
+            update,
+            _build_list(runtime, delayed, session_id=session_id),
+        )
         return
     if sub == "show" and len(args) >= 2:
-        item = _find_item(runtime, args[1])
+        item = _find_item(runtime, args[1], session_id=session_id)
         if item is not None:
             await _send(runtime, update, _format_detail(item))
             return
-        delayed = await runtime_pending.delayed_messages(runtime)
+        delayed = await runtime_pending.delayed_messages(
+            runtime, session_id=session_id
+        )
         delayed_matches = [
             record
             for record in delayed
@@ -392,13 +461,13 @@ async def queue_command(runtime: Any, update: Any, context: Any) -> None:
         )
         return
     if sub == "cancel" and len(args) >= 2:
-        await _cancel(runtime, update, args[1])
+        await _cancel(runtime, update, args[1], session_id=session_id)
         return
     if sub == "clear":
-        await _clear(runtime, update)
+        await _clear(runtime, update, session_id=session_id)
         return
     if sub == "history":
-        await _send(runtime, update, _history(runtime))
+        await _send(runtime, update, _history(runtime, session_id=session_id))
         return
     await _send(runtime, update, html.escape(USAGE))
 

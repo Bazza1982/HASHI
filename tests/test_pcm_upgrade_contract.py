@@ -11,8 +11,9 @@ import pytest
 
 sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
+from orchestrator import runtime_session
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
-from orchestrator.config import ConfigManager, LEGACY_PCM_CONFIG_BACKUP_SUFFIX
+from orchestrator.config import LEGACY_PCM_CONFIG_BACKUP_SUFFIX, ConfigManager
 from orchestrator.config_admin import ConfigAdmin
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.handoff_builder import HandoffBuilder
@@ -38,6 +39,22 @@ def _assembler(tmp_path, **kwargs):
     _write_pcm(pcm)
     store = BridgeMemoryStore(tmp_path)
     return store, BridgeContextAssembler(store, pcm, **kwargs)
+
+
+def _install_session_fixture(runtime, tmp_path, builder):
+    runtime.name = "pcm-test"
+    runtime.global_config = SimpleNamespace(
+        bridge_home=tmp_path,
+        project_root=tmp_path,
+        instance_id="HASHI1",
+        authorized_id=1,
+    )
+    session = runtime_session.initialize_runtime_sessions(runtime)
+    workspace = runtime.session_store.session_workspace(
+        session["session_id"], session["context_generation"]
+    )
+    runtime._session_handoff_builders = {str(workspace.resolve()): builder}
+    return session
 
 
 def test_valid_pcm_isolates_persona_system_and_memory(tmp_path):
@@ -294,7 +311,7 @@ def test_pcm_envelope_preserves_authority_layers(tmp_path):
     assert sections["current_user_request"]["protected"] is True
 
 
-def test_flex_injects_latest_ten_completed_exchanges_with_sequence_and_timestamps(tmp_path):
+def test_legacy_assembler_caller_injects_latest_ten_completed_exchanges(tmp_path):
     store, assembler = _assembler(tmp_path)
     for index in range(12):
         store.record_completed_exchange(
@@ -460,6 +477,7 @@ async def test_backend_plus_delivers_one_continuation_payload_to_fixed_target(tm
         build_handoff=Mock(),
         build_session_restore_prompt=Mock(return_value=("RESTORE ONCE", 3, 30)),
     )
+    _install_session_fixture(runtime, tmp_path, runtime.handoff_builder)
     runtime.handoff_path = tmp_path / "handoff.md"
     runtime._evaluate_enterprise_policy = lambda *_args, **_kwargs: SimpleNamespace(
         allowed=True,
@@ -505,6 +523,7 @@ async def test_handoff_command_enqueues_exactly_one_restore_request(tmp_path):
         build_handoff=Mock(),
         build_session_restore_prompt=Mock(return_value=("HANDOFF ONCE", 2, 20)),
     )
+    _install_session_fixture(runtime, tmp_path, runtime.handoff_builder)
     backend = SimpleNamespace(
         capabilities=SimpleNamespace(supports_sessions=True),
         handle_new_session=AsyncMock(),

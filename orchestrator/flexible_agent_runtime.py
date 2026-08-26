@@ -121,6 +121,7 @@ from orchestrator.memory_plus_mode import (
     compact_memory_plus,
     extract_memory_plus_update_details,
     get_memory_plus_status,
+    is_memory_plus_enabled,
     list_memory_plus_history,
     read_memory_plus_notepad,
     replace_memory_plus_notepad,
@@ -244,7 +245,9 @@ class FlexibleAgentRuntime:
         self.skill_manager = skill_manager
         self.agent_fyi_path = self.global_config.project_root / "docs" / "AGENT_FYI.md"
         self._pending_session_primer: str | None = None
+        self._pending_session_primer_session_id: str | None = None
         self._pending_auto_recall_context: str | None = None
+        self._pending_auto_recall_session_id: str | None = None
 
         self.app = ApplicationBuilder().token(self.token).get_updates_connection_pool_size(8).build()
 
@@ -289,7 +292,18 @@ class FlexibleAgentRuntime:
         self.runtime_session_path = self.workspace_dir / ".runtime_session.json"
         self.transfer_state_path = self.workspace_dir / "active_transfer.json"
         self._cos_enabled: bool = (self.workspace_dir / ".cos_on").exists()
-        self._workzone_dir: Path | None = load_workzone(self.workspace_dir)
+        default_session = runtime_session.initialize_runtime_sessions(self)
+        legacy_workzone = load_workzone(self.workspace_dir)
+        if default_session.get("workzone"):
+            self._workzone_dir = Path(str(default_session["workzone"]))
+        else:
+            self._workzone_dir = legacy_workzone
+            if legacy_workzone is not None:
+                # One-time compatibility migration: the old Agent-wide value
+                # becomes only the permanent default Session's Workzone.
+                self.session_store.set_workzone(
+                    default_session["session_id"], str(legacy_workzone)
+                )
         self._sync_workzone_to_backend_config()
         self.voice_manager = VoiceManager(self.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
@@ -428,7 +442,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "fresh", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "bg", "jobs", "verbose", "think", "stream", "preview", "voice", "say", "whisper", "transfer", "fork", "cos", "long", "end", "browser", "exp"})
+        self._enabled_commands.update({"help", "status", "new", "fresh", "sessions", "use", "current", "archive", "promote", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "bg", "jobs", "verbose", "think", "stream", "preview", "voice", "say", "whisper", "transfer", "fork", "cos", "long", "end", "browser", "exp"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -690,7 +704,8 @@ class FlexibleAgentRuntime:
 
     def next_request_id(self) -> str:
         self.request_seq += 1
-        return f"req-{self.request_seq:04d}"
+        agent = re.sub(r"[^a-zA-Z0-9_-]+", "-", self.name).strip("-") or "agent"
+        return f"req-{agent}-{self.session_id_dt}-{self.request_seq:04d}"
 
     async def enqueue_request(
         self,
@@ -707,6 +722,7 @@ class FlexibleAgentRuntime:
         scheduler_context: Mapping[str, str] | None = None,
         request_metadata: Mapping[str, Any] | None = None,
         request_content: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ):
         if not prompt or not prompt.strip():
             self.error_logger.error(f"Rejected empty prompt from {source} (summary={summary!r})")
@@ -721,8 +737,43 @@ class FlexibleAgentRuntime:
 
             normalized_request_content = normalize_request_content(request_content)
             manifest = attachment_manifest(normalized_request_content)
+        request_id = self.next_request_id()
+        session, accepted, session_owner, session_surface, session_channel_key = (
+            runtime_session.accept_request(
+                self,
+                request_id=request_id,
+                chat_id=chat_id,
+                prompt=prompt,
+                source=source,
+                request_metadata=request_metadata,
+                request_content=normalized_request_content,
+                idempotency_key=idempotency_key,
+            )
+        )
+        if accepted is not None and accepted.replayed:
+            self.message_logger.info(
+                "Reused idempotent Session run %s for %s", accepted.run_id, accepted.request_id
+            )
+            return accepted.request_id
+        metadata = dict(request_metadata or {})
+        metadata.update(
+            {
+                "hashi_session_id": session["session_id"],
+                "hashi_run_id": accepted.run_id if accepted is not None else None,
+                "hashi_message_id": accepted.message_id if accepted is not None else None,
+                "context_generation": int(session["context_generation"]),
+                "owner_id": session_owner,
+                "session_surface": session_surface,
+                "session_channel_key": session_channel_key,
+                "session_workspace": str(
+                    self.session_store.session_workspace(
+                        session["session_id"], int(session["context_generation"])
+                    )
+                ),
+            }
+        )
         item = runtime_common.QueuedRequest(
-            request_id=self.next_request_id(),
+            request_id=request_id,
             chat_id=chat_id,
             prompt=prompt,
             source=source,
@@ -732,14 +783,19 @@ class FlexibleAgentRuntime:
             is_retry=is_retry,
             deliver_to_telegram=deliver_to_telegram,
             skip_memory_injection=skip_memory_injection,
+            session_id=session["session_id"],
+            run_id=accepted.run_id if accepted is not None else None,
+            message_id=accepted.message_id if accepted is not None else None,
+            context_generation=int(session["context_generation"]),
+            owner_id=session_owner,
+            session_surface=session_surface,
+            session_channel_key=session_channel_key,
             habit_learning_eligible=habit_learning_eligible,
             skill_id=skill_id,
             scheduler_context=(
                 dict(scheduler_context) if scheduler_context else None
             ),
-            request_metadata=(
-                dict(request_metadata) if request_metadata else None
-            ),
+            request_metadata=metadata,
             request_content=normalized_request_content,
             attachment_manifest=manifest,
         )
@@ -773,6 +829,9 @@ class FlexibleAgentRuntime:
                 asyncio.create_task(result)
 
     async def _notify_request_listeners(self, request_id: str, payload: dict):
+        # Commit the canonical Session terminal state before any transport or
+        # in-memory listener observes the result.
+        runtime_session.finish_request_from_listener(self, request_id, payload)
         try:
             self.request_activity.complete(
                 request_id,
@@ -1234,10 +1293,15 @@ class FlexibleAgentRuntime:
             )
         return catalogue
 
-    def _arm_session_primer(self, context_line: str):
+    def _arm_session_primer(
+        self, context_line: str, *, session_id: str | None = None
+    ):
         primer = build_agent_fyi_primer(self.agent_fyi_path, context_line=context_line)
         if primer:
             self._pending_session_primer = primer
+            self._pending_session_primer_session_id = str(
+                session_id or getattr(self, "default_session_id", "") or ""
+            ) or None
 
     def _load_runtime_session_state(self) -> dict:
         if not self.runtime_session_path.exists():
@@ -1344,7 +1408,10 @@ class FlexibleAgentRuntime:
         active = self.skill_manager.get_active_toggle_ids(self.workspace_dir)
         if "recall" not in active or not unexpected_restart:
             return
-        context_block, exchange_count, word_count = self.handoff_builder.build_recent_context_block(
+        default_handoff = runtime_session.session_handoff_builder(
+            self, surface="scheduled", channel_key="default"
+        )
+        context_block, exchange_count, word_count = default_handoff.build_recent_context_block(
             max_rounds=10,
             max_words=6000,
         )
@@ -1354,8 +1421,12 @@ class FlexibleAgentRuntime:
             "This session is recovering from an unexpected interruption. Restore recent continuity from the bridge-managed transcript below and use it as background context only.\n\n"
             f"{context_block}"
         )
+        self._pending_auto_recall_session_id = getattr(
+            self, "default_session_id", None
+        )
         self._arm_session_primer(
-            f"Unexpected restart detected. Recall mode is ON, so restore the last {exchange_count} exchanges ({word_count} words) once before continuing."
+            f"Unexpected restart detected. Recall mode is ON, so restore the last {exchange_count} exchanges ({word_count} words) once before continuing.",
+            session_id=getattr(self, "default_session_id", None),
         )
 
     def _build_fyi_request_prompt(self, prompt_text: str = "") -> str:
@@ -1378,12 +1449,21 @@ class FlexibleAgentRuntime:
         if item.silent:
             return item.prompt
         sections = []
-        if self._pending_session_primer:
+        item_session_id = str(getattr(item, "session_id", "") or "")
+        if self._pending_session_primer and (
+            not getattr(self, "_pending_session_primer_session_id", None)
+            or self._pending_session_primer_session_id == item_session_id
+        ):
             sections.append(self._pending_session_primer)
             self._pending_session_primer = None
-        if self._pending_auto_recall_context:
+            self._pending_session_primer_session_id = None
+        if self._pending_auto_recall_context and (
+            not getattr(self, "_pending_auto_recall_session_id", None)
+            or self._pending_auto_recall_session_id == item_session_id
+        ):
             sections.append(f"--- AUTO RECALL ---\n{self._pending_auto_recall_context}")
             self._pending_auto_recall_context = None
+            self._pending_auto_recall_session_id = None
         if not sections:
             return item.prompt
         return "\n\n".join(sections + [item.prompt])
@@ -1466,15 +1546,23 @@ class FlexibleAgentRuntime:
             '{"title":"...","summary_short":"...","summary_long":"..."}'
         )
 
-    async def _summarize_current_topic_for_parking(self, title_override: str | None = None) -> dict[str, Any] | None:
-        context_block, exchange_count, _ = self.handoff_builder.build_recent_context_block(
+    async def _summarize_current_topic_for_parking(
+        self,
+        title_override: str | None = None,
+        *,
+        update: Update | None = None,
+    ) -> dict[str, Any] | None:
+        handoff_builder = runtime_session.session_handoff_builder(
+            self, update=update
+        )
+        context_block, exchange_count, _ = handoff_builder.build_recent_context_block(
             max_rounds=12,
             max_words=4500,
         )
         if exchange_count <= 0 or not context_block:
             return None
 
-        recent_rounds = self.handoff_builder.get_recent_rounds(max_rounds=3)
+        recent_rounds = handoff_builder.get_recent_rounds(max_rounds=3)
         last_user_text = ""
         last_assistant_text = ""
         last_exchange_text = ""
@@ -1532,11 +1620,20 @@ class FlexibleAgentRuntime:
     def is_idle_for_proactive_message(self, min_idle_seconds: int = 900) -> bool:
         if self._backend_busy():
             return False
-        last_user_ts = self.memory_store.get_last_user_turn_ts()
+        session_store = getattr(self, "session_store", None)
+        if session_store is not None:
+            last_user_ts = session_store.last_user_message_at(
+                agent_id=self.name,
+                owner_id=runtime_session.owner_id(self),
+            )
+        else:
+            last_user_ts = self.memory_store.get_last_user_turn_ts()
         if not last_user_ts:
             return True
         try:
-            idle_for = (datetime.now() - datetime.fromisoformat(last_user_ts)).total_seconds()
+            last_user_at = datetime.fromisoformat(str(last_user_ts).replace("Z", "+00:00"))
+            now = datetime.now(last_user_at.tzinfo) if last_user_at.tzinfo else datetime.now()
+            idle_for = (now - last_user_at).total_seconds()
         except Exception:
             return False
         return idle_for >= min_idle_seconds
@@ -1649,8 +1746,12 @@ class FlexibleAgentRuntime:
     def _format_status_mode_block(self, mode: str, state: Mapping[str, Any], detailed: bool) -> list[str]:
         return runtime_status.format_status_mode_block(mode, state, detailed)
 
-    def _build_status_text(self, detailed: bool = False) -> str:
-        return runtime_status.build_status_text(self, detailed=detailed)
+    def _build_status_text(
+        self, detailed: bool = False, *, update: Update | None = None
+    ) -> str:
+        return runtime_status.build_status_text(
+            self, detailed=detailed, update=update
+        )
 
     def _skill_keyboard(self) -> InlineKeyboardMarkup:
         from orchestrator.runtime_skill_callbacks import build_skill_catalog_keyboard
@@ -1817,7 +1918,15 @@ class FlexibleAgentRuntime:
     def _build_media_prompt(self, media_kind: str, filename: str, caption: str = "", emoji: str = "") -> tuple[str, str]:
         return runtime_media.build_media_prompt(media_kind, filename, caption=caption, emoji=emoji)
 
-    async def enqueue_api_text(self, text: str, source: str = "api", deliver_to_telegram: bool = True):
+    async def enqueue_api_text(
+        self,
+        text: str,
+        source: str = "api",
+        deliver_to_telegram: bool = True,
+        *,
+        request_metadata: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
+    ):
         if self._should_redirect_after_transfer() and not source.startswith(("bridge-transfer:", "bridge-fork:")):
             if deliver_to_telegram:
                 await self.send_long_message(
@@ -1834,6 +1943,8 @@ class FlexibleAgentRuntime:
             source,
             _safe_excerpt(text),
             deliver_to_telegram=deliver_to_telegram,
+            request_metadata=request_metadata,
+            idempotency_key=idempotency_key,
         )
 
     async def _hchat_route_reply(self, item, response_text: str):
@@ -1951,6 +2062,8 @@ class FlexibleAgentRuntime:
         emoji: str = "",
         source: str = "api",
         deliver_to_telegram: bool = True,
+        request_metadata: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ):
         if self._should_redirect_after_transfer():
             if deliver_to_telegram:
@@ -1972,6 +2085,8 @@ class FlexibleAgentRuntime:
             source,
             summary,
             deliver_to_telegram=deliver_to_telegram,
+            request_metadata=request_metadata,
+            idempotency_key=idempotency_key,
         )
 
     def bind_handlers(self):
@@ -2660,8 +2775,26 @@ class FlexibleAgentRuntime:
     def _resolve_bridge_handoff_endpoint(self, target_instance: str, mode: str) -> tuple[str, str]:
         return runtime_transfer.resolve_bridge_handoff_endpoint(self, target_instance, mode)
 
-    def _build_handoff_payload(self, target_agent: str, target_instance: str, mode: str) -> dict[str, Any]:
-        return runtime_transfer.build_handoff_payload(self, target_agent, target_instance, mode)
+    def _build_handoff_payload(
+        self,
+        target_agent: str,
+        target_instance: str,
+        mode: str,
+        *,
+        update: Update | None = None,
+    ) -> dict[str, Any]:
+        builder = (
+            runtime_session.session_handoff_builder(self, update=update)
+            if update is not None
+            else self.handoff_builder
+        )
+        return runtime_transfer.build_handoff_payload(
+            self,
+            target_agent,
+            target_instance,
+            mode,
+            handoff_builder=builder,
+        )
 
     async def _cmd_bridge_handoff(self, update: Update, context: Any, *, mode: str) -> None:
         action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"
@@ -2692,7 +2825,9 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, f"Cannot {action} to the same agent on the same instance.")
             return
 
-        package = self._build_handoff_payload(target_agent, target_instance, action)
+        package = self._build_handoff_payload(
+            target_agent, target_instance, action, update=update
+        )
         if int(package.get("exchange_count") or 0) <= 0:
             await self._reply_text(update, f"No recent bridge transcript was available to {action}.")
             return
@@ -4573,9 +4708,10 @@ class FlexibleAgentRuntime:
             return
 
         await self._reply_text(update, "Starting a fresh session with recent bridge history...")
-        self.handoff_builder.refresh_recent_context()
-        self.handoff_builder.build_handoff()
-        prompt, exchange_count, word_count = self.handoff_builder.build_session_restore_prompt(
+        handoff_builder = runtime_session.session_handoff_builder(self, update=update)
+        handoff_builder.refresh_recent_context()
+        handoff_builder.build_handoff()
+        prompt, exchange_count, word_count = handoff_builder.build_session_restore_prompt(
             max_rounds=10,
             max_words=6000,
         )
@@ -4584,7 +4720,10 @@ class FlexibleAgentRuntime:
             return
 
         self._arm_session_primer(
-            "This is a bridge-managed handoff restore. Review AGENT FYI, then use the recent transcript as continuity context."
+            "This is a bridge-managed handoff restore. Review AGENT FYI, then use the recent transcript as continuity context.",
+            session_id=runtime_session.current_session_for_update(
+                self, update
+            )["session_id"],
         )
         if self.backend_manager.current_backend and getattr(self.backend_manager.current_backend.capabilities, "supports_sessions", False):
             await self.backend_manager.current_backend.handle_new_session()
@@ -4725,7 +4864,9 @@ class FlexibleAgentRuntime:
 
         title_override = " ".join(args[1:]).strip() or None
         await self._reply_text(update, "Parking the current topic and writing a resume summary...")
-        summary = await self._summarize_current_topic_for_parking(title_override=title_override)
+        summary = await self._summarize_current_topic_for_parking(
+            title_override=title_override, update=update
+        )
         if not summary:
             await self._reply_text(update, "No recent bridge transcript was available to park.")
             return
@@ -4783,8 +4924,13 @@ class FlexibleAgentRuntime:
             f"Last Exchange:\n{last_exchange or '(none)'}\n\n"
             f"{recent_context}"
         )
+        active_session_id = runtime_session.current_session_for_update(
+            self, update
+        )["session_id"]
+        self._pending_auto_recall_session_id = active_session_id
         self._arm_session_primer(
-            f"Loading parked topic [{slot_id}] {title}. Resume it as the active working context."
+            f"Loading parked topic [{slot_id}] {title}. Resume it as the active working context.",
+            session_id=active_session_id,
         )
         await self._reply_text(update, f"Loading parked topic [{slot_id}] {title} and restoring continuity...")
         await self.enqueue_request(
@@ -5152,7 +5298,11 @@ class FlexibleAgentRuntime:
         if self._backend_busy():
             return False, "Backend switch blocked while a request is running or queued."
 
-        self._workzone_dir = load_workzone(self.workspace_dir)
+        selected_session = runtime_session.current_session(
+            self, surface="telegram", channel_key=str(chat_id)
+        )
+        workzone_value = str(selected_session.get("workzone") or "").strip()
+        self._workzone_dir = Path(workzone_value) if workzone_value else None
         self._sync_workzone_to_backend_config()
         switch_ok = await self.backend_manager.switch_backend(
             target_engine,
@@ -5175,8 +5325,11 @@ class FlexibleAgentRuntime:
 
         if with_context:
             with suppress(Exception):
-                self.handoff_builder.refresh_recent_context()
-                self.handoff_builder.build_handoff()
+                handoff_builder = runtime_session.session_handoff_builder(
+                    self, surface="telegram", channel_key=str(chat_id)
+                )
+                handoff_builder.refresh_recent_context()
+                handoff_builder.build_handoff()
         else:
             self._clear_handoff_state()
         self.last_backend_switch_at = datetime.now()
@@ -5186,14 +5339,18 @@ class FlexibleAgentRuntime:
             if with_context
             else f"Backend switched to {target_engine}. Review AGENT FYI before the next task."
         )
-        self._arm_session_primer(primer_note)
+        self._arm_session_primer(
+            primer_note, session_id=selected_session["session_id"]
+        )
 
         # A continuation request is an actual one-time backend delivery, not a
         # handoff file that merely waits for a future user message. Stateless
         # Flex targets already receive history every turn and need no package.
         if with_context and supports_sessions:
             restore_prompt, exchange_count, _word_count = (
-                self.handoff_builder.build_session_restore_prompt(
+                runtime_session.session_handoff_builder(
+                    self, surface="telegram", channel_key=str(chat_id)
+                ).build_session_restore_prompt(
                     max_rounds=10,
                     max_words=6000,
                 )
@@ -6536,6 +6693,21 @@ class FlexibleAgentRuntime:
     async def cmd_fresh(self, update: Update, context: Any):
         await runtime_session.cmd_fresh(self, update, context)
 
+    async def cmd_sessions(self, update: Update, context: Any):
+        await runtime_session.cmd_sessions(self, update, context)
+
+    async def cmd_use(self, update: Update, context: Any):
+        await runtime_session.cmd_use(self, update, context)
+
+    async def cmd_current(self, update: Update, context: Any):
+        await runtime_session.cmd_current(self, update, context)
+
+    async def cmd_archive(self, update: Update, context: Any):
+        await runtime_session.cmd_archive(self, update, context)
+
+    async def cmd_promote(self, update: Update, context: Any):
+        await runtime_session.cmd_promote(self, update, context)
+
     def _get_skill_state(self) -> dict:
         path = self.workspace_dir / "skill_state.json"
         try:
@@ -6555,10 +6727,11 @@ class FlexibleAgentRuntime:
     async def cmd_notepad(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
+        workspace = self._notepad_workspace(update)
         args = [str(arg) for arg in (context.args or [])]
         action = (args[0].strip().lower() if args else "show")
         if action in {"show", "status", "view", "today"}:
-            text, markup = self._notepad_view_payload()
+            text, markup = self._notepad_view_payload(workspace)
             await self._reply_text(
                 update,
                 text,
@@ -6568,12 +6741,12 @@ class FlexibleAgentRuntime:
             return
 
         if action == "carryover":
-            text, markup = self._notepad_carryover_payload()
+            text, markup = self._notepad_carryover_payload(workspace)
             await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
             return
 
         if action == "history":
-            text, markup = self._notepad_history_payload()
+            text, markup = self._notepad_history_payload(workspace)
             await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
             return
 
@@ -6587,13 +6760,13 @@ class FlexibleAgentRuntime:
                     reply_markup=self._notepad_back_keyboard(),
                 )
                 return
-            text, markup = self._notepad_find_payload(query_text)
+            text, markup = self._notepad_find_payload(query_text, workspace)
             await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
             return
 
         if action == "compact":
-            compact_memory_plus(self.workspace_dir)
-            text, markup = self._notepad_view_payload()
+            compact_memory_plus(workspace)
+            text, markup = self._notepad_view_payload(workspace)
             await self._reply_text(
                 update,
                 "✅ Memory+ card compacted and de-duplicated.\n\n" + text,
@@ -6612,7 +6785,7 @@ class FlexibleAgentRuntime:
                     reply_markup=self._notepad_back_keyboard(),
                 )
                 return
-            path = append_memory_plus_manual_note(self.workspace_dir, text)
+            path = append_memory_plus_manual_note(workspace, text)
             await self._reply_text(
                 update,
                 f"✅ Memory+ notepad updated.\nPath: <code>{html.escape(str(path))}</code>",
@@ -6631,7 +6804,7 @@ class FlexibleAgentRuntime:
                     reply_markup=self._notepad_back_keyboard(),
                 )
                 return
-            path = replace_memory_plus_notepad(self.workspace_dir, text)
+            path = replace_memory_plus_notepad(workspace, text)
             await self._reply_text(
                 update,
                 f"✅ Memory+ notepad replaced.\nPath: <code>{html.escape(str(path))}</code>",
@@ -6641,7 +6814,7 @@ class FlexibleAgentRuntime:
             return
 
         if action == "clear":
-            path = clear_memory_plus_notepad(self.workspace_dir)
+            path = clear_memory_plus_notepad(workspace)
             await self._reply_text(
                 update,
                 f"🧹 Memory+ notepad cleared for today.\nPath: <code>{html.escape(str(path))}</code>",
@@ -6690,9 +6863,19 @@ class FlexibleAgentRuntime:
             ]
         )
 
-    def _notepad_view_payload(self) -> tuple[str, InlineKeyboardMarkup]:
-        view = read_memory_plus_notepad(self.workspace_dir)
-        status = get_memory_plus_status(self.workspace_dir)
+    def _notepad_workspace(self, update: Any | None = None) -> Path:
+        try:
+            return runtime_session.current_session_workspace(self, update)
+        except (AttributeError, runtime_session.SessionNotFound):
+            return self.workspace_dir
+
+    def _notepad_view_payload(
+        self, workspace: Path | None = None
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        workspace = workspace or self._notepad_workspace()
+        view = read_memory_plus_notepad(workspace)
+        status = get_memory_plus_status(workspace)
+        status["enabled"] = is_memory_plus_enabled(self.workspace_dir)
         body = view.body.strip()
         if not body:
             body = "(empty)"
@@ -6717,8 +6900,10 @@ class FlexibleAgentRuntime:
             header.append(f"• Showing first <code>{max_body_chars}</code> chars")
         return "\n".join(header) + "\n\n<pre>" + html.escape(body) + "</pre>", self._notepad_keyboard()
 
-    def _notepad_carryover_payload(self) -> tuple[str, InlineKeyboardMarkup]:
-        view = read_memory_plus_notepad(self.workspace_dir)
+    def _notepad_carryover_payload(
+        self, workspace: Path | None = None
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        view = read_memory_plus_notepad(workspace or self._notepad_workspace())
         body = view.carryover.strip() or "(none)"
         return (
             f"{card_title('🌙', 'Memory+ carryover')}\n\n"
@@ -6729,8 +6914,12 @@ class FlexibleAgentRuntime:
             self._notepad_keyboard(),
         )
 
-    def _notepad_history_payload(self) -> tuple[str, InlineKeyboardMarkup]:
-        rows = list_memory_plus_history(self.workspace_dir, limit=10)
+    def _notepad_history_payload(
+        self, workspace: Path | None = None
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        rows = list_memory_plus_history(
+            workspace or self._notepad_workspace(), limit=10
+        )
         lines = [
             card_title("🗂️", "Memory+ history"),
             "",
@@ -6752,8 +6941,12 @@ class FlexibleAgentRuntime:
                 lines.append(f"  <code>{html.escape(str(row['archive']))}</code>")
         return "\n".join(lines), self._notepad_keyboard()
 
-    def _notepad_find_payload(self, query_text: str) -> tuple[str, InlineKeyboardMarkup]:
-        rows = search_memory_plus_history(self.workspace_dir, query_text)
+    def _notepad_find_payload(
+        self, query_text: str, workspace: Path | None = None
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        rows = search_memory_plus_history(
+            workspace or self._notepad_workspace(), query_text
+        )
         lines = [
             card_title("🔎", "Find continuity"),
             "",
@@ -6831,18 +7024,19 @@ class FlexibleAgentRuntime:
             return
         data = query.data or ""
         action = data.split(":", 1)[1] if ":" in data else ""
+        workspace = self._notepad_workspace(update)
         if action == "refresh":
-            text, markup = self._notepad_view_payload()
+            text, markup = self._notepad_view_payload(workspace)
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         elif action == "carryover":
-            text, markup = self._notepad_carryover_payload()
+            text, markup = self._notepad_carryover_payload(workspace)
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         elif action == "history":
-            text, markup = self._notepad_history_payload()
+            text, markup = self._notepad_history_payload(workspace)
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         elif action == "compact":
-            compact_memory_plus(self.workspace_dir)
-            text, markup = self._notepad_view_payload()
+            compact_memory_plus(workspace)
+            text, markup = self._notepad_view_payload(workspace)
             await query.edit_message_text(
                 "✅ Compacted.\n\n" + text,
                 parse_mode="HTML",
@@ -6854,7 +7048,7 @@ class FlexibleAgentRuntime:
             set_memory_plus_enabled(self.workspace_dir, True)
             resume_automatic_context(self)
             self.reload_post_turn_observers()
-            text, markup = self._notepad_view_payload()
+            text, markup = self._notepad_view_payload(workspace)
             await query.edit_message_text(
                 "✅ Memory+ continuity enabled.\n\n" + text,
                 parse_mode="HTML",
@@ -6863,7 +7057,7 @@ class FlexibleAgentRuntime:
         elif action == "memory_off":
             set_memory_plus_enabled(self.workspace_dir, False)
             self.reload_post_turn_observers()
-            text, markup = self._notepad_view_payload()
+            text, markup = self._notepad_view_payload(workspace)
             await query.edit_message_text(
                 "⏸️ Memory+ continuity paused; all files were preserved.\n\n" + text,
                 parse_mode="HTML",
@@ -6899,8 +7093,8 @@ class FlexibleAgentRuntime:
                 reply_markup=self._notepad_clear_confirm_keyboard(),
             )
         elif action == "clear_now":
-            clear_memory_plus_notepad(self.workspace_dir)
-            text, markup = self._notepad_view_payload()
+            clear_memory_plus_notepad(workspace)
+            text, markup = self._notepad_view_payload(workspace)
             await query.edit_message_text("🧹 Cleared.\n\n" + text, parse_mode="HTML", reply_markup=markup)
         else:
             await query.answer("Unknown notepad action.", show_alert=True)
@@ -7837,8 +8031,10 @@ class FlexibleAgentRuntime:
     def _wrapper_enabled(self) -> bool:
         return runtime_wrapper.wrapper_enabled(self)
 
-    def _wrapper_visible_context(self, context_window: int) -> list[dict[str, str]]:
-        return runtime_wrapper.wrapper_visible_context(self, context_window)
+    def _wrapper_visible_context(
+        self, context_window: int, item: QueuedRequest | None = None
+    ) -> list[dict[str, str]]:
+        return runtime_wrapper.wrapper_visible_context(self, context_window, item=item)
 
     def _wrapper_audit_fields(self, wrapper_result) -> dict[str, Any]:
         return runtime_wrapper.wrapper_audit_fields(self, wrapper_result)
@@ -8037,8 +8233,10 @@ class FlexibleAgentRuntime:
     def _audit_enabled(self) -> bool:
         return runtime_audit.audit_enabled(self)
 
-    def _audit_visible_context(self, context_window: int) -> list[dict[str, str]]:
-        return runtime_audit.audit_visible_context(self, context_window)
+    def _audit_visible_context(
+        self, context_window: int, item: QueuedRequest | None = None
+    ) -> list[dict[str, str]]:
+        return runtime_audit.audit_visible_context(self, context_window, item=item)
 
     def _build_audit_telemetry(self, item: QueuedRequest, response, collector: AuditTelemetryCollector | None) -> dict[str, Any]:
         return runtime_audit.build_audit_telemetry(self, item, response, collector)
@@ -8390,9 +8588,13 @@ class FlexibleAgentRuntime:
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 if item.source not in {"startup", "system", SESSION_RESET_SOURCE}:
                     memory_assistant_text = self._core_memory_assistant_text(response.text, visible_text, wrapper_result)
-                    self.memory_store.record_turn("user", item.source, memory_user_text)
-                    self.memory_store.record_turn("assistant", self.config.active_backend, memory_assistant_text)
-                    self.memory_store.record_exchange(memory_user_text, memory_assistant_text, item.source)
+                    runtime_session.record_working_exchange(
+                        self,
+                        item,
+                        user_text=memory_user_text,
+                        assistant_text=memory_assistant_text,
+                        assistant_source=self.config.active_backend,
+                    )
                     self._schedule_post_turn_observers(
                         item,
                         memory_user_text,
@@ -8435,9 +8637,12 @@ class FlexibleAgentRuntime:
                                 type(exc).__name__,
                                 exc,
                             )
-                self.handoff_builder.append_transcript("user", item.prompt, item.source)
-                self.handoff_builder.append_transcript("assistant", visible_text, item.source)
-                self.handoff_builder.refresh_recent_context()
+                handoff_builder = runtime_session.session_handoff_builder(
+                    self, item=item
+                )
+                handoff_builder.append_transcript("user", item.prompt, item.source)
+                handoff_builder.append_transcript("assistant", visible_text, item.source)
+                handoff_builder.refresh_recent_context()
                 self.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
                 _print_final_response(self.name, visible_text)
                 total_s = runtime_pipeline.queued_elapsed_s(item)

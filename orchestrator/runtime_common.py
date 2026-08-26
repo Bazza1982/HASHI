@@ -20,6 +20,15 @@ class QueuedRequest:
     is_retry: bool = False
     deliver_to_telegram: bool = True
     skip_memory_injection: bool = False
+    # HASHI conversation identity. ``session_scope`` below is retained for the
+    # older provider-isolation policy and is not a user Session identifier.
+    session_id: str | None = None
+    run_id: str | None = None
+    message_id: str | None = None
+    context_generation: int = 1
+    owner_id: str | None = None
+    session_surface: str | None = None
+    session_channel_key: str | None = None
     session_scope: str | None = None
     queued_monotonic: float = field(default_factory=time.monotonic, repr=False)
     habit_learning_eligible: bool = True

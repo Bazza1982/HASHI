@@ -2,6 +2,7 @@
 secrets.json
 secrets/
 agents.json
+/agents.json.orig
 agent_capabilities.json
 tasks.json
 local_doc/

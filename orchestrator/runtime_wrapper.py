@@ -41,11 +41,19 @@ def memory_plus_response_writer_enabled(runtime: Any) -> bool:
     return memory_plus_enabled(runtime) and getattr(runtime.backend_manager, "agent_mode", "flex") != "dual-brain"
 
 
-def wrapper_visible_context(runtime: Any, context_window: int) -> list[dict[str, str]]:
+def wrapper_visible_context(
+    runtime: Any, context_window: int, item: Any | None = None
+) -> list[dict[str, str]]:
     if context_window <= 0:
         return []
     try:
-        rounds = runtime.handoff_builder.get_recent_rounds(max_rounds=context_window)
+        if item is not None:
+            from orchestrator.runtime_session import session_handoff_builder
+
+            builder = session_handoff_builder(runtime, item=item)
+        else:
+            builder = runtime.handoff_builder
+        rounds = builder.get_recent_rounds(max_rounds=context_window)
     except Exception as exc:
         runtime.logger.warning(f"_wrapper_visible_context: get_recent_rounds failed: {exc}")
         return []
@@ -172,6 +180,9 @@ async def apply_wrapper_to_visible_text(runtime: Any, item: Any, visible_text: s
     memory_plus_written = False
     memory_plus_active = memory_plus_response_writer_enabled(runtime)
     if memory_plus_active:
+        from orchestrator.runtime_session import item_session_workspace
+
+        memory_workspace = item_session_workspace(runtime, item)
         extracted = extract_memory_plus_update_details(visible_text)
         visible_text = extracted.visible_text
         update = extracted.update
@@ -205,7 +216,7 @@ async def apply_wrapper_to_visible_text(runtime: Any, item: Any, visible_text: s
         reason = "not_attempted"
         try:
             write_result = write_memory_plus_update(
-                runtime.workspace_dir,
+                memory_workspace,
                 request_id=item.request_id,
                 source=item.source,
                 prompt=item.prompt,
@@ -218,7 +229,7 @@ async def apply_wrapper_to_visible_text(runtime: Any, item: Any, visible_text: s
             runtime.logger.warning("Memory+ write-back failed for %s: %s", item.request_id, exc)
         try:
             write_memory_plus_diagnostic(
-                runtime.workspace_dir,
+                memory_workspace,
                 request_id=item.request_id,
                 source=item.source,
                 block_present=extracted.block_present,
@@ -235,7 +246,7 @@ async def apply_wrapper_to_visible_text(runtime: Any, item: Any, visible_text: s
         except Exception as exc:
             runtime.logger.warning("Memory+ diagnostic write failed for %s: %s", item.request_id, exc)
         if memory_plus_written:
-            mark_memory_plus_session_synced(runtime)
+            mark_memory_plus_session_synced(runtime, memory_workspace)
 
     if not wrapper_enabled(runtime):
         fallback = "memory_plus" if memory_plus_active else "wrapper_mode_disabled"
@@ -269,7 +280,9 @@ async def apply_wrapper_to_visible_text(runtime: Any, item: Any, visible_text: s
             source=item.source,
             core_raw=visible_text,
             user_request=item.prompt,
-            visible_context=runtime._wrapper_visible_context(cfg.context_window),
+            visible_context=runtime._wrapper_visible_context(
+                cfg.context_window, item=item
+            ),
             wrapper_slots=slots,
             config=cfg,
             silent=True,

@@ -21,6 +21,7 @@ from orchestrator.memory_plus_mode import (
     ensure_memory_plus_notepad,
     ensure_memory_plus_observer,
     get_memory_plus_status,
+    is_memory_plus_enabled,
     set_memory_plus_enabled,
 )
 
@@ -106,10 +107,7 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         return
 
     if args in ("", "status"):
-        from orchestrator.fresh_context import (
-            automatic_context_suppressed,
-            habit_context_suppressed,
-        )
+        from orchestrator import runtime_session
 
         search_enabled = is_memory_search_enabled(runtime.workspace_dir)
         if assembler:
@@ -118,21 +116,19 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
             state = f"turns={turns_state}, long-term search={search_state} (persistent)"
         else:
             state = "unknown (assembler not ready)"
+        session = runtime_session.current_session_for_update(runtime, update)
+        session_messages = runtime_session.ensure_store(runtime).messages(
+            session["session_id"], owner_id=runtime_session.owner_id(runtime), limit=1000
+        )
         stats = runtime.memory_store.get_stats() if hasattr(runtime, "memory_store") else {}
-        turns = stats.get("turns", "?")
         memories = stats.get("memories", "?")
         sync_on = runtime._get_skill_state().get("memory_sync", False)
         sync_state = "ON 🔄" if sync_on else "OFF ⬜"
-        continuity = get_memory_plus_status(runtime.workspace_dir)
-        fresh_aux_paused = automatic_context_suppressed(runtime)
-        continuity_state = (
-            "ON · FRESH-FENCED ⏸️"
-            if continuity["enabled"] and fresh_aux_paused
-            else ("ON ✅" if continuity["enabled"] else "OFF ⬜")
+        continuity = get_memory_plus_status(
+            runtime_session.current_session_workspace(runtime, update)
         )
-        habit_fence_state = (
-            "ACTIVE ⏸️" if habit_context_suppressed(runtime) else "CLEAR ✅"
-        )
+        continuity["enabled"] = is_memory_plus_enabled(runtime.workspace_dir)
+        continuity_state = "ON ✅" if continuity["enabled"] else "OFF ⬜"
         carryover = continuity.get("carryover_from") or "none"
         await runtime._reply_text(
             update,
@@ -142,10 +138,10 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
             f"<code>{continuity['open_items']}</code> open\n"
             f"<b>Carryover</b> · <code>{carryover}</code>\n"
             f"<b>Context injection</b> · {state}\n"
-            f"<b>Fresh fences</b> · auxiliary context "
-            f"{'ACTIVE ⏸️' if fresh_aux_paused else 'CLEAR ✅'} · "
-            f"Habit advice {habit_fence_state}\n"
-            f"<b>Stored</b> · <code>{turns}</code> turns · <code>{memories}</code> memories\n"
+            f"<b>Session</b> · <code>{session['session_id']}</code> · generation "
+            f"<code>{session['context_generation']}</code>\n"
+            f"<b>Stored</b> · <code>{len(session_messages)}</code> Session messages · "
+            f"<code>{memories}</code> promoted Agent memories\n"
             f"<b>BGE sync</b> · <code>{sync_state}</code>\n\n"
             "Changes apply immediately and preserve stored data unless <code>wipe</code> is explicitly used.\n\n"
             "<code>/memory plus on|off</code> · <code>on</code> · <code>pause</code> · <code>search on|off|status</code> · "

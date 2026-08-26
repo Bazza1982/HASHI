@@ -314,8 +314,34 @@ class BridgeMemoryStore:
                     source TEXT NOT NULL,
                     content TEXT NOT NULL,
                     importance REAL NOT NULL DEFAULT 1.0,
-                    embedding TEXT NOT NULL
+                    embedding TEXT NOT NULL,
+                    origin TEXT NOT NULL DEFAULT 'legacy',
+                    origin_ref TEXT NOT NULL DEFAULT '',
+                    session_id TEXT,
+                    run_id TEXT,
+                    message_id TEXT,
+                    promoted_at TEXT
                 )
+                """
+            )
+            memory_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(memories)").fetchall()
+            }
+            for name, definition in (
+                ("origin", "TEXT NOT NULL DEFAULT 'legacy'"),
+                ("origin_ref", "TEXT NOT NULL DEFAULT ''"),
+                ("session_id", "TEXT"),
+                ("run_id", "TEXT"),
+                ("message_id", "TEXT"),
+                ("promoted_at", "TEXT"),
+            ):
+                if name not in memory_columns:
+                    conn.execute(f"ALTER TABLE memories ADD COLUMN {name} {definition}")
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS memories_origin_ref_unique
+                ON memories(origin_ref) WHERE origin_ref != ''
                 """
             )
             conn.execute(
@@ -735,7 +761,20 @@ class BridgeMemoryStore:
                 imported += 1
         return imported
 
-    def record_memory(self, memory_type: str, source: str, content: str, importance: float = 1.0) -> int | None:
+    def record_memory(
+        self,
+        memory_type: str,
+        source: str,
+        content: str,
+        importance: float = 1.0,
+        *,
+        origin: str = "legacy",
+        origin_ref: str = "",
+        session_id: str | None = None,
+        run_id: str | None = None,
+        message_id: str | None = None,
+        promoted_at: str | None = None,
+    ) -> int | None:
         clean = (content or "").strip()
         if not clean:
             return None
@@ -744,13 +783,34 @@ class BridgeMemoryStore:
         with self._connect() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO memories (ts, memory_type, source, content, importance, embedding)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO memories (
+                    ts, memory_type, source, content, importance, embedding,
+                    origin, origin_ref, session_id, run_id, message_id, promoted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (self._now(), memory_type, source, clean, float(importance), emb),
+                (
+                    self._now(),
+                    memory_type,
+                    source,
+                    clean,
+                    float(importance),
+                    emb,
+                    str(origin or "legacy"),
+                    str(origin_ref or ""),
+                    str(session_id) if session_id else None,
+                    str(run_id) if run_id else None,
+                    str(message_id) if message_id else None,
+                    str(promoted_at) if promoted_at else None,
+                ),
             )
-            memory_id = int(cur.lastrowid) if cur.lastrowid is not None else None
-            if memory_id is not None:
+            inserted = cur.rowcount == 1
+            memory_id = int(cur.lastrowid) if inserted and cur.lastrowid is not None else None
+            if memory_id is None and origin_ref:
+                existing = conn.execute(
+                    "SELECT id FROM memories WHERE origin_ref = ?", (str(origin_ref),)
+                ).fetchone()
+                memory_id = int(existing["id"]) if existing is not None else None
+            if inserted and memory_id is not None:
                 conn.execute(
                     "INSERT INTO memory_fts (content, memory_id, source) VALUES (?, ?, ?)",
                     (clean, memory_id, source),
@@ -758,6 +818,16 @@ class BridgeMemoryStore:
                 self._upsert_vec(conn, "memory_vec", "memory_id", memory_id, embedding)
             conn.commit()
         return memory_id
+
+    def memory_origin_exists(self, origin_ref: str) -> bool:
+        clean = str(origin_ref or "").strip()
+        if not clean:
+            return False
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM memories WHERE origin_ref = ?", (clean,)
+            ).fetchone()
+        return row is not None
 
     def record_exchange(self, user_text: str, assistant_text: str, source: str):
         user_clean = (user_text or "").strip()
@@ -1315,6 +1385,7 @@ class BridgeContextAssembler:
         incremental: bool = False,
         extra_sections: list[tuple[str, str]] | None = None,
         context_profile: str | None = None,
+        recent_exchanges: list[dict[str, Any]] | None = None,
     ) -> str:
         return self.build_prompt_payload(
             user_prompt,
@@ -1322,6 +1393,7 @@ class BridgeContextAssembler:
             incremental=incremental,
             extra_sections=extra_sections,
             context_profile=context_profile,
+            recent_exchanges=recent_exchanges,
         )["final_prompt"]
 
     @staticmethod
@@ -1378,6 +1450,7 @@ class BridgeContextAssembler:
         extra_sections: list[tuple[str, str]] | None = None,
         inject_memory: bool = True,
         context_profile: str | None = None,
+        recent_exchanges: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Build PCM and prune only oldest complete exchanges for char caps."""
 
@@ -1480,18 +1553,23 @@ class BridgeContextAssembler:
         )
         exchanges = []
         if should_inject_history:
-            getter = self.memory_store.get_completed_exchanges
-            kwargs: dict[str, Any] = {"limit": self.MAX_RECENT_EXCHANGES}
-            try:
-                if "after_epoch" in inspect.signature(getter).parameters:
-                    from orchestrator.fresh_context import workspace_cutoff_epoch
+            if recent_exchanges is not None:
+                exchanges = list(recent_exchanges)[-self.MAX_RECENT_EXCHANGES :]
+            else:
+                # Compatibility for legacy callers and migration tooling. The
+                # live runtime always supplies a Session-scoped timeline.
+                getter = self.memory_store.get_completed_exchanges
+                kwargs: dict[str, Any] = {"limit": self.MAX_RECENT_EXCHANGES}
+                try:
+                    if "after_epoch" in inspect.signature(getter).parameters:
+                        from orchestrator.fresh_context import workspace_cutoff_epoch
 
-                    workspace = getattr(self.memory_store, "workspace_dir", None)
-                    if workspace is not None:
-                        kwargs["after_epoch"] = workspace_cutoff_epoch(workspace)
-            except (TypeError, ValueError):
-                pass
-            exchanges = getter(**kwargs)
+                        workspace = getattr(self.memory_store, "workspace_dir", None)
+                        if workspace is not None:
+                            kwargs["after_epoch"] = workspace_cutoff_epoch(workspace)
+                except (TypeError, ValueError):
+                    pass
+                exchanges = getter(**kwargs)
         for exchange in exchanges:
             sequence = int(exchange.get("sequence") or exchange.get("exchange_id") or 0)
             user_ts = str(exchange.get("user_ts") or "unknown-time")

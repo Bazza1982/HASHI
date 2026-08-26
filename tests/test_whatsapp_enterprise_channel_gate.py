@@ -5,7 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.enterprise import AuditEventWriter, ChannelRegistry, EnterpriseChannelGate, IdentityService
+from orchestrator.enterprise import (
+    AuditEventWriter,
+    ChannelRegistry,
+    EnterpriseChannelGate,
+    IdentityService,
+)
 from transports.whatsapp import WhatsAppTransport
 
 
@@ -172,3 +177,63 @@ async def test_enterprise_whatsapp_egress_allows_bound_agent(tmp_path):
 
     assert transport.sent == [("61400000000@s.whatsapp.net", "[nana]: hello")]
     assert _audit_events(tmp_path) == []
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_ingress_passes_chat_key_to_session_routing(tmp_path):
+    captured = []
+
+    class Runtime:
+        name = "nana"
+
+        async def enqueue_request(self, **kwargs):
+            captured.append(kwargs)
+            return "req-whatsapp"
+
+        def register_request_listener(self, request_id, callback):
+            self.listener = (request_id, callback)
+
+    runtime = Runtime()
+    transport = WhatsAppTransport.__new__(WhatsAppTransport)
+    transport._refresh_runtime_config = lambda: None
+    transport._allowed_numbers = set()
+    transport._allowed_chat_ids = set()
+    transport._jid_cache = {}
+    transport._jid_str = lambda jid: str(jid)
+    transport._phone_candidates = lambda _jid: {"+61400000000"}
+
+    async def allow_ingress(**_kwargs):
+        return True
+
+    transport._check_whatsapp_ingress_allowed = allow_ingress
+    transport._extract_text = lambda _msg: "hello"
+    transport._is_voice = lambda _msg: False
+    transport._detect_media_kind = lambda _msg: None
+    transport._router = SimpleNamespace(
+        get_targets=lambda _chat: ["nana"],
+        get_mode=lambda _chat: "single",
+    )
+    transport.orchestrator = SimpleNamespace(runtimes=[runtime])
+    transport._get_runtime = lambda name: runtime if name == "nana" else None
+
+    async def send_text(_chat_key, _text):
+        raise AssertionError("no reply should be sent before the Agent completes")
+
+    transport._send_text = send_text
+    chat_key = "61400000000@s.whatsapp.net"
+    message = SimpleNamespace(
+        Info=SimpleNamespace(
+            MessageSource=SimpleNamespace(
+                IsFromMe=False,
+                Chat=chat_key,
+                Sender=chat_key,
+            )
+        )
+    )
+
+    await transport._on_message(message)
+
+    assert captured[0]["request_metadata"] == {
+        "session_surface": "whatsapp",
+        "session_channel_key": chat_key,
+    }
