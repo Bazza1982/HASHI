@@ -8,7 +8,9 @@ from orchestrator import runtime_session
 from orchestrator.session_store import (
     IdempotencyConflict,
     SessionConflict,
+    SessionNotFound,
     SessionStore,
+    StaleFencingToken,
 )
 
 
@@ -125,12 +127,12 @@ def test_recent_context_never_crosses_session_or_fresh_generation(tmp_path):
         answer="second answer",
     )
 
-    assert [row["user_text"] for row in store.recent_exchanges(first["session_id"])] == [
-        "FIRST SESSION SECRET"
-    ]
-    assert [row["user_text"] for row in store.recent_exchanges(second["session_id"])] == [
-        "SECOND SESSION SECRET"
-    ]
+    assert [
+        row["user_text"] for row in store.recent_exchanges(first["session_id"])
+    ] == ["FIRST SESSION SECRET"]
+    assert [
+        row["user_text"] for row in store.recent_exchanges(second["session_id"])
+    ] == ["SECOND SESSION SECRET"]
 
     fresh = store.start_fresh_generation(first["session_id"])
     assert fresh["context_generation"] == 2
@@ -217,7 +219,10 @@ def test_terminal_commit_writes_message_event_projection_and_outbox_together(tmp
     )
 
     snapshot = store.snapshot(session["session_id"], owner_id=owner)
-    assert [message["role"] for message in snapshot["messages"]] == ["user", "assistant"]
+    assert [message["role"] for message in snapshot["messages"]] == [
+        "user",
+        "assistant",
+    ]
     assert snapshot["runs"][0]["state"] == "completed"
     assert snapshot["runs"][0]["run_id"] == accepted.run_id
     assert [event["kind"] for event in store.events(session["session_id"])] == [
@@ -227,7 +232,10 @@ def test_terminal_commit_writes_message_event_projection_and_outbox_together(tmp
         "run.completed",
     ]
     with sqlite3.connect(store.db_path) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0] == 2
+        assert (
+            connection.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0]
+            == 2
+        )
 
 
 def test_promotion_watermark_is_idempotent_and_archive_is_non_destructive(tmp_path):
@@ -258,6 +266,108 @@ def test_promotion_watermark_is_idempotent_and_archive_is_non_destructive(tmp_pa
     assert store.promotion_status(agent_id="lily")["promoted_count"] == 1
 
 
+def test_cancel_fences_late_worker_and_is_idempotent(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-cancel",
+        text="stop",
+        source="test",
+        idempotency_key="cancel-key",
+    )
+    token = store.mark_request_running(accepted.request_id, worker_id="worker")
+    stopped = store.cancel_run(accepted.run_id, owner_id=owner)
+    assert stopped["state"] == "stopped"
+    assert stopped["fencing_token"] == token + 1
+    assert store.cancel_run(accepted.run_id, owner_id=owner)["state"] == "stopped"
+    assert (
+        store.finish_request(
+            accepted.request_id,
+            success=True,
+            assistant_text="late",
+            fencing_token=token,
+        )["state"]
+        == "stopped"
+    )
+
+
+def test_attachment_owner_binding_and_approval_origin_fencing(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    staged = store.stage_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        filename="a.txt",
+        media_type="text/plain",
+        size_bytes=3,
+        sha256="a" * 64,
+    )
+    assert (
+        store.commit_attachment(
+            session_id=session["session_id"],
+            owner_id=owner,
+            attachment_id=staged["attachment_id"],
+        )["state"]
+        == "committed"
+    )
+    with pytest.raises(SessionNotFound):
+        store.commit_attachment(
+            session_id=session["session_id"],
+            owner_id="user:8",
+            attachment_id=staged["attachment_id"],
+        )
+
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-approval",
+        text="approve",
+        source="test",
+        idempotency_key="approval-key",
+    )
+    token = store.mark_request_running(accepted.request_id, worker_id="worker")
+    approval = store.create_approval(
+        run_id=accepted.run_id,
+        owner_id=owner,
+        fencing_token=token,
+        scope={"tool": "write"},
+    )
+    assert (
+        store.decide_approval(
+            approval_id=approval["approval_id"], owner_id=owner, decision="approved"
+        )["decision"]
+        == "approved"
+    )
+
+    second = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-expired",
+        text="expire",
+        source="test",
+        idempotency_key="expired-key",
+    )
+    token2 = store.mark_request_running(second.request_id, worker_id="worker")
+    expired = store.create_approval(
+        run_id=second.run_id,
+        owner_id=owner,
+        fencing_token=token2,
+        scope={"tool": "write"},
+    )
+    store.cancel_run(second.run_id, owner_id=owner)
+    with pytest.raises(StaleFencingToken):
+        store.decide_approval(
+            approval_id=expired["approval_id"], owner_id=owner, decision="approved"
+        )
+
+
 def test_backend_bindings_are_keyed_by_session_generation_and_backend(tmp_path):
     store = _store(tmp_path)
     session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
@@ -269,24 +379,33 @@ def test_backend_bindings_are_keyed_by_session_generation_and_backend(tmp_path):
         backend_thread_id="thread-one",
     )
 
-    assert store.backend_binding(
-        agent_id="lily",
-        session_id=session["session_id"],
-        context_generation=1,
-        backend_id="codex-cli",
-    ) == "thread-one"
-    assert store.backend_binding(
-        agent_id="lily",
-        session_id=session["session_id"],
-        context_generation=2,
-        backend_id="codex-cli",
-    ) is None
-    assert store.backend_binding(
-        agent_id="lily",
-        session_id=session["session_id"],
-        context_generation=1,
-        backend_id="claude-cli",
-    ) is None
+    assert (
+        store.backend_binding(
+            agent_id="lily",
+            session_id=session["session_id"],
+            context_generation=1,
+            backend_id="codex-cli",
+        )
+        == "thread-one"
+    )
+    assert (
+        store.backend_binding(
+            agent_id="lily",
+            session_id=session["session_id"],
+            context_generation=2,
+            backend_id="codex-cli",
+        )
+        is None
+    )
+    assert (
+        store.backend_binding(
+            agent_id="lily",
+            session_id=session["session_id"],
+            context_generation=1,
+            backend_id="claude-cli",
+        )
+        is None
+    )
 
 
 def test_event_consumer_replays_until_monotonic_ack(tmp_path):
@@ -328,11 +447,14 @@ def test_event_consumer_replays_until_monotonic_ack(tmp_path):
         sequence=issued,
     )
     assert acknowledged["acknowledged_sequence"] == issued
-    assert store.poll_event_consumer(
-        session_id=session["session_id"],
-        owner_id=owner,
-        consumer_id=consumer["consumer_id"],
-    )["events"] == []
+    assert (
+        store.poll_event_consumer(
+            session_id=session["session_id"],
+            owner_id=owner,
+            consumer_id=consumer["consumer_id"],
+        )["events"]
+        == []
+    )
 
     # A stale ACK is idempotent and cannot move the cursor backwards.
     stale = store.acknowledge_event_consumer(
@@ -372,9 +494,9 @@ def test_fresh_is_blocked_until_active_run_is_terminal(tmp_path):
     store.finish_request(
         "req-active", success=False, error_text="cancelled before execution"
     )
-    assert store.start_fresh_generation(session["session_id"])[
-        "context_generation"
-    ] == 2
+    assert (
+        store.start_fresh_generation(session["session_id"])["context_generation"] == 2
+    )
 
 
 def test_restart_reconciliation_terminalizes_queued_and_running_runs_once(tmp_path):
@@ -399,9 +521,12 @@ def test_restart_reconciliation_terminalizes_queued_and_running_runs_once(tmp_pa
         source="test",
         idempotency_key="running-restart",
     )
-    assert store.mark_request_running(
-        running.request_id, worker_id="worker-before-restart"
-    ) == 1
+    assert (
+        store.mark_request_running(
+            running.request_id, worker_id="worker-before-restart"
+        )
+        == 1
+    )
 
     restarted = _store(tmp_path)
     reconciled = restarted.reconcile_incomplete_runs()
@@ -418,8 +543,7 @@ def test_restart_reconciliation_terminalizes_queued_and_running_runs_once(tmp_pa
         terminal = [
             event
             for event in events
-            if event["run_id"] == accepted.run_id
-            and event["kind"] == "run.interrupted"
+            if event["run_id"] == accepted.run_id and event["kind"] == "run.interrupted"
         ]
         assert len(terminal) == 1
         assert terminal[0]["detail"]["prior_state"] == prior_state

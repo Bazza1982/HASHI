@@ -94,9 +94,7 @@ def _server(tmp_path: Path) -> tuple[WorkbenchApiServer, _Runtime]:
 async def test_unqualified_session_api_is_not_advertised(tmp_path):
     server, _runtime = _server(tmp_path)
 
-    capabilities = json.loads(
-        (await server.handle_v1_capabilities(_Request())).text
-    )
+    capabilities = json.loads((await server.handle_v1_capabilities(_Request())).text)
     unavailable = await server.handle_v1_session_not_ready(_Request())
 
     assert "session_api_version" not in capabilities
@@ -147,9 +145,7 @@ async def test_session_api_run_event_ack_and_fresh_contract(tmp_path):
             {
                 "idempotency_key": "api-key",
                 "surface": "desktop-client",
-                "message": {
-                    "content": [{"type": "text", "text": "hello Session"}]
-                },
+                "message": {"content": [{"type": "text", "text": "hello Session"}]},
             },
             match_info={"session_id": session_id},
             headers={"X-Client-Id": "aptenra-test"},
@@ -198,9 +194,10 @@ async def test_session_api_run_event_ack_and_fresh_contract(tmp_path):
             },
         )
     )
-    assert json.loads(ack_response.text)["consumer"][
-        "acknowledged_sequence"
-    ] == poll["issued_through_sequence"]
+    assert (
+        json.loads(ack_response.text)["consumer"]["acknowledged_sequence"]
+        == poll["issued_through_sequence"]
+    )
     replay = json.loads(
         (
             await server.handle_v1_session_events(
@@ -217,6 +214,74 @@ async def test_session_api_run_event_ack_and_fresh_contract(tmp_path):
         _Request({}, match_info={"session_id": session_id})
     )
     assert json.loads(fresh_response.text)["session"]["context_generation"] == 2
-    assert [
-        row["text"] for row in server.session_store.messages(session_id)
-    ] == ["hello Session", "hello back"]
+    assert [row["text"] for row in server.session_store.messages(session_id)] == [
+        "hello Session",
+        "hello back",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_api_cancel_and_attachment_controls(tmp_path):
+    server, _runtime = _server(tmp_path)
+    created = json.loads(
+        (
+            await server.handle_v1_sessions_create(
+                _Request({"agent_id": "lily", "title": "Controls"})
+            )
+        ).text
+    )
+    session_id = created["session"]["session_id"]
+    run = json.loads(
+        (
+            await server.handle_v1_session_runs_create(
+                _Request(
+                    {
+                        "idempotency_key": "controls-key",
+                        "message": {"content": [{"type": "text", "text": "wait"}]},
+                    },
+                    match_info={"session_id": session_id},
+                )
+            )
+        ).text
+    )
+    server.session_store.mark_request_running(run["request_id"], worker_id="worker")
+    cancelled = json.loads(
+        (
+            await server.handle_v1_session_run_cancel(
+                _Request(
+                    {"reason": "user stop"},
+                    match_info={"session_id": session_id, "run_id": run["run_id"]},
+                )
+            )
+        ).text
+    )
+    assert cancelled["run"]["state"] == "stopped"
+
+    staged = json.loads(
+        (
+            await server.handle_v1_attachment_stage(
+                _Request(
+                    {
+                        "filename": "proof.txt",
+                        "media_type": "text/plain",
+                        "size_bytes": 5,
+                        "sha256": "e" * 64,
+                    },
+                    match_info={"session_id": session_id},
+                )
+            )
+        ).text
+    )["attachment"]
+    committed = json.loads(
+        (
+            await server.handle_v1_attachment_commit(
+                _Request(
+                    match_info={
+                        "session_id": session_id,
+                        "attachment_id": staged["attachment_id"],
+                    }
+                )
+            )
+        ).text
+    )
+    assert committed["attachment"]["state"] == "committed"

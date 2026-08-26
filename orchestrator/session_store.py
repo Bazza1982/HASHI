@@ -52,6 +52,10 @@ class IdempotencyConflict(SessionConflict):
     code = "idempotency_conflict"
 
 
+class StaleFencingToken(SessionConflict):
+    code = "stale_fencing_token"
+
+
 @dataclass(frozen=True)
 class AcceptedRun:
     session_id: str
@@ -94,7 +98,9 @@ class SessionStore:
         )
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+        connection = sqlite3.connect(
+            self.db_path, timeout=30.0, check_same_thread=False
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")
@@ -354,6 +360,36 @@ class SessionStore:
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id),
                     FOREIGN KEY(event_id) REFERENCES run_events(event_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS session_attachments (
+                    attachment_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'staged',
+                    created_at TEXT NOT NULL,
+                    committed_at TEXT,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS run_approvals (
+                    approval_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    fencing_token INTEGER NOT NULL,
+                    scope_json TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    decision TEXT,
+                    created_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(run_id) REFERENCES runs(run_id)
+                );
                 """
             )
             consumer_columns = {
@@ -397,7 +433,8 @@ class SessionStore:
 
     def _next_ordinal(self, connection: sqlite3.Connection, session_id: str) -> int:
         row = connection.execute(
-            "SELECT next_message_ordinal FROM sessions WHERE session_id = ?", (session_id,)
+            "SELECT next_message_ordinal FROM sessions WHERE session_id = ?",
+            (session_id,),
         ).fetchone()
         if row is None:
             raise SessionNotFound(session_id)
@@ -422,7 +459,8 @@ class SessionStore:
         outbox: bool = False,
     ) -> dict[str, Any]:
         row = connection.execute(
-            "SELECT next_event_sequence FROM sessions WHERE session_id = ?", (session_id,)
+            "SELECT next_event_sequence FROM sessions WHERE session_id = ?",
+            (session_id,),
         ).fetchone()
         if row is None:
             raise SessionNotFound(session_id)
@@ -500,7 +538,9 @@ class SessionStore:
                     return self._session_dict(row)
             session_id = _new_id("ses")
             now = _utc_now()
-            resolved_title = str(title or (f"{agent_id} default" if is_default else "New session")).strip()
+            resolved_title = str(
+                title or (f"{agent_id} default" if is_default else "New session")
+            ).strip()
             connection.execute(
                 """
                 INSERT INTO sessions(
@@ -597,7 +637,7 @@ class SessionStore:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT * FROM sessions WHERE {' AND '.join(clauses)}
+                SELECT * FROM sessions WHERE {" AND ".join(clauses)}
                 ORDER BY is_default DESC, updated_at DESC, session_id ASC LIMIT ?
                 """,
                 params,
@@ -904,6 +944,7 @@ class SessionStore:
         assistant_source: str = "",
         error_text: str | None = None,
         failure_state: str = "failed",
+        fencing_token: int | None = None,
     ) -> dict[str, Any] | None:
         now = _utc_now()
         with self._lock, self._connect() as connection:
@@ -916,13 +957,19 @@ class SessionStore:
             current_state = str(run["state"])
             if current_state in TERMINAL_RUN_STATES:
                 return self._run_dict(run)
+            if fencing_token is not None and int(run["fencing_token"]) != int(
+                fencing_token
+            ):
+                raise StaleFencingToken("executor fencing token is stale")
             session_id = str(run["session_id"])
             final_message_id = None
             if success:
                 clean = str(assistant_text or "").strip()
                 if not clean:
                     success = False
-                    error_text = error_text or "backend returned no visible final response"
+                    error_text = (
+                        error_text or "backend returned no visible final response"
+                    )
                 else:
                     final_message_id = _new_id("msg")
                     ordinal = self._next_ordinal(connection, session_id)
@@ -983,8 +1030,12 @@ class SessionStore:
                 kind="run.completed" if success else f"run.{state}",
                 status=state,
                 phase="terminal",
-                summary="Assistant response completed" if success else str(error_text or "Run failed"),
-                detail={"message_id": final_message_id} if success else {"error": str(error_text or "run failed")},
+                summary="Assistant response completed"
+                if success
+                else str(error_text or "Run failed"),
+                detail={"message_id": final_message_id}
+                if success
+                else {"error": str(error_text or "run failed")},
                 outbox=True,
             )
             projection = {
@@ -1017,6 +1068,186 @@ class SessionStore:
                 "SELECT * FROM runs WHERE run_id = ?", (run["run_id"],)
             ).fetchone()
             return self._run_dict(result)
+
+    def cancel_run(
+        self, run_id: str, *, owner_id: str, reason: str = "cancelled_by_user"
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                """SELECT r.* FROM runs r JOIN sessions s ON s.session_id=r.session_id
+                   WHERE r.run_id=? AND s.instance_id=? AND s.owner_id=?""",
+                (str(run_id), self.instance_id, str(owner_id)),
+            ).fetchone()
+            if run is None:
+                raise SessionNotFound(str(run_id))
+            if str(run["state"]) in TERMINAL_RUN_STATES:
+                return self._run_dict(run)
+            connection.execute(
+                """UPDATE runs SET state='stopped', fencing_token=fencing_token+1,
+                   worker_id=NULL, error_code='run_cancelled', error_text=?,
+                   completed_at=?, updated_at=? WHERE run_id=?""",
+                (str(reason), now, now, str(run_id)),
+            )
+            connection.execute(
+                "UPDATE run_attempts SET state='stopped', finished_at=? WHERE run_id=? AND state='running'",
+                (now, str(run_id)),
+            )
+            self._append_event(
+                connection,
+                session_id=str(run["session_id"]),
+                run_id=str(run_id),
+                kind="run.stopped",
+                status="stopped",
+                phase="control",
+                summary=str(reason),
+                detail={"reason": str(reason)},
+                outbox=True,
+            )
+            row = connection.execute(
+                "SELECT * FROM runs WHERE run_id=?", (str(run_id),)
+            ).fetchone()
+        return self._run_dict(row)
+
+    def stage_attachment(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        filename: str,
+        media_type: str,
+        size_bytes: int,
+        sha256: str,
+    ) -> dict[str, Any]:
+        self.get_session(session_id, owner_id=owner_id, include_deleted=False)
+        digest = str(sha256).lower()
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("sha256 must be 64 lowercase hexadecimal characters")
+        attachment_id, now = _new_id("att"), _utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """INSERT INTO session_attachments(attachment_id,session_id,owner_id,filename,
+                   media_type,size_bytes,sha256,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    attachment_id,
+                    str(session_id),
+                    str(owner_id),
+                    str(filename),
+                    str(media_type),
+                    max(0, int(size_bytes)),
+                    digest,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM session_attachments WHERE attachment_id=?",
+                (attachment_id,),
+            ).fetchone()
+        return dict(row)
+
+    def commit_attachment(
+        self, *, session_id: str, owner_id: str, attachment_id: str
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM session_attachments WHERE attachment_id=? AND session_id=? AND owner_id=?",
+                (str(attachment_id), str(session_id), str(owner_id)),
+            ).fetchone()
+            if row is None:
+                raise SessionNotFound("attachment not found")
+            connection.execute(
+                "UPDATE session_attachments SET state='committed', committed_at=COALESCE(committed_at,?) WHERE attachment_id=?",
+                (now, str(attachment_id)),
+            )
+            updated = connection.execute(
+                "SELECT * FROM session_attachments WHERE attachment_id=?",
+                (str(attachment_id),),
+            ).fetchone()
+        return dict(updated)
+
+    def create_approval(
+        self,
+        *,
+        run_id: str,
+        owner_id: str,
+        fencing_token: int,
+        scope: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        run = self.get_run(run_id, owner_id=owner_id)
+        if int(run["fencing_token"]) != int(fencing_token) or run["state"] != "running":
+            raise StaleFencingToken("approval origin is no longer authoritative")
+        approval_id, now = _new_id("approval"), _utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """INSERT INTO run_approvals(approval_id,session_id,run_id,owner_id,attempt,
+                   fencing_token,scope_json,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    approval_id,
+                    run["session_id"],
+                    str(run_id),
+                    str(owner_id),
+                    int(run["attempt"]),
+                    int(fencing_token),
+                    _json(dict(scope)),
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM run_approvals WHERE approval_id=?", (approval_id,)
+            ).fetchone()
+        result = dict(row)
+        result["scope"] = _json_object(result.pop("scope_json"))
+        return result
+
+    def decide_approval(
+        self, *, approval_id: str, owner_id: str, decision: str
+    ) -> dict[str, Any]:
+        resolved = str(decision).lower()
+        if resolved not in {"approved", "denied"}:
+            raise ValueError("decision must be approved or denied")
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM run_approvals WHERE approval_id=? AND owner_id=?",
+                (str(approval_id), str(owner_id)),
+            ).fetchone()
+            if row is None:
+                raise SessionNotFound("approval not found")
+            run = connection.execute(
+                "SELECT * FROM runs WHERE run_id=?", (row["run_id"],)
+            ).fetchone()
+            if str(row["state"]) == "pending" and (
+                run is None
+                or run["state"] != "running"
+                or int(run["fencing_token"]) != int(row["fencing_token"])
+            ):
+                raise StaleFencingToken("approval expired with its originating attempt")
+            if str(row["state"]) == "pending":
+                connection.execute(
+                    "UPDATE run_approvals SET state='decided',decision=?,decided_at=? WHERE approval_id=?",
+                    (resolved, now, str(approval_id)),
+                )
+                self._append_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    run_id=str(row["run_id"]),
+                    kind="approval.decided",
+                    status=resolved,
+                    phase="control",
+                    summary=f"Approval {resolved}",
+                    detail={"approval_id": str(approval_id), "decision": resolved},
+                    outbox=True,
+                )
+            updated = connection.execute(
+                "SELECT * FROM run_approvals WHERE approval_id=?", (str(approval_id),)
+            ).fetchone()
+        result = dict(updated)
+        result["scope"] = _json_object(result.pop("scope_json"))
+        return result
 
     def reconcile_incomplete_runs(self) -> list[dict[str, Any]]:
         """Terminalize Runs whose in-memory executor was lost on restart.
@@ -1137,7 +1368,7 @@ class SessionStore:
             row = connection.execute(
                 f"""
                 SELECT r.* FROM runs AS r JOIN sessions AS s ON s.session_id = r.session_id
-                WHERE {' AND '.join(clauses)}
+                WHERE {" AND ".join(clauses)}
                 """,
                 params,
             ).fetchone()
@@ -1165,7 +1396,7 @@ class SessionStore:
                 f"""
                 SELECT r.* FROM runs AS r
                 JOIN sessions AS s ON s.session_id = r.session_id
-                WHERE {' AND '.join(clauses)}
+                WHERE {" AND ".join(clauses)}
                 """,
                 params,
             ).fetchone()
@@ -1226,7 +1457,11 @@ class SessionStore:
                 SELECT * FROM messages WHERE session_id = ? AND ordinal > ?
                 ORDER BY ordinal ASC LIMIT ?
                 """,
-                (str(session_id), max(0, int(after_ordinal)), max(1, min(int(limit), 1000))),
+                (
+                    str(session_id),
+                    max(0, int(after_ordinal)),
+                    max(1, min(int(limit), 1000)),
+                ),
             ).fetchall()
         return [self._message_dict(row) for row in rows]
 
@@ -1281,19 +1516,22 @@ class SessionStore:
                 SELECT MAX(m.created_at) AS created_at
                 FROM messages AS m
                 JOIN sessions AS s ON s.session_id = m.session_id
-                WHERE {' AND '.join(clauses)}
+                WHERE {" AND ".join(clauses)}
                 """,
                 params,
             ).fetchone()
         value = row["created_at"] if row is not None else None
         return str(value) if value else None
 
-    def start_fresh_generation(self, session_id: str, *, reason: str = "fresh") -> dict[str, Any]:
+    def start_fresh_generation(
+        self, session_id: str, *, reason: str = "fresh"
+    ) -> dict[str, Any]:
         now = _utc_now()
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT * FROM sessions WHERE session_id = ? AND status = 'active'", (str(session_id),)
+                "SELECT * FROM sessions WHERE session_id = ? AND status = 'active'",
+                (str(session_id),),
             ).fetchone()
             if row is None:
                 raise SessionNotFound(str(session_id))
@@ -1369,7 +1607,9 @@ class SessionStore:
             ).fetchone()
             return self._session_dict(row)
 
-    def archive_session(self, session_id: str, *, deleted: bool = False) -> dict[str, Any]:
+    def archive_session(
+        self, session_id: str, *, deleted: bool = False
+    ) -> dict[str, Any]:
         now = _utc_now()
         target = "deleted" if deleted else "archived"
         with self._lock, self._connect() as connection:
@@ -1380,7 +1620,9 @@ class SessionStore:
             if row is None:
                 raise SessionNotFound(str(session_id))
             if bool(row["is_default"]):
-                raise SessionConflict("the permanent default Session cannot be archived")
+                raise SessionConflict(
+                    "the permanent default Session cannot be archived"
+                )
             connection.execute(
                 """
                 UPDATE sessions SET status = ?, deleted_at = ?, revision = revision + 1,
@@ -1422,7 +1664,12 @@ class SessionStore:
                 WHERE agent_id = ? AND session_id = ? AND context_generation = ?
                   AND backend_id = ?
                 """,
-                (str(agent_id).lower(), str(session_id), int(context_generation), str(backend_id)),
+                (
+                    str(agent_id).lower(),
+                    str(session_id),
+                    int(context_generation),
+                    str(backend_id),
+                ),
             ).fetchone()
         return str(row["backend_thread_id"]) if row is not None else None
 
@@ -1442,7 +1689,12 @@ class SessionStore:
                     DELETE FROM backend_bindings WHERE agent_id = ? AND session_id = ?
                       AND context_generation = ? AND backend_id = ?
                     """,
-                    (str(agent_id).lower(), str(session_id), int(context_generation), str(backend_id)),
+                    (
+                        str(agent_id).lower(),
+                        str(session_id),
+                        int(context_generation),
+                        str(backend_id),
+                    ),
                 )
                 return
             connection.execute(
@@ -1480,7 +1732,11 @@ class SessionStore:
                 SELECT * FROM run_events WHERE session_id = ? AND sequence > ?
                 ORDER BY sequence ASC LIMIT ?
                 """,
-                (str(session_id), max(0, int(after_sequence)), max(1, min(int(limit), 2000))),
+                (
+                    str(session_id),
+                    max(0, int(after_sequence)),
+                    max(1, min(int(limit), 2000)),
+                ),
             ).fetchall()
         result = []
         for row in rows:
@@ -1505,10 +1761,9 @@ class SessionStore:
                 (resolved_id,),
             ).fetchone()
             if existing is not None:
-                if (
-                    str(existing["session_id"]) != str(session_id)
-                    or str(existing["owner_id"]) != str(owner_id)
-                ):
+                if str(existing["session_id"]) != str(session_id) or str(
+                    existing["owner_id"]
+                ) != str(owner_id):
                     raise SessionConflict("event consumer belongs to another Session")
                 return dict(existing)
             connection.execute(
@@ -1634,7 +1889,9 @@ class SessionStore:
             ).fetchone()
         return dict(updated)
 
-    def snapshot(self, session_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
+    def snapshot(
+        self, session_id: str, *, owner_id: str | None = None
+    ) -> dict[str, Any]:
         session = self.get_session(session_id, owner_id=owner_id)
         with self._lock, self._connect() as connection:
             projections = connection.execute(
@@ -1689,7 +1946,7 @@ class SessionStore:
                 JOIN messages AS u ON u.message_id = r.user_message_id
                 JOIN messages AS a ON a.message_id = r.final_message_id
                 LEFT JOIN agent_memory_records AS p ON p.run_id = r.run_id
-                WHERE {' AND '.join(clauses)}
+                WHERE {" AND ".join(clauses)}
                 ORDER BY a.created_at, a.ordinal, r.run_id LIMIT ?
                 """,
                 params,
@@ -1697,7 +1954,9 @@ class SessionStore:
         result = []
         for row in rows:
             item = dict(row)
-            item["memory_origin_ref"] = f"session:{item['session_id']}:run:{item['run_id']}"
+            item["memory_origin_ref"] = (
+                f"session:{item['session_id']}:run:{item['run_id']}"
+            )
             result.append(item)
         return result
 
@@ -1752,7 +2011,9 @@ class SessionStore:
                 (str(agent_id).lower(),),
             ).fetchone()
         return {
-            "schedule": dict(schedule) if schedule is not None else {
+            "schedule": dict(schedule)
+            if schedule is not None
+            else {
                 "agent_id": str(agent_id).lower(),
                 "enabled": 1,
                 "local_time": "00:00",
@@ -1760,7 +2021,9 @@ class SessionStore:
                 "last_local_date": None,
             },
             "promoted_count": int(promoted["value"] if promoted is not None else 0),
-            "pending_count": len(self.promotion_candidates(agent_id=agent_id, limit=5000)),
+            "pending_count": len(
+                self.promotion_candidates(agent_id=agent_id, limit=5000)
+            ),
         }
 
     def set_promotion_schedule(
@@ -1772,7 +2035,9 @@ class SessionStore:
         timezone_name: str | None = None,
     ) -> dict[str, Any]:
         current = self.promotion_status(agent_id=agent_id)["schedule"]
-        resolved_enabled = bool(current.get("enabled", 1)) if enabled is None else bool(enabled)
+        resolved_enabled = (
+            bool(current.get("enabled", 1)) if enabled is None else bool(enabled)
+        )
         resolved_time = str(local_time or current.get("local_time") or "00:00")
         parts = resolved_time.split(":")
         if len(parts) != 2 or not all(part.isdigit() for part in parts):
@@ -1817,7 +2082,9 @@ class SessionStore:
 
     def session_workspace(self, session_id: str, context_generation: int) -> Path:
         safe_session = "".join(
-            character for character in str(session_id) if character.isalnum() or character in {"_", "-"}
+            character
+            for character in str(session_id)
+            if character.isalnum() or character in {"_", "-"}
         )
         if safe_session != str(session_id) or not safe_session:
             raise ValueError("invalid session_id")

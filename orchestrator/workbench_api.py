@@ -77,7 +77,9 @@ from orchestrator.session_store import (
 )
 from orchestrator.transfer_store import TransferStore
 
-_SUPPORTED_CONNECTOR_TYPES = frozenset({"github", "slack", "google_chat", "teams", "feishu"})
+_SUPPORTED_CONNECTOR_TYPES = frozenset(
+    {"github", "slack", "google_chat", "teams", "feishu"}
+)
 # External Session API publication stays fail-closed until the complete
 # qualification gate in the Session architecture contract has passed.
 PERSISTENT_SESSION_V1_QUALIFIED = False
@@ -109,7 +111,9 @@ def _connector_scopes_from_payload(value) -> list[str]:
     return sorted({str(item).strip() for item in raw_items if str(item).strip()})
 
 
-def _validate_connector_credential_payload(payload: dict, scopes: list[str]) -> str | None:
+def _validate_connector_credential_payload(
+    payload: dict, scopes: list[str]
+) -> str | None:
     connector_type = str(payload.get("connector_type") or "").strip().lower()
     if connector_type not in _SUPPORTED_CONNECTOR_TYPES:
         supported = ", ".join(sorted(_SUPPORTED_CONNECTOR_TYPES))
@@ -138,7 +142,9 @@ def _read_jsonl_recent(file_path: Path, limit: int = 50) -> dict:
             obj = json.loads(line)
         except Exception:
             continue
-        if obj.get("role") not in {"user", "assistant", "thinking"} or not obj.get("text"):
+        if obj.get("role") not in {"user", "assistant", "thinking"} or not obj.get(
+            "text"
+        ):
             continue
         records.append(obj)
 
@@ -166,7 +172,9 @@ def _read_jsonl_increment(file_path: Path, offset: int = 0) -> dict:
             obj = json.loads(line)
         except Exception:
             continue
-        if obj.get("role") not in {"user", "assistant", "thinking"} or not obj.get("text"):
+        if obj.get("role") not in {"user", "assistant", "thinking"} or not obj.get(
+            "text"
+        ):
             continue
         messages.append(obj)
 
@@ -181,7 +189,9 @@ def _saml_assertion_xml_from_payload(payload: dict) -> str:
     if not saml_response:
         raise ValueError("SAMLResponse or assertion_xml is required")
     try:
-        return base64.b64decode(saml_response.encode("ascii"), validate=True).decode("utf-8")
+        return base64.b64decode(saml_response.encode("ascii"), validate=True).decode(
+            "utf-8"
+        )
     except Exception as exc:
         raise ValueError("SAMLResponse must be base64 encoded XML") from exc
 
@@ -225,78 +235,190 @@ class WorkbenchApiServer:
         self.bridge_router = ConversationRouter(
             config_path=self.config_path,
             capabilities_path=self.config_path.parent / "agent_capabilities.json",
-            store_path=self.config_path.parent / "state" / "bridge_conversations.sqlite",
+            store_path=self.config_path.parent
+            / "state"
+            / "bridge_conversations.sqlite",
             runtimes=self._runtime_list(),
         )
-        self.transfer_store = TransferStore(self.config_path.parent / "state" / "bridge_transfers.sqlite")
+        self.transfer_store = TransferStore(
+            self.config_path.parent / "state" / "bridge_transfers.sqlite"
+        )
         self.app = web.Application(client_max_size=64 * 1024 * 1024)
         self.app.router.add_post("/api/auth/login", self.handle_auth_login)
         self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)
         self.app.router.add_get("/api/auth/providers", self.handle_auth_providers)
-        self.app.router.add_get("/api/auth/oidc/{provider_id}/start", self.handle_auth_oidc_start)
-        self.app.router.add_get("/api/auth/oidc/{provider_id}/callback", self.handle_auth_oidc_callback)
-        self.app.router.add_get("/api/auth/saml/{provider_id}/start", self.handle_auth_saml_start)
-        self.app.router.add_post("/api/auth/saml/{provider_id}/callback", self.handle_auth_saml_callback)
+        self.app.router.add_get(
+            "/api/auth/oidc/{provider_id}/start", self.handle_auth_oidc_start
+        )
+        self.app.router.add_get(
+            "/api/auth/oidc/{provider_id}/callback", self.handle_auth_oidc_callback
+        )
+        self.app.router.add_get(
+            "/api/auth/saml/{provider_id}/start", self.handle_auth_saml_start
+        )
+        self.app.router.add_post(
+            "/api/auth/saml/{provider_id}/callback", self.handle_auth_saml_callback
+        )
         self.app.router.add_get("/api/enterprise/users", self.handle_enterprise_users)
-        self.app.router.add_post("/api/enterprise/users", self.handle_enterprise_users_create)
-        self.app.router.add_post("/api/enterprise/scim/users", self.handle_enterprise_scim_users_upsert)
-        self.app.router.add_post("/api/enterprise/scim/users/deactivate", self.handle_enterprise_scim_users_deactivate)
-        self.app.router.add_get("/api/enterprise/scim/v2/Users", self.handle_enterprise_scim_v2_users_list)
-        self.app.router.add_post("/api/enterprise/scim/v2/Users", self.handle_enterprise_scim_v2_users_create)
-        self.app.router.add_get("/api/enterprise/scim/v2/Users/{user_id}", self.handle_enterprise_scim_v2_users_get)
-        self.app.router.add_patch("/api/enterprise/scim/v2/Users/{user_id}", self.handle_enterprise_scim_v2_users_patch)
-        self.app.router.add_get("/api/enterprise/scim/v2/Groups", self.handle_enterprise_scim_v2_groups_list)
-        self.app.router.add_get("/api/enterprise/scim/v2/Groups/{group_id}", self.handle_enterprise_scim_v2_groups_get)
+        self.app.router.add_post(
+            "/api/enterprise/users", self.handle_enterprise_users_create
+        )
+        self.app.router.add_post(
+            "/api/enterprise/scim/users", self.handle_enterprise_scim_users_upsert
+        )
+        self.app.router.add_post(
+            "/api/enterprise/scim/users/deactivate",
+            self.handle_enterprise_scim_users_deactivate,
+        )
+        self.app.router.add_get(
+            "/api/enterprise/scim/v2/Users", self.handle_enterprise_scim_v2_users_list
+        )
+        self.app.router.add_post(
+            "/api/enterprise/scim/v2/Users", self.handle_enterprise_scim_v2_users_create
+        )
+        self.app.router.add_get(
+            "/api/enterprise/scim/v2/Users/{user_id}",
+            self.handle_enterprise_scim_v2_users_get,
+        )
+        self.app.router.add_patch(
+            "/api/enterprise/scim/v2/Users/{user_id}",
+            self.handle_enterprise_scim_v2_users_patch,
+        )
+        self.app.router.add_get(
+            "/api/enterprise/scim/v2/Groups", self.handle_enterprise_scim_v2_groups_list
+        )
+        self.app.router.add_get(
+            "/api/enterprise/scim/v2/Groups/{group_id}",
+            self.handle_enterprise_scim_v2_groups_get,
+        )
         self.app.router.add_get(
             "/api/enterprise/scim/v2/ServiceProviderConfig",
             self.handle_enterprise_scim_v2_service_provider_config,
         )
-        self.app.router.add_get("/api/enterprise/scim/v2/ResourceTypes", self.handle_enterprise_scim_v2_resource_types)
+        self.app.router.add_get(
+            "/api/enterprise/scim/v2/ResourceTypes",
+            self.handle_enterprise_scim_v2_resource_types,
+        )
         self.app.router.add_get(
             "/api/enterprise/scim/v2/ResourceTypes/{resource_type}",
             self.handle_enterprise_scim_v2_resource_type_get,
         )
-        self.app.router.add_get("/api/enterprise/scim/v2/Schemas", self.handle_enterprise_scim_v2_schemas)
-        self.app.router.add_get("/api/enterprise/scim/v2/Schemas/{schema_id:.+}", self.handle_enterprise_scim_v2_schema_get)
-        self.app.router.add_post("/api/enterprise/scim/v2/Bulk", self.handle_enterprise_scim_v2_bulk)
+        self.app.router.add_get(
+            "/api/enterprise/scim/v2/Schemas", self.handle_enterprise_scim_v2_schemas
+        )
+        self.app.router.add_get(
+            "/api/enterprise/scim/v2/Schemas/{schema_id:.+}",
+            self.handle_enterprise_scim_v2_schema_get,
+        )
+        self.app.router.add_post(
+            "/api/enterprise/scim/v2/Bulk", self.handle_enterprise_scim_v2_bulk
+        )
         self.app.router.add_get("/scim/v2/Users", self.handle_public_scim_v2_users_list)
-        self.app.router.add_post("/scim/v2/Users", self.handle_public_scim_v2_users_create)
-        self.app.router.add_get("/scim/v2/Users/{user_id}", self.handle_public_scim_v2_users_get)
-        self.app.router.add_patch("/scim/v2/Users/{user_id}", self.handle_public_scim_v2_users_patch)
-        self.app.router.add_get("/scim/v2/Groups", self.handle_public_scim_v2_groups_list)
-        self.app.router.add_get("/scim/v2/Groups/{group_id}", self.handle_public_scim_v2_groups_get)
-        self.app.router.add_get("/scim/v2/ServiceProviderConfig", self.handle_public_scim_v2_service_provider_config)
-        self.app.router.add_get("/scim/v2/ResourceTypes", self.handle_public_scim_v2_resource_types)
-        self.app.router.add_get("/scim/v2/ResourceTypes/{resource_type}", self.handle_public_scim_v2_resource_type_get)
+        self.app.router.add_post(
+            "/scim/v2/Users", self.handle_public_scim_v2_users_create
+        )
+        self.app.router.add_get(
+            "/scim/v2/Users/{user_id}", self.handle_public_scim_v2_users_get
+        )
+        self.app.router.add_patch(
+            "/scim/v2/Users/{user_id}", self.handle_public_scim_v2_users_patch
+        )
+        self.app.router.add_get(
+            "/scim/v2/Groups", self.handle_public_scim_v2_groups_list
+        )
+        self.app.router.add_get(
+            "/scim/v2/Groups/{group_id}", self.handle_public_scim_v2_groups_get
+        )
+        self.app.router.add_get(
+            "/scim/v2/ServiceProviderConfig",
+            self.handle_public_scim_v2_service_provider_config,
+        )
+        self.app.router.add_get(
+            "/scim/v2/ResourceTypes", self.handle_public_scim_v2_resource_types
+        )
+        self.app.router.add_get(
+            "/scim/v2/ResourceTypes/{resource_type}",
+            self.handle_public_scim_v2_resource_type_get,
+        )
         self.app.router.add_get("/scim/v2/Schemas", self.handle_public_scim_v2_schemas)
-        self.app.router.add_get("/scim/v2/Schemas/{schema_id:.+}", self.handle_public_scim_v2_schema_get)
+        self.app.router.add_get(
+            "/scim/v2/Schemas/{schema_id:.+}", self.handle_public_scim_v2_schema_get
+        )
         self.app.router.add_post("/scim/v2/Bulk", self.handle_public_scim_v2_bulk)
-        self.app.router.add_get("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens)
-        self.app.router.add_post("/api/enterprise/api-tokens", self.handle_enterprise_api_tokens_create)
+        self.app.router.add_get(
+            "/api/enterprise/api-tokens", self.handle_enterprise_api_tokens
+        )
+        self.app.router.add_post(
+            "/api/enterprise/api-tokens", self.handle_enterprise_api_tokens_create
+        )
         self.app.router.add_post(
             "/api/enterprise/api-tokens/{token_id}/revoke",
             self.handle_enterprise_api_token_revoke,
         )
-        self.app.router.add_get("/api/enterprise/projects", self.handle_enterprise_projects)
-        self.app.router.add_post("/api/enterprise/projects", self.handle_enterprise_projects_create)
-        self.app.router.add_get("/api/enterprise/channels", self.handle_enterprise_channels)
-        self.app.router.add_post("/api/enterprise/channels", self.handle_enterprise_channels_register)
-        self.app.router.add_post("/api/enterprise/channels/bind", self.handle_enterprise_channels_bind)
+        self.app.router.add_get(
+            "/api/enterprise/projects", self.handle_enterprise_projects
+        )
+        self.app.router.add_post(
+            "/api/enterprise/projects", self.handle_enterprise_projects_create
+        )
+        self.app.router.add_get(
+            "/api/enterprise/channels", self.handle_enterprise_channels
+        )
+        self.app.router.add_post(
+            "/api/enterprise/channels", self.handle_enterprise_channels_register
+        )
+        self.app.router.add_post(
+            "/api/enterprise/channels/bind", self.handle_enterprise_channels_bind
+        )
         self.app.router.add_get("/api/enterprise/audit", self.handle_enterprise_audit)
-        self.app.router.add_get("/api/enterprise/audit/export", self.handle_enterprise_audit_export)
-        self.app.router.add_get("/api/enterprise/policies", self.handle_enterprise_policies)
-        self.app.router.add_post("/api/enterprise/policies", self.handle_enterprise_policies_create)
-        self.app.router.add_post("/api/enterprise/policies/install-defaults", self.handle_enterprise_policies_install_defaults)
-        self.app.router.add_get("/api/enterprise/approvals", self.handle_enterprise_approvals)
-        self.app.router.add_post("/api/enterprise/approvals/{request_id}/approve", self.handle_enterprise_approval_approve)
-        self.app.router.add_post("/api/enterprise/approvals/{request_id}/deny", self.handle_enterprise_approval_deny)
-        self.app.router.add_get("/api/enterprise/agent-capabilities", self.handle_enterprise_agent_capabilities)
-        self.app.router.add_get("/api/enterprise/connectors/health", self.handle_enterprise_connector_health)
-        self.app.router.add_get("/api/enterprise/connectors/action-schemas", self.handle_enterprise_connector_schemas)
-        self.app.router.add_post("/api/enterprise/connectors/execute", self.handle_enterprise_connector_execute)
-        self.app.router.add_get("/api/enterprise/connectors/credentials", self.handle_enterprise_connector_credentials)
-        self.app.router.add_post("/api/enterprise/connectors/credentials", self.handle_enterprise_connector_credentials_create)
+        self.app.router.add_get(
+            "/api/enterprise/audit/export", self.handle_enterprise_audit_export
+        )
+        self.app.router.add_get(
+            "/api/enterprise/policies", self.handle_enterprise_policies
+        )
+        self.app.router.add_post(
+            "/api/enterprise/policies", self.handle_enterprise_policies_create
+        )
+        self.app.router.add_post(
+            "/api/enterprise/policies/install-defaults",
+            self.handle_enterprise_policies_install_defaults,
+        )
+        self.app.router.add_get(
+            "/api/enterprise/approvals", self.handle_enterprise_approvals
+        )
+        self.app.router.add_post(
+            "/api/enterprise/approvals/{request_id}/approve",
+            self.handle_enterprise_approval_approve,
+        )
+        self.app.router.add_post(
+            "/api/enterprise/approvals/{request_id}/deny",
+            self.handle_enterprise_approval_deny,
+        )
+        self.app.router.add_get(
+            "/api/enterprise/agent-capabilities",
+            self.handle_enterprise_agent_capabilities,
+        )
+        self.app.router.add_get(
+            "/api/enterprise/connectors/health", self.handle_enterprise_connector_health
+        )
+        self.app.router.add_get(
+            "/api/enterprise/connectors/action-schemas",
+            self.handle_enterprise_connector_schemas,
+        )
+        self.app.router.add_post(
+            "/api/enterprise/connectors/execute",
+            self.handle_enterprise_connector_execute,
+        )
+        self.app.router.add_get(
+            "/api/enterprise/connectors/credentials",
+            self.handle_enterprise_connector_credentials,
+        )
+        self.app.router.add_post(
+            "/api/enterprise/connectors/credentials",
+            self.handle_enterprise_connector_credentials_create,
+        )
         self.app.router.add_post(
             "/api/enterprise/connectors/credentials/{credential_id}/revoke",
             self.handle_enterprise_connector_credential_revoke,
@@ -304,11 +426,14 @@ class WorkbenchApiServer:
         self.app.router.add_get("/api/agents", self.handle_agents)
         self.app.router.add_get("/api/v1/capabilities", self.handle_v1_capabilities)
         self.app.router.add_get("/api/v1/agents", self.handle_v1_agents)
-        session_handler = (
-            lambda handler: handler
-            if self._persistent_session_v1_ready()
-            else self.handle_v1_session_not_ready
-        )
+
+        def session_handler(handler):
+            return (
+                handler
+                if self._persistent_session_v1_ready()
+                else self.handle_v1_session_not_ready
+            )
+
         for method, path, handler in (
             ("POST", "/api/v1/sessions", self.handle_v1_sessions_create),
             ("GET", "/api/v1/sessions", self.handle_v1_sessions_list),
@@ -336,6 +461,11 @@ class WorkbenchApiServer:
                 self.handle_v1_session_run_get,
             ),
             (
+                "POST",
+                "/api/v1/sessions/{session_id}/runs/{run_id}/cancel",
+                self.handle_v1_session_run_cancel,
+            ),
+            (
                 "GET",
                 "/api/v1/sessions/{session_id}/events",
                 self.handle_v1_session_events,
@@ -356,6 +486,17 @@ class WorkbenchApiServer:
                 self.handle_v1_session_fresh,
             ),
             (
+                "POST",
+                "/api/v1/sessions/{session_id}/attachments",
+                self.handle_v1_attachment_stage,
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/{session_id}/attachments/{attachment_id}/commit",
+                self.handle_v1_attachment_commit,
+            ),
+            ("POST", "/api/v1/approvals/{approval_id}", self.handle_v1_approval_decide),
+            (
                 "GET",
                 "/api/v1/agents/{agent_id}/promotion",
                 self.handle_v1_promotion_get,
@@ -367,30 +508,52 @@ class WorkbenchApiServer:
             ),
         ):
             self.app.router.add_route(method, path, session_handler(handler))
-        self.app.router.add_get("/api/agents/{name}/overview", self.handle_agent_overview)
+        self.app.router.add_get(
+            "/api/agents/{name}/overview", self.handle_agent_overview
+        )
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
-        self.app.router.add_get("/api/transcript/{name}/poll", self.handle_transcript_poll)
+        self.app.router.add_get(
+            "/api/transcript/{name}/poll", self.handle_transcript_poll
+        )
         self.app.router.add_get(
             "/api/agents/{name}/requests/{request_id}/activity",
             self.handle_request_activity,
         )
-        self.app.router.add_get("/api/project-chat/{name}/{project}", self.handle_project_chat_log)
+        self.app.router.add_get(
+            "/api/project-chat/{name}/{project}", self.handle_project_chat_log
+        )
         self.app.router.add_post("/api/chat", self.handle_chat)
-        self.app.router.add_post("/api/browser/chat/send", self.handle_browser_chat_send)
+        self.app.router.add_post(
+            "/api/browser/chat/send", self.handle_browser_chat_send
+        )
         self.app.router.add_post("/api/bridge/message", self.handle_bridge_message)
         self.app.router.add_post("/api/bridge/reply", self.handle_bridge_reply)
-        self.app.router.add_post("/api/bridge/hchat-exchange", self.handle_hchat_exchange)
+        self.app.router.add_post(
+            "/api/bridge/hchat-exchange", self.handle_hchat_exchange
+        )
         self.app.router.add_post("/api/bridge/transfer", self.handle_bridge_transfer)
         self.app.router.add_post("/api/bridge/fork", self.handle_bridge_fork)
         self.app.router.add_post("/api/bridge/cos", self.handle_bridge_cos)
-        self.app.router.add_get("/api/bridge/transfer/{transfer_id}", self.handle_bridge_transfer_get)
+        self.app.router.add_get(
+            "/api/bridge/transfer/{transfer_id}", self.handle_bridge_transfer_get
+        )
         self.app.router.add_post("/api/bridge/spawn", self.handle_bridge_spawn)
-        self.app.router.add_get("/api/bridge/message/{message_id}", self.handle_bridge_message_get)
-        self.app.router.add_get("/api/bridge/thread/{thread_id}", self.handle_bridge_thread)
-        self.app.router.add_get("/api/bridge/capabilities/{agent}", self.handle_bridge_capabilities)
-        self.app.router.add_get("/api/admin/commands/{name}", self.handle_admin_commands)
+        self.app.router.add_get(
+            "/api/bridge/message/{message_id}", self.handle_bridge_message_get
+        )
+        self.app.router.add_get(
+            "/api/bridge/thread/{thread_id}", self.handle_bridge_thread
+        )
+        self.app.router.add_get(
+            "/api/bridge/capabilities/{agent}", self.handle_bridge_capabilities
+        )
+        self.app.router.add_get(
+            "/api/admin/commands/{name}", self.handle_admin_commands
+        )
         self.app.router.add_post("/api/admin/command", self.handle_admin_command)
-        self.app.router.add_post("/api/agents/{name}/command", self.handle_agent_command)
+        self.app.router.add_post(
+            "/api/agents/{name}/command", self.handle_agent_command
+        )
         self.app.router.add_get(
             "/api/agents/{name}/scheduler/jobs",
             self.handle_agent_scheduler_jobs,
@@ -403,14 +566,28 @@ class WorkbenchApiServer:
             "/api/agents/{name}/scheduler/runs",
             self.handle_agent_scheduler_runs,
         )
-        self.app.router.add_post("/api/agents/{name}/jobs/run", self.handle_agent_run_job)
-        self.app.router.add_post("/api/background-jobs", self.handle_background_jobs_start)
-        self.app.router.add_get("/api/background-jobs", self.handle_background_jobs_list)
-        self.app.router.add_get("/api/background-jobs/{job_id}", self.handle_background_jobs_get)
-        self.app.router.add_get("/api/background-jobs/{job_id}/tail", self.handle_background_jobs_tail)
-        self.app.router.add_post("/api/background-jobs/{job_id}/cancel", self.handle_background_jobs_cancel)
+        self.app.router.add_post(
+            "/api/agents/{name}/jobs/run", self.handle_agent_run_job
+        )
+        self.app.router.add_post(
+            "/api/background-jobs", self.handle_background_jobs_start
+        )
+        self.app.router.add_get(
+            "/api/background-jobs", self.handle_background_jobs_list
+        )
+        self.app.router.add_get(
+            "/api/background-jobs/{job_id}", self.handle_background_jobs_get
+        )
+        self.app.router.add_get(
+            "/api/background-jobs/{job_id}/tail", self.handle_background_jobs_tail
+        )
+        self.app.router.add_post(
+            "/api/background-jobs/{job_id}/cancel", self.handle_background_jobs_cancel
+        )
         self.app.router.add_post("/api/admin/smoke", self.handle_admin_smoke)
-        self.app.router.add_post("/api/admin/start-agent", self.handle_admin_start_agent)
+        self.app.router.add_post(
+            "/api/admin/start-agent", self.handle_admin_start_agent
+        )
         self.app.router.add_post("/api/admin/stop-agent", self.handle_admin_stop_agent)
         self.app.router.add_post("/api/admin/shutdown", self.handle_admin_shutdown)
         self.app.router.add_post("/api/admin/notify", self.handle_admin_notify)
@@ -424,6 +601,7 @@ class WorkbenchApiServer:
         """Auto-learn sender's routing info from reply_route metadata in hchat messages."""
         try:
             from tools.hchat_send import parse_return_address, update_contact
+
             info = parse_return_address(text)
             if not info:
                 return
@@ -433,7 +611,9 @@ class WorkbenchApiServer:
             wb_port = reply_route.get("wb_port", port)
             ttl = reply_route.get("ttl", 3600)
             if inst and host and port:
-                update_contact(info["agent"], inst, host, port, wb_port=wb_port, ttl=ttl)
+                update_contact(
+                    info["agent"], inst, host, port, wb_port=wb_port, ttl=ttl
+                )
         except Exception:
             pass  # non-critical — don't break message delivery
 
@@ -444,7 +624,9 @@ class WorkbenchApiServer:
 
     def _load_agent_rows(self) -> list[dict]:
         raw = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
-        return [agent for agent in raw.get("agents", []) if agent.get("is_active", True)]
+        return [
+            agent for agent in raw.get("agents", []) if agent.get("is_active", True)
+        ]
 
     def _load_agent_capability_rows(self):
         capabilities_path = self.config_path.parent / "agent_capabilities.json"
@@ -461,34 +643,76 @@ class WorkbenchApiServer:
         return {runtime.name: runtime for runtime in self._runtime_list()}
 
     def _is_governed_profile(self) -> bool:
-        return str(getattr(self.global_config, "deployment_profile", "personal") or "personal") != "personal"
+        return (
+            str(
+                getattr(self.global_config, "deployment_profile", "personal")
+                or "personal"
+            )
+            != "personal"
+        )
 
     def _build_identity_service(self) -> IdentityService | None:
-        if str(getattr(self.global_config, "deployment_profile", "personal") or "personal") == "personal":
+        if (
+            str(
+                getattr(self.global_config, "deployment_profile", "personal")
+                or "personal"
+            )
+            == "personal"
+        ):
             return None
-        bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
+        bridge_home = Path(
+            getattr(self.global_config, "bridge_home", None) or self.config_path.parent
+        )
         return IdentityService.from_path(bridge_home / "state" / "enterprise.sqlite")
 
     def _build_channel_registry(self) -> ChannelRegistry | None:
-        if str(getattr(self.global_config, "deployment_profile", "personal") or "personal") == "personal":
+        if (
+            str(
+                getattr(self.global_config, "deployment_profile", "personal")
+                or "personal"
+            )
+            == "personal"
+        ):
             return None
-        bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
+        bridge_home = Path(
+            getattr(self.global_config, "bridge_home", None) or self.config_path.parent
+        )
         return ChannelRegistry.from_path(bridge_home / "state" / "enterprise.sqlite")
 
     def _build_audit_ledger(self) -> EnterpriseAuditLedger | None:
-        if str(getattr(self.global_config, "deployment_profile", "personal") or "personal") == "personal":
+        if (
+            str(
+                getattr(self.global_config, "deployment_profile", "personal")
+                or "personal"
+            )
+            == "personal"
+        ):
             return None
         org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
         if not org_id:
             return None
-        bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
-        return EnterpriseAuditLedger.from_path(bridge_home / "state" / "enterprise.sqlite", org_id=org_id)
+        bridge_home = Path(
+            getattr(self.global_config, "bridge_home", None) or self.config_path.parent
+        )
+        return EnterpriseAuditLedger.from_path(
+            bridge_home / "state" / "enterprise.sqlite", org_id=org_id
+        )
 
     def _build_connector_credentials(self) -> ConnectorCredentialStore | None:
-        if str(getattr(self.global_config, "deployment_profile", "personal") or "personal") == "personal":
+        if (
+            str(
+                getattr(self.global_config, "deployment_profile", "personal")
+                or "personal"
+            )
+            == "personal"
+        ):
             return None
-        bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
-        return ConnectorCredentialStore.from_path(bridge_home / "state" / "enterprise.sqlite")
+        bridge_home = Path(
+            getattr(self.global_config, "bridge_home", None) or self.config_path.parent
+        )
+        return ConnectorCredentialStore.from_path(
+            bridge_home / "state" / "enterprise.sqlite"
+        )
 
     def _build_connector_registry(self) -> ConnectorRegistry:
         registry = ConnectorRegistry(self._static_connectors)
@@ -523,13 +747,19 @@ class WorkbenchApiServer:
         org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
         if not org_id:
             return None
-        bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
-        return PolicyEvaluator.from_path(bridge_home / "state" / "enterprise.sqlite", org_id=org_id)
+        bridge_home = Path(
+            getattr(self.global_config, "bridge_home", None) or self.config_path.parent
+        )
+        return PolicyEvaluator.from_path(
+            bridge_home / "state" / "enterprise.sqlite", org_id=org_id
+        )
 
     def _build_audit_writer(self) -> AuditEventWriter:
         if not self._is_governed_profile():
             return AuditEventWriter(enabled=False)
-        bridge_home = Path(getattr(self.global_config, "bridge_home", None) or self.config_path.parent)
+        bridge_home = Path(
+            getattr(self.global_config, "bridge_home", None) or self.config_path.parent
+        )
         return AuditEventWriter(
             enabled=True,
             jsonl_path=bridge_home / "state" / "enterprise_audit.jsonl",
@@ -557,7 +787,8 @@ class WorkbenchApiServer:
     def _enterprise_channel_gate(self) -> EnterpriseChannelGate:
         return EnterpriseChannelGate(
             governed=self._is_governed_profile(),
-            org_id=str(getattr(self.global_config, "organization_id", "") or "").strip() or None,
+            org_id=str(getattr(self.global_config, "organization_id", "") or "").strip()
+            or None,
             registry=self.channel_registry,
             audit_writer=self.audit_writer,
         )
@@ -629,7 +860,11 @@ class WorkbenchApiServer:
             return None, None
         scopes = set(api_token.scopes)
         implied = {"scim:write"} if required_scope == "scim:read" else set()
-        if required_scope not in scopes and "scim:*" not in scopes and not scopes.intersection(implied):
+        if (
+            required_scope not in scopes
+            and "scim:*" not in scopes
+            and not scopes.intersection(implied)
+        ):
             return None, api_token
         user = self.identity_service.get_user(api_token.user_id)
         if user is None or user.status != "active":
@@ -638,34 +873,53 @@ class WorkbenchApiServer:
 
     def _enterprise_scim_scope_error_response(self, request, *, required_scope: str):
         if not self._is_governed_profile():
-            return web.json_response({"schemas": [], "detail": "SCIM requires governed profile"}, status=404)
+            return web.json_response(
+                {"schemas": [], "detail": "SCIM requires governed profile"}, status=404
+            )
         if self.identity_service is None:
-            return web.json_response({"schemas": [], "detail": "identity service unavailable"}, status=503)
-        api_token, user = self._enterprise_api_token_with_scope(request, required_scope=required_scope)
+            return web.json_response(
+                {"schemas": [], "detail": "identity service unavailable"}, status=503
+            )
+        api_token, user = self._enterprise_api_token_with_scope(
+            request, required_scope=required_scope
+        )
         if api_token is None or user is None:
             self._append_enterprise_audit(
                 event_type="auth",
                 action="scim_token_auth",
                 status="denied",
                 actor_id=getattr(api_token, "user_id", None),
-                context={"path": getattr(request, "path", ""), "required_scope": required_scope},
+                context={
+                    "path": getattr(request, "path", ""),
+                    "required_scope": required_scope,
+                },
             )
-            return web.json_response({"schemas": [], "detail": "SCIM token auth failed"}, status=403)
+            return web.json_response(
+                {"schemas": [], "detail": "SCIM token auth failed"}, status=403
+            )
         return None
 
     def _enterprise_scim_actor_from_request(self, request, *, required_scope: str):
-        return self._enterprise_api_token_with_scope(request, required_scope=required_scope)
+        return self._enterprise_api_token_with_scope(
+            request, required_scope=required_scope
+        )
 
     def _enterprise_visible_project_ids(self, user_id: str) -> set[str]:
         if self.identity_service is None:
             return set()
         memberships = self.identity_service.list_project_memberships(user_id=user_id)
-        return {str(row.get("project_id") or "").strip() for row in memberships if row.get("project_id")}
+        return {
+            str(row.get("project_id") or "").strip()
+            for row in memberships
+            if row.get("project_id")
+        }
 
     def _agent_project_ids(self, agent_row: dict) -> set[str]:
         return agent_project_ids(agent_row)
 
-    def _filter_enterprise_agent_rows_for_user(self, user, agent_rows: list[dict]) -> list[dict]:
+    def _filter_enterprise_agent_rows_for_user(
+        self, user, agent_rows: list[dict]
+    ) -> list[dict]:
         if self._enterprise_user_has_admin_role(user.id):
             return agent_rows
         visible_project_ids = self._enterprise_visible_project_ids(user.id)
@@ -674,7 +928,9 @@ class WorkbenchApiServer:
         visible_rows = []
         for agent_row in agent_rows:
             agent_project_ids = self._agent_project_ids(agent_row)
-            if agent_project_ids and agent_project_ids.intersection(visible_project_ids):
+            if agent_project_ids and agent_project_ids.intersection(
+                visible_project_ids
+            ):
                 visible_rows.append(agent_row)
         return visible_rows
 
@@ -713,7 +969,10 @@ class WorkbenchApiServer:
                     if not text:
                         continue
                     if role == "user":
-                        source_ok = expected_source is None or message.get("source") == expected_source
+                        source_ok = (
+                            expected_source is None
+                            or message.get("source") == expected_source
+                        )
                         prompt_ok = expected_prompt is None or text == expected_prompt
                         if source_ok and prompt_ok:
                             matched_prompt = True
@@ -726,7 +985,11 @@ class WorkbenchApiServer:
                             "new_messages": new_messages,
                         }
             else:
-                assistants = [m for m in new_messages if m.get("role") == "assistant" and m.get("text")]
+                assistants = [
+                    m
+                    for m in new_messages
+                    if m.get("role") == "assistant" and m.get("text")
+                ]
                 if assistants:
                     return {
                         "received": True,
@@ -735,7 +998,12 @@ class WorkbenchApiServer:
                         "new_messages": new_messages,
                     }
             await asyncio.sleep(0.5)
-        return {"received": False, "offset": current_offset, "assistant_text": None, "new_messages": []}
+        return {
+            "received": False,
+            "offset": current_offset,
+            "assistant_text": None,
+            "new_messages": [],
+        }
 
     def _resolve_transcript_path(self, agent_row: dict, runtime) -> Path:
         if runtime is not None and getattr(runtime, "transcript_log_path", None):
@@ -758,7 +1026,9 @@ class WorkbenchApiServer:
                 config_dir=self.config_path.parent,
                 bridge_home=self.global_config.bridge_home,
             ) or (self.config_path.parent / agent_row["workspace_dir"])
-            engine = agent_row.get("engine") or agent_row.get("active_backend", "unknown")
+            engine = agent_row.get("engine") or agent_row.get(
+                "active_backend", "unknown"
+            )
             model = agent_row.get("model", "unknown")
             if agent_row.get("type") in {"flex", "limited"}:
                 for backend in agent_row.get("allowed_backends", []):
@@ -773,7 +1043,9 @@ class WorkbenchApiServer:
                 "engine": engine,
                 "active_backend": agent_row.get("active_backend", engine),
                 "model": model,
-                "allowed_backends": [dict(backend) for backend in agent_row.get("allowed_backends", [])],
+                "allowed_backends": [
+                    dict(backend) for backend in agent_row.get("allowed_backends", [])
+                ],
                 "workspace_dir": str(workspace_dir),
                 "transcript_path": str(transcript_path),
                 "online": False,
@@ -804,11 +1076,15 @@ class WorkbenchApiServer:
         await self.runner.setup()
         bind_host = self._select_bind_host()
         self.bind_host = bind_host
-        self.site = web.TCPSite(self.runner, bind_host, self.global_config.workbench_port)
+        self.site = web.TCPSite(
+            self.runner, bind_host, self.global_config.workbench_port
+        )
         await self.site.start()
 
     def _select_bind_host(self) -> str:
-        configured = str(getattr(self.global_config, "api_host", "") or "127.0.0.1").strip()
+        configured = str(
+            getattr(self.global_config, "api_host", "") or "127.0.0.1"
+        ).strip()
         if configured not in {"127.0.0.1", "localhost"}:
             return configured
         for candidate in ("10.255.255.254",):
@@ -841,18 +1117,31 @@ class WorkbenchApiServer:
                 status=404,
             )
         if self.identity_service is None:
-            return web.json_response({"ok": False, "error": "identity service unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "identity service unavailable"}, status=503
+            )
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
-        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
+        org_id = str(
+            payload.get("org_id")
+            or getattr(self.global_config, "organization_id", "")
+            or ""
+        ).strip()
         email = str(payload.get("email") or "").strip()
         password = str(payload.get("password") or "")
         if not org_id or not email or not password:
-            return web.json_response({"ok": False, "error": "org_id, email, and password are required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "org_id, email, and password are required"},
+                status=400,
+            )
 
-        user = self.identity_service.authenticate_user(org_id=org_id, email=email, password=password)
+        user = self.identity_service.authenticate_user(
+            org_id=org_id, email=email, password=password
+        )
         if user is None:
             self._append_enterprise_audit(
                 event_type="auth",
@@ -861,7 +1150,9 @@ class WorkbenchApiServer:
                 actor_id=email,
                 context={"org_id": org_id},
             )
-            return web.json_response({"ok": False, "error": "invalid credentials"}, status=401)
+            return web.json_response(
+                {"ok": False, "error": "invalid credentials"}, status=401
+            )
         session = self.identity_service.create_session(user_id=user.id)
         self._append_enterprise_audit(
             event_type="auth",
@@ -885,7 +1176,9 @@ class WorkbenchApiServer:
         if not self._is_governed_profile():
             return web.json_response({"ok": True})
         if self.identity_service is None:
-            return web.json_response({"ok": False, "error": "identity service unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "identity service unavailable"}, status=503
+            )
         token = self._bearer_token_from_request(request)
         user = self.identity_service.get_session_user(token) if token else None
         revoked = self.identity_service.revoke_session(token) if token else False
@@ -899,29 +1192,54 @@ class WorkbenchApiServer:
 
     async def handle_auth_me(self, request):
         if not self._is_governed_profile():
-            return web.json_response({"ok": True, "profile": "personal", "user": {"role": "owner"}})
+            return web.json_response(
+                {"ok": True, "profile": "personal", "user": {"role": "owner"}}
+            )
         user = self._enterprise_user_from_request(request)
         if user is None:
-            return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
-        return web.json_response({"ok": True, "profile": "enterprise", "user": self._enterprise_user_payload(user)})
-
-    async def handle_auth_providers(self, request):
-        configured = getattr(self.global_config, "enterprise_auth_providers", []) or []
-        providers = load_auth_providers(configured if self._is_governed_profile() else [])
+            return web.json_response(
+                {"ok": False, "error": "not authenticated"}, status=401
+            )
         return web.json_response(
             {
                 "ok": True,
-                "profile": str(getattr(self.global_config, "deployment_profile", "personal") or "personal"),
+                "profile": "enterprise",
+                "user": self._enterprise_user_payload(user),
+            }
+        )
+
+    async def handle_auth_providers(self, request):
+        configured = getattr(self.global_config, "enterprise_auth_providers", []) or []
+        providers = load_auth_providers(
+            configured if self._is_governed_profile() else []
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "profile": str(
+                    getattr(self.global_config, "deployment_profile", "personal")
+                    or "personal"
+                ),
                 "providers": [provider.public_payload() for provider in providers],
             }
         )
 
     async def handle_auth_oidc_start(self, request):
         if not self._is_governed_profile():
-            return web.json_response({"ok": False, "error": "OIDC login is only enabled for governed profiles"}, status=404)
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "OIDC login is only enabled for governed profiles",
+                },
+                status=404,
+            )
         provider_id = str(request.match_info.get("provider_id") or "").strip()
-        redirect_uri = str((getattr(request, "query", {}) or {}).get("redirect_uri") or "").strip()
-        providers = load_auth_providers(getattr(self.global_config, "enterprise_auth_providers", []) or [])
+        redirect_uri = str(
+            (getattr(request, "query", {}) or {}).get("redirect_uri") or ""
+        ).strip()
+        providers = load_auth_providers(
+            getattr(self.global_config, "enterprise_auth_providers", []) or []
+        )
         provider = next((item for item in providers if item.id == provider_id), None)
         if provider is None:
             self._append_enterprise_audit(
@@ -931,7 +1249,9 @@ class WorkbenchApiServer:
                 actor_id=provider_id,
                 context={"error": "provider not found"},
             )
-            return web.json_response({"ok": False, "error": "OIDC provider not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "OIDC provider not found"}, status=404
+            )
         try:
             start = build_oidc_authorization_start(provider, redirect_uri=redirect_uri)
         except Exception as exc:
@@ -955,7 +1275,13 @@ class WorkbenchApiServer:
 
     async def handle_auth_oidc_callback(self, request):
         if not self._is_governed_profile():
-            return web.json_response({"ok": False, "error": "OIDC login is only enabled for governed profiles"}, status=404)
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "OIDC login is only enabled for governed profiles",
+                },
+                status=404,
+            )
         provider_id = str(request.match_info.get("provider_id") or "").strip()
         query = getattr(request, "query", {}) or {}
         state = str(query.get("state") or "").strip()
@@ -970,7 +1296,10 @@ class WorkbenchApiServer:
                 context={
                     "provider_id": provider_id,
                     "error": provider_error,
-                    "error_description": str(query.get("error_description") or "").strip() or None,
+                    "error_description": str(
+                        query.get("error_description") or ""
+                    ).strip()
+                    or None,
                 },
             )
             return web.json_response({"ok": False, "error": provider_error}, status=400)
@@ -982,7 +1311,9 @@ class WorkbenchApiServer:
                 actor_id=provider_id,
                 context={"provider_id": provider_id, "error": "missing state"},
             )
-            return web.json_response({"ok": False, "error": "state is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "state is required"}, status=400
+            )
         flow = self._pending_oidc_flows.get(state)
         if flow is None:
             self._append_enterprise_audit(
@@ -992,7 +1323,9 @@ class WorkbenchApiServer:
                 actor_id=provider_id,
                 context={"provider_id": provider_id, "error": "invalid state"},
             )
-            return web.json_response({"ok": False, "error": "invalid OIDC state"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "invalid OIDC state"}, status=400
+            )
         if getattr(flow, "provider_id", None) != provider_id:
             self._append_enterprise_audit(
                 event_type="auth",
@@ -1005,7 +1338,9 @@ class WorkbenchApiServer:
                     "error": "provider mismatch",
                 },
             )
-            return web.json_response({"ok": False, "error": "OIDC provider mismatch"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "OIDC provider mismatch"}, status=400
+            )
         if not code:
             self._append_enterprise_audit(
                 event_type="auth",
@@ -1014,8 +1349,12 @@ class WorkbenchApiServer:
                 actor_id=provider_id,
                 context={"provider_id": provider_id, "error": "missing code"},
             )
-            return web.json_response({"ok": False, "error": "authorization code is required"}, status=400)
-        providers = load_auth_providers(getattr(self.global_config, "enterprise_auth_providers", []) or [])
+            return web.json_response(
+                {"ok": False, "error": "authorization code is required"}, status=400
+            )
+        providers = load_auth_providers(
+            getattr(self.global_config, "enterprise_auth_providers", []) or []
+        )
         provider = next((item for item in providers if item.id == provider_id), None)
         if provider is None:
             self._append_enterprise_audit(
@@ -1025,7 +1364,9 @@ class WorkbenchApiServer:
                 actor_id=provider_id,
                 context={"provider_id": provider_id, "error": "provider not found"},
             )
-            return web.json_response({"ok": False, "error": "OIDC provider not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "OIDC provider not found"}, status=404
+            )
         try:
             exchange = build_oidc_token_exchange_request(provider, flow, code=code)
         except Exception as exc:
@@ -1052,10 +1393,20 @@ class WorkbenchApiServer:
                         transport=self._oidc_jwks_transport,
                     ),
                 )
-                validated = verify_oidc_id_token(provider, flow, token_response.id_token, jwks)
-                org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
-                mapped = map_oidc_claims(provider_id=provider.id, org_id=org_id, claims=validated.claims)
-                default_project_id = f"{org_id}-default" if org_id and self.identity_service.get_project(f"{org_id}-default") else None
+                validated = verify_oidc_id_token(
+                    provider, flow, token_response.id_token, jwks
+                )
+                org_id = str(
+                    getattr(self.global_config, "organization_id", "") or ""
+                ).strip()
+                mapped = map_oidc_claims(
+                    provider_id=provider.id, org_id=org_id, claims=validated.claims
+                )
+                default_project_id = (
+                    f"{org_id}-default"
+                    if org_id and self.identity_service.get_project(f"{org_id}-default")
+                    else None
+                )
                 completion = complete_oidc_session(
                     identity_service=self.identity_service,
                     mapped_identity=mapped,
@@ -1128,9 +1479,19 @@ class WorkbenchApiServer:
 
     async def handle_auth_saml_start(self, request):
         if not self._is_governed_profile():
-            return web.json_response({"ok": False, "error": "SAML login is only enabled for governed profiles"}, status=404)
-        provider_id = str(getattr(request, "match_info", {}).get("provider_id") or "").strip()
-        providers = load_auth_providers(getattr(self.global_config, "enterprise_auth_providers", []) or [])
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "SAML login is only enabled for governed profiles",
+                },
+                status=404,
+            )
+        provider_id = str(
+            getattr(request, "match_info", {}).get("provider_id") or ""
+        ).strip()
+        providers = load_auth_providers(
+            getattr(self.global_config, "enterprise_auth_providers", []) or []
+        )
         provider = next((item for item in providers if item.id == provider_id), None)
         if provider is None:
             self._append_enterprise_audit(
@@ -1140,7 +1501,9 @@ class WorkbenchApiServer:
                 actor_id=provider_id,
                 context={"error": "provider_not_found"},
             )
-            return web.json_response({"ok": False, "error": "SAML provider not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "SAML provider not found"}, status=404
+            )
         try:
             start = build_saml_authn_start(provider)
         except Exception as exc:
@@ -1158,18 +1521,32 @@ class WorkbenchApiServer:
             action="saml_start",
             status="success",
             actor_id=provider_id,
-            context={"provider_id": provider_id, "binding": start.binding, "request_id": start.request_id},
+            context={
+                "provider_id": provider_id,
+                "binding": start.binding,
+                "request_id": start.request_id,
+            },
         )
         return web.json_response({"ok": True, "saml": start.public_payload()})
 
     async def handle_auth_saml_callback(self, request):
         if not self._is_governed_profile():
-            return web.json_response({"ok": False, "error": "SAML login is only enabled for governed profiles"}, status=404)
-        provider_id = str(getattr(request, "match_info", {}).get("provider_id") or "").strip()
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "SAML login is only enabled for governed profiles",
+                },
+                status=404,
+            )
+        provider_id = str(
+            getattr(request, "match_info", {}).get("provider_id") or ""
+        ).strip()
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
         state = str(payload.get("RelayState") or payload.get("state") or "").strip()
         flow = self._pending_saml_flows.get(state)
         if flow is None:
@@ -1180,7 +1557,9 @@ class WorkbenchApiServer:
                 actor_id=provider_id,
                 context={"error": "invalid_state"},
             )
-            return web.json_response({"ok": False, "error": "invalid SAML state"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "invalid SAML state"}, status=400
+            )
         if getattr(flow, "provider_id", None) != provider_id:
             self._append_enterprise_audit(
                 event_type="auth",
@@ -1189,34 +1568,59 @@ class WorkbenchApiServer:
                 actor_id=provider_id,
                 context={"error": "provider_mismatch"},
             )
-            return web.json_response({"ok": False, "error": "SAML provider mismatch"}, status=400)
-        providers = load_auth_providers(getattr(self.global_config, "enterprise_auth_providers", []) or [])
+            return web.json_response(
+                {"ok": False, "error": "SAML provider mismatch"}, status=400
+            )
+        providers = load_auth_providers(
+            getattr(self.global_config, "enterprise_auth_providers", []) or []
+        )
         provider = next((item for item in providers if item.id == provider_id), None)
         if provider is None:
-            return web.json_response({"ok": False, "error": "SAML provider not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "SAML provider not found"}, status=404
+            )
         assertion_xml = _saml_assertion_xml_from_payload(payload)
         signature_verified = False
         try:
             if self._saml_assertion_verifier is not None:
-                verified = self._saml_assertion_verifier(provider, assertion_xml, payload)
+                verified = self._saml_assertion_verifier(
+                    provider, assertion_xml, payload
+                )
                 if isinstance(verified, tuple):
                     assertion_xml, signature_verified = verified
                 else:
                     signature_verified = bool(verified)
-            elif getattr(self.global_config, "enterprise_saml_allow_preverified_assertions", False):
+            elif getattr(
+                self.global_config,
+                "enterprise_saml_allow_preverified_assertions",
+                False,
+            ):
                 signature_verified = bool(payload.get("signature_verified")) and bool(
-                    getattr(self.global_config, "enterprise_saml_allow_preverified_assertions", False)
+                    getattr(
+                        self.global_config,
+                        "enterprise_saml_allow_preverified_assertions",
+                        False,
+                    )
                 )
             else:
-                signature_verified = verify_saml_assertion_signature(assertion_xml, provider)
+                signature_verified = verify_saml_assertion_signature(
+                    assertion_xml, provider
+                )
             claims = validate_saml_assertion(
                 assertion_xml,
                 expected_issuer=flow.idp_entity_id,
                 expected_audience=flow.sp_entity_id,
                 signature_verified=signature_verified,
             )
-            org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
-            default_project_id = str(provider.config.get("default_project_id") or f"{org_id}-default").strip() or None
+            org_id = str(
+                getattr(self.global_config, "organization_id", "") or ""
+            ).strip()
+            default_project_id = (
+                str(
+                    provider.config.get("default_project_id") or f"{org_id}-default"
+                ).strip()
+                or None
+            )
             user, created = self.identity_service.upsert_oidc_user(
                 org_id=org_id,
                 email=claims.email,
@@ -1284,7 +1688,9 @@ class WorkbenchApiServer:
             "created_at": project.created_at,
         }
 
-    def _enterprise_api_token_payload(self, token, *, include_plaintext: bool = False) -> dict:
+    def _enterprise_api_token_payload(
+        self, token, *, include_plaintext: bool = False
+    ) -> dict:
         payload = {
             "id": token.id,
             "user_id": token.user_id,
@@ -1297,7 +1703,9 @@ class WorkbenchApiServer:
             payload["token"] = token.token
         return payload
 
-    def _enterprise_channel_payload(self, channel, *, include_bindings: bool = True) -> dict:
+    def _enterprise_channel_payload(
+        self, channel, *, include_bindings: bool = True
+    ) -> dict:
         bindings = []
         if include_bindings and self.channel_registry is not None:
             bindings = [
@@ -1308,7 +1716,9 @@ class WorkbenchApiServer:
                     "permission": binding.permission,
                     "created_at": binding.created_at,
                 }
-                for binding in self.channel_registry.list_bindings(channel_id=channel.id)
+                for binding in self.channel_registry.list_bindings(
+                    channel_id=channel.id
+                )
             ]
         return {
             "id": channel.id,
@@ -1368,9 +1778,14 @@ class WorkbenchApiServer:
 
     def _enterprise_admin_error_response(self, request):
         if not self._is_governed_profile():
-            return web.json_response({"ok": False, "error": "enterprise API requires governed profile"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "enterprise API requires governed profile"},
+                status=404,
+            )
         if self.identity_service is None:
-            return web.json_response({"ok": False, "error": "identity service unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "identity service unavailable"}, status=503
+            )
         if not self._check_admin_auth(request):
             self._append_enterprise_audit(
                 event_type="admin_api",
@@ -1378,14 +1793,21 @@ class WorkbenchApiServer:
                 status="denied",
                 context={"path": getattr(request, "path", "")},
             )
-            return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+            return web.json_response(
+                {"ok": False, "error": "admin auth failed"}, status=403
+            )
         return None
 
     def _enterprise_audit_read_error_response(self, request):
         if not self._is_governed_profile():
-            return web.json_response({"ok": False, "error": "enterprise API requires governed profile"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "enterprise API requires governed profile"},
+                status=404,
+            )
         if self.identity_service is None:
-            return web.json_response({"ok": False, "error": "identity service unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "identity service unavailable"}, status=503
+            )
         user = self._enterprise_user_from_request(request)
         if user is None or not self._enterprise_user_has_audit_reader_role(user.id):
             self._append_enterprise_audit(
@@ -1395,7 +1817,9 @@ class WorkbenchApiServer:
                 actor_id=user.id if user else None,
                 context={"path": getattr(request, "path", "")},
             )
-            return web.json_response({"ok": False, "error": "audit read auth failed"}, status=403)
+            return web.json_response(
+                {"ok": False, "error": "audit read auth failed"}, status=403
+            )
         return None
 
     async def handle_enterprise_users(self, request):
@@ -1403,7 +1827,10 @@ class WorkbenchApiServer:
         if error is not None:
             return error
         org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
-        users = [self._enterprise_user_payload(user) for user in self.identity_service.list_users(org_id=org_id)]
+        users = [
+            self._enterprise_user_payload(user)
+            for user in self.identity_service.list_users(org_id=org_id)
+        ]
         return web.json_response({"ok": True, "users": users})
 
     async def handle_enterprise_users_create(self, request):
@@ -1414,14 +1841,23 @@ class WorkbenchApiServer:
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
-        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
+        org_id = str(
+            payload.get("org_id")
+            or getattr(self.global_config, "organization_id", "")
+            or ""
+        ).strip()
         email = str(payload.get("email") or "").strip()
         display_name = str(payload.get("display_name") or "").strip()
         password = str(payload.get("password") or "")
         if not org_id or not email or not display_name or not password:
             return web.json_response(
-                {"ok": False, "error": "org_id, email, display_name, and password are required"},
+                {
+                    "ok": False,
+                    "error": "org_id, email, display_name, and password are required",
+                },
                 status=400,
             )
         try:
@@ -1435,7 +1871,9 @@ class WorkbenchApiServer:
             project_id = str(payload.get("project_id") or "").strip()
             role = str(payload.get("role") or "").strip()
             if project_id and role:
-                self.identity_service.assign_project_role(user_id=user.id, project_id=project_id, role=role)
+                self.identity_service.assign_project_role(
+                    user_id=user.id, project_id=project_id, role=role
+                )
         except Exception as exc:
             self._append_enterprise_audit(
                 event_type="admin_api",
@@ -1452,7 +1890,9 @@ class WorkbenchApiServer:
             actor_id=actor.id if actor else None,
             context={"target_user_id": user.id, "org_id": org_id},
         )
-        return web.json_response({"ok": True, "user": self._enterprise_user_payload(user)}, status=201)
+        return web.json_response(
+            {"ok": True, "user": self._enterprise_user_payload(user)}, status=201
+        )
 
     async def handle_enterprise_scim_users_upsert(self, request):
         error = self._enterprise_admin_error_response(request)
@@ -1462,11 +1902,23 @@ class WorkbenchApiServer:
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
-        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
-        scim_payload = payload.get("scim") if isinstance(payload.get("scim"), dict) else payload
-        default_project_id = str(payload.get("default_project_id") or "").strip() or None
-        default_role = str(payload.get("default_role") or "").strip() or "individual_user"
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
+        org_id = str(
+            payload.get("org_id")
+            or getattr(self.global_config, "organization_id", "")
+            or ""
+        ).strip()
+        scim_payload = (
+            payload.get("scim") if isinstance(payload.get("scim"), dict) else payload
+        )
+        default_project_id = (
+            str(payload.get("default_project_id") or "").strip() or None
+        )
+        default_role = (
+            str(payload.get("default_role") or "").strip() or "individual_user"
+        )
         try:
             result = ScimProvisioningService(self.identity_service).upsert_user(
                 org_id=org_id,
@@ -1497,7 +1949,11 @@ class WorkbenchApiServer:
             },
         )
         return web.json_response(
-            {"ok": True, "scim": result.to_dict(), "user": self._enterprise_user_payload(result.user)},
+            {
+                "ok": True,
+                "scim": result.to_dict(),
+                "user": self._enterprise_user_payload(result.user),
+            },
             status=201 if result.created else 200,
         )
 
@@ -1509,13 +1965,23 @@ class WorkbenchApiServer:
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
-        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
+        org_id = str(
+            payload.get("org_id")
+            or getattr(self.global_config, "organization_id", "")
+            or ""
+        ).strip()
         user_name = str(payload.get("userName") or payload.get("email") or "").strip()
         if not user_name:
-            return web.json_response({"ok": False, "error": "userName or email is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "userName or email is required"}, status=400
+            )
         try:
-            result = ScimProvisioningService(self.identity_service).deactivate_user(org_id=org_id, user_name=user_name)
+            result = ScimProvisioningService(self.identity_service).deactivate_user(
+                org_id=org_id, user_name=user_name
+            )
         except Exception as exc:
             self._append_enterprise_audit(
                 event_type="admin_api",
@@ -1532,19 +1998,31 @@ class WorkbenchApiServer:
             actor_id=actor.id if actor else None,
             context={"target_user_id": result.user.id, "org_id": org_id},
         )
-        return web.json_response({"ok": True, "scim": result.to_dict(), "user": self._enterprise_user_payload(result.user)})
+        return web.json_response(
+            {
+                "ok": True,
+                "scim": result.to_dict(),
+                "user": self._enterprise_user_payload(result.user),
+            }
+        )
 
     async def handle_enterprise_scim_v2_users_list(self, request):
         error = self._enterprise_admin_error_response(request)
         if error is not None:
             return error
         query = getattr(request, "query", {}) or {}
-        org_id = str(query.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        org_id = str(
+            query.get("org_id")
+            or getattr(self.global_config, "organization_id", "")
+            or ""
+        ).strip()
         filter_expression = str(query.get("filter") or "").strip() or None
         try:
             start_index = max(1, int(str(query.get("startIndex") or "1")))
             count = max(0, min(500, int(str(query.get("count") or "100"))))
-            payload = ScimProvisioningService(self.identity_service).list_user_resources(
+            payload = ScimProvisioningService(
+                self.identity_service
+            ).list_user_resources(
                 org_id=org_id,
                 filter_expression=filter_expression,
                 start_index=start_index,
@@ -1562,10 +2040,18 @@ class WorkbenchApiServer:
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
-        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
+        org_id = str(
+            payload.get("org_id")
+            or getattr(self.global_config, "organization_id", "")
+            or ""
+        ).strip()
         try:
-            result = ScimProvisioningService(self.identity_service).upsert_user(org_id=org_id, payload=payload)
+            result = ScimProvisioningService(self.identity_service).upsert_user(
+                org_id=org_id, payload=payload
+            )
         except Exception as exc:
             self._append_enterprise_audit(
                 event_type="admin_api",
@@ -1587,7 +2073,9 @@ class WorkbenchApiServer:
                 "provisioning_action": result.action,
             },
         )
-        return web.json_response(scim_user_resource(result.user), status=201 if result.created else 200)
+        return web.json_response(
+            scim_user_resource(result.user), status=201 if result.created else 200
+        )
 
     async def handle_enterprise_scim_v2_users_get(self, request):
         error = self._enterprise_admin_error_response(request)
@@ -1595,7 +2083,9 @@ class WorkbenchApiServer:
             return error
         user_id = str(getattr(request, "match_info", {}).get("user_id") or "").strip()
         try:
-            payload = ScimProvisioningService(self.identity_service).get_user_resource(user_id=user_id)
+            payload = ScimProvisioningService(self.identity_service).get_user_resource(
+                user_id=user_id
+            )
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=404)
         return web.json_response(payload)
@@ -1609,9 +2099,13 @@ class WorkbenchApiServer:
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
         try:
-            result = ScimProvisioningService(self.identity_service).patch_user(user_id=user_id, payload=payload)
+            result = ScimProvisioningService(self.identity_service).patch_user(
+                user_id=user_id, payload=payload
+            )
         except Exception as exc:
             self._append_enterprise_audit(
                 event_type="admin_api",
@@ -1626,7 +2120,10 @@ class WorkbenchApiServer:
             action="scim_v2_user_patch",
             status="success",
             actor_id=actor.id if actor else None,
-            context={"target_user_id": result.user.id, "provisioning_action": result.action},
+            context={
+                "target_user_id": result.user.id,
+                "provisioning_action": result.action,
+            },
         )
         return web.json_response(scim_user_resource(result.user))
 
@@ -1635,12 +2132,18 @@ class WorkbenchApiServer:
         if error is not None:
             return error
         query = getattr(request, "query", {}) or {}
-        org_id = str(query.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        org_id = str(
+            query.get("org_id")
+            or getattr(self.global_config, "organization_id", "")
+            or ""
+        ).strip()
         filter_expression = str(query.get("filter") or "").strip() or None
         try:
             start_index = max(1, int(str(query.get("startIndex") or "1")))
             count = max(0, min(500, int(str(query.get("count") or "100"))))
-            payload = ScimProvisioningService(self.identity_service).list_group_resources(
+            payload = ScimProvisioningService(
+                self.identity_service
+            ).list_group_resources(
                 org_id=org_id,
                 filter_expression=filter_expression,
                 start_index=start_index,
@@ -1655,7 +2158,11 @@ class WorkbenchApiServer:
         if error is not None:
             return error
         query = getattr(request, "query", {}) or {}
-        org_id = str(query.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+        org_id = str(
+            query.get("org_id")
+            or getattr(self.global_config, "organization_id", "")
+            or ""
+        ).strip()
         group_id = str(getattr(request, "match_info", {}).get("group_id") or "").strip()
         try:
             payload = ScimProvisioningService(self.identity_service).get_group_resource(
@@ -1682,7 +2189,9 @@ class WorkbenchApiServer:
         error = self._enterprise_admin_error_response(request)
         if error is not None:
             return error
-        resource_type = str(getattr(request, "match_info", {}).get("resource_type") or "").strip()
+        resource_type = str(
+            getattr(request, "match_info", {}).get("resource_type") or ""
+        ).strip()
         try:
             payload = scim_resource_type(resource_type)
         except Exception as exc:
@@ -1699,7 +2208,9 @@ class WorkbenchApiServer:
         error = self._enterprise_admin_error_response(request)
         if error is not None:
             return error
-        schema_id = str(getattr(request, "match_info", {}).get("schema_id") or "").strip()
+        schema_id = str(
+            getattr(request, "match_info", {}).get("schema_id") or ""
+        ).strip()
         try:
             payload = scim_schema(schema_id)
         except Exception as exc:
@@ -1714,10 +2225,18 @@ class WorkbenchApiServer:
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"schemas": [], "detail": "invalid JSON body"}, status=400)
-        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+            return web.json_response(
+                {"schemas": [], "detail": "invalid JSON body"}, status=400
+            )
+        org_id = str(
+            payload.get("org_id")
+            or getattr(self.global_config, "organization_id", "")
+            or ""
+        ).strip()
         try:
-            result = ScimProvisioningService(self.identity_service).bulk(org_id=org_id, payload=payload)
+            result = ScimProvisioningService(self.identity_service).bulk(
+                org_id=org_id, payload=payload
+            )
         except Exception as exc:
             self._append_enterprise_audit(
                 event_type="admin_api",
@@ -1732,21 +2251,30 @@ class WorkbenchApiServer:
             action="scim_v2_bulk",
             status="success",
             actor_id=actor.id if actor else None,
-            context={"org_id": org_id, "operation_count": len(result.get("Operations") or [])},
+            context={
+                "org_id": org_id,
+                "operation_count": len(result.get("Operations") or []),
+            },
         )
         return web.json_response(result)
 
     async def handle_public_scim_v2_users_list(self, request):
-        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        error = self._enterprise_scim_scope_error_response(
+            request, required_scope="scim:read"
+        )
         if error is not None:
             return error
-        _, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:read")
+        _, actor = self._enterprise_scim_actor_from_request(
+            request, required_scope="scim:read"
+        )
         query = getattr(request, "query", {}) or {}
         filter_expression = str(query.get("filter") or "").strip() or None
         try:
             start_index = max(1, int(str(query.get("startIndex") or "1")))
             count = max(0, min(500, int(str(query.get("count") or "100"))))
-            payload = ScimProvisioningService(self.identity_service).list_user_resources(
+            payload = ScimProvisioningService(
+                self.identity_service
+            ).list_user_resources(
                 org_id=actor.org_id,
                 filter_expression=filter_expression,
                 start_index=start_index,
@@ -1757,23 +2285,34 @@ class WorkbenchApiServer:
         return web.json_response(payload)
 
     async def handle_public_scim_v2_users_create(self, request):
-        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:write")
+        error = self._enterprise_scim_scope_error_response(
+            request, required_scope="scim:write"
+        )
         if error is not None:
             return error
-        api_token, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:write")
+        api_token, actor = self._enterprise_scim_actor_from_request(
+            request, required_scope="scim:write"
+        )
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"schemas": [], "detail": "invalid JSON body"}, status=400)
+            return web.json_response(
+                {"schemas": [], "detail": "invalid JSON body"}, status=400
+            )
         try:
-            result = ScimProvisioningService(self.identity_service).upsert_user(org_id=actor.org_id, payload=payload)
+            result = ScimProvisioningService(self.identity_service).upsert_user(
+                org_id=actor.org_id, payload=payload
+            )
         except Exception as exc:
             self._append_enterprise_audit(
                 event_type="scim",
                 action="scim_v2_user_create",
                 status="failed",
                 actor_id=actor.id,
-                context={"error": str(exc), "api_token_id": getattr(api_token, "id", None)},
+                context={
+                    "error": str(exc),
+                    "api_token_id": getattr(api_token, "id", None),
+                },
             )
             return web.json_response({"schemas": [], "detail": str(exc)}, status=400)
         self._append_enterprise_audit(
@@ -1788,45 +2327,65 @@ class WorkbenchApiServer:
                 "api_token_id": getattr(api_token, "id", None),
             },
         )
-        return web.json_response(scim_user_resource(result.user), status=201 if result.created else 200)
+        return web.json_response(
+            scim_user_resource(result.user), status=201 if result.created else 200
+        )
 
     async def handle_public_scim_v2_users_get(self, request):
-        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        error = self._enterprise_scim_scope_error_response(
+            request, required_scope="scim:read"
+        )
         if error is not None:
             return error
-        _, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:read")
+        _, actor = self._enterprise_scim_actor_from_request(
+            request, required_scope="scim:read"
+        )
         user_id = str(getattr(request, "match_info", {}).get("user_id") or "").strip()
         try:
             target = self.identity_service.get_user(user_id)
             if target is None or target.org_id != actor.org_id:
                 raise ValueError(f"SCIM user not found: {user_id!r}")
-            payload = ScimProvisioningService(self.identity_service).get_user_resource(user_id=user_id)
+            payload = ScimProvisioningService(self.identity_service).get_user_resource(
+                user_id=user_id
+            )
         except Exception as exc:
             return web.json_response({"schemas": [], "detail": str(exc)}, status=404)
         return web.json_response(payload)
 
     async def handle_public_scim_v2_users_patch(self, request):
-        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:write")
+        error = self._enterprise_scim_scope_error_response(
+            request, required_scope="scim:write"
+        )
         if error is not None:
             return error
-        api_token, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:write")
+        api_token, actor = self._enterprise_scim_actor_from_request(
+            request, required_scope="scim:write"
+        )
         user_id = str(getattr(request, "match_info", {}).get("user_id") or "").strip()
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"schemas": [], "detail": "invalid JSON body"}, status=400)
+            return web.json_response(
+                {"schemas": [], "detail": "invalid JSON body"}, status=400
+            )
         try:
             target = self.identity_service.get_user(user_id)
             if target is None or target.org_id != actor.org_id:
                 raise ValueError(f"SCIM user not found: {user_id!r}")
-            result = ScimProvisioningService(self.identity_service).patch_user(user_id=user_id, payload=payload)
+            result = ScimProvisioningService(self.identity_service).patch_user(
+                user_id=user_id, payload=payload
+            )
         except Exception as exc:
             self._append_enterprise_audit(
                 event_type="scim",
                 action="scim_v2_user_patch",
                 status="failed",
                 actor_id=actor.id,
-                context={"error": str(exc), "target_user_id": user_id, "api_token_id": getattr(api_token, "id", None)},
+                context={
+                    "error": str(exc),
+                    "target_user_id": user_id,
+                    "api_token_id": getattr(api_token, "id", None),
+                },
             )
             return web.json_response({"schemas": [], "detail": str(exc)}, status=400)
         self._append_enterprise_audit(
@@ -1843,16 +2402,22 @@ class WorkbenchApiServer:
         return web.json_response(scim_user_resource(result.user))
 
     async def handle_public_scim_v2_groups_list(self, request):
-        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        error = self._enterprise_scim_scope_error_response(
+            request, required_scope="scim:read"
+        )
         if error is not None:
             return error
-        _, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:read")
+        _, actor = self._enterprise_scim_actor_from_request(
+            request, required_scope="scim:read"
+        )
         query = getattr(request, "query", {}) or {}
         filter_expression = str(query.get("filter") or "").strip() or None
         try:
             start_index = max(1, int(str(query.get("startIndex") or "1")))
             count = max(0, min(500, int(str(query.get("count") or "100"))))
-            payload = ScimProvisioningService(self.identity_service).list_group_resources(
+            payload = ScimProvisioningService(
+                self.identity_service
+            ).list_group_resources(
                 org_id=actor.org_id,
                 filter_expression=filter_expression,
                 start_index=start_index,
@@ -1863,10 +2428,14 @@ class WorkbenchApiServer:
         return web.json_response(payload)
 
     async def handle_public_scim_v2_groups_get(self, request):
-        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        error = self._enterprise_scim_scope_error_response(
+            request, required_scope="scim:read"
+        )
         if error is not None:
             return error
-        _, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:read")
+        _, actor = self._enterprise_scim_actor_from_request(
+            request, required_scope="scim:read"
+        )
         group_id = str(getattr(request, "match_info", {}).get("group_id") or "").strip()
         try:
             payload = ScimProvisioningService(self.identity_service).get_group_resource(
@@ -1878,22 +2447,30 @@ class WorkbenchApiServer:
         return web.json_response(payload)
 
     async def handle_public_scim_v2_service_provider_config(self, request):
-        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        error = self._enterprise_scim_scope_error_response(
+            request, required_scope="scim:read"
+        )
         if error is not None:
             return error
         return web.json_response(scim_service_provider_config())
 
     async def handle_public_scim_v2_resource_types(self, request):
-        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        error = self._enterprise_scim_scope_error_response(
+            request, required_scope="scim:read"
+        )
         if error is not None:
             return error
         return web.json_response(scim_resource_types())
 
     async def handle_public_scim_v2_resource_type_get(self, request):
-        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        error = self._enterprise_scim_scope_error_response(
+            request, required_scope="scim:read"
+        )
         if error is not None:
             return error
-        resource_type = str(getattr(request, "match_info", {}).get("resource_type") or "").strip()
+        resource_type = str(
+            getattr(request, "match_info", {}).get("resource_type") or ""
+        ).strip()
         try:
             payload = scim_resource_type(resource_type)
         except Exception as exc:
@@ -1901,16 +2478,22 @@ class WorkbenchApiServer:
         return web.json_response(payload)
 
     async def handle_public_scim_v2_schemas(self, request):
-        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        error = self._enterprise_scim_scope_error_response(
+            request, required_scope="scim:read"
+        )
         if error is not None:
             return error
         return web.json_response(scim_schemas())
 
     async def handle_public_scim_v2_schema_get(self, request):
-        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:read")
+        error = self._enterprise_scim_scope_error_response(
+            request, required_scope="scim:read"
+        )
         if error is not None:
             return error
-        schema_id = str(getattr(request, "match_info", {}).get("schema_id") or "").strip()
+        schema_id = str(
+            getattr(request, "match_info", {}).get("schema_id") or ""
+        ).strip()
         try:
             payload = scim_schema(schema_id)
         except Exception as exc:
@@ -1918,23 +2501,34 @@ class WorkbenchApiServer:
         return web.json_response(payload)
 
     async def handle_public_scim_v2_bulk(self, request):
-        error = self._enterprise_scim_scope_error_response(request, required_scope="scim:write")
+        error = self._enterprise_scim_scope_error_response(
+            request, required_scope="scim:write"
+        )
         if error is not None:
             return error
-        api_token, actor = self._enterprise_scim_actor_from_request(request, required_scope="scim:write")
+        api_token, actor = self._enterprise_scim_actor_from_request(
+            request, required_scope="scim:write"
+        )
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"schemas": [], "detail": "invalid JSON body"}, status=400)
+            return web.json_response(
+                {"schemas": [], "detail": "invalid JSON body"}, status=400
+            )
         try:
-            result = ScimProvisioningService(self.identity_service).bulk(org_id=actor.org_id, payload=payload)
+            result = ScimProvisioningService(self.identity_service).bulk(
+                org_id=actor.org_id, payload=payload
+            )
         except Exception as exc:
             self._append_enterprise_audit(
                 event_type="scim",
                 action="scim_v2_bulk",
                 status="failed",
                 actor_id=actor.id,
-                context={"error": str(exc), "api_token_id": getattr(api_token, "id", None)},
+                context={
+                    "error": str(exc),
+                    "api_token_id": getattr(api_token, "id", None),
+                },
             )
             return web.json_response({"schemas": [], "detail": str(exc)}, status=400)
         self._append_enterprise_audit(
@@ -1956,7 +2550,11 @@ class WorkbenchApiServer:
         query = getattr(request, "query", {}) or {}
         org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
         user_id = str(query.get("user_id") or "").strip() or None
-        include_revoked = str(query.get("include_revoked") or "").strip().lower() in {"1", "true", "yes"}
+        include_revoked = str(query.get("include_revoked") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         try:
             tokens = self.identity_service.list_api_tokens(
                 org_id=org_id,
@@ -1968,7 +2566,9 @@ class WorkbenchApiServer:
         return web.json_response(
             {
                 "ok": True,
-                "api_tokens": [self._enterprise_api_token_payload(token) for token in tokens],
+                "api_tokens": [
+                    self._enterprise_api_token_payload(token) for token in tokens
+                ],
                 "count": len(tokens),
             }
         )
@@ -1981,12 +2581,17 @@ class WorkbenchApiServer:
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
         user_id = str(payload.get("user_id") or "").strip()
         scopes = payload.get("scopes")
         expires_at = str(payload.get("expires_at") or "").strip() or None
         if not user_id or not isinstance(scopes, list):
-            return web.json_response({"ok": False, "error": "user_id and scopes list are required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "user_id and scopes list are required"},
+                status=400,
+            )
         org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
         try:
             target_user = self.identity_service.get_user(user_id)
@@ -1994,7 +2599,9 @@ class WorkbenchApiServer:
                 raise ValueError("target user is not in this organization")
             token = self.identity_service.create_api_token(
                 user_id=user_id,
-                scopes=tuple(str(scope).strip() for scope in scopes if str(scope).strip()),
+                scopes=tuple(
+                    str(scope).strip() for scope in scopes if str(scope).strip()
+                ),
                 expires_at=expires_at,
             )
         except Exception as exc:
@@ -2019,7 +2626,12 @@ class WorkbenchApiServer:
             },
         )
         return web.json_response(
-            {"ok": True, "api_token": self._enterprise_api_token_payload(token, include_plaintext=True)},
+            {
+                "ok": True,
+                "api_token": self._enterprise_api_token_payload(
+                    token, include_plaintext=True
+                ),
+            },
             status=201,
         )
 
@@ -2030,9 +2642,13 @@ class WorkbenchApiServer:
         actor = self._enterprise_user_from_request(request)
         token_id = str(request.match_info.get("token_id") or "").strip()
         if not token_id:
-            return web.json_response({"ok": False, "error": "token_id is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "token_id is required"}, status=400
+            )
         tokens = self.identity_service.list_api_tokens(
-            org_id=str(getattr(self.global_config, "organization_id", "") or "").strip(),
+            org_id=str(
+                getattr(self.global_config, "organization_id", "") or ""
+            ).strip(),
             include_revoked=True,
         )
         if token_id not in {token.id for token in tokens}:
@@ -2041,9 +2657,14 @@ class WorkbenchApiServer:
                 action="api_token_revoke",
                 status="failed",
                 actor_id=actor.id if actor else None,
-                context={"token_id": token_id, "error": "token not found in organization"},
+                context={
+                    "token_id": token_id,
+                    "error": "token not found in organization",
+                },
             )
-            return web.json_response({"ok": False, "error": "token not found in organization"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "token not found in organization"}, status=404
+            )
         revoked = self.identity_service.revoke_api_token_by_id(token_id)
         self._append_enterprise_audit(
             event_type="admin_api",
@@ -2073,11 +2694,19 @@ class WorkbenchApiServer:
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
-        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
+        org_id = str(
+            payload.get("org_id")
+            or getattr(self.global_config, "organization_id", "")
+            or ""
+        ).strip()
         name = str(payload.get("name") or "").strip()
         if not org_id or not name:
-            return web.json_response({"ok": False, "error": "org_id and name are required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "org_id and name are required"}, status=400
+            )
         try:
             project = self.identity_service.create_project(
                 org_id=org_id,
@@ -2101,14 +2730,19 @@ class WorkbenchApiServer:
             actor_id=actor.id if actor else None,
             context={"project_id": project.id, "org_id": org_id},
         )
-        return web.json_response({"ok": True, "project": self._enterprise_project_payload(project)}, status=201)
+        return web.json_response(
+            {"ok": True, "project": self._enterprise_project_payload(project)},
+            status=201,
+        )
 
     async def handle_enterprise_channels(self, request):
         error = self._enterprise_admin_error_response(request)
         if error is not None:
             return error
         if self.channel_registry is None:
-            return web.json_response({"ok": False, "error": "channel registry unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "channel registry unavailable"}, status=503
+            )
         org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
         channels = [
             self._enterprise_channel_payload(channel)
@@ -2121,22 +2755,34 @@ class WorkbenchApiServer:
         if error is not None:
             return error
         if self.channel_registry is None:
-            return web.json_response({"ok": False, "error": "channel registry unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "channel registry unavailable"}, status=503
+            )
         actor = self._enterprise_user_from_request(request)
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
-        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
+        org_id = str(
+            payload.get("org_id")
+            or getattr(self.global_config, "organization_id", "")
+            or ""
+        ).strip()
         channel_type = str(payload.get("type") or "").strip()
         if not org_id or not channel_type:
-            return web.json_response({"ok": False, "error": "org_id and type are required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "org_id and type are required"}, status=400
+            )
         try:
             channel = self.channel_registry.register_channel(
                 org_id=org_id,
                 channel_type=channel_type,
                 display_name=payload.get("display_name"),
-                config=payload.get("config") if isinstance(payload.get("config"), dict) else {},
+                config=payload.get("config")
+                if isinstance(payload.get("config"), dict)
+                else {},
                 enabled=bool(payload.get("enabled", False)),
                 risk_tier=str(payload.get("risk_tier") or "medium"),
                 channel_id=payload.get("channel_id"),
@@ -2162,27 +2808,41 @@ class WorkbenchApiServer:
                 "risk_tier": channel.risk_tier,
             },
         )
-        return web.json_response({"ok": True, "channel": self._enterprise_channel_payload(channel)}, status=201)
+        return web.json_response(
+            {"ok": True, "channel": self._enterprise_channel_payload(channel)},
+            status=201,
+        )
 
     async def handle_enterprise_channels_bind(self, request):
         error = self._enterprise_admin_error_response(request)
         if error is not None:
             return error
         if self.channel_registry is None:
-            return web.json_response({"ok": False, "error": "channel registry unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "channel registry unavailable"}, status=503
+            )
         actor = self._enterprise_user_from_request(request)
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
-        org_id = str(payload.get("org_id") or getattr(self.global_config, "organization_id", "") or "").strip()
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
+        org_id = str(
+            payload.get("org_id")
+            or getattr(self.global_config, "organization_id", "")
+            or ""
+        ).strip()
         channel_type = str(payload.get("type") or "").strip()
         scope_type = str(payload.get("scope_type") or "").strip()
         scope_id = str(payload.get("scope_id") or "").strip()
         permission = str(payload.get("permission") or "both").strip()
         if not org_id or not channel_type or not scope_type or not scope_id:
             return web.json_response(
-                {"ok": False, "error": "org_id, type, scope_type, and scope_id are required"},
+                {
+                    "ok": False,
+                    "error": "org_id, type, scope_type, and scope_id are required",
+                },
                 status=400,
             )
         try:
@@ -2255,7 +2915,9 @@ class WorkbenchApiServer:
         if error is not None:
             return error
         if self.audit_ledger is None:
-            return web.json_response({"ok": False, "error": "audit ledger unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "audit ledger unavailable"}, status=503
+            )
         filters = self._enterprise_audit_filters(request)
         events = self.audit_ledger.query(**filters)
         return web.json_response(
@@ -2272,9 +2934,15 @@ class WorkbenchApiServer:
         if error is not None:
             return error
         if self.audit_ledger is None:
-            return web.json_response({"ok": False, "error": "audit ledger unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "audit ledger unavailable"}, status=503
+            )
         filters = self._enterprise_audit_filters(request)
-        export_format = str((getattr(request, "query", {}) or {}).get("format") or "ndjson").strip().lower()
+        export_format = (
+            str((getattr(request, "query", {}) or {}).get("format") or "ndjson")
+            .strip()
+            .lower()
+        )
         events = self.audit_ledger.query(**filters)
         if export_format in {"ndjson", "ledger"}:
             records = [event.to_dict() for event in events]
@@ -2283,8 +2951,16 @@ class WorkbenchApiServer:
         elif export_format in {"otel", "opentelemetry"}:
             records = [format_otel_log(event) for event in events]
         else:
-            return web.json_response({"ok": False, "error": f"unsupported audit export format: {export_format}"}, status=400)
-        lines = [json.dumps(record, ensure_ascii=False, sort_keys=True) for record in records]
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": f"unsupported audit export format: {export_format}",
+                },
+                status=400,
+            )
+        lines = [
+            json.dumps(record, ensure_ascii=False, sort_keys=True) for record in records
+        ]
         body = "\n".join(lines)
         if body:
             body += "\n"
@@ -2296,8 +2972,13 @@ class WorkbenchApiServer:
             return error
         evaluator = self._enterprise_policy_evaluator()
         if evaluator is None:
-            return web.json_response({"ok": False, "error": "policy evaluator unavailable"}, status=503)
-        rules = [self._enterprise_policy_rule_payload(rule) for rule in evaluator.list_rules()]
+            return web.json_response(
+                {"ok": False, "error": "policy evaluator unavailable"}, status=503
+            )
+        rules = [
+            self._enterprise_policy_rule_payload(rule)
+            for rule in evaluator.list_rules()
+        ]
         return web.json_response({"ok": True, "policies": rules, "count": len(rules)})
 
     async def handle_enterprise_policies_create(self, request):
@@ -2306,13 +2987,21 @@ class WorkbenchApiServer:
             return error
         evaluator = self._enterprise_policy_evaluator()
         if evaluator is None:
-            return web.json_response({"ok": False, "error": "policy evaluator unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "policy evaluator unavailable"}, status=503
+            )
         actor = self._enterprise_user_from_request(request)
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
-        conditions = payload.get("conditions") if isinstance(payload.get("conditions"), dict) else {}
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
+        conditions = (
+            payload.get("conditions")
+            if isinstance(payload.get("conditions"), dict)
+            else {}
+        )
         try:
             rule = evaluator.add_rule(
                 action=payload.get("action"),
@@ -2338,9 +3027,16 @@ class WorkbenchApiServer:
             action="policy_rule_create",
             status="success",
             actor_id=actor.id if actor else None,
-            context={"policy_rule_id": rule.id, "effect": rule.effect.value, "action": rule.action},
+            context={
+                "policy_rule_id": rule.id,
+                "effect": rule.effect.value,
+                "action": rule.action,
+            },
         )
-        return web.json_response({"ok": True, "policy": self._enterprise_policy_rule_payload(rule)}, status=201)
+        return web.json_response(
+            {"ok": True, "policy": self._enterprise_policy_rule_payload(rule)},
+            status=201,
+        )
 
     async def handle_enterprise_policies_install_defaults(self, request):
         error = self._enterprise_admin_error_response(request)
@@ -2348,7 +3044,9 @@ class WorkbenchApiServer:
             return error
         evaluator = self._enterprise_policy_evaluator()
         if evaluator is None:
-            return web.json_response({"ok": False, "error": "policy evaluator unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "policy evaluator unavailable"}, status=503
+            )
         actor = self._enterprise_user_from_request(request)
         rules = install_default_connector_policy(evaluator)
         self._append_enterprise_audit(
@@ -2361,7 +3059,9 @@ class WorkbenchApiServer:
         return web.json_response(
             {
                 "ok": True,
-                "policies": [self._enterprise_policy_rule_payload(rule) for rule in rules],
+                "policies": [
+                    self._enterprise_policy_rule_payload(rule) for rule in rules
+                ],
                 "count": len(rules),
             }
         )
@@ -2372,14 +3072,19 @@ class WorkbenchApiServer:
             return error
         evaluator = self._enterprise_policy_evaluator()
         if evaluator is None:
-            return web.json_response({"ok": False, "error": "policy evaluator unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "policy evaluator unavailable"}, status=503
+            )
         query = getattr(request, "query", {}) or {}
         status = str(query.get("status") or "pending").strip() or None
         approvals = evaluator.list_approval_requests(status=status)
         return web.json_response(
             {
                 "ok": True,
-                "approvals": [self._enterprise_approval_payload(approval) for approval in approvals],
+                "approvals": [
+                    self._enterprise_approval_payload(approval)
+                    for approval in approvals
+                ],
                 "count": len(approvals),
             }
         )
@@ -2390,11 +3095,17 @@ class WorkbenchApiServer:
             return error
         evaluator = self._enterprise_policy_evaluator()
         if evaluator is None:
-            return web.json_response({"ok": False, "error": "policy evaluator unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "policy evaluator unavailable"}, status=503
+            )
         actor = self._enterprise_user_from_request(request)
-        request_id = str(getattr(request, "match_info", {}).get("request_id") or "").strip()
+        request_id = str(
+            getattr(request, "match_info", {}).get("request_id") or ""
+        ).strip()
         if not request_id:
-            return web.json_response({"ok": False, "error": "request_id is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "request_id is required"}, status=400
+            )
         try:
             payload = await request.json()
         except Exception:
@@ -2408,10 +3119,14 @@ class WorkbenchApiServer:
             )
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
-        return web.json_response({"ok": True, "approval": self._enterprise_approval_payload(approval)})
+        return web.json_response(
+            {"ok": True, "approval": self._enterprise_approval_payload(approval)}
+        )
 
     async def handle_enterprise_approval_approve(self, request):
-        return await self._handle_enterprise_approval_decision(request, status="approved")
+        return await self._handle_enterprise_approval_decision(
+            request, status="approved"
+        )
 
     async def handle_enterprise_approval_deny(self, request):
         return await self._handle_enterprise_approval_decision(request, status="denied")
@@ -2426,7 +3141,9 @@ class WorkbenchApiServer:
             agent_rows=self._load_agent_rows(),
             capability_rows=self._load_agent_capability_rows(),
         )
-        summaries = [summary.to_dict() for summary in registry.list_agents(project_id=project_id)]
+        summaries = [
+            summary.to_dict() for summary in registry.list_agents(project_id=project_id)
+        ]
         return web.json_response(
             {
                 "ok": True,
@@ -2441,11 +3158,17 @@ class WorkbenchApiServer:
         if error is not None:
             return error
         if self.connector_credentials is None:
-            return web.json_response({"ok": False, "error": "connector credentials unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "connector credentials unavailable"}, status=503
+            )
         org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
         query = getattr(request, "query", {}) or {}
         connector_type = str(query.get("connector_type") or "").strip() or None
-        include_revoked = str(query.get("include_revoked") or "").strip().lower() in {"1", "true", "yes"}
+        include_revoked = str(query.get("include_revoked") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         credentials = self.connector_credentials.list_credentials(
             org_id=org_id,
             connector_type=connector_type,
@@ -2454,7 +3177,10 @@ class WorkbenchApiServer:
         return web.json_response(
             {
                 "ok": True,
-                "credentials": [self._enterprise_connector_credential_payload(item) for item in credentials],
+                "credentials": [
+                    self._enterprise_connector_credential_payload(item)
+                    for item in credentials
+                ],
                 "count": len(credentials),
             }
         )
@@ -2464,13 +3190,17 @@ class WorkbenchApiServer:
         if error is not None:
             return error
         if self.connector_credentials is None:
-            return web.json_response({"ok": False, "error": "connector credentials unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "connector credentials unavailable"}, status=503
+            )
         actor = self._enterprise_user_from_request(request)
         org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
         scopes = _connector_scopes_from_payload(payload.get("scopes"))
         validation_error = _validate_connector_credential_payload(payload, scopes)
         if validation_error:
@@ -2481,7 +3211,9 @@ class WorkbenchApiServer:
                 actor_id=actor.id if actor else None,
                 context={"error": validation_error},
             )
-            return web.json_response({"ok": False, "error": validation_error}, status=400)
+            return web.json_response(
+                {"ok": False, "error": validation_error}, status=400
+            )
         try:
             credential = self.connector_credentials.create_credential(
                 org_id=org_id,
@@ -2505,11 +3237,17 @@ class WorkbenchApiServer:
             action="connector_credential_create",
             status="success",
             actor_id=actor.id if actor else None,
-            context={"credential_id": credential.id, "connector_type": credential.connector_type},
+            context={
+                "credential_id": credential.id,
+                "connector_type": credential.connector_type,
+            },
         )
         self._refresh_connector_registry()
         return web.json_response(
-            {"ok": True, "credential": self._enterprise_connector_credential_payload(credential)},
+            {
+                "ok": True,
+                "credential": self._enterprise_connector_credential_payload(credential),
+            },
             status=201,
         )
 
@@ -2518,11 +3256,17 @@ class WorkbenchApiServer:
         if error is not None:
             return error
         if self.connector_credentials is None:
-            return web.json_response({"ok": False, "error": "connector credentials unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "connector credentials unavailable"}, status=503
+            )
         actor = self._enterprise_user_from_request(request)
-        credential_id = str(getattr(request, "match_info", {}).get("credential_id") or "").strip()
+        credential_id = str(
+            getattr(request, "match_info", {}).get("credential_id") or ""
+        ).strip()
         if not credential_id:
-            return web.json_response({"ok": False, "error": "credential_id is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "credential_id is required"}, status=400
+            )
         try:
             credential = self.connector_credentials.revoke_credential(credential_id)
         except Exception as exc:
@@ -2539,16 +3283,29 @@ class WorkbenchApiServer:
             action="connector_credential_revoke",
             status="success",
             actor_id=actor.id if actor else None,
-            context={"credential_id": credential.id, "connector_type": credential.connector_type},
+            context={
+                "credential_id": credential.id,
+                "connector_type": credential.connector_type,
+            },
         )
         self._refresh_connector_registry()
-        return web.json_response({"ok": True, "credential": self._enterprise_connector_credential_payload(credential)})
+        return web.json_response(
+            {
+                "ok": True,
+                "credential": self._enterprise_connector_credential_payload(credential),
+            }
+        )
 
     async def handle_enterprise_connector_health(self, request):
         error = self._enterprise_admin_error_response(request)
         if error is not None:
             return error
-        health = [summary.to_dict() for summary in self.connector_registry.health_checks(ledger=self.audit_ledger)]
+        health = [
+            summary.to_dict()
+            for summary in self.connector_registry.health_checks(
+                ledger=self.audit_ledger
+            )
+        ]
         return web.json_response(
             {
                 "ok": True,
@@ -2564,7 +3321,9 @@ class WorkbenchApiServer:
         if error is not None:
             return error
         schemas = connector_action_schemas()
-        return web.json_response({"ok": True, "schemas": schemas, "count": len(schemas)})
+        return web.json_response(
+            {"ok": True, "schemas": schemas, "count": len(schemas)}
+        )
 
     async def handle_enterprise_connector_execute(self, request):
         error = self._enterprise_admin_error_response(request)
@@ -2572,16 +3331,26 @@ class WorkbenchApiServer:
             return error
         evaluator = self._enterprise_policy_evaluator()
         if evaluator is None or self.connector_credentials is None:
-            return web.json_response({"ok": False, "error": "connector execution unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "connector execution unavailable"}, status=503
+            )
         actor = self._enterprise_user_from_request(request)
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
         credential_id = str(payload.get("credential_id") or "").strip()
         if not credential_id:
-            return web.json_response({"ok": False, "error": "credential_id is required"}, status=400)
-        parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+            return web.json_response(
+                {"ok": False, "error": "credential_id is required"}, status=400
+            )
+        parameters = (
+            payload.get("parameters")
+            if isinstance(payload.get("parameters"), dict)
+            else {}
+        )
         action = ConnectorAction(
             connector_type=str(payload.get("connector_type") or "").strip(),
             action=str(payload.get("action") or "").strip(),
@@ -2595,10 +3364,15 @@ class WorkbenchApiServer:
             parameters=parameters,
         )
         if not action.connector_type or not action.action:
-            return web.json_response({"ok": False, "error": "connector_type and action are required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "connector_type and action are required"},
+                status=400,
+            )
         validation_error = validate_connector_action(action)
         if validation_error:
-            return web.json_response({"ok": False, "error": validation_error}, status=400)
+            return web.json_response(
+                {"ok": False, "error": validation_error}, status=400
+            )
         service = ConnectorExecutionService(
             registry=self.connector_registry,
             credential_store=self.connector_credentials,
@@ -2631,7 +3405,9 @@ class WorkbenchApiServer:
         if self._is_governed_profile():
             user = self._enterprise_user_from_request(request)
             if user is None:
-                return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+                return web.json_response(
+                    {"ok": False, "error": "not authenticated"}, status=401
+                )
             agent_rows = self._filter_enterprise_agent_rows_for_user(user, agent_rows)
         agents = [
             self._metadata_for_agent(agent_row, runtime_map.get(agent_row["name"]))
@@ -2646,11 +3422,15 @@ class WorkbenchApiServer:
         if self._is_governed_profile():
             user = self._enterprise_user_from_request(request)
             if user is None:
-                return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+                return web.json_response(
+                    {"ok": False, "error": "not authenticated"}, status=401
+                )
             agent_rows = self._filter_enterprise_agent_rows_for_user(user, agent_rows)
         agent_row = next((row for row in agent_rows if row["name"] == name), None)
         if agent_row is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
 
         runtime = runtime_map.get(name)
         metadata = self._metadata_for_agent(agent_row, runtime)
@@ -2667,20 +3447,28 @@ class WorkbenchApiServer:
         name = request.match_info["name"]
         limit = max(1, min(int(request.query.get("limit", 50)), 200))
         runtime_map = self._runtime_map()
-        agent_row = next((row for row in self._load_agent_rows() if row["name"] == name), None)
+        agent_row = next(
+            (row for row in self._load_agent_rows() if row["name"] == name), None
+        )
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
-        transcript_path = self._resolve_transcript_path(agent_row, runtime_map.get(name))
+        transcript_path = self._resolve_transcript_path(
+            agent_row, runtime_map.get(name)
+        )
         return web.json_response(_read_jsonl_recent(transcript_path, limit=limit))
 
     async def handle_transcript_poll(self, request):
         name = request.match_info["name"]
         offset = int(request.query.get("offset", 0))
         runtime_map = self._runtime_map()
-        agent_row = next((row for row in self._load_agent_rows() if row["name"] == name), None)
+        agent_row = next(
+            (row for row in self._load_agent_rows() if row["name"] == name), None
+        )
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
-        transcript_path = self._resolve_transcript_path(agent_row, runtime_map.get(name))
+        transcript_path = self._resolve_transcript_path(
+            agent_row, runtime_map.get(name)
+        )
         return web.json_response(_read_jsonl_increment(transcript_path, offset=offset))
 
     async def handle_request_activity(self, request):
@@ -2691,7 +3479,11 @@ class WorkbenchApiServer:
         runtime = self._runtime_map().get(name)
         if runtime is None:
             return web.json_response(
-                {"ok": False, "error": "agent not found", "error_code": "agent_not_found"},
+                {
+                    "ok": False,
+                    "error": "agent not found",
+                    "error_code": "agent_not_found",
+                },
                 status=404,
             )
         store = getattr(runtime, "request_activity", None)
@@ -2709,13 +3501,21 @@ class WorkbenchApiServer:
             limit = max(1, min(int(request.query.get("limit", 100)), 256))
         except (TypeError, ValueError):
             return web.json_response(
-                {"ok": False, "error": "invalid activity cursor", "error_code": "invalid_activity_cursor"},
+                {
+                    "ok": False,
+                    "error": "invalid activity cursor",
+                    "error_code": "invalid_activity_cursor",
+                },
                 status=400,
             )
         owner_id = self._v1_owner_id(request)
         if owner_id is None:
             return web.json_response(
-                {"ok": False, "error": "not authenticated", "error_code": "not_authenticated"},
+                {
+                    "ok": False,
+                    "error": "not authenticated",
+                    "error_code": "not_authenticated",
+                },
                 status=401,
             )
         try:
@@ -2775,13 +3575,19 @@ class WorkbenchApiServer:
         name = request.match_info["name"]
         project = request.match_info["project"]
         limit = int(request.query.get("limit", 100))
-        agent_row = next((row for row in self._load_agent_rows() if row["name"] == name), None)
+        agent_row = next(
+            (row for row in self._load_agent_rows() if row["name"] == name), None
+        )
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
         import re
+
         slug = re.sub(r"['\"]", "", project.lower())
         slug = re.sub(r"[^a-z0-9]+", "_", slug).strip("_") or "default"
-        workspace_dir = Path(agent_row.get("workspace_dir") or (self.global_config.project_root / "workspaces" / name))
+        workspace_dir = Path(
+            agent_row.get("workspace_dir")
+            or (self.global_config.project_root / "workspaces" / name)
+        )
         chat_log = workspace_dir / "projects" / slug / "chat_log.jsonl"
         if not chat_log.exists():
             return web.json_response({"entries": [], "count": 0})
@@ -2850,12 +3656,21 @@ class WorkbenchApiServer:
                 {
                     "session_api_version": "1.0",
                     "event_schema_version": "1.0",
+                    "control_schema_version": "1.0",
+                    "attachment_schema_version": "1.0",
+                    "approval_schema_version": "1.0",
+                    "fencing_schema_version": "1.0",
                     "durability": "sqlite-wal",
                     "controls": [
                         "fresh",
                         "archive",
                         "promotion",
                         "event_consumer_ack",
+                        "cancel",
+                        "attachments",
+                        "approvals",
+                        "fencing",
+                        "restart_interruption",
                     ],
                     "event_delivery": "cursor-polling-at-least-once",
                     "max_message_chars": 200000,
@@ -2885,7 +3700,11 @@ class WorkbenchApiServer:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
             payload = await request.json()
-            agent_id = str(payload.get("agent_id") or payload.get("agent") or "").strip().lower()
+            agent_id = (
+                str(payload.get("agent_id") or payload.get("agent") or "")
+                .strip()
+                .lower()
+            )
             if agent_id not in self._runtime_map():
                 raise SessionNotFound("agent not found")
             session = self.session_store.create_session(
@@ -2894,7 +3713,9 @@ class WorkbenchApiServer:
                 title=str(payload.get("title") or "New session"),
             )
             surface = str(payload.get("surface") or "").strip().lower()
-            channel_key = str(payload.get("channel_key") or payload.get("client_id") or "").strip()
+            channel_key = str(
+                payload.get("channel_key") or payload.get("client_id") or ""
+            ).strip()
             if surface and channel_key:
                 self.session_store.bind_channel(
                     owner_id=owner,
@@ -2915,11 +3736,15 @@ class WorkbenchApiServer:
             rows = self.session_store.list_sessions(
                 owner_id=owner,
                 agent_id=str(request.query.get("agent_id") or "") or None,
-                include_archived=str(request.query.get("include_archived") or "").lower()
+                include_archived=str(
+                    request.query.get("include_archived") or ""
+                ).lower()
                 in {"1", "true", "yes"},
                 limit=int(request.query.get("limit") or 100),
             )
-            return web.json_response({"ok": True, "sessions": rows, "next_cursor": None})
+            return web.json_response(
+                {"ok": True, "sessions": rows, "next_cursor": None}
+            )
         except Exception as exc:
             return self._v1_error(exc)
 
@@ -2963,7 +3788,9 @@ class WorkbenchApiServer:
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            self.session_store.get_session(request.match_info["session_id"], owner_id=owner)
+            self.session_store.get_session(
+                request.match_info["session_id"], owner_id=owner
+            )
             session = self.session_store.archive_session(
                 request.match_info["session_id"], deleted=True
             )
@@ -3000,7 +3827,9 @@ class WorkbenchApiServer:
                 after_ordinal=int(request.query.get("after_ordinal") or 0),
                 limit=int(request.query.get("limit") or 200),
             )
-            return web.json_response({"ok": True, "messages": rows, "next_cursor": None})
+            return web.json_response(
+                {"ok": True, "messages": rows, "next_cursor": None}
+            )
         except Exception as exc:
             return self._v1_error(exc)
 
@@ -3036,12 +3865,18 @@ class WorkbenchApiServer:
             if not idempotency_key:
                 raise ValueError("idempotency_key is required")
             client_id = str(
-                request.headers.get("X-Client-Id") or payload.get("client_id") or "default"
+                request.headers.get("X-Client-Id")
+                or payload.get("client_id")
+                or "default"
             )
             surface = str(payload.get("surface") or "session-api").strip().lower()
-            if not surface or len(surface) > 80 or any(
-                character not in "abcdefghijklmnopqrstuvwxyz0123456789._-"
-                for character in surface
+            if (
+                not surface
+                or len(surface) > 80
+                or any(
+                    character not in "abcdefghijklmnopqrstuvwxyz0123456789._-"
+                    for character in surface
+                )
             ):
                 raise ValueError("surface must be a lowercase protocol identifier")
             request_id = await runtime.enqueue_request(
@@ -3082,10 +3917,32 @@ class WorkbenchApiServer:
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            run = self.session_store.get_run(request.match_info["run_id"], owner_id=owner)
+            run = self.session_store.get_run(
+                request.match_info["run_id"], owner_id=owner
+            )
             if run["session_id"] != request.match_info["session_id"]:
                 raise SessionNotFound("run not found in Session")
             return web.json_response({"ok": True, "run": run})
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_run_cancel(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            payload = await request.json()
+            run = self.session_store.get_run(
+                request.match_info["run_id"], owner_id=owner
+            )
+            if run["session_id"] != request.match_info["session_id"]:
+                raise SessionNotFound("run not found in Session")
+            stopped = self.session_store.cancel_run(
+                run["run_id"],
+                owner_id=owner,
+                reason=str(payload.get("reason") or "cancelled_by_user"),
+            )
+            return web.json_response({"ok": True, "run": stopped})
         except Exception as exc:
             return self._v1_error(exc)
 
@@ -3173,6 +4030,53 @@ class WorkbenchApiServer:
         except Exception as exc:
             return self._v1_error(exc)
 
+    async def handle_v1_attachment_stage(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            payload = await request.json()
+            attachment = self.session_store.stage_attachment(
+                session_id=request.match_info["session_id"],
+                owner_id=owner,
+                filename=str(payload.get("filename") or "attachment"),
+                media_type=str(payload.get("media_type") or "application/octet-stream"),
+                size_bytes=int(payload.get("size_bytes") or 0),
+                sha256=str(payload.get("sha256") or ""),
+            )
+            return web.json_response({"ok": True, "attachment": attachment}, status=201)
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_attachment_commit(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            attachment = self.session_store.commit_attachment(
+                session_id=request.match_info["session_id"],
+                owner_id=owner,
+                attachment_id=request.match_info["attachment_id"],
+            )
+            return web.json_response({"ok": True, "attachment": attachment})
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_approval_decide(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            payload = await request.json()
+            approval = self.session_store.decide_approval(
+                approval_id=request.match_info["approval_id"],
+                owner_id=owner,
+                decision=str(payload.get("decision") or ""),
+            )
+            return web.json_response({"ok": True, "approval": approval})
+        except Exception as exc:
+            return self._v1_error(exc)
+
     async def handle_v1_promotion_get(self, request):
         owner = self._v1_owner_id(request)
         if owner is None:
@@ -3184,9 +4088,7 @@ class WorkbenchApiServer:
             return web.json_response(
                 {
                     "ok": True,
-                    "promotion": self.session_store.promotion_status(
-                        agent_id=agent_id
-                    ),
+                    "promotion": self.session_store.promotion_status(agent_id=agent_id),
                 }
             )
         except Exception as exc:
@@ -3229,7 +4131,9 @@ class WorkbenchApiServer:
         except Exception as exc:
             return self._v1_error(exc)
 
-    def _classify_upload(self, filename: str, declared_media_type: str = "", content_type: str = "") -> str:
+    def _classify_upload(
+        self, filename: str, declared_media_type: str = "", content_type: str = ""
+    ) -> str:
         if declared_media_type:
             return declared_media_type.lower()
 
@@ -3278,7 +4182,9 @@ class WorkbenchApiServer:
             agent_name = fields.get("agent") or fields.get("agentId")
             runtime = runtime_map.get(agent_name)
             if runtime is None:
-                return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+                return web.json_response(
+                    {"ok": False, "error": "agent not found"}, status=404
+                )
 
             text = fields.get("text", "").strip()
             caption = fields.get("caption", "").strip()
@@ -3290,7 +4196,9 @@ class WorkbenchApiServer:
                 "session_surface": fields.get("surface") or "workbench",
                 "session_channel_key": fields.get("client_id") or "default",
             }
-            base_idempotency_key = str(fields.get("idempotency_key") or "").strip() or None
+            base_idempotency_key = (
+                str(fields.get("idempotency_key") or "").strip() or None
+            )
 
             request_ids = []
             if text and not uploads:
@@ -3314,7 +4222,11 @@ class WorkbenchApiServer:
 
             for upload_index, part in enumerate(uploads):
                 local_path, original_name = await self._save_upload(runtime, part)
-                media_kind = self._classify_upload(original_name, declared_media_type, part.headers.get("Content-Type", ""))
+                media_kind = self._classify_upload(
+                    original_name,
+                    declared_media_type,
+                    part.headers.get("Content-Type", ""),
+                )
                 request_id = await runtime.enqueue_api_media(
                     local_path=local_path,
                     media_kind=media_kind,
@@ -3331,18 +4243,26 @@ class WorkbenchApiServer:
                 request_ids.append(request_id)
 
             if not request_ids:
-                return web.json_response({"ok": False, "error": "empty payload"}, status=400)
+                return web.json_response(
+                    {"ok": False, "error": "empty payload"}, status=400
+                )
 
-            return web.json_response({"ok": True, "request_id": request_ids[0], "request_ids": request_ids})
+            return web.json_response(
+                {"ok": True, "request_id": request_ids[0], "request_ids": request_ids}
+            )
 
         payload = await request.json()
         agent_name = payload.get("agent") or payload.get("agentId")
         text = (payload.get("text") or "").strip()
         runtime = runtime_map.get(agent_name)
         if runtime is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
         if not text:
-            return web.json_response({"ok": False, "error": "text is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "text is required"}, status=400
+            )
 
         # Auto-learn reply route from hchat messages (updates contacts.json)
         reply_route = payload.get("reply_route")
@@ -3396,8 +4316,16 @@ class WorkbenchApiServer:
         text = (payload.get("text") or "").strip()
         reply_route = payload.get("reply_route")
 
-        if not to_agent or not to_instance or not from_agent or not from_instance or not text:
-            return web.json_response({"ok": False, "error": "missing required fields"}, status=400)
+        if (
+            not to_agent
+            or not to_instance
+            or not from_agent
+            or not from_instance
+            or not text
+        ):
+            return web.json_response(
+                {"ok": False, "error": "missing required fields"}, status=400
+            )
 
         local_instance = str(
             getattr(self.global_config, "instance_id", None) or "HASHI"
@@ -3418,7 +4346,10 @@ class WorkbenchApiServer:
             )
             if not gate_result.allowed:
                 return web.json_response(
-                    {"ok": False, "error": f"hchat ingress denied: {gate_result.reason}"},
+                    {
+                        "ok": False,
+                        "error": f"hchat ingress denied: {gate_result.reason}",
+                    },
                     status=403,
                 )
             # Target is this instance: deliver directly to avoid blocking the event loop
@@ -3427,8 +4358,15 @@ class WorkbenchApiServer:
             runtime_map = self._runtime_map()
             runtime = runtime_map.get(to_agent)
             if runtime is None:
-                return web.json_response({"ok": False, "error": f"agent '{to_agent}' not found on {local_instance}"}, status=404)
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": f"agent '{to_agent}' not found on {local_instance}",
+                    },
+                    status=404,
+                )
             from tools.hchat_send import format_hchat_message
+
             message_text = format_hchat_message(from_agent, from_instance, text)
             if reply_route and isinstance(reply_route, dict):
                 self._learn_reply_route(message_text, reply_route)
@@ -3456,17 +4394,24 @@ class WorkbenchApiServer:
         # Target is a different instance: relay via send_hchat
         try:
             from tools.hchat_send import send_hchat
+
             ok = send_hchat(
                 to_agent,
                 from_agent,
                 text,
                 target_instance=to_instance,
                 source_instance=from_instance,
-                reply_route_override=reply_route if isinstance(reply_route, dict) else None,
+                reply_route_override=reply_route
+                if isinstance(reply_route, dict)
+                else None,
             )
             if ok:
-                return web.json_response({"ok": True, "relayed": True, "exchange": True})
-            return web.json_response({"ok": False, "error": "exchange delivery failed"}, status=502)
+                return web.json_response(
+                    {"ok": True, "relayed": True, "exchange": True}
+                )
+            return web.json_response(
+                {"ok": False, "error": "exchange delivery failed"}, status=502
+            )
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
 
@@ -3479,9 +4424,13 @@ class WorkbenchApiServer:
         source = (payload.get("source") or "browser-api").strip()
         runtime = runtime_map.get(agent_name)
         if runtime is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
         if not text:
-            return web.json_response({"ok": False, "error": "text is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "text is required"}, status=400
+            )
 
         loop = asyncio.get_running_loop()
         completion_future = loop.create_future()
@@ -3497,7 +4446,9 @@ class WorkbenchApiServer:
             deliver_to_telegram=False,
         )
         if request_id is None:
-            return web.json_response({"ok": False, "error": "failed to enqueue browser request"}, status=500)
+            return web.json_response(
+                {"ok": False, "error": "failed to enqueue browser request"}, status=500
+            )
 
         runtime.register_request_listener(request_id, _listener)
 
@@ -3512,7 +4463,9 @@ class WorkbenchApiServer:
             "source": result.get("source") or source,
             "summary": result.get("summary"),
         }
-        return web.json_response(response_payload, status=200 if response_payload["ok"] else 502)
+        return web.json_response(
+            response_payload, status=200 if response_payload["ok"] else 502
+        )
 
     async def handle_bridge_message(self, request):
         self._refresh_bridge_router()
@@ -3567,20 +4520,36 @@ class WorkbenchApiServer:
             "exchange_count": int(payload.get("exchange_count") or 0),
             "word_count": int(payload.get("word_count") or 0),
             "recent_context_block": str(payload["recent_context_block"]).strip(),
-            "recent_rounds": payload.get("recent_rounds") if isinstance(payload.get("recent_rounds"), list) else [],
+            "recent_rounds": payload.get("recent_rounds")
+            if isinstance(payload.get("recent_rounds"), list)
+            else [],
             "last_user_message": str(payload["last_user_message"]).strip(),
             "last_assistant_message": str(payload["last_assistant_message"]).strip(),
-            "source_runtime": payload.get("source_runtime") if isinstance(payload.get("source_runtime"), dict) else {},
-            "source_workspace_dir": str(payload.get("source_workspace_dir") or "").strip(),
-            "source_transcript_path": str(payload.get("source_transcript_path") or "").strip(),
-            "transfer_guidance": payload.get("transfer_guidance") if isinstance(payload.get("transfer_guidance"), dict) else {},
-            "task_state": payload.get("task_state") if isinstance(payload.get("task_state"), dict) else {},
+            "source_runtime": payload.get("source_runtime")
+            if isinstance(payload.get("source_runtime"), dict)
+            else {},
+            "source_workspace_dir": str(
+                payload.get("source_workspace_dir") or ""
+            ).strip(),
+            "source_transcript_path": str(
+                payload.get("source_transcript_path") or ""
+            ).strip(),
+            "transfer_guidance": payload.get("transfer_guidance")
+            if isinstance(payload.get("transfer_guidance"), dict)
+            else {},
+            "task_state": payload.get("task_state")
+            if isinstance(payload.get("task_state"), dict)
+            else {},
             "handoff_summary": str(payload.get("handoff_summary") or "").strip(),
-            "memory_files": payload.get("memory_files") if isinstance(payload.get("memory_files"), dict) else {},
+            "memory_files": payload.get("memory_files")
+            if isinstance(payload.get("memory_files"), dict)
+            else {},
         }
 
     def _accept_prefix_for_mode(self, mode: str) -> str:
-        return self.FORK_ACCEPT_PREFIX if mode == "fork" else self.TRANSFER_ACCEPT_PREFIX
+        return (
+            self.FORK_ACCEPT_PREFIX if mode == "fork" else self.TRANSFER_ACCEPT_PREFIX
+        )
 
     def _build_transfer_prompt(self, package: dict) -> str:
         mode = str(package.get("mode") or "transfer").strip().lower()
@@ -3603,8 +4572,7 @@ class WorkbenchApiServer:
         handoff_summary = str(package.get("handoff_summary") or "").strip()
         return (
             intro
-            +
-            f"You are NOT {package['source_agent']}. Do not imitate that agent's identity, persona, or relationship style.\n"
+            + f"You are NOT {package['source_agent']}. Do not imitate that agent's identity, persona, or relationship style.\n"
             "Keep your own identity, permissions, and system instructions.\n\n"
             f"Continue the {action_label}ed work using the operational context below.\n\n"
             "--- TRANSFER METADATA ---\n"
@@ -3642,7 +4610,9 @@ class WorkbenchApiServer:
             "3. Do not ask the user to restate context unless a critical field is missing."
         )
 
-    async def _notify_transfer_chat(self, runtime, text: str, *, purpose: str) -> dict[str, Any]:
+    async def _notify_transfer_chat(
+        self, runtime, text: str, *, purpose: str
+    ) -> dict[str, Any]:
         if not getattr(runtime, "telegram_connected", False):
             runtime.logger.warning(
                 "Transfer system notification not delivered because Telegram is disconnected.",
@@ -3662,21 +4632,33 @@ class WorkbenchApiServer:
                 "chunks": chunk_count,
             }
         except Exception:
-            runtime.logger.warning("Failed to deliver transfer system notification.", exc_info=True)
+            runtime.logger.warning(
+                "Failed to deliver transfer system notification.", exc_info=True
+            )
             return {"delivered": False, "reason": "send_exception", "chunks": 0}
 
-    def _classify_transfer_ack(self, transfer_id: str, result: dict[str, Any], *, mode: str = "transfer") -> dict[str, Any]:
+    def _classify_transfer_ack(
+        self, transfer_id: str, result: dict[str, Any], *, mode: str = "transfer"
+    ) -> dict[str, Any]:
         if not result.get("success"):
-            return {"ok": False, "error": result.get("error") or "transfer bootstrap failed"}
+            return {
+                "ok": False,
+                "error": result.get("error") or "transfer bootstrap failed",
+            }
         raw_text = str(result.get("text") or "").strip()
         if not raw_text:
-            return {"ok": False, "error": "target completed transfer bootstrap without a visible reply"}
+            return {
+                "ok": False,
+                "error": "target completed transfer bootstrap without a visible reply",
+            }
         expected = f"{self._accept_prefix_for_mode(mode)}{transfer_id}"
         if raw_text.startswith(expected):
             return {"ok": True, "raw_text": raw_text, "ack_mode": "explicit"}
         return {"ok": True, "raw_text": raw_text, "ack_mode": "implicit"}
 
-    def _finalize_transfer_status(self, *notifications: dict[str, Any]) -> tuple[str, str]:
+    def _finalize_transfer_status(
+        self, *notifications: dict[str, Any]
+    ) -> tuple[str, str]:
         if any(not note.get("delivered") for note in notifications):
             return "accepted_but_chat_offline", "offline"
         return "accepted", "online"
@@ -3700,22 +4682,43 @@ class WorkbenchApiServer:
         ).upper()
         if str(package["target_instance"]).upper() != str(current_instance).upper():
             return web.json_response(
-                {"ok": False, "error": f"target instance mismatch: this endpoint is {current_instance}"},
+                {
+                    "ok": False,
+                    "error": f"target instance mismatch: this endpoint is {current_instance}",
+                },
                 status=409,
             )
         runtime = self._runtime_map().get(package["target_agent"])
         if runtime is None:
-            return web.json_response({"ok": False, "error": "target agent not found"}, status=404)
-        if package["source_agent"] == package["target_agent"] and package["source_instance"] == package["target_instance"]:
-            return web.json_response({"ok": False, "error": f"cannot {mode} to the same agent"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "target agent not found"}, status=404
+            )
+        if (
+            package["source_agent"] == package["target_agent"]
+            and package["source_instance"] == package["target_instance"]
+        ):
+            return web.json_response(
+                {"ok": False, "error": f"cannot {mode} to the same agent"}, status=400
+            )
         if not getattr(runtime, "startup_success", False):
-            return web.json_response({"ok": False, "error": "target runtime is offline"}, status=409)
-        if mode == "transfer" and getattr(runtime, "has_active_transfer", None) and runtime.has_active_transfer():
-            return web.json_response({"ok": False, "error": "target already has an active transfer"}, status=409)
+            return web.json_response(
+                {"ok": False, "error": "target runtime is offline"}, status=409
+            )
+        if (
+            mode == "transfer"
+            and getattr(runtime, "has_active_transfer", None)
+            and runtime.has_active_transfer()
+        ):
+            return web.json_response(
+                {"ok": False, "error": "target already has an active transfer"},
+                status=409,
+            )
 
         transfer_id = package["transfer_id"]
         self.transfer_store.create_transfer(package, status="received")
-        self.transfer_store.append_event(transfer_id, "received", {"target_agent": package["target_agent"]})
+        self.transfer_store.append_event(
+            transfer_id, "received", {"target_agent": package["target_agent"]}
+        )
         incoming_notice = await self._notify_transfer_chat(
             runtime,
             (
@@ -3725,7 +4728,9 @@ class WorkbenchApiServer:
             ),
             purpose=f"{mode}-incoming",
         )
-        self.transfer_store.append_event(transfer_id, "incoming_notice", incoming_notice)
+        self.transfer_store.append_event(
+            transfer_id, "incoming_notice", incoming_notice
+        )
         bridge_prompt = self._build_transfer_prompt(package)
         request_id = await runtime.enqueue_api_text(
             bridge_prompt,
@@ -3739,7 +4744,9 @@ class WorkbenchApiServer:
                 error_code="enqueue_failed",
                 error_text=f"failed to enqueue {mode} request on target",
             )
-            self.transfer_store.append_event(transfer_id, "failed", {"reason": "enqueue_failed"})
+            self.transfer_store.append_event(
+                transfer_id, "failed", {"reason": "enqueue_failed"}
+            )
             await self._notify_transfer_chat(
                 runtime,
                 (
@@ -3748,17 +4755,26 @@ class WorkbenchApiServer:
                 ),
                 purpose=f"{mode}-failed",
             )
-            return web.json_response({"ok": False, "error": f"failed to enqueue {mode} request on target"}, status=409)
+            return web.json_response(
+                {"ok": False, "error": f"failed to enqueue {mode} request on target"},
+                status=409,
+            )
 
-        self.transfer_store.update_transfer(transfer_id, status="queued_on_target", request_id=request_id)
-        self.transfer_store.append_event(transfer_id, "queued_on_target", {"request_id": request_id})
+        self.transfer_store.update_transfer(
+            transfer_id, status="queued_on_target", request_id=request_id
+        )
+        self.transfer_store.append_event(
+            transfer_id, "queued_on_target", {"request_id": request_id}
+        )
         loop = asyncio.get_running_loop()
         ack_future = loop.create_future()
 
         async def _listener(result: dict) -> None:
             if ack_future.done():
                 return
-            ack_future.set_result(self._classify_transfer_ack(transfer_id, result, mode=mode))
+            ack_future.set_result(
+                self._classify_transfer_ack(transfer_id, result, mode=mode)
+            )
 
         runtime.register_request_listener(request_id, _listener)
         ack_result = await ack_future
@@ -3771,7 +4787,9 @@ class WorkbenchApiServer:
                 error_code="target_ack_failed",
                 error_text=error_text,
             )
-            self.transfer_store.append_event(transfer_id, "failed", {"reason": error_text})
+            self.transfer_store.append_event(
+                transfer_id, "failed", {"reason": error_text}
+            )
             await self._notify_transfer_chat(
                 runtime,
                 (
@@ -3781,7 +4799,10 @@ class WorkbenchApiServer:
                 ),
                 purpose=f"{mode}-failed",
             )
-            return web.json_response({"ok": False, "error": error_text, "transfer_id": transfer_id}, status=409)
+            return web.json_response(
+                {"ok": False, "error": error_text, "transfer_id": transfer_id},
+                status=409,
+            )
 
         ack_text = str(ack_result.get("raw_text") or "")
         ack_mode = str(ack_result.get("ack_mode") or "explicit")
@@ -3794,9 +4815,15 @@ class WorkbenchApiServer:
             ),
             purpose=f"{mode}-accepted",
         )
-        self.transfer_store.append_event(transfer_id, "accepted_notice", accepted_notice)
-        final_status, target_chat_status = self._finalize_transfer_status(incoming_notice, accepted_notice)
-        self.transfer_store.update_transfer(transfer_id, status=final_status, ack_text=ack_text)
+        self.transfer_store.append_event(
+            transfer_id, "accepted_notice", accepted_notice
+        )
+        final_status, target_chat_status = self._finalize_transfer_status(
+            incoming_notice, accepted_notice
+        )
+        self.transfer_store.update_transfer(
+            transfer_id, status=final_status, ack_text=ack_text
+        )
         self.transfer_store.append_event(
             transfer_id,
             "accepted",
@@ -3823,20 +4850,29 @@ class WorkbenchApiServer:
         question = str(payload.get("question") or "").strip()
         from_agent = str(payload.get("from_agent") or "").strip()
         if not question or not from_agent:
-            return web.json_response({"ok": False, "error": "question and from_agent required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "question and from_agent required"}, status=400
+            )
 
         lily_runtime = self._runtime_map().get("lily")
         if lily_runtime is None or not getattr(lily_runtime, "startup_success", False):
-            return web.json_response({"ok": False, "error": "lily is offline", "reason": "lily_offline"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "lily is offline", "reason": "lily_offline"},
+                status=503,
+            )
 
         cos_result = await lily_runtime.cos_query(question)
-        return web.json_response({"ok": cos_result.get("answered", False), **cos_result})
+        return web.json_response(
+            {"ok": cos_result.get("answered", False), **cos_result}
+        )
 
     async def handle_bridge_transfer_get(self, request):
         transfer_id = request.match_info["transfer_id"]
         record = self.transfer_store.get_transfer(transfer_id)
         if record is None:
-            return web.json_response({"ok": False, "error": "transfer not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "transfer not found"}, status=404
+            )
         return web.json_response({"ok": True, "transfer": record})
 
     async def handle_bridge_spawn(self, request):
@@ -3853,7 +4889,9 @@ class WorkbenchApiServer:
         thread_id = request.match_info["thread_id"]
         thread = self.bridge_router.get_thread(thread_id)
         if thread is None:
-            return web.json_response({"ok": False, "error": "thread not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "thread not found"}, status=404
+            )
         return web.json_response({"ok": True, "thread": thread})
 
     async def handle_bridge_message_get(self, request):
@@ -3861,7 +4899,9 @@ class WorkbenchApiServer:
         message_id = request.match_info["message_id"]
         message = self.bridge_router.get_message(message_id)
         if message is None:
-            return web.json_response({"ok": False, "error": "message not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "message not found"}, status=404
+            )
         return web.json_response({"ok": True, "message": message})
 
     async def handle_bridge_capabilities(self, request):
@@ -3869,22 +4909,32 @@ class WorkbenchApiServer:
         agent_name = request.match_info["agent"]
         capability = self.bridge_router.get_capability(agent_name)
         if capability is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
         return web.json_response({"ok": True, "capability": capability})
 
     async def handle_admin_commands(self, request):
         if not self._check_admin_auth(request):
-            return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+            return web.json_response(
+                {"ok": False, "error": "admin auth failed"}, status=403
+            )
 
         name = request.match_info["name"]
         runtime = self._runtime_map().get(name)
         if runtime is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
-        return web.json_response({"ok": True, "agent": name, "commands": supported_commands(runtime)})
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
+        return web.json_response(
+            {"ok": True, "agent": name, "commands": supported_commands(runtime)}
+        )
 
     async def handle_admin_command(self, request):
         if not self._check_admin_auth(request):
-            return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+            return web.json_response(
+                {"ok": False, "error": "admin auth failed"}, status=403
+            )
 
         payload = await request.json()
         agent_name = payload.get("agent") or payload.get("agentId")
@@ -3893,9 +4943,13 @@ class WorkbenchApiServer:
 
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
         if not command:
-            return web.json_response({"ok": False, "error": "command is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "command is required"}, status=400
+            )
 
         result = await execute_local_command(runtime, command, chat_id=chat_id)
         status = 200 if result.get("ok") else 400
@@ -3910,9 +4964,13 @@ class WorkbenchApiServer:
 
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
         if not command:
-            return web.json_response({"ok": False, "error": "command is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "command is required"}, status=400
+            )
 
         result = await execute_local_command(runtime, command)
         status_code = 200 if result.get("ok") else 400
@@ -3956,8 +5014,14 @@ class WorkbenchApiServer:
         task_id = str(job.get("id") or "")
         scheduler = self._task_scheduler()
         state = getattr(scheduler, "state", {}) if scheduler is not None else {}
-        state_key = {"cron": "crons", "heartbeat": "heartbeats", "nudge": "nudges"}[kind]
-        last_run = (state.get(state_key) or {}).get(task_id) if isinstance(state, dict) else None
+        state_key = {"cron": "crons", "heartbeat": "heartbeats", "nudge": "nudges"}[
+            kind
+        ]
+        last_run = (
+            (state.get(state_key) or {}).get(task_id)
+            if isinstance(state, dict)
+            else None
+        )
         pending_recovery = []
         recovery_batches = (
             (state.get("recovery_batches") or {}) if isinstance(state, dict) else {}
@@ -4012,10 +5076,14 @@ class WorkbenchApiServer:
         agent_name = request.match_info.get("name")
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
         skill_manager = getattr(runtime, "skill_manager", None)
         if skill_manager is None:
-            return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "skill manager unavailable"}, status=503
+            )
 
         kind = str(request.query.get("kind") or "all").strip().lower()
         if kind not in {"all", "cron", "heartbeat", "nudge"}:
@@ -4058,21 +5126,30 @@ class WorkbenchApiServer:
         agent_name = request.match_info.get("name")
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
         kind = str(request.query.get("kind") or "").strip().lower()
         job_id = str(request.query.get("job_id") or "").strip()
         if kind not in {"cron", "heartbeat", "nudge"}:
             return web.json_response(
-                {"ok": False, "error": "kind must be cron, heartbeat, or nudge"}, status=400
+                {"ok": False, "error": "kind must be cron, heartbeat, or nudge"},
+                status=400,
             )
         if not job_id:
-            return web.json_response({"ok": False, "error": "job_id is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "job_id is required"}, status=400
+            )
         skill_manager = getattr(runtime, "skill_manager", None)
         if skill_manager is None:
-            return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "skill manager unavailable"}, status=503
+            )
         job = skill_manager.get_job(kind, job_id)
         if not job or job.get("agent") != agent_name:
-            return web.json_response({"ok": False, "error": "job not found for agent"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "job not found for agent"}, status=404
+            )
         return web.json_response(
             {
                 "ok": True,
@@ -4093,7 +5170,9 @@ class WorkbenchApiServer:
         agent_name = request.match_info.get("name")
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
         kind = str(request.query.get("kind") or "all").strip().lower()
         job_id = str(request.query.get("job_id") or "").strip()
         if kind not in {"all", "cron", "heartbeat", "nudge"}:
@@ -4104,7 +5183,9 @@ class WorkbenchApiServer:
         try:
             limit = max(1, min(50, int(request.query.get("limit") or 10)))
         except (TypeError, ValueError):
-            return web.json_response({"ok": False, "error": "limit must be an integer"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "limit must be an integer"}, status=400
+            )
 
         runs = []
         for receipt in reversed(runtime_cross_session.load_receipts(runtime)):
@@ -4156,14 +5237,21 @@ class WorkbenchApiServer:
 
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
         if kind not in {"cron", "heartbeat"}:
-            return web.json_response({"ok": False, "error": "kind must be cron or heartbeat"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "kind must be cron or heartbeat"}, status=400
+            )
         if not job_id:
-            return web.json_response({"ok": False, "error": "job_id is required"}, status=400)
-        if payload.get("requested_by") == "hashi_tool_gateway" and payload.get(
-            "authorization"
-        ) != "explicit_user_authorization":
+            return web.json_response(
+                {"ok": False, "error": "job_id is required"}, status=400
+            )
+        if (
+            payload.get("requested_by") == "hashi_tool_gateway"
+            and payload.get("authorization") != "explicit_user_authorization"
+        ):
             return web.json_response(
                 {"ok": False, "error": "explicit single-job authorization is required"},
                 status=403,
@@ -4171,15 +5259,21 @@ class WorkbenchApiServer:
 
         skill_manager = getattr(runtime, "skill_manager", None)
         if skill_manager is None:
-            return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "skill manager unavailable"}, status=503
+            )
         job = skill_manager.get_job(kind, job_id)
         if not job or job.get("agent") != agent_name:
-            return web.json_response({"ok": False, "error": "job not found for agent"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "job not found for agent"}, status=404
+            )
 
         try:
             ok, message = await runtime._run_job_now(job, kind=kind)
         except Exception as e:
-            return web.json_response({"ok": False, "error": f"{type(e).__name__}: {e}"}, status=500)
+            return web.json_response(
+                {"ok": False, "error": f"{type(e).__name__}: {e}"}, status=500
+            )
         status_code = 200 if ok else 409
         return web.json_response(
             {
@@ -4194,10 +5288,14 @@ class WorkbenchApiServer:
 
     def _background_job_manager(self):
         kernel = getattr(self.orchestrator, "kernel", None)
-        return getattr(kernel, "background_job_manager", None) or getattr(self.orchestrator, "background_job_manager", None)
+        return getattr(kernel, "background_job_manager", None) or getattr(
+            self.orchestrator, "background_job_manager", None
+        )
 
     def _background_job_not_running_response(self):
-        return web.json_response({"ok": False, "error": "BackgroundJobManager is not running"}, status=503)
+        return web.json_response(
+            {"ok": False, "error": "BackgroundJobManager is not running"}, status=503
+        )
 
     def _runtime_for_background_job_agent(self, manager, agent: str):
         runtime = self._runtime_map().get(agent)
@@ -4222,18 +5320,35 @@ class WorkbenchApiServer:
         else:
             command = str(raw_command or "").strip() or None
         if argv is not None:
-            if not isinstance(argv, list) or not all(isinstance(item, str) and item for item in argv):
-                return web.json_response({"ok": False, "error": "argv must be a non-empty string array"}, status=400)
+            if not isinstance(argv, list) or not all(
+                isinstance(item, str) and item for item in argv
+            ):
+                return web.json_response(
+                    {"ok": False, "error": "argv must be a non-empty string array"},
+                    status=400,
+                )
             if not argv:
-                return web.json_response({"ok": False, "error": "argv must not be empty"}, status=400)
+                return web.json_response(
+                    {"ok": False, "error": "argv must not be empty"}, status=400
+                )
         if not argv and not command:
-            return web.json_response({"ok": False, "error": "argv or command is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "argv or command is required"}, status=400
+            )
         if argv and command:
-            return web.json_response({"ok": False, "error": "provide argv or command, not both"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "provide argv or command, not both"}, status=400
+            )
 
-        cwd = str(payload.get("cwd") or getattr(self.global_config, "project_root", "") or self.config_path.parent).strip()
+        cwd = str(
+            payload.get("cwd")
+            or getattr(self.global_config, "project_root", "")
+            or self.config_path.parent
+        ).strip()
         agent = str(payload.get("agent") or "unknown").strip() or "unknown"
-        origin = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
+        origin = (
+            payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
+        )
         origin.setdefault("source", "workbench_api:background_jobs")
         origin.setdefault("api_path", "/api/background-jobs")
         runtime = self._runtime_for_background_job_agent(manager, agent)
@@ -4260,15 +5375,23 @@ class WorkbenchApiServer:
                 origin=origin,
                 notify_on_complete=bool(payload.get("notify_on_complete", True)),
                 notify_on_failure=bool(payload.get("notify_on_failure", True)),
-                trigger_agent_on_complete=bool(payload.get("trigger_agent_on_complete", True)),
-                trigger_agent_on_failure=bool(payload.get("trigger_agent_on_failure", True)),
+                trigger_agent_on_complete=bool(
+                    payload.get("trigger_agent_on_complete", True)
+                ),
+                trigger_agent_on_failure=bool(
+                    payload.get("trigger_agent_on_failure", True)
+                ),
             )
         except FileNotFoundError as exc:
-            return web.json_response({"ok": False, "error": f"cwd not found: {exc}"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": f"cwd not found: {exc}"}, status=400
+            )
         except ValueError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:
-            return web.json_response({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=500)
+            return web.json_response(
+                {"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=500
+            )
         return web.json_response({"ok": True, "job": record.to_dict()}, status=201)
 
     async def handle_background_jobs_list(self, request):
@@ -4283,7 +5406,10 @@ class WorkbenchApiServer:
             limit = max(1, min(int(query.get("limit") or 50), 200))
         except Exception:
             limit = 50
-        jobs = [record.to_dict() for record in manager.list(agent=agent, states=states, limit=limit)]
+        jobs = [
+            record.to_dict()
+            for record in manager.list(agent=agent, states=states, limit=limit)
+        ]
         return web.json_response({"ok": True, "jobs": jobs})
 
     async def handle_background_jobs_get(self, request):
@@ -4293,7 +5419,9 @@ class WorkbenchApiServer:
         job_id = str(request.match_info.get("job_id") or "").strip()
         record = manager.get(job_id)
         if record is None:
-            return web.json_response({"ok": False, "error": "job not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "job not found"}, status=404
+            )
         return web.json_response({"ok": True, "job": record.to_dict()})
 
     async def handle_background_jobs_tail(self, request):
@@ -4304,13 +5432,19 @@ class WorkbenchApiServer:
         job_id = str(request.match_info.get("job_id") or "").strip()
         stream = str(query.get("stream") or "stdout").strip().lower()
         if stream not in {"stdout", "stderr"}:
-            return web.json_response({"ok": False, "error": "stream must be stdout or stderr"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "stream must be stdout or stderr"}, status=400
+            )
         try:
             lines = max(1, min(int(query.get("lines") or 80), 1000))
             text = manager.tail(job_id, stream=stream, lines=lines)
         except KeyError:
-            return web.json_response({"ok": False, "error": "job not found"}, status=404)
-        return web.json_response({"ok": True, "job_id": job_id, "stream": stream, "tail": text})
+            return web.json_response(
+                {"ok": False, "error": "job not found"}, status=404
+            )
+        return web.json_response(
+            {"ok": True, "job_id": job_id, "stream": stream, "tail": text}
+        )
 
     async def handle_background_jobs_cancel(self, request):
         manager = self._background_job_manager()
@@ -4320,14 +5454,20 @@ class WorkbenchApiServer:
         try:
             record = await manager.cancel(job_id)
         except KeyError:
-            return web.json_response({"ok": False, "error": "job not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "job not found"}, status=404
+            )
         except Exception as exc:
-            return web.json_response({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=500)
+            return web.json_response(
+                {"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=500
+            )
         return web.json_response({"ok": True, "job": record.to_dict()})
 
     async def handle_admin_smoke(self, request):
         if not self._check_admin_auth(request):
-            return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+            return web.json_response(
+                {"ok": False, "error": "admin auth failed"}, status=403
+            )
 
         payload = await request.json()
         runtime_map = self._runtime_map()
@@ -4342,11 +5482,15 @@ class WorkbenchApiServer:
             target_names = [rt.name for rt in self._runtime_list()]
 
         if not target_names:
-            return web.json_response({"ok": False, "error": "no matching agents"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "no matching agents"}, status=404
+            )
 
         include_commands = bool(payload.get("include_commands", True))
         include_chat = bool(payload.get("include_chat", True))
-        chat_text = (payload.get("chat_text") or "Smoke test ping. Reply with one short line.").strip()
+        chat_text = (
+            payload.get("chat_text") or "Smoke test ping. Reply with one short line."
+        ).strip()
         timeout_s = float(payload.get("timeout_s", 45))
         timeout_s = max(5.0, min(timeout_s, 180.0))
 
@@ -4358,16 +5502,31 @@ class WorkbenchApiServer:
             agent_result = {"agent": name, "commands": [], "chat": None}
 
             if include_commands:
-                commands = command_plan if isinstance(command_plan, list) and command_plan else self._default_smoke_commands(runtime)
+                commands = (
+                    command_plan
+                    if isinstance(command_plan, list) and command_plan
+                    else self._default_smoke_commands(runtime)
+                )
                 for command in commands:
                     cmd_result = await execute_local_command(runtime, str(command))
                     agent_result["commands"].append(cmd_result)
 
             if include_chat:
-                agent_row = next((row for row in self._load_agent_rows() if row["name"] == name), None)
-                transcript_path = self._resolve_transcript_path(agent_row, runtime) if agent_row else Path(runtime.get_runtime_metadata()["transcript_path"])
-                start_offset = transcript_path.stat().st_size if transcript_path.exists() else 0
-                request_id = await runtime.enqueue_api_text(chat_text, source="api-smoke")
+                agent_row = next(
+                    (row for row in self._load_agent_rows() if row["name"] == name),
+                    None,
+                )
+                transcript_path = (
+                    self._resolve_transcript_path(agent_row, runtime)
+                    if agent_row
+                    else Path(runtime.get_runtime_metadata()["transcript_path"])
+                )
+                start_offset = (
+                    transcript_path.stat().st_size if transcript_path.exists() else 0
+                )
+                request_id = await runtime.enqueue_api_text(
+                    chat_text, source="api-smoke"
+                )
                 wait_result = await self._wait_for_assistant_reply(
                     transcript_path,
                     start_offset,
@@ -4392,7 +5551,9 @@ class WorkbenchApiServer:
         return web.json_response({"ok": all_ok, "results": results})
 
     async def handle_health(self, request):
-        running_agents = [runtime.name for runtime in self._runtime_list() if runtime.startup_success]
+        running_agents = [
+            runtime.name for runtime in self._runtime_list() if runtime.startup_success
+        ]
         orchestrator = self.orchestrator
         payload = {
             "ok": True,
@@ -4402,7 +5563,9 @@ class WorkbenchApiServer:
             "workbench_port": getattr(self.global_config, "workbench_port", None),
             "api_gateway_port": getattr(self.global_config, "api_gateway_port", None),
             "api_gateway_enabled": bool(getattr(orchestrator, "api_gateway", None)),
-            "api_gateway_default_model": getattr(getattr(orchestrator, "api_gateway", None), "default_model", None),
+            "api_gateway_default_model": getattr(
+                getattr(orchestrator, "api_gateway", None), "default_model", None
+            ),
             "agents": running_agents,
         }
         if self._is_governed_profile():
@@ -4419,7 +5582,10 @@ class WorkbenchApiServer:
         }
         return {
             "profile": str(getattr(self.global_config, "deployment_profile", "") or ""),
-            "organization_id": str(getattr(self.global_config, "organization_id", "") or "").strip() or None,
+            "organization_id": str(
+                getattr(self.global_config, "organization_id", "") or ""
+            ).strip()
+            or None,
             "services": services,
             "ok": all(services.values()),
         }
@@ -4438,7 +5604,9 @@ class WorkbenchApiServer:
         kind = payload.get("kind", "")
         job = payload.get("job")
         if kind not in ("cron", "heartbeat") or not isinstance(job, dict):
-            return web.json_response({"ok": False, "error": "kind and job are required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "kind and job are required"}, status=400
+            )
 
         # Find skill_manager from any running runtime
         skill_manager = None
@@ -4448,67 +5616,105 @@ class WorkbenchApiServer:
                 skill_manager = sm
                 break
         if skill_manager is None:
-            return web.json_response({"ok": False, "error": "skill_manager unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "skill_manager unavailable"}, status=503
+            )
 
         job["enabled"] = False  # always import as disabled
         ok, message = skill_manager.import_job(kind, job)
-        return web.json_response({"ok": ok, "message": message, "job_id": job.get("id")})
+        return web.json_response(
+            {"ok": ok, "message": message, "job_id": job.get("id")}
+        )
 
     async def handle_admin_start_agent(self, request):
         if not self._check_admin_auth(request):
-            return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+            return web.json_response(
+                {"ok": False, "error": "admin auth failed"}, status=403
+            )
         if self.orchestrator is None:
-            return web.json_response({"ok": False, "error": "orchestrator unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "orchestrator unavailable"}, status=503
+            )
         payload = await request.json()
         agent_name = payload.get("agent") or payload.get("agentId")
         if not agent_name:
-            return web.json_response({"ok": False, "error": "agent is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "agent is required"}, status=400
+            )
         ok, message = await self.orchestrator.start_agent(str(agent_name))
         status = 200 if ok else 400
-        return web.json_response({"ok": ok, "agent": agent_name, "message": message}, status=status)
+        return web.json_response(
+            {"ok": ok, "agent": agent_name, "message": message}, status=status
+        )
 
     async def handle_admin_stop_agent(self, request):
         if not self._check_admin_auth(request):
-            return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+            return web.json_response(
+                {"ok": False, "error": "admin auth failed"}, status=403
+            )
         if self.orchestrator is None:
-            return web.json_response({"ok": False, "error": "orchestrator unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "orchestrator unavailable"}, status=503
+            )
         payload = await request.json()
         agent_name = payload.get("agent") or payload.get("agentId")
         if not agent_name:
-            return web.json_response({"ok": False, "error": "agent is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "agent is required"}, status=400
+            )
         ok, message = await self.orchestrator.stop_agent(str(agent_name))
         status = 200 if ok else 400
-        return web.json_response({"ok": ok, "agent": agent_name, "message": message}, status=status)
+        return web.json_response(
+            {"ok": ok, "agent": agent_name, "message": message}, status=status
+        )
 
     async def handle_admin_shutdown(self, request):
         if not self._check_admin_auth(request):
-            return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+            return web.json_response(
+                {"ok": False, "error": "admin auth failed"}, status=403
+            )
         if self.orchestrator is None:
-            return web.json_response({"ok": False, "error": "orchestrator unavailable"}, status=503)
+            return web.json_response(
+                {"ok": False, "error": "orchestrator unavailable"}, status=503
+            )
         payload = await request.json() if request.can_read_body else {}
         reason = str((payload or {}).get("reason") or "admin-api")
         self.orchestrator.request_shutdown(reason=reason)
-        return web.json_response({"ok": True, "message": f"Shutdown requested ({reason})."})
+        return web.json_response(
+            {"ok": True, "message": f"Shutdown requested ({reason})."}
+        )
 
     async def handle_admin_notify(self, request):
         if not self._check_admin_auth(request):
-            return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+            return web.json_response(
+                {"ok": False, "error": "admin auth failed"}, status=403
+            )
         payload = await request.json() if request.can_read_body else {}
         agent_name = str(payload.get("agent") or payload.get("agentId") or "").strip()
         text = str(payload.get("text") or payload.get("message") or "").strip()
         if not agent_name:
-            return web.json_response({"ok": False, "error": "agent is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "agent is required"}, status=400
+            )
         if not text:
-            return web.json_response({"ok": False, "error": "text is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "text is required"}, status=400
+            )
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
-            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
         chat_id = payload.get("chat_id")
         if chat_id is None:
             primary_chat_id = getattr(runtime, "_primary_chat_id", None)
             if callable(primary_chat_id):
                 chat_id = primary_chat_id()
         if chat_id is None:
-            return web.json_response({"ok": False, "error": "chat_id is required"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "chat_id is required"}, status=400
+            )
         await runtime._send_text(int(chat_id), text)
-        return web.json_response({"ok": True, "agent": agent_name, "chat_id": int(chat_id)})
+        return web.json_response(
+            {"ok": True, "agent": agent_name, "chat_id": int(chat_id)}
+        )

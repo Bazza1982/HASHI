@@ -211,3 +211,37 @@ busy reproduction, cross-Session history, missing pre-Triage evidence, skipped
 Lane C, unsigned/inconsistent Runtime Lock, or selectable target before all gates
 is an immediate No-Go. The candidate remains uninserted or non-selected and the
 last-known-good path stays authoritative.
+
+## 10. Activation-candidate closure (27 August 2026)
+
+The generic HASHI candidate now includes the complete `4d61aeb40a5e3183d6aa6cd479766a90d7a2efed`
+orphaned-Run reconciliation change. The final handoff must cite the single full
+descendant SHA produced after all tests, never the earlier `6a4d4a1` candidate.
+
+Phase 4 publishes independently versioned Session, Event, Control, Attachment,
+Approval, and Fencing contracts. The implemented controls are cancel, fresh,
+non-destructive archive/tombstone, scheduled/manual promotion, durable consumer
+ACK, attachment stage/commit, approval decision bound to the originating Run
+attempt, monotonically fenced execution, and durable restart interruption.
+Capability publication remains fail-closed until the joint evidence is complete.
+
+`tools/session_release_gate.py` is the controlled release gate. It builds a
+source-locked package from a clean Git revision, records every tracked artifact
+hash and the LKG revision, verifies the package and optional OpenSSL detached
+signature, and converts a complete machine capture into a Lane C receipt. It
+deliberately refuses incomplete Aptenra identity or a failing 20-message profile.
+
+The following external inputs are mandatory and must not be simulated:
+
+- the final Aptenra full revision and qualification profile;
+- the exact Compatibility Matrix row and Runtime Lock file/hash;
+- a black-box capture from the exact packaged pair, including authoritative
+  Session, Run, Event and consumer ACK identity plus provider-envelope digest;
+- the trusted publisher's private-key signing operation, detached signature,
+  public certificate/key and approved publisher fingerprint;
+- Windows verification output for package hash, detached signature, startup
+  health, LKG selection, and the no-customer-state-loss rollback drill.
+
+Until those materials are supplied, the honest release state is **HASHI controls
+implemented; joint activation No-Go**. LKG remains selected and
+`/api/v1/sessions` continues to return 503.
