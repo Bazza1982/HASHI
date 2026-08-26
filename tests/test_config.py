@@ -1,13 +1,19 @@
 import json
 import logging
+from pathlib import Path
 
 import pytest
 
 from orchestrator.config import (
-    ConfigManager,
     LEGACY_PCM_CONFIG_BACKUP_SUFFIX,
+    ConfigManager,
 )
+from orchestrator.her_v2.config import HERv2Config
+from orchestrator.her_v2.runtime_configuration import build_her_v2_provider_options
 from orchestrator.pcm import load_pcm_document
+
+ROOT = Path(__file__).resolve().parent.parent
+CORE_HER_V2_PROVIDERS = {"hashi-api", "deepseek-api", "openrouter-api"}
 
 
 def _materialize_legacy_pcm(config_path, root):
@@ -185,6 +191,37 @@ def test_public_her_configuration_id_resolves_forward_to_v2(tmp_path):
     assert global_cfg.her_providers["providers"]["openrouter"]["secret"] == "openrouter_key"
     assert agents[0].active_backend == "her-v2"
     assert agents[0].allowed_backends[0]["engine"] == "her-v2"
+
+
+def test_agents_sample_has_valid_her_v2_core_providers():
+    sample = json.loads((ROOT / "agents.json.sample").read_text(encoding="utf-8"))
+    providers = sample["global"]["her_providers"]["providers"]
+    her_entries = []
+
+    for agent in sample["agents"]:
+        assert all(
+            backend.get("engine") != "her"
+            for backend in agent.get("allowed_backends", [])
+            if isinstance(backend, dict)
+        )
+        her_entries.extend(
+            (agent["allowed_backends"], backend)
+            for backend in agent.get("allowed_backends", [])
+            if isinstance(backend, dict) and backend.get("engine") == "her-v2"
+        )
+
+    assert her_entries
+    for allowed_backends, backend in her_entries:
+        HERv2Config.from_mapping(backend["her_v2"])
+        options = build_her_v2_provider_options(
+            allowed_backends,
+            providers,
+            backend["her_v2"],
+        )
+        available = {
+            option["engine"] for option in options if option.get("available")
+        }
+        assert CORE_HER_V2_PROVIDERS <= available
 
 
 @pytest.mark.parametrize(

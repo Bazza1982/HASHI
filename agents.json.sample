@@ -25,6 +25,13 @@
           "base_url": "https://api.deepseek.com/v1",
           "secret": "deepseek-api_key",
           "status": "stable"
+        },
+        "hashi": {
+          "base_url": "http://127.0.0.1:18801/v1",
+          "secret": null,
+          "fast_model": "gpt-5.6-luna",
+          "pro_model": "gpt-5.6-sol",
+          "status": "provisional"
         }
       }
     }
@@ -55,26 +62,60 @@
         },
         {
           "engine": "openrouter-api",
-          "model": "anthropic/claude_sonnet-4.6"
+          "model": "anthropic/claude-sonnet-4.6"
         },
         {
-          "engine": "her",
-          "provider": "openrouter",
-          "models": [
-            "deepseek/deepseek-v4-flash",
-            "deepseek/deepseek-v4-pro",
-            "openai/gpt-4.1-mini"
-          ],
-          "default_model": "deepseek/deepseek-v4-flash"
-        },
-        {
-          "engine": "her",
-          "provider": "deepseek",
+          "engine": "deepseek-api",
           "models": [
             "deepseek-v4-flash",
             "deepseek-v4-pro"
           ],
           "default_model": "deepseek-v4-flash"
+        },
+        {
+          "engine": "hashi-api",
+          "models": [
+            "gpt-5.6-luna",
+            "gpt-5.6-sol"
+          ],
+          "default_model": "gpt-5.6-luna"
+        },
+        {
+          "engine": "her-v2",
+          "model": "role-configured",
+          "effort": "high",
+          "her_v2": {
+            "shadow_mode": false,
+            "user_idle_timeout_s": 300,
+            "audit_failure_terminal": "ERROR",
+            "profiles": {
+              "lightweight": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-flash",
+                "reasoning": "high"
+              },
+              "triage": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-flash",
+                "reasoning": "high"
+              },
+              "premium": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-pro",
+                "reasoning": "high"
+              },
+              "reviewer": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-pro",
+                "reasoning": "max"
+              },
+              "orchestrator": {
+                "engine": "deepseek-api",
+                "model": "deepseek-v4-pro",
+                "reasoning": "max"
+              }
+            }
+          }
         }
       ],
       "active_backend": "claude-cli"
