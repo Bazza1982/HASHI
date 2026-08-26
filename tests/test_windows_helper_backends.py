@@ -26,6 +26,31 @@ from tools.windows_helper import backends
 
 
 @pytest.mark.asyncio
+async def test_helper_window_focus_can_maximize(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    target = {"id": 458844, "pid": 6132, "title": "YouTube - Google Chrome"}
+
+    monkeypatch.setattr(backends.win32, "find_window", lambda **kwargs: target)
+
+    def fake_focus(window: dict, *, maximize: bool = False) -> dict:
+        calls.append((window, maximize))
+        return {**window, "maximized": maximize}
+
+    monkeypatch.setattr(backends.win32, "focus_window", fake_focus)
+
+    result = await backends.execute_action(
+        "window_focus",
+        {"window_id": 458844, "maximize": True},
+    )
+
+    assert calls == [(target, True)]
+    assert result == (
+        "Focused and maximized window id=458844 "
+        "title=YouTube - Google Chrome"
+    )
+
+
+@pytest.mark.asyncio
 async def test_helper_drag_uses_native_win32_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
 

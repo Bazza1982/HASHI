@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import socketserver
+import subprocess
+import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -14,7 +19,15 @@ from tools.browser_extension_bridge import (
     send_bridge_command,
 )
 from tools.browser_audit import append_audit_record, sanitize_value
-from tools.browser_native_host import decode_native_message, encode_native_message
+from tools.browser_bridge_transport import is_windows_pipe, load_auth_key
+from tools.browser_native_host import (
+    BridgeState,
+    EXPECTED_EXTENSION_ORIGIN,
+    WindowsPipeServer,
+    build_parser,
+    decode_native_message,
+    encode_native_message,
+)
 
 HAS_UNIX_STREAM_SERVER = hasattr(socketserver, "UnixStreamServer")
 requires_unix_stream_server = pytest.mark.skipif(
@@ -83,6 +96,149 @@ def test_native_message_codec_roundtrip() -> None:
     encoded = encode_native_message(message)
     decoded = decode_native_message(__import__("io").BytesIO(encoded))
     assert decoded == message
+
+
+def test_windows_pipe_endpoint_detection() -> None:
+    assert is_windows_pipe(r"\\.\pipe\hashi-browser-bridge") is True
+    assert is_windows_pipe("/tmp/hashi-browser-bridge.sock") is False
+
+
+def test_browser_bridge_auth_key_is_created_once(tmp_path: Path) -> None:
+    auth_file = tmp_path / "bridge-auth.key"
+
+    first = load_auth_key(auth_file, create=True)
+    second = load_auth_key(auth_file, create=True)
+
+    assert len(first) == 32
+    assert second == first
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows named-pipe transport requires Windows")
+def test_windows_named_pipe_roundtrip_and_healthcheck(tmp_path: Path) -> None:
+    endpoint = rf"\\.\pipe\hashi-browser-test-{uuid.uuid4().hex}"
+    auth_file = tmp_path / "bridge-auth.key"
+    auth_key = load_auth_key(auth_file, create=True)
+    state = BridgeState(
+        logger=logging.getLogger("hashi.browser_bridge.test"),
+        socket_path=endpoint,
+        audit_path=tmp_path / "audit.jsonl",
+    )
+    server = WindowsPipeServer(endpoint, state, auth_key)
+    try:
+        wrong_auth_file = tmp_path / "wrong-auth.key"
+        wrong_auth_file.write_bytes(b"x" * 32)
+        with pytest.raises(BrowserBridgeError, match="authentication failed"):
+            send_bridge_command(
+                "ping",
+                {},
+                socket_path=endpoint,
+                auth_file=wrong_auth_file,
+                timeout_s=2.0,
+                connect_wait_s=2.0,
+            )
+        disconnected_status = healthcheck(
+            socket_path=endpoint,
+            auth_file=auth_file,
+            timeout_s=2.0,
+        )
+        state.extension_connected.set()
+        state.extension_meta = {"browser": "Chrome", "test": True}
+        response = send_bridge_command(
+            "ping",
+            {},
+            socket_path=endpoint,
+            auth_file=auth_file,
+            timeout_s=2.0,
+            connect_wait_s=2.0,
+        )
+        status = healthcheck(
+            socket_path=endpoint,
+            auth_file=auth_file,
+            timeout_s=2.0,
+        )
+    finally:
+        server.shutdown()
+
+    assert response["ok"] is True
+    assert disconnected_status["connected"] is False
+    assert response["extension_connected"] is True
+    assert response["extension_meta"]["browser"] == "Chrome"
+    assert status["connected"] is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Chromium Windows invocation requires Windows")
+def test_native_host_parser_accepts_chromium_invocation_arguments() -> None:
+    args = build_parser().parse_args(
+        [EXPECTED_EXTENSION_ORIGIN, "--parent-window=123"]
+    )
+
+    assert args.stdio is True
+    assert args.origin == EXPECTED_EXTENSION_ORIGIN
+    assert args.parent_window == "123"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows host process requires Windows")
+def test_native_windows_host_process_serves_authenticated_pipe(tmp_path: Path) -> None:
+    endpoint = rf"\\.\pipe\hashi-browser-host-test-{uuid.uuid4().hex}"
+    auth_file = tmp_path / "host-auth.key"
+    log_file = tmp_path / "native-host.log"
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "tools.browser_native_host",
+            "--endpoint",
+            endpoint,
+            "--auth-file",
+            str(auth_file),
+            "--log-file",
+            str(log_file),
+            EXPECTED_EXTENSION_ORIGIN,
+            "--parent-window=0",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert process.stdin is not None
+        process.stdin.write(
+            encode_native_message(
+                {"type": "hello", "browser": "Chrome", "test": True}
+            )
+        )
+        process.stdin.flush()
+
+        deadline = time.monotonic() + 5.0
+        status = {"connected": False}
+        while time.monotonic() < deadline:
+            if auth_file.exists():
+                status = healthcheck(
+                    socket_path=endpoint,
+                    auth_file=auth_file,
+                    timeout_s=0.5,
+                )
+                if status["connected"]:
+                    break
+            time.sleep(0.05)
+
+        assert status["connected"] is True
+        assert status["response"]["extension_meta"]["browser"] == "Chrome"
+    finally:
+        if process.stdin is not None:
+            process.stdin.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+    stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+    assert process.returncode == 0, stderr
 
 
 @requires_unix_stream_server

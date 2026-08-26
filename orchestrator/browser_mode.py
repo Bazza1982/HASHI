@@ -110,7 +110,7 @@ def get_browser_status_text(
         extension_status = "not checked"
     else:
         extension_icon = "🟢" if extension_bridge_configured else "🔴"
-        extension_status = "bridge socket present" if extension_bridge_configured else "bridge socket not detected"
+        extension_status = "extension bridge connected" if extension_bridge_configured else "extension bridge unavailable"
 
     native_icon = "🟢" if backend in CLI_NATIVE_BROWSER_BACKENDS else "🟡"
     headless_icon = "🟢"

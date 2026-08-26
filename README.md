@@ -1048,15 +1048,15 @@ Recommended workflow for agents:
 1. Use `windows_info` and inspect `displays`.
 2. Capture `windows_screenshot(display=N)` for the monitor that should contain the real Chrome window.
 3. Use `windows_window_list` to find the real Chrome window.
-4. Use `windows_window_focus` on that window.
+4. Use `windows_window_focus(maximize=true)` on that window when the user wants a maximized browser window. This is normal window maximization, not F11 or video full-screen.
 5. Re-capture `windows_screenshot(display=N)` before typing if focus matters.
 6. Drive navigation with:
    - `windows_key` → `ctrl+l`
    - `windows_type` → target URL
    - `windows_key` → `ENTER`
 7. Verify the extension bridge through bridge-owned evidence, not only by what the desktop looks like:
-   - native host log: `logs/browser_native_host.log`
-   - socket: `/tmp/hashi-browser-bridge.sock`
+   - native host log: `%LOCALAPPDATA%\HASHI\browser_bridge\logs\native-host.log` on native Windows, or `logs/browser_native_host.log` for the WSL-backed host
+   - endpoint: `\\.\pipe\hashi-browser-bridge` on native Windows, or `/tmp/hashi-browser-bridge.sock` for Linux/WSL
    - `tools.browser_extension_bridge.healthcheck(...)`
 8. On real pages, verify:
    - `active_tab`

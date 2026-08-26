@@ -31,6 +31,8 @@ user32.BringWindowToTop.argtypes = [wintypes.HWND]
 user32.BringWindowToTop.restype = wintypes.BOOL
 user32.IsIconic.argtypes = [wintypes.HWND]
 user32.IsIconic.restype = wintypes.BOOL
+user32.IsZoomed.argtypes = [wintypes.HWND]
+user32.IsZoomed.restype = wintypes.BOOL
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.PostMessageW.restype = wintypes.BOOL
 user32.GetForegroundWindow.argtypes = []
@@ -72,6 +74,7 @@ kernel32.GlobalUnlock.restype = wintypes.BOOL
 
 SW_RESTORE = 9
 SW_SHOW = 5
+SW_MAXIMIZE = 3
 WM_CLOSE = 0x0010
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
@@ -334,15 +337,19 @@ def find_window(
     return None
 
 
-def focus_window(window: dict) -> dict:
+def focus_window(window: dict, *, maximize: bool = False) -> dict:
     hwnd = int(window["id"])
-    if user32.IsIconic(hwnd):
+    if maximize:
+        user32.ShowWindow(hwnd, SW_MAXIMIZE)
+    elif user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, SW_RESTORE)
     else:
         user32.ShowWindow(hwnd, SW_SHOW)
     user32.BringWindowToTop(hwnd)
     user32.SetForegroundWindow(hwnd)
-    return window
+    focused = dict(window)
+    focused["maximized"] = bool(user32.IsZoomed(hwnd))
+    return focused
 
 
 def close_window(window: dict) -> bool:

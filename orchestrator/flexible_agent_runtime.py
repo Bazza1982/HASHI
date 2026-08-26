@@ -3030,7 +3030,14 @@ class FlexibleAgentRuntime:
                 except Exception as e:
                     self.logger.warning("Failed to refresh secrets for /browser status: %s", e)
             active_backend = getattr(self.config, "active_backend", None)
-            extension_bridge_configured = Path("/tmp/hashi-browser-bridge.sock").exists()
+            try:
+                from tools.browser_extension_bridge import healthcheck as browser_bridge_healthcheck
+
+                bridge_health = await asyncio.to_thread(browser_bridge_healthcheck, timeout_s=2.0)
+                extension_bridge_configured = bool(bridge_health.get("connected"))
+            except Exception as e:
+                self.logger.warning("Failed to probe browser extension bridge for /browser status: %s", e)
+                extension_bridge_configured = False
             await self._reply_text(
                 update,
                 get_browser_status_text(

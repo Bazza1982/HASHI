@@ -1416,6 +1416,10 @@ WINDOWS_USE_TOOL_SCHEMAS = [
                     "pid": {"type": "integer", "description": "Optional target process id."},
                     "title_contains": {"type": "string", "description": "Optional partial title match."},
                     "exact_title": {"type": "string", "description": "Optional exact title match."},
+                    "maximize": {
+                        "type": "boolean",
+                        "description": "Maximize the matched window after focusing it. Default false.",
+                    },
                 },
             },
         },

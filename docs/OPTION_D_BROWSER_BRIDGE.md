@@ -4,7 +4,7 @@ This is the HASHI "real profile" bridge for Chrome:
 
 - Chrome extension runs inside the user's real browser profile.
 - Chrome native messaging launches a local host process.
-- HASHI agents in WSL talk to the host over a Unix socket.
+- HASHI agents use an authenticated Windows named pipe on native Windows or a Unix socket on Linux/WSL.
 
 ## Why this exists
 
@@ -19,17 +19,28 @@ Components:
   - Uses `chrome.scripting` and `tabs` against the active real-profile browser session.
 - `tools/browser_native_host.py`
   - Native messaging host launched by Chrome.
-  - Exposes `/tmp/hashi-browser-bridge.sock` inside WSL for HASHI agents.
+  - Exposes `\\.\pipe\hashi-browser-bridge` on native Windows or `/tmp/hashi-browser-bridge.sock` on Linux/WSL.
 - `tools/browser_extension_bridge.py`
-  - WSL client used by HASHI browser tools.
+  - Cross-platform client used by HASHI browser tools.
+- `tools/install_browser_option_d_windows.ps1`
+  - Installs the native Windows host and Chrome extension without WSL.
 - `tools/install_browser_option_d.sh`
-  - Installs the Windows native host manifest and copies the extension to `%LOCALAPPDATA%`.
+  - Installs the WSL-backed Windows host manifest and copies the extension to `%LOCALAPPDATA%`.
 - `tools/install_browser_option_d_linux.sh`
   - Installs an isolated Linux native host manifest for Chrome running inside WSL/X11 and copies a WSL-specific extension bundle to `~/.local/share/hashi/browser_bridge_wsl/extension`.
 
 ## Install
 
-From WSL for Windows Chrome:
+From native Windows PowerShell for Windows Chrome:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\tools\install_browser_option_d_windows.ps1
+```
+
+The installer uses `.venv\Scripts\python.exe` when present, otherwise the `python.exe` on `PATH`.
+
+From WSL for Windows Chrome (legacy WSL-backed transport):
 
 ```bash
 cd /home/lily/projects/hashi
@@ -77,7 +88,26 @@ This avoids the failure mode where the extension loads and its service worker ru
 
 ## Runtime
 
-When Chrome starts, the extension connects to the native host automatically. The native host creates:
+When Chrome starts, the extension connects to the native host automatically. The native host creates one of these endpoints:
+
+```text
+Windows: \\.\pipe\hashi-browser-bridge
+Linux/WSL: /tmp/hashi-browser-bridge.sock
+```
+
+The Windows pipe uses a per-user authentication key stored at:
+
+```text
+%LOCALAPPDATA%\HASHI\browser_bridge\bridge-auth.key
+```
+
+The Windows native-host log defaults to:
+
+```text
+%LOCALAPPDATA%\HASHI\browser_bridge\logs\native-host.log
+```
+
+The legacy WSL-backed installer explicitly keeps using:
 
 ```text
 /tmp/hashi-browser-bridge.sock
@@ -146,6 +176,6 @@ This is intended for traceability and auditability across HASHI browser actions.
 
 ## Notes
 
-- This design is intentionally modular: the WSL client only knows about a socket protocol.
+- This design is intentionally modular: browser tools use the same JSON protocol over the platform transport.
 - If we later replace native messaging with a different transport, the browser tool layer can stay stable.
 - The core host is deliberately small so protocol and feature updates do not require redesigning the bridge.
