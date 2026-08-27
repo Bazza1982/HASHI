@@ -1,6 +1,15 @@
 # HASHI Runtime Modularization Plan
 
-Status: active incremental migration. Updated 2026-08-12.
+Status: historical migration plan. Baseline recorded 2026-08-12; superseded
+2026-08-27.
+
+> This document preserves the plan and pre-retirement findings that guided the
+> migration. Present-tense statements below describe the 2026-08-12 baseline,
+> not the current runtime. HASHI now builds only `FlexibleAgentRuntime`; missing
+> Agent types are rejected, explicit legacy `type: "fixed"` rows are migrated
+> once to Flex shape, the legacy runtime modules are removed, and supported
+> transcripts use `transcript.jsonl`. Use [AGENT_FYI.md](AGENT_FYI.md) and
+> [tools.md](tools.md) for current operational guidance.
 
 ## Goals
 

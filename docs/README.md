@@ -16,7 +16,7 @@ This directory contains developer documentation and operational notes for HASHI.
 > [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md).
 >
 > **Current integration checkpoint:** see
-> [HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md)
+> [HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md)
 > for the merged implementation baseline, verification evidence, known limits,
 > and GitHub push boundary.
 >
@@ -61,6 +61,8 @@ deployment validation continues.
 
 ### Core references
 - [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) — authoritative target design for backend-neutral HASHI Persona-Context-Memory ownership, assembly, retrieval and migration
+- [HER_V2_WIP_JOURNAL.md](HER_V2_WIP_JOURNAL.md) — crash-safe transient unfinished-work context, clear/preserve rules, and lifecycle audit evidence
+- [TELEGRAM_NOTIFICATION_MODES.md](TELEGRAM_NOTIFICATION_MODES.md) — `/notify on|quiet|off`, final/error notification policy, persistence, and Telegram sound/vibration boundary
 - [HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md](HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md) — client-neutral persistent Session, Run, Message and Event architecture for agentic frontends
 - [HASHI_PCM_UPGRADE_TEST_PLAN.md](HASHI_PCM_UPGRADE_TEST_PLAN.md) — accepted assertion migration and minimum 24-contract backend-neutral PCM verification gate
 - [AGENT_FYI.md](AGENT_FYI.md) — Bridge environment FYI (operational reference)
@@ -100,7 +102,8 @@ deployment validation continues.
 - [HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md](HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md) — staged HASHI2 WSL rollout and full-function validation plan for stable Remote port allocation
 - [AUDIT_VIBE_CODING_SUPERLOOP.md](AUDIT_VIBE_CODING_SUPERLOOP.md) — end-to-end vibe-coded product superloop with mandatory independent reviews and live runtime exit gates
 - [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md) — local-first voice runtime plan for the WhatsApp Desktop call bridge and future provider transports
-- [HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md) — current HER v2 integration identity, verification evidence, known limits, and GitHub publication boundary
+- [HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) — current HER v2, Session, notification, WIP Journal, multimodal, and publication checkpoint
+- [HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md) — historical compulsory-Replanning integration and publication record, superseded by the 27 August checkpoint
 - [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) — historical native-HER integration and release-preparation evidence
 - [HER_HABIT_MEDITATION.md](HER_HABIT_MEDITATION.md) — default-off adapter-direct HER Habit controls, JSON persistence, recovery, audit, and change notifications
 - [her_multimedia_multimodal_plan.md](her_multimedia_multimodal_plan.md) — implemented HER media bridge, security limits, compatibility paths, and remaining live rollout matrix
@@ -110,6 +113,7 @@ deployment validation continues.
 - [HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md) — authoritative fixed 10-result/5-minute compulsory Adaptive-or-above Replanning contract, tests, and limit audit
 - [HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md](HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md) — retired incorrect optional-checkpoint design retained only as a migration pointer
 - [HER_V2_AUTO_COMPACTION_DESIGN.md](HER_V2_AUTO_COMPACTION_DESIGN.md) — HER v2 Quick/Light high-effort compaction policy, protected context, atomic commit, and Tier 2/Tier 3 isolation
+- [PROVIDER_AGNOSTIC_MULTIMODAL_INPUT_UPGRADE_TEST_PLAN.md](PROVIDER_AGNOSTIC_MULTIMODAL_INPUT_UPGRADE_TEST_PLAN.md) — current model-exact native/fallback media contract and remaining live multi-provider canary matrix
 
 ### Nagare Flow System (v2.1)
 - [NAGARE_FLOW_SYSTEM.md](NAGARE_FLOW_SYSTEM.md) — Complete technical reference for the multi-agent workflow orchestration engine
@@ -136,7 +140,7 @@ deployment validation continues.
 
 ### Release Notes
 - [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md) — Enterprise AAI v0.1 alpha release notes and known limits
-- [RELEASE_NOTES_v4.0.0-alpha.2.md](RELEASE_NOTES_v4.0.0-alpha.2.md) — historical native-HER release-candidate record, superseded by the HER v1 retirement series
+- [RELEASE_NOTES_v4.0.0-alpha.2.md](RELEASE_NOTES_v4.0.0-alpha.2.md) — current broader HASHI v4 HER v2 release-candidate scope and alpha boundaries
 - [RELEASE_PREPARATION_v4.0.0-alpha.2.md](RELEASE_PREPARATION_v4.0.0-alpha.2.md) — consolidation, verification, publication-hygiene findings, and remaining tag/push boundary
 - [RELEASE_NOTES_v4.0.0-alpha.1.md](RELEASE_NOTES_v4.0.0-alpha.1.md) — v4 alpha release notes for HER mode and Superloop foundation
 - [RELEASE_NOTES_v1.1.md](RELEASE_NOTES_v1.1.md) — v1.1 release notes

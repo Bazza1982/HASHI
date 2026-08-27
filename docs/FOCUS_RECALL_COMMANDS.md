@@ -17,8 +17,8 @@
 - `/delay <minutes> <message>` creates a persistent FUTURE request that joins
   the normal READY FIFO when its due time arrives.
 
-All three commands are available in flexible and fixed runtimes and appear in the
-Telegram bot command menu.
+All three commands are available in every supported Flex Agent execution mode
+and appear in the Telegram bot command menu.
 
 ## `/focus`
 
@@ -201,8 +201,7 @@ active task continues.
 | Persistent delay state and due dispatch | `orchestrator/scheduler.py` |
 | Shared READY/FUTURE queue operations | `orchestrator/runtime_pending.py` |
 | Delay command | `orchestrator/commands/delay.py` |
-| Flexible-runtime command method | `orchestrator/flexible_agent_runtime.py` |
-| Fixed-runtime command method and menu | `orchestrator/legacy/bridge_agent_runtime.py` |
+| Flex Agent command method | `orchestrator/flexible_agent_runtime.py` |
 | Shared command and bot-menu bindings | `orchestrator/runtime_command_binding.py` |
 | Focus tests | `tests/test_focus_command.py` |
 | Recall tests | `tests/test_recall_command.py` |

@@ -362,6 +362,14 @@ The following decisions were accepted on 26 August 2026. They are normative and 
 | PCM-DEC-005 | Central BGE-M3 raw-memory search is scoped to the current HASHI instance and Agent by default. | `memory_sync` permits ingestion but does not grant cross-Agent read access. Shared knowledge is delivered through the curated Wiki. Searching another Agent’s raw consolidated records requires explicit user authorisation, an auditable purpose and provenance-preserving results. `/wiki` never exposes the underlying raw cross-Agent memory store. |
 | PCM-DEC-006 | Unfinished work is transient Context, not Agent Memory. HER v2 maintains a model-independent WIP Journal from observable, durably audited turn events. | An interrupted or error turn leaves its Journal intact. Later HER v2 turns append to it and receive the prior Journal at the end of their prompt with a neutral warning that it may be unrelated and must not be continued by default. After a later Ledger is durably `COMPLETED`, the accumulated Journal is cleared. Memory+ is not responsible for crash recovery. |
 
+Operationally, the Journal lives under
+`<agent-workspace>/backend_state/her_v2/wip_journal.jsonl`. Its content may be
+sensitive, but its lifecycle is separately observable in
+`<base-logs-dir>/<agent>/her_v2_audit.jsonl` through content-free
+`wip_journal_turn_started`, `wip_journal_context_injected`,
+`wip_journal_preserved`, and `wip_journal_cleared` events. See
+[HER v2 WIP Journal](HER_V2_WIP_JOURNAL.md) for the inspection contract.
+
 ## 11. Upgrade Test Contract
 
 The accepted assertion migration, retained-test boundaries and minimum

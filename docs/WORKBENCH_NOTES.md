@@ -15,7 +15,7 @@ Examples:
 
 - `/new` resets the shared backend session for that agent
 - `/model` changes the active model used by both Telegram and workbench traffic
-- flex backend switches affect the same shared flex runtime
+- backend switches affect the same shared Flex Agent runtime
 - `/resend` replays the last model or Bridge output without changing runtime state
 - `/retry` intentionally replaces stale shared context with a clean `/new` or
   `/fresh` context, restores bounded handoff continuity, then reruns the last
@@ -23,6 +23,10 @@ Examples:
 
 ## Operational Notes
 
-- fixed agents write transcripts to `conversation_log.jsonl`
-- flex agents write transcripts to `transcript.jsonl`
+- supported Flex Agents write the durable user/assistant delivery record to
+  `transcript.jsonl` across their execution modes
+- `core_transcript.jsonl`, backend logs, and HER v2 audit records are auxiliary
+  evidence; they do not replace the visible delivery transcript
+- the client-neutral persistent Session API keeps canonical Session, Message,
+  Run, and Event state only after its fail-closed qualification gate is enabled
 - the Python workbench API is optional infrastructure; if it fails to bind, the Telegram bridge should still start normally

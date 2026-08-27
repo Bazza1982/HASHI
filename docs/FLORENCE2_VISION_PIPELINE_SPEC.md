@@ -1,8 +1,15 @@
 # Florence-2 Vision Pipeline Spec
 
 > **Owner:** HASHI (platform layer)
-> **Status:** Approved design, pending implementation
+> **Status:** Historical proposal — not the current runtime contract
 > **Date:** 2026-04-04
+
+> **Superseded:** HASHI now uses a provider-agnostic, model-exact multimodal
+> contract. Supported media is sent natively to the selected capable model;
+> otherwise HASHI uses only an authorised local inspection path. Florence-2 is
+> not a mandatory bridge-start preprocessing layer, and the `/raw` design below
+> must not be used as current operational guidance. See
+> [Provider-agnostic multimodal input](PROVIDER_AGNOSTIC_MULTIMODAL_INPUT_UPGRADE_TEST_PLAN.md).
 
 ---
 
@@ -25,7 +32,7 @@ Insert a **Florence-2** (ONNX INT8, CPU inference) preprocessing layer that conv
 ```
 Image arrives (any source)
   │
-  ├── /raw flag set for this image? ──── YES ──→ Original image sent to LLM (current behaviour)
+  ├── /raw flag set for this image? ──── YES ──→ Original image sent to LLM (proposal baseline)
   │
   └── NO
       │
@@ -256,7 +263,7 @@ python browser_cli.py screenshot --url "..." --out /tmp/shot.png --describe --ra
 
 ## 6. Token Savings Estimate
 
-| Scenario | Current (raw image) | With Florence-2 | Savings |
+| Scenario | Proposal baseline (raw image) | Proposed Florence-2 path | Estimated savings |
 |----------|-------------------|-----------------|---------|
 | Terminal screenshot | ~2,000 tokens | ~200–400 tokens | ~85% |
 | UI screenshot | ~2,500 tokens | ~300–500 tokens | ~80% |

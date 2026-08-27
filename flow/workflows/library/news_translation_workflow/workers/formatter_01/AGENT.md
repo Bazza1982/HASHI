@@ -10,7 +10,7 @@
   - Headers are properly formatted
   - Lists (ordered/unordered) are correct
   - Code blocks are preserved
-  - Links are intact (format: [text](url))
+  - Links are intact (format: `[text](url)`)
   - Tables are properly formatted if present
   - Bold/italic formatting is preserved
 - Fix minor Chinese grammar/punctuation issues

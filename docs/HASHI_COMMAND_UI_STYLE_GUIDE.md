@@ -132,10 +132,10 @@ Current coverage includes:
 - reboot, hard restart, retry, move, workspace reset, workspace wipe, and other
   destructive confirmation cards.
 
-The flexible and legacy fixed runtimes use the same shared headings, selection
-marker, navigation labels, and information order wherever they expose the same
-menu. Callback data and command behavior remain stable during presentation-only
-migrations.
+All supported Flex Agent execution modes use the same shared headings,
+selection marker, navigation labels, and information order wherever they expose
+the same menu. Callback data and command behavior remain stable during
+presentation-only migrations.
 
 Private commands are outside this migration inventory because they are installed
 per machine. HASHI2's local `/oll` command follows the same card structure but

@@ -379,7 +379,7 @@ hashi2/                                  (WSL dev repo — release/v3 branch)
 │   ├── workbench_api.py                 ✅ Python Workbench API server (bridge-u-f backend)
 │   ├── project_chat_logger.py           ✅ Per-agent project chat logger (Python side)
 │   ├── flexible_agent_runtime.py        ✅ Agent runtime (integrates ProjectChatLogger)
-│   ├── agent_runtime.py                 ✅ Legacy agent runtime
+│   ├── runtime_pipeline.py              ✅ Shared generation and delivery pipeline
 │   └── skill_manager.py                 ✅ Skill loading and dispatch
 │
 ├── flow/                                (Nagare workflow engine — in Windows HASHI)

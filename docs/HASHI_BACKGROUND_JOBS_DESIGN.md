@@ -1,8 +1,13 @@
 # HASHI Background Jobs Design
 
-Status: design plus Phase 1/Workbench implementation notes
+Status: historical design plus Phase 1/Workbench implementation notes
 Date: 2026-07-06
 Scope: HASHI runtime, HASHI Remote, Workbench, governed tool execution
+
+> Runtime file references below describe the July 2026 implementation
+> baseline. The legacy fixed runtime has since been removed; current Background
+> Jobs behavior is owned by `FlexibleAgentRuntime` and its extracted runtime
+> modules.
 
 ## Summary
 

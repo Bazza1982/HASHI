@@ -4,11 +4,11 @@
 
 | 字段 | 内容 |
 |---|---|
-| 状态 | 已合并并通过离线验证；通用热重载已验收，真实多图专项验收仍待执行 |
+| 状态 | 已合并并通过离线验证；通用热重载与 DeepSeek 原生图片路径已验收，跨 Provider 真实多图专项验收仍待执行 |
 | 批准日期 | 2026-08-23 |
 | 适用范围 | HASHI Agent Runtime、HER v2、API Gateway、Provider Adapters、Telegram /long |
 | 首要验收对象 | Momo 多图读取 |
-| 代表性原生 Provider | OpenRouter Gemini、HASHI API 所服务的 Codex/GPT 模型 |
+| 代表性原生 Provider | OpenRouter Gemini、DeepSeek `deepseek-v4-flash-vision-exp`、HASHI API 所服务的 Codex/GPT 模型 |
 | 兼容对象 | 不具备原生多模态能力的现有 backend/model |
 | 发布要求 | 在宣称具体 Provider 多模态生产可用前，须完成真实媒体专项 canary |
 
@@ -20,8 +20,9 @@ HASHI 的多模态能力必须采用 Provider 无关、Model 精确、逐模态�
    Provider 接受的结构化内容形状直接进入模型。
 2. 当前模型不支持该媒体时，必须保留并使用现有本地解释链路，包括
    media_read、vision_inspect、OCR、音频规范化与转录、PDF 解析以及视频抽帧。
-3. HASHI API 所服务的 Codex/GPT 模型只是一个适配实例；OpenRouter Gemini、
-   Claude 或未来任何具备多模态能力的模型均应遵守同一内部契约。
+3. HASHI API 所服务的 Codex/GPT 模型、OpenRouter Gemini 与 DeepSeek
+   `deepseek-v4-flash-vision-exp` 都只是适配实例；Claude 或未来任何具备
+   多模态能力的模型均应遵守同一内部契约。
 4. HER v2 的 Immediate Response、Triage 及后续前台阶段必须按各自实际选择的
    provider/model 独立解析能力，不得依赖 HER 外层 supports_files 布尔值。
 5. 图片路径、文件名及 transport receipt 只能证明媒体已接收，不能证明模型已

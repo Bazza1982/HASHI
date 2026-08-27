@@ -6,13 +6,15 @@
 
 | Commit | Change |
 | --- | --- |
-| `a28ece3` | Add global `/steer` (flex + fixed + Telegram menu) |
+| `a28ece3` | Original global `/steer` implementation and Telegram menu |
 | `ba8952f` | Idle: plain new request (no mid-task wrapper) |
 | `f39473c` | Suppress false `❌ Backend error` on intentional kill |
 
 ## What it is
 
-`/steer <direction>` is a **global** Telegram command available on **all backends and models** (flex and fixed runtimes). It is like `/stop` followed by a new instruction, with one critical difference:
+`/steer <direction>` is a **global** Telegram command available on **all
+supported Flex Agent execution modes, backends, and models**. It is like
+`/stop` followed by a new instruction, with one critical difference:
 
 - **Progress is kept** — interim thinking, workspace files, artefacts, tool results, CLI session state, and partial answers are **not** discarded.
 - **No session reset** — the agent continues from the current state unless the new direction explicitly requires a wipe/reset.
@@ -114,8 +116,7 @@ You should see the stop/steer acknowledgement, not a red Backend error line.
 
 | Surface | Status |
 | --- | --- |
-| Flexible agents (`FlexibleAgentRuntime`) | ✅ `cmd_steer` → `runtime_control.cmd_steer` |
-| Fixed / legacy agents (`bridge_agent_runtime`) | ✅ same shared handler |
+| Flex Agents (`FlexibleAgentRuntime`) in every execution mode | ✅ `cmd_steer` → `runtime_control.cmd_steer` |
 | All backends via `backend.shutdown()` / `backend_manager` | ✅ |
 | Telegram `BotCommand` menu | ✅ `steer` |
 | Command binding table | ✅ `CommandBinding("steer", "cmd_steer")` |
@@ -128,7 +129,6 @@ You should see the stop/steer acknowledgement, not a red Backend error line.
 | Interrupt mark / consume | `mark_user_interrupt`, `consume_user_interrupt` |
 | Flex pipeline error suppress | `orchestrator/runtime_pipeline.py` |
 | Lifecycle double-notify avoid | `orchestrator/runtime_lifecycle.py` |
-| Fixed-runtime exit suppress | `orchestrator/legacy/bridge_agent_runtime.py` |
 | Menu + bindings | `orchestrator/runtime_command_binding.py` |
 | Tests | `tests/test_steer_command.py` |
 

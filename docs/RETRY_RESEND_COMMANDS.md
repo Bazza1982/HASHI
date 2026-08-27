@@ -14,8 +14,8 @@
   clean context, restores bounded recent continuity, and runs the last request
   again.
 
-Both commands are available in flexible and fixed runtimes and appear in the
-Telegram bot command menu.
+Both commands are available to every supported Flex Agent execution mode and
+appear in the Telegram bot command menu.
 
 ## Choosing the right command
 
@@ -160,8 +160,7 @@ review request.
 | Shared command handlers and recovery orchestration | `orchestrator/runtime_control.py` |
 | `/new` and `/fresh` reset primitives | `orchestrator/runtime_session.py` |
 | Shared command and bot-menu metadata | `orchestrator/command_specs.py` |
-| Flexible runtime integration | `orchestrator/flexible_agent_runtime.py`, `orchestrator/runtime_pipeline.py` |
-| Fixed runtime compatibility | `orchestrator/legacy/bridge_agent_runtime.py` |
+| Flex Agent integration | `orchestrator/flexible_agent_runtime.py`, `orchestrator/runtime_pipeline.py` |
 | Recovery regression coverage | `tests/test_retry_command.py` |
 
 ## Related

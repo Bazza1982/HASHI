@@ -3,15 +3,18 @@
 ## Universal Multi-Agent Telegram Orchestrator (`bridge-u-f`)
 The `bridge-u-f` project located at `<project_root>` is a local multi-agent bridge that connects Telegram bots (and optionally WhatsApp) to multiple AI backends, with an optional browser workbench.
 
-Five execution modes:
-- **Fixed agents:** one Telegram bot, one backend, one workspace.
-- **Flex agents:** one Telegram bot, one workspace, one shared identity, switchable backend via `/backend`.
-- **Wrapper agents:** one shared identity with a functional core backend/model plus a stateless wrapper backend/model that rewrites only the final user-facing response.
-- **Audit agents:** a functional core response plus a separate auditor pass and findings.
-- **Dual Brain agents:** a left-brain continuity/planning pass plus right-brain execution.
+Five runtime execution modes are available to a Flex Agent:
+- **Fixed mode:** keep one selected session-capable backend and its native session.
+- **Flex mode:** one bot, one workspace, one shared identity, and a switchable backend via `/backend`.
+- **Wrapper mode:** one shared identity with a functional core backend/model plus a stateless wrapper backend/model that rewrites only the final user-facing response.
+- **Audit mode:** a functional core response plus a separate auditor pass and findings.
+- **Dual Brain mode:** a left-brain continuity/planning pass plus right-brain execution.
 
 - **Memory+ continuity:** an independent optional layer that can stay enabled in any execution mode.
-- **Supported backends:** `gemini-cli`, `claude-cli`, `codex-cli`, `her`, `grok-cli`, `openrouter-api`, `deepseek-api`, `ollama-api`, and `xai-api`.
+- **Selectable backends:** `gemini-cli`, `claude-cli`, `codex-cli`, `grok-cli`,
+  `her-v2` (with `her` as a migration alias), `ollama-api`, and `xai-api`.
+  `openrouter-api` and `deepseek-api` remain provider-only engines for HER v2
+  and internal rendering; they are hidden from `/backend`.
 - **Adding agents:** Add a new block to `<project_root>\agents.json`. Always set `type` explicitly. New agents should normally use `type: "flex"`; omitted `type` is rejected so HASHI cannot accidentally fall back to the retired legacy fixed runtime.
   - Flex required fields: `name`, `type: "flex"`, `workspace_dir`, `allowed_backends`, `active_backend`, `is_active`; the workspace must contain a strict lower-case `agent.md`
   - Legacy `type: "fixed"` and `system_md` values are one-time migration inputs only; successful startup converts the row to Flex shape, validates/writes `agent.md`, and removes `system_md`
@@ -67,6 +70,7 @@ Five execution modes:
 - `/commentary [on|off]` — HER only: show explicitly model-authored Persona acknowledgements and interim reports once each; independent of `/think`, `/verbose`, and raw reasoning
 - `/verbose [on|off]` — show a temporary technical activity card with planning, tools, tests, validation, retries, and runtime status; Persona speech, reasoning, and answer drafts are excluded
 - `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
+- `/notify [on|quiet|off]` — `on` notifies for every message; `quiet` silences interim activity but not final results, errors, warnings, recovery, or important alerts; `off` delivers every message silently
 - `/stream` and `/preview` — retired compatibility commands that point to the display controls above; Telegram answers are delivered only when complete
 - `/skill` — browse and apply standard instruction Skills (inline keyboard)
 - `/active [on|off] [minutes]` — toggle bridge-managed proactive heartbeat (default 10 min)
@@ -312,10 +316,12 @@ python tools/browser_cli.py fill       --url https://site.com --selector "#q" --
 python tools/browser_cli.py evaluate   --url https://site.com --script "() => document.title"
 ```
 
-**OpenRouter API backend** — native tool schema via `ToolRegistry`. Enable in `agents.json`:
+**HER v2 / provider tool path** — enable the required Tool Registry entries on
+the explicit HER v2 row or the provider row consumed by HER v2:
 ```json
 {
-  "engine": "openrouter-api",
+  "engine": "her-v2",
+  "model": "role-configured",
   "tools": {
     "allowed": ["browser_screenshot", "browser_get_text", "browser_get_html",
                 "browser_click", "browser_fill", "browser_evaluate"]
@@ -356,9 +362,11 @@ Parameters:
 
 Auto-detection: `.jpg/.jpeg/.png/.webp` → photo, `.mp4/.mov/.avi/.mkv` → video, `.mp3/.ogg/.flac/.wav/.m4a` → audio, everything else → document.
 
-### Native Tool Call (OpenRouter/DeepSeek API backends)
+### Native Tool Call (HER v2 provider/tool paths)
 
-`telegram_send_file` is auto-injected for all agents via `global.default_tools` in `agents.json`. No per-agent configuration needed.
+`telegram_send_file` can be supplied through `global.default_tools` and becomes
+model-visible when the selected runtime/provider exposes the HASHI Tool
+Registry. It is not proof that every backend supports native tools.
 
 ```json
 {
@@ -371,7 +379,9 @@ Auto-detection: `.jpg/.jpeg/.png/.webp` → photo, `.mp4/.mov/.avi/.mkv` → vid
 
 ### Global Default Tools
 
-Tools listed in `agents.json` → `global.default_tools.allowed` are automatically available to all agents when using OpenRouter or DeepSeek API backends. Per-backend `tools` config merges with (not replaces) the global defaults.
+Tools listed in `agents.json` → `global.default_tools.allowed` merge with each
+backend/provider tool configuration. The selected runtime still applies its
+own capability and permission checks before advertising or executing them.
 
 ```json
 {
@@ -600,8 +610,8 @@ Recommended protocol for Windows UI work:
 | HER | Actual reasoning text, explicit redaction notices, or legacy reasoning summaries when `stream-json` is supported | Task start, tool start/end, usage summary; JSON fallback can still report completed tool use but not live reasoning |
 | Claude CLI | Actual `thinking_delta` content when the model emits it | Tool/file/shell start, streamed tool input, and completion markers; result output is not always exposed |
 | Gemini CLI | Not currently exposed by Gemini's parsed stream schema | Task start, tool use, short tool-result previews, and errors |
-| OpenRouter API | `reasoning` or `reasoning_details`, model/provider dependent | HASHI tool-gateway start/action/end events, short output previews, policy blocks, and tool-loop warnings |
-| DeepSeek API | `reasoning_content` and reported reasoning-token usage on reasoning models | Same HASHI tool-gateway summaries as OpenRouter |
+| OpenRouter provider adapter | `reasoning` or `reasoning_details`, model/provider dependent | HASHI tool-gateway start/action/end events, short output previews, policy blocks, and tool-loop warnings |
+| DeepSeek provider adapter | `reasoning_content` and reported reasoning-token usage on reasoning models | Same HASHI tool-gateway summaries as OpenRouter |
 | xAI API | Provider reasoning fields when the selected model/endpoint returns them | HASHI tool-gateway summaries where local tool execution is used |
 | Ollama API | The model's `reasoning` field when available | HASHI tool-gateway summaries for locally enabled tools |
 

@@ -8,7 +8,7 @@
 > Enterprise `0.1.0a1` resets the enterprise-grade package version line for
 > alpha testing; it is not a production-certified deployment claim.
 >
-> **Current integration checkpoint:** see [`docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md`](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md) · **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
+> **Current integration checkpoint:** see [`docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md`](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) · **Changelog:** see [`CHANGELOG.md`](CHANGELOG.md) · **Roadmap:** see [`docs/ROADMAP.md`](docs/ROADMAP.md) · **Nagare Docs:** see [`docs/NAGARE_FLOW_SYSTEM.md`](docs/NAGARE_FLOW_SYSTEM.md).
 
 ## About
 
@@ -201,6 +201,13 @@ HER v2 is the sole supported HER execution backend:
 - **Provider-aware multimodal routing** — images and other supported media keep
   stable identity and order, travel natively to capable provider/models, and
   fall back only through authorised local media inspection when needed.
+- **Crash-safe WIP continuity** — HER v2 records observable work from an
+  unfinished turn in a transient journal, exposes its lifecycle in the durable
+  audit log, and clears it only after a later Ledger is durably completed.
+- **Quiet Telegram notifications** — `/notify quiet` keeps acknowledgements,
+  commentary, reasoning, verbose activity, and other interim updates silent
+  while final results, errors, warnings, recovery notices, and important alerts
+  still notify normally.
 - **Hybrid routing and context maintenance** — Quick and Pro model slots can use
   Single or Hybrid provider routes. Automatic Compact follows the active
   Quick/Light route and cannot block the selected model when maintenance fails.
@@ -216,7 +223,7 @@ HER v2 is the sole supported HER execution backend:
 See [the HER v2 design](docs/HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md)
 and [HER v2 testing plan](docs/HER_V2_TESTING_PLAN.md). The exact integrated
 baseline and GitHub publication boundary are recorded in the
-[2026-08-24 checkpoint](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md).
+[2026-08-27 checkpoint](docs/HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md).
 
 HASHI 2.x proved that local agents could execute tools, browse, switch backends, run from a TUI, and orchestrate Nagare workflows. HASHI 3.2 turns that foundation into a much broader local agent platform:
 
@@ -507,7 +514,7 @@ HASHI uses a **Universal Orchestrator** pattern where a single Python process ma
 ```
 hashi/
 ├── main.py                    # Slim process bootstrap and kernel wrapper
-├── agents.json                # Agent definitions (name, backend, system prompt)
+├── agents.json                # Agent routing, workspace, runtime, and backend configuration
 ├── secrets.json               # API keys (gitignored)
 ├── tasks.json                 # Heartbeat + cron job definitions
 ├── onboarding/                # Multi-language guided setup
@@ -521,9 +528,9 @@ hashi/
 │   ├── startup_manager.py     # Cold-start orchestration
 │   ├── shutdown_manager.py    # Final shutdown orchestration
 │   ├── whatsapp_manager.py    # WhatsApp control manager
-│   ├── agent_runtime.py       # Legacy fixed-runtime compatibility shim
-│   ├── legacy/                # Retired fixed runtime, emergency flag only
-│   ├── flexible_agent_runtime.py  # Flex agent (switchable backend)
+│   ├── flexible_agent_runtime.py  # Sole supported Agent runtime
+│   ├── runtime_pipeline.py    # Shared generation and delivery pipeline
+│   ├── runtime_session.py     # Session/reset/continuity controls
 │   ├── scheduler.py           # Heartbeat + cron job runner
 │   ├── skill_manager.py       # Skills system
 │   ├── bridge_memory.py       # Context assembly + memory retrieval
@@ -535,8 +542,8 @@ hashi/
 │   ├── gemini_cli.py          # Google Gemini CLI
 │   ├── claude_cli.py          # Anthropic Claude Code
 │   ├── codex_cli.py           # OpenAI Codex CLI
-│   ├── openrouter_api.py      # OpenRouter API
-│   ├── deepseek_api.py        # DeepSeek API (direct)
+│   ├── openrouter_api.py      # OpenRouter provider adapter
+│   ├── deepseek_api.py        # DeepSeek provider adapter
 │   ├── ollama_api.py          # Ollama local LLM
 │   ├── her_habits.py          # HER-local Habit search, Meditation, and file writes
 │   └── registry.py            # Backend auto-discovery
@@ -582,7 +589,10 @@ First-run setup is handled by the **TUI Onboarding** program, which runs entirel
 1. **Language selection** — 9 languages
 2. **AI Ethics & Human Well-being disclaimer** — Enter to confirm
 3. **Mental health & AI relationship reminder** — Enter to confirm
-4. **API key check** — auto-detects OpenRouter or DeepSeek key with live ping; prompts for a key if none found
+4. **Backend check** — selects the first available Claude, Gemini, or Codex CLI.
+   The legacy no-CLI fallback can validate an OpenRouter key, but OpenRouter is
+   now provider-only and requires an explicit HER v2 configuration before
+   normal startup.
 5. **Generates `agents.json`** from sample if not present
 6. **Bridge starts** — TUI transitions seamlessly into normal chat
 7. **First agent greets the user** in their selected language and guides Telegram setup
@@ -596,7 +606,7 @@ HASHI supports multiple communication channels:
 #### Telegram
 - Default transport, enabled by default
 - Requires `telegram_bot_token` in `secrets.json`
-- Commands: `/new`, `/fresh`, `/stop`, `/reboot`, `/handoff`, `/skill`, etc.
+- Commands: `/new`, `/fresh`, `/stop`, `/reboot`, `/handoff`, `/notify`, `/skill`, etc.
 - Supports inline keyboards, file uploads, voice messages, SafeVoice
 - File sending (photos, documents, videos, audio) from agents
 
@@ -685,6 +695,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/status [full]` | Show agent status, backend info |
 | `/memory [status\|on\|pause\|plus on\|plus off]` | Control normal memory injection and the independent Memory+ continuity layer |
 | `/notepad [today\|carryover\|history\|find <query>]` | Inspect the compact Memory+ work card and archived-day pointers |
+| `/notify [on\|quiet\|off]` | Choose normal notifications, final/error-only Quiet notifications, or silent delivery |
 | `/privacy [0-5]` | Show privacy details or quickly select a privacy level; Level 1 is the default |
 | `/handoff` | Restore continuity from recent transcript |
 | `/skill` | Browse and apply standard instruction Skills (inline keyboard) |
@@ -945,12 +956,14 @@ This prevents runaway API costs from automated workflows.
 
 #### Tool Execution Layer
 
-API-backed agents can execute local actions via the tool system:
+HER v2 and other tool-capable runtimes can execute local actions through the
+HASHI Tool Registry. OpenRouter and DeepSeek remain provider adapters inside
+HER v2 rather than selectable top-level backends:
 
 ```json
 {
-  "engine": "openrouter-api",
-  "model": "anthropic/claude-sonnet-4.6",
+  "engine": "her-v2",
+  "model": "role-configured",
   "tools": {
     "allowed": ["bash", "file_read", "file_write", "file_list", "apply_patch",
                 "web_search", "web_fetch", "http_request",
@@ -1224,7 +1237,12 @@ Telegram splits long messages and delivers each attachment as its own update. Th
 /end           ← assemble and submit as one request with one consolidated response
 ```
 
-Pure-text batches keep the original long-text behavior. Media batches preserve item order and identify every local file path so the agent can inspect all items and compare them before replying. SafeVoice confirmations still apply to voice transcripts.
+Pure-text batches keep the original long-text behavior. Media batches preserve
+item order and stable attachment identity. Each selected provider/model receives
+supported media natively; unsupported media uses only an authorised local
+inspection path. A local path or receipt by itself is never treated as proof
+that a model saw the media. SafeVoice confirmations still apply to voice
+transcripts.
 
 **Safety:** 5-minute auto-submit timeout, empty buffer warning, duplicate `/long` detection, chat-scoped collection, and blocking `/end` while voice confirmations are pending.
 
@@ -1472,13 +1490,15 @@ duplicate alias `/paswd` has been removed.
 
 Every agent must set `type` explicitly. New agents should normally use
 `"type": "flex"`. Omitted `type` is rejected so HASHI cannot accidentally fall
-back to the retired legacy fixed runtime. Explicit `"type": "fixed"` is reserved
-for emergency rollback only and requires `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1`.
+back to the retired legacy fixed runtime. Explicit legacy `"type": "fixed"`
+rows are accepted only as one-time migration inputs and are rewritten to the
+supported Flex shape during successful configuration loading.
 
 HER provider profiles hold instance-level connection details, not secrets. An
-enabled instance provider is enough for HER v2 routing; per-Agent backend rows
-remain optional default/model hints and still govern ordinary direct backend
-selection. Every explicit HER v2 row defaults to YOLO authority when its
+enabled instance provider is enough for HER v2 routing; per-Agent OpenRouter and
+DeepSeek rows are optional provider authorisation/model hints and are not
+selectable through `/backend`. Selectable non-provider rows still govern
+ordinary direct backend selection. Every explicit HER v2 row defaults to YOLO authority when its
 authority fields are omitted; set `permission_mode`, `access_scope`, or
 `tools.allowed` explicitly to narrow one Agent. The legacy singular `model`
 field remains a one-model hint.

@@ -72,21 +72,29 @@ consolidated as the `v4.0.0-alpha.2` release candidate:
 - retirement of HER v1, native Rust source/packages, `/rebuild` machinery,
   `claw-cli`, the legacy fixed runtime, and the OpenClaw importer;
 - canonical Workbench Agent Overview and shared-token-authenticated remote
-  terminal execution.
+  terminal execution;
+- crash-safe HER v2 WIP context with explicit preserve/inject/clear audit
+  events, provider-only OpenRouter/DeepSeek selection, and exact DeepSeek native
+  vision capability;
+- client-neutral persistent Session/Message/Run/Event services behind a
+  fail-closed qualification boundary, plus restart reconciliation for orphaned
+  Runs; and
+- three-state Telegram notification control with a Quiet mode that silences
+  interim activity while keeping final, error, warning, recovery, and important
+  messages attention-bearing.
 
-The final local Python, architecture, documentation, publication-hygiene, and
-approved live HER v2 canary gates are recorded as passed.
-Remaining work is the publication boundary: review the final `main` tip and exact
-outbound range, then create the tag and push only after the destination and operation
-receive explicit approval. Wider runtime rollout remains a separate operator-controlled
-deployment action, not an unfinished `.22` certification gate.
+The local Python, architecture, documentation, and publication-hygiene gates
+must be rerun against each outgoing `main` tip. Wider runtime rollout and release
+tagging remain separate operator-controlled actions rather than implicit effects
+of a source push.
 
 See [the release notes](RELEASE_NOTES_v4.0.0-alpha.2.md) for the delivered scope
 and alpha boundaries. The
-[2026-08-24 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md) records the
+[2026-08-27 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) records the
 current integrated implementation and publication boundary. The
-[2026-08-13 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) remains a
-historical record of the earlier native `.13` integration state.
+[2026-08-24 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md) and
+[2026-08-13 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) remain
+historical records of earlier integration states.
 
 ---
 
@@ -288,8 +296,8 @@ Current decision:
 Future upgrade target:
 
 - Add `sendRichMessage` as an optional Telegram transport capability shared by
-  fixed and flex agents, while retaining `sendMessage` as the universal
-  fallback.
+  all Flex Agent execution modes, while retaining `sendMessage` as the
+  universal fallback.
 - Route compact structured content to `rich_message.markdown`; convert
   narrative or mobile-unfriendly wide tables into readable vertical cards.
 - Preserve delivery ordering, retry/failover, notification policy, exact
@@ -328,7 +336,7 @@ Deferred target:
   - `args`
   - `user`
   - `outcome`
-- Make this audit path apply to both flex and fixed runtimes.
+- Make this audit path apply to every supported Flex Agent execution mode.
 - Keep the log durable and machine-readable so command-frequency reports, unused-command reports, and per-agent command analysis can be generated exactly rather than inferred.
 
 Why deferred:

@@ -30,8 +30,17 @@ interfaces. Its release contract includes:
   Quick/Light target at fixed high HER effort;
 - Single or Hybrid stage routing, including the HASHI API provider;
 - provider/model-specific multimodal routing with authorised local fallback;
+- exact native DeepSeek image routing for
+  `deepseek-v4-flash-vision-exp`, without granting image capability to
+  text-only DeepSeek models;
 - explicit stream-channel ownership and idempotent user delivery;
+- crash-safe transient WIP context with separately auditable
+  start/inject/preserve/clear lifecycle events;
 - isolated scheduler execution with one authoritative user conversation;
+- a client-neutral persistent Session/Message/Run/Event API behind a fail-closed
+  qualification boundary, including restart reconciliation for orphaned Runs;
+- three-state Telegram notification control, including Quiet final/error-only
+  notification signalling; and
 - HASHI Tool Gateway access, secure multimedia, and agent-local Habits.
 
 ## HER Execution Modes
@@ -124,6 +133,17 @@ commentary presentation with `💬 ` while preserving the original audit text.
 A final candidate paired only with `StructuredOutput` remains on the final lane
 instead of appearing once as commentary and again as final.
 
+An unfinished HER v2 turn leaves observable progress in a per-Agent WIP
+Journal. A later turn receives that prior context with an explicit warning not
+to continue it by default. The Journal clears only after a later Ledger is
+durably `COMPLETED`, while lifecycle events remain in the canonical HER v2
+audit log.
+
+OpenRouter and DeepSeek adapters remain available as HER v2 providers, but are
+no longer selectable as top-level `/backend` engines. A legacy direct active
+selection migrates only when the Agent already grants an explicit HER v2 row;
+otherwise startup fails with an actionable configuration error.
+
 ## Adoption Workflow
 
 HER v2 is ordinary hot-reloadable HASHI Python code. `/reboot min` and numbered
@@ -180,4 +200,4 @@ The release gate requires:
 Exact results are recorded during final release preparation; no tag or GitHub
 push is implied by this release-candidate document. The latest integrated
 results and outbound boundary are recorded in the
-[2026-08-24 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md).
+[2026-08-27 checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md).

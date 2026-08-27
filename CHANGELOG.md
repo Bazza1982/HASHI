@@ -11,6 +11,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Telegram Quiet notification mode** — expanded `/notify` to
+  `on|quiet|off`. Quiet delivers every message, silences acknowledgements,
+  commentary, reasoning, technical activity, placeholders, and previews, then
+  uses normal notification signalling for final results, command/background
+  completions, errors, warnings, recovery, control, and important alerts. Only
+  the last chunk of a split final notifies. The workspace preference survives
+  restart, and hot reload validates the current command and purpose-aware
+  notification contract before adopting a refreshed runtime.
+- **HER v2 crash-safe WIP Journal** — added per-Agent transient Context built
+  from observable, durably audited turn events. Interrupted and error turns
+  preserve accumulated work; later turns receive it with a neutral warning not
+  to continue by default; a later durably `COMPLETED` Ledger atomically clears
+  it. Content-free lifecycle events record turn start, context injection,
+  preservation, and clearing in the canonical HER v2 audit log.
+- **Persistent Session API v1** — added client-neutral Session, Message, Run,
+  Event, consumer ACK, attachment, approval, fencing, context-generation, and
+  promotion services behind a fail-closed qualification boundary. Restart
+  reconciliation terminalizes orphaned queued/running Runs as interrupted,
+  advances fencing, preserves Messages, and emits one durable interruption
+  Event.
+- **DeepSeek native vision route** — registered exact native image capability
+  for `deepseek-v4-flash-vision-exp`, preserved ordered structured media through
+  the shared provider contract, and kept other DeepSeek models text-only unless
+  explicitly proven capable.
 - **HER v2 compulsory periodic Replanning** — corrected the earlier optional
   high-risk checkpoint implementation. Adaptive (`high`), Reviewed (`xhigh`),
   and Assured (`max`) Execution now unconditionally enters Replanning at the
@@ -77,6 +101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **OpenRouter and DeepSeek are provider-only engines** — removed both from
+  top-level `/backend` selection while retaining their adapters for HER v2 and
+  internal rendering. Legacy direct active selections migrate to `her-v2` only
+  when the Agent already grants an explicit HER v2 row; otherwise startup fails
+  with an actionable configuration error.
 - **HER v2 execution continuity** — removed legacy turn, tool, provider-attempt,
   and wall-clock ceilings from the HER path. Meaningful-progress idle detection,
   explicit user control, immediate policy/approval denial, scoped transport
@@ -106,6 +135,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Notification-policy delivery and hot-reload safety** — notification helper
+  signature mismatches or policy exceptions can no longer suppress a final
+  message. Delivery uses a compatibility fallback or safe audible default, and
+  foundation-first module reload plus runtime contract validation keeps
+  `/reboot min` and `/reboot max` from accepting a partially refreshed
+  notification implementation.
 - **Streaming error and Codex stdin fallbacks** — OpenRouter-compatible SSE
   errors now retain typed failure handling even when a minimal client omits
   response request metadata. Codex document/media fallback prompts continue
@@ -360,7 +395,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Grok 4.5 CLI support** — upgraded the local stable Grok CLI to `0.2.93`, added smoke-tested `grok-4.5` as the `grok-cli` default, and retained `grok-composer-2.5-fast` as the other currently CLI-advertised model. The stale `grok-build` CLI model id is no longer advertised by HASHI.
 - **GPT-5.6 Codex support** — upgraded local Codex CLI to `0.144.1` and added the smoke-tested ChatGPT-account Codex variants `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` to HASHI model catalogs. The OpenAI API alias `gpt-5.6` is intentionally not exposed through `codex-cli` because Codex CLI rejected it for the current ChatGPT account.
 - **Model-aware Codex `/effort`** — `gpt-5.6-sol` now exposes its documented `max` reasoning tier; Terra and Luna retain the verified `low` through `xhigh` tiers. Switching away from Sol automatically normalizes an incompatible `max` selection.
-- **Telegram `/notify` preference** — added a functional-layer `/notify [on|off]` command. Telegram notifications default to `off`, which still delivers messages but sends them with Telegram `disable_notification=true`; `/notify on` restores audible notifications and persists per agent workspace.
+- **Initial Telegram `/notify` preference** — introduced the earlier
+  two-state `/notify [on|off]` form. The current three-state behavior is
+  documented under Unreleased above.
 - **Managed `/bg` background jobs** — added a Workbench-backed BackgroundJobManager path for long OS/process work with durable job ids, status/tail/cancel APIs, bounded stdout/stderr logs, terminal success/failure notifications, and one-shot `background-job-event` routing that can wake the responsible agent to summarize the completed job.
 
 ### Fixed

@@ -10,7 +10,7 @@ Use this guide to:
 
 - debug the bridge systematically instead of guessing
 - preserve knowledge learned from runtime failures
-- check whether a bug in a fixed agent also affects flex agents
+- check whether a bug in one runtime mode or backend also affects shared paths
 - keep a structured audit trail of recurring failure modes and proven fixes
 
 ## Debugging Philosophy
@@ -28,15 +28,18 @@ Practical principles:
 - separate backend failures from Telegram failures
 - separate startup failures from runtime failures
 - keep terminal output clean, but keep detailed file logs
-- treat fixed-agent bugs as probes for flex-agent risk
+- treat backend- or mode-specific bugs as probes for shared-runtime risk
 - avoid broad behavioral changes when a narrow retry/recovery path will do
 
 ## System Model
 
-There are two main runtime models:
+There is one supported configured Agent type: a Flex Agent with one workspace,
+one Telegram identity, and a switchable backend. Its execution modes include
+Fixed, Flex, Wrapper, Audit, and Dual Brain. Fixed is a session-preserving mode
+inside `FlexibleAgentRuntime`; it is not the retired legacy fixed Agent runtime.
 
-- fixed agents: one backend permanently bound to one Telegram bot
-- flex agents: one Telegram bot with a switchable active backend
+OpenRouter and DeepSeek are provider-only engines used through HER v2 and
+internal rendering. They are not selectable top-level `/backend` choices.
 
 There are also two operator surfaces:
 
@@ -286,11 +289,15 @@ Fix pattern:
 
 Additional operational note:
 
-- the same chunk-limit failure can also appear in flex when `sakura` is on `codex-cli` and receives a large raw prompt
-- in flex, keep Codex free of wrapper context, but still run raw prompts through the prompt-budget cap before dispatch
-- the fixed runtime now applies the same prompt-budget cap before dispatch as well; if `codex-coder` still shows this error before restart, treat it as stale-runtime recurrence rather than a missing patch
-- the flex runtime (FlexibleAgentRuntime) now also implements the same targeted 120s retry logic for scheduler tasks hitting this limit, matching the fixed-agent behavior
-- on Windows, large wrapped Codex prompts can also fail earlier with `The command line is too long.` because `codex.cmd` goes through `cmd.exe`; route large or multiline Codex prompts over stdin in both fixed and flex paths
+- the same chunk-limit failure can appear in any Flex Agent using `codex-cli`
+  with a large raw prompt
+- keep Codex free of unnecessary wrapper context, but still run raw prompts
+  through the shared prompt-budget cap before dispatch
+- `FlexibleAgentRuntime` applies the targeted 120-second retry for scheduler
+  tasks that hit this limit
+- on Windows, large wrapped Codex prompts can fail earlier with
+  `The command line is too long.` because `codex.cmd` goes through `cmd.exe`;
+  route large or multiline Codex prompts over stdin on every current Codex path
 
 ### 7. Codex wrapper/handoff misinterpretation
 
@@ -377,35 +384,37 @@ Fix pattern:
 - convert unknown objects to `repr(...)` in admin-local testing helper
 - if 500 persists immediately after patch, check whether runtime has restarted and loaded new code
 
-## Fixed Agents vs Flex Agents
+## Runtime Modes and Shared Backend Paths
 
-### Why fixed agents still matter
+### Why Fixed mode still matters
 
-Fixed agents are useful because they:
+Fixed mode inside a Flex Agent is useful because it:
 
-- expose backend-specific failures more directly
-- are simpler to reason about
-- serve as baseline backend probes
-- can remain good stable workers for narrow roles
+- preserves a selected session-capable backend and its native conversation
+  session
+- exposes backend-specific failures directly
+- provides a stable baseline for narrow roles without restoring a second
+  runtime implementation
 
-### Why flex agents matter more
+### Why Flex mode matters
 
-Flex agents are strategically more important because they:
+Flex mode is useful because it:
 
-- realize the vendor-indifferent architecture
-- concentrate orchestration value in one runtime
-- benefit directly from lessons learned in fixed-agent debugging
+- enables explicit backend switching within one Agent identity
+- exercises the same queue, command, delivery, media, and continuity services
+  used by the other modes
+- makes provider-neutral orchestration behavior easier to compare
 
 ### Rule of thumb
 
-When a bug is found in a fixed agent, ask:
+When a bug is found in one backend or mode, ask:
 
-- does the same adapter exist under flex?
-- does the same resume path exist under flex?
-- does the same media path exist under flex?
-- does the same scheduler path exist under flex?
+- does another mode use the same adapter?
+- does it share the same resume or WIP-continuity path?
+- does it share the same media and notification-delivery path?
+- does it share the same scheduler path?
 
-If yes, verify flex explicitly.
+If yes, verify the shared path and at least one contrasting mode or backend.
 
 ## Debugging Workflow
 
@@ -422,8 +431,9 @@ When something breaks:
    - send-back failure
    - handoff/memory contamination
 4. Check whether the same failure path exists in:
-   - fixed runtime
-   - flex runtime
+   - another execution mode
+   - another backend or provider route
+   - another frontend using the same runtime queue
 5. Prefer a narrow fix:
    - targeted retry
    - backend-specific fallback
@@ -496,22 +506,6 @@ All database calls use synchronous `sqlite3` inside async code, which technicall
 The `messages` table grows indefinitely with no pruning or rotation. Old conversation history is never cleaned up.
 
 **Why no rush:** At current usage rates (tens of messages per day per agent), the DB won't reach problematic size for months. A fix requires a design decision — time-based pruning? row-count cap? archival? — and should be done thoughtfully rather than rushed. When it matters, add a `PRAGMA auto_vacuum` and a periodic cleanup that preserves recent context.
-
-### 14. Flex runtime missing transcript logging
-
-**Where:** `orchestrator/flexible_agent_runtime.py`
-
-The flex runtime doesn't call `log_transcript()` after responses, unlike the fixed runtime in `agent_runtime.py`. This means flex agent conversations don't appear in the workbench dashboard transcript view.
-
-**Why no rush:** Flex agents use `handoff_builder` for context transfer instead of transcript logs. The missing logging only affects the workbench UI display — agents still function correctly. Adding it is straightforward (call `log_transcript` after `generate_response`) but low impact since the workbench dashboard is a convenience tool, not a critical path.
-
-### 15. Backend init retry logic
-
-**Where:** `orchestrator/backend_preflight.py` — backend availability and initialization checks
-
-Backend initialization uses a `--version` check that either passes or fails with no retry. A transient failure (e.g., CLI not yet on PATH after install) would permanently skip the agent for that session.
-
-**Why no rush:** The `--version` check rarely fails transiently — if a CLI isn't installed, retrying won't help. The current fail-fast behavior is actually reasonable: it surfaces misconfiguration immediately rather than hiding it behind retries. If transient failures become observed (e.g., slow PATH resolution on Windows), a single retry with a short delay would suffice.
 
 ## Future Additions
 

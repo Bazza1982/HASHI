@@ -14,9 +14,11 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   5. Configure credentials in `secrets.json`. Use `WORKBENCH_ONLY_NO_TOKEN` if a Telegram token is not yet available.
   6. Ask the user to authorise the appropriate `/reboot` scope so the validated configuration can be loaded.
 
-## Agent Types and Runtime Modes
-- Flex agent: one bot, one workspace, switchable backend via `/backend`.
-- Fixed agent: one bot, one backend, one workspace.
+## Agent Type and Runtime Modes
+- The supported configured Agent type is Flex: one bot, one workspace, and a
+  switchable backend via `/backend`.
+- Fixed is a session-preserving runtime mode inside a Flex Agent, not a second
+  normal configured Agent type. The legacy fixed runtime is retired.
 - Runtime execution modes are `fixed`, `flex`, `wrapper`, `audit`, and
   `dual-brain`. Memory+ is an independent continuity setting, not a sixth mode.
 
@@ -64,6 +66,10 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   and delivered at most once, independently from `/think` and `/verbose`; other
   backends retain their own display rules.
 - `/typing [on|off|status]`: control both the temporary typing bubble and Telegram's native typing indicator, independently from `/verbose` and `/think`.
+- `/notify [on|quiet|off]`: control Telegram notification sound. `quiet`
+  silences acknowledgements, commentary, reasoning, verbose activity, and
+  other interim updates while final results, errors, warnings, recovery, and
+  important alerts still notify. All three modes still deliver the messages.
 - `/stop`: cancel current processing. HASHI durably preserves the interrupted user task;
   a later plain `continue`, `resume`, or `继续` request is explicitly rebound to that task,
   including after a runtime restart. An unrelated new request remains unrelated. The
@@ -92,6 +98,10 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   existing model-selection flow. In another execution mode, first ask for
   confirmation to move to Flex; saved specialized-mode configuration and
   Memory+ are preserved.
+- OpenRouter and DeepSeek are HER v2 providers, not selectable top-level
+  backends. Legacy direct selections migrate to `her-v2` only when that Agent
+  already has an explicit HER v2 row; otherwise startup fails with an
+  actionable configuration error.
 - backend `+`: same flow, but rebuild handoff context after the backend switch.
 - `/provider`: while HER v2 is active, select a Single call provider or open a
   Hybrid routing draft. Instance configuration is sufficient; a provider need
@@ -149,11 +159,13 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - When switching a Codex model, HASHI normalizes an effort unsupported by the
   destination model before it invokes Codex (for example, Sol `max` becomes
   `medium` on Terra or Luna).
-- OpenRouter key lookup order for flex agents is:
+- OpenRouter provider key lookup order is:
   - `<agent_name>_openrouter_key`
   - `openrouter-api_key`
   - `openrouter_key`
-- Default OpenRouter model is `anthropic/claude-sonnet-4.6`.
+- The legacy provider-row default OpenRouter model is
+  `anthropic/claude-sonnet-4.6`; HER v2 Quick/Pro model choices remain explicit
+  routing configuration.
 
 ## Core Memory Model
 - Fixed mode uses real persistent sessions and incremental prompts with
@@ -188,8 +200,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - Main repo guide: `README.md`
 - Agent config: `agents.json`
 - Scheduler tasks: `tasks.json`
-- Fixed transcript: `conversation_log.jsonl`
-- Flex transcript: `transcript.jsonl`
+- Durable visible delivery transcript: `transcript.jsonl`
 - Flex continuity files:
   - `recent_context.jsonl`
   - `handoff.md`
@@ -270,7 +281,8 @@ python tools/browser_cli.py fill       --url <url> --selector <css> --text <text
 python tools/browser_cli.py evaluate   --url <url> --script "() => document.title"
 ```
 
-**For OpenRouter API agents** — add to `agents.json` `tools.allowed`:
+**For HER v2 or a tool-capable provider invocation** — allow the browser tools
+on the explicit HER v2 row or provider row used by HER:
 ```json
 "allowed": ["browser_screenshot", "browser_get_text", "browser_get_html",
             "browser_click", "browser_fill", "browser_evaluate"]
@@ -340,7 +352,8 @@ DISPLAY=:10 xdotool type "hello world"
 DISPLAY=:10 ~/projects/hashi2/tools/bin/usecomputer press "ctrl+s"
 ```
 
-**For OpenRouter API agents** — add the `desktop` tier to `agents.json`:
+**For HER v2 or a tool-capable provider invocation** — add the `desktop` tier
+to the explicit HER v2 row or provider row used by HER:
 ```json
 "tools": {
   "tiers": ["core", "desktop"]
@@ -385,7 +398,8 @@ This tier is one of the backends that `/usecomputer` may choose when real Window
 - `windows_type` can focus a target window first.
 - `windows_window_close` supports optional unsaved-prompt dismissal and explicit force close.
 
-**For OpenRouter API agents** — add the `windows_use` tier to `agents.json`:
+**For HER v2 or a tool-capable provider invocation** — add the `windows_use`
+tier to the explicit HER v2 row or provider row used by HER:
 ```json
 "tools": {
   "tiers": ["core", "windows_use"]
@@ -504,7 +518,9 @@ Parameters:
 
 Auto-detection: `.jpg/.png/.webp` → photo, `.mp4/.mov` → video, `.mp3/.ogg/.wav` → audio, everything else → document.
 
-**For OpenRouter/DeepSeek API agents** — `telegram_send_file` is auto-injected via global `default_tools` in `agents.json`. No per-agent config needed. Use it as a native tool call:
+**For HER v2 provider/tool paths** — `telegram_send_file` may be supplied via
+`global.default_tools` and used as a native tool call when the selected runtime
+advertises it:
 ```json
 {"tool": "telegram_send_file", "path": "/tmp/chart.png", "caption": "Daily report"}
 ```
@@ -513,6 +529,10 @@ Auto-detection: `.jpg/.png/.webp` → photo, `.mp4/.mov` → video, `.mp3/.ogg/.
 - Agents can receive text plus Telegram media.
 - Voice/audio is transcribed locally before being sent to the backend.
 - Photos, documents, audio, video, and stickers are supported.
+- Ordered media is sent natively only to the exact provider/model that declares
+  the required modality and transport. Otherwise HASHI uses an authorised local
+  inspection/transcription path or fails explicitly; a file path alone is not
+  evidence that the model saw the media.
 - Outbound spoken replies can be bridge-generated locally and delivered through supported transports when voice mode is enabled.
 - Voice is bridge-owned capability: models still return text, and bridge handles synthesis, OGG/Opus conversion, and transport delivery.
 - Voice providers are pluggable; built-ins include `edge`, `piper` ect.

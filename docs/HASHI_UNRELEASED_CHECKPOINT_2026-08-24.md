@@ -1,5 +1,12 @@
 # HASHI Unreleased Integration Checkpoint — 2026-08-24
 
+> **Historical record:** this checkpoint is retained as evidence of the
+> 24 August integration boundary. It is superseded for current operation and
+> publication status by the
+> [27 August checkpoint](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md). Statements
+> below about an unpushed corrective tree or branch divergence describe that
+> earlier moment and must not be read as current repository status.
+
 Status: **the original integration baseline was published at `2e3a3f0`; the
 current working tree contains a corrective compulsory-Replanning update that
 has not been rebooted, deployed, tagged, or pushed**
