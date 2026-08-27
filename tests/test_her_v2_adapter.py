@@ -247,6 +247,21 @@ async def test_adapter_injects_prior_wip_and_clears_after_completed_ledger(tmp_p
     assert any(CONTEXT_HEADER in goal for goal in injected_goals)
     assert any("partial observable result" in goal for goal in injected_goals)
     assert journal.records() == []
+    audit_rows = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "agent" / "her_v2_audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    lifecycle = {
+        row["event"]: row["payload"]
+        for row in audit_rows
+        if row["stage"] == "wip_journal"
+    }
+    assert lifecycle["wip_journal_turn_started"]["context_injected"] is True
+    assert lifecycle["wip_journal_context_injected"]["record_count"] == 2
+    assert lifecycle["wip_journal_cleared"]["ledger_status"] == "COMPLETED"
+    assert lifecycle["wip_journal_cleared"]["record_count"] > 2
 
 
 class _ImmediateFirstDirectProvider(_DirectProvider):

@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 FORMAT = "her-v2-wip-journal-v1"
 CONTEXT_HEADER = "[HASHI HER v2 WIP context from interrupted earlier turn(s)]"
@@ -59,6 +60,15 @@ class WIPJournal:
                 if isinstance(value, Mapping) and value.get("format") == FORMAT:
                     result.append(dict(value))
             return result
+
+    def activity_summary(self) -> dict[str, int]:
+        """Return non-content metrics suitable for lifecycle audit records."""
+        with self._lock:
+            size_bytes = self.path.stat().st_size if self.path.exists() else 0
+            return {
+                "record_count": len(self.records()),
+                "size_bytes": int(size_bytes),
+            }
 
     def begin_turn(self, *, request_id: str, prompt: str) -> str:
         """Return prior WIP context, then append the new turn boundary."""

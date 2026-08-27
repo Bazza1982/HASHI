@@ -171,6 +171,28 @@ class HERv2Adapter(BaseBackend):
         ):
             self._wip_journal.append_audit(record)
 
+    def _record_wip_lifecycle(
+        self,
+        event: str,
+        *,
+        request_id: str,
+        turn_id: str | None = None,
+        payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Persist content-free WIP Journal lifecycle evidence."""
+        if self._audit_log is None:
+            return
+        resolved_turn_id = str(turn_id or request_id)
+        self._audit_log.append(
+            event_id=f"{resolved_turn_id}:wip-journal:{event}",
+            turn_id=resolved_turn_id,
+            request_ref=f"hashi-request:{request_id}",
+            stage="wip_journal",
+            role="hashi_process",
+            event=event,
+            payload=dict(payload or {}),
+        )
+
     def accepts_media_input(self, modality: str) -> bool:
         """Prove ingress support from configured stage provider/model pairs.
 
@@ -944,6 +966,11 @@ class HERv2Adapter(BaseBackend):
             effort_resolution.scheduler_trigger or "none",
         )
         request_ref = f"hashi-request:{request_id}"
+        prior_wip_summary = (
+            self._wip_journal.activity_summary()
+            if self._wip_journal is not None
+            else {"record_count": 0, "size_bytes": 0}
+        )
         prior_wip = (
             self._wip_journal.begin_turn(
                 request_id=request_id,
@@ -952,8 +979,21 @@ class HERv2Adapter(BaseBackend):
             if self._wip_journal is not None
             else ""
         )
+        self._record_wip_lifecycle(
+            "wip_journal_turn_started",
+            request_id=request_id,
+            payload={
+                **prior_wip_summary,
+                "context_injected": bool(prior_wip),
+            },
+        )
         if prior_wip:
             prompt = f"{prompt}\n\n{prior_wip}"
+            self._record_wip_lifecycle(
+                "wip_journal_context_injected",
+                request_id=request_id,
+                payload=prior_wip_summary,
+            )
         provider = self._new_stage_provider(
             on_stream_event=on_stream_event, silent=silent
         )
@@ -1099,11 +1139,32 @@ class HERv2Adapter(BaseBackend):
         finally:
             self._active_runtimes.pop(request_id, None)
             self._wip_active_request_refs.discard(request_ref)
-        if (
-            self._wip_journal is not None
-            and str(result.ledger.get("status") or "").upper() == "COMPLETED"
-        ):
-            self._wip_journal.clear_completed()
+        ledger_status = str(result.ledger.get("status") or "").upper()
+        if self._wip_journal is not None:
+            final_wip_summary = self._wip_journal.activity_summary()
+            if ledger_status == "COMPLETED":
+                self._wip_journal.clear_completed()
+                self._record_wip_lifecycle(
+                    "wip_journal_cleared",
+                    request_id=request_id,
+                    turn_id=result.turn_id,
+                    payload={
+                        **final_wip_summary,
+                        "ledger_status": ledger_status,
+                        "reason": "completed_ledger_durable",
+                    },
+                )
+            else:
+                self._record_wip_lifecycle(
+                    "wip_journal_preserved",
+                    request_id=request_id,
+                    turn_id=result.turn_id,
+                    payload={
+                        **final_wip_summary,
+                        "ledger_status": ledger_status,
+                        "reason": "ledger_not_completed",
+                    },
+                )
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
         metadata = {
             "her_v2": {
