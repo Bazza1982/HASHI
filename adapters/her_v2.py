@@ -55,6 +55,7 @@ from orchestrator.her_v2.retry import (
     ProviderRetryPolicy,
 )
 from orchestrator.her_v2.runtime import HERv2Runtime
+from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.multimodal_contract import resolve_input_capability
 
 HER_V2_DISPLAY_NAME = "HASHI Engine Runtime v2"
@@ -141,6 +142,8 @@ class HERv2Adapter(BaseBackend):
         self._v2_config: HERv2Config | None = None
         self._ledger_store: LedgerStore | None = None
         self._audit_log: DurableAuditLog | None = None
+        self._wip_journal: WIPJournal | None = None
+        self._wip_active_request_refs: set[str] = set()
         self._learning: HERv2Learning | None = None
         self._active_runtimes: dict[str, HERv2Runtime] = {}
         self._pending_delivery_receipts: dict[str, dict[str, Any]] = {}
@@ -159,6 +162,14 @@ class HERv2Adapter(BaseBackend):
     def _backend_manager(self) -> Any:
         runtime = self._runtime_context()
         return getattr(runtime, "backend_manager", None)
+
+    def _observe_wip_audit(self, record: Mapping[str, Any]) -> None:
+        request_ref = str(record.get("request_ref") or "")
+        if (
+            self._wip_journal is not None
+            and request_ref in self._wip_active_request_refs
+        ):
+            self._wip_journal.append_audit(record)
 
     def accepts_media_input(self, modality: str) -> bool:
         """Prove ingress support from configured stage provider/model pairs.
@@ -377,9 +388,7 @@ class HERv2Adapter(BaseBackend):
             return None
         return await sender(job)
 
-    async def _deliver_meditation_cost_tail(
-        self, job: dict[str, Any]
-    ) -> bool | None:
+    async def _deliver_meditation_cost_tail(self, job: dict[str, Any]) -> bool | None:
         """Forward the async Meditation cost tail to the HASHI runtime.
 
         Only the runtime knows the frozen ``meter_at_start`` and the per-turn
@@ -424,6 +433,7 @@ class HERv2Adapter(BaseBackend):
 
             state_root = Path(self.config.workspace_dir) / "backend_state" / "her_v2"
             self._ledger_store = LedgerStore(state_root / "ledgers")
+            self._wip_journal = WIPJournal(state_root / "wip_journal.jsonl")
             base_logs = getattr(self.global_config, "base_logs_dir", None)
             primary_root = (
                 Path(base_logs) / str(self.config.name) if base_logs else state_root
@@ -431,6 +441,7 @@ class HERv2Adapter(BaseBackend):
             self._audit_log = DurableAuditLog(
                 primary_root / "her_v2_audit.jsonl",
                 state_root / "audit_fallback.jsonl",
+                observer=self._observe_wip_audit,
             )
             self._audit_log.replay_fallback()
             reconciled = self._ledger_store.reconcile_interrupted()
@@ -468,9 +479,7 @@ class HERv2Adapter(BaseBackend):
             self._habit_dream_run_lock = self._learning.dream_run_lock
             self._habit_meditation_tasks = self._learning.meditation_tasks
             self._habit_notification_tasks = self._learning.notification_tasks
-            self._meter_notification_tasks = (
-                self._learning.meter_notification_tasks
-            )
+            self._meter_notification_tasks = self._learning.meter_notification_tasks
             self._habit_dream_tasks = self._learning.dream_tasks
             recovery = self._learning.recover()
             if any(
@@ -934,6 +943,17 @@ class HERv2Adapter(BaseBackend):
             effort_resolution.scheduler_task_id or "none",
             effort_resolution.scheduler_trigger or "none",
         )
+        request_ref = f"hashi-request:{request_id}"
+        prior_wip = (
+            self._wip_journal.begin_turn(
+                request_id=request_id,
+                prompt=prompt,
+            )
+            if self._wip_journal is not None
+            else ""
+        )
+        if prior_wip:
+            prompt = f"{prompt}\n\n{prior_wip}"
         provider = self._new_stage_provider(
             on_stream_event=on_stream_event, silent=silent
         )
@@ -1038,10 +1058,7 @@ class HERv2Adapter(BaseBackend):
         habit_advisor = (
             turn_learning
             if not habit_request_eligible
-            else (
-                getattr(self.config, "_her_v2_habit_advisor", None)
-                or turn_learning
-            )
+            else (getattr(self.config, "_her_v2_habit_advisor", None) or turn_learning)
         )
         from orchestrator.fresh_context import habit_context_suppressed
 
@@ -1070,6 +1087,7 @@ class HERv2Adapter(BaseBackend):
             workzone_ref=str(self.config.workspace_dir.resolve()),
             skills_catalogue=self._direct_skill_catalogue(),
         )
+        self._wip_active_request_refs.add(request_ref)
         self._active_runtimes[request_id] = runtime
         try:
             result = await runtime.run_turn(
@@ -1080,6 +1098,12 @@ class HERv2Adapter(BaseBackend):
             )
         finally:
             self._active_runtimes.pop(request_id, None)
+            self._wip_active_request_refs.discard(request_ref)
+        if (
+            self._wip_journal is not None
+            and str(result.ledger.get("status") or "").upper() == "COMPLETED"
+        ):
+            self._wip_journal.clear_completed()
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
         metadata = {
             "her_v2": {

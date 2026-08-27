@@ -6,7 +6,7 @@
 | ------------------------ | --------- |
 | Purpose | Define how HASHI maintains and distributes persona, context and memory to different agent backends, while distinguishing target design from known implementation gaps. |
 | Status | Authoritative target design for the next major HASHI PCM upgrade. |
-| Revision | 26 August 2026 — clarified context caps, complete raw audit retention, recency decay, Workzone enforcement, the generic `/wiki` core command and deterministic Memory+ rollover. |
+| Revision | 27 August 2026 — added the HER v2 crash-safe WIP Journal as transient Context rather than Memory. |
 
 ## 1. Overview
 
@@ -360,6 +360,7 @@ The following decisions were accepted on 26 August 2026. They are normative and 
 | PCM-DEC-003 | A Skills or Tools catalogue may advertise only capabilities that the Agent can actually invoke in the current request scope. Uniform HASHI Tool access for supported Fixed CLIs is part of this upgrade. | Resolve availability after Agent, backend, stage and permission filtering. Catalogue metadata never grants permission. Connect supported Fixed CLIs to the HASHI Tool Gateway through MCP or an equivalent native bridge, and do not advertise a capability until that connection is available and authorised. |
 | PCM-DEC-004 | Canonical raw audit evidence has indefinite retention and no automatic expiry. | Preserve complete unredacted audit evidence across `/reset`, `/new`, backend switches, process reloads and ordinary workspace maintenance. Use encryption at rest where supported together with strict least-privilege access controls. Archival or tiered storage may move evidence but may not discard it. Deletion is permitted only through a separately scoped, explicitly confirmed destructive audit-wipe operation; ordinary reset or wipe behaviour must not silently delete it. Backups inherit the same retention and access requirements. |
 | PCM-DEC-005 | Central BGE-M3 raw-memory search is scoped to the current HASHI instance and Agent by default. | `memory_sync` permits ingestion but does not grant cross-Agent read access. Shared knowledge is delivered through the curated Wiki. Searching another Agent’s raw consolidated records requires explicit user authorisation, an auditable purpose and provenance-preserving results. `/wiki` never exposes the underlying raw cross-Agent memory store. |
+| PCM-DEC-006 | Unfinished work is transient Context, not Agent Memory. HER v2 maintains a model-independent WIP Journal from observable, durably audited turn events. | An interrupted or error turn leaves its Journal intact. Later HER v2 turns append to it and receive the prior Journal at the end of their prompt with a neutral warning that it may be unrelated and must not be continued by default. After a later Ledger is durably `COMPLETED`, the accumulated Journal is cleared. Memory+ is not responsible for crash recovery. |
 
 ## 11. Upgrade Test Contract
 

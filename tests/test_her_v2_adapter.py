@@ -63,6 +63,7 @@ from orchestrator.her_v2.presentation import (
     RenderedRequiredMessage,
     RequiredUserMessage,
 )
+from orchestrator.her_v2.wip_journal import CONTEXT_HEADER, WIPJournal
 from orchestrator.pcm import render_pcm_document
 
 
@@ -216,6 +217,36 @@ class _ZeroProvider:
             model=profile.model,
             reasoning_trace="direct trace",
         )
+
+
+@pytest.mark.asyncio
+async def test_adapter_injects_prior_wip_and_clears_after_completed_ledger(tmp_path):
+    config = _agent_config(tmp_path)
+    provider = _DirectProvider()
+    setattr(config, "_her_v2_stage_provider", provider)
+    journal = WIPJournal(
+        config.workspace_dir / "backend_state" / "her_v2" / "wip_journal.jsonl"
+    )
+    journal.begin_turn(request_id="req-crashed", prompt="unfinished source check")
+    journal.append_audit(
+        {
+            "event": "stage_completed",
+            "stage": "execution",
+            "payload": {"output": "partial observable result"},
+        }
+    )
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize() is True
+
+    response = await adapter.generate_response(
+        "What is the current status?", "req-next"
+    )
+
+    assert response.is_success is True
+    injected_goals = [request.goal for _profile, request in provider.requests]
+    assert any(CONTEXT_HEADER in goal for goal in injected_goals)
+    assert any("partial observable result" in goal for goal in injected_goals)
+    assert journal.records() == []
 
 
 class _ImmediateFirstDirectProvider(_DirectProvider):
@@ -640,9 +671,7 @@ async def test_adapter_zero_effort_is_one_direct_call_and_question_is_completed(
     assert request.stage is Stage.DIRECT
     assert request.allow_tools is True
     assert request.allow_side_effects is True
-    assert [item["id"] for item in request.context["skills_catalogue"]] == [
-        "reports"
-    ]
+    assert [item["id"] for item in request.context["skills_catalogue"]] == ["reports"]
     assert profile.name == "lightweight"
     assert profile.reasoning == "high"
     await adapter.shutdown()
@@ -2876,10 +2905,7 @@ async def test_persona_presentation_lanes_receive_only_block_and_minimal_inputs(
     system_md.write_text(
         render_pcm_document(
             persona="Use a warm voice and address the user as Captain.",
-            system=(
-                "FULL AGENT OPERATIONAL CONTENT\n"
-                "PRIVATE WORKFLOW INSTRUCTIONS"
-            ),
+            system=("FULL AGENT OPERATIONAL CONTENT\nPRIVATE WORKFLOW INSTRUCTIONS"),
         ),
         encoding="utf-8",
     )
@@ -3033,8 +3059,7 @@ Please scan Outlook.""",
     fallback_backend = manager.backends[-1]
     assert (
         "Agent display name: agent. Use the configured default language and a "
-        "respectful tone."
-        in fallback_backend.sys_prompt
+        "respectful tone." in fallback_backend.sys_prompt
     )
     assert "FULL AGENT CONTENT WITHOUT A PERSONA BLOCK" not in (
         fallback_backend.sys_prompt

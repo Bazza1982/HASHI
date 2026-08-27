@@ -63,7 +63,10 @@ def _redact(value: Any, *, key: str = "") -> Any:
     if lowered in _SENSITIVE_KEYS or lowered.endswith("_api_key"):
         return "[REDACTED]"
     if isinstance(value, Mapping):
-        return {str(item): _redact(content, key=str(item)) for item, content in value.items()}
+        return {
+            str(item): _redact(content, key=str(item))
+            for item, content in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [_redact(item) for item in value]
     if isinstance(value, str):
@@ -105,6 +108,7 @@ class DurableAuditLog:
         primary_writer: AuditWriter | None = None,
         fallback_writer: AuditWriter | None = None,
         redactor: Callable[[Any], Any] | None = None,
+        observer: Callable[[Mapping[str, Any]], None] | None = None,
     ):
         if primary_writer is None and primary_path is None:
             raise ValueError("a primary audit path or writer is required")
@@ -115,7 +119,10 @@ class DurableAuditLog:
         self.primary_writer = primary_writer or JsonlAuditWriter(self.primary_path)  # type: ignore[arg-type]
         self.fallback_writer = fallback_writer or JsonlAuditWriter(self.fallback_path)  # type: ignore[arg-type]
         self.redactor = redactor or _redact
-        self._seen = self._read_ids(self.primary_path) | self._read_ids(self.fallback_path)
+        self.observer = observer
+        self._seen = self._read_ids(self.primary_path) | self._read_ids(
+            self.fallback_path
+        )
         self._lock = threading.Lock()
 
     @staticmethod
@@ -183,6 +190,13 @@ class DurableAuditLog:
                         f"fallback={type(fallback_error).__name__})"
                     ) from fallback_error
             self._seen.add(identifier)
+            if self.observer is not None:
+                try:
+                    self.observer(record)
+                except Exception:
+                    # WIP observation must never change HER control flow after
+                    # the canonical audit record is already durable.
+                    pass
             return ref
 
     def record_reasoning(
