@@ -1,13 +1,20 @@
 import json
 import logging
+from pathlib import Path
 
 import pytest
 
 from orchestrator.config import (
-    ConfigManager,
     LEGACY_PCM_CONFIG_BACKUP_SUFFIX,
+    ConfigManager,
 )
+from orchestrator.flexible_backend_registry import normalize_allowed_backends
+from orchestrator.her_v2.config import HERv2Config
+from orchestrator.her_v2.runtime_configuration import build_her_v2_provider_options
 from orchestrator.pcm import load_pcm_document
+
+ROOT = Path(__file__).resolve().parent.parent
+CORE_HER_V2_PROVIDERS = {"hashi-api", "deepseek-api", "openrouter-api"}
 
 
 def _materialize_legacy_pcm(config_path, root):
@@ -184,7 +191,83 @@ def test_public_her_configuration_id_resolves_forward_to_v2(tmp_path):
 
     assert global_cfg.her_providers["providers"]["openrouter"]["secret"] == "openrouter_key"
     assert agents[0].active_backend == "her-v2"
-    assert agents[0].allowed_backends[0]["engine"] == "her-v2"
+    assert agents[0].allowed_backends[0] == {
+        "engine": "her-v2",
+        "model": "role-configured",
+        "permission_mode": "danger-full-access",
+        "access_scope": "drive",
+        "tools": {"allowed": ["*"]},
+    }
+
+
+@pytest.mark.parametrize("engine", ["her-v2", "her"])
+def test_her_v2_backend_policy_defaults_to_yolo(engine):
+    [backend] = normalize_allowed_backends(
+        [{"engine": engine, "model": "role-configured"}]
+    )
+
+    assert backend["engine"] == "her-v2"
+    assert backend["permission_mode"] == "danger-full-access"
+    assert backend["access_scope"] == "drive"
+    assert backend["tools"] == {"allowed": ["*"]}
+
+
+def test_her_v2_backend_policy_preserves_explicit_user_restrictions():
+    [backend] = normalize_allowed_backends(
+        [
+            {
+                "engine": "her-v2",
+                "model": "role-configured",
+                "permission_mode": "read-only",
+                "access_scope": "workspace",
+                "tools": {
+                    "allowed": ["file_read", "file_list"],
+                    "file_read": {"max_file_size_kb": 64},
+                },
+            }
+        ]
+    )
+
+    assert backend["permission_mode"] == "read-only"
+    assert backend["access_scope"] == "workspace"
+    assert backend["tools"] == {
+        "allowed": ["file_read", "file_list"],
+        "file_read": {"max_file_size_kb": 64},
+    }
+
+
+def test_agents_sample_has_valid_her_v2_core_providers():
+    sample = json.loads((ROOT / "agents.json.sample").read_text(encoding="utf-8"))
+    providers = sample["global"]["her_providers"]["providers"]
+    her_entries = []
+
+    for agent in sample["agents"]:
+        assert all(
+            backend.get("engine") != "her"
+            for backend in agent.get("allowed_backends", [])
+            if isinstance(backend, dict)
+        )
+        her_entries.extend(
+            (agent["allowed_backends"], backend)
+            for backend in agent.get("allowed_backends", [])
+            if isinstance(backend, dict) and backend.get("engine") == "her-v2"
+        )
+
+    assert her_entries
+    for allowed_backends, backend in her_entries:
+        assert backend["permission_mode"] == "danger-full-access"
+        assert backend["access_scope"] == "drive"
+        assert backend["tools"]["allowed"] == ["*"]
+        HERv2Config.from_mapping(backend["her_v2"])
+        options = build_her_v2_provider_options(
+            allowed_backends,
+            providers,
+            backend["her_v2"],
+        )
+        available = {
+            option["engine"] for option in options if option.get("available")
+        }
+        assert CORE_HER_V2_PROVIDERS <= available
 
 
 @pytest.mark.parametrize("provider", ["openrouter-api", "deepseek-api"])

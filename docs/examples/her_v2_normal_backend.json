@@ -3,8 +3,10 @@
   "allowed_backends": [
     {
       "engine": "her-v2",
+      "access_scope": "drive",
       "model": "role-configured",
       "effort": "high",
+      "permission_mode": "danger-full-access",
       "tools": {
         "allowed": ["*"]
       },

@@ -81,8 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and wall-clock ceilings from the HER path. Meaningful-progress idle detection,
   explicit user control, immediate policy/approval denial, scoped transport
   guards, explicitly requested single-tool timeouts, and bounded policy stages
-  remain the only authorised stop or pause boundaries. Scheduled HER work now
-  defaults to Fast path unless the job explicitly selects another mode.
+  remain the only authorised stop or pause boundaries. Cron and heartbeat
+  prompt/skill work now always uses Direct (`zero`) so it bypasses Triage and
+  preserves the authoritative scheduled instruction; legacy per-job effort
+  overrides cannot bypass this policy.
 - **Context-aware verification authority** — Reviewed remains read-only, while
   Assured Verification may run validation-only commands in the authoritative
   workspace. Verification inherits the HASHI process filesystem, environment,

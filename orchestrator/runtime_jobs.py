@@ -20,12 +20,8 @@ MAX_CALLBACK_TOKENS = 256
 
 
 def _her_v2_job_effort_label(job: dict) -> str:
-    try:
-        policy = job_effort_policy(job)
-    except ValueError as exc:
-        return f"INVALID: {exc}"
-    source = "job override" if policy["source"] == "job_override" else "job default"
-    return f"{effort_display_label(policy['effective'])} · {source}"
+    policy = job_effort_policy(job)
+    return f"{effort_display_label(policy['effective'])} · fixed scheduler policy"
 
 
 def _runtime_logger(runtime):

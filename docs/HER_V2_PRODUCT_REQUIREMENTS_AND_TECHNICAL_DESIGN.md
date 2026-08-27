@@ -454,16 +454,17 @@ Non-HER backends retain their established `/model` behaviour.
 
 ### 5.2 Scheduled-job execution policy
 
-Cron and heartbeat prompt work defaults to HER v2 Fast path (`low`) execution
-mode. These jobs
-already persist their execution specification, so repeating formal Planning or
-independent Review on every routine occurrence is unnecessary by default.
+Cron and heartbeat prompt work always uses HER v2 Direct (`zero`) execution
+mode. Direct passes the authoritative job instruction to one fully capable
+Quick-model agent without Triage pre-processing, preventing a preprocessing
+stage from dropping or reframing original instruction details.
 
 The scheduler attaches an explicit request-local context containing the job
-kind, task id, and trigger (`scheduled`, `manual`, or `recovery`). An optional
-job field, `her_v2_effort`, may override the default with any valid HER effort
-value. The same policy applies whether the occurrence is automatic, manually
-run from Telegram or Workbench, or replayed from recovery.
+kind, task id, and trigger (`scheduled`, `manual`, or `recovery`). The Direct
+policy is compulsory and the same whether the occurrence is automatic,
+manually run from Telegram or Workbench, or replayed from recovery. Per-job HER
+effort overrides are not accepted by the policy. Legacy `her_v2_effort` fields
+are ignored and opportunistically removed at job mutation boundaries.
 
 This resolution is request-scoped. It must not mutate the Agent's configured
 effort, and a later ordinary request must still use that configured value.
@@ -473,8 +474,8 @@ scheduled-job context and therefore retain the Agent effort. Deterministic
 scheduler actions that bypass the Agent backend, including automation,
 transcript export, and HER Dream, do not consume this policy.
 
-Invalid `her_v2_effort` values are rejected before prompt work is queued. They
-must not be silently coerced to `low` or allowed to change global Agent state.
+Legacy `her_v2_effort` values, valid or invalid, cannot block prompt dispatch,
+change the fixed Direct mode, or alter global Agent state.
 
 ## 6. Stage 1: Initial Processing
 
@@ -1518,10 +1519,10 @@ HER v2 is ready for production rollout only when:
 - no risk label, checkpoint decision, Replan count, time/token/turn/loop limit,
   provider option, or test fixture can suppress a due compulsory Replan or cap
   the whole workflow;
-- cron and heartbeat prompt work defaults to request-local Fast path (`low`)
-  execution mode across
-  scheduled, manual, and recovery triggers; valid job overrides win without
-  changing provider reasoning or leaking into later ordinary turns;
+- cron and heartbeat prompt work always uses request-local Direct (`zero`)
+  execution mode across scheduled, manual, and recovery triggers; legacy job
+  overrides cannot bypass it, change provider reasoning settings, or leak into
+  later ordinary turns;
 - Replanning and Review loops cannot violate lifecycle order;
 - Reviewed (`xhigh`) performs no more than one Review-driven remediation round
   before Finalisation, while Assured (`max`) repeats Review/Replan/Execution

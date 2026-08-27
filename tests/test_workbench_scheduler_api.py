@@ -127,8 +127,8 @@ async def test_scheduler_list_and_status_use_hashi_authority(tmp_path):
         }
     ]
     assert list_payload["jobs"][0]["her_v2_effort_policy"] == {
-        "effective": "low",
-        "source": "scheduled_job_default",
+        "effective": "zero",
+        "source": "scheduled_direct_policy",
         "applies_to": "her-v2",
     }
 
