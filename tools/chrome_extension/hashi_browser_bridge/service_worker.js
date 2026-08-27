@@ -1,11 +1,12 @@
 const HOST_NAME = "com.hashi.browser_bridge";
-const BRIDGE_VERSION = "0.1.5";
+const BRIDGE_VERSION = "0.2.0";
 const RECONNECT_DELAY_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 10000;
 const DEBUGGER_VERSION = "1.3";
 const SUPPORTED_ACTIONS = Object.freeze([
   "active_tab", "session_create", "session", "get_text", "get_html",
-  "click", "react", "hover", "fill", "type_text", "evaluate", "scroll", "screenshot"
+  "click", "react", "hover", "fill", "type_text", "evaluate", "scroll", "screenshot",
+  "media_state", "media_play"
 ]);
 
 let nativePort = null;
@@ -213,11 +214,200 @@ async function withDebugger(tabId, callback) {
 }
 
 async function actionActiveTab(args) {
-  const tab = await resolveTab(args);
-  return {
-    output: JSON.stringify(tabMeta(tab)),
-    meta: tabMeta(tab)
+  let tab = await resolveTab(args);
+  let windowState = "unknown";
+  let windowFocused = false;
+  if (tab.windowId) {
+    if (args.maximize === true) {
+      await chrome.windows.update(tab.windowId, { focused: true, state: "maximized" });
+    }
+    const browserWindow = await chrome.windows.get(tab.windowId);
+    windowState = String(browserWindow?.state || "unknown");
+    windowFocused = Boolean(browserWindow?.focused);
+    tab = await chrome.tabs.get(tab.id);
+  }
+  const details = {
+    ...tabMeta(tab),
+    windowState,
+    windowFocused,
+    maximized: windowState === "maximized"
   };
+  return {
+    output: JSON.stringify(details),
+    meta: details
+  };
+}
+
+function buildMediaExpression({ play, timeoutMs, sampleMs, minProgressSeconds }) {
+  return `(async () => {
+    const playRequested = ${JSON.stringify(Boolean(play))};
+    const timeoutMs = ${JSON.stringify(timeoutMs)};
+    const sampleMs = ${JSON.stringify(sampleMs)};
+    const minProgressSeconds = ${JSON.stringify(minProgressSeconds)};
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const visibleArea = (element) => {
+      const rect = element.getBoundingClientRect();
+      const width = Math.max(0, Math.min(rect.right, innerWidth) - Math.max(rect.left, 0));
+      const height = Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0));
+      return width * height;
+    };
+    const candidates = Array.from(document.querySelectorAll("video, audio"));
+    const ranked = candidates
+      .map((element, index) => ({
+        element,
+        index,
+        area: visibleArea(element),
+        duration: Number.isFinite(element.duration) ? element.duration : 0
+      }))
+      .sort((left, right) => (right.area - left.area) || (right.duration - left.duration));
+    if (!ranked.length) {
+      return {
+        ok: false,
+        action: playRequested ? "media_play" : "media_state",
+        media_found: false,
+        candidate_count: 0,
+        error: "no HTML media element found"
+      };
+    }
+    const selected = ranked[0];
+    const media = selected.element;
+    const snapshot = () => ({
+      media_found: true,
+      tag_name: String(media.tagName || "").toLowerCase(),
+      candidate_count: candidates.length,
+      selected_index: selected.index,
+      visible_area: Math.round(visibleArea(media)),
+      paused: Boolean(media.paused),
+      ended: Boolean(media.ended),
+      current_time: Number.isFinite(media.currentTime) ? Number(media.currentTime) : null,
+      duration: Number.isFinite(media.duration) ? Number(media.duration) : null,
+      ready_state: Number(media.readyState),
+      network_state: Number(media.networkState),
+      muted: Boolean(media.muted),
+      volume: Number(media.volume),
+      playback_rate: Number(media.playbackRate),
+      current_src: String(media.currentSrc || media.src || "")
+    });
+    const before = snapshot();
+    if (!playRequested) {
+      return { ok: true, action: "media_state", media_found: true, state: before };
+    }
+
+    let playAttempted = false;
+    let playError = null;
+    let fallbackControl = null;
+    if (media.paused || media.ended) {
+      playAttempted = true;
+      if (media.ended && Number.isFinite(media.duration)) {
+        media.currentTime = 0;
+      }
+      try {
+        await media.play();
+      } catch (error) {
+        playError = String(error?.message || error);
+      }
+      await sleep(200);
+      if (media.paused) {
+        const selectors = [
+          "button.ytp-large-play-button",
+          "button.ytp-play-button",
+          "button[aria-label^='Play']",
+          "button[title^='Play']"
+        ];
+        for (const selector of selectors) {
+          const control = document.querySelector(selector);
+          if (!control || visibleArea(control) <= 0 || !media.paused) {
+            continue;
+          }
+          control.click();
+          fallbackControl = selector;
+          await sleep(250);
+          if (!media.paused) {
+            break;
+          }
+        }
+      }
+    }
+
+    const verificationStart = snapshot();
+    const startTime = Number(verificationStart.current_time || 0);
+    const deadline = Date.now() + timeoutMs;
+    let after = verificationStart;
+    let timeAdvanced = false;
+    while (Date.now() < deadline) {
+      await sleep(sampleMs);
+      after = snapshot();
+      const currentTime = Number(after.current_time || 0);
+      timeAdvanced = currentTime - startTime >= minProgressSeconds;
+      if (!after.paused && !after.ended && timeAdvanced) {
+        break;
+      }
+    }
+    const verified = !after.paused && !after.ended && timeAdvanced;
+    return {
+      ok: verified,
+      action: "media_play",
+      media_found: true,
+      verified,
+      play_attempted: playAttempted,
+      play_error: playError,
+      fallback_control: fallbackControl,
+      time_advanced: timeAdvanced,
+      time_delta: Number(after.current_time || 0) - startTime,
+      before,
+      verification_start: verificationStart,
+      after,
+      error: verified ? null : "media playback did not satisfy the advancing-time postcondition"
+    };
+  })()`;
+}
+
+async function executeMediaAction(args, { play }) {
+  const tab = await resolveTab(args);
+  assertScriptableTab(tab);
+  const timeoutMs = Math.max(500, Math.min(Number(args.timeout_ms || 8000), 30000));
+  const sampleMs = Math.max(100, Math.min(Number(args.sample_ms || 250), 2000));
+  const minProgressSeconds = Math.max(
+    0.1,
+    Math.min(Number(args.min_progress_seconds || 0.75), 10)
+  );
+  const expression = buildMediaExpression({ play, timeoutMs, sampleMs, minProgressSeconds });
+  const evaluated = await withDebugger(tab.id, async (target) => {
+    return await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+      userGesture: true
+    });
+  });
+  if (evaluated?.exceptionDetails) {
+    const message = evaluated.exceptionDetails.exception?.description
+      || evaluated.exceptionDetails.text
+      || "media action failed";
+    throw new Error(message);
+  }
+  const details = evaluated?.result?.value;
+  if (!details || typeof details !== "object") {
+    throw new Error("media action produced no structured result");
+  }
+  const updatedTab = await chrome.tabs.get(tab.id);
+  return {
+    output: JSON.stringify(details),
+    meta: {
+      ...tabMeta(updatedTab),
+      action: play ? "media_play" : "media_state",
+      mediaFound: Boolean(details.media_found),
+      verified: Boolean(details.verified)
+    }
+  };
+}
+
+async function actionMediaState(args) {
+  return executeMediaAction(args, { play: false });
+}
+
+async function actionMediaPlay(args) {
+  return executeMediaAction(args, { play: true });
 }
 
 async function actionGetText(args) {
@@ -972,6 +1162,12 @@ async function executeAction(action, args) {
   }
   if (action === "screenshot") {
     return actionScreenshot(args);
+  }
+  if (action === "media_state") {
+    return actionMediaState(args);
+  }
+  if (action === "media_play") {
+    return actionMediaPlay(args);
   }
   throw new Error(`unsupported action: ${action}`);
 }

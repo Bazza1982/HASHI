@@ -98,7 +98,7 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("🟢 <b>3 · SEARCH</b>", text)
         self.assertIn("🔴 <b>4 · LOGGED-IN</b>", text)
         self.assertIn("configured", text)
-        self.assertIn("bridge socket not detected", text)
+        self.assertIn("extension bridge unavailable", text)
 
     def test_status_text_uses_yellow_for_unknowns(self):
         text = get_browser_status_text()
@@ -138,6 +138,19 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.enqueued[0]["source"], "browser:brave")
         self.assertIn("Find recent CSR sources", runtime.enqueued[0]["prompt"])
         self.assertTrue(runtime.enqueued[0]["habit_learning_eligible"])
+
+    async def test_command_status_uses_cross_platform_bridge_healthcheck(self):
+        runtime = _BrowserRuntime()
+        update = _FakeUpdate()
+
+        with patch(
+            "tools.browser_extension_bridge.healthcheck",
+            return_value={"connected": True, "endpoint": r"\\.\pipe\hashi-browser-bridge"},
+        ) as bridge_healthcheck:
+            await runtime.cmd_browser(update, SimpleNamespace(args=["status"]))
+
+        bridge_healthcheck.assert_called_once_with(timeout_s=2.0)
+        self.assertIn("extension bridge connected", update.message.replies[-1])
 
     async def test_runtime_enqueue_preserves_browser_habit_eligibility(self):
         with tempfile.TemporaryDirectory() as tmp:

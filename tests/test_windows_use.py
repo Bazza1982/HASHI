@@ -61,6 +61,7 @@ def test_windows_tool_schemas_include_window_controls_and_stability_args() -> No
     assert "windows_helper_warmup" in TOOL_SCHEMA_MAP
     assert "windows_drag" in TOOL_SCHEMA_MAP
     close_props = TOOL_SCHEMA_MAP["windows_window_close"]["function"]["parameters"]["properties"]
+    focus_props = TOOL_SCHEMA_MAP["windows_window_focus"]["function"]["parameters"]["properties"]
     type_props = TOOL_SCHEMA_MAP["windows_type"]["function"]["parameters"]["properties"]
     key_props = TOOL_SCHEMA_MAP["windows_key"]["function"]["parameters"]["properties"]
     drag_props = TOOL_SCHEMA_MAP["windows_drag"]["function"]["parameters"]["properties"]
@@ -68,12 +69,87 @@ def test_windows_tool_schemas_include_window_controls_and_stability_args() -> No
     assert "dismiss_unsaved" in close_props
     assert "force" in close_props
     assert "wait_ms" in close_props
+    assert "maximize" in focus_props
     assert "focus_first" in type_props
     assert "title_contains" in type_props
     assert "focus_first" in key_props
     assert "title_contains" in key_props
     assert "curve_x" in drag_props
     assert "curve_y" in drag_props
+
+
+@pytest.mark.asyncio
+async def test_windows_window_focus_can_maximize_and_verify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = {}
+
+    async def fake_powershell(body: str, timeout: int = 30):
+        observed["body"] = body
+        return {
+            "ok": True,
+            "window": {"id": 458844, "title": "YouTube - Google Chrome"},
+            "maximize_requested": True,
+            "maximized": True,
+        }, None
+
+    monkeypatch.setattr(windows_use, "_run_powershell_json", fake_powershell)
+
+    result = await windows_use.execute_windows_window_focus(
+        {"window_id": 458844, "maximize": True}
+    )
+
+    assert "ShowWindowAsync($handle, 3)" in observed["body"]
+    assert "[HashiWin]::IsZoomed($handle)" in observed["body"]
+    assert result == (
+        "Focused and maximized window id=458844 "
+        "title=YouTube - Google Chrome"
+    )
+
+
+@pytest.mark.asyncio
+async def test_windows_window_focus_reports_unverified_maximize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_powershell(body: str, timeout: int = 30):
+        return {
+            "ok": True,
+            "window": {"id": 9, "title": "Chrome"},
+            "maximize_requested": True,
+            "maximized": False,
+        }, None
+
+    monkeypatch.setattr(windows_use, "_run_powershell_json", fake_powershell)
+
+    result = await windows_use.execute_windows_window_focus(
+        {"window_id": 9, "maximize": True}
+    )
+
+    assert result == (
+        "Error: window focus succeeded but maximize verification failed "
+        "for id=9 title=Chrome"
+    )
+
+
+@pytest.mark.asyncio
+async def test_windows_tool_can_bypass_optional_helper_for_bounded_composites(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper_calls: list[str] = []
+
+    async def fake_helper_post(action: str, args: dict, timeout: int = 60):
+        helper_calls.append(action)
+        return "unexpected", None
+
+    monkeypatch.setattr(windows_use, "_helper_post", fake_helper_post)
+
+    result = await windows_use._maybe_execute_windows_helper(
+        "window_focus",
+        {"title_contains": "YouTube", "_skip_helper": True},
+    )
+
+    assert result is None
+    assert helper_calls == []
 
 
 @pytest.mark.asyncio

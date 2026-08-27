@@ -40,7 +40,8 @@ TOOL_TIERS: dict[str, list[str]] = {
         "hashi_scheduler_rerun",
     ],
     "browser": [
-        "browser_session", "browser_screenshot", "browser_get_text",
+        "browser_session", "browser_active_tab", "browser_get_media_state",
+        "browser_play", "browser_open_play_verify", "browser_screenshot", "browser_get_text",
         "browser_get_html", "browser_click", "browser_react", "browser_fill", "browser_type_text",
         "browser_evaluate", "browser_scroll", "browser_hover",
         "browser_key", "browser_select", "browser_wait_for",
@@ -870,6 +871,10 @@ class ToolRegistry:
                 execute_browser_upload,
                 execute_browser_session,
                 execute_browser_type_text,
+                execute_browser_active_tab,
+                execute_browser_get_media_state,
+                execute_browser_play,
+                execute_browser_open_play_verify,
             )
             _browser_dispatch = {
                 "browser_screenshot":    execute_browser_screenshot,
@@ -889,6 +894,10 @@ class ToolRegistry:
                 "browser_drag":          execute_browser_drag,
                 "browser_upload":        execute_browser_upload,
                 "browser_session":       execute_browser_session,
+                "browser_active_tab": execute_browser_active_tab,
+                "browser_get_media_state": execute_browser_get_media_state,
+                "browser_play": execute_browser_play,
+                "browser_open_play_verify": execute_browser_open_play_verify,
             }
             if tool_name in _browser_dispatch:
                 browser_args = dict(arguments)

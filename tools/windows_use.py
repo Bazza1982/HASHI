@@ -273,6 +273,9 @@ public static class HashiWin {
     public static extern bool IsIconic(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    public static extern bool IsZoomed(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
     public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll")]
@@ -514,7 +517,7 @@ Start-Process -FilePath $uv.command -ArgumentList $argsList -WorkingDirectory $h
 
 
 async def _maybe_execute_windows_helper(action: str, args: dict) -> str | None:
-    if not _windows_helper_enabled():
+    if args.get("_skip_helper") is True or not _windows_helper_enabled():
         return None
     output, error = await _helper_post(action, args, timeout=60)
     if output is not None:
@@ -1211,6 +1214,7 @@ async def execute_windows_window_focus(args: dict) -> str:
     pid = int(args.get("pid", 0) or 0)
     title_contains = str(args.get("title_contains", "") or "")
     exact_title = str(args.get("exact_title", "") or "")
+    maximize = bool(args.get("maximize", False))
     if not any([window_id, pid, title_contains, exact_title]):
         return "Error: provide one of: window_id, pid, title_contains, exact_title"
 
@@ -1220,17 +1224,21 @@ if (-not $target) {{
     throw "target window not found"
 }}
 $handle = [IntPtr]$target.id
-if ([HashiWin]::IsIconic($handle)) {{
+if ({_ps_bool(maximize)}) {{
+    [void][HashiWin]::ShowWindowAsync($handle, 3)
+}} elseif ([HashiWin]::IsIconic($handle)) {{
     [void][HashiWin]::ShowWindowAsync($handle, 9)
 }} else {{
     [void][HashiWin]::ShowWindowAsync($handle, 5)
 }}
-Start-Sleep -Milliseconds 120
+Start-Sleep -Milliseconds 180
 [void][HashiWin]::BringWindowToTop($handle)
 [void][HashiWin]::SetForegroundWindow($handle)
 @{{
     ok = $true
     window = $target
+    maximize_requested = {_ps_bool(maximize)}
+    maximized = [HashiWin]::IsZoomed($handle)
 }} | ConvertTo-Json -Compress -Depth 6
 """
     data, error = await _run_powershell_json(body)
@@ -1238,6 +1246,16 @@ Start-Sleep -Milliseconds 120
         return f"Error: window focus failed: {error}"
     data = _normalize_ps_value(data)
     target = (data or {}).get("window") or {}
+    if maximize and not bool((data or {}).get("maximized")):
+        return (
+            "Error: window focus succeeded but maximize verification failed "
+            f"for id={target.get('id')} title={target.get('title', '')}"
+        )
+    if maximize:
+        return (
+            f"Focused and maximized window id={target.get('id')} "
+            f"title={target.get('title', '')}"
+        )
     return f"Focused window id={target.get('id')} title={target.get('title', '')}"
 
 

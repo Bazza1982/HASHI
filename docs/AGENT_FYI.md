@@ -402,7 +402,7 @@ npm install -g usecomputer
 1. Use `windows_info` first and inspect `displays`.
 2. Choose the display that should contain the real Chrome window and capture `windows_screenshot(display=N)` for that screen.
 3. Use `windows_window_list` to find a Chrome window.
-4. Use `windows_window_focus` to bring that window forward.
+4. Use `windows_window_focus(maximize=true)` to bring that window forward and maximize it when requested. Do not use F11 or a site's video full-screen control for window maximization.
 5. Re-capture `windows_screenshot(display=N)` before typing if focus or monitor placement matters.
 6. Navigate with:
    - `windows_key` → `ctrl+l`
@@ -412,18 +412,17 @@ npm install -g usecomputer
    - `https://scholar.google.com`
    - `https://www.wikipedia.org/`
    - `https://arxiv.org/`
-8. Verify the bridge from WSL/Linux side with bridge-owned evidence:
-```bash
-python3 - <<'PY'
+8. Verify the bridge with its platform-default endpoint and bridge-owned evidence:
+```python
 from tools.browser_extension_bridge import healthcheck, send_bridge_command
 import json
-print(json.dumps(healthcheck(socket_path='/tmp/hashi-browser-bridge.sock'), indent=2))
-print(json.dumps(send_bridge_command('active_tab', {}, socket_path='/tmp/hashi-browser-bridge.sock'), ensure_ascii=False)[:2000])
-PY
+print(json.dumps(healthcheck(), indent=2))
+print(json.dumps(send_bridge_command('active_tab', {}), ensure_ascii=False)[:2000])
 ```
 
-**Known good Windows live socket:**
-- `/tmp/hashi-browser-bridge.sock`
+**Platform endpoints:**
+- native Windows: `\\.\pipe\hashi-browser-bridge`
+- Linux/WSL: `/tmp/hashi-browser-bridge.sock`
 
 **Known good Windows live extension action surface:**
 - `active_tab`
@@ -450,8 +449,9 @@ PY
   - a narrow side-window or suggestions overlay can remain on screen
   - the bridge may still be fully healthy behind that UI
 - If UI and bridge state disagree, trust bridge-owned evidence first:
-  - `/tmp/hashi-browser-bridge.sock`
-  - `logs/browser_native_host.log`
+  - `tools.browser_extension_bridge.healthcheck()`
+  - `%LOCALAPPDATA%\HASHI\browser_bridge\logs\native-host.log` on native Windows
+  - `logs/browser_native_host.log` for the WSL-backed host
   - Chrome profile `Secure Preferences`
 
 **Known good Windows live outcomes already verified:**

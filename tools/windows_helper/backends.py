@@ -144,6 +144,7 @@ async def execute_action(action: str, args: dict) -> str:
 
     if action == "window_focus":
         window_id, pid, title_contains, exact_title = _selector(args)
+        maximize = bool(args.get("maximize", False))
         target = win32.find_window(
             window_id=window_id,
             pid=pid,
@@ -152,7 +153,17 @@ async def execute_action(action: str, args: dict) -> str:
         )
         if not target:
             return "Error: window focus failed: target window not found"
-        focused = win32.focus_window(target)
+        focused = win32.focus_window(target, maximize=maximize)
+        if maximize and not bool(focused.get("maximized")):
+            return (
+                "Error: window focus succeeded but maximize verification failed "
+                f"for id={focused.get('id')} title={focused.get('title', '')}"
+            )
+        if maximize:
+            return (
+                f"Focused and maximized window id={focused.get('id')} "
+                f"title={focused.get('title', '')}"
+            )
         return f"Focused window id={focused.get('id')} title={focused.get('title', '')}"
 
     if action == "window_close":
