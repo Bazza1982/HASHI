@@ -511,19 +511,46 @@ async def test_backend_plus_delivers_one_continuation_payload_to_fixed_target(tm
 
 
 @pytest.mark.asyncio
-async def test_handoff_command_enqueues_exactly_one_restore_request(tmp_path):
+async def test_handoff_command_uses_bridge_history_across_sessions(tmp_path):
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name = "pcm-test"
+    runtime.workspace_dir = tmp_path / "workspaces" / "pcm-test"
+    runtime.workspace_dir.mkdir(parents=True)
+    runtime.global_config = SimpleNamespace(
+        bridge_home=tmp_path,
+        project_root=tmp_path,
+        instance_id="HASHI1",
+        authorized_id=1,
+    )
+    current = runtime_session.initialize_runtime_sessions(runtime)
+    historical = runtime.session_store.create_session(
+        owner_id="user:1", agent_id="pcm-test", title="Historical"
+    )
+    accepted = runtime.session_store.accept_run(
+        session_id=historical["session_id"],
+        owner_id="user:1",
+        agent_id="pcm-test",
+        request_id="req-historical",
+        text="HISTORY FROM ANOTHER SESSION",
+        source="text",
+        idempotency_key="historical",
+    )
+    runtime.session_store.mark_request_running(
+        accepted.request_id, worker_id="test-worker"
+    )
+    runtime.session_store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="historical answer",
+        assistant_source="codex-cli",
+    )
+    runtime.session_store.archive_session(historical["session_id"])
     runtime._is_authorized_user = lambda _user_id: True
     runtime._backend_busy = lambda: False
     runtime._reply_text = AsyncMock()
     runtime._send_text = AsyncMock()
     runtime._arm_session_primer = Mock()
-    runtime.handoff_builder = SimpleNamespace(
-        refresh_recent_context=Mock(),
-        build_handoff=Mock(),
-        build_session_restore_prompt=Mock(return_value=("HANDOFF ONCE", 2, 20)),
-    )
-    _install_session_fixture(runtime, tmp_path, runtime.handoff_builder)
+    runtime.handoff_builder = HandoffBuilder(runtime.workspace_dir)
     backend = SimpleNamespace(
         capabilities=SimpleNamespace(supports_sessions=True),
         handle_new_session=AsyncMock(),
@@ -537,10 +564,18 @@ async def test_handoff_command_enqueues_exactly_one_restore_request(tmp_path):
 
     await FlexibleAgentRuntime.cmd_handoff(runtime, update, SimpleNamespace(args=[]))
 
-    runtime.enqueue_request.assert_awaited_once_with(
-        42,
-        "HANDOFF ONCE",
+    runtime.enqueue_request.assert_awaited_once()
+    args, kwargs = runtime.enqueue_request.await_args
+    assert args[0] == 42
+    assert args[2:] == (
         "handoff",
-        "Handoff restore [2 exchanges]",
-        skip_memory_injection=True,
+        "Handoff restore [1 exchanges]",
+    )
+    assert "HISTORY FROM ANOTHER SESSION" in args[1]
+    assert "historical answer" in args[1]
+    assert kwargs == {"skip_memory_injection": True}
+    backend.handle_new_session.assert_awaited_once_with()
+    runtime._arm_session_primer.assert_called_once_with(
+        "This is a bridge-managed handoff restore. Review AGENT FYI, then use the recent transcript as continuity context.",
+        session_id=current["session_id"],
     )

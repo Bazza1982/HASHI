@@ -41,14 +41,16 @@ def _complete(
     key: str,
     text: str,
     answer: str,
+    agent_id: str = "lily",
+    source: str = "test",
 ):
     accepted = store.accept_run(
         session_id=session_id,
         owner_id=owner_id,
-        agent_id="lily",
+        agent_id=agent_id,
         request_id=request_id,
         text=text,
-        source="test",
+        source=source,
         idempotency_key=key,
     )
     assert store.mark_request_running(request_id, worker_id="test-worker") == 1
@@ -102,7 +104,7 @@ def test_default_session_is_permanent_and_channel_bindings_are_isolated(tmp_path
         store.archive_session(default_a["session_id"])
 
 
-def test_recent_context_never_crosses_session_or_fresh_generation(tmp_path):
+def test_ordinary_recent_context_never_crosses_session_or_fresh_generation(tmp_path):
     store = _store(tmp_path)
     owner = "user:7"
     first = store.ensure_default_session(owner_id=owner, agent_id="lily")
@@ -140,6 +142,86 @@ def test_recent_context_never_crosses_session_or_fresh_generation(tmp_path):
     assert "FIRST SESSION SECRET" in [
         message["text"] for message in store.messages(first["session_id"])
     ]
+
+
+def test_bridge_recent_exchanges_cross_sessions_but_preserve_owner_agent_scope(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    first = store.create_session(owner_id=owner, agent_id="lily", title="First")
+    second = store.create_session(owner_id=owner, agent_id="lily", title="Second")
+
+    for index in range(6):
+        _complete(
+            store,
+            session_id=first["session_id"],
+            owner_id=owner,
+            request_id=f"req-first-{index}",
+            key=f"key-first-{index}",
+            text=f"turn-{index}",
+            answer=f"answer-{index}",
+        )
+    store.archive_session(first["session_id"])
+    for index in range(6, 12):
+        _complete(
+            store,
+            session_id=second["session_id"],
+            owner_id=owner,
+            request_id=f"req-second-{index}",
+            key=f"key-second-{index}",
+            text=f"turn-{index}",
+            answer=f"answer-{index}",
+        )
+
+    ignored_agent = store.create_session(
+        owner_id=owner, agent_id="other-agent", title="Other Agent"
+    )
+    _complete(
+        store,
+        session_id=ignored_agent["session_id"],
+        owner_id=owner,
+        request_id="req-other-agent",
+        key="key-other-agent",
+        text="OTHER AGENT SECRET",
+        answer="other agent answer",
+        agent_id="other-agent",
+    )
+    ignored_owner = store.create_session(
+        owner_id="user:8", agent_id="lily", title="Other Owner"
+    )
+    _complete(
+        store,
+        session_id=ignored_owner["session_id"],
+        owner_id="user:8",
+        request_id="req-other-owner",
+        key="key-other-owner",
+        text="OTHER OWNER SECRET",
+        answer="other owner answer",
+    )
+    _complete(
+        store,
+        session_id=second["session_id"],
+        owner_id=owner,
+        request_id="req-handoff-source",
+        key="key-handoff-source",
+        text="HANDOFF SHOULD NOT RECURSE",
+        answer="handoff acknowledgement",
+        source="handoff",
+    )
+
+    rows = store.recent_agent_exchanges(
+        owner_id=owner,
+        agent_id="lily",
+        limit=10,
+        excluded_sources={"handoff"},
+    )
+
+    assert [row["user_text"] for row in rows] == [
+        f"turn-{index}" for index in range(2, 12)
+    ]
+    assert {row["session_id"] for row in rows} == {
+        first["session_id"],
+        second["session_id"],
+    }
 
 
 def test_last_user_activity_comes_from_all_agent_sessions(tmp_path):

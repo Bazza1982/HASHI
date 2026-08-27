@@ -132,7 +132,19 @@ class HandoffBuilder:
         max_rounds: int,
         max_words: int,
     ) -> tuple[list[tuple[int, List[Dict[str, Any]]]], int]:
-        rounds = self._load_rounds()
+        return self._bounded_rounds(
+            self._load_rounds(),
+            max_rounds=max_rounds,
+            max_words=max_words,
+        )
+
+    def _bounded_rounds(
+        self,
+        rounds: list[list[dict[str, Any]]],
+        *,
+        max_rounds: int,
+        max_words: int,
+    ) -> tuple[list[tuple[int, List[Dict[str, Any]]]], int]:
         selected_rounds = rounds[-max_rounds:] if max_rounds > 0 else rounds
         first_sequence = len(rounds) - len(selected_rounds) + 1
         selected = list(
@@ -178,6 +190,40 @@ class HandoffBuilder:
                 )
         return kept, total_words
 
+    def _rounds_from_exchanges(
+        self, exchanges: list[dict[str, Any]]
+    ) -> list[list[dict[str, Any]]]:
+        rounds: list[list[dict[str, Any]]] = []
+        for exchange in exchanges:
+            user_text = str(exchange.get("user_text") or "").strip()
+            assistant_text = str(exchange.get("assistant_text") or "").strip()
+            user_source = str(exchange.get("user_source") or "")
+            assistant_source = str(exchange.get("assistant_source") or "")
+            if not user_text or not assistant_text:
+                continue
+            if {
+                user_source.strip().lower(),
+                assistant_source.strip().lower(),
+            } & self.EXCLUDED_RECENT_SOURCES:
+                continue
+            rounds.append(
+                [
+                    {
+                        "role": "user",
+                        "text": user_text,
+                        "source": user_source,
+                        "ts": str(exchange.get("user_ts") or ""),
+                    },
+                    {
+                        "role": "assistant",
+                        "text": assistant_text,
+                        "source": assistant_source,
+                        "ts": str(exchange.get("assistant_ts") or ""),
+                    },
+                ]
+            )
+        return rounds
+
     @staticmethod
     def _render_recent_context(
         kept: list[tuple[int, List[Dict[str, Any]]]],
@@ -206,6 +252,20 @@ class HandoffBuilder:
 
     def build_recent_context_block(self, max_rounds: int = 10, max_words: int = 6000) -> tuple[str, int, int]:
         kept, total_words = self._bounded_recent_rounds(
+            max_rounds=max_rounds,
+            max_words=max_words,
+        )
+        return self._render_recent_context(kept), len(kept), total_words
+
+    def build_recent_context_block_from_exchanges(
+        self,
+        exchanges: list[dict[str, Any]],
+        *,
+        max_rounds: int = 10,
+        max_words: int = 6000,
+    ) -> tuple[str, int, int]:
+        kept, total_words = self._bounded_rounds(
+            self._rounds_from_exchanges(exchanges),
             max_rounds=max_rounds,
             max_words=max_words,
         )
@@ -304,11 +364,8 @@ class HandoffBuilder:
             "memory_files": memory_files,
         }
 
-    def build_session_restore_prompt(self, max_rounds: int = 10, max_words: int = 6000) -> tuple[str, int, int]:
-        context_block, exchange_count, total_words = self.build_recent_context_block(
-            max_rounds=max_rounds,
-            max_words=max_words,
-        )
+    @staticmethod
+    def _render_session_restore_prompt(context_block: str) -> str:
         lines = [
             "SYSTEM: Start a fresh session, but preserve continuity from the recent bridge-managed transcript below.",
             "Use it as background memory for unresolved work, user preferences, decisions, and recent activity.",
@@ -325,7 +382,38 @@ class HandoffBuilder:
                 "Acknowledge that you have restored recent context from bridge history and are ready for the next instruction.",
             ]
         )
-        return "\n".join(lines).strip(), exchange_count, total_words
+        return "\n".join(lines).strip()
+
+    def build_session_restore_prompt(self, max_rounds: int = 10, max_words: int = 6000) -> tuple[str, int, int]:
+        context_block, exchange_count, total_words = self.build_recent_context_block(
+            max_rounds=max_rounds,
+            max_words=max_words,
+        )
+        return (
+            self._render_session_restore_prompt(context_block),
+            exchange_count,
+            total_words,
+        )
+
+    def build_session_restore_prompt_from_exchanges(
+        self,
+        exchanges: list[dict[str, Any]],
+        *,
+        max_rounds: int = 10,
+        max_words: int = 6000,
+    ) -> tuple[str, int, int]:
+        context_block, exchange_count, total_words = (
+            self.build_recent_context_block_from_exchanges(
+                exchanges,
+                max_rounds=max_rounds,
+                max_words=max_words,
+            )
+        )
+        return (
+            self._render_session_restore_prompt(context_block),
+            exchange_count,
+            total_words,
+        )
 
     def refresh_recent_context(self):
         """Reads transcript, extracts last N rounds, writes to recent_context."""

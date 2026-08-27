@@ -74,13 +74,22 @@ class FakeMessage:
         self.replies.append(text)
 
 
+class SlottedUpdate:
+    __slots__ = ("_message", "effective_chat", "effective_user", "message")
+
+    def __init__(self, *, user_id, chat_id, message):
+        self.effective_user = SimpleNamespace(id=user_id)
+        self.effective_chat = SimpleNamespace(id=chat_id)
+        self.message = message
+        self._message = message
+
+
 def fake_update(user_id=123, chat_id=456):
     message = FakeMessage()
-    return SimpleNamespace(
-        effective_user=SimpleNamespace(id=user_id),
-        effective_chat=SimpleNamespace(id=chat_id),
+    return SlottedUpdate(
+        user_id=user_id,
+        chat_id=chat_id,
         message=message,
-        _message=message,
     )
 
 
@@ -206,6 +215,24 @@ def _session_command_runtime(tmp_path, *, engine="openrouter-api", supports_sess
 async def test_new_creates_and_binds_a_hashi_session_for_any_backend(tmp_path):
     runtime, default, replies, resets = _session_command_runtime(tmp_path)
     update = fake_update()
+    accepted = runtime.session_store.accept_run(
+        session_id=default["session_id"],
+        owner_id="user:123",
+        agent_id="arale",
+        request_id="req-before-new",
+        text="retained Bridge history",
+        source="text",
+        idempotency_key="before-new",
+    )
+    runtime.session_store.mark_request_running(
+        accepted.request_id, worker_id="test-worker"
+    )
+    runtime.session_store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="retained answer",
+        assistant_source="test-backend",
+    )
 
     await runtime.cmd_new(update, fake_context())
 
@@ -217,18 +244,63 @@ async def test_new_creates_and_binds_a_hashi_session_for_any_backend(tmp_path):
     )) == 2
     assert replies[-1].startswith("New Session active:")
     assert resets == []
+    assert [
+        message["text"]
+        for message in runtime.session_store.messages(default["session_id"])
+    ] == ["retained Bridge history", "retained answer"]
 
 
 @pytest.mark.asyncio
-async def test_new_resets_only_the_new_session_cli_binding(tmp_path):
+async def test_new_resets_fixed_backend_session_when_supported(tmp_path):
     runtime, default, _replies, resets = _session_command_runtime(
         tmp_path, engine="codex-cli", supports_sessions=True
     )
+    update = fake_update()
 
-    await runtime.cmd_new(fake_update(), fake_context())
+    await runtime.cmd_new(update, fake_context())
 
     assert resets == [True]
+    assert runtime_session.current_session_for_update(runtime, update)[
+        "session_id"
+    ] != default["session_id"]
     assert runtime.session_store.get_session(default["session_id"])["is_default"] is True
+
+
+@pytest.mark.asyncio
+async def test_new_backend_reset_failure_keeps_previous_channel_binding(tmp_path):
+    runtime, default, replies, _resets = _session_command_runtime(
+        tmp_path, engine="codex-cli", supports_sessions=True
+    )
+    previous = runtime.session_store.create_session(
+        owner_id="user:123", agent_id="arale", title="Previous"
+    )
+    runtime.session_store.bind_channel(
+        owner_id="user:123",
+        agent_id="arale",
+        surface="telegram",
+        channel_key="456",
+        session_id=previous["session_id"],
+    )
+    runtime.backend_manager.current_backend.handle_new_session = AsyncMock(
+        side_effect=RuntimeError("reset failed")
+    )
+    runtime.logger = SimpleNamespace(exception=lambda *_args, **_kwargs: None)
+    update = fake_update()
+
+    await runtime.cmd_new(update, fake_context())
+
+    assert runtime_session.current_session_for_update(runtime, update)[
+        "session_id"
+    ] == previous["session_id"]
+    assert {
+        session["session_id"]
+        for session in runtime.session_store.list_sessions(
+            owner_id="user:123", agent_id="arale"
+        )
+    } == {default["session_id"], previous["session_id"]}
+    assert replies[-1] == (
+        "Could not start a new Session. The previous channel binding remains active."
+    )
 
 
 @pytest.mark.asyncio

@@ -42,12 +42,12 @@ Five runtime execution modes are available to a Flex Agent:
 
 **Common (all agents):**
 - `/help` — list available commands
-- `/new` — fresh CLI session reset; non-CLI backends should use `/fresh`
+- `/new` — create and select a new HASHI Session for the originating channel; session-capable fixed backends also clear their native session so the next request starts fresh
 - `/fresh` — clean API context for non-CLI backends; HER v2 persists a boundary across every prior turn source while preserving logs, searchable memory, and archives
 - `/memory [status|on|pause|saved on|saved off|plus on|plus off]` — inspect or change normal memory injection and independent Memory+ continuity
 - `/notepad [today|carryover|history|find <query>|edit <text>|replace <text>|compact|clear]` — inspect or maintain the compact Memory+ work card and archive index
 - `/clear` — clear workspace context files
-- `/handoff` — restore recent continuity from bridge transcript into a fresh session
+- `/handoff` — restore the latest 10 completed Bridge exchanges across retained HASHI Sessions into a fresh backend session
 - `/fyi [prompt]` — refresh bridge environment awareness; optionally append a follow-up prompt
 - `/usecomputer [on|off|status|examples|task]` — load managed GUI-aware computer-use guidance; unified shortcut for desktop/browser/Windows interaction when needed
 - `/browser [status|examples|1-4 task]` — route an internet task through HASHI headless browser, CLI-native browsing, Brave search, or the logged-in browser extension

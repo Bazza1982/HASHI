@@ -681,7 +681,7 @@ HASHI agents respond to both natural language and structured commands:
 
 | Command | Description |
 |---------|-------------|
-| `/new` | Start a fresh CLI session |
+| `/new` | Create/select a new HASHI Session and reset a session-capable fixed backend |
 | `/fresh` | Start a clean API context; HER v2 fences every pre-command history source without deleting logs or memories |
 | `/stop` | Cancel current processing |
 | `/steer <direction>` | Interrupt the current turn, preserve progress, and continue with an added direction |
@@ -697,7 +697,7 @@ HASHI agents respond to both natural language and structured commands:
 | `/notepad [today\|carryover\|history\|find <query>]` | Inspect the compact Memory+ work card and archived-day pointers |
 | `/notify [on\|quiet\|off]` | Choose normal notifications, final/error-only Quiet notifications, or silent delivery |
 | `/privacy [0-5]` | Show privacy details or quickly select a privacy level; Level 1 is the default |
-| `/handoff` | Restore continuity from recent transcript |
+| `/handoff` | Restore the latest 10 completed Bridge exchanges across Sessions |
 | `/skill` | Browse and apply standard instruction Skills (inline keyboard) |
 | `/exp <task>` | Run a task after consulting text-first EXP guidebooks; large assets install on demand |
 | `/help` | Show available commands |

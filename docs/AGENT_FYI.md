@@ -24,9 +24,9 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 
 ## Important Commands
 - `/help`: command list for this agent.
-- `/new`: fresh CLI session reset. Use this for CLI-backed agents (`claude-cli`, `gemini-cli`, `codex-cli`).
+- `/new`: create and select a new HASHI Session for the originating channel; session-capable fixed backends also clear their native session.
 - `/fresh`: clean API context for non-CLI backends. On HER v2 it creates a persistent boundary across normal turns, completed exchanges, cross-session receipts, Compact capsules, and auxiliary continuity sources. Logs and memories remain stored but are not automatically injected.
-- `/handoff`: fresh continuity restore from recent chat history.
+- `/handoff`: restore the latest 10 completed Bridge exchanges across retained HASHI Sessions into a fresh backend session.
 - `/fyi [prompt]`: explicit bridge environment awareness refresh.
 - `/bg <task>`: queue a background-capable task. Treat `/bg <task>` as `/bg run <task>`; preserve the user's task text exactly and use HASHI BackgroundJobManager for long OS/process work instead of blocking the chat. If model-facing `background_job_*` tools are unavailable, use the live local Workbench `/api/background-jobs` endpoints instead of starting a temporary standalone manager. Start managed jobs with success/failure notification and completion/failure agent-event routing enabled when possible.
 - `/bg status [job_id]`, `/bg tail <job_id>`, `/bg cancel <job_id>`, `/bg list`: inspect or manage recorded background jobs.
@@ -174,10 +174,13 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   stateless.
 - Bridge owns normal context assembly. Optional Memory+ adds a canonical bounded
   today card, short carryover, and archive pointers across every execution mode.
-- `/new` starts a fresh CLI session and re-primes the agent with this FYI
-  catalog. If Memory+ is enabled, its compact card is preserved and reloaded.
+- `/new` creates and selects a new HASHI Session for the originating channel,
+  clears the native session of a session-capable fixed backend, and re-primes
+  the agent with this FYI catalog. If Memory+ is enabled, its compact card is
+  preserved and reloaded.
 - `/fresh` starts a clean API context. For HER v2 it fences every pre-command context source, preserves logs/memories/archives, pauses Memory+, saved-memory search, and Habit advice, and lets only new post-boundary turns accumulate. Explicit memory/Habit commands can restore their automatic sources without reopening pre-boundary turn history.
-- `/handoff` restores recent continuity from bridge transcript, not CLI resume state.
+- `/handoff` restores the latest 10 completed exchanges from Bridge-owned
+  history across retained HASHI Sessions, not CLI resume state.
 - `/fyi` explicitly refreshes awareness of this bridge environment and can carry a follow-up prompt.
 - Memory+ never injects archived prompts or full answers. `/notepad history` and
   `/notepad find <query>` expose bounded archive pointers only when requested.

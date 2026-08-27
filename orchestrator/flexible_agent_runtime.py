@@ -4728,12 +4728,15 @@ class FlexibleAgentRuntime:
             return
 
         await self._reply_text(update, "Starting a fresh session with recent bridge history...")
-        handoff_builder = runtime_session.session_handoff_builder(self, update=update)
-        handoff_builder.refresh_recent_context()
-        handoff_builder.build_handoff()
-        prompt, exchange_count, word_count = handoff_builder.build_session_restore_prompt(
-            max_rounds=10,
-            max_words=6000,
+        bridge_exchanges = runtime_session.bridge_recent_exchanges(
+            self, update, limit=10
+        )
+        prompt, exchange_count, word_count = (
+            self.handoff_builder.build_session_restore_prompt_from_exchanges(
+                bridge_exchanges,
+                max_rounds=10,
+                max_words=6000,
+            )
         )
         if exchange_count <= 0:
             await self._send_text(update.effective_chat.id, "No recent bridge transcript was available for handoff.")

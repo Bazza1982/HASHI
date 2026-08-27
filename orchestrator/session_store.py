@@ -1495,6 +1495,71 @@ class SessionStore:
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def recent_agent_exchanges(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        limit: int = 10,
+        excluded_sources: Iterable[str] = (),
+    ) -> list[dict[str, Any]]:
+        """Return recent completed Bridge exchanges across Session boundaries.
+
+        Session-local history remains the authority for ordinary turn context.
+        Explicit continuity operations such as ``/handoff`` instead need the
+        owner's recent Agent timeline regardless of which Session is currently
+        selected. Deleted Sessions are intentionally excluded; archived
+        Sessions remain eligible because archival retains their history.
+        """
+
+        normalized_sources = sorted(
+            {
+                str(source).strip().lower()
+                for source in excluded_sources
+                if str(source).strip()
+            }
+        )
+        source_clause = ""
+        source_params: list[Any] = []
+        if normalized_sources:
+            placeholders = ",".join("?" for _ in normalized_sources)
+            source_clause = f" AND LOWER(u.source) NOT IN ({placeholders})"
+            source_params.extend(normalized_sources)
+
+        params: list[Any] = [
+            self.instance_id,
+            str(owner_id),
+            str(agent_id).strip().lower(),
+            *source_params,
+            max(1, min(int(limit), 100)),
+        ]
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT r.run_id, r.session_id, r.context_generation,
+                       u.ordinal AS session_sequence,
+                       u.message_id AS user_message_id,
+                       a.message_id AS assistant_message_id,
+                       u.created_at AS user_ts, a.created_at AS assistant_ts,
+                       u.source AS user_source, a.source AS assistant_source,
+                       u.text AS user_text, a.text AS assistant_text
+                FROM runs AS r
+                JOIN sessions AS s ON s.session_id = r.session_id
+                JOIN messages AS u ON u.message_id = r.user_message_id
+                JOIN messages AS a ON a.message_id = r.final_message_id
+                WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                  AND s.status != 'deleted'
+                  AND r.state = 'completed'
+                  AND u.visibility = 'visible' AND a.visibility = 'visible'
+                  AND u.history_eligible = 1 AND a.history_eligible = 1
+                  {source_clause}
+                ORDER BY u.created_at DESC, a.created_at DESC, r.run_id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
     def last_user_message_at(
         self,
         *,

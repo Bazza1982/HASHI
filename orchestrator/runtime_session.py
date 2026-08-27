@@ -305,6 +305,29 @@ def recent_exchanges(
     )
 
 
+def bridge_recent_exchanges(
+    runtime: Any, update: Any, *, limit: int = 10
+) -> list[dict[str, Any]]:
+    """Return Bridge-owned recent history without a Session boundary.
+
+    Ordinary context is Session-local. An explicit handoff is different: it
+    restores the user's recent Agent timeline into whichever Session/backend
+    is active now, including history retained in archived Sessions.
+    """
+
+    from orchestrator.handoff_builder import HandoffBuilder
+
+    _surface, _channel_key, resolved_owner, _explicit_session_id = (
+        _update_session_route(runtime, update)
+    )
+    return ensure_store(runtime).recent_agent_exchanges(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        limit=limit,
+        excluded_sources=HandoffBuilder.EXCLUDED_RECENT_SOURCES,
+    )
+
+
 def session_memory_store(runtime: Any, item: Any) -> Any:
     from orchestrator.bridge_memory import BridgeMemoryStore
 
@@ -463,6 +486,11 @@ def capture_backend_binding(runtime: Any, *, request_id: str) -> None:
     )
 
 
+def _session_workzone_path(session: Mapping[str, Any]) -> Path | None:
+    value = str(session.get("workzone") or "").strip()
+    return Path(value) if value else None
+
+
 def session_workzone(runtime: Any, item: Any | None = None, *, update: Any | None = None) -> Path | None:
     try:
         if item is not None and getattr(item, "session_id", None):
@@ -473,8 +501,7 @@ def session_workzone(runtime: Any, item: Any | None = None, *, update: Any | Non
             session = ensure_store(runtime).get_session(runtime.default_session_id)
     except (AttributeError, SessionNotFound):
         return None
-    value = str(session.get("workzone") or "").strip()
-    return Path(value) if value else None
+    return _session_workzone_path(session)
 
 
 def apply_item_workzone(runtime: Any, item: Any) -> None:
@@ -516,7 +543,9 @@ async def _reset_cli_backend(runtime: Any, *, reason: str) -> str:
     if supports_sessions and hasattr(backend, "handle_new_session"):
         result = backend.handle_new_session()
         if inspect.isawaitable(result):
-            await result
+            result = await result
+        if result is False:
+            raise RuntimeError("backend refused to start a new session")
         return "session"
     return "stateless"
 
@@ -541,9 +570,9 @@ async def _bind_session(runtime: Any, update: Any, session_id: str) -> None:
         channel_key=channel_key,
         session_id=session_id,
     )
-    # Commands may target an explicit Session. Keep subsequent work in the
-    # same command (for example Workzone selection after /use) on the new bind.
-    setattr(update, "_hashi_session_id", session_id)
+    # Telegram Update objects are slotted and cannot carry arbitrary HASHI
+    # attributes. The durable channel binding is canonical; callers already
+    # hold the selected Session for any remaining work in the same command.
 
 
 async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
@@ -559,13 +588,46 @@ async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
     session = ensure_store(runtime).create_session(
         owner_id=resolved_owner, agent_id=runtime.name, title="New session"
     )
-    await _bind_session(runtime, update, session["session_id"])
-    _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
-    await _reset_cli_backend(runtime, reason="cmd_new_session")
-    runtime._workzone_dir = None
+    previous_workzone = getattr(runtime, "_workzone_dir", None)
     sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
-    if callable(sync):
-        sync()
+    logger = getattr(runtime, "logger", None)
+    try:
+        await _reset_cli_backend(runtime, reason="cmd_new_session")
+        _prepare_clean_context(
+            runtime, disable_saved_memory=False, clear_session_primer=True
+        )
+        runtime._workzone_dir = None
+        if callable(sync):
+            sync()
+        await _bind_session(runtime, update, session["session_id"])
+    except Exception:  # noqa: BLE001 - backend adapters expose heterogeneous failures
+        if logger is not None:
+            logger.exception("Could not activate new Session safely")
+        runtime._workzone_dir = previous_workzone
+        if callable(sync):
+            try:
+                sync()
+            except Exception:  # noqa: BLE001 - best-effort runtime state restoration
+                if logger is not None:
+                    logger.warning(
+                        "Could not restore the previous Workzone after Session failure",
+                        exc_info=True,
+                    )
+        try:
+            ensure_store(runtime).archive_session(
+                session["session_id"], deleted=True
+            )
+        except Exception:  # noqa: BLE001 - best-effort cleanup after activation failure
+            if logger is not None:
+                logger.warning(
+                    "Could not archive the inactive Session after activation failure",
+                    exc_info=True,
+                )
+        await runtime._reply_text(
+            update,
+            "Could not start a new Session. The previous channel binding remains active.",
+        )
+        return
     await runtime._reply_text(
         update,
         f"New Session active: <code>{html.escape(session['session_id'])}</code>",
@@ -670,7 +732,7 @@ async def cmd_use(runtime: Any, update: Any, context: Any) -> None:
     await _bind_session(runtime, update, session["session_id"])
     _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
     await _reset_cli_backend(runtime, reason="cmd_use_session")
-    runtime._workzone_dir = session_workzone(runtime, update=update)
+    runtime._workzone_dir = _session_workzone_path(session)
     sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
     if callable(sync):
         sync()
@@ -715,7 +777,7 @@ async def cmd_archive(runtime: Any, update: Any, context: Any) -> None:
         runtime, disable_saved_memory=False, clear_session_primer=True
     )
     await _reset_cli_backend(runtime, reason="cmd_archive_session")
-    runtime._workzone_dir = session_workzone(runtime, update=update)
+    runtime._workzone_dir = _session_workzone_path(default)
     sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
     if callable(sync):
         sync()
@@ -895,6 +957,7 @@ __all__ = [
     "accept_request",
     "activate_backend_binding",
     "apply_item_workzone",
+    "bridge_recent_exchanges",
     "capture_backend_binding",
     "cmd_archive",
     "cmd_current",
