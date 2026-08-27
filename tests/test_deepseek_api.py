@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -9,6 +11,7 @@ from adapters.deepseek_api import DeepSeekAdapter
 from adapters.openrouter_api import _APIResult, _backend_failure_response
 from adapters.stream_events import KIND_TOOL_END
 from orchestrator.enterprise import IdentityService, PolicyEvaluator
+from orchestrator.multimodal_contract import canonical_request_content
 from tools.registry import ToolResult
 
 
@@ -61,11 +64,11 @@ class _DummyToolRegistry:
         )
 
 
-def _adapter(tmp_path, *, global_config=None):
+def _adapter(tmp_path, *, global_config=None, model="deepseek-v4-pro"):
     cfg = SimpleNamespace(
         name="ying",
         engine="deepseek-api",
-        model="deepseek-v4-pro",
+        model=model,
         workspace_dir=tmp_path,
         system_md=None,
         extra={},
@@ -73,6 +76,50 @@ def _adapter(tmp_path, *, global_config=None):
     adapter = DeepSeekAdapter(cfg, global_config or SimpleNamespace(), api_key="test-key")
     adapter.tool_registry = _DummyToolRegistry()
     return adapter
+
+
+@pytest.mark.asyncio
+async def test_deepseek_vision_model_receives_native_image_content(tmp_path):
+    image = tmp_path / "vision.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nvision")
+    payload = image.read_bytes()
+    content = canonical_request_content(
+        [
+            {"type": "text", "item_index": 1, "text": "Inspect it."},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": "attachment-vision",
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/png",
+                "filename": image.name,
+                "caption": "",
+                "local_ref": str(image),
+                "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "transport": {"message_id": 2},
+            },
+        ]
+    )
+    adapter = _adapter(tmp_path, model="deepseek-v4-flash-vision-exp")
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult("seen", None, "stop", 10, 2)
+    )
+
+    response = await adapter.generate_response(
+        "Inspect it.", "request-deepseek-vision", request_content=content
+    )
+
+    assert response.is_success is True
+    outbound = adapter._call_api_once.call_args.args[0]
+    user_content = outbound["messages"][1]["content"]
+    assert [part["type"] for part in user_content] == ["text", "image_url"]
+    assert user_content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    tool_names = {
+        item["function"]["name"] for item in outbound.get("tools", [])
+    }
+    assert tool_names.isdisjoint({"media_read", "vision_inspect"})
 
 
 def _init_org(tmp_path, org_id: str = "ORG-001") -> None:

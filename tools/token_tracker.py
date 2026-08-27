@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -38,6 +37,7 @@ PRICING: dict[str, dict[str, float]] = {
     "gemini-2.5-flash-preview": {"input": 0.15,  "output": 0.60},
     # DeepSeek
     "deepseek-v4-flash":        {"input": 0.14,  "cached": 0.0028,   "output": 0.28},
+    "deepseek-v4-flash-vision-exp": {"input": 0.14, "cached": 0.0028, "output": 0.28},
     "deepseek-v4-pro":          {"input": 0.435, "cached": 0.003625, "output": 0.87},
     # Retain historical prices for already-recorded legacy model IDs.
     "deepseek-chat":            {"input": 0.32,  "cached": 0.032, "output": 0.89},

@@ -111,3 +111,9 @@ def test_pricing_lookup_does_not_fuzzy_match_partial_model_names():
     assert get_price("anthropic/claude-sonnet-4-6") == PRICING[
         "claude-sonnet-4-6"
     ]
+
+
+def test_deepseek_flash_vision_uses_flash_pricing():
+    assert get_price("deepseek-v4-flash-vision-exp") == PRICING[
+        "deepseek-v4-flash"
+    ]

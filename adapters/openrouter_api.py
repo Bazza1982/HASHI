@@ -523,6 +523,20 @@ class OpenRouterAdapter(BaseBackend):
     # Subclasses (e.g. OllamaAdapter) override with smaller defaults.
     DEFAULT_TOOL_TIERS: list[str] | None = None
 
+    def _request_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "HTTP-Referer": "https://github.com/Bazza1982/HASHI",
+            "X-Title": "Bridge-U Orchestrator",
+        }
+
+    def _augment_assistant_tool_message(
+        self,
+        assistant_msg: dict[str, Any],
+        result: _APIResult,
+    ) -> None:
+        del assistant_msg, result
+
     def _media_fallback_modalities(self) -> frozenset[str]:
         registry = getattr(self, "tool_registry", None)
         is_allowed = getattr(registry, "is_allowed", None)
@@ -1125,11 +1139,7 @@ class OpenRouterAdapter(BaseBackend):
 
         use_streaming = on_stream_event is not None
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "HTTP-Referer": "https://github.com/Bazza1982/HASHI",
-            "X-Title": "Bridge-U Orchestrator",
-        }
+        headers = self._request_headers()
 
         last_text = ""
         last_structured_data = None
@@ -1256,6 +1266,7 @@ class OpenRouterAdapter(BaseBackend):
                 assistant_msg: dict = {"role": "assistant"}
                 if result.text:
                     assistant_msg["content"] = result.text
+                self._augment_assistant_tool_message(assistant_msg, result)
                 assistant_msg["tool_calls"] = result.tool_calls
                 messages.append(assistant_msg)
 

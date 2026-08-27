@@ -96,7 +96,11 @@ def test_current_deepseek_models_replace_retired_and_experimental_ids():
     direct_models = get_available_models("deepseek-api")
     openrouter_models = get_available_models("openrouter-api")
 
-    assert direct_models == ["deepseek-v4-pro", "deepseek-v4-flash"]
+    assert direct_models == [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+    ]
     assert "deepseek-chat" not in direct_models
     assert "deepseek-reasoner" not in direct_models
     assert "deepseek/deepseek-v4-pro" in openrouter_models

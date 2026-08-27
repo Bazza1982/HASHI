@@ -5,19 +5,18 @@ Differences from OpenRouter:
   - Endpoint: https://api.deepseek.com/v1/chat/completions
   - No OpenRouter-specific headers (HTTP-Referer, X-Title)
   - Reasoning content field: "reasoning_content" (not "reasoning")
-  - Current model IDs are deepseek-v4-flash and deepseek-v4-pro
+  - Current model IDs include deepseek-v4-flash, deepseek-v4-pro, and the
+    exact vision-capable deepseek-v4-flash-vision-exp model
 """
 
 from __future__ import annotations
 
 import json
-from itertools import count
 
 from adapters.openrouter_api import (
     OpenRouterAdapter,
     _APIResult,
     _assistant_content_text,
-    _backend_failure_response,
     _message_structured_data,
 )
 from adapters.stream_events import KIND_THINKING, StreamEvent
@@ -31,6 +30,10 @@ HASHI_COMPACTION_CAPABILITIES = {
     "local_or_slow": False,
 }
 HASHI_MODEL_CAPACITY_PROFILES = {
+    "deepseek-v4-flash-vision-exp": {
+        "context_window_tokens": 1_000_000,
+        "capacity_provenance": "official_deepseek_api_docs_2026-08-21",
+    },
     "deepseek-v4-flash": {
         "context_window_tokens": 1_000_000,
         "capacity_provenance": "official_deepseek_api_docs_2026-08-22",
@@ -52,8 +55,26 @@ def _with_reasoning_content(result: _APIResult, reasoning_content: str) -> _APIR
 
 class DeepSeekAdapter(OpenRouterAdapter):
 
-    def _build_payload(self, messages: list[dict], use_streaming: bool = False,
-                       tool_tiers: list[str] | None = ...) -> dict:
+    def _request_headers(self) -> dict[str, str]:
+        return self._deepseek_headers()
+
+    def _augment_assistant_tool_message(
+        self,
+        assistant_msg: dict,
+        result: _APIResult,
+    ) -> None:
+        reasoning_content = getattr(result, "reasoning_content", "")
+        if reasoning_content:
+            assistant_msg["reasoning_content"] = reasoning_content
+
+    def _build_payload(
+        self,
+        messages: list[dict],
+        use_streaming: bool = False,
+        tool_tiers: list[str] | None = ...,
+        *,
+        excluded_tool_names: frozenset[str] = frozenset(),
+    ) -> dict:
         payload: dict = {
             "model": self.config.model,
             "messages": messages,
@@ -77,6 +98,13 @@ class DeepSeekAdapter(OpenRouterAdapter):
         if self.tool_registry:
             tiers = self.DEFAULT_TOOL_TIERS if tool_tiers is ... else tool_tiers
             tool_defs = self.tool_registry.get_tool_definitions(tiers=tiers)
+            if excluded_tool_names:
+                tool_defs = [
+                    item
+                    for item in tool_defs
+                    if str((item.get("function") or {}).get("name") or "")
+                    not in excluded_tool_names
+                ]
             if tool_defs:
                 payload["tools"] = tool_defs
         return payload
@@ -231,100 +259,20 @@ class DeepSeekAdapter(OpenRouterAdapter):
             reasoning_content,
         )
 
-    async def generate_response(self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None):
-        # Inject DeepSeek headers instead of OpenRouter's
-        import time
-        started = time.perf_counter()
-        self._ensure_client()
-
-        use_streaming = on_stream_event is not None
-        messages = [
-            {"role": "system", "content": self.sys_prompt},
-            {"role": "user", "content": prompt},
-        ]
-        headers = self._deepseek_headers()
-        last_text = ""
-        last_structured_data = None
-        result = None
-        total_prompt = 0
-        total_completion = 0
-        total_thinking = 0
-        total_tool_calls = 0
-        tool_loop_count = 0
-        provider_calls: list[dict] = []
-
-        try:
-            self._touch_activity()
-            for loop_idx in count():
-                payload = self._build_payload(messages, use_streaming=use_streaming)
-                if use_streaming:
-                    result = await self._stream_api_once(payload, headers, on_stream_event)
-                else:
-                    result = await self._call_api_once(payload, headers, on_stream_event)
-
-                total_prompt += result.prompt_tokens
-                total_completion += result.completion_tokens
-                total_thinking += result.thinking_tokens
-                provider_calls.append(
-                    {
-                        "input": int(result.prompt_tokens or 0),
-                        "output": int(result.completion_tokens or 0),
-                        "thinking": int(result.thinking_tokens or 0),
-                        "token_source": "provider",
-                        # DeepSeek's completion_tokens already includes its
-                        # reported reasoning_tokens subset.
-                        "thinking_in_output": True,
-                        "cost_usd": result.cost_usd,
-                    }
-                )
-
-                last_text = result.text
-                last_structured_data = result.structured_data
-                if not result.tool_calls or not self.tool_registry:
-                    break
-
-                tool_loop_count += 1
-                total_tool_calls += len(result.tool_calls)
-                assistant_msg: dict = {"role": "assistant"}
-                if result.text:
-                    assistant_msg["content"] = result.text
-                reasoning_content = getattr(result, "reasoning_content", "")
-                if reasoning_content:
-                    assistant_msg["reasoning_content"] = reasoning_content
-                assistant_msg["tool_calls"] = result.tool_calls
-                messages.append(assistant_msg)
-                await self._run_tool_calls(result.tool_calls, messages, on_stream_event)
-
-            from adapters.base import BackendResponse, TokenUsage
-            duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            usage = TokenUsage(
-                input_tokens=total_prompt,
-                output_tokens=total_completion,
-                thinking_tokens=total_thinking,
-            ) if (total_prompt or total_completion) else None
-            return BackendResponse(
-                text=last_text,
-                duration_ms=duration_ms,
-                structured_data=last_structured_data,
-                is_success=True,
-                stop_reason=result.finish_reason if result else "stop",
-                usage=usage,
-                tool_call_count=total_tool_calls,
-                tool_loop_count=tool_loop_count,
-                stream_metadata={
-                    "meter": {"provider_calls": provider_calls},
-                },
-            )
-
-        except Exception as e:
-            from adapters.base import BackendResponse
-            import asyncio as _asyncio
-            if isinstance(e, _asyncio.CancelledError):
-                raise
-            duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            return _backend_failure_response(
-                e,
-                duration_ms=duration_ms,
-                tool_call_count=total_tool_calls,
-                tool_loop_count=tool_loop_count,
-            )
+    async def generate_response(
+        self,
+        prompt,
+        request_id,
+        is_retry=False,
+        silent=False,
+        on_stream_event=None,
+        request_content=None,
+    ):
+        return await super().generate_response(
+            prompt,
+            request_id,
+            is_retry=is_retry,
+            silent=silent,
+            on_stream_event=on_stream_event,
+            request_content=request_content,
+        )

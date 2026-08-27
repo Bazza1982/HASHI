@@ -42,6 +42,11 @@ _PERSISTENT_TRANSPORT_FIELDS = frozenset(
 # guess.  A newly named model remains text-only until configuration or this
 # registry explicitly proves its input shape.
 _VERIFIED_NATIVE_IMAGE_MODELS: Mapping[str, frozenset[str]] = {
+    "deepseek-api": frozenset(
+        {
+            "deepseek-v4-flash-vision-exp",
+        }
+    ),
     "openrouter-api": frozenset(
         {
             "google/gemini-2.5-pro",
@@ -521,6 +526,16 @@ def _registry_capability(provider: str, model: str) -> InputCapability | None:
         "item_bytes": 20 * 1024 * 1024,
         "total_bytes": 50 * 1024 * 1024,
     }
+    if provider == "deepseek-api":
+        # DeepSeek accepts up to 600 images and 32 MiB per regular image.  Its
+        # HTTP body limit is 48 MiB, so cap decoded aggregate bytes at 32 MiB;
+        # base64 expansion then remains below the provider body boundary with
+        # room for the surrounding JSON and text prompt.
+        limits = {
+            "item_count": 600,
+            "item_bytes": 32 * 1024 * 1024,
+            "total_bytes": 32 * 1024 * 1024,
+        }
     if provider == "hashi-api":
         # HASHI's serialized 256 MiB request limit is the aggregate boundary.
         # Keeping no lower decoded-total cap lets a 50 MiB current image coexist

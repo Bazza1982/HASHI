@@ -4158,16 +4158,17 @@ class WorkbenchApiServer:
             return "video"
         return "document"
 
-    async def _save_upload(self, runtime, part) -> tuple[Path, str]:
-        filename = part.filename or f"upload_{uuid4().hex}"
+    def _save_upload(
+        self,
+        runtime,
+        *,
+        filename: str,
+        payload: bytes,
+    ) -> tuple[Path, str]:
+        filename = filename or f"upload_{uuid4().hex}"
         safe_name = f"{uuid4().hex}_{Path(filename).name}"
         local_path = runtime.media_dir / safe_name
-        with open(local_path, "wb") as f:
-            while True:
-                chunk = await part.read_chunk()
-                if not chunk:
-                    break
-                f.write(chunk)
+        local_path.write_bytes(payload)
         return local_path, filename
 
     async def handle_chat(self, request):
@@ -4182,7 +4183,19 @@ class WorkbenchApiServer:
                 if part is None:
                     break
                 if part.filename:
-                    uploads.append(part)
+                    chunks = bytearray()
+                    while True:
+                        chunk = await part.read_chunk()
+                        if not chunk:
+                            break
+                        chunks.extend(chunk)
+                    uploads.append(
+                        {
+                            "filename": part.filename,
+                            "content_type": part.headers.get("Content-Type", ""),
+                            "payload": bytes(chunks),
+                        }
+                    )
                 else:
                     fields[part.name] = await part.text()
 
@@ -4227,12 +4240,16 @@ class WorkbenchApiServer:
                 )
                 request_ids.append(request_id)
 
-            for upload_index, part in enumerate(uploads):
-                local_path, original_name = await self._save_upload(runtime, part)
+            for upload_index, upload in enumerate(uploads):
+                local_path, original_name = self._save_upload(
+                    runtime,
+                    filename=upload["filename"],
+                    payload=upload["payload"],
+                )
                 media_kind = self._classify_upload(
                     original_name,
                     declared_media_type,
-                    part.headers.get("Content-Type", ""),
+                    upload["content_type"],
                 )
                 request_id = await runtime.enqueue_api_media(
                     local_path=local_path,

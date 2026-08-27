@@ -106,6 +106,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "models": [
             "deepseek-v4-pro",
             "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
         ],
         "default_model": "deepseek-v4-pro",
         "efforts": [],
