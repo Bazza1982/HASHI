@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import platform
 import sys
+import re
 import uuid
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger("hashi.browser")
 
@@ -187,7 +190,14 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
             for item in (extension_meta.get("actions") or [])
             if str(item).strip()
         }
-        contract_required_actions = {"session", "scroll", "evaluate"}
+        contract_required_actions = {
+            "session",
+            "scroll",
+            "evaluate",
+            "active_tab",
+            "media_state",
+            "media_play",
+        }
         if action in contract_required_actions and action not in advertised_actions:
             version = str(extension_meta.get("extension_version") or "unknown")
             return (
@@ -220,6 +230,303 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
 # ---------------------------------------------------------------------------
 # Public executors (called by ToolRegistry)
 # ---------------------------------------------------------------------------
+
+def _decode_structured_browser_result(value: str) -> tuple[Optional[dict], Optional[str]]:
+    text = str(value or "").strip()
+    if text.startswith("Error:"):
+        return None, text.removeprefix("Error:").strip()
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None, f"browser bridge returned a non-JSON result: {text[:240]}"
+    if not isinstance(payload, dict):
+        return None, "browser bridge returned a non-object result"
+    return payload, None
+
+
+def _youtube_video_id(value: str) -> str:
+    parsed = urlparse(str(value or ""))
+    host = (parsed.hostname or "").casefold()
+    if host in {"youtu.be", "www.youtu.be"}:
+        return parsed.path.strip("/").split("/", 1)[0]
+    if host.endswith("youtube.com"):
+        if parsed.path == "/watch":
+            return str((parse_qs(parsed.query).get("v") or [""])[0])
+        match = re.match(r"^/(?:shorts|live|embed)/([^/?#]+)", parsed.path)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _urls_refer_to_same_page(expected: str, actual: str) -> bool:
+    expected_video_id = _youtube_video_id(expected)
+    actual_video_id = _youtube_video_id(actual)
+    if expected_video_id or actual_video_id:
+        return bool(expected_video_id and expected_video_id == actual_video_id)
+    left = urlparse(expected)
+    right = urlparse(actual)
+    return bool(
+        (left.hostname or "").casefold() == (right.hostname or "").casefold()
+        and left.path.rstrip("/") == right.path.rstrip("/")
+    )
+
+
+async def _wait_for_extension_connection(timeout_s: float) -> dict:
+    from tools.browser_extension_bridge import healthcheck
+
+    deadline = asyncio.get_running_loop().time() + max(0.5, timeout_s)
+    last: dict = {}
+    while asyncio.get_running_loop().time() < deadline:
+        last = await asyncio.to_thread(healthcheck, timeout_s=1.5)
+        if last.get("connected"):
+            return last
+        await asyncio.sleep(0.25)
+    return last
+
+
+async def execute_browser_active_tab(args: dict) -> str:
+    """Return the visible Chrome active tab and verified Chrome window state."""
+    bridge_args = {**args, "bridge_backend": "extension"}
+    result = await _maybe_execute_extension_bridge("active_tab", bridge_args)
+    if result is None:
+        return "Error: browser_active_tab requires the HASHI browser bridge extension"
+    return result
+
+
+async def execute_browser_get_media_state(args: dict) -> str:
+    """Return structured state for the primary visible HTML video/audio element."""
+    bridge_args = {**args, "bridge_backend": "extension"}
+    result = await _maybe_execute_extension_bridge("media_state", bridge_args)
+    if result is None:
+        return "Error: browser_get_media_state requires the HASHI browser bridge extension"
+    return result
+
+
+async def execute_browser_play(args: dict) -> str:
+    """Idempotently start media and verify that its playback time advances."""
+    bridge_args = {**args, "bridge_backend": "extension"}
+    result = await _maybe_execute_extension_bridge("media_play", bridge_args)
+    if result is None:
+        return "Error: browser_play requires the HASHI browser bridge extension"
+    return result
+
+
+async def execute_browser_open_play_verify(args: dict) -> str:
+    """Open a visible Chrome page, maximize it, play media, and verify postconditions."""
+    url = str(args.get("url") or "").strip()
+    expected_title = str(args.get("expected_title") or "").strip()
+    if not url:
+        return "Error: url is required"
+    parsed_url = urlparse(url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+        return "Error: url must be an absolute http(s) URL"
+    if not expected_title:
+        return "Error: expected_title is required for verified playback"
+
+    try:
+        connect_timeout_s = max(2.0, min(float(args.get("connect_timeout_s", 18)), 60.0))
+        media_timeout_ms = max(500, min(int(args.get("media_timeout_ms", 10000)), 30000))
+        min_progress_seconds = max(
+            0.1,
+            min(float(args.get("min_progress_seconds", 0.75)), 10.0),
+        )
+    except (TypeError, ValueError):
+        return "Error: timeout and progress values must be numeric"
+
+    stages: list[dict] = []
+    health = await _wait_for_extension_connection(0.6)
+    if not health.get("connected"):
+        if platform.system() != "Windows":
+            return json.dumps(
+                {
+                    "ok": False,
+                    "action": "open_play_verify",
+                    "failed_stage": "browser_launch",
+                    "error": "browser extension is disconnected and automatic launch is only available on Windows",
+                    "stages": stages,
+                },
+                ensure_ascii=False,
+            )
+        chrome = _find_chrome_executable()
+        if not chrome:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "action": "open_play_verify",
+                    "failed_stage": "browser_launch",
+                    "error": "Google Chrome executable was not found",
+                    "stages": stages,
+                },
+                ensure_ascii=False,
+            )
+        from tools.windows_use import execute_windows_launch
+
+        launch_result = await execute_windows_launch(
+            {
+                "target": chrome,
+                "arguments": [url],
+                "wait_for_window_ms": 1200,
+            }
+        )
+        launch_ok = not launch_result.startswith("Error:")
+        stages.append({"stage": "browser_launch", "ok": launch_ok, "result": launch_result})
+        if not launch_ok:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "action": "open_play_verify",
+                    "failed_stage": "browser_launch",
+                    "error": launch_result,
+                    "stages": stages,
+                },
+                ensure_ascii=False,
+            )
+        health = await _wait_for_extension_connection(connect_timeout_s)
+        if not health.get("connected"):
+            stages.append({"stage": "bridge_connect", "ok": False, "health": health})
+            return json.dumps(
+                {
+                    "ok": False,
+                    "action": "open_play_verify",
+                    "failed_stage": "bridge_connect",
+                    "error": "Chrome opened but the HASHI Browser Bridge did not connect",
+                    "stages": stages,
+                },
+                ensure_ascii=False,
+            )
+    stages.append(
+        {
+            "stage": "bridge_connect",
+            "ok": True,
+            "extension_version": (
+                (health.get("response") or {}).get("extension_meta") or {}
+            ).get("extension_version"),
+        }
+    )
+
+    active_raw = await execute_browser_active_tab(
+        {
+            **args,
+            "url": url,
+            "maximize": True,
+            "wait_ms": int(args.get("page_wait_ms", 750)),
+        }
+    )
+    active_tab, active_error = _decode_structured_browser_result(active_raw)
+    if active_error or active_tab is None:
+        stages.append({"stage": "open_and_maximize", "ok": False, "error": active_error})
+        return json.dumps(
+            {
+                "ok": False,
+                "action": "open_play_verify",
+                "failed_stage": "open_and_maximize",
+                "error": active_error,
+                "stages": stages,
+            },
+            ensure_ascii=False,
+        )
+
+    actual_url = str(active_tab.get("url") or "")
+    actual_title = str(active_tab.get("title") or "")
+    url_verified = _urls_refer_to_same_page(url, actual_url)
+    title_verified = expected_title.casefold() in actual_title.casefold()
+    extension_maximized = bool(active_tab.get("maximized"))
+
+    native_maximized = True
+    native_result = "not required on this platform"
+    if platform.system() == "Windows":
+        from tools.windows_use import execute_windows_window_focus
+
+        title_hint = "YouTube" if (parsed_url.hostname or "").casefold().endswith("youtube.com") else re.sub(
+            r"[*?\[\]]", "", actual_title
+        )[:80]
+        native_result = await execute_windows_window_focus(
+            {"title_contains": title_hint or "Google Chrome", "maximize": True}
+        )
+        native_maximized = not native_result.startswith("Error:")
+
+    open_ok = url_verified and title_verified and extension_maximized and native_maximized
+    stages.append(
+        {
+            "stage": "open_and_maximize",
+            "ok": open_ok,
+            "active_tab": active_tab,
+            "url_verified": url_verified,
+            "title_verified": title_verified,
+            "extension_maximized": extension_maximized,
+            "native_maximized": native_maximized,
+            "native_result": native_result,
+        }
+    )
+    if not open_ok:
+        return json.dumps(
+            {
+                "ok": False,
+                "action": "open_play_verify",
+                "failed_stage": "open_and_maximize",
+                "error": "page identity or normal-window maximization could not be verified",
+                "stages": stages,
+            },
+            ensure_ascii=False,
+        )
+
+    play_raw = await execute_browser_play(
+        {
+            **args,
+            "url": actual_url,
+            "timeout_ms": media_timeout_ms,
+            "min_progress_seconds": min_progress_seconds,
+        }
+    )
+    playback, play_error = _decode_structured_browser_result(play_raw)
+    play_verified = bool(playback and playback.get("verified")) and not play_error
+    stages.append(
+        {
+            "stage": "play_and_verify",
+            "ok": play_verified,
+            "result": playback,
+            "error": play_error,
+        }
+    )
+
+    final_raw = await execute_browser_active_tab({**args, "maximize": False})
+    final_tab, final_error = _decode_structured_browser_result(final_raw)
+    final_identity_verified = bool(
+        final_tab
+        and _urls_refer_to_same_page(url, str(final_tab.get("url") or ""))
+        and expected_title.casefold() in str(final_tab.get("title") or "").casefold()
+        and final_tab.get("maximized")
+    )
+    stages.append(
+        {
+            "stage": "final_identity_check",
+            "ok": final_identity_verified,
+            "active_tab": final_tab,
+            "error": final_error,
+        }
+    )
+    success = play_verified and final_identity_verified
+    return json.dumps(
+        {
+            "ok": success,
+            "action": "open_play_verify",
+            "failed_stage": None if success else (
+                "play_and_verify" if not play_verified else "final_identity_check"
+            ),
+            "url": actual_url,
+            "title": actual_title,
+            "maximized": bool(extension_maximized and native_maximized),
+            "playback_verified": play_verified,
+            "playback": playback,
+            "stages": stages,
+            "error": None if success else (
+                (playback or {}).get("error")
+                if not play_verified
+                else "final page identity or maximized state changed before completion"
+            ),
+        },
+        ensure_ascii=False,
+    )
 
 async def execute_browser_screenshot(args: dict) -> str:
     """

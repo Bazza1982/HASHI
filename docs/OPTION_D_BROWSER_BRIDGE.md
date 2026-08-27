@@ -133,9 +133,17 @@ Implemented:
 - scroll  (detects internal scroll containers and returns the target, coordinates, and `state_changed`)
 - hover  (CDP `Input.dispatchMouseEvent` / `mouseMoved`; supports `timeout_ms`, `wait_ms`, `x_ratio`, `y_ratio` — see [BROWSER_BRIDGE_HOVER_NOTE.md](BROWSER_BRIDGE_HOVER_NOTE.md))
 - active_tab
+- media_state  (structured paused/time/duration/readiness state for the primary visible media element)
+- media_play  (idempotent play with advancing-time verification; never a blind play/pause toggle)
 - session  (executes supported steps sequentially and returns a result for every step)
 
-Extension package version: **0.1.5** (`tools/chrome_extension/hashi_browser_bridge/`).
+Model-facing HASHI tools also expose `browser_active_tab`, `browser_get_media_state`,
+`browser_play`, and the high-level `browser_open_play_verify` action. The high-level
+action opens the selected visible page, maximizes the normal Chrome window, starts
+media idempotently, and returns success only after URL/title, maximize state, and
+advancing playback time are all verified.
+
+Extension package version: **0.2.0** (`tools/chrome_extension/hashi_browser_bridge/`).
 
 Not yet implemented in the extension path:
 

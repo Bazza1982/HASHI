@@ -27,6 +27,7 @@ from tools.browser_native_host import (
     build_parser,
     decode_native_message,
     encode_native_message,
+    dispatch_local_request,
 )
 
 HAS_UNIX_STREAM_SERVER = hasattr(socketserver, "UnixStreamServer")
@@ -164,6 +165,31 @@ def test_windows_named_pipe_roundtrip_and_healthcheck(tmp_path: Path) -> None:
     assert response["extension_connected"] is True
     assert response["extension_meta"]["browser"] == "Chrome"
     assert status["connected"] is True
+
+
+def test_existing_session_returns_current_extension_capabilities() -> None:
+    state = BridgeState(logger=logging.getLogger("test-browser-bridge"))
+    state.extension_meta = {
+        "extension_version": "0.2.0",
+        "actions": ["active_tab", "media_state", "media_play"],
+    }
+    state.sessions["default::primary"] = {
+        "session_id": "default::primary",
+        "owner": "primary",
+        "tab_id": 7,
+    }
+
+    response = dispatch_local_request(
+        state,
+        {
+            "action": "session_create",
+            "args": {"session_id": "default::primary", "owner": "primary"},
+        },
+    )
+
+    assert response["ok"] is True
+    assert response["extension_meta"]["extension_version"] == "0.2.0"
+    assert response["extension_meta"]["actions"][-2:] == ["media_state", "media_play"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Chromium Windows invocation requires Windows")

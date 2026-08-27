@@ -483,6 +483,140 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "browser_active_tab",
+            "description": (
+                "Read the visible Chrome active tab as structured data. Optionally navigate it to a URL "
+                "and maximize its normal browser window. Returns tabId, windowId, URL, title, focus, "
+                "and verified Chrome window state. Requires the HASHI Browser Bridge extension."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Optional URL to open in the active visible Chrome tab.",
+                    },
+                    "maximize": {
+                        "type": "boolean",
+                        "description": (
+                            "Maximize the normal Chrome window and verify state=maximized. "
+                            "This is not F11 or media fullscreen."
+                        ),
+                    },
+                    "wait_ms": {
+                        "type": "integer",
+                        "description": "Optional wait before reading the active tab. Default 0.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_get_media_state",
+            "description": (
+                "Read structured state for the primary visible HTML video or audio element: paused, "
+                "ended, current time, duration, readiness, mute, volume, playback rate, and source. "
+                "Use this instead of inferring playback from a play-button label."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Optional expected/current page URL. Omit to inspect the active tab.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_play",
+            "description": (
+                "Idempotently play the primary visible HTML media element. If it is already playing, "
+                "do not toggle it. Success requires paused=false and currentTime advancing between "
+                "observations; a click alone is never reported as playback success."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Optional expected/current page URL. Omit to use the active tab.",
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 500,
+                        "maximum": 30000,
+                        "description": "Maximum playback verification time. Default 8000.",
+                    },
+                    "min_progress_seconds": {
+                        "type": "number",
+                        "minimum": 0.1,
+                        "maximum": 10,
+                        "description": "Minimum media-time advancement required. Default 0.75 seconds.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_open_play_verify",
+            "description": (
+                "Preferred high-level action when the user asks to open or play a selected video. "
+                "Deterministically opens visible Chrome, verifies the selected URL/title, maximizes "
+                "the normal browser window (never fullscreen), starts media idempotently, verifies "
+                "that playback time advances, and returns one structured completion result."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Absolute URL of the selected video page.",
+                    },
+                    "expected_title": {
+                        "type": "string",
+                        "description": "Distinctive title text that must be present in the active tab title.",
+                    },
+                    "connect_timeout_s": {
+                        "type": "number",
+                        "minimum": 2,
+                        "maximum": 60,
+                        "description": "How long to wait for Chrome and the extension bridge. Default 18.",
+                    },
+                    "page_wait_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000,
+                        "description": "Extra page-settle wait before identity checks. Default 750.",
+                    },
+                    "media_timeout_ms": {
+                        "type": "integer",
+                        "minimum": 500,
+                        "maximum": 30000,
+                        "description": "Maximum playback verification time. Default 10000.",
+                    },
+                    "min_progress_seconds": {
+                        "type": "number",
+                        "minimum": 0.1,
+                        "maximum": 10,
+                        "description": "Minimum verified media-time advancement. Default 0.75 seconds.",
+                    },
+                },
+                "required": ["url", "expected_title"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "browser_session",
             "description": (
                 "Execute a multi-step browser workflow on a single page without reloading between steps. "
@@ -1703,6 +1837,10 @@ _BROWSER_EXTRA_FIELDS = {
 
 for _tool_name in [
     "browser_session",
+    "browser_active_tab",
+    "browser_get_media_state",
+    "browser_play",
+    "browser_open_play_verify",
     "browser_scroll",
     "browser_hover",
     "browser_key",

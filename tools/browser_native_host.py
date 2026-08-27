@@ -65,6 +65,7 @@ MUTATING_ACTIONS = {
     "drag",
     "upload",
     "session_close",
+    "media_play",
 }
 
 
