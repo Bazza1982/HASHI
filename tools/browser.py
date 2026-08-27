@@ -19,7 +19,6 @@ import json
 import logging
 import os
 import platform
-import sys
 import re
 import uuid
 from typing import Optional
@@ -758,7 +757,6 @@ async def execute_browser_type_text(args: dict) -> str:
     """Type text into a contenteditable element using CDP Input.insertText (React-compatible)."""
     url = str(args.get("url", "")).strip()
     selector = str(args.get("selector", "")).strip()
-    text = str(args.get("text", ""))
     if not url:
         return "Error: url is required"
     if not selector:

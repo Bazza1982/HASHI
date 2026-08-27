@@ -1180,7 +1180,7 @@ async def execute_windows_window_list(args: dict) -> str:
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
-    provider = _resolve_provider(requested_provider, "window_list")
+    _resolve_provider(requested_provider, "window_list")
 
     title_contains = args.get("title_contains", "")
     pid = int(args.get("pid", 0) or 0)
@@ -1208,7 +1208,7 @@ async def execute_windows_window_focus(args: dict) -> str:
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
-    provider = _resolve_provider(requested_provider, "window_focus")
+    _resolve_provider(requested_provider, "window_focus")
 
     window_id = int(args.get("window_id", 0) or 0)
     pid = int(args.get("pid", 0) or 0)
@@ -1266,7 +1266,7 @@ async def execute_windows_window_close(args: dict) -> str:
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
-    provider = _resolve_provider(requested_provider, "window_close")
+    _resolve_provider(requested_provider, "window_close")
 
     window_id = int(args.get("window_id", 0) or 0)
     pid = int(args.get("pid", 0) or 0)
@@ -1338,7 +1338,7 @@ async def execute_windows_info(args: dict) -> str:
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
-    provider = _resolve_provider(requested_provider, "info")
+    _resolve_provider(requested_provider, "info")
 
     include_windows = bool(args.get("include_windows", True))
     include_displays = bool(args.get("include_displays", True))
