@@ -2962,6 +2962,25 @@ async def test_her_v2_stream_callback_returns_receipts_and_resolves_provisional_
 
 
 @pytest.mark.asyncio
+async def test_quiet_mode_defers_initial_resolution_to_audible_final_delivery():
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "medium"
+    runtime._commentary = True
+    runtime._notify_mode = "quiet"
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(request_id="req-her-v2-quiet-resolution"),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert feedback.on_stream_event.supports_initial_resolution is False
+
+
+@pytest.mark.asyncio
 async def test_her_v2_initial_resolution_accepts_mapping_receipt_and_edit_only_transport():
     runtime = _runtime()
     runtime.config.active_backend = "her-v2"

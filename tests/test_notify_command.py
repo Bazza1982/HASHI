@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.commands.notify import notify_command
-from orchestrator.telegram_notifications import notify_enabled
+from orchestrator.commands.notify import notify_callback, notify_command
+from orchestrator.telegram_notifications import notification_mode, notify_enabled
 
 
 class _Message:
@@ -37,6 +37,19 @@ def _update():
         effective_chat=SimpleNamespace(id=456),
         message=_Message(),
     )
+
+
+class _CallbackQuery:
+    def __init__(self, data):
+        self.data = data
+        self.edits = []
+        self.answers = 0
+
+    async def edit_message_text(self, text, **kwargs):
+        self.edits.append((text, kwargs))
+
+    async def answer(self, **_kwargs):
+        self.answers += 1
 
 
 @pytest.mark.asyncio
@@ -83,3 +96,39 @@ async def test_notify_off_removes_marker(tmp_path):
     assert notify_enabled(runtime) is False
     assert not marker.exists()
     assert "<b>Current</b> · <b>OFF</b>" in runtime.replies[0][0]
+
+
+@pytest.mark.asyncio
+async def test_notify_quiet_persists_exclusive_marker(tmp_path):
+    runtime = _runtime(tmp_path)
+    (tmp_path / ".notify_on").touch()
+
+    await notify_command(runtime, _update(), SimpleNamespace(args=["quiet"]))
+
+    assert notification_mode(runtime) == "quiet"
+    assert notify_enabled(runtime) is False
+    assert (tmp_path / ".notify_quiet").exists()
+    assert not (tmp_path / ".notify_on").exists()
+    assert "<b>Current</b> · <b>QUIET</b>" in runtime.replies[0][0]
+    labels = [
+        button.text
+        for row in runtime.replies[0][1]["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    assert "✓ Quiet" in labels
+
+
+@pytest.mark.asyncio
+async def test_notify_quiet_callback_updates_mode_and_menu(tmp_path):
+    runtime = _runtime(tmp_path)
+    query = _CallbackQuery("notify:quiet")
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        callback_query=query,
+    )
+
+    await notify_callback(runtime, update, SimpleNamespace())
+
+    assert notification_mode(runtime) == "quiet"
+    assert query.answers == 1
+    assert "<b>Current</b> · <b>QUIET</b>" in query.edits[0][0]

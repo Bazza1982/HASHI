@@ -57,7 +57,6 @@ from orchestrator import runtime_retry
 from orchestrator import runtime_scheduler_recovery
 from orchestrator import telegram_delivery_failover
 from orchestrator import telegram_stream_policy
-from orchestrator.telegram_notifications import disable_notification
 from orchestrator.source_policy import source_requires_manual_remote_api_permission
 from remote.local_http import local_http_hosts
 from remote.runtime_identity import read_runtime_claim
@@ -136,7 +135,11 @@ from orchestrator.usecomputer_mode import (
     set_usecomputer_mode,
 )
 from orchestrator.skill_manager import SkillDefinition, SkillManager
-from orchestrator.telegram_notifications import apply_disable_notification_default
+from orchestrator.telegram_notifications import (
+    apply_disable_notification_default,
+    disable_notification,
+    notification_mode,
+)
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.workzone import load_workzone
 from orchestrator.wrapper_mode import SESSION_RESET_SOURCE, load_wrapper_config, visible_wrapper_slots
@@ -271,8 +274,9 @@ class FlexibleAgentRuntime:
             self, "meter", default=False
         )
         self._meter_receipt_by_id: dict[str, Any] = {}
-        # Load persisted Telegram notification preference (.notify_on presence = audible, absence = silent)
-        self._notify_enabled: bool = (self.workspace_dir / ".notify_on").exists()
+        # Load persisted Telegram notification preference, including final-only Quiet mode.
+        self._notify_mode = notification_mode(self)
+        self._notify_enabled = self._notify_mode == "on"
         self._think_buffer: list[str] = []
         self._openrouter_think_chunk: str = ""
         self._last_openrouter_think_snippet: str | None = None
@@ -8016,7 +8020,7 @@ class FlexibleAgentRuntime:
                 chat_id=chat_id,
                 text=_think_msg,
                 parse_mode="HTML",
-                disable_notification=not self._notify_enabled,
+                disable_notification=disable_notification(self, purpose="think"),
             )
         except Exception as e:
             if "ConnectError" in type(e).__name__ or "ConnectError" in str(e):
@@ -8026,7 +8030,7 @@ class FlexibleAgentRuntime:
                         chat_id=chat_id,
                         text=_think_msg,
                         parse_mode="HTML",
-                        disable_notification=not self._notify_enabled,
+                        disable_notification=disable_notification(self, purpose="think"),
                     )
                 except Exception as e2:
                     self.telegram_logger.warning(f"Failed to send thinking message (retry): {e2}")

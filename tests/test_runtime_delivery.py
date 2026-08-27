@@ -123,6 +123,133 @@ async def test_send_long_message_respects_notify_on(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_legacy_notification_signature_cannot_block_final_delivery(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime(tmp_path)
+    monkeypatch.setattr(
+        runtime_delivery.telegram_notifications,
+        "disable_notification",
+        lambda _runtime: True,
+    )
+
+    _elapsed, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="final answer",
+        request_id="req-legacy-notify",
+        purpose="response",
+    )
+
+    assert chunks == 1
+    assert runtime.app.bot.messages[0]["text"] == "final answer"
+    assert runtime.app.bot.messages[0]["disable_notification"] is True
+    assert any("compatibility fallback" in text for _level, text in runtime.telegram_logger.messages)
+
+
+@pytest.mark.asyncio
+async def test_notification_policy_exception_cannot_block_final_delivery(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime(tmp_path)
+
+    def broken_policy(*_args, **_kwargs):
+        raise RuntimeError("policy broke")
+
+    monkeypatch.setattr(
+        runtime_delivery.telegram_notifications,
+        "disable_notification",
+        broken_policy,
+    )
+
+    _elapsed, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="still delivered",
+        request_id="req-broken-notify",
+        purpose="response",
+    )
+
+    assert chunks == 1
+    assert runtime.app.bot.messages[0]["text"] == "still delivered"
+    assert runtime.app.bot.messages[0]["disable_notification"] is False
+    assert any("sending audibly" in text for _level, text in runtime.telegram_logger.messages)
+
+
+@pytest.mark.asyncio
+async def test_quiet_mode_silences_interim_but_not_final_or_error(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime._notify_mode = "quiet"
+
+    await runtime_delivery.send_long_message(
+        runtime, chat_id=123, text="working", request_id="req-q1", purpose="task_commentary"
+    )
+    await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="starting",
+        request_id="req-q1b",
+        purpose="task_acknowledgement",
+    )
+    await runtime_delivery.send_long_message(
+        runtime, chat_id=123, text="done", request_id="req-q2", purpose="response"
+    )
+    await runtime_delivery.send_long_message(
+        runtime, chat_id=123, text="failure", request_id="req-q3", purpose="error"
+    )
+    await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="compaction problem",
+        request_id="req-q4",
+        purpose="context-compaction-warning",
+    )
+    await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="background complete",
+        request_id="req-q5",
+        purpose="bg-response",
+    )
+    await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="command complete",
+        request_id="req-q6",
+        purpose="command",
+    )
+
+    assert [message["disable_notification"] for message in runtime.app.bot.messages] == [
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_quiet_mode_only_notifies_last_final_chunk(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime._notify_mode = "quiet"
+
+    _elapsed, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text=("line of final output\n" * 500),
+        request_id="req-long-final",
+        purpose="response",
+    )
+
+    assert chunks > 1
+    notifications = [message["disable_notification"] for message in runtime.app.bot.messages]
+    assert notifications[:-1] == [True] * (len(notifications) - 1)
+    assert notifications[-1] is False
+
+
+@pytest.mark.asyncio
 async def test_send_long_message_error_uses_plain_summary(tmp_path):
     runtime = _runtime(tmp_path)
 

@@ -196,6 +196,10 @@ class RebootManager:
         flexible_runtime = importlib.import_module(
             "orchestrator.flexible_agent_runtime"
         )
+        command_registry = importlib.import_module("orchestrator.command_registry")
+        telegram_notifications = importlib.import_module(
+            "orchestrator.telegram_notifications"
+        )
         tool_registry = importlib.import_module("tools.registry")
         gateway_context = importlib.import_module("tools.gateway.context")
 
@@ -221,6 +225,31 @@ class RebootManager:
         if not callable(getattr(runtime_pipeline, "setup_interactive_feedback", None)):
             raise HotReloadError(
                 "Hot reload contract failed: runtime acknowledgement pipeline unavailable"
+            )
+        notification_mode = getattr(
+            telegram_notifications, "notification_mode", None
+        )
+        set_notification_mode = getattr(
+            telegram_notifications, "set_notification_mode", None
+        )
+        disable_notification = getattr(
+            telegram_notifications, "disable_notification", None
+        )
+        disable_parameters = (
+            inspect.signature(disable_notification).parameters
+            if callable(disable_notification)
+            else {}
+        )
+        runtime_commands = command_registry.runtime_command_map()
+        if (
+            not callable(notification_mode)
+            or not callable(set_notification_mode)
+            or "purpose" not in disable_parameters
+            or "notify" not in runtime_commands
+        ):
+            raise HotReloadError(
+                "Hot reload contract failed: Telegram notification mode or "
+                "/notify command is not current"
             )
         queued_request = getattr(runtime_common, "QueuedRequest", None)
         enqueue_request = getattr(
@@ -265,7 +294,8 @@ class RebootManager:
                 "is unavailable"
             )
         contract_message = (
-            "Hot reload contract verified: HER compatibility facade and runtime pipeline are current."
+            "Hot reload contract verified: HER compatibility facade, runtime "
+            "pipeline, and Telegram notification commands are current."
         )
         main_logger.info(contract_message)
         bridge_logger.info(contract_message)

@@ -222,6 +222,30 @@ def test_validate_agent_runtime_contract_accepts_current_modules():
     manager.validate_agent_runtime_contract()
 
 
+def test_validate_agent_runtime_contract_rejects_legacy_notification_signature(
+    monkeypatch,
+):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    monkeypatch.setattr(
+        "orchestrator.telegram_notifications.disable_notification",
+        lambda runtime: not bool(runtime),
+    )
+
+    with pytest.raises(HotReloadError, match="notification mode"):
+        manager.validate_agent_runtime_contract()
+
+
+def test_validate_agent_runtime_contract_requires_notify_command(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    monkeypatch.setattr(
+        "orchestrator.command_registry.runtime_command_map",
+        lambda: {},
+    )
+
+    with pytest.raises(HotReloadError, match="/notify command"):
+        manager.validate_agent_runtime_contract()
+
+
 def test_reload_hands_current_contract_to_live_legacy_manager():
     class LegacyRebootManager:
         def validate_agent_runtime_contract(self):

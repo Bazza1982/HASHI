@@ -9,15 +9,63 @@ from typing import Any
 from telegram import constants
 from telegram.error import RetryAfter
 
-from orchestrator import runtime_delivery_order, telegram_delivery_failover
+from orchestrator import (
+    runtime_delivery_order,
+    telegram_delivery_failover,
+    telegram_notifications,
+)
 from orchestrator.runtime_common import _md_to_html
-from orchestrator.telegram_notifications import disable_notification
 
 
 def _retry_after_seconds(exc: Exception) -> int | None:
     if isinstance(exc, RetryAfter):
         return int(getattr(exc, "retry_after", 0) or 0)
     return None
+
+
+def _safe_disable_notification(
+    runtime: Any,
+    *,
+    purpose: str,
+    delivery_mode: str = "",
+    final_chunk: bool = True,
+) -> bool:
+    """Keep notification policy failures from blocking message delivery."""
+    resolver = telegram_notifications.disable_notification
+    try:
+        return bool(
+            resolver(
+                runtime,
+                purpose=purpose,
+                delivery_mode=delivery_mode,
+                final_chunk=final_chunk,
+            )
+        )
+    except TypeError as exc:
+        # During the first hot reboot across a signature change, a partially
+        # refreshed process may briefly retain the legacy one-argument helper.
+        try:
+            result = bool(resolver(runtime))
+        except Exception:
+            result = False
+        logger = getattr(runtime, "error_logger", None) or getattr(
+            runtime, "telegram_logger", None
+        )
+        if logger is not None:
+            logger.warning(
+                f"Notification policy compatibility fallback for purpose={purpose}: {exc}"
+            )
+        return result
+    except Exception as exc:
+        logger = getattr(runtime, "error_logger", None) or getattr(
+            runtime, "telegram_logger", None
+        )
+        if logger is not None:
+            logger.warning(
+                f"Notification policy failed for purpose={purpose}; "
+                f"sending audibly: {exc}"
+            )
+        return False
 
 
 def _extract_backend_error_message(text: str) -> str:
@@ -201,7 +249,9 @@ async def send_long_message(
         sent = await _send_or_skip(
             chat_id=chat_id,
             text=msg,
-            disable_notification=disable_notification(runtime),
+            disable_notification=_safe_disable_notification(
+                runtime, purpose="error"
+            ),
         )
         if not sent:
             return max(0.0, monotonic() - send_started), 0
@@ -214,13 +264,21 @@ async def send_long_message(
 
     html = _md_to_html(text)
 
-    async def _send_chunk(chunk_raw: str, chunk_html: str, chunk_index: int):
+    async def _send_chunk(
+        chunk_raw: str, chunk_html: str, chunk_index: int, *, final_chunk: bool
+    ):
+        notification_disabled = _safe_disable_notification(
+            runtime,
+            purpose=purpose,
+            delivery_mode=delivery_mode,
+            final_chunk=final_chunk,
+        )
         try:
             sent = await _send_or_skip(
                 chat_id=chat_id,
                 text=chunk_html,
                 parse_mode=constants.ParseMode.HTML,
-                disable_notification=disable_notification(runtime),
+                disable_notification=notification_disabled,
             )
             if not sent:
                 return False
@@ -233,7 +291,7 @@ async def send_long_message(
                 sent = await _send_or_skip(
                     chat_id=chat_id,
                     text=chunk_raw,
-                    disable_notification=disable_notification(runtime),
+                    disable_notification=notification_disabled,
                 )
                 if not sent:
                     return False
@@ -244,7 +302,7 @@ async def send_long_message(
                         sent = await _send_or_skip(
                             chat_id=chat_id,
                             text=remain,
-                            disable_notification=disable_notification(runtime),
+                            disable_notification=notification_disabled,
                         )
                         return sent
                     split_at = remain.rfind("\n", 0, tg_max_len)
@@ -253,7 +311,7 @@ async def send_long_message(
                     sent = await _send_or_skip(
                         chat_id=chat_id,
                         text=remain[:split_at],
-                        disable_notification=disable_notification(runtime),
+                        disable_notification=notification_disabled,
                     )
                     if not sent:
                         return False
@@ -262,7 +320,7 @@ async def send_long_message(
 
     if len(html) <= tg_max_len:
         chunk_count = 1
-        if not await _send_chunk(text, html, chunk_count):
+        if not await _send_chunk(text, html, chunk_count, final_chunk=True):
             return max(0.0, monotonic() - send_started), 0
         runtime.telegram_logger.info(
             f"Sent Telegram message for request_id={request_id or '<none>'} "
@@ -290,8 +348,11 @@ async def send_long_message(
         raw_remain = raw_remain[raw_split:].lstrip("\n")
         html_remain = html_remain[split_at:].lstrip("\n")
 
+    total_chunks = len(raw_chunks)
     for chunk_count, (rc, hc) in enumerate(zip(raw_chunks, html_chunks), start=1):
-        if not await _send_chunk(rc, hc, chunk_count):
+        if not await _send_chunk(
+            rc, hc, chunk_count, final_chunk=chunk_count == total_chunks
+        ):
             return max(0.0, monotonic() - send_started), chunk_count - 1
     runtime.telegram_logger.info(
         f"Sent Telegram message for request_id={request_id or '<none>'} "

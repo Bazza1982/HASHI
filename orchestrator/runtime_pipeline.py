@@ -20,6 +20,7 @@ from orchestrator import (
     runtime_retry,
     runtime_session,
     telegram_delivery_failover,
+    telegram_notifications,
     telegram_stream_policy,
 )
 from orchestrator.flexible_backend_registry import canonical_backend_engine
@@ -32,7 +33,6 @@ from orchestrator.runtime_common import (
     _print_final_response,
     _safe_excerpt,
 )
-from orchestrator.telegram_notifications import disable_notification
 
 EMPTY_SUCCESS_TOOL_FAILURE_MESSAGE = (
     "I wasn't able to complete that — a tool I tried to use didn't return a result. "
@@ -1435,6 +1435,7 @@ def wrap_her_persona_stream(
     initial_resolution_capable = bool(
         callable(getattr(runtime, "_send_text", None))
         and callable(getattr(bot, "edit_message_text", None))
+        and telegram_notifications.notification_mode(runtime) != "quiet"
     )
 
     async def _send_event(event, *, purpose: str, commentary: bool = False):
@@ -1747,7 +1748,9 @@ async def setup_interactive_feedback(
                     chat_id=item.chat_id,
                     text=placeholder_text,
                     parse_mode=placeholder_parse_mode,
-                    disable_notification=disable_notification(runtime),
+                    disable_notification=telegram_notifications.disable_notification(
+                        runtime, purpose="placeholder"
+                    ),
                 )
                 placeholder_elapsed_s = max(
                     0.0, time.monotonic() - placeholder_started

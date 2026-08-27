@@ -40,6 +40,11 @@ FOUNDATION_PHASES = {
     # across a newly added symbol cannot bind consumers to the old dictionary.
     "orchestrator.multimodal_contract": 0,
     "orchestrator.command_specs": 0,
+    # Notification helpers are imported directly by command and runtime
+    # consumers.  Reload the provider first so a hot reboot that introduces a
+    # new helper cannot ask freshly reloaded consumers to import it from the
+    # previous in-memory module.
+    "orchestrator.telegram_notifications": 0,
     # QueuedRequest is imported at module scope by both agent runtimes and
     # request-pipeline consumers. Reload it first so a hot reboot cannot bind
     # a new enqueue method to the previous dataclass constructor.
