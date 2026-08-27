@@ -183,18 +183,18 @@ async def test_registry_cancellation_reaps_process_tree_and_audits_cleanup(tmp_p
     child_pid = await _read_pid(child_path)
 
     task.cancel()
-    with pytest.raises(asyncio.CancelledError) as cancelled:
+    with pytest.raises(asyncio.CancelledError):
         await task
 
-    cleanup = cancelled.value.hashi_tool_details["foreground_cleanup"]
-    assert cleanup["status"] in {"terminated", "force_killed"}
-    assert cleanup["process_reaped"] is True
-    assert cleanup["group_alive"] is False
     await _assert_pid_gone(parent_pid)
     await _assert_pid_gone(child_pid)
     record = json.loads(
         (tmp_path / "tool_action_audit.jsonl").read_text(encoding="utf-8")
     )
+    cleanup = record["details"]["foreground_cleanup"]
+    assert cleanup["status"] in {"terminated", "force_killed"}
+    assert cleanup["process_reaped"] is True
+    assert cleanup["group_alive"] is False
     assert record["status"] == "failed"
     assert record["tool_call_id"] == "cancel-tree"
     assert record["details"]["foreground_cleanup"]["process_reaped"] is True
