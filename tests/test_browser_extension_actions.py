@@ -226,7 +226,11 @@ async def test_open_play_verify_requires_every_postcondition(
         )
 
     async def fake_focus(args: dict) -> str:
-        assert args == {"title_contains": "YouTube", "maximize": True}
+        assert args == {
+            "title_contains": "YouTube",
+            "maximize": True,
+            "_skip_helper": True,
+        }
         return "Focused and maximized window id=11 title=YouTube - Google Chrome"
 
     monkeypatch.setattr(browser, "_wait_for_extension_connection", fake_wait)

@@ -132,6 +132,27 @@ async def test_windows_window_focus_reports_unverified_maximize(
 
 
 @pytest.mark.asyncio
+async def test_windows_tool_can_bypass_optional_helper_for_bounded_composites(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper_calls: list[str] = []
+
+    async def fake_helper_post(action: str, args: dict, timeout: int = 60):
+        helper_calls.append(action)
+        return "unexpected", None
+
+    monkeypatch.setattr(windows_use, "_helper_post", fake_helper_post)
+
+    result = await windows_use._maybe_execute_windows_helper(
+        "window_focus",
+        {"title_contains": "YouTube", "_skip_helper": True},
+    )
+
+    assert result is None
+    assert helper_calls == []
+
+
+@pytest.mark.asyncio
 async def test_windows_screenshot_auto_falls_back_to_usecomputer(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_windows_mcp(payload: dict, timeout: int = 90):
         return None, "No module named uv"

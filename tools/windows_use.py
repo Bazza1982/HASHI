@@ -517,7 +517,7 @@ Start-Process -FilePath $uv.command -ArgumentList $argsList -WorkingDirectory $h
 
 
 async def _maybe_execute_windows_helper(action: str, args: dict) -> str | None:
-    if not _windows_helper_enabled():
+    if args.get("_skip_helper") is True or not _windows_helper_enabled():
         return None
     output, error = await _helper_post(action, args, timeout=60)
     if output is not None:

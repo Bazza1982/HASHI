@@ -441,7 +441,14 @@ async def execute_browser_open_play_verify(args: dict) -> str:
             r"[*?\[\]]", "", actual_title
         )[:80]
         native_result = await execute_windows_window_focus(
-            {"title_contains": title_hint or "Google Chrome", "maximize": True}
+            {
+                "title_contains": title_hint or "Google Chrome",
+                "maximize": True,
+                # This composite action already owns the exact Chrome tab and
+                # needs a bounded Win32 postcondition check. Avoid waiting for
+                # an optional helper service before the local verifier runs.
+                "_skip_helper": True,
+            }
         )
         native_maximized = not native_result.startswith("Error:")
 
