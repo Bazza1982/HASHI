@@ -311,6 +311,31 @@ class RuntimeInvocationMixin:
                 stage.value,
                 meaningful=False,
             )
+            if stage in {
+                Stage.PLANNING,
+                Stage.EXECUTION,
+                Stage.REPLANNING,
+                Stage.REVIEW,
+                Stage.FINALISATION,
+                Stage.JSON_REPAIR,
+            }:
+                activity_kind = "review" if stage is Stage.REVIEW else "progress"
+                activity_type = (
+                    "recovery" if stage is Stage.JSON_REPAIR else "stage"
+                )
+                await self._publish_activity(
+                    state,
+                    kind=activity_kind,
+                    text=f"{stage.value.replace('_', ' ').title()} started",
+                    event_id=f"{attempt_prefix}:activity:start",
+                    phase=stage.value,
+                    metadata={
+                        "activity_type": activity_type,
+                        "status": "started",
+                        "stage": stage.value,
+                        "attempt": attempt,
+                    },
+                )
             response: StageResponse | None = None
             try:
                 response = await state.control.run_cancellable(
@@ -1239,6 +1264,23 @@ class RuntimeInvocationMixin:
                     attempts=attempt,
                 )
             delay = min(delay, idle_remaining)
+        await self._publish_activity(
+            state,
+            kind="progress",
+            text=f"{retry_kind.replace('_', ' ')} retry scheduled",
+            event_id=(
+                f"{invocation_id}:activity:retry:{retry_kind}:{attempt}"
+            ),
+            phase=stage.value,
+            metadata={
+                "activity_type": "recovery",
+                "status": "started",
+                "stage": stage.value,
+                "retry_kind": retry_kind,
+                "attempt": attempt,
+                "delay_s": delay,
+            },
+        )
         self._audit(
             state,
             stage=stage.value,

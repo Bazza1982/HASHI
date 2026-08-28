@@ -68,7 +68,7 @@ Five runtime execution modes are available to a Flex Agent:
 - `/mode [fixed|flex|wrapper|audit|dual-brain]` — switch execution mode; `/mode memory+` only enables Memory+ and keeps the current mode
 - `/think [on|off]` — show the current backend's reasoning presentation; for HER this is only genuine provider-returned reasoning chunks or explicit provider-redaction notices, independent of `/verbose` and `/typing`
 - `/commentary [on|off]` — HER only: show explicitly model-authored Persona acknowledgements and interim reports once each; independent of `/think`, `/verbose`, and raw reasoning
-- `/verbose [on|off]` — show a temporary technical activity card with planning, tools, tests, validation, retries, and runtime status; Persona speech, reasoning, and answer drafts are excluded
+- `/verbose [on|off]` — show one temporary deterministic activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status. The same Telegram card is edited as work advances; raw technical events remain in logs, while Persona speech, reasoning, and answer drafts stay excluded.
 - `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
 - `/notify [on|quiet|off]` — `on` notifies for every message; `quiet` silences interim activity but not final results, errors, warnings, recovery, or important alerts; `off` delivers every message silently
 - `/stream` and `/preview` — retired compatibility commands that point to the display controls above; Telegram answers are delivered only when complete
@@ -83,6 +83,15 @@ Five runtime execution modes are available to a Flex Agent:
   changed, while the process lock and live WhatsApp transport remain intact
 - `/rebuild` — one-version compatibility notice for the retired native HER build workflow; performs no build, reload, or restart
 - Alias: `/usercomputer`
+
+The `/verbose` digest uses one stable, backend-neutral vocabulary. Lifecycle
+headers are `🧭 Planning`, `🛠️ Execution`, `🔄 Replanning`, `🧐 Review`,
+`🔬 Verification`, `✍️ Finalisation`, and `✅ Completed`, with `⏳ Preparing`,
+`⛔ Blocked`, and `❌ Error` for control states. Body rows are grouped as
+`🔎 Inspect`, `📝 Change`, `⚙️ Execute`, `🧪 Check`, `🌐 External`,
+`🔁 Recovery`, and `⏳ Waiting`. Outcomes use `✅` success, `⚠️` warning,
+`❌` failure, and `⛔` blocked. Classification is programmatic from canonical
+events and known command/tool shapes; no model generates or paraphrases it.
 
 **Backend configuration:**
 - `/backend` — switch active backend in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the backend picker. Selecting `her-v2` switches only the backend; it never asks the user to select the internal `role-configured` sentinel.

@@ -1725,6 +1725,23 @@ async def test_xhigh_publishes_replaceable_draft_then_replaces_it_with_final(
         ("final", "Reviewed final response."),
     ]
     assert delivery.records[-1].event_id.endswith(":execution:draft")
+    activity = delivery.activity_records
+    assert any(
+        item["phase"] == "planning"
+        and item["metadata"]["activity_type"] == "stage"
+        for item in activity
+    )
+    assert any(
+        item["phase"] == "review"
+        and item["metadata"].get("outcome") == "PASS"
+        for item in activity
+    )
+    assert any(
+        item["phase"] == "finalisation"
+        and item["metadata"]["activity_type"] == "stage"
+        for item in activity
+    )
+    assert activity[-1]["metadata"]["lifecycle_state"] == "COMPLETED"
     rows = [
         json.loads(line)
         for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()

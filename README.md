@@ -783,7 +783,7 @@ configuration summary.
 
 | Command | Description |
 |---------|-------------|
-| `/verbose [on\|off]` | Show bounded technical execution telemetry only: planning, tools, tests, validation, retries, and runtime status |
+| `/verbose [on\|off]` | Show one deterministic rolling activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status; raw technical events remain in logs |
 | `/think [on\|off]` | Show backend-owned reasoning output; for HER this is genuine provider-returned reasoning only |
 | `/commentary [on\|off]` | HER only: show each explicitly model-authored Persona acknowledgement or interim report once, independently from `/think` and `/verbose` |
 | `/typing [on\|off\|status]` | Control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator |

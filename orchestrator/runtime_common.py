@@ -94,9 +94,19 @@ def _streaming_status_to_html(
     lines: list[str],
     *,
     max_message_len: int = 3800,
+    phase_icon: str = "🔍",
+    phase_label: str = "",
 ) -> str:
     """Render a rolling Telegram status message without exposing Markdown markers."""
-    header_text = f"🔍 {agent_name} | {engine} | {elapsed_s}s"
+    elapsed = (
+        f"{elapsed_s // 60}m {elapsed_s % 60}s"
+        if elapsed_s >= 60
+        else f"{elapsed_s}s"
+    )
+    if phase_label:
+        header_text = f"{phase_icon} {agent_name} · {phase_label} | {engine} | {elapsed}"
+    else:
+        header_text = f"{phase_icon} {agent_name} | {engine} | {elapsed}"
     body = "\n".join(lines)
     separator = "\n\n"
     truncation = "\n..."
@@ -105,10 +115,17 @@ def _streaming_status_to_html(
         keep = max(0, max_body_len - len(truncation))
         body = body[:keep].rstrip() + truncation
 
-    header = (
-        f"🔍 <b>{html.escape(str(agent_name))}</b> | "
-        f"{html.escape(str(engine))} | {elapsed_s}s"
-    )
+    if phase_label:
+        header = (
+            f"{html.escape(str(phase_icon))} <b>{html.escape(str(agent_name))}</b> · "
+            f"<b>{html.escape(str(phase_label))}</b> | "
+            f"{html.escape(str(engine))} | {elapsed}"
+        )
+    else:
+        header = (
+            f"{html.escape(str(phase_icon))} <b>{html.escape(str(agent_name))}</b> | "
+            f"{html.escape(str(engine))} | {elapsed}"
+        )
     if not body:
         return header
     return header + separator + _md_to_html(body)

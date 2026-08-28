@@ -11,9 +11,15 @@ from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from adapters.stream_events import (
     DELIVERY_USER_COMMENTARY,
     KIND_COMMENTARY,
+    KIND_FILE_EDIT,
+    KIND_FILE_READ,
     KIND_PROGRESS,
+    KIND_REVIEW,
+    KIND_SHELL_EXEC,
+    KIND_TESTING,
     KIND_TEXT_DELTA,
     KIND_THINKING,
+    KIND_VALIDATION,
     StreamEvent,
 )
 
@@ -418,6 +424,59 @@ async def test_verbose_stream_display_stops_before_cleanup_timeout(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_verbose_stream_display_drains_review_event_during_stop(tmp_path):
+    edits = []
+
+    class Bot:
+        async def edit_message_text(self, **kwargs):
+            edits.append(kwargs)
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        workspace_dir=tmp_path / "workspaces" / "zelda",
+        config=SimpleNamespace(
+            active_backend="her-v2",
+            extra={"answer_stream_edit_interval_s": 0.01},
+        ),
+        telegram_connected=True,
+        app=SimpleNamespace(bot=Bot()),
+        telegram_logger=SimpleNamespace(
+            info=lambda _message: None,
+            warning=lambda _message: None,
+        ),
+    )
+    runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+    event_queue = asyncio.Queue()
+    stop_event = asyncio.Event()
+    await event_queue.put(
+        StreamEvent(
+            kind=KIND_REVIEW,
+            summary="Review pass",
+            phase="review",
+            metadata={
+                "activity_type": "review_result",
+                "outcome": "PASS",
+                "finding_count": 0,
+            },
+        )
+    )
+    stop_event.set()
+
+    await FlexibleAgentRuntime._streaming_display_loop(
+        runtime,
+        123,
+        SimpleNamespace(message_id=77),
+        "req-review-stop",
+        stop_event,
+        event_queue,
+    )
+
+    assert edits
+    assert "Review passed" in edits[-1]["text"]
+    assert "Completed" in edits[-1]["text"]
+
+
+@pytest.mark.asyncio
 async def test_verbose_stream_display_rolls_over_after_each_message_edit_budget(tmp_path):
     edits = []
     sends = []
@@ -468,9 +527,18 @@ async def test_verbose_stream_display_rolls_over_after_each_message_edit_budget(
         )
     )
 
-    for index in range(3):
-        summary = "step **zero** with `details`" if index == 0 else f"step {index}"
-        await event_queue.put(StreamEvent(kind=KIND_PROGRESS, summary=summary))
+    events = [
+        StreamEvent(kind=KIND_FILE_READ, summary="Read a.py", file_path="a.py"),
+        StreamEvent(kind=KIND_FILE_EDIT, summary="Edited a.py", file_path="a.py"),
+        StreamEvent(
+            kind=KIND_SHELL_EXEC,
+            summary="Running: pytest -q",
+            tool_name="Bash",
+            metadata={"command": "pytest -q"},
+        ),
+    ]
+    for index, event in enumerate(events):
+        await event_queue.put(event)
         for _ in range(20):
             if len(edits) + len(sends) >= index + 1:
                 break
@@ -487,8 +555,9 @@ async def test_verbose_stream_display_rolls_over_after_each_message_edit_budget(
     assert display_state.rollover_count == 1
     assert len(edits) == 3
     assert [edit["message_id"] for edit in edits] == [77, 77, 78]
-    assert any("<b>zero</b>" in edit["text"] for edit in edits)
-    assert any("<code>details</code>" in edit["text"] for edit in edits)
+    assert any("Inspected 1 file" in edit["text"] for edit in edits)
+    assert any("Changed 1 file" in edit["text"] for edit in edits)
+    assert any("Ran 1 check" in edit["text"] for edit in edits)
     assert all(edit["parse_mode"] == "HTML" for edit in edits)
     assert any("Rolled over streaming display" in message for message in log_messages)
 
@@ -559,9 +628,9 @@ async def test_her_compaction_start_and_failure_are_both_visible_with_verbose(tm
     stop_event.set()
     await task
 
-    assert any("semantic_compaction started" in edit["text"] for edit in edits)
-    assert any("semantic_compaction failed" in edit["text"] for edit in edits)
-    assert any("original context unchanged" in edit["text"] for edit in edits)
+    assert any("Performed 1 recovery action" in edit["text"] for edit in edits)
+    assert any("Performed 2 recovery actions" in edit["text"] for edit in edits)
+    assert any("1 warning reported" in edit["text"] for edit in edits)
 
 
 @pytest.mark.asyncio
@@ -582,12 +651,19 @@ async def test_verbose_and_think_receive_disjoint_event_classes():
 
     await callback(StreamEvent(kind=KIND_TEXT_DELTA, summary="draft answer"))
     await callback(StreamEvent(kind=KIND_PROGRESS, summary="checking files"))
+    await callback(StreamEvent(kind=KIND_REVIEW, summary="review started"))
+    await callback(StreamEvent(kind=KIND_TESTING, summary="tests completed"))
+    await callback(StreamEvent(kind=KIND_VALIDATION, summary="validation passed"))
     await callback(StreamEvent(kind=KIND_THINKING, summary="r" * 160))
     commentary = "model update\n\n" + " ".join(["complete"] * 80)
     await callback(StreamEvent(kind=KIND_COMMENTARY, summary=commentary))
 
-    verbose_event = verbose_queue.get_nowait()
-    assert verbose_event.kind == KIND_PROGRESS
+    assert [verbose_queue.get_nowait().kind for _ in range(4)] == [
+        KIND_PROGRESS,
+        KIND_REVIEW,
+        KIND_TESTING,
+        KIND_VALIDATION,
+    ]
     assert verbose_queue.empty()
     assert think_buffer == ["r" * 160, commentary]
 

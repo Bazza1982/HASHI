@@ -768,24 +768,50 @@ class OpenRouterAdapter(BaseBackend):
             else:
                 evt_kind = KIND_TOOL_START
 
-            await self._emit(on_stream_event, KIND_TOOL_START,
-                             f"Tool: {tool_name}", tool_name=tool_name)
-            await self._emit(on_stream_event, evt_kind,
-                             f"{tool_name}: {raw_args[:120]}", tool_name=tool_name)
-
             # Parse arguments
             try:
                 arguments = json.loads(raw_args) if raw_args else {}
             except json.JSONDecodeError as e:
                 result_text = f"Error: could not parse tool arguments: {e}"
+                await self._emit(
+                    on_stream_event,
+                    evt_kind,
+                    f"{tool_name}: {raw_args[:120]}",
+                    tool_name=tool_name,
+                )
                 await self._emit(on_stream_event, KIND_TOOL_END,
-                                 f"{tool_name}: argument parse error", tool_name=tool_name)
+                                 f"{tool_name}: argument parse error", tool_name=tool_name,
+                                 metadata={"is_error": True})
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
                     "content": result_text,
                 })
                 continue
+
+            event_metadata: dict[str, Any] = {}
+            event_path = ""
+            if isinstance(arguments, Mapping):
+                if tool_name == "bash":
+                    command = arguments.get("command") or arguments.get("cmd")
+                    if command:
+                        event_metadata["command"] = str(command)
+                elif tool_name in {"file_read", "file_write"}:
+                    path = arguments.get("path") or arguments.get("file_path")
+                    if path:
+                        event_path = str(path)
+                        event_metadata["file_paths"] = (event_path,)
+            # One canonical start event per operation.  The specialised kind
+            # already carries tool-start semantics; a preceding generic
+            # KIND_TOOL_START would make deterministic activity counters lie.
+            await self._emit(
+                on_stream_event,
+                evt_kind,
+                f"{tool_name}: {raw_args[:120]}",
+                tool_name=tool_name,
+                file_path=event_path,
+                metadata=event_metadata,
+            )
 
             if tool_name in _MEDIA_FALLBACK_TOOL_NAMES and (
                 all_media_native
@@ -804,6 +830,7 @@ class OpenRouterAdapter(BaseBackend):
                     KIND_TOOL_END,
                     f"{tool_name}: duplicate media fallback blocked",
                     tool_name=tool_name,
+                    metadata={"blocked": True},
                 )
                 messages.append(
                     {
@@ -833,7 +860,10 @@ class OpenRouterAdapter(BaseBackend):
                     denial_details = dict(denial_result.details or {})
                 await self._emit(on_stream_event, KIND_TOOL_END,
                                  f"{tool_name}: blocked by policy", tool_name=tool_name,
-                                 metadata={"tool_result_details": denial_details})
+                                 metadata={
+                                     "blocked": True,
+                                     "tool_result_details": denial_details,
+                                 })
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
@@ -853,7 +883,10 @@ class OpenRouterAdapter(BaseBackend):
                     KIND_TOOL_END,
                     f"{tool_name}: cancelled after cleanup",
                     tool_name=tool_name,
-                    metadata={"tool_result_details": details},
+                    metadata={
+                        "is_error": True,
+                        "tool_result_details": details,
+                    },
                 )
                 raise
 
@@ -861,6 +894,7 @@ class OpenRouterAdapter(BaseBackend):
             await self._emit(on_stream_event, KIND_TOOL_END,
                              f"{tool_name}: {output_preview}", tool_name=tool_name,
                              metadata={
+                                 "is_error": bool(getattr(result, "is_error", False)),
                                  "tool_result_details": dict(result.details or {})
                              })
 

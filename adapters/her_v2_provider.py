@@ -21,6 +21,7 @@ from adapters.stream_events import (
     DELIVERY_FINAL,
     DELIVERY_INTERNAL,
     DELIVERY_REASONING,
+    DELIVERY_TECHNICAL,
     DELIVERY_USER_COMMENTARY,
     KIND_ACKNOWLEDGEMENT,
     KIND_COMMENTARY,
@@ -1501,6 +1502,33 @@ class _AdapterDelivery(DeliveryPort):
             )
         )
         return accepted is True if commentary.draft_response else accepted is not False
+
+    async def deliver_activity(
+        self,
+        *,
+        kind: str,
+        text: str,
+        event_id: str,
+        phase: str,
+        metadata: Mapping[str, Any],
+    ) -> bool:
+        """Publish deterministic runtime activity through the technical lane."""
+
+        if self.callback is None:
+            return False
+        accepted = await self.callback(
+            StreamEvent(
+                kind=kind,
+                summary=text,
+                event_id=event_id,
+                delivery_class=DELIVERY_TECHNICAL,
+                origin="her_v2:runtime",
+                phase=phase,
+                provenance="runtime_state",
+                metadata=dict(metadata),
+            )
+        )
+        return accepted is not False
 
     async def resolve_initial(
         self,

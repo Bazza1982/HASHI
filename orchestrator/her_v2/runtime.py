@@ -2704,6 +2704,24 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 summary=f"Independent Review unavailable: {exc.human_description}",
             )
         state.last_review = finding
+        await self._publish_activity(
+            state,
+            kind="review",
+            text=f"Review {finding.outcome.value.casefold().replace('_', ' ')}",
+            event_id=(
+                f"{state.ledger.turn_id}:activity:review:{review_kind}:"
+                f"{state.review_count}:{finding.outcome.value}"
+            ),
+            phase=Stage.REVIEW.value,
+            metadata={
+                "activity_type": "review_result",
+                "status": "completed",
+                "stage": Stage.REVIEW.value,
+                "review_kind": review_kind,
+                "outcome": finding.outcome.value,
+                "finding_count": len(finding.findings),
+            },
+        )
         return finding
 
     @staticmethod
