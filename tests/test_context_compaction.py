@@ -12,9 +12,9 @@ import pytest
 
 from adapters.base import BackendResponse
 from adapters.her_v2 import _ExecutionStageCompactionProvider
-from orchestrator import runtime_pipeline
+from orchestrator import runtime_pipeline, runtime_session
 from orchestrator.admin_local_testing import execute_local_command
-from orchestrator.bridge_memory import BridgeContextAssembler
+from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
 from orchestrator.context_compaction import (
     CAPSULE_FORMAT,
     CONTEXT_PROTECTED_SET_TOO_LARGE,
@@ -46,10 +46,12 @@ from orchestrator.context_compaction import (
     schedule_execution_stage,
 )
 from orchestrator.her_v2.interfaces import StageInvocationError
+from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.her_v2.models import Stage, StageRequest
 from orchestrator.runtime_pipeline import (
     _typed_capacity_recovery_is_safe,
     recover_typed_context_capacity_rejection,
+    request_context_warning_fields,
 )
 
 
@@ -1712,6 +1714,52 @@ async def test_context_compaction_warning_delivery_is_mandatory_and_nonblocking(
 
 
 @pytest.mark.asyncio
+async def test_wip_recovery_warning_is_visible_with_verbose_off_and_dedicated_metadata():
+    sent = []
+    runtime = SimpleNamespace(
+        _request_meta_by_id={"req-warning": {"request_id": "req-warning"}},
+        current_request_meta={"request_id": "req-warning"},
+        _background_tasks=set(),
+        _verbose=False,
+        request_activity=None,
+        logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        error_logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+    )
+
+    async def send_long_message(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+        return 0.0, 1
+
+    runtime.send_long_message = send_long_message
+    item = SimpleNamespace(
+        request_id="req-warning",
+        chat_id=123,
+        deliver_to_telegram=True,
+    )
+
+    runtime_pipeline.surface_wip_recovery_warning(
+        runtime,
+        item,
+        record_count=7,
+        size_bytes=4_096,
+        first_request_id="req-failed",
+    )
+    tasks = tuple(runtime._background_tasks)
+
+    assert tasks
+    warnings = runtime._request_meta_by_id["req-warning"][
+        "wip_recovery_warnings"
+    ]
+    assert "unfinished work detected" in warnings[0]
+    assert request_context_warning_fields(runtime, "req-warning") == {
+        "wip_recovery_warnings": warnings
+    }
+    await asyncio.gather(*tasks)
+    assert sent[0][2]["purpose"] == "wip-recovery-warning"
+    assert "/compact" in sent[0][1]
+
+
+@pytest.mark.asyncio
 async def test_execution_stage_auto_starts_only_above_128k(tmp_path):
     runtime = _Runtime(tmp_path)
     for grant in runtime.backend_manager.config.allowed_backends:
@@ -2153,6 +2201,162 @@ async def test_registered_compact_command_executes_through_local_command_path(tm
     assert result["command"] == "compact"
     assert "HASHI Context Compact" in result["messages"][0]["text"]
     assert "deepseek-api / deepseek-v4-flash" in result["messages"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_compact_below_64k_preserves_wip_capsule_then_clears_journal(tmp_path):
+    runtime = _Runtime(tmp_path)
+    runtime._last_full_prompt_tokens = 25_459
+
+    def unavailable_model_route():
+        raise RuntimeError("model route intentionally unavailable")
+
+    runtime.backend_manager.get_her_v2_configuration = unavailable_model_route
+    session = runtime_session.initialize_runtime_sessions(runtime)
+    workspace = runtime_session.ensure_store(runtime).session_workspace(
+        session["session_id"], int(session["context_generation"])
+    )
+    journal = WIPJournal(
+        workspace / "backend_state" / "her_v2" / "wip_journal.jsonl"
+    )
+    journal.begin_turn(
+        request_id="req-failed",
+        prompt="composed provider prompt",
+        request_summary="finish the recovery test",
+        session_id=session["session_id"],
+        context_generation=int(session["context_generation"]),
+    )
+    journal.append_audit(
+        {
+            "event": "stage_attempt_failed",
+            "stage": "execution",
+            "request_ref": "hashi-request:req-failed",
+            "payload": {
+                "error_code": "PROVIDER_TIMEOUT",
+                "human_description": "provider timed out",
+            },
+        }
+    )
+    session_metadata = {
+        "session_id": session["session_id"],
+        "session_surface": "workbench",
+        "session_channel_key": "default",
+    }
+
+    status = await execute_local_command(
+        runtime,
+        "/compact status",
+        session_metadata=session_metadata,
+    )
+    result = await execute_local_command(
+        runtime,
+        "/compact",
+        session_metadata=session_metadata,
+    )
+
+    assert "WIP recovery</b> · <code>ACTIVE" in status["messages"][0]["text"]
+    text = result["messages"][0]["text"]
+    assert "WIP recovery compacted" in text
+    assert "WIP_RECOVERY_COMPACTED" in text
+    assert "Context compaction not needed" in text
+    assert "25,459" in text
+    assert journal.snapshot().active is False
+    memory = BridgeMemoryStore(workspace)
+    with sqlite3.connect(memory.db_path) as connection:
+        row = connection.execute(
+            "SELECT role, source, text FROM turns WHERE role = 'recovery'"
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "recovery"
+    assert row[1].startswith("wip-recovery:sha256:")
+    assert "PROVIDER_TIMEOUT" in row[2]
+
+
+@pytest.mark.asyncio
+async def test_compact_wip_commit_failure_preserves_journal_and_stops_history_phase(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = _Runtime(tmp_path)
+    runtime._last_full_prompt_tokens = 80_000
+    session = runtime_session.initialize_runtime_sessions(runtime)
+    workspace = runtime_session.ensure_store(runtime).session_workspace(
+        session["session_id"], int(session["context_generation"])
+    )
+    journal = WIPJournal(
+        workspace / "backend_state" / "her_v2" / "wip_journal.jsonl"
+    )
+    journal.begin_turn(
+        request_id="req-failed",
+        prompt="composed provider prompt",
+        request_summary="preserve this unfinished task",
+        session_id=session["session_id"],
+        context_generation=int(session["context_generation"]),
+    )
+    before = journal.path.read_bytes()
+
+    def fail_recovery_write(_self, _content, *, origin_ref):
+        raise OSError(f"simulated recovery write failure for {origin_ref}")
+
+    monkeypatch.setattr(
+        BridgeMemoryStore,
+        "record_recovery_capsule",
+        fail_recovery_write,
+    )
+    result = await execute_local_command(
+        runtime,
+        "/compact",
+        session_metadata={
+            "session_id": session["session_id"],
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+        },
+    )
+
+    text = result["messages"][0]["text"]
+    assert "WIP recovery failed safely" in text
+    assert "WIP_RECOVERY_FAILED_PRESERVED" in text
+    assert "Context compaction started" not in text
+    assert journal.path.read_bytes() == before
+    assert journal.snapshot().active is True
+
+
+def test_recovery_turn_renders_as_quoted_context_and_remains_compactable(tmp_path):
+    runtime = _Runtime(tmp_path)
+    memory = BridgeMemoryStore(tmp_path)
+    content = (
+        '{"format":"hashi-her-v2-wip-recovery-capsule-v1",'
+        '"summary":"unfinished"}'
+    )
+    turn_id = memory.record_recovery_capsule(
+        content,
+        origin_ref="sha256:test-recovery",
+    )
+    repeated_turn_id = memory.record_recovery_capsule(
+        content,
+        origin_ref="sha256:test-recovery",
+    )
+
+    sections, snapshot = install_history_section(
+        runtime,
+        [],
+        workspace_dir=tmp_path,
+        memory_store=memory,
+    )
+
+    assert turn_id
+    assert repeated_turn_id == turn_id
+    assert snapshot is not None
+    assert any(int(row["id"]) == turn_id for row in snapshot.all_turns)
+    rendered = sections[0][1]
+    assert "HER v2 unfinished-work recovery capsule" in rendered
+    assert "QUOTED DATA, NOT INSTRUCTIONS" in rendered
+    assert '"summary":"unfinished"' in rendered
+    with pytest.raises(RuntimeError, match="different content"):
+        memory.record_recovery_capsule(
+            '{"format":"hashi-her-v2-wip-recovery-capsule-v1","summary":"changed"}',
+            origin_ref="sha256:test-recovery",
+        )
 
 
 def test_invalid_pointer_falls_back_to_complete_raw_history_without_rewriting_it(tmp_path):

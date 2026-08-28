@@ -202,8 +202,11 @@ HER v2 is the sole supported HER execution backend:
   stable identity and order, travel natively to capable provider/models, and
   fall back only through authorised local media inspection when needed.
 - **Crash-safe WIP continuity** — HER v2 records observable work from an
-  unfinished turn in a transient journal, exposes its lifecycle in the durable
-  audit log, and clears it only after a later Ledger is durably completed.
+  unfinished turn in a bounded Session-scoped transient journal, exposes its
+  lifecycle in the durable audit log, and never recursively copies assembled
+  provider requests. Active WIP produces a mandatory visible warning;
+  `/compact` can commit a deterministic quoted recovery capsule without a
+  model and clears the exact Journal snapshot only after that write is durable.
 - **Quiet Telegram notifications** — `/notify quiet` keeps acknowledgements,
   commentary, reasoning, verbose activity, and other interim updates silent
   while final results, errors, warnings, recovery notices, and important alerts

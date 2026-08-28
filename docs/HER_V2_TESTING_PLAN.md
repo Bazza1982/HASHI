@@ -1089,6 +1089,30 @@ must prove the following boundaries.
   proving current-turn preservation, complete tool-call/result pairing, no tool
   replay, and unchanged loop authority.
 
+### 10.5 WIP recovery compaction and visibility
+
+The model-free WIP phase is tested independently from the model-based
+conversation-history phase:
+
+- repeated large requests and `request_received` audit events cannot grow the
+  Journal recursively; record, row, file, and rendered-context limits remain
+  hard bounds while retaining the first unfinished request boundary;
+- a recovery capsule is byte-stable for the same bounded snapshot, includes
+  bounded unfinished-request and failure facts, and excludes raw assembled
+  requests, full provider payloads, credentials, and large output;
+- `/compact` below 64,000 tokens durably inserts one idempotent quoted Session
+  recovery turn, clears only the exact source digest, and then independently
+  reports that ordinary history compaction is not needed;
+- destination write failure and a compare-and-swap race both preserve the
+  Journal and prevent the conversation-history phase from starting;
+- a committed recovery turn renders as quoted data rather than instructions
+  and remains eligible historical context for a later normal Compact;
+- each new HER v2 request that encounters previous-turn WIP schedules exactly
+  one mandatory visible warning even with `/verbose off`;
+- new Journals are isolated by HASHI Session context, while legacy Agent-level
+  state migrates by write-before-compare-and-swap-clear; and
+- a torn tail does not hide earlier durable recovery records.
+
 ## 11. Commentary and User Delivery
 
 Tests must prove:

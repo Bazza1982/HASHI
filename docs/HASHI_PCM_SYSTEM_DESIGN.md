@@ -6,7 +6,7 @@
 | ------------------------ | --------- |
 | Purpose | Define how HASHI maintains and distributes persona, context and memory to different agent backends, while distinguishing target design from known implementation gaps. |
 | Status | Authoritative target design for the next major HASHI PCM upgrade. |
-| Revision | 27 August 2026 — added the HER v2 crash-safe WIP Journal as transient Context rather than Memory. |
+| Revision | 28 August 2026 — bounded the HER v2 WIP Journal, scoped new state to the current Session context, and added deterministic `/compact` recovery. |
 
 ## 1. Overview
 
@@ -360,14 +360,17 @@ The following decisions were accepted on 26 August 2026. They are normative and 
 | PCM-DEC-003 | A Skills or Tools catalogue may advertise only capabilities that the Agent can actually invoke in the current request scope. Uniform HASHI Tool access for supported Fixed CLIs is part of this upgrade. | Resolve availability after Agent, backend, stage and permission filtering. Catalogue metadata never grants permission. Connect supported Fixed CLIs to the HASHI Tool Gateway through MCP or an equivalent native bridge, and do not advertise a capability until that connection is available and authorised. |
 | PCM-DEC-004 | Canonical raw audit evidence has indefinite retention and no automatic expiry. | Preserve complete unredacted audit evidence across `/reset`, `/new`, backend switches, process reloads and ordinary workspace maintenance. Use encryption at rest where supported together with strict least-privilege access controls. Archival or tiered storage may move evidence but may not discard it. Deletion is permitted only through a separately scoped, explicitly confirmed destructive audit-wipe operation; ordinary reset or wipe behaviour must not silently delete it. Backups inherit the same retention and access requirements. |
 | PCM-DEC-005 | Central BGE-M3 raw-memory search is scoped to the current HASHI instance and Agent by default. | `memory_sync` permits ingestion but does not grant cross-Agent read access. Shared knowledge is delivered through the curated Wiki. Searching another Agent’s raw consolidated records requires explicit user authorisation, an auditable purpose and provenance-preserving results. `/wiki` never exposes the underlying raw cross-Agent memory store. |
-| PCM-DEC-006 | Unfinished work is transient Context, not Agent Memory. HER v2 maintains a model-independent WIP Journal from observable, durably audited turn events. | An interrupted or error turn leaves its Journal intact. Later HER v2 turns append to it and receive the prior Journal at the end of their prompt with a neutral warning that it may be unrelated and must not be continued by default. After a later Ledger is durably `COMPLETED`, the accumulated Journal is cleared. Memory+ is not responsible for crash recovery. |
+| PCM-DEC-006 | Unfinished work is transient Context, not Agent Memory. HER v2 maintains a model-independent, strictly bounded WIP Journal from observable, durably audited turn events. | An interrupted or error turn leaves its Session-scoped Journal intact. Later HER v2 turns receive a mandatory visible warning and only a deterministic bounded recovery summary labelled as quoted data. Raw assembled requests are excluded. `/compact` may durably commit that summary into current Session history at any token count, then compare-and-swap clear the exact Journal snapshot; a failed commit preserves it. A later durably `COMPLETED` Ledger may also clear it. Memory+ is not responsible for crash recovery. |
 
-Operationally, the Journal lives under
-`<agent-workspace>/backend_state/her_v2/wip_journal.jsonl`. Its content may be
+Operationally, new Journal state lives under
+`<session-workspace>/backend_state/her_v2/wip_journal.jsonl`; the former
+Agent-level path is a bounded one-time migration source. Its content may be
 sensitive, but its lifecycle is separately observable in
 `<base-logs-dir>/<agent>/her_v2_audit.jsonl` through content-free
 `wip_journal_turn_started`, `wip_journal_context_injected`,
-`wip_journal_preserved`, and `wip_journal_cleared` events. See
+`wip_journal_preserved`, and `wip_journal_cleared` events. WIP recovery
+transactions additionally record `wip_recovery_started`, capsule commit,
+completion, or failed-preserved events in the Session compaction audit. See
 [HER v2 WIP Journal](HER_V2_WIP_JOURNAL.md) for the inspection contract.
 
 ## 11. Upgrade Test Contract

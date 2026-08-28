@@ -296,6 +296,92 @@ async def test_adapter_injects_prior_wip_and_clears_after_completed_ledger(tmp_p
     assert lifecycle["wip_journal_cleared"]["record_count"] > 2
 
 
+@pytest.mark.asyncio
+async def test_adapter_scopes_new_wip_journals_to_hashi_sessions(tmp_path):
+    config = _agent_config(tmp_path)
+    setattr(config, "_her_v2_stage_provider", _DirectProvider())
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize() is True
+    first_workspace = tmp_path / "sessions" / "session-a" / "generation_1"
+    second_workspace = tmp_path / "sessions" / "session-b" / "generation_1"
+
+    first = adapter._wip_journal_for_request(
+        {"session_workspace": str(first_workspace)}
+    )
+    second = adapter._wip_journal_for_request(
+        {"session_workspace": str(second_workspace)}
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.path != second.path
+    first.begin_turn(request_id="req-a", prompt="unfinished in A")
+    assert first.snapshot().active is True
+    assert second.snapshot().active is False
+
+
+@pytest.mark.asyncio
+async def test_adapter_migrates_legacy_agent_wip_into_current_session(tmp_path):
+    config = _agent_config(tmp_path)
+    setattr(config, "_her_v2_stage_provider", _DirectProvider())
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize() is True
+    assert adapter._wip_journal is not None
+    adapter._wip_journal.begin_turn(
+        request_id="req-legacy",
+        prompt="unfinished legacy work",
+    )
+    session_workspace = tmp_path / "sessions" / "session-a" / "generation_1"
+
+    selected = adapter._wip_journal_for_request(
+        {"session_workspace": str(session_workspace)}
+    )
+
+    assert selected is not None
+    assert selected.path != adapter._wip_journal.path
+    assert selected.snapshot().first_request_id == "req-legacy"
+    assert adapter._wip_journal.snapshot().active is False
+
+
+def test_adapter_surfaces_active_wip_once_for_each_new_request(tmp_path, monkeypatch):
+    from orchestrator import runtime_pipeline
+
+    config = _agent_config(tmp_path)
+    runtime = SimpleNamespace()
+    setattr(config, "_hashi_runtime", runtime)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    surfaced = []
+
+    def capture(_runtime, item, **details):
+        surfaced.append((item.request_id, details["record_count"]))
+
+    monkeypatch.setattr(runtime_pipeline, "surface_wip_recovery_warning", capture)
+    summary = {
+        "generation_id": "sha256:active-wip",
+        "record_count": 3,
+        "size_bytes": 512,
+        "first_request_id": "req-failed",
+    }
+
+    adapter._surface_wip_recovery_warning(
+        request_id="req-next-1",
+        summary=summary,
+        request_meta={},
+    )
+    adapter._surface_wip_recovery_warning(
+        request_id="req-next-1",
+        summary=summary,
+        request_meta={},
+    )
+    adapter._surface_wip_recovery_warning(
+        request_id="req-next-2",
+        summary=summary,
+        request_meta={},
+    )
+
+    assert surfaced == [("req-next-1", 3), ("req-next-2", 3)]
+
+
 class _ImmediateFirstDirectProvider(_DirectProvider):
     async def invoke(self, profile, request):
         if request.stage is Stage.TRIAGE:

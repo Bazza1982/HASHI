@@ -151,7 +151,9 @@ class HERv2Adapter(BaseBackend):
         self._ledger_store: LedgerStore | None = None
         self._audit_log: DurableAuditLog | None = None
         self._wip_journal: WIPJournal | None = None
-        self._wip_active_request_refs: set[str] = set()
+        self._wip_active_journals: dict[str, WIPJournal] = {}
+        self._wip_journal_cache: dict[str, WIPJournal] = {}
+        self._wip_warned_requests: set[str] = set()
         self._learning: HERv2Learning | None = None
         self._active_runtimes: dict[str, HERv2Runtime] = {}
         self._pending_delivery_receipts: dict[str, dict[str, Any]] = {}
@@ -173,11 +175,76 @@ class HERv2Adapter(BaseBackend):
 
     def _observe_wip_audit(self, record: Mapping[str, Any]) -> None:
         request_ref = str(record.get("request_ref") or "")
+        journal = self._wip_active_journals.get(request_ref)
+        if journal is not None:
+            journal.append_audit(record)
+
+    def _wip_journal_for_request(
+        self,
+        request_meta: Mapping[str, Any],
+    ) -> WIPJournal | None:
+        """Resolve new WIP state to the owning HASHI Session workspace."""
+
+        value = str(request_meta.get("session_workspace") or "").strip()
+        request_metadata = request_meta.get("request_metadata")
+        if not value and isinstance(request_metadata, Mapping):
+            value = str(request_metadata.get("session_workspace") or "").strip()
+        if not value:
+            return self._wip_journal
+        path = Path(value) / "backend_state" / "her_v2" / "wip_journal.jsonl"
+        key = str(path.resolve())
+        journal = self._wip_journal_cache.get(key)
+        if journal is None:
+            journal = WIPJournal(path)
+            self._wip_journal_cache[key] = journal
+        # A pre-session WIP Journal cannot be attributed more precisely. Let
+        # the first explicit current Session recover it, then all new state is
+        # written only to the Session-scoped Journal above.
         if (
-            self._wip_journal is not None
-            and request_ref in self._wip_active_request_refs
+            not journal.snapshot().active
+            and self._wip_journal is not None
+            and self._wip_journal.snapshot().active
         ):
-            self._wip_journal.append_audit(record)
+            journal.adopt_from(self._wip_journal)
+        return journal
+
+    def _surface_wip_recovery_warning(
+        self,
+        *,
+        request_id: str,
+        summary: Mapping[str, Any],
+        request_meta: Mapping[str, Any],
+    ) -> None:
+        generation_id = str(summary.get("generation_id") or "")
+        warning_key = f"{request_id}:{generation_id}"
+        if not generation_id or warning_key in self._wip_warned_requests:
+            return
+        runtime = self._runtime_context()
+        if runtime is None:
+            return
+        try:
+            from orchestrator import runtime_pipeline
+
+            runtime_pipeline.surface_wip_recovery_warning(
+                runtime,
+                SimpleNamespace(
+                    request_id=request_id,
+                    chat_id=request_meta.get("chat_id"),
+                    deliver_to_telegram=bool(
+                        request_meta.get("deliver_to_telegram")
+                    ),
+                ),
+                record_count=int(summary.get("record_count") or 0),
+                size_bytes=int(summary.get("size_bytes") or 0),
+                first_request_id=str(summary.get("first_request_id") or ""),
+            )
+            self._wip_warned_requests.add(warning_key)
+        except Exception as exc:
+            self.logger.warning(
+                "HER v2 WIP recovery warning failed safely request=%s error=%s",
+                request_id,
+                type(exc).__name__,
+            )
 
     def _record_wip_lifecycle(
         self,
@@ -570,6 +637,9 @@ class HERv2Adapter(BaseBackend):
             state_root = Path(self.config.workspace_dir) / "backend_state" / "her_v2"
             self._ledger_store = LedgerStore(state_root / "ledgers")
             self._wip_journal = WIPJournal(state_root / "wip_journal.jsonl")
+            self._wip_journal_cache[str(self._wip_journal.path.resolve())] = (
+                self._wip_journal
+            )
             base_logs = getattr(self.global_config, "base_logs_dir", None)
             primary_root = (
                 Path(base_logs) / str(self.config.name) if base_logs else state_root
@@ -1082,17 +1152,30 @@ class HERv2Adapter(BaseBackend):
             effort_resolution.scheduler_trigger or "none",
         )
         request_ref = f"hashi-request:{request_id}"
+        wip_journal = self._wip_journal_for_request(request_meta)
         prior_wip_summary = (
-            self._wip_journal.activity_summary()
-            if self._wip_journal is not None
+            wip_journal.activity_summary()
+            if wip_journal is not None
             else {"record_count": 0, "size_bytes": 0}
         )
+        if int(prior_wip_summary.get("record_count") or 0) > 0:
+            self._surface_wip_recovery_warning(
+                request_id=request_id,
+                summary=prior_wip_summary,
+                request_meta=request_meta,
+            )
         prior_wip = (
-            self._wip_journal.begin_turn(
+            wip_journal.begin_turn(
                 request_id=request_id,
                 prompt=prompt,
+                request_summary=str(request_meta.get("summary") or ""),
+                session_id=str(request_meta.get("hashi_session_id") or ""),
+                context_generation=int(
+                    request_meta.get("context_generation") or 0
+                )
+                or None,
             )
-            if self._wip_journal is not None
+            if wip_journal is not None
             else ""
         )
         self._record_wip_lifecycle(
@@ -1288,7 +1371,8 @@ class HERv2Adapter(BaseBackend):
             workzone_ref=str(self.config.workspace_dir.resolve()),
             skills_catalogue=self._direct_skill_catalogue(),
         )
-        self._wip_active_request_refs.add(request_ref)
+        if wip_journal is not None:
+            self._wip_active_journals[request_ref] = wip_journal
         self._active_runtimes[request_id] = runtime
         try:
             result = await runtime.run_turn(
@@ -1299,12 +1383,12 @@ class HERv2Adapter(BaseBackend):
             )
         finally:
             self._active_runtimes.pop(request_id, None)
-            self._wip_active_request_refs.discard(request_ref)
+            self._wip_active_journals.pop(request_ref, None)
         ledger_status = str(result.ledger.get("status") or "").upper()
-        if self._wip_journal is not None:
-            final_wip_summary = self._wip_journal.activity_summary()
+        if wip_journal is not None:
+            final_wip_summary = wip_journal.activity_summary()
             if ledger_status == "COMPLETED":
-                self._wip_journal.clear_completed()
+                wip_journal.clear_completed()
                 self._record_wip_lifecycle(
                     "wip_journal_cleared",
                     request_id=request_id,

@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | Status | Implemented, merged, and offline-verified; live threshold-trigger acceptance pending |
-| Revised | 2026-08-24 |
-| Scope | HASHI-owned context capacity management for HER v2 |
+| Revised | 2026-08-28 |
+| Scope | HASHI-owned conversation capacity management and deterministic WIP recovery for HER v2 |
 | Decision | Compact follows the initiating Agent's active provider and Quick/Light model at high HER effort |
 
 This revision supersedes the earlier independent Compact-route design. The
@@ -13,8 +13,9 @@ confirmation, and capability-declaration lock rules are retired.
 
 ## 1. Approved default
 
-For every manual or automatic Compact operation, HASHI resolves the route from
-the initiating Agent's current persisted HER v2 configuration:
+For every model-based manual or automatic **conversation-history** Compact
+operation, HASHI resolves the route from the initiating Agent's current
+persisted HER v2 configuration:
 
 1. provider = active HER v2 Quick/Fast provider;
 2. model = active HER v2 Quick/Fast model (the lightweight profile);
@@ -27,6 +28,10 @@ the initiating Agent's current persisted HER v2 configuration:
 Compact does not have an independent provider/model configuration path and
 does not silently fall back to Pro, a global default model, retired HER, or a
 different provider.
+
+This route does not apply to WIP Journal recovery. That phase is a
+deterministic HASHI transaction, invokes no model, and always runs before the
+conversation-history phase when `/compact` finds active WIP.
 
 Legacy persisted `inherit_pro` and explicit Compact route records are read as
 `inherit_quick` without changing the active provider/model configuration.
@@ -58,8 +63,8 @@ without claiming that 32,000 is the model's context capacity. A real provider
 capacity rejection remains an execution error and must not change the active
 context pointer.
 
-Target-model capacity metadata does not move the Compact thresholds. HASHI
-uses one fixed product window for known and unknown targets:
+Target-model capacity metadata does not move the conversation-history Compact
+thresholds. HASHI uses one fixed product window for known and unknown targets:
 
 - below 64,000 effective tokens, manual `/compact` reports that compaction is
   not yet useful and gives the exact current count;
@@ -74,10 +79,13 @@ automatic Compact. Provider capacity remains diagnostic information and the
 32,000-token maintenance-call partition remains an implementation budget; neither
 changes the 64,000–128,000 operating window.
 
+WIP recovery is independently eligible at every context size, including below
+64,000 tokens. It does not weaken or move any conversation-history threshold.
+
 ## 3. Authority and safety boundary
 
-Compact is maintenance, not an HER execution stage. Every Compact request
-enforces these request-local constraints:
+Compact is maintenance, not an HER execution stage. Every model-based
+conversation Compact request enforces these request-local constraints:
 
 - tool registry disabled;
 - tools not authorised;
@@ -109,7 +117,7 @@ Raw transcript rows are append-only and are never deleted by Compact.
 
 ## 5. Transactional commit
 
-Compact uses the following transaction:
+Model-based conversation Compact uses the following transaction:
 
 1. snapshot the active generation and source hashes;
 2. select an eligible historical prefix;
@@ -129,17 +137,25 @@ advances the generation.
 
 Manual controls:
 
-- `/compact` — compact the eligible prefix now;
-- `/compact status` — inspect effective route and pointer;
+- `/compact` — recover active WIP first, then compact an eligible conversation
+  prefix when the normal threshold permits;
+- `/compact status` — inspect active WIP, effective route, and pointer;
 - `/compact cancel` — cancel an active operation;
 - `/model compact inherit_quick [tier]` — enable the approved default;
 - `/model compact off [tier]` — disable Compact;
 - `/model compact tier <auto|tier_2|tier_3>` — select the watchdog tier.
 
-Manual `/compact` is accepted at every effective size of 64,000 tokens or
-greater. Below that floor it performs no model call and reports the exact
-threshold comparison. At or above the floor it invokes the initiating Agent's
-Quick/Light backend immediately and reports the selected-history reduction.
+Manual `/compact` always checks active WIP first. For each active current
+Session or legacy Journal, HASHI snapshots bounded records, produces a
+deterministic recovery capsule without a model, inserts it idempotently as a
+quoted Session `recovery` turn, verifies the durable write, and
+compare-and-swap clears only that exact snapshot. A failure preserves the
+Journal and stops the command before ordinary history compaction. Once WIP
+recovery finishes, the conversation-history phase is accepted at every
+effective size of 64,000 tokens or greater. Below that floor it performs no
+model call and reports the exact threshold comparison. At or above the floor
+it invokes the initiating Agent's Quick/Light backend immediately and reports
+the selected-history reduction.
 
 Threshold-triggered automatic Compact has exactly one scheduling boundary:
 the first main HER v2 Execution provider invocation, and only when the effective
@@ -184,16 +200,30 @@ Audit events record:
 - mandatory warning scheduling/delivery outcome when automatic maintenance
   does not complete.
 
-`/compact` reports the current count and thresholds before work, then the
-selected-history reduction or an exact not-needed reason. Internal compaction
-IDs and route diagnostics are omitted from ordinary results. `/compact status`
-retains route, effort, pointer, capacity, current-count, and window diagnostics
-for troubleshooting.
+The model-free WIP phase separately records source digest/count/bytes, capsule
+turn identity, `model_invoked=false`, compare-and-swap clear outcome, and a
+failed-preserved event when any commit step fails.
+
+`/compact` reports a WIP recovery result when applicable, then the current count
+and either selected-history reduction or exact not-needed reason. Internal
+compaction IDs and route diagnostics are omitted from ordinary results.
+`/compact status` retains WIP state, route, effort, pointer, capacity,
+current-count, and window diagnostics for troubleshooting.
 
 ## 8. Verification requirements
 
 Release verification must cover:
 
+- active WIP below 64,000 tokens commits a deterministic quoted Session
+  recovery turn without a model, then clears only the matching Journal;
+- WIP commit failure, verification failure, and compare-and-swap race preserve
+  the Journal and do not start the conversation-history phase;
+- active WIP produces a mandatory visible warning independently of `/verbose`,
+  while raw requests and full Journal JSONL are never sent to the provider;
+- new Journals are Session-scoped and legacy Agent-level WIP migrates without a
+  delete-before-durable-write gap;
+- recovery turns render as quoted data and remain eligible historical context
+  for later ordinary compaction;
 - active-provider + Quick/Light selection;
 - HASHI API `gpt-5.6-luna` at high effort;
 - providers with enable-only reasoning;

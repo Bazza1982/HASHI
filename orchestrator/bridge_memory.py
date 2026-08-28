@@ -307,6 +307,12 @@ class BridgeMemoryStore:
             )
             conn.execute(
                 """
+                CREATE UNIQUE INDEX IF NOT EXISTS turns_wip_recovery_source_unique
+                ON turns(source) WHERE role = 'recovery'
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS memories (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ts TEXT NOT NULL,
@@ -467,6 +473,43 @@ class BridgeMemoryStore:
                 self._upsert_vec(conn, "turns_vec", "turn_id", int(cur.lastrowid), embedding)
             conn.commit()
             return int(cur.lastrowid) if cur.lastrowid is not None else None
+
+    def record_recovery_capsule(self, content: str, *, origin_ref: str) -> int | None:
+        """Idempotently add one deterministic WIP capsule to quoted history."""
+
+        clean = (content or "").strip()
+        reference = str(origin_ref or "").strip()
+        if not clean or not reference:
+            return None
+        source = f"wip-recovery:{reference}"
+        embedding = self.encoder.encode(clean)
+        encoded_embedding = json.dumps(embedding)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO turns(ts, role, source, text, embedding)
+                VALUES (?, 'recovery', ?, ?, ?)
+                """,
+                (self._now(), source, clean, encoded_embedding),
+            )
+            row = conn.execute(
+                "SELECT id, text FROM turns WHERE role = 'recovery' AND source = ?",
+                (source,),
+            ).fetchone()
+            if row is not None and str(row["text"] or "") != clean:
+                raise RuntimeError(
+                    "recovery capsule source digest resolved to different content"
+                )
+            if row is not None:
+                self._upsert_vec(
+                    conn,
+                    "turns_vec",
+                    "turn_id",
+                    int(row["id"]),
+                    embedding,
+                )
+            conn.commit()
+            return int(row["id"]) if row is not None else None
 
     def record_completed_exchange(
         self,

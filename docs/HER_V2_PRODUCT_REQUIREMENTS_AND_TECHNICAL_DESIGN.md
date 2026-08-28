@@ -1332,6 +1332,17 @@ fall back to Pro, a global default, or a different provider. Gemini remains
 stateless, and this maintenance path does not split, cap, or replace the
 existing OpenRouter or DeepSeek request-local tool loops.
 
+Manual `/compact` also owns a separate model-free WIP recovery phase. Before
+evaluating conversation capacity, HASHI converts each active bounded WIP
+Journal snapshot into an idempotent quoted recovery turn in the current Session
+and compare-and-swap clears that Journal only after the Session write is
+durable. This phase runs at any token count. A write or compare-and-swap failure
+preserves the Journal and stops the ordinary conversation compaction phase.
+Every later HER v2 request that sees previous-turn WIP emits a mandatory visible
+warning independently of `/verbose`; only bounded deterministic recovery
+context, never raw Journal JSONL or a recursively assembled provider request,
+may reach the provider.
+
 Known and unknown target capacity use the same fixed product window. Below
 64,000 effective tokens, manual `/compact` reports the exact not-needed reason;
 from 64,000 tokens upward it executes. Automatic Compact triggers strictly

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib as _hashlib
+import html
 import inspect
 import json
 import os
@@ -266,6 +267,8 @@ def _store_context_compaction_warnings(
     runtime,
     request_id: str,
     warnings: tuple[str, ...],
+    *,
+    field: str = "context_compaction_warnings",
 ) -> None:
     if not warnings:
         return
@@ -274,24 +277,38 @@ def _store_context_compaction_warnings(
     if isinstance(registry, dict):
         meta = registry.get(str(request_id or ""))
         if isinstance(meta, dict):
-            meta["context_compaction_warnings"] = warning_list
+            meta[field] = warning_list
     current = getattr(runtime, "current_request_meta", None)
     if isinstance(current, dict) and str(current.get("request_id") or "") == str(
         request_id or ""
     ):
-        current["context_compaction_warnings"] = warning_list
+        current[field] = warning_list
 
 
 def request_context_warning_fields(runtime, request_id: str) -> dict[str, Any]:
-    warnings = request_meta_for(runtime, request_id).get(
-        "context_compaction_warnings"
-    )
-    if not isinstance(warnings, list) or not warnings:
-        return {}
-    return {"context_compaction_warnings": list(warnings)}
+    meta = request_meta_for(runtime, request_id)
+    result: dict[str, Any] = {}
+    for field in ("context_compaction_warnings", "wip_recovery_warnings"):
+        warnings = meta.get(field)
+        if isinstance(warnings, list) and warnings:
+            result[field] = list(warnings)
+    return result
 
 
-def surface_context_compaction_warnings(runtime, item, warnings: tuple[str, ...]) -> None:
+def surface_context_compaction_warnings(
+    runtime,
+    item,
+    warnings: tuple[str, ...],
+    *,
+    _metadata_field: str = "context_compaction_warnings",
+    _log_label: str = "Context compaction warning",
+    _audit_prefix: str = "capacity",
+    _purpose: str = "context-compaction-warning",
+    _origin: str = "hashi_context_compaction",
+    _stream_summary: str = (
+        "⚠️ Context compaction did not complete; the current model request is continuing."
+    ),
+) -> None:
     """Expose mandatory warnings without delaying or cancelling model work."""
 
     if not warnings:
@@ -329,15 +346,21 @@ def surface_context_compaction_warnings(runtime, item, warnings: tuple[str, ...]
                 type(exc).__name__,
             )
 
-    _store_context_compaction_warnings(runtime, item.request_id, warnings)
+    _store_context_compaction_warnings(
+        runtime,
+        item.request_id,
+        warnings,
+        field=_metadata_field,
+    )
     for index, warning in enumerate(warnings, start=1):
         runtime.logger.warning(
-            "Context compaction warning; continuing request=%s: %s",
+            "%s; continuing request=%s: %s",
+            _log_label,
             item.request_id,
             _safe_excerpt(warning, 600),
         )
         audit_presentation(
-            "capacity_warning_scheduled",
+            f"{_audit_prefix}_warning_scheduled",
             warning,
             index,
             telegram_requested=bool(
@@ -360,16 +383,13 @@ def surface_context_compaction_warnings(runtime, item, warnings: tuple[str, ...]
                     item.request_id,
                     StreamEvent(
                         kind=KIND_PROGRESS,
-                        summary=(
-                            "⚠️ Context compaction did not complete; the current "
-                            "model request is continuing."
-                        ),
+                        summary=_stream_summary,
                         detail=_safe_excerpt(warning, 1200),
                         event_id=(
-                            f"context-compaction-warning:{item.request_id}:{index}"
+                            f"{_purpose}:{item.request_id}:{index}"
                         ),
                         delivery_class=DELIVERY_CONTROL,
-                        origin="hashi_context_compaction",
+                        origin=_origin,
                         phase="pre_model",
                         required=True,
                     ),
@@ -391,10 +411,10 @@ def surface_context_compaction_warnings(runtime, item, warnings: tuple[str, ...]
                     item.chat_id,
                     warning,
                     request_id=item.request_id,
-                    purpose="context-compaction-warning",
+                    purpose=_purpose,
                 )
                 audit_presentation(
-                    "capacity_warning_delivery",
+                    f"{_audit_prefix}_warning_delivery",
                     warning,
                     index,
                     channel="telegram",
@@ -409,7 +429,7 @@ def surface_context_compaction_warnings(runtime, item, warnings: tuple[str, ...]
                     exc,
                 )
                 audit_presentation(
-                    "capacity_warning_delivery",
+                    f"{_audit_prefix}_warning_delivery",
                     warning,
                     index,
                     channel="telegram",
@@ -419,12 +439,55 @@ def surface_context_compaction_warnings(runtime, item, warnings: tuple[str, ...]
 
     task = asyncio.create_task(
         deliver(),
-        name=f"context-compaction-warning-{item.request_id}",
+        name=f"{_purpose}-{item.request_id}",
     )
     background_tasks = getattr(runtime, "_background_tasks", None)
     if isinstance(background_tasks, set):
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
+
+
+def surface_wip_recovery_warning(
+    runtime,
+    item,
+    *,
+    record_count: int,
+    size_bytes: int,
+    first_request_id: str = "",
+) -> None:
+    """Warn visibly when unfinished HER v2 recovery state precedes a turn."""
+
+    request_line = (
+        "\n<b>First unfinished request</b> · "
+        f"<code>{html.escape(first_request_id)}</code>"
+        if first_request_id
+        else ""
+    )
+    warning = (
+        "⚠️ <b>HER v2 unfinished work detected</b>\n\n"
+        "A bounded recovery Journal from an earlier turn is active. HASHI will "
+        "supply only its bounded recovery summary; raw Journal data will not "
+        "be sent to the Provider.\n"
+        f"<b>Recovery records</b> · <code>{max(0, int(record_count)):,}</code>\n"
+        f"<b>Journal bytes</b> · <code>{max(0, int(size_bytes)):,}</code>"
+        f"{request_line}\n\n"
+        "Use <code>/compact</code> to preserve this unfinished-work summary in "
+        "the current Session context and clear the active Journal."
+    )
+    surface_context_compaction_warnings(
+        runtime,
+        item,
+        (warning,),
+        _metadata_field="wip_recovery_warnings",
+        _log_label="HER v2 WIP recovery warning",
+        _audit_prefix="wip_recovery",
+        _purpose="wip-recovery-warning",
+        _origin="hashi_wip_recovery",
+        _stream_summary=(
+            "⚠️ Unfinished HER v2 work was recovered in bounded form; "
+            "/compact can preserve it in Session context."
+        ),
+    )
 
 
 def _her_v2_delivery_metadata(response: Any) -> dict[str, Any]:
