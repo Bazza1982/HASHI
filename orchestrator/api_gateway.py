@@ -1,4 +1,3 @@
-from __future__ import annotations
 """
 Local OpenAI-compatible API gateway.
 
@@ -15,6 +14,8 @@ Supports stateless mode (client manages history) and optional server-side
 session cache (in-memory, TTL-based) for clients that don't resend full history.
 """
 
+from __future__ import annotations
+
 import asyncio
 from datetime import datetime, timezone
 import json
@@ -30,7 +31,7 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
-from orchestrator import multimodal_contract
+from orchestrator import multimodal_contract, terminal_console
 from adapters.xai_imagine import (
     DEFAULT_IMAGINE_MODEL,
     DEFAULT_IMAGINE_VIDEO_MODEL,
@@ -127,21 +128,25 @@ _C_RESET   = "\033[0m"
 
 def _print_api_in(model: str, preview: str):
     ts = datetime.now().strftime("%H:%M:%S")
+    if terminal_console.shows_activity():
+        safe_model = terminal_console.safe_identifier(model, fallback="model")
+        terminal_console.print_activity(f"← [api {ts}] {safe_model} · request")
+        return
     text = f"{_C_API_IN}[api {ts}] <- {model}  {preview}{_C_RESET}"
-    try:
-        print(text, flush=True)
-    except (UnicodeEncodeError, OSError):
-        print(text.encode("utf-8", errors="backslashreplace").decode("utf-8", errors="replace"), flush=True)
+    terminal_console.print_raw(text)
 
 
 def _print_api_out(model: str, elapsed_s: float, chars: int, stream: bool):
     ts = datetime.now().strftime("%H:%M:%S")
     mode = "stream" if stream else "sync"
+    if terminal_console.shows_activity():
+        safe_model = terminal_console.safe_identifier(model, fallback="model")
+        terminal_console.print_activity(
+            f"→ [api {ts}] {safe_model} · {mode} · {elapsed_s:.2f}s · chars={chars}"
+        )
+        return
     text = f"{_C_API_OUT}[api {ts}] -> {model}  ({mode}, {elapsed_s:.2f}s, {chars} chars){_C_RESET}"
-    try:
-        print(text, flush=True)
-    except (UnicodeEncodeError, OSError):
-        print(text.encode("utf-8", errors="backslashreplace").decode("utf-8", errors="replace"), flush=True)
+    terminal_console.print_raw(text)
 
 
 # ── Prompt assembly ───────────────────────────────────────────────────────────

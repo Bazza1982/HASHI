@@ -20,6 +20,7 @@ from telegram.error import RetryAfter, TimedOut as TelegramTimedOut
 from telegram.ext import ApplicationBuilder
 
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
+from orchestrator.bootstrap_logging import refresh_console_output_filters
 from orchestrator.command_ui import (
     BACK_LABEL,
     REFRESH_LABEL,
@@ -30,7 +31,7 @@ from orchestrator.command_ui import (
     setting_card,
     status_label,
 )
-from orchestrator import runtime_audit, runtime_common, runtime_pending
+from orchestrator import runtime_audit, runtime_common, runtime_pending, terminal_console
 from orchestrator import runtime_background_status
 from orchestrator.browser_mode import (
     build_browser_task_prompt,
@@ -178,6 +179,12 @@ class FlexibleAgentRuntime:
         self.token = telegram_token
         self.secrets = secrets
         self.name = config.name
+        terminal_console.configure(
+            self.global_config.bridge_home
+            or self.global_config.project_root
+            or config.workspace_dir.parent.parent
+        )
+        refresh_console_output_filters()
 
         self.session_started_at = datetime.now()
         self.session_id_dt = self.session_started_at.strftime("%Y-%m-%d_%H%M%S")
@@ -437,7 +444,7 @@ class FlexibleAgentRuntime:
             )
             # explicitly allowed convenience commands for conversational agents
             self._enabled_commands.update(
-                {"bg", "jobs", "verbose", "think", "stream", "preview", "voice", "say", "whisper"}
+                {"bg", "jobs", "terminal", "verbose", "think", "stream", "preview", "voice", "say", "whisper"}
             )
 
         # Optional overrides (per-agent): extra.limited_policy
@@ -454,7 +461,7 @@ class FlexibleAgentRuntime:
                     self._enabled_commands.add(name.strip().lstrip("/").lower())
 
         # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "fresh", "sessions", "use", "current", "archive", "promote", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "bg", "jobs", "verbose", "think", "stream", "preview", "voice", "say", "whisper", "transfer", "fork", "cos", "long", "end", "browser", "exp"})
+        self._enabled_commands.update({"help", "status", "new", "fresh", "sessions", "use", "current", "archive", "promote", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "bg", "jobs", "terminal", "verbose", "think", "stream", "preview", "voice", "say", "whisper", "transfer", "fork", "cos", "long", "end", "browser", "exp"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -872,6 +879,13 @@ class FlexibleAgentRuntime:
                 request_id,
                 type(exc).__name__,
             )
+        terminal_console.finish_request(
+            self.name,
+            request_id,
+            success=bool(payload.get("success")),
+            error=payload.get("error") or "",
+            interrupted=bool(payload.get("interrupted")),
+        )
         callbacks = self._request_listeners.pop(request_id, [])
         if not callbacks:
             self._pending_request_results[request_id] = payload
@@ -2505,7 +2519,8 @@ class FlexibleAgentRuntime:
         await query.answer(message or "Updated")
 
     # ── toggle callback ──────────────────────────────────────────────────────────
-    # Handles: tgl:verbose:on/off, tgl:think:on/off, tgl:commentary:on/off,
+    # Handles: tgl:terminal:quiet/activity/debug/raw, tgl:verbose:on/off,
+    #          tgl:think:on/off, tgl:commentary:on/off,
     #          tgl:typing:on/off,
     #          tgl:mode:fixed/flex,
     #          tgl:retry:response/prompt, tgl:whisper:small/medium/large,
@@ -2521,7 +2536,32 @@ class FlexibleAgentRuntime:
             return
         _, target, value = parts[0], parts[1], parts[2]
 
-        if target == "verbose":
+        if target == "terminal":
+            if value not in terminal_console.LEVELS:
+                await query.answer("Unknown terminal level", show_alert=True)
+                return
+            try:
+                terminal_console.set_level(
+                    value,
+                    bridge_home=(
+                        self.global_config.bridge_home
+                        or self.global_config.project_root
+                        or self.workspace_dir.parent.parent
+                    ),
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                await query.answer(
+                    f"Setting failed: {type(exc).__name__}", show_alert=True
+                )
+                return
+            await query.edit_message_text(
+                self._terminal_menu_text(),
+                parse_mode="HTML",
+                reply_markup=self._terminal_keyboard(),
+            )
+            await query.answer(f"Terminal: {value}")
+
+        elif target == "verbose":
             self._verbose = value == "on"
             telegram_stream_policy.set_display_preference(self, "verbose", self._verbose)
             _f = self.workspace_dir / ".verbose_off"
@@ -4261,6 +4301,101 @@ class FlexibleAgentRuntime:
 
     async def cmd_status(self, update: Update, context: Any):
         await runtime_status.cmd_status(self, update, context)
+
+    def _terminal_keyboard(self) -> InlineKeyboardMarkup:
+        current = terminal_console.get_level()
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        selected_label("Quiet", current == "quiet"),
+                        callback_data="tgl:terminal:quiet",
+                    ),
+                    InlineKeyboardButton(
+                        selected_label("Activity", current == "activity"),
+                        callback_data="tgl:terminal:activity",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        selected_label("Debug", current == "debug"),
+                        callback_data="tgl:terminal:debug",
+                    ),
+                    InlineKeyboardButton(
+                        selected_label("Raw", current == "raw"),
+                        callback_data="tgl:terminal:raw",
+                    ),
+                ],
+            ]
+        )
+
+    def _terminal_menu_text(self) -> str:
+        current = terminal_console.get_level()
+        instance = html.escape(
+            str(getattr(self.global_config, "instance_id", "HASHI") or "HASHI")
+        )
+        descriptions = {
+            "quiet": "Lifecycle, failures, and events that need operator attention.",
+            "activity": "Adds content-free request phases, timing, tool counts, and token counts.",
+            "debug": "Adds sanitised technical events and failure clues, without chat or reasoning text.",
+            "raw": "Shows the historical plaintext console, including chat and visible provider reasoning.",
+        }
+        description = descriptions[current]
+        if current == terminal_console.LEVEL_RAW:
+            description = (
+                "Raw may expose user messages, assistant replies, and provider reasoning "
+                "in plaintext."
+            )
+        return setting_card(
+            "🖥️",
+            "Terminal detail",
+            current=f"<b>{html.escape(current.upper())}</b>",
+            facts=[
+                f"<b>Scope</b> · <code>{instance}</code> instance",
+                "<b>Saved</b> · instance setting",
+                "<b>Default</b> · <code>QUIET</code>",
+            ],
+            consequence=(
+                f"{description}\n\n"
+                "This controls terminal stdout only. Workbench, TUI chat, Telegram, "
+                "transcripts, and file logs are unchanged."
+            ),
+            action="Choose a level below. Changes apply immediately and persist across reboot.",
+        )
+
+    async def cmd_terminal(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip().casefold() for a in (context.args or []) if a.strip()]
+        if args and args[0] not in {"status", "show", "list"}:
+            if len(args) != 1 or args[0] not in terminal_console.LEVELS:
+                await self._reply_text(
+                    update,
+                    "Usage: /terminal [quiet|activity|debug|raw]",
+                )
+                return
+            try:
+                terminal_console.set_level(
+                    args[0],
+                    bridge_home=(
+                        self.global_config.bridge_home
+                        or self.global_config.project_root
+                        or self.workspace_dir.parent.parent
+                    ),
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                await self._reply_text(
+                    update,
+                    f"Terminal setting was not changed: {html.escape(type(exc).__name__)}",
+                    parse_mode="HTML",
+                )
+                return
+        await self._reply_text(
+            update,
+            self._terminal_menu_text(),
+            parse_mode="HTML",
+            reply_markup=self._terminal_keyboard(),
+        )
 
     def _verbose_keyboard(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[
@@ -8610,6 +8745,13 @@ class FlexibleAgentRuntime:
     async def _on_background_complete(self, task: asyncio.Task, item: QueuedRequest) -> None:
         """Called when a background generate_response task finishes."""
         if self.is_shutting_down:
+            terminal_console.finish_request(
+                self.name,
+                item.request_id,
+                success=False,
+                error="[SHUTDOWN]",
+                interrupted=True,
+            )
             await runtime_delivery_order.complete_turn(self, item.request_id)
             getattr(self, "_background_request_ids", set()).discard(item.request_id)
             registry = getattr(self, "_request_meta_by_id", None)
@@ -8664,6 +8806,7 @@ class FlexibleAgentRuntime:
 
             exc = task.exception()
             if exc:
+                terminal_console.observe_exception(self.name, item.request_id, exc)
                 receipt_error = str(exc)
                 self._mark_error(str(exc))
                 self.error_logger.error(f"Background task {item.request_id} raised: {exc}")
@@ -8699,6 +8842,7 @@ class FlexibleAgentRuntime:
                 return
 
             response = task.result()
+            runtime_pipeline.observe_terminal_response(self, item, response)
             recovered = await runtime_pipeline.recover_typed_context_capacity_rejection(
                 self,
                 item,
@@ -8707,6 +8851,7 @@ class FlexibleAgentRuntime:
             )
             if recovered is not None:
                 response, _recovered_prompt = recovered
+                runtime_pipeline.observe_terminal_response(self, item, response)
             receipt_response = response
 
             if response.is_success and response.text:
@@ -8982,6 +9127,13 @@ class FlexibleAgentRuntime:
                 receipt_delivered = chunk_count > 0
 
         except Exception as e:
+            terminal_console.observe_exception(self.name, item.request_id, e)
+            terminal_console.finish_request(
+                self.name,
+                item.request_id,
+                success=False,
+                error="[BACKGROUND_EXCEPTION]",
+            )
             receipt_error = str(e)
             receipt_error_type = type(e).__name__
             if not receipt_delivered:

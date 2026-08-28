@@ -786,6 +786,7 @@ configuration summary.
 
 | Command | Description |
 |---------|-------------|
+| `/terminal [quiet\|activity\|debug\|raw]` | Control instance-wide terminal stdout only. Defaults to `quiet`; Workbench, TUI chat, Telegram, transcripts, and file logs are unchanged |
 | `/verbose [on\|off]` | Show one deterministic rolling activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status; raw technical events remain in logs |
 | `/think [on\|off]` | Show backend-owned reasoning output; for HER this is genuine provider-returned reasoning only |
 | `/commentary [on\|off]` | HER only: show each explicitly model-authored Persona acknowledgement or interim report once, independently from `/think` and `/verbose` |

@@ -56,6 +56,11 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   adapter-owned HER Habit/Meditation path. Non-HER backends do not read or
   modify its records.
 - `/superloop`: recording-first long-running workflow orchestration.
+- `/terminal [quiet|activity|debug|raw]`: control instance-wide terminal stdout.
+  Quiet is the default; Activity adds content-free phases, timing, tool counts,
+  and token counts; Debug adds sanitised technical clues; Raw restores the
+  historical plaintext chat and visible provider-reasoning output. Workbench,
+  TUI chat, Telegram, transcripts, and file logs are never filtered by it.
 - `/verbose [on|off]`: toggle one deterministic rolling digest grouped by
   lifecycle stage, inspected/changed files, commands, checks, external work,
   recovery, and runtime status. Raw events remain in logs; HER Persona speech

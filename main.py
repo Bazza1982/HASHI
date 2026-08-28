@@ -11,6 +11,7 @@ from datetime import datetime
 
 from orchestrator.pathing import BridgePaths, build_bridge_paths
 from orchestrator.bootstrap_logging import (
+    configure_terminal_console,
     emit_bridge_audit,
     setup_bridge_file_logging,
     setup_console_logging,
@@ -294,6 +295,7 @@ if __name__ == "__main__":
     selected_agents = set(args.agents) if args.agents else None
     paths = build_bridge_paths(CODE_ROOT, bridge_home=args.bridge_home)
     os.environ["BRIDGE_HOME"] = str(paths.bridge_home)
+    configure_terminal_console(paths.bridge_home)
 
     if run_onboarding_gate(paths, CODE_ROOT):
         sys.exit(0)

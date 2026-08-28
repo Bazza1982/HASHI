@@ -93,6 +93,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("reboot", "cmd_reboot", "Hot restart agents", "execution"),
     CommandSpec("resend", "cmd_resend", "Replay previous model or Bridge output", "execution"),
     CommandSpec("retry", "cmd_retry", "Reset context and rerun last prompt", "execution"),
+    CommandSpec("terminal", "cmd_terminal", "Control terminal detail level", "session"),
     CommandSpec("verbose", "cmd_verbose", "Show technical execution telemetry", "session"),
     CommandSpec("think", "cmd_think", "Show commentary and provider reasoning", "session"),
     CommandSpec("commentary", "cmd_commentary", "Show HER Persona interim reports", "session"),

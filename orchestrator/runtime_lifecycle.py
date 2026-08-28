@@ -9,6 +9,7 @@ from orchestrator import (
     runtime_delivery_order,
     runtime_pipeline,
     runtime_session,
+    terminal_console,
 )
 from orchestrator.audit_mode import AuditTelemetryCollector, should_audit_source
 from orchestrator.memory_plus_mode import (
@@ -287,6 +288,12 @@ async def process_queue(runtime: Any) -> None:
                         request_id=item.request_id,
                         purpose="remote-backend-policy",
                     )
+                terminal_console.finish_request(
+                    runtime.name,
+                    item.request_id,
+                    success=False,
+                    error="[REMOTE_BACKEND_BLOCKED]",
+                )
                 continue
             turn_prompt = await runtime_pipeline.build_turn_prompt(
                 runtime,
@@ -508,6 +515,15 @@ async def process_queue(runtime: Any) -> None:
         except Exception as exc:
             runtime._mark_error(str(exc))
             if item is not None:
+                terminal_console.observe_exception(
+                    runtime.name, item.request_id, exc
+                )
+                terminal_console.finish_request(
+                    runtime.name,
+                    item.request_id,
+                    success=False,
+                    error="[RUNTIME_EXCEPTION]",
+                )
                 try:
                     is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                     runtime._notify_right_brain_interrupted(

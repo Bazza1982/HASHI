@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from orchestrator import terminal_console
+
 
 @dataclass
 class QueuedRequest:
@@ -132,30 +134,24 @@ def _streaming_status_to_html(
 
 
 def _print_user_message(agent_name: str, text: str, media_tag: str = ""):
-    """Print incoming user message in a restrained cyan on the console."""
+    """Print incoming user content only in the explicit raw terminal mode."""
     if not text:
         return
     prefix = f"[{media_tag}] " if media_tag else ""
     line = f"\033[38;5;117m[User] >> {prefix}{text}\033[0m"
-    try:
-        print(line, flush=True)
-    except (UnicodeEncodeError, OSError):
-        safe = line.encode("utf-8", errors="backslashreplace").decode("utf-8", errors="replace")
-        print(safe, flush=True)
+    terminal_console.print_raw(line)
 
 
 def _print_thinking(agent_name: str, text: str):
-    """Print thinking trace in dim graphite on the console."""
+    """Print provider reasoning only in the explicit raw terminal mode."""
     if not text:
         return
     c_dim = "\033[38;5;240m"
     c_reset = "\033[0m"
     line = f"{c_dim}[{agent_name}] 💭 {text}{c_reset}"
-    try:
-        print(line, flush=True)
-    except (UnicodeEncodeError, OSError):
-        safe = line.encode("utf-8", errors="backslashreplace").decode("utf-8", errors="replace")
-        print(safe, flush=True)
+    if terminal_console.is_raw():
+        terminal_console.mark_reasoning_presented(agent_name, text)
+        terminal_console.print_raw(line)
 
 
 def _print_final_response(agent_name: str, text: str):
@@ -171,11 +167,7 @@ def _print_final_response(agent_name: str, text: str):
         f"{c_green}{text}{c_reset}\n",
         f"{c_border}{line}{c_reset}\n\n",
     ):
-        try:
-            print(part, end="", flush=True)
-        except (UnicodeEncodeError, OSError):
-            safe = part.encode("utf-8", errors="backslashreplace").decode("utf-8", errors="replace")
-            print(safe, end="", flush=True)
+        terminal_console.print_raw(part, end="")
 
 
 def resolve_authorized_telegram_ids(extra: dict | None, global_authorized_id: int) -> tuple[int, ...]:

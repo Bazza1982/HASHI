@@ -21,6 +21,7 @@ from orchestrator import (
     runtime_delivery_order,
     runtime_retry,
     runtime_session,
+    terminal_console,
     telegram_delivery_failover,
     telegram_notifications,
     telegram_stream_policy,
@@ -57,6 +58,23 @@ def response_has_deliverable_content(response: Any) -> bool:
     from orchestrator.native_audio_delivery import audio_parts
 
     return bool(audio_parts(getattr(response, "content", ())))
+
+
+def observe_terminal_response(runtime, item, response) -> None:
+    """Capture content-free response metrics before terminal completion."""
+
+    terminal_console.observe_response(runtime.name, item.request_id, response)
+    if getattr(response, "usage", None) is not None:
+        return
+    response_text = str(getattr(response, "text", "") or "")
+    terminal_console.observe_estimated_usage(
+        runtime.name,
+        item.request_id,
+        input_tokens=None,
+        output_tokens=(len(response_text) + 3) // 4,
+        thinking_tokens=None,
+    )
+
 
 _DANGLING_TOOL_MARKERS = (
     "<｜dsml｜tool_calls",
@@ -744,6 +762,12 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
     activity_store = getattr(runtime, "request_activity", None)
     if activity_store is not None:
         activity_store.mark_running(item.request_id)
+    terminal_console.start_request(
+        runtime.name,
+        item.request_id,
+        source=item.source,
+        backend=runtime.config.active_backend,
+    )
     runtime._log_maintenance(
         item,
         "processing",
@@ -967,6 +991,13 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     runtime._thinking_chars_this_req = 0
     if runtime.config.active_backend != "her-v2" or incremental:
         runtime._last_full_prompt_tokens = len(final_prompt) // 4
+    terminal_console.observe_estimated_usage(
+        runtime.name,
+        item.request_id,
+        input_tokens=int(getattr(runtime, "_last_full_prompt_tokens", 0) or 0),
+        output_tokens=0,
+        thinking_tokens=0,
+    )
     if runtime.config.active_backend == "her-v2" and not incremental:
         states = getattr(runtime, "_context_compaction_prompt_states", None)
         if not isinstance(states, dict):
@@ -2037,6 +2068,7 @@ async def setup_interactive_feedback(
     presentation_callback = stream_callback
 
     async def _canonical_stream_callback(event):
+        terminal_console.record_stream_event(runtime.name, item.request_id, event)
         payload = dict(vars(event)) if hasattr(event, "__dict__") else {"repr": repr(event)}
         _canonical_record(
             runtime,
@@ -2259,6 +2291,7 @@ async def handle_empty_success_response(runtime, item) -> None:
 
 
 async def prepare_successful_response(runtime, item, response, *, completion_path: str) -> SuccessfulResponse:
+    observe_terminal_response(runtime, item, response)
     if item.source == "bridge:hchat-draft" and hasattr(runtime, "_prepare_hchat_draft_success"):
         return await runtime._prepare_hchat_draft_success(
             item,
@@ -2791,6 +2824,7 @@ async def handle_backend_error(
     queued_monotonic: float | None = None,
 ) -> None:
     await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
+    observe_terminal_response(runtime, item, response)
     err_msg = response.error or "Unknown error"
     # /stop, /steer, and /retry intentionally kill the backend process
     # (e.g. exit -9 / SIGKILL).

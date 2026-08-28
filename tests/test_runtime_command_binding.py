@@ -38,6 +38,7 @@ def test_bot_command_metadata_is_unique_and_covers_static_commands():
         "typing",
         "commentary",
         "provider",
+        "terminal",
     ):
         assert command in metadata_names
     assert "stream" not in metadata_names

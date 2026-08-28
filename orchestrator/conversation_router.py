@@ -6,23 +6,27 @@ from orchestrator.agent_directory import AgentDirectory
 from orchestrator.bridge_protocol import build_result_reply, validate_reply_payload, validate_request_payload
 from orchestrator.conversation_store import ConversationStore
 from orchestrator.enterprise.routing import evaluate_project_route
+from orchestrator import terminal_console
 
 _C_BRIDGE = "\033[38;5;110m"
 _C_RESET = "\033[0m"
 
 
 def _print_bridge_message(from_agent: str, to_agent: str, text: str, kind: str = "request"):
-    """Print inter-agent traffic in muted steel blue on the console."""
+    """Present bridge traffic without leaking message content outside raw mode."""
+    tag = "reply" if kind == "reply" else "msg"
+    if terminal_console.shows_activity():
+        source = terminal_console.safe_identifier(from_agent, fallback="agent")
+        target = terminal_console.safe_identifier(to_agent, fallback="agent")
+        terminal_console.print_activity(
+            f"↔ [bridge] {source} -> {target} · {tag}"
+        )
+        return
     preview = text[:200].replace("\n", " ")
     if len(text) > 200:
         preview += "..."
-    tag = "reply" if kind == "reply" else "msg"
     line = f"{_C_BRIDGE}[bridge] {from_agent} -> {to_agent} ({tag}) {preview}{_C_RESET}"
-    try:
-        print(line, flush=True)
-    except (UnicodeEncodeError, OSError):
-        safe = line.encode("utf-8", errors="backslashreplace").decode("utf-8", errors="replace")
-        print(safe, flush=True)
+    terminal_console.print_raw(line)
 
 
 class ConversationRouter:
