@@ -16,6 +16,7 @@ import pytest
 from tools.browser_extension_bridge import (
     BrowserBridgeError,
     healthcheck,
+    project_browser_audit_metadata,
     send_bridge_command,
 )
 from tools.browser_audit import append_audit_record, sanitize_value
@@ -44,7 +45,11 @@ class _UnixHandler(socketserver.StreamRequestHandler):
         if payload["action"] == "ping":
             response = {"ok": True, "output": "pong"}
         else:
-            response = {"ok": True, "output": f"echo:{payload['action']}"}
+            response = {
+                "ok": True,
+                "output": f"echo:{payload['action']}",
+                "received_args": payload["args"],
+            }
         self.wfile.write((json.dumps(response) + "\n").encode("utf-8"))
         self.wfile.flush()
 
@@ -71,6 +76,66 @@ def test_send_bridge_command_roundtrip(bridge_socket: Path) -> None:
     response = send_bridge_command("get_text", {"url": "https://example.com"}, socket_path=bridge_socket)
     assert response["ok"] is True
     assert response["output"] == "echo:get_text"
+
+
+@requires_unix_stream_server
+def test_send_bridge_command_projects_runtime_audit_context(bridge_socket: Path) -> None:
+    from orchestrator.config import GlobalConfig
+
+    response = send_bridge_command(
+        "get_text",
+        {
+            "url": "https://example.com",
+            "_audit": {
+                "agent_name": "momo",
+                "workspace_dir": bridge_socket.parent,
+                "safety_mode": "read_only",
+                "global_config": GlobalConfig(authorized_id=123),
+                "_runtime": object(),
+                "nested": {"runtime": object()},
+            },
+        },
+        socket_path=bridge_socket,
+    )
+
+    assert response["received_args"]["_audit"] == {
+        "agent_name": "momo",
+        "workspace_dir": str(bridge_socket.parent),
+        "safety_mode": "read_only",
+    }
+
+
+def test_project_browser_audit_metadata_is_allowlisted_and_json_safe(tmp_path: Path) -> None:
+    from orchestrator.config import GlobalConfig
+
+    projected = project_browser_audit_metadata(
+        {
+            "agent_name": "momo",
+            "request_id": "request-7",
+            "workspace_dir": tmp_path,
+            "global_config": GlobalConfig(authorized_id=123),
+            "_runtime": object(),
+            "nested": {"unsafe": object()},
+            "safety_mode": object(),
+        }
+    )
+
+    assert projected == {
+        "agent_name": "momo",
+        "request_id": "request-7",
+        "workspace_dir": str(tmp_path),
+    }
+    json.dumps(projected, allow_nan=False)
+
+
+def test_send_bridge_command_rejects_non_audit_runtime_objects(tmp_path: Path) -> None:
+    with pytest.raises(BrowserBridgeError, match="not JSON serializable"):
+        send_bridge_command(
+            "evaluate",
+            {"script": object()},
+            socket_path=tmp_path / "unused.sock",
+            connect_wait_s=0,
+        )
 
 
 @requires_unix_stream_server

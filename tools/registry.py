@@ -853,6 +853,7 @@ class ToolRegistry:
             )
 
         if tool_name.startswith("browser_"):
+            from tools.browser_extension_bridge import project_browser_audit_metadata
             from tools.browser import (
                 execute_browser_screenshot,
                 execute_browser_get_text,
@@ -901,7 +902,9 @@ class ToolRegistry:
             }
             if tool_name in _browser_dispatch:
                 browser_args = dict(arguments)
-                browser_args.setdefault("_audit", self._effective_audit_context())
+                browser_args["_audit"] = project_browser_audit_metadata(
+                    self._effective_audit_context()
+                )
                 return await _browser_dispatch[tool_name](browser_args)
             return f"Error: unknown browser tool '{tool_name}'"
 
