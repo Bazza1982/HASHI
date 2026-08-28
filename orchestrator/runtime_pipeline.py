@@ -609,7 +609,7 @@ class QueueItemStart:
 class TurnPrompt:
     effective_prompt: str
     final_prompt: str
-    extra_sections: list[tuple[str, str]]
+    extra_sections: list[tuple]
     incremental: bool
     prompt_audit: dict[str, Any]
     context_warnings: tuple[str, ...] = ()
@@ -897,7 +897,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         history_compaction_enabled = compaction_snapshot is not None
         prompt_kwargs["extra_sections"] = extra_sections
 
-    def assemble(sections: list[tuple[str, str]]) -> dict[str, Any]:
+    def assemble(sections: list[tuple]) -> dict[str, Any]:
         current_kwargs = dict(prompt_kwargs)
         current_kwargs["extra_sections"] = sections
         return prompt_builder(

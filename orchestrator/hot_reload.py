@@ -51,6 +51,10 @@ FOUNDATION_PHASES = {
     "orchestrator.runtime_common": 0,
     "orchestrator.runtime_defaults": 0,
     "orchestrator.workspace_state": 0,
+    # Workzone helpers are imported directly by overview, backend-manager and
+    # runtime consumers. Refresh the provider before the first consumer so a
+    # targeted reboot can adopt newly added helper symbols in one pass.
+    "orchestrator.workzone": 0,
     # SessionStore defines classes imported directly by runtime_session.  The
     # provider must reload first; otherwise runtime_session can retain the old
     # class while a later SessionStore reload installs the new implementation.

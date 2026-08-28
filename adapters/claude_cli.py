@@ -291,9 +291,9 @@ class ClaudeCLIAdapter(BaseBackend):
             "--effort",
             self.effort,
             "--dangerously-skip-permissions",
-            "--add-dir",
-            self.effective_add_dir,
         ]
+        for directory in self.effective_add_dirs:
+            cmd.extend(["--add-dir", str(directory)])
         if self._hashi_mcp_enabled and self._hashi_mcp_config_path is not None:
             cmd.extend(
                 [

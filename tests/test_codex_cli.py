@@ -552,6 +552,53 @@ def test_codex_add_dir_uses_workzone_when_workzone_on(tmp_path):
     assert cmd[cmd.index("--add-dir") + 1] == str(workzone.resolve())
 
 
+def test_codex_add_dir_repeats_for_every_active_workzone(tmp_path):
+    workspace = tmp_path / "workspace"
+    main = tmp_path / "main"
+    attached = tmp_path / "attached"
+    for path in (workspace, main, attached):
+        path.mkdir()
+    adapter = _build_adapter(workspace)
+    adapter.config.extra.update(
+        {
+            "workzone_dir": str(main),
+            "workzone_dirs": [str(main), str(attached)],
+        }
+    )
+
+    cmd = adapter._build_cmd("hello", tmp_path / "out.txt")
+    supplied = [
+        cmd[index + 1]
+        for index, value in enumerate(cmd)
+        if value == "--add-dir"
+    ]
+
+    assert supplied == [str(main.resolve()), str(attached.resolve())]
+
+
+def test_codex_unavailable_active_workzone_does_not_widen_to_default_root(tmp_path):
+    workspace = tmp_path / "workspace"
+    default_root = tmp_path / "project"
+    workspace.mkdir()
+    default_root.mkdir()
+    adapter = _build_adapter(workspace)
+    adapter.config.resolve_access_root = lambda: default_root
+    adapter.config.extra["workzone_state"] = {
+        "slots": [
+            {
+                "slot_id": "main",
+                "path": str(tmp_path / "missing"),
+                "enabled": True,
+            }
+        ]
+    }
+
+    cmd = adapter._build_cmd("hello", tmp_path / "out.txt")
+
+    assert cmd[cmd.index("--add-dir") + 1] == str(workspace.resolve())
+    assert str(default_root.resolve()) not in cmd
+
+
 def test_codex_long_prompt_is_preserved_and_switched_to_stdin(tmp_path):
     adapter = _build_adapter(tmp_path)
     prompt = "z" * (adapter.LONG_PROMPT_STDIN_THRESHOLD + 10_000)

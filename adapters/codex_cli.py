@@ -557,8 +557,12 @@ class CodexCLIAdapter(BaseBackend):
             # Resume existing session — access root already set in session, no --add-dir needed
             cmd = [self.cmd_base, "exec", "resume", self._session_id] + base_flags
         else:
-            # First turn: start a new persistent session (no --ephemeral), include --add-dir
-            cmd = [self.cmd_base, "exec", "--add-dir", self.effective_add_dir] + base_flags
+            # First turn: start a new persistent session (no --ephemeral) and
+            # bind every active Workzone as an exact writable directory.
+            add_dir_flags: list[str] = []
+            for directory in self.effective_add_dirs:
+                add_dir_flags.extend(["--add-dir", str(directory)])
+            cmd = [self.cmd_base, "exec", *add_dir_flags] + base_flags
 
         cmd += ["--", prompt_arg]
         return cmd

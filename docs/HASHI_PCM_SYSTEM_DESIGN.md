@@ -73,23 +73,29 @@ Each HASHI agent has a native workspace configured during setup. By default, the
 
 `<HASHI_ROOT>/workspaces/<agent_name>`
 
-#### Workzone
+#### Workzones
 
-A workzone gives an agent access to, and focus on, a specific project folder. It is enabled through /workzone. When active, HASHI passes the workzone location to the agent on each turn.
+Workzones give an agent access to, and focus on, one or more project folders. Each Session owns ten independent slots: `main` plus `1` through `9`. `/workzone` without a number addresses `main`; `/workzone 1` through `/workzone 9` address attached roots.
 
-  - It becomes the effective working directory.
+  - An enabled `main` slot becomes the effective working directory and first inspection location.
 
-  - It may be passed to a CLI through --add-dir or --include-directories.
+  - Enabled numbered slots are attached task roots. They do not change the effective working directory.
 
-  - It updates workspace\_dir in the HASHI Tool Registry.
+  - Each slot may be enabled, disabled, replaced, reloaded or deleted independently. Reload revalidates and rebinds the saved directory; it does not clear it. Delete removes only the slot configuration and never deletes filesystem content.
 
-  - It may update a tool’s access\_root.
+  - Active available directories may be passed to native CLIs through repeated `--add-dir` or `--include-directories` arguments, according to backend support.
+
+  - The HASHI Tool Registry receives the exact active roots. Multiple roots are not widened to their common parent.
+
+  - Slot mutations carry an internal Session revision so stale inline menus and delayed path replies cannot overwrite newer state. This revision is control metadata and is not rendered as user-facing menu or PCM text.
 
 |                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Important** Workzone is primarily a focus and default execution location mechanism, not a security boundary by itself. Access restrictions are enforced jointly by the active backend and HASHI. Native backend sandboxes and permission modes remain applicable, while the HASHI Tool Registry and Tool Gateway enforce configured tool permissions, `access_root` and other admission controls. Workzone does not override or weaken any of these controls. |
+| **Important** Workzone is primarily a focus and default execution location mechanism, not a security boundary by itself. Access restrictions are enforced jointly by the active backend and HASHI. Native backend sandboxes and permission modes remain applicable, while the HASHI Tool Registry and Tool Gateway enforce configured tool permissions, exact `access_roots` and other admission controls. Workzone does not override or weaken any of these controls. |
 
-When Workzone is off, HASHI does not generate a WORKZONE prompt section. The runtime restores the backend and tool registry working directory to the agent workspace and uses the default access root. It does not separately write the native workspace path into the prompt as a Working Environment section.
+When at least one slot is enabled, HASHI emits one protected `working_environment.workzones` runtime-context section. It lists only enabled slots, marks `main` as primary and numbered slots as attached, and treats every path and label as data rather than instructions. Disabled slots are retained in Session state but omitted from PCM.
+
+When all Workzones are off, HASHI does not generate a WORKZONES prompt section. The runtime restores the backend and Tool Registry working directory to the Agent home workspace and uses its normal default access root. The Agent home workspace is therefore a normal task folder when no Workzone is active; the instruction to reserve it for memory, identity, logs and workspace-state work applies only while one or more Workzones are active.
 
 #### High-permission or “YOLO” mode
 
@@ -224,7 +230,7 @@ Compatible backends may locate the \[persona\] block in agent.md and retrieve it
 
   - System prompts: HASHI automatically adds the permanent \[sys\] prompt and active global and local /sys prompts to the assembled request.
 
-  - Working environment: HASHI adds active workzone information to the assembled request. When workzone is off, no WORKZONE section is generated.
+  - Working environment: HASHI adds enabled Session Workzones to one protected runtime-context section. When all slots are off, no WORKZONES section is generated.
 
   - Time information: HASHI automatically adds time information. There is no on/off switch.
 
@@ -242,7 +248,7 @@ After bootstrap, fixed mode uses delta PCM on every external user turn. HASHI se
 
   - the current user message; and
 
-  - the current authoritative PCM sections, including system prompts, long-term memory, time, active workzone, permitted skills and tools catalogues, and persona.
+  - the current authoritative PCM sections, including system prompts, long-term memory, time, active Workzones, permitted skills and tools catalogues, and persona.
 
 HASHI does not repeatedly inject the previous ten completed exchanges during ordinary fixed-session operation. Recent history is injected again only at an applicable session bootstrap or explicit continuation event, such as cross-session context or /handoff.
 
@@ -326,7 +332,7 @@ The following sequence applies when HASHI assembles a request for a connected ba
 | 4            | Long-term memory from \[memory\], when available                                                                                                                                                                       | Every turn                           | Every turn    |
 | Separator    | The following sections are context information only.                                                                                                                                                                   | Every turn                           | Every turn    |
 | 5            | Date and time                                                                                                                                                                                                          | Every turn                           | Every turn    |
-| 6            | Workzone, when active and different from the agent workspace                                                                                                                                                           | Every turn                           | Every turn    |
+| 6            | Enabled Session Workzones, when at least one slot is active                                                                                                                                                            | Every turn                           | Every turn    |
 | 7            | Concise skills catalogue, when skill use is permitted, including the memory search skill                                                                                                                               | Every turn                           | Every turn    |
 | 8            | Concise tools catalogue, when tool use is permitted. Tool access may support raw transcript/log search and /wiki retrieval.                                                                                            | Every turn                           | Every turn    |
 | Separator    | “The following defines the agent’s current presentation persona. It overrides older persona descriptions found in memory or conversation history but does not override system instructions, the current user request.” | Every turn                           | Every turn    |

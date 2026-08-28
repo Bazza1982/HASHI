@@ -51,7 +51,7 @@ from orchestrator.privacy_levels import (
     require_level_available,
 )
 from orchestrator.workspace_state import WorkspaceStateStore
-from orchestrator.workzone import access_root_for_workzone
+from orchestrator import workzone as workzone_module
 
 HER_HABIT_MEDITATION_STATE_KEY = "her_habit_meditation"
 
@@ -1268,9 +1268,30 @@ class FlexibleBackendManager:
             if not allowed:
                 return
 
-            workzone_dir = (adapter_cfg.extra or {}).get("workzone_dir")
-            workspace_dir = Path(workzone_dir).expanduser().resolve() if workzone_dir else adapter_cfg.workspace_dir
-            access_root = access_root_for_workzone(adapter_cfg.resolve_access_root(), workspace_dir if workzone_dir else None)
+            extra = adapter_cfg.extra or {}
+            state = workzone_module.normalize_workzone_state(
+                extra.get("workzone_state")
+            )
+            workzone_dir = str(extra.get("workzone_dir") or "").strip()
+            if not state["slots"] and workzone_dir:
+                state = workzone_module.normalize_workzone_state(
+                    {
+                        "slots": [
+                            {
+                                "slot_id": "main",
+                                "path": workzone_dir,
+                                "enabled": True,
+                            }
+                        ]
+                    }
+                )
+            primary = workzone_module.primary_workzone_path(state)
+            workspace_dir = primary or adapter_cfg.workspace_dir
+            access_roots = workzone_module.access_roots_for_workzones(
+                adapter_cfg.resolve_access_root(),
+                state,
+                workspace_dir=adapter_cfg.workspace_dir,
+            )
             # Per-tool options (e.g. bash.timeout_max, file_write.max_file_size_kb)
             tool_options = {k: v for k, v in tools_cfg.items()
                             if k != "allowed"}
@@ -1285,7 +1306,7 @@ class FlexibleBackendManager:
 
             registry = ToolRegistry(
                 allowed_tools=allowed,
-                access_root=access_root,
+                access_root=access_roots[0],
                 workspace_dir=workspace_dir,
                 secrets=enriched_secrets,
                 tool_options=tool_options,
@@ -1301,6 +1322,7 @@ class FlexibleBackendManager:
                 canonical_audit=getattr(
                     getattr(self, "runtime", None), "canonical_audit", None
                 ),
+                access_roots=list(access_roots),
             )
             self.current_backend.tool_registry = registry
             self.logger.info(

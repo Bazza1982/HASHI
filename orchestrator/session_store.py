@@ -99,7 +99,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, db_path: str | Path, *, instance_id: str = "HASHI"):
         self.db_path = Path(db_path)
@@ -156,6 +156,7 @@ class SessionStore:
                     context_generation INTEGER NOT NULL DEFAULT 1,
                     memory_policy TEXT NOT NULL DEFAULT 'promote',
                     workzone TEXT,
+                    workzone_revision INTEGER NOT NULL DEFAULT 0,
                     revision INTEGER NOT NULL DEFAULT 1,
                     next_message_ordinal INTEGER NOT NULL DEFAULT 1,
                     next_event_sequence INTEGER NOT NULL DEFAULT 1,
@@ -168,6 +169,20 @@ class SessionStore:
                     WHERE is_default = 1;
                 CREATE INDEX IF NOT EXISTS sessions_owner_agent_updated
                     ON sessions(instance_id, owner_id, agent_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS session_workzones (
+                    session_id TEXT NOT NULL,
+                    slot_id TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    label TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(session_id, slot_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS session_workzones_session_enabled
+                    ON session_workzones(session_id, enabled, slot_id);
 
                 CREATE TABLE IF NOT EXISTS session_participants (
                     session_id TEXT NOT NULL,
@@ -509,6 +524,28 @@ class SessionStore:
                     "ALTER TABLE runs ADD COLUMN "
                     "response_preferences_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            session_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "workzone_revision" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN "
+                    "workzone_revision INTEGER NOT NULL DEFAULT 0"
+                )
+            # One-time compatibility projection.  The former scalar Workzone
+            # becomes the enabled ``main`` slot without changing the Session's
+            # effective working directory.
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO session_workzones(
+                    session_id, slot_id, path, enabled, label, created_at, updated_at
+                )
+                SELECT session_id, 'main', workzone, 1, '', created_at, updated_at
+                FROM sessions
+                WHERE workzone IS NOT NULL AND TRIM(workzone) != ''
+                """
+            )
             connection.execute(
                 "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
@@ -2985,33 +3022,373 @@ class SessionStore:
             ).fetchone()
             return self._session_dict(updated)
 
-    def set_workzone(self, session_id: str, workzone: str | None) -> dict[str, Any]:
+    @staticmethod
+    def _workzone_slot_sort_key(slot_id: str) -> tuple[int, int]:
+        if str(slot_id) == "main":
+            return (0, 0)
+        try:
+            return (1, int(slot_id))
+        except (TypeError, ValueError):
+            return (2, 0)
+
+    def _workzone_set_from_connection(
+        self, connection: sqlite3.Connection, session_id: str
+    ) -> dict[str, Any]:
+        session = connection.execute(
+            "SELECT * FROM sessions WHERE session_id = ? AND instance_id = ?",
+            (str(session_id), self.instance_id),
+        ).fetchone()
+        if session is None:
+            raise SessionNotFound(str(session_id))
+        rows = connection.execute(
+            """
+            SELECT slot_id, path, enabled, label, created_at, updated_at
+            FROM session_workzones WHERE session_id = ?
+            """,
+            (str(session_id),),
+        ).fetchall()
+        slots = []
+        for row in sorted(
+            rows,
+            key=lambda item: self._workzone_slot_sort_key(str(item["slot_id"])),
+        ):
+            item = dict(row)
+            item["enabled"] = bool(item.get("enabled"))
+            slots.append(item)
+        return {
+            "session_id": str(session_id),
+            "revision": int(session["workzone_revision"] or 0),
+            "slots": slots,
+        }
+
+    def get_workzone_set(self, session_id: str) -> dict[str, Any]:
+        """Return the Session-scoped, revisioned Workzone slot collection."""
+
+        with self._lock, self._connect() as connection:
+            return self._workzone_set_from_connection(connection, str(session_id))
+
+    @staticmethod
+    def _require_workzone_slot(slot_id: str) -> str:
+        slot = str(slot_id or "").strip().lower()
+        if slot in {"default", "0"}:
+            slot = "main"
+        if slot != "main" and slot not in {str(number) for number in range(1, 10)}:
+            raise ValueError("workzone slot must be main or 1..9")
+        return slot
+
+    @staticmethod
+    def _check_workzone_revision(
+        session: sqlite3.Row, expected_revision: int | None
+    ) -> None:
+        if expected_revision is None:
+            return
+        actual = int(session["workzone_revision"] or 0)
+        if actual != int(expected_revision):
+            raise SessionConflict(
+                f"Workzone menu is stale (expected revision {expected_revision}, current {actual})"
+            )
+
+    def set_workzone_slot(
+        self,
+        session_id: str,
+        slot_id: str,
+        *,
+        path: str | None = None,
+        enabled: bool | None = None,
+        label: str | None = None,
+        expected_revision: int | None = None,
+        source: str = "telegram",
+    ) -> dict[str, Any]:
+        """Atomically create or update one Workzone slot."""
+
+        slot = self._require_workzone_slot(slot_id)
         now = _utc_now()
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            updated = connection.execute(
+            session = connection.execute(
                 """
-                UPDATE sessions SET workzone = ?, revision = revision + 1, updated_at = ?
-                WHERE session_id = ? AND status = 'active'
+                SELECT * FROM sessions
+                WHERE session_id = ? AND instance_id = ? AND status = 'active'
                 """,
-                (str(workzone) if workzone else None, now, str(session_id)),
+                (str(session_id), self.instance_id),
+            ).fetchone()
+            if session is None:
+                raise SessionNotFound(str(session_id))
+            self._check_workzone_revision(session, expected_revision)
+            existing = connection.execute(
+                "SELECT * FROM session_workzones WHERE session_id = ? AND slot_id = ?",
+                (str(session_id), slot),
+            ).fetchone()
+            before = None
+            if existing is not None:
+                before = {
+                    "path": str(existing["path"]),
+                    "enabled": bool(existing["enabled"]),
+                    "label": str(existing["label"] or ""),
+                }
+            resolved_path = str(path).strip() if path is not None else ""
+            if not resolved_path and existing is not None:
+                resolved_path = str(existing["path"])
+            if not resolved_path:
+                raise ValueError("path is required for an empty workzone slot")
+            resolved_enabled = (
+                bool(enabled)
+                if enabled is not None
+                else bool(existing["enabled"] if existing is not None else True)
             )
-            if updated.rowcount != 1:
+            resolved_label = (
+                str(label).strip()
+                if label is not None
+                else str(existing["label"] or "") if existing is not None else ""
+            )
+            after = {
+                "path": resolved_path,
+                "enabled": resolved_enabled,
+                "label": resolved_label,
+            }
+            if before == after:
+                return self._workzone_set_from_connection(connection, str(session_id))
+            connection.execute(
+                """
+                INSERT INTO session_workzones(
+                    session_id, slot_id, path, enabled, label, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, slot_id) DO UPDATE SET
+                    path = excluded.path,
+                    enabled = excluded.enabled,
+                    label = excluded.label,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(session_id),
+                    slot,
+                    resolved_path,
+                    int(resolved_enabled),
+                    resolved_label,
+                    now,
+                    now,
+                ),
+            )
+            legacy_main = resolved_path if slot == "main" and resolved_enabled else None
+            if slot == "main":
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET workzone = ?, workzone_revision = workzone_revision + 1,
+                        revision = revision + 1, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (legacy_main, now, str(session_id)),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET workzone_revision = workzone_revision + 1,
+                        revision = revision + 1, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (now, str(session_id)),
+                )
+            self._append_event(
+                connection,
+                session_id=str(session_id),
+                run_id=None,
+                kind="session.workzone_slot_changed",
+                status="active",
+                phase="control",
+                summary=f"Session Workzone slot {slot} changed",
+                detail={
+                    "slot": slot,
+                    "source": str(source),
+                    "before": before,
+                    "after": after,
+                },
+            )
+            return self._workzone_set_from_connection(connection, str(session_id))
+
+    def delete_workzone_slot(
+        self,
+        session_id: str,
+        slot_id: str,
+        *,
+        expected_revision: int | None = None,
+        source: str = "telegram",
+    ) -> dict[str, Any]:
+        """Delete one slot configuration without touching its filesystem path."""
+
+        slot = self._require_workzone_slot(slot_id)
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                """
+                SELECT * FROM sessions
+                WHERE session_id = ? AND instance_id = ? AND status = 'active'
+                """,
+                (str(session_id), self.instance_id),
+            ).fetchone()
+            if session is None:
+                raise SessionNotFound(str(session_id))
+            self._check_workzone_revision(session, expected_revision)
+            existing = connection.execute(
+                "SELECT * FROM session_workzones WHERE session_id = ? AND slot_id = ?",
+                (str(session_id), slot),
+            ).fetchone()
+            if existing is None:
+                return self._workzone_set_from_connection(connection, str(session_id))
+            before = {
+                "path": str(existing["path"]),
+                "enabled": bool(existing["enabled"]),
+                "label": str(existing["label"] or ""),
+            }
+            connection.execute(
+                "DELETE FROM session_workzones WHERE session_id = ? AND slot_id = ?",
+                (str(session_id), slot),
+            )
+            if slot == "main":
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET workzone = NULL, workzone_revision = workzone_revision + 1,
+                        revision = revision + 1, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (now, str(session_id)),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET workzone_revision = workzone_revision + 1,
+                        revision = revision + 1, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (now, str(session_id)),
+                )
+            self._append_event(
+                connection,
+                session_id=str(session_id),
+                run_id=None,
+                kind="session.workzone_slot_deleted",
+                status="active",
+                phase="control",
+                summary=f"Session Workzone slot {slot} deleted",
+                detail={"slot": slot, "source": str(source), "before": before},
+            )
+            return self._workzone_set_from_connection(connection, str(session_id))
+
+    def disable_all_workzones(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int | None = None,
+        source: str = "telegram",
+    ) -> dict[str, Any]:
+        """Disable every configured slot in one revisioned transaction."""
+
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                """
+                SELECT * FROM sessions
+                WHERE session_id = ? AND instance_id = ? AND status = 'active'
+                """,
+                (str(session_id), self.instance_id),
+            ).fetchone()
+            if session is None:
+                raise SessionNotFound(str(session_id))
+            self._check_workzone_revision(session, expected_revision)
+            changed = connection.execute(
+                """
+                UPDATE session_workzones SET enabled = 0, updated_at = ?
+                WHERE session_id = ? AND enabled != 0
+                """,
+                (now, str(session_id)),
+            )
+            if changed.rowcount:
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET workzone = NULL, workzone_revision = workzone_revision + 1,
+                        revision = revision + 1, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (now, str(session_id)),
+                )
+                self._append_event(
+                    connection,
+                    session_id=str(session_id),
+                    run_id=None,
+                    kind="session.workzones_disabled",
+                    status="active",
+                    phase="control",
+                    summary="All Session Workzones disabled",
+                    detail={"source": str(source), "changed": int(changed.rowcount)},
+                )
+            return self._workzone_set_from_connection(connection, str(session_id))
+
+    def record_workzone_reload(
+        self, session_id: str, *, slots: Iterable[str], source: str = "telegram"
+    ) -> None:
+        """Audit a revalidation/rebind that deliberately leaves state unchanged."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                "SELECT status FROM sessions WHERE session_id = ? AND instance_id = ?",
+                (str(session_id), self.instance_id),
+            ).fetchone()
+            if session is None or str(session["status"]) != "active":
                 raise SessionNotFound(str(session_id))
             self._append_event(
                 connection,
                 session_id=str(session_id),
                 run_id=None,
-                kind="session.workzone_changed",
+                kind="session.workzones_reloaded",
                 status="active",
                 phase="control",
-                summary="Session Workzone changed",
-                detail={"workzone": str(workzone) if workzone else None},
+                summary="Session Workzones reloaded",
+                detail={
+                    "slots": [self._require_workzone_slot(slot) for slot in slots],
+                    "source": str(source),
+                },
             )
-            row = connection.execute(
-                "SELECT * FROM sessions WHERE session_id = ?", (str(session_id),)
-            ).fetchone()
-            return self._session_dict(row)
+
+    def set_workzone(self, session_id: str, workzone: str | None) -> dict[str, Any]:
+        """Compatibility wrapper for the former scalar ``sessions.workzone`` API."""
+
+        if workzone:
+            self.set_workzone_slot(
+                session_id,
+                "main",
+                path=str(workzone),
+                enabled=True,
+                source="legacy_set_workzone",
+            )
+            return self.get_session(session_id)
+        state = self.get_workzone_set(session_id)
+        if any(item["slot_id"] == "main" for item in state["slots"]):
+            self.set_workzone_slot(
+                session_id,
+                "main",
+                enabled=False,
+                source="legacy_set_workzone",
+            )
+            return self.get_session(session_id)
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE sessions SET workzone = NULL, revision = revision + 1, updated_at = ?
+                WHERE session_id = ? AND status = 'active'
+                """,
+                (now, str(session_id)),
+            )
+            if updated.rowcount != 1:
+                raise SessionNotFound(str(session_id))
+        return self.get_session(session_id)
 
     def archive_session(
         self, session_id: str, *, deleted: bool = False
@@ -3317,6 +3694,7 @@ class SessionStore:
             ).fetchone()
         return {
             "session": session,
+            "workzones": self.get_workzone_set(session_id),
             "messages": self.messages(session_id, owner_id=owner_id, limit=1000),
             "runs": [_json_object(row["projection_json"]) for row in projections],
             "earliest_available_sequence": int(

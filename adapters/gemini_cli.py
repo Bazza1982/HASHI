@@ -261,9 +261,9 @@ class GeminiCLIAdapter(BaseBackend):
             output_format,
             "--approval-mode",
             "yolo",
-            "--include-directories",
-            self.effective_add_dir,
         ]
+        for directory in self.effective_add_dirs:
+            cmd.extend(["--include-directories", str(directory)])
         try:
             started = time.perf_counter()
             effective_workdir = self.effective_workdir

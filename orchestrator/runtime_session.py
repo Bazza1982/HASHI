@@ -525,8 +525,61 @@ def session_workzone(runtime: Any, item: Any | None = None, *, update: Any | Non
     return _session_workzone_path(session)
 
 
+def session_workzone_state(
+    runtime: Any,
+    item: Any | None = None,
+    *,
+    session_id: str | None = None,
+    update: Any | None = None,
+) -> dict[str, Any]:
+    from orchestrator.workzone import normalize_workzone_state
+
+    metadata = getattr(item, "request_metadata", None)
+    if isinstance(metadata, Mapping):
+        snapshot = metadata.get("workzone_snapshot")
+        if isinstance(snapshot, Mapping):
+            return normalize_workzone_state(snapshot)
+    resolved_session_id = str(session_id or getattr(item, "session_id", "") or "")
+    try:
+        if not resolved_session_id and update is not None:
+            resolved_session_id = str(current_session_for_update(runtime, update)["session_id"])
+        if not resolved_session_id:
+            resolved_session_id = str(runtime.default_session_id)
+        store = ensure_store(runtime)
+        getter = getattr(store, "get_workzone_set", None)
+        if callable(getter):
+            return normalize_workzone_state(getter(resolved_session_id))
+        session = store.get_session(resolved_session_id)
+    except (AttributeError, SessionNotFound):
+        return {"session_id": resolved_session_id, "revision": 0, "slots": []}
+    value = str(session.get("workzone") or "").strip()
+    return normalize_workzone_state(
+        {
+            "session_id": resolved_session_id,
+            "slots": (
+                [{"slot_id": "main", "path": value, "enabled": True}]
+                if value
+                else []
+            ),
+        }
+    )
+
+
+def apply_session_workzones(runtime: Any, session_id: str) -> dict[str, Any]:
+    from orchestrator import runtime_workzone
+
+    state = session_workzone_state(runtime, session_id=str(session_id))
+    runtime_workzone.install_runtime_state(runtime, state)
+    sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
+    if callable(sync):
+        sync()
+    return state
+
+
 def apply_item_workzone(runtime: Any, item: Any) -> None:
-    runtime._workzone_dir = session_workzone(runtime, item)
+    from orchestrator import runtime_workzone
+
+    runtime_workzone.install_runtime_state(runtime, session_workzone_state(runtime, item))
     sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
     if callable(sync):
         sync()
@@ -609,7 +662,7 @@ async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
     session = ensure_store(runtime).create_session(
         owner_id=resolved_owner, agent_id=runtime.name, title="New session"
     )
-    previous_workzone = getattr(runtime, "_workzone_dir", None)
+    previous_workzones = getattr(runtime, "_workzone_state", None)
     sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
     logger = getattr(runtime, "logger", None)
     try:
@@ -617,14 +670,14 @@ async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
         _prepare_clean_context(
             runtime, disable_saved_memory=False, clear_session_primer=True
         )
-        runtime._workzone_dir = None
-        if callable(sync):
-            sync()
+        apply_session_workzones(runtime, session["session_id"])
         await _bind_session(runtime, update, session["session_id"])
     except Exception:  # noqa: BLE001 - backend adapters expose heterogeneous failures
         if logger is not None:
             logger.exception("Could not activate new Session safely")
-        runtime._workzone_dir = previous_workzone
+        from orchestrator import runtime_workzone
+
+        runtime_workzone.install_runtime_state(runtime, previous_workzones)
         if callable(sync):
             try:
                 sync()
@@ -761,10 +814,7 @@ async def cmd_use(runtime: Any, update: Any, context: Any) -> None:
     await _bind_session(runtime, update, session["session_id"])
     _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
     await _reset_cli_backend(runtime, reason="cmd_use_session")
-    runtime._workzone_dir = _session_workzone_path(session)
-    sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
-    if callable(sync):
-        sync()
+    apply_session_workzones(runtime, session["session_id"])
     await runtime._reply_text(
         update,
         ui_language.tr(
@@ -810,10 +860,7 @@ async def cmd_archive(runtime: Any, update: Any, context: Any) -> None:
         runtime, disable_saved_memory=False, clear_session_primer=True
     )
     await _reset_cli_backend(runtime, reason="cmd_archive_session")
-    runtime._workzone_dir = _session_workzone_path(default)
-    sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
-    if callable(sync):
-        sync()
+    apply_session_workzones(runtime, default["session_id"])
     await runtime._reply_text(
         update,
         ui_language.tr("session.archived"),
@@ -1016,6 +1063,7 @@ __all__ = [
     "accept_request",
     "activate_backend_binding",
     "apply_item_workzone",
+    "apply_session_workzones",
     "bridge_recent_exchanges",
     "capture_backend_binding",
     "cmd_archive",
@@ -1041,5 +1089,6 @@ __all__ = [
     "reset_for_retry",
     "session_memory_store",
     "session_workzone",
+    "session_workzone_state",
     "start_automatic_promotion",
 ]

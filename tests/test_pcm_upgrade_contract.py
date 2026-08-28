@@ -311,6 +311,35 @@ def test_pcm_envelope_preserves_authority_layers(tmp_path):
     assert sections["current_user_request"]["protected"] is True
 
 
+def test_workzones_use_protected_runtime_envelope_without_rendering_revision(tmp_path):
+    _store, assembler = _assembler(tmp_path)
+    payload = assembler.build_prompt_payload(
+        "Current request",
+        "openrouter-api",
+        extra_sections=[
+            (
+                "WORKZONES",
+                "Primary working directory: /repo/main\nAttached: /repo/shared",
+                {
+                    "key": "working_environment.workzones",
+                    "protected": True,
+                    "schema_version": 2,
+                    "scope": "session",
+                    "workzone_revision": 18,
+                },
+            )
+        ],
+    )
+    sections = {item["key"]: item for item in payload["envelope"]["sections"]}
+    workzones = sections["working_environment.workzones"]
+
+    assert workzones["authority"] == "runtime_context"
+    assert workzones["protected"] is True
+    assert workzones["metadata"]["workzone_revision"] == 18
+    assert "State revision" not in payload["final_prompt"]
+    assert "workzone_revision" not in payload["final_prompt"]
+
+
 def test_legacy_assembler_caller_injects_latest_ten_completed_exchanges(tmp_path):
     store, assembler = _assembler(tmp_path)
     for index in range(12):

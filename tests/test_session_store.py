@@ -148,6 +148,101 @@ def test_default_session_is_permanent_and_channel_bindings_are_isolated(tmp_path
         store.archive_session(default_a["session_id"])
 
 
+def test_workzone_slots_are_session_scoped_revisioned_and_snapshot_visible(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    first = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    second = store.create_session(owner_id=owner, agent_id="lily", title="Second")
+    main = tmp_path / "main"
+    attached = tmp_path / "attached"
+    main.mkdir()
+    attached.mkdir()
+
+    state = store.set_workzone_slot(
+        first["session_id"],
+        "main",
+        path=str(main),
+        enabled=True,
+        expected_revision=0,
+        source="test",
+    )
+    assert state["revision"] == 1
+    assert state["slots"] == [
+        {
+            "slot_id": "main",
+            "path": str(main),
+            "enabled": True,
+            "label": "",
+            "created_at": state["slots"][0]["created_at"],
+            "updated_at": state["slots"][0]["updated_at"],
+        }
+    ]
+    assert store.get_session(first["session_id"])["workzone"] == str(main)
+
+    state = store.set_workzone_slot(
+        first["session_id"],
+        "1",
+        path=str(attached),
+        enabled=True,
+        label="shared",
+        expected_revision=1,
+        source="test",
+    )
+    assert state["revision"] == 2
+    assert [slot["slot_id"] for slot in state["slots"]] == ["main", "1"]
+    assert store.get_workzone_set(second["session_id"])["slots"] == []
+
+    with pytest.raises(SessionConflict, match="stale"):
+        store.set_workzone_slot(
+            first["session_id"],
+            "1",
+            enabled=False,
+            expected_revision=1,
+            source="stale-test",
+        )
+
+    state = store.disable_all_workzones(
+        first["session_id"], expected_revision=2, source="test"
+    )
+    assert state["revision"] == 3
+    assert all(slot["enabled"] is False for slot in state["slots"])
+    assert store.get_session(first["session_id"])["workzone"] is None
+    assert store.snapshot(first["session_id"], owner_id=owner)["workzones"] == state
+
+
+def test_existing_scalar_workzone_is_migrated_to_enabled_main_slot(tmp_path):
+    store = _store(tmp_path)
+    session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            "UPDATE sessions SET workzone = ? WHERE session_id = ?",
+            (str(legacy), session["session_id"]),
+        )
+        connection.execute(
+            "DELETE FROM session_workzones WHERE session_id = ?",
+            (session["session_id"],),
+        )
+
+    reloaded = SessionStore(store.db_path, instance_id="HASHI1")
+    state = reloaded.get_workzone_set(session["session_id"])
+
+    assert state["revision"] == 0
+    assert [(slot["slot_id"], slot["path"], slot["enabled"]) for slot in state["slots"]] == [
+        ("main", str(legacy), True)
+    ]
+
+
+def test_workzone_slot_ids_are_limited_to_main_plus_one_through_nine(tmp_path):
+    store = _store(tmp_path)
+    session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+
+    with pytest.raises(ValueError, match="main or 1..9"):
+        store.set_workzone_slot(session["session_id"], "10", path=str(tmp_path))
+
+
 def test_ordinary_recent_context_never_crosses_session_or_fresh_generation(tmp_path):
     store = _store(tmp_path)
     owner = "user:7"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from orchestrator.bridge_memory import SysPromptManager
 from orchestrator.parked_topics import ParkedTopicStore
@@ -95,6 +95,46 @@ def _parked_topics_overview(store: Any) -> dict[str, Any]:
     return {"count": len(topics), "topics": topics}
 
 
+def _workzone_overview(runtime: Any | None, workspace_dir: Path) -> dict[str, Any]:
+    # Keep the new helper lookup lazy so the first hot reboot from the legacy
+    # single-Workzone module can reload this consumer before its provider.
+    from orchestrator import workzone as workzone_module
+
+    raw_state = getattr(runtime, "_workzone_state", None)
+    if isinstance(raw_state, Mapping):
+        state = workzone_module.normalize_workzone_state(raw_state)
+    else:
+        legacy = load_workzone(workspace_dir)
+        state = workzone_module.normalize_workzone_state(
+            {
+                "slots": (
+                    [{"slot_id": "main", "path": str(legacy), "enabled": True}]
+                    if legacy is not None
+                    else []
+                )
+            }
+        )
+    active = workzone_module.active_workzone_slots(state)
+    primary = workzone_module.primary_workzone_path(state)
+    return {
+        "active": bool(active),
+        "path": str(primary) if primary is not None else None,
+        "active_count": len(active),
+        "configured_count": len(state["slots"]),
+        "slots": [
+            {
+                "slot": item["slot_id"],
+                "role": "primary" if item["slot_id"] == "main" else "attached",
+                "path": item["path"],
+                "label": item.get("label") or Path(item["path"]).name,
+                "enabled": bool(item["enabled"]),
+                "available": bool(item["available"]),
+            }
+            for item in state["slots"]
+        ],
+    }
+
+
 def build_agent_overview(
     *,
     metadata: dict[str, Any],
@@ -106,8 +146,6 @@ def build_agent_overview(
     prompt_manager = getattr(runtime, "sys_prompt_manager", None) or SysPromptManager(workspace_dir)
     parked_store = getattr(runtime, "parked_topics", None) or ParkedTopicStore(workspace_dir)
     session_id = str(getattr(runtime, "session_id_dt", "") or "") or None
-    workzone = load_workzone(workspace_dir)
-
     return {
         "agent": {
             "id": str(metadata.get("id") or metadata.get("name") or ""),
@@ -116,10 +154,7 @@ def build_agent_overview(
             "status": str(metadata.get("status") or "offline"),
             "online": bool(metadata.get("online")),
         },
-        "workzone": {
-            "active": workzone is not None,
-            "path": str(workzone) if workzone is not None else None,
-        },
+        "workzone": _workzone_overview(runtime, workspace_dir),
         "usage": _usage_overview(workspace_dir, session_id),
         "system_prompts": _system_prompt_overview(prompt_manager),
         "parked_topics": _parked_topics_overview(parked_store),

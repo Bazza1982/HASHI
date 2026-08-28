@@ -13,7 +13,7 @@ import os
 import re
 import signal
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -27,7 +27,23 @@ from tools.workbench_client import request_workbench_json, workbench_endpoint
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_path(raw_path: str, access_root: Path, workspace_dir: Path) -> Path:
+def _access_roots(value: Path | Sequence[Path]) -> tuple[Path, ...]:
+    raw_roots = value if isinstance(value, Sequence) and not isinstance(value, (str, bytes, Path)) else (value,)
+    roots: list[Path] = []
+    for raw in raw_roots:
+        root = Path(raw).expanduser().resolve()
+        if root not in roots:
+            roots.append(root)
+    if not roots:
+        raise ValueError("no allowed access roots are configured")
+    return tuple(roots)
+
+
+def _resolve_path(
+    raw_path: str,
+    access_root: Path | Sequence[Path],
+    workspace_dir: Path,
+) -> Path:
     """
     Resolve a user-supplied path.
     - Absolute paths are kept as-is but verified against access_root.
@@ -40,12 +56,11 @@ def _resolve_path(raw_path: str, access_root: Path, workspace_dir: Path) -> Path
     else:
         p = p.resolve()
 
-    access_root_resolved = access_root.resolve()
-    try:
-        p.relative_to(access_root_resolved)
-    except ValueError:
+    access_roots = _access_roots(access_root)
+    if not any(p == root or p.is_relative_to(root) for root in access_roots):
+        rendered = ", ".join(str(root) for root in access_roots)
         raise ValueError(
-            f"Path '{p}' is outside the allowed access scope '{access_root_resolved}'"
+            f"Path '{p}' is outside the allowed access scopes [{rendered}]"
         )
     return p
 
@@ -383,7 +398,7 @@ async def execute_bash(
 
 async def execute_file_read(
     args: dict,
-    access_root: Path,
+    access_root: Path | Sequence[Path],
     workspace_dir: Path,
 ) -> str:
     raw_path = args.get("path", "")
@@ -424,7 +439,7 @@ async def execute_file_read(
 
 async def execute_file_write(
     args: dict,
-    access_root: Path,
+    access_root: Path | Sequence[Path],
     workspace_dir: Path,
     max_file_size_kb: int = 1024,
 ) -> str:
@@ -505,7 +520,7 @@ async def execute_web_search(
 
 async def execute_file_list(
     args: dict,
-    access_root: Path,
+    access_root: Path | Sequence[Path],
     workspace_dir: Path,
 ) -> str:
     raw_path = args.get("path", "")
@@ -554,7 +569,7 @@ async def execute_file_list(
 
 async def execute_apply_patch(
     args: dict,
-    access_root: Path,
+    access_root: Path | Sequence[Path],
     workspace_dir: Path,
 ) -> str:
     raw_path = args.get("path", "")
@@ -747,7 +762,7 @@ def _job_summary(record: Any) -> dict[str, Any]:
 
 async def execute_background_job_start(
     args: dict,
-    access_root: Path,
+    access_root: Path | Sequence[Path],
     workspace_dir: Path,
     audit_context: dict | None = None,
 ) -> str:

@@ -1450,14 +1450,14 @@ def render_history(
 
 def install_history_section(
     runtime: Any,
-    extra_sections: Sequence[tuple[str, str]],
+    extra_sections: Sequence[tuple],
     *,
     protected_only: bool = False,
     cross_session_entries: Sequence[Mapping[str, Any]] = (),
     primary_timeline_entries: Sequence[Mapping[str, Any]] | None = None,
     workspace_dir: Path | None = None,
     memory_store: Any | None = None,
-) -> tuple[list[tuple[str, str]], HistorySnapshot | None]:
+) -> tuple[list[tuple], HistorySnapshot | None]:
     if str(getattr(getattr(runtime, "config", None), "active_backend", "")) != HER_V2_ENGINE:
         return list(extra_sections), None
     manager = getattr(runtime, "backend_manager", None)
@@ -1518,7 +1518,11 @@ def install_history_section(
                     "Completed-exchange timeline unavailable; using working turns: %s",
                     type(exc).__name__,
                 )
-    result = [(title, body) for title, body in extra_sections if title != MANAGED_HISTORY_TITLE]
+    result = [
+        section
+        for section in extra_sections
+        if len(section) >= 2 and str(section[0]) != MANAGED_HISTORY_TITLE
+    ]
     if (
         snapshot.all_turns
         or snapshot.active_capsule is not None
@@ -1539,8 +1543,11 @@ def install_history_section(
     return result, snapshot
 
 
-def managed_history_present(extra_sections: Sequence[tuple[str, str]] | None) -> bool:
-    return any(str(title) == MANAGED_HISTORY_TITLE for title, _body in (extra_sections or ()))
+def managed_history_present(extra_sections: Sequence[tuple] | None) -> bool:
+    return any(
+        len(section) >= 2 and str(section[0]) == MANAGED_HISTORY_TITLE
+        for section in (extra_sections or ())
+    )
 
 
 def _source_record_from_turn(row: Mapping[str, Any]) -> dict[str, Any]:

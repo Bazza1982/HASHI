@@ -116,6 +116,9 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
         "adapters.her_v2_provider",
         "orchestrator.runtime_pipeline",
         "orchestrator.flexible_agent_runtime",
+        "orchestrator.workzone",
+        "orchestrator.agent_overview",
+        "orchestrator.runtime_workzone",
     ]
 
     ordered = sorted(names, key=module_reload_key)
@@ -168,6 +171,15 @@ def test_hot_reload_orders_adapter_protocol_before_consumers():
     )
     assert ordered.index("orchestrator.runtime_pipeline") < ordered.index(
         "orchestrator.flexible_agent_runtime"
+    )
+    assert ordered.index("orchestrator.workzone") < ordered.index(
+        "orchestrator.agent_overview"
+    )
+    assert ordered.index("orchestrator.workzone") < ordered.index(
+        "orchestrator.flexible_backend_manager"
+    )
+    assert ordered.index("orchestrator.workzone") < ordered.index(
+        "orchestrator.runtime_workzone"
     )
 
 
@@ -258,6 +270,53 @@ def test_first_hot_upgrade_from_legacy_notification_module_is_import_safe():
         assert refreshed.notification_mode(runtime) == "quiet"
         for consumer in consumers:
             assert consumer.telegram_notifications is refreshed
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_first_hot_upgrade_from_legacy_workzone_module_is_import_safe():
+    script = textwrap.dedent(
+        """
+        import importlib
+        from pathlib import Path
+
+        provider = importlib.import_module("orchestrator.workzone")
+        consumers = [
+            importlib.import_module("orchestrator.agent_overview"),
+            importlib.import_module("orchestrator.flexible_backend_manager"),
+            importlib.import_module("orchestrator.runtime_workzone"),
+        ]
+        for name in (
+            "WORKZONE_SLOT_IDS",
+            "access_roots_for_workzones",
+            "active_workzone_slots",
+            "configured_workzone_slot",
+            "display_workzone_path",
+            "normalize_workzone_slot",
+            "normalize_workzone_state",
+            "primary_workzone_path",
+        ):
+            delattr(provider, name)
+
+        consumers = [importlib.reload(consumer) for consumer in consumers]
+        refreshed = importlib.reload(provider)
+
+        runtime = type("Runtime", (), {"_workzone_state": {"slots": []}})()
+        assert consumers[0]._workzone_overview(runtime, Path("."))["slots"] == []
+        assert consumers[1].workzone_module is refreshed
+        assert consumers[2].workzone_module is refreshed
+        assert consumers[2]._workzone_slot_ids()[0] == "main"
         """
     )
 

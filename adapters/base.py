@@ -254,7 +254,7 @@ class BaseBackend(ABC):
     def authorized_media_roots(self) -> tuple[Path, ...]:
         candidates: list[Any] = [getattr(self.config, "workspace_dir", None)]
         try:
-            candidates.append(self.effective_add_dir)
+            candidates.extend(self.effective_add_dirs)
         except (AttributeError, OSError, TypeError, ValueError):
             pass
         candidates.append(getattr(self.global_config, "base_media_dir", None))
@@ -412,6 +412,25 @@ class BaseBackend(ABC):
         return path if path.is_dir() else None
 
     @property
+    def workzone_dirs(self) -> tuple[Path, ...]:
+        extra = getattr(self.config, "extra", {}) or {}
+        raw_values = extra.get("workzone_dirs") or ()
+        if isinstance(raw_values, (str, Path)):
+            raw_values = (raw_values,)
+        paths: list[Path] = []
+        for raw in raw_values:
+            try:
+                path = Path(str(raw)).expanduser().resolve()
+            except (OSError, RuntimeError, TypeError, ValueError):
+                continue
+            if path.is_dir() and path not in paths:
+                paths.append(path)
+        legacy = self.workzone_dir
+        if legacy is not None and legacy not in paths:
+            paths.insert(0, legacy)
+        return tuple(paths)
+
+    @property
     def effective_workdir(self) -> Path:
         if self.workzone_dir is not None:
             return self.workzone_dir
@@ -419,9 +438,22 @@ class BaseBackend(ABC):
 
     @property
     def effective_add_dir(self) -> str:
-        if self.workzone_dir is not None:
-            return str(self.workzone_dir)
-        return str(self.config.resolve_access_root())
+        return str(self.effective_add_dirs[0])
+
+    @property
+    def effective_add_dirs(self) -> tuple[Path, ...]:
+        if self.workzone_dirs:
+            return self.workzone_dirs
+        extra = getattr(self.config, "extra", {}) or {}
+        state = extra.get("workzone_state")
+        if isinstance(state, Mapping) and any(
+            isinstance(item, Mapping) and bool(item.get("enabled"))
+            for item in (state.get("slots") or ())
+        ):
+            # An enabled but currently unavailable Workzone must not make a
+            # native CLI fall back to the broader default access root.
+            return (Path(self.config.workspace_dir).expanduser().resolve(),)
+        return (self.config.resolve_access_root(),)
 
     def _preview_text(self, text: str | bytes | None, limit: int = 400) -> str:
         if text is None:

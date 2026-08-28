@@ -307,16 +307,20 @@ class FlexibleAgentRuntime:
         self._cos_enabled: bool = (self.workspace_dir / ".cos_on").exists()
         default_session = runtime_session.initialize_runtime_sessions(self)
         legacy_workzone = load_workzone(self.workspace_dir)
-        if default_session.get("workzone"):
-            self._workzone_dir = Path(str(default_session["workzone"]))
-        else:
-            self._workzone_dir = legacy_workzone
-            if legacy_workzone is not None:
-                # One-time compatibility migration: the old Agent-wide value
-                # becomes only the permanent default Session's Workzone.
-                self.session_store.set_workzone(
-                    default_session["session_id"], str(legacy_workzone)
-                )
+        workzone_state = self.session_store.get_workzone_set(
+            default_session["session_id"]
+        )
+        if not workzone_state["slots"] and legacy_workzone is not None:
+            # One-time compatibility migration: the old Agent-wide value
+            # becomes only the permanent default Session's main Workzone.
+            workzone_state = self.session_store.set_workzone_slot(
+                default_session["session_id"],
+                "main",
+                path=str(legacy_workzone),
+                enabled=True,
+                source="legacy_workzone_json",
+            )
+        runtime_workzone.install_runtime_state(self, workzone_state)
         self._sync_workzone_to_backend_config()
         self.voice_manager = VoiceManager(
             self.workspace_dir,
@@ -821,6 +825,12 @@ class FlexibleAgentRuntime:
                         session["session_id"], int(session["context_generation"])
                     )
                 ),
+                # Freeze the working-environment topology at admission so the
+                # provider prompt, CLI flags and HASHI Tool Registry cannot
+                # observe different Workzone revisions for one request.
+                "workzone_snapshot": runtime_session.session_workzone_state(
+                    self, session_id=session["session_id"]
+                ),
             }
         )
         item = runtime_common.QueuedRequest(
@@ -1001,7 +1011,7 @@ class FlexibleAgentRuntime:
     def _sync_workzone_to_backend_config(self) -> None:
         runtime_workzone.sync_workzone_to_backend_config(self)
 
-    def _workzone_prompt_section(self) -> list[tuple[str, str]]:
+    def _workzone_prompt_section(self) -> list[tuple]:
         return runtime_workzone.workzone_prompt_section(self)
 
     def _extract_task_id(self, summary: str) -> Optional[str]:
@@ -6406,9 +6416,9 @@ class FlexibleAgentRuntime:
         selected_session = runtime_session.current_session(
             self, surface="telegram", channel_key=str(chat_id)
         )
-        workzone_value = str(selected_session.get("workzone") or "").strip()
-        self._workzone_dir = Path(workzone_value) if workzone_value else None
-        self._sync_workzone_to_backend_config()
+        runtime_session.apply_session_workzones(
+            self, selected_session["session_id"]
+        )
         switch_ok = await self.backend_manager.switch_backend(
             target_engine,
             target_model=target_model,
@@ -8058,6 +8068,9 @@ class FlexibleAgentRuntime:
     async def cmd_workzone(self, update: Update, context: Any):
         await runtime_workzone.cmd_workzone(self, update, context)
 
+    async def callback_workzone(self, update: Update, context: Any):
+        await runtime_workzone.callback_workzone(self, update, context)
+
     async def cmd_new(self, update: Update, context: Any):
         await runtime_session.cmd_new(self, update, context)
 
@@ -8920,6 +8933,8 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, self._transfer_redirect_text())
             return
         text = update.message.text
+        if await runtime_workzone.handle_pending_path_reply(self, update):
+            return
         # /long is scoped to the chat that started it.
         if runtime_long.collect_text(self, update.effective_chat.id, text):
             return

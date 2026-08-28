@@ -140,7 +140,10 @@ class ToolRegistry:
         Tool names the model is permitted to call.
         Pass ["*"] to allow all tools.
     access_root : Path
-        Filesystem sandbox root for file_read / file_write.
+        Legacy primary filesystem root for file_read / file_write.
+    access_roots : list[Path] | None
+        Exact filesystem roots permitted for file-aware tools.  This never
+        widens multiple roots to their common parent.
     workspace_dir : Path
         CWD for bash commands; base for relative paths.
     secrets : dict
@@ -164,9 +167,16 @@ class ToolRegistry:
         audit_context: Optional[dict] = None,
         media_roots: Optional[list[Path]] = None,
         canonical_audit: Any = None,
+        access_roots: Optional[list[Path]] = None,
     ):
         self.logger = logging.getLogger("Tools.Registry")
-        self.access_root = Path(access_root)
+        roots: list[Path] = []
+        for raw_root in [access_root, *(access_roots or [])]:
+            root = Path(raw_root).expanduser().resolve()
+            if root not in roots:
+                roots.append(root)
+        self.access_roots = tuple(roots)
+        self.access_root = self.access_roots[0]
         self.workspace_dir = Path(workspace_dir)
         self.secrets = secrets or {}
         self.tool_options = tool_options or {}
@@ -580,6 +590,7 @@ class ToolRegistry:
                         "source": "hashi_tool_registry",
                         "workspace_dir": str(self.workspace_dir),
                         "access_root": str(self.access_root),
+                        "access_roots": [str(root) for root in self.access_roots],
                     },
                 )
             except Exception as exc:
@@ -629,7 +640,11 @@ class ToolRegistry:
                 path = (self.workspace_dir / path).resolve()
             else:
                 path = path.resolve()
-            path.relative_to(self.access_root.resolve())
+            if not any(
+                path == root or path.is_relative_to(root)
+                for root in self.access_roots
+            ):
+                return None
 
             from orchestrator.enterprise.artifacts import ArtifactRegistry
 
@@ -690,7 +705,7 @@ class ToolRegistry:
         if tool_name == "file_read":
             return await execute_file_read(
                 arguments,
-                access_root=self.access_root,
+                access_root=self.access_roots,
                 workspace_dir=self.workspace_dir,
             )
 
@@ -701,7 +716,7 @@ class ToolRegistry:
                 arguments,
                 access_root=self.access_root,
                 workspace_dir=self.workspace_dir,
-                media_roots=self.media_roots,
+                media_roots=[*self.media_roots, *self.access_roots[1:]],
             )
 
         if tool_name == "vision_inspect":
@@ -711,7 +726,7 @@ class ToolRegistry:
                 arguments,
                 access_root=self.access_root,
                 workspace_dir=self.workspace_dir,
-                media_roots=self.media_roots,
+                media_roots=[*self.media_roots, *self.access_roots[1:]],
                 options=opts.get("vision_inspect", {}),
                 secrets=self.secrets,
             )
@@ -720,7 +735,7 @@ class ToolRegistry:
             fw_opts = opts.get("file_write", {})
             return await execute_file_write(
                 arguments,
-                access_root=self.access_root,
+                access_root=self.access_roots,
                 workspace_dir=self.workspace_dir,
                 max_file_size_kb=int(fw_opts.get("max_file_size_kb", 1024)),
             )
@@ -728,14 +743,14 @@ class ToolRegistry:
         if tool_name == "file_list":
             return await execute_file_list(
                 arguments,
-                access_root=self.access_root,
+                access_root=self.access_roots,
                 workspace_dir=self.workspace_dir,
             )
 
         if tool_name == "apply_patch":
             return await execute_apply_patch(
                 arguments,
-                access_root=self.access_root,
+                access_root=self.access_roots,
                 workspace_dir=self.workspace_dir,
             )
 
@@ -765,7 +780,7 @@ class ToolRegistry:
         if tool_name == "background_job_start":
             return await execute_background_job_start(
                 arguments,
-                access_root=self.access_root,
+                access_root=self.access_roots,
                 workspace_dir=self.workspace_dir,
                 audit_context=self._effective_audit_context(),
             )

@@ -723,7 +723,7 @@ class HERv2Adapter(BaseBackend):
             silent=silent,
             retry_policy=self._provider_retry_policy(),
             audit_log=self._audit_log,
-            workzone_ref=str(self.config.workspace_dir.resolve()),
+            workzone_ref=str(self.effective_workdir.resolve()),
             runtime_context=self._runtime_context(),
         )
 
@@ -1368,7 +1368,7 @@ class HERv2Adapter(BaseBackend):
             dream=getattr(self.config, "_her_v2_dream_maintainer", None),
             logger=self.logger,
             retry_policy=self._provider_retry_policy(),
-            workzone_ref=str(self.config.workspace_dir.resolve()),
+            workzone_ref=str(self.effective_workdir.resolve()),
             skills_catalogue=self._direct_skill_catalogue(),
         )
         if wip_journal is not None:
