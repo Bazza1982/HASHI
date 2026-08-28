@@ -25,6 +25,7 @@ from adapters.stream_events import (
     KIND_ACKNOWLEDGEMENT,
     KIND_COMMENTARY,
     KIND_INITIAL_RESOLUTION,
+    KIND_PROVIDER_ACTIVITY,
     KIND_TEXT_DELTA,
     KIND_THINKING,
     KIND_TOOL_END,
@@ -2063,7 +2064,7 @@ class HashiStageProvider(StageProvider):
                     reasoning_chunks.append(trace)
             # Structured JSON answer deltas are internal.  Reasoning and
             # invalid envelope retries are not meaningful execution progress.
-            if event.kind == KIND_TEXT_DELTA:
+            if event.kind in {KIND_TEXT_DELTA, KIND_PROVIDER_ACTIVITY}:
                 return
             if event.kind == KIND_TOOL_END and request.progress_callback is not None:
                 request.progress_callback(event.kind, event.summary, True)

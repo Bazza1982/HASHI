@@ -30,6 +30,11 @@ KIND_REVIEW = "review"
 KIND_VALIDATION = "validation"
 KIND_TESTING = "testing"
 KIND_ERROR = "error"
+KIND_PROVIDER_ACTIVITY = "provider_activity"
+
+# Private HASHI SSE extension used to carry provider liveness through the
+# OpenAI-compatible API gateway without exposing provider reasoning content.
+HASHI_PROVIDER_ACTIVITY_SSE_TYPE = "hashi.provider_activity"
 
 # Canonical presentation owners.  These are deliberately independent of event
 # kinds: a direct-response acknowledgement, for example, has acknowledgement
@@ -55,6 +60,8 @@ DELIVERY_CLASSES = frozenset(
 def legacy_delivery_class(kind: str) -> str:
     """Return the compatibility owner for adapters not yet emitting metadata."""
 
+    if kind == KIND_PROVIDER_ACTIVITY:
+        return DELIVERY_INTERNAL
     if kind == KIND_THINKING:
         return DELIVERY_REASONING
     if kind in {KIND_ACKNOWLEDGEMENT, KIND_COMMENTARY}:

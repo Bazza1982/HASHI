@@ -53,7 +53,12 @@ from orchestrator.multimodal_contract import (
     contains_persistent_inline_media,
     resolve_input_capability,
 )
-from adapters.stream_events import StreamEvent, KIND_TEXT_DELTA
+from adapters.stream_events import (
+    HASHI_PROVIDER_ACTIVITY_SSE_TYPE,
+    KIND_PROVIDER_ACTIVITY,
+    KIND_TEXT_DELTA,
+    StreamEvent,
+)
 
 logger = logging.getLogger("BridgeU.APIGateway")
 
@@ -95,6 +100,17 @@ def available_gateway_models() -> list[str]:
 
 def default_gateway_model() -> str:
     return DEFAULT_API_MODEL
+
+
+def _provider_activity_extension(event: StreamEvent) -> dict[str, str]:
+    """Return the private, content-free SSE representation of real activity."""
+
+    source = str(event.origin or "provider").strip()[:64] or "provider"
+    return {
+        "type": HASHI_PROVIDER_ACTIVITY_SSE_TYPE,
+        "source": source,
+        "activity": "protocol_progress",
+    }
 
 
 @web.middleware
@@ -1626,6 +1642,11 @@ class APIGatewayServer:
             if event.kind == KIND_TEXT_DELTA and event.summary:
                 collected_text.append(event.summary)
                 await write_chunk({"content": event.summary})
+            elif event.kind == KIND_PROVIDER_ACTIVITY:
+                await write_chunk(
+                    {},
+                    hashi=_provider_activity_extension(event),
+                )
 
         try:
             response = await adapter.generate_external_tool_response(
@@ -1818,6 +1839,11 @@ class APIGatewayServer:
             if event.kind == KIND_TEXT_DELTA and event.summary:
                 collected_text.append(event.summary)
                 await write_chunk({"content": event.summary})
+            elif event.kind == KIND_PROVIDER_ACTIVITY:
+                await write_chunk(
+                    {},
+                    hashi=_provider_activity_extension(event),
+                )
 
         try:
             response = await adapter.generate_structured_response(
@@ -2020,6 +2046,31 @@ class APIGatewayServer:
                             "finish_reason": None,
                         }
                     ],
+                }
+                try:
+                    await resp.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                except Exception as exc:
+                    self._observe(
+                        "stream_chunk_write_failed",
+                        gateway_request_id=request_id,
+                        event_index=event_count,
+                        error_type=type(exc).__name__,
+                        elapsed_ms=round((time.time() - t_start) * 1000, 2),
+                    )
+            elif event.kind == KIND_PROVIDER_ACTIVITY:
+                chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(t_start),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": None,
+                        }
+                    ],
+                    "hashi": _provider_activity_extension(event),
                 }
                 try:
                     await resp.write(f"data: {json.dumps(chunk)}\n\n".encode())
