@@ -12,7 +12,11 @@ from adapters.codex_app_server import (
     openai_messages_to_codex_conversation,
     openai_tools_to_codex_dynamic_tools,
 )
-from adapters.stream_events import KIND_TEXT_DELTA
+from adapters.stream_events import (
+    DELIVERY_INTERNAL,
+    KIND_PROVIDER_ACTIVITY,
+    KIND_TEXT_DELTA,
+)
 from tools.schemas import TOOL_SCHEMA_MAP
 
 WEATHER_TOOL = {
@@ -826,9 +830,18 @@ async def test_codex_app_server_returns_final_text_and_usage_in_stream_mode(monk
     assert response.usage.input_tokens == 11
     assert response.usage.output_tokens == 3
     assert response.usage.thinking_tokens == 1
-    assert [(event.kind, event.summary) for event in events] == [
-        (KIND_TEXT_DELTA, "Final answer")
+    activity_events = [
+        event for event in events if event.kind == KIND_PROVIDER_ACTIVITY
     ]
+    assert activity_events
+    assert all(event.delivery_class == DELIVERY_INTERNAL for event in activity_events)
+    assert all(event.origin == "codex-app-server" for event in activity_events)
+    assert all(event.raw_delta == "" for event in activity_events)
+    assert [
+        (event.kind, event.summary)
+        for event in events
+        if event.kind == KIND_TEXT_DELTA
+    ] == [(KIND_TEXT_DELTA, "Final answer")]
     assert fake.thread_params["dynamicTools"] == []
 
 

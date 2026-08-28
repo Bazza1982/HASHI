@@ -10,7 +10,14 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from adapters.base import BackendResponse, TokenUsage
-from adapters.stream_events import KIND_TEXT_DELTA, KIND_TOOL_END, StreamEvent
+from adapters.stream_events import (
+    DELIVERY_INTERNAL,
+    HASHI_PROVIDER_ACTIVITY_SSE_TYPE,
+    KIND_PROVIDER_ACTIVITY,
+    KIND_TEXT_DELTA,
+    KIND_TOOL_END,
+    StreamEvent,
+)
 from orchestrator.api_gateway import (
     API_GATEWAY_MAX_REQUEST_BYTES,
     APIGatewayServer,
@@ -160,9 +167,16 @@ def test_gateway_uses_current_multimodal_error_generation(monkeypatch):
 
 
 class _ExternalAdapter:
-    def __init__(self, *, supports: bool = True, stream_text: str = ""):
+    def __init__(
+        self,
+        *,
+        supports: bool = True,
+        stream_text: str = "",
+        provider_activity: bool = False,
+    ):
         self.supports = supports
         self.stream_text = stream_text
+        self.provider_activity = provider_activity
         self.calls = []
 
     def supports_external_tool_passthrough(self, model=None):
@@ -224,8 +238,20 @@ class _ExternalAdapter:
                 "model": model,
             }
         )
-        if use_streaming and self.stream_text and on_stream_event is not None:
-            await on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary=self.stream_text))
+        if use_streaming and on_stream_event is not None:
+            if self.provider_activity:
+                await on_stream_event(
+                    StreamEvent(
+                        kind=KIND_PROVIDER_ACTIVITY,
+                        summary="private reasoning must not cross the gateway",
+                        delivery_class=DELIVERY_INTERNAL,
+                        origin="codex-app-server",
+                    )
+                )
+            if self.stream_text:
+                await on_stream_event(
+                    StreamEvent(kind=KIND_TEXT_DELTA, summary=self.stream_text)
+                )
         return BackendResponse(
             text=self.stream_text,
             duration_ms=1,
@@ -1102,6 +1128,45 @@ async def test_streaming_external_tools_emit_openai_tool_delta_and_finish_reason
     assert events[-1]["choices"][0]["finish_reason"] == "tool_calls"
     assert raw.rstrip().endswith("data: [DONE]")
     assert adapter.calls[0]["use_streaming"] is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_streams_content_free_private_provider_activity(tmp_path):
+    adapter = _ExternalAdapter(provider_activity=True)
+    server = _server(tmp_path, adapter)
+
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-5.5",
+                "messages": [{"role": "user", "content": "Keep working"}],
+                "tools": [TOOL_SCHEMA],
+                "stream": True,
+            },
+        )
+        raw = await response.text()
+
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in raw.splitlines()
+        if line.startswith("data: {")
+    ]
+    activity_event = next(
+        event
+        for event in events
+        if event.get("hashi", {}).get("type")
+        == HASHI_PROVIDER_ACTIVITY_SSE_TYPE
+    )
+    assert response.status == 200
+    assert activity_event["hashi"] == {
+        "type": HASHI_PROVIDER_ACTIVITY_SSE_TYPE,
+        "source": "codex-app-server",
+        "activity": "protocol_progress",
+    }
+    assert activity_event["choices"][0]["delta"] == {}
+    assert "private reasoning" not in raw
+    assert raw.rstrip().endswith("data: [DONE]")
 
 
 @pytest.mark.asyncio

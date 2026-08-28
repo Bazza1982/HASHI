@@ -28,6 +28,7 @@ from adapters.stream_events import (
     DELIVERY_USER_COMMENTARY,
     KIND_COMMENTARY,
     KIND_INITIAL_RESOLUTION,
+    KIND_PROVIDER_ACTIVITY,
     KIND_REVIEW,
     KIND_THINKING,
     KIND_TOOL_START,
@@ -1635,6 +1636,35 @@ class _CommentaryManager(_FakeManager):
         return backend
 
 
+class _ProviderActivityBackend(_FakeBackend):
+    async def generate_response(
+        self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
+    ):
+        del request_id, is_retry, silent
+        self.prompt = prompt
+        await on_stream_event(
+            StreamEvent(
+                kind=KIND_PROVIDER_ACTIVITY,
+                summary="Provider protocol activity",
+                delivery_class=DELIVERY_INTERNAL,
+                origin="codex-app-server",
+            )
+        )
+        return BackendResponse(
+            text='{"disposition":"COMPLETED","summary":"done"}',
+            duration_ms=1,
+        )
+
+
+class _ProviderActivityManager(_FakeManager):
+    def create_ephemeral_backend(self, engine, target_model=None):
+        assert engine == "openrouter-api"
+        assert target_model == "configured/model"
+        backend = _ProviderActivityBackend(self.system_md)
+        self.backends.append(backend)
+        return backend
+
+
 class _FlakyPersonaBackend(_FakeBackend):
     def __init__(self, manager):
         super().__init__()
@@ -1987,6 +2017,48 @@ async def test_json_repair_uses_isolated_specialist_prompt_and_no_tools():
     assert "configured agent persona" not in backend.sys_prompt
     assert "Do the requested work" not in backend.prompt
     assert "Do not call tools" in backend.sys_prompt
+
+
+@pytest.mark.asyncio
+async def test_hashi_stage_provider_consumes_activity_without_presenting_it():
+    manager = _ProviderActivityManager()
+    forwarded = []
+    observed = []
+
+    async def capture(event):
+        forwarded.append(event)
+
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        on_stream_event=capture,
+    )
+    profile = ProviderProfile(
+        "premium",
+        "openrouter-api",
+        "configured/model",
+        reasoning="provider-high",
+    )
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "provider_activity_callback": observed.append,
+        }
+    )
+
+    result = await provider.invoke(profile, request)
+
+    assert '"summary":"done"' in result.text
+    assert len(observed) == 1
+    assert observed[0]["kind"] == KIND_PROVIDER_ACTIVITY
+    assert observed[0]["content"] == "Provider protocol activity"
+    assert observed[0]["tool_name"] == ""
+    assert forwarded == []
+    assert manager.backends[-1].shutdown_called is True
 
 
 @pytest.mark.asyncio
