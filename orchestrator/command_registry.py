@@ -36,6 +36,16 @@ class RuntimeCallback:
     callback: CommandCallback
 
 
+@dataclass(frozen=True)
+class RuntimeRegistrySnapshot:
+    commands: tuple[RuntimeCommand, ...]
+    callbacks: tuple[RuntimeCallback, ...]
+
+
+_registry_snapshot: RuntimeRegistrySnapshot | None = None
+_registry_source_signature: tuple[Any, ...] | None = None
+
+
 def _iter_command_modules() -> Iterable[str]:
     try:
         package = importlib.import_module("orchestrator.commands")
@@ -70,6 +80,7 @@ def _load_private_command_module(path: Path):
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load private command module: {path.name}")
     module = importlib.util.module_from_spec(spec)
+    module.__hashi_private_command_path__ = str(path)
     sys.modules[module_name] = module
     sys.path.insert(0, str(path.parent))
     try:
@@ -78,6 +89,17 @@ def _load_private_command_module(path: Path):
         with contextlib.suppress(ValueError):
             sys.path.remove(str(path.parent))
     return module
+
+
+def _is_private_command_module(module: Any) -> bool:
+    return bool(getattr(module, "__hashi_private_command_path__", None))
+
+
+def _module_label(module: Any) -> str:
+    private_path = getattr(module, "__hashi_private_command_path__", None)
+    if private_path:
+        return Path(private_path).name
+    return str(getattr(module, "__name__", "unknown"))
 
 
 def _commands_from_module(module) -> Iterable[RuntimeCommand]:
@@ -113,52 +135,89 @@ def _iter_runtime_modules():
             logger.warning("Failed to import private command module %s: %s", path.name, exc)
 
 
-def load_runtime_commands() -> list[RuntimeCommand]:
+def _source_signature() -> tuple[Any, ...]:
+    public_modules = tuple(_iter_command_modules())
+    private_files: list[tuple[str, int | None, int | None]] = []
+    for path in _iter_private_command_files():
+        try:
+            stat = path.stat()
+            private_files.append((str(path.resolve()), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            private_files.append((str(path), None, None))
+    return public_modules, tuple(private_files)
+
+
+def invalidate_runtime_registry_cache() -> None:
+    """Force the next registry read to rebuild its command snapshot."""
+
+    global _registry_snapshot, _registry_source_signature
+    _registry_snapshot = None
+    _registry_source_signature = None
+
+
+def _build_runtime_registry_snapshot() -> RuntimeRegistrySnapshot:
     commands: dict[str, RuntimeCommand] = {}
+    callbacks: list[RuntimeCallback] = []
     for module in _iter_runtime_modules():
-        for command in _commands_from_module(module):
+        module_commands = list(_commands_from_module(module))
+        is_private = _is_private_command_module(module)
+        protected = {
+            command.name
+            for command in module_commands
+            if is_private and command.name in NON_OVERRIDABLE_CORE_COMMANDS
+        }
+        for command in module_commands:
             if command.name in commands:
-                if module.__name__.startswith("_hashi_private_command_"):
+                if is_private:
                     if command.name in NON_OVERRIDABLE_CORE_COMMANDS:
                         logger.warning(
                             "Ignoring private override of protected core command %s from %s",
                             command.name,
-                            module.__name__,
+                            _module_label(module),
                         )
                         continue
                     logger.debug(
                         "Runtime command %s intentionally overridden by private command module %s",
                         command.name,
-                        module.__name__,
+                        _module_label(module),
                     )
                 else:
                     logger.warning(
                         "Runtime command %s overwritten by %s",
                         command.name,
-                        module.__name__,
+                        _module_label(module),
                     )
             commands[command.name] = command
-    return [commands[name] for name in sorted(commands)]
+        module_callbacks = list(_callbacks_from_module(module))
+        if protected and module_callbacks:
+            logger.warning(
+                "Ignoring callbacks from private override of protected core command(s) %s in %s",
+                ", ".join(sorted(protected)),
+                _module_label(module),
+            )
+            continue
+        callbacks.extend(module_callbacks)
+    return RuntimeRegistrySnapshot(
+        commands=tuple(commands[name] for name in sorted(commands)),
+        callbacks=tuple(callbacks),
+    )
+
+
+def _runtime_registry_snapshot() -> RuntimeRegistrySnapshot:
+    global _registry_snapshot, _registry_source_signature
+    signature = _source_signature()
+    if _registry_snapshot is None or signature != _registry_source_signature:
+        _registry_snapshot = _build_runtime_registry_snapshot()
+        _registry_source_signature = signature
+    return _registry_snapshot
+
+
+def load_runtime_commands() -> list[RuntimeCommand]:
+    return list(_runtime_registry_snapshot().commands)
 
 
 def load_runtime_callbacks() -> list[RuntimeCallback]:
-    callbacks: list[RuntimeCallback] = []
-    for module in _iter_runtime_modules():
-        if module.__name__.startswith("_hashi_private_command_"):
-            protected = {
-                command.name
-                for command in _commands_from_module(module)
-                if command.name in NON_OVERRIDABLE_CORE_COMMANDS
-            }
-            if protected:
-                logger.warning(
-                    "Ignoring callbacks from private override of protected core command(s) %s in %s",
-                    ", ".join(sorted(protected)),
-                    module.__name__,
-                )
-                continue
-        callbacks.extend(_callbacks_from_module(module))
-    return callbacks
+    return list(_runtime_registry_snapshot().callbacks)
 
 
 def runtime_command_map() -> dict[str, RuntimeCommand]:

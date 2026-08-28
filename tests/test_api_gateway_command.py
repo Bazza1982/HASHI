@@ -16,6 +16,7 @@ from orchestrator.api_gateway_config import (
     save_api_gateway_config,
 )
 from orchestrator.commands import api as api_command_module
+from orchestrator.commands import api_restart
 from orchestrator.command_registry import load_runtime_callbacks, load_runtime_commands
 
 
@@ -91,10 +92,11 @@ def test_api_gateway_model_list_includes_smoke_tested_gpt56_variants():
 
 
 def test_api_command_module_is_registered():
-    commands = {command.name for command in load_runtime_commands()}
+    commands = {command.name: command for command in load_runtime_commands()}
     callbacks = [callback.pattern for callback in load_runtime_callbacks()]
 
     assert "api" in commands
+    assert commands["api"].callback is api_restart.api_command
     assert r"^api:" in callbacks
 
 

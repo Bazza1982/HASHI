@@ -12,7 +12,7 @@ from orchestrator.api_gateway_config import (
     normalize_api_model,
     save_api_gateway_config,
 )
-from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
+from orchestrator.command_registry import RuntimeCallback
 
 
 USAGE = "Usage: /api [on|off|model <model>]"
@@ -234,13 +234,10 @@ async def api_callback(runtime: Any, update: Any, context: Any) -> None:
             await query.answer()
 
 
-COMMANDS = [
-    RuntimeCommand(
-        name="api",
-        description="Control API gateway on/off/default model",
-        callback=api_command,
-    )
-]
+# The canonical /api command lives in api_restart.py alongside /restart. Keep
+# this legacy callback registered so buttons in older Telegram messages that
+# use the former ``api:`` callback prefix continue to work.
+COMMANDS = []
 
 CALLBACKS = [
     RuntimeCallback(pattern=r"^api:", callback=api_callback),

@@ -8,6 +8,9 @@ import pytest
 from orchestrator import command_registry
 from orchestrator.admin_local_testing import execute_local_command, supported_commands
 from orchestrator.command_registry import (
+    RuntimeCallback,
+    RuntimeCommand,
+    invalidate_runtime_registry_cache,
     load_runtime_callbacks,
     load_runtime_commands,
     runtime_bot_commands,
@@ -136,6 +139,7 @@ def test_private_command_override_is_debug_not_warning(
 def test_session_scoped_queue_command_rejects_private_override_and_callbacks(
     monkeypatch,
     tmp_path,
+    caplog,
 ):
     private_dir = tmp_path / "private_commands"
     private_dir.mkdir()
@@ -154,11 +158,31 @@ def test_session_scoped_queue_command_rejects_private_override_and_callbacks(
     )
     monkeypatch.setenv("HASHI_PRIVATE_COMMAND_DIRS", str(private_dir))
 
-    commands = {command.name: command for command in load_runtime_commands()}
-    callbacks = load_runtime_callbacks()
+    with caplog.at_level(logging.WARNING, logger="BridgeU.CommandRegistry"):
+        commands = {command.name: command for command in load_runtime_commands()}
+        callbacks = load_runtime_callbacks()
+        load_runtime_commands()
+        load_runtime_callbacks()
 
     assert commands["queue"].description != "Unsafe global queue"
     assert all(callback.pattern != r"^queue:" for callback in callbacks)
+    command_warnings = [
+        record.message
+        for record in caplog.records
+        if "protected core command queue" in record.message
+    ]
+    callback_warnings = [
+        record.message
+        for record in caplog.records
+        if "callbacks from private override" in record.message
+    ]
+    assert command_warnings == [
+        "Ignoring private override of protected core command queue from queue_override.py"
+    ]
+    assert callback_warnings == [
+        "Ignoring callbacks from private override of protected core command(s) queue "
+        "in queue_override.py"
+    ]
 
 
 def test_runtime_command_registry_loads_external_private_callbacks(monkeypatch, tmp_path):
@@ -176,6 +200,37 @@ def test_runtime_command_registry_loads_external_private_callbacks(monkeypatch, 
     callbacks = load_runtime_callbacks()
 
     assert any(callback.pattern == r"^private:" for callback in callbacks)
+
+
+def test_runtime_command_registry_reuses_one_snapshot(monkeypatch):
+    imports = 0
+
+    async def callback(runtime, update, context):
+        return None
+
+    module = SimpleNamespace(
+        __name__="orchestrator.commands.sample",
+        COMMANDS=[RuntimeCommand("sample", "Sample", callback)],
+        CALLBACKS=[RuntimeCallback(r"^sample:", callback)],
+    )
+
+    def iter_modules():
+        nonlocal imports
+        imports += 1
+        yield module
+
+    monkeypatch.setattr(command_registry, "_source_signature", lambda: ("stable",))
+    monkeypatch.setattr(command_registry, "_iter_runtime_modules", iter_modules)
+    invalidate_runtime_registry_cache()
+
+    assert [command.name for command in load_runtime_commands()] == ["sample"]
+    assert [callback.pattern for callback in load_runtime_callbacks()] == [r"^sample:"]
+    assert [command.command for command in runtime_bot_commands()] == ["sample"]
+    assert imports == 1
+
+    invalidate_runtime_registry_cache()
+    load_runtime_commands()
+    assert imports == 2
 
 
 @pytest.mark.asyncio

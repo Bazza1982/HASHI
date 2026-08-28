@@ -41,7 +41,7 @@ def test_catalogs_are_complete_and_keep_formal_chinese_agent_term() -> None:
     assert chinese.strings["reboot.all_active"] == "所有已启用的代理"
     assert chinese.strings["reboot.all_running"] == "所有正在运行的代理"
     assert all(
-        "agent" not in value.casefold()
+        "agent" not in value.casefold().replace("{agent}", "")
         for mapping in (chinese.strings, chinese.commands, chinese.titles)
         for value in mapping.values()
     )
