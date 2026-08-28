@@ -50,6 +50,20 @@ class BackendCapabilities:
     input_transports: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     input_limits: Mapping[str, int] = field(default_factory=dict)
     input_capability_source: str = "unknown_fail_closed"
+    # Provider/model output support is independent from input support.  These
+    # dimensions are explicit so an audio-input model is never assumed to
+    # produce audio, use a particular endpoint, or support function calling.
+    output_modalities: frozenset[str] = frozenset({"text"})
+    api_surface: str = "unknown"
+    input_formats: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    output_formats: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    supported_voices: tuple[str, ...] = ()
+    output_streaming: str = "none"
+    provider_output_transcript: bool = False
+    function_calling: bool = False
+    # Provider-neutral policy for models that technically accept text but
+    # require an audio-bearing request shape for a particular route.
+    input_policy: str = "auto"
 
 
 @dataclass
@@ -84,6 +98,30 @@ class BackendResponse:
     provider_request_id: Optional[str] = None
     retry_after_s: Optional[float] = None
     side_effects_possible: bool = False
+    # Provider-neutral output parts.  Durable parts contain asset references,
+    # hashes, and metadata only; inline bytes/base64 are forbidden upstream.
+    content: tuple[Mapping[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.content is None:
+            self.content = ()
+        elif not isinstance(self.content, tuple):
+            self.content = tuple(self.content)
+
+    @property
+    def has_deliverable_content(self) -> bool:
+        if str(self.text or "").strip():
+            return True
+        return any(
+            isinstance(part, Mapping)
+            and str(part.get("type") or "").strip().casefold()
+            in {"text", "audio"}
+            and (
+                bool(str(part.get("text") or "").strip())
+                or bool(str(part.get("asset_id") or "").strip())
+            )
+            for part in self.content
+        )
 
 
 class BaseBackend(ABC):
@@ -111,6 +149,7 @@ class BaseBackend(ABC):
         self.capabilities.input_limits = dict(capability.limits)
         self.capabilities.input_capability_source = capability.source
         self.capabilities.supports_native_vision = capability.supports("image")
+        self._apply_declared_multimodal_capabilities(extra)
         self.image_input_mode = (
             image_input
             if configured_image_input is not None
@@ -125,6 +164,69 @@ class BaseBackend(ABC):
         # cumulative count of output events (stdout lines for CLI, 1 for HTTP).
         # Codex increments this per stdout line; others increment once on start.
         self.output_line_count: int = 0
+
+    @staticmethod
+    def _configured_tuple(value: Any) -> tuple[str, ...]:
+        if isinstance(value, str):
+            values = [value]
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            values = list(value)
+        else:
+            values = []
+        normalized: list[str] = []
+        for item in values:
+            text = str(item or "").strip().casefold()
+            if text and text not in normalized:
+                normalized.append(text)
+        return tuple(normalized)
+
+    @classmethod
+    def _configured_formats(cls, value: Any) -> dict[str, tuple[str, ...]]:
+        if not isinstance(value, Mapping):
+            return {}
+        formats: dict[str, tuple[str, ...]] = {}
+        for modality, entries in value.items():
+            normalized = cls._configured_tuple(entries)
+            if normalized:
+                formats[str(modality or "").strip().casefold()] = normalized
+        return formats
+
+    def _apply_declared_multimodal_capabilities(
+        self, extra: Mapping[str, Any]
+    ) -> None:
+        if "input_policy" in extra:
+            input_policy = str(extra.get("input_policy") or "auto").strip().casefold()
+            if input_policy not in {"auto", "audio_required"}:
+                raise ValueError(
+                    "input_policy must be one of: auto, audio_required"
+                )
+            self.capabilities.input_policy = input_policy
+        output_modalities = self._configured_tuple(extra.get("output_modalities"))
+        if output_modalities:
+            self.capabilities.output_modalities = frozenset(output_modalities)
+        self.capabilities.api_surface = str(
+            extra.get("api_surface") or self.capabilities.api_surface
+        ).strip().casefold()
+        input_formats = self._configured_formats(extra.get("input_formats"))
+        if input_formats:
+            self.capabilities.input_formats = input_formats
+        output_formats = self._configured_formats(extra.get("output_formats"))
+        if output_formats:
+            self.capabilities.output_formats = output_formats
+        voices = self._configured_tuple(
+            extra.get("supported_voices") or extra.get("native_audio_voices")
+        )
+        if voices:
+            self.capabilities.supported_voices = voices
+        self.capabilities.output_streaming = str(
+            extra.get("output_streaming") or self.capabilities.output_streaming
+        ).strip().casefold()
+        if "provider_output_transcript" in extra:
+            self.capabilities.provider_output_transcript = bool(
+                extra.get("provider_output_transcript")
+            )
+        if "function_calling" in extra:
+            self.capabilities.function_calling = bool(extra.get("function_calling"))
 
     def resolve_input_capability(self):
         """Resolve the current exact model on demand.

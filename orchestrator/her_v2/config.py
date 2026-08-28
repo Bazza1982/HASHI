@@ -171,6 +171,15 @@ class HERv2Config:
     route_model_slots: Mapping[Route, str] = field(default_factory=dict)
     route_targets: Mapping[Route, ProviderTarget] = field(default_factory=dict)
     route_reasoning: Mapping[Route, str] = field(default_factory=dict)
+    # Voice-origin routing is an overlay, never a replacement for the normal
+    # Quick/Pro and task-route choices.  ``voice_origin_active`` is a
+    # request-local snapshot set by the outer HASHI adapter.
+    voice_route_targets: Mapping[Route, ProviderTarget] = field(default_factory=dict)
+    voice_fallback_text_target: ProviderTarget | None = None
+    voice_triage_input_policy: str = "auto"
+    voice_tools_enabled: bool = False
+    voice_options: Mapping[str, Any] = field(default_factory=dict)
+    voice_origin_active: bool = False
     review_limits: Mapping[Effort, int] = field(
         default_factory=lambda: {
             Effort.ZERO: 0,
@@ -213,6 +222,34 @@ class HERv2Config:
                 "the Direct route always uses the Quick model slot and cannot "
                 "select a custom target"
             )
+        invalid_voice_routes = set(self.voice_route_targets).difference(
+            {Route.DIRECT, Route.IMMEDIATE_RESPONSE}
+        )
+        if invalid_voice_routes:
+            raise HERv2ConfigurationError(
+                "voice routes may target only direct and immediate_response"
+            )
+        if self.voice_triage_input_policy not in {"auto", "native", "transcript"}:
+            raise HERv2ConfigurationError(
+                "voice triage_input_policy must be auto, native, or transcript"
+            )
+        if self.voice_tools_enabled:
+            raise HERv2ConfigurationError(
+                "audio-model tools are reserved but disabled in this proof of concept"
+            )
+        if self.routing_mode == "single":
+            normal_providers = {
+                target.engine for target in self.targets.values()
+            } or {profile.engine for profile in self.profiles.values()}
+            voice_providers = {
+                target.engine for target in self.voice_route_targets.values()
+            }
+            if self.voice_fallback_text_target is not None:
+                voice_providers.add(self.voice_fallback_text_target.engine)
+            if voice_providers.difference(normal_providers):
+                raise HERv2ConfigurationError(
+                    "cross-provider voice routes require HER v2 Hybrid mode"
+                )
         if self.user_idle_timeout_s <= 0:
             raise HERv2ConfigurationError("idle-progress timeout must be positive")
         if self.audit_failure_terminal not in {
@@ -477,6 +514,53 @@ class HERv2Config:
                 )
             route_reasoning[route] = reasoning
 
+        voice_routes_raw = raw.get("voice_routes") or {}
+        if not isinstance(voice_routes_raw, Mapping):
+            raise HERv2ConfigurationError("her_v2.voice_routes must be an object")
+
+        def _voice_target(key: str) -> ProviderTarget | None:
+            value = voice_routes_raw.get(key)
+            if value is None or value == "":
+                return None
+            if not isinstance(value, Mapping):
+                raise HERv2ConfigurationError(
+                    f"her_v2.voice_routes.{key} must be an object"
+                )
+            return ProviderTarget(
+                engine=str(
+                    value.get("provider") or value.get("engine") or ""
+                ).strip(),
+                model=str(value.get("model") or "").strip(),
+            )
+
+        voice_route_targets: dict[Route, ProviderTarget] = {}
+        direct_voice_target = _voice_target("direct_target")
+        immediate_voice_target = _voice_target("immediate_target")
+        if direct_voice_target is not None:
+            voice_route_targets[Route.DIRECT] = direct_voice_target
+        if immediate_voice_target is not None:
+            voice_route_targets[Route.IMMEDIATE_RESPONSE] = immediate_voice_target
+        voice_fallback_text_target = _voice_target("fallback_text_target")
+        voice_triage_input_policy = str(
+            voice_routes_raw.get("triage_input_policy") or "auto"
+        ).strip().casefold()
+        voice_tools_enabled = _strict_bool(
+            voice_routes_raw.get("tools_enabled", False),
+            "voice_routes.tools_enabled",
+        )
+        known_voice_keys = {
+            "direct_target",
+            "immediate_target",
+            "fallback_text_target",
+            "triage_input_policy",
+            "tools_enabled",
+        }
+        voice_options = {
+            str(key): value
+            for key, value in voice_routes_raw.items()
+            if key not in known_voice_keys
+        }
+
         routing_mode = str(raw.get("routing_mode") or "").strip().lower()
         if not routing_mode:
             configured_engines = {target.engine for target in targets.values()}
@@ -506,6 +590,11 @@ class HERv2Config:
             route_model_slots=route_model_slots,
             route_targets=route_targets,
             route_reasoning=route_reasoning,
+            voice_route_targets=voice_route_targets,
+            voice_fallback_text_target=voice_fallback_text_target,
+            voice_triage_input_policy=voice_triage_input_policy,
+            voice_tools_enabled=voice_tools_enabled,
+            voice_options=voice_options,
             review_limits=review_limits,
             user_idle_timeout_s=float(raw.get("user_idle_timeout_s", 1800.0)),
             audit_failure_terminal=_audit_failure_terminal(
@@ -536,6 +625,28 @@ class HERv2Config:
             model = slot_target.model
         elif slot in {"fast", "pro"} and self.slot_models.get(slot):
             model = self.slot_models[slot]
+        ordinary_target = ProviderTarget(engine=engine, model=model)
+        options = dict(profile.options)
+        if self.voice_origin_active and route in {
+            Route.DIRECT,
+            Route.IMMEDIATE_RESPONSE,
+        }:
+            voice_target = self.voice_route_targets.get(route)
+            if voice_target is not None:
+                engine = voice_target.engine
+                model = voice_target.model
+            fallback_target = self.voice_fallback_text_target or ordinary_target
+            options.update(dict(self.voice_options))
+            options.update(
+                {
+                    "_native_audio_route": True,
+                    "_voice_fallback_provider": fallback_target.engine,
+                    "_voice_fallback_model": fallback_target.model,
+                    "audio_model_tools": False,
+                }
+            )
+        elif self.voice_origin_active and stage is Stage.TRIAGE:
+            options["_voice_triage_input_policy"] = self.voice_triage_input_policy
         reasoning = self.route_reasoning.get(route)
         if reasoning is None:
             reasoning = self.stage_reasoning.get(stage)
@@ -543,7 +654,53 @@ class HERv2Config:
             # Zero is orchestration complexity, not a provider effort value.
             # Its one Direct call has an independent provider default.
             reasoning = "high" if route is Route.DIRECT else profile.reasoning
-        return replace(profile, engine=engine, model=model, reasoning=reasoning)
+        return replace(
+            profile,
+            engine=engine,
+            model=model,
+            reasoning=reasoning,
+            options=options,
+        )
+
+    def activate_voice_origin(
+        self, policy: Mapping[str, Any] | None = None
+    ) -> HERv2Config:
+        """Return one immutable voice-overlay snapshot for the current Turn."""
+
+        resolved_policy = dict(policy or {})
+        targets = dict(self.voice_route_targets)
+        provider = str(resolved_policy.get("provider") or "").strip()
+        model = str(resolved_policy.get("model") or "").strip()
+        if provider or model:
+            if not provider or not model:
+                raise HERv2ConfigurationError(
+                    "native voice provider and model must be configured together"
+                )
+            target = ProviderTarget(engine=provider, model=model)
+            targets[Route.DIRECT] = target
+            targets[Route.IMMEDIATE_RESPONSE] = target
+        options = dict(self.voice_options)
+        voice = str(resolved_policy.get("voice") or "").strip()
+        audio_format = str(resolved_policy.get("format") or "").strip().casefold()
+        if voice:
+            options["native_audio_voice"] = voice
+        if audio_format:
+            options["native_audio_format"] = audio_format
+        retention = resolved_policy.get("retention_seconds")
+        if retention is not None:
+            options["native_audio_retention_seconds"] = retention
+        fallback = str(
+            resolved_policy.get("fallback") or "local_chain"
+        ).strip().casefold()
+        options["_voice_fallback_enabled"] = fallback != "native_only"
+        options["audio_model_tools"] = False
+        return replace(
+            self,
+            voice_route_targets=targets,
+            voice_options=options,
+            voice_tools_enabled=False,
+            voice_origin_active=True,
+        )
 
     def profile_for_name(self, name: str) -> ProviderProfile:
         profile_name = str(name or "").strip()
@@ -588,6 +745,20 @@ class HERv2Config:
                 candidates.append(self.profile_for_route(route))
             except HERv2ConfigurationError:
                 continue
+        for route, target in self.voice_route_targets.items():
+            base = self.profile_for(ROUTE_STAGES[route])
+            candidates.append(
+                replace(base, engine=target.engine, model=target.model)
+            )
+        if self.voice_fallback_text_target is not None:
+            base = self.profile_for(Stage.DIRECT)
+            candidates.append(
+                replace(
+                    base,
+                    engine=self.voice_fallback_text_target.engine,
+                    model=self.voice_fallback_text_target.model,
+                )
+            )
         result: list[ProviderProfile] = []
         seen: set[tuple[str, str]] = set()
         for profile in candidates:

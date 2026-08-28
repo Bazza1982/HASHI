@@ -34,20 +34,21 @@ from orchestrator import (
 )
 from orchestrator import telegram_delivery_failover as failover
 from orchestrator.canonical_audit import CanonicalAuditStore
+from orchestrator.session_store import SessionStore
 
 
 class _Logger:
     def __init__(self):
         self.messages = []
 
-    def info(self, message):
-        self.messages.append(message)
+    def info(self, message, *args):
+        self.messages.append(message % args if args else message)
 
-    def warning(self, message):
-        self.messages.append(message)
+    def warning(self, message, *args):
+        self.messages.append(message % args if args else message)
 
-    def error(self, message):
-        self.messages.append(message)
+    def error(self, message, *args):
+        self.messages.append(message % args if args else message)
 
 
 class _ContextAssembler:
@@ -2712,6 +2713,88 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat():
 
 
 @pytest.mark.asyncio
+async def test_voice_origin_delivers_native_audio_and_companion_text_without_tts():
+    runtime = _runtime()
+    runtime.media_dir = runtime.global_config.project_root / "media"
+    runtime.media_dir.mkdir(parents=True, exist_ok=True)
+    runtime.session_store = SessionStore.from_global_config(runtime.global_config)
+    session = runtime.session_store.create_session(
+        owner_id="user:123", agent_id=runtime.name
+    )
+    item = _item(
+        request_id="req-native-terminal",
+        prompt="voice turn",
+        session_id=session["session_id"],
+        owner_id="user:123",
+        request_metadata={"voice_origin": True},
+    )
+    asset = runtime.session_store.audio_assets.create(
+        b"OggS" + b"\0" * 64,
+        owner_id="",
+        session_id="",
+        direction="output",
+        mime_type="audio/ogg",
+        audio_format="ogg",
+        correlation={"request_id": item.request_id},
+    )
+    runtime.voice_manager = SimpleNamespace(
+        native_policy={"reply_content": "audio_and_text"},
+        ffmpeg_cmd="ffmpeg",
+    )
+    sent_voice = []
+
+    async def _send_voice(**kwargs):
+        sent_voice.append(kwargs)
+        return SimpleNamespace(message_id=88)
+
+    runtime.app.bot.send_voice = _send_voice
+    response = SimpleNamespace(
+        text="Native transcript.",
+        content=(
+            {
+                "type": "text",
+                "text": "Native transcript.",
+                "provenance": "provider_audio_transcript",
+            },
+            {
+                "type": "audio",
+                "asset_id": asset["asset_id"],
+                "mime_type": "audio/ogg",
+                "format": "ogg",
+                "sha256": asset["sha256"],
+            },
+        ),
+        stream_metadata={},
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        item,
+        response,
+        visible_text="Native transcript.",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert runtime.sent_message["text"] == "Native transcript."
+    assert len(sent_voice) == 1
+    assert sent_voice[0]["chat_id"] == item.chat_id
+    assert runtime.voice_replies == []
+    metadata, payload = runtime.session_store.audio_asset_bytes(
+        session_id=session["session_id"],
+        owner_id="user:123",
+        asset_id=asset["asset_id"],
+    )
+    assert metadata["lease_count"] == 0
+    assert payload.startswith(b"OggS")
+
+
+@pytest.mark.asyncio
 async def test_handle_success_delivery_writes_correlated_her_v2_transport_receipt():
     runtime = _runtime()
     item = _item(request_id="req-her-v2-receipt", prompt="user text")
@@ -2962,13 +3045,22 @@ async def test_her_v2_stream_callback_returns_receipts_and_resolves_provisional_
 
 
 @pytest.mark.asyncio
-async def test_quiet_mode_defers_initial_resolution_to_audible_final_delivery():
+async def test_quiet_mode_keeps_initial_resolution_available_and_silent():
     runtime = _runtime()
     runtime.config.active_backend = "her-v2"
     runtime.backend_manager.current_backend.effort = "medium"
     runtime._commentary = True
     runtime._notify_mode = "quiet"
     telegram_stream_policy.set_typing_enabled(runtime, False)
+
+    async def _send_text(chat_id, text, **kwargs):
+        return await runtime.app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=kwargs.get("parse_mode"),
+        )
+
+    runtime._send_text = _send_text
 
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
@@ -2977,7 +3069,92 @@ async def test_quiet_mode_defers_initial_resolution_to_audible_final_delivery():
         audit_collector=None,
     )
 
-    assert feedback.on_stream_event.supports_initial_resolution is False
+    assert feedback.on_stream_event.supports_initial_resolution is True
+
+
+@pytest.mark.asyncio
+async def test_required_native_audio_immediate_ignores_commentary_and_uses_quiet_delivery(
+    tmp_path,
+):
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "medium"
+    runtime._commentary = False
+    runtime._notify_mode = "quiet"
+    runtime.media_dir = tmp_path / "media"
+    runtime.media_dir.mkdir(parents=True, exist_ok=True)
+    runtime.session_store = SessionStore.from_global_config(runtime.global_config)
+    session = runtime.session_store.create_session(
+        owner_id="user:123", agent_id=runtime.name
+    )
+    runtime.voice_manager = SimpleNamespace(
+        native_policy={"reply_content": "audio_and_text"},
+        ffmpeg_cmd="ffmpeg",
+    )
+    asset = runtime.session_store.audio_assets.create(
+        b"OggS" + b"\0" * 64,
+        owner_id="",
+        session_id="",
+        direction="output",
+        mime_type="audio/ogg",
+        audio_format="ogg",
+        correlation={"request_id": "req-native-immediate"},
+    )
+    sent_voice = []
+
+    async def _send_voice(**kwargs):
+        sent_voice.append(kwargs)
+        return SimpleNamespace(message_id=99)
+
+    async def _send_text(chat_id, text, **kwargs):
+        runtime.sent_message = {
+            "chat_id": chat_id,
+            "text": text,
+            **kwargs,
+        }
+        return SimpleNamespace(message_id=100)
+
+    runtime.app.bot.send_voice = _send_voice
+    runtime._send_text = _send_text
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(
+            request_id="req-native-immediate",
+            session_id=session["session_id"],
+            owner_id="user:123",
+        ),
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    accepted = await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT,
+            summary="Native transcript.",
+            event_id="turn-native:immediate",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_v2",
+            phase="immediate",
+            required=True,
+            metadata={
+                "content": [
+                    {
+                        "type": "audio",
+                        "asset_id": asset["asset_id"],
+                        "mime_type": "audio/ogg",
+                        "format": "ogg",
+                        "sha256": asset["sha256"],
+                    }
+                ]
+            },
+        )
+    )
+
+    assert accepted is True
+    assert len(sent_voice) == 1
+    assert runtime.sent_message["text"] == "Native transcript."
+    assert runtime.sent_message["_purpose"] == "task_acknowledgement"
 
 
 @pytest.mark.asyncio

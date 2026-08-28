@@ -164,24 +164,39 @@ def accept_request(
     )
     if str(source or "").strip().lower() in _INTERNAL_NON_CHAT_SOURCES:
         return session, None, resolved_owner, surface, channel_key
-    blocks = None
-    if isinstance(request_content, Mapping) and isinstance(request_content.get("content"), list):
+    metadata = dict(request_metadata or {})
+    blocks = metadata.get("session_message_content")
+    if isinstance(blocks, list):
+        blocks = [dict(block) for block in blocks if isinstance(block, Mapping)]
+    elif isinstance(request_content, Mapping) and isinstance(request_content.get("content"), list):
         blocks = [
             dict(block)
             for block in request_content["content"]
             if isinstance(block, Mapping)
         ]
+    else:
+        blocks = None
+    persistent_text = (
+        str(metadata.get("session_message_text") or "")
+        if "session_message_text" in metadata
+        else prompt
+    )
     accepted = ensure_store(runtime).accept_run(
         session_id=session["session_id"],
         owner_id=resolved_owner,
         agent_id=runtime.name,
         request_id=request_id,
-        text=prompt,
+        text=persistent_text,
         source=source,
         idempotency_key=str(idempotency_key or f"legacy:{request_id}"),
-        execution_mode=str((request_metadata or {}).get("execution_mode") or "") or None,
+        execution_mode=str(metadata.get("execution_mode") or "") or None,
         content=blocks,
-        parent_run_id=str((request_metadata or {}).get("parent_run_id") or "") or None,
+        parent_run_id=str(metadata.get("parent_run_id") or "") or None,
+        response_preferences=(
+            metadata.get("response_preferences")
+            if isinstance(metadata.get("response_preferences"), Mapping)
+            else None
+        ),
     )
     return session, accepted, resolved_owner, surface, channel_key
 
@@ -445,6 +460,11 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
         request_id,
         success=success,
         assistant_text=str(payload.get("text") or "") or None,
+        assistant_content=(
+            payload.get("content")
+            if isinstance(payload.get("content"), (list, tuple))
+            else None
+        ),
         assistant_source=_active_engine(runtime) or runtime.name,
         error_text=str(payload.get("error") or "") or None,
     )

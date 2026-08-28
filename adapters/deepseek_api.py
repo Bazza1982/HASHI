@@ -74,7 +74,15 @@ class DeepSeekAdapter(OpenRouterAdapter):
         tool_tiers: list[str] | None = ...,
         *,
         excluded_tool_names: frozenset[str] = frozenset(),
+        audio_output=None,
+        allow_tools: bool = True,
     ) -> dict:
+        # OpenRouter owns the optional native-audio request extension.  The
+        # DeepSeek compatibility surface remains text/image-only, but accepts
+        # the additive keyword so inherited request orchestration stays
+        # substitutable when no audio output profile was selected.
+        if audio_output is not None:
+            raise ValueError("DeepSeek does not support native audio output")
         payload: dict = {
             "model": self.config.model,
             "messages": messages,
@@ -95,7 +103,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
         if use_streaming:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
-        if self.tool_registry:
+        if allow_tools and self.tool_registry:
             tiers = self.DEFAULT_TOOL_TIERS if tool_tiers is ... else tool_tiers
             tool_defs = self.tool_registry.get_tool_definitions(tiers=tiers)
             if excluded_tool_names:

@@ -936,11 +936,13 @@ def safevoice_menu_text(*, enabled: bool) -> str:
         "🛡️",
         "Safe voice",
         current=f"<b>{status_label(enabled)}</b>",
-        facts=["<b>Scope</b> · incoming Telegram voice messages"],
+        facts=["<b>Scope</b> · Triage, fallback, and actionable voice paths"],
         consequence=(
-            "Voice transcripts require confirmation before being sent to the agent."
+            "Confirmation is requested only when another model path will "
+            "classify, act on, or fall back through the voice. No-tool native "
+            "audio chat remains direct."
             if enabled
-            else "Voice transcripts are sent directly to the agent."
+            else "Voice inputs and local transcripts are released automatically."
         ),
         action="Choose below or use <code>/safevoice on|off</code>. Changes persist in this workspace.",
     )

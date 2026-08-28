@@ -33,7 +33,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("habit", "cmd_habit", "View and manage HER habits", "tools"),
     CommandSpec("dream", "cmd_dream", "Maintain HER habits on a schedule", "tools"),
     CommandSpec("credit", "cmd_credit", "Check API credit/usage", "tools", sensitive=True),
-    CommandSpec("voice", "cmd_voice", "Toggle native voice replies", "session"),
+    CommandSpec("voice", "cmd_voice", "Configure voice replies", "session"),
     CommandSpec("safevoice", "cmd_safevoice", "Toggle voice confirmation safety layer", "session"),
     CommandSpec("say", "cmd_say", "Read the last assistant reply as voice", "session"),
     CommandSpec("loop", "cmd_loop", "Create/manage recurring loop tasks", "tools"),

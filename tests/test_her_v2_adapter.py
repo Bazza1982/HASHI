@@ -16,6 +16,7 @@ from adapters.her_v2 import (
     HashiStageProvider,
     HERv2Adapter,
     _AdapterDelivery,
+    _ExecutionStageCompactionProvider,
     _backend_response_error,
 )
 from adapters.ollama_api import OllamaAdapter
@@ -76,6 +77,34 @@ def _profiles():
         }
         for name in ("lightweight", "triage", "premium", "reviewer", "orchestrator")
     }
+
+
+@pytest.mark.asyncio
+async def test_execution_compaction_wrapper_preserves_optional_provider_contracts():
+    class _Provider:
+        async def resolve_stage_modalities(self, profile):
+            return {"profile": profile}
+
+        async def materialize_text_audio(self, **kwargs):
+            return dict(kwargs)
+
+        async def cleanup_text_audio(self):
+            return "cleaned"
+
+    wrapper = _ExecutionStageCompactionProvider(_Provider(), lambda: None)
+    profile = ProviderProfile("lightweight", "test", "model")
+
+    assert await wrapper.resolve_stage_modalities(profile) == {"profile": profile}
+    assert await wrapper.materialize_text_audio(
+        text="hello",
+        turn_id="turn-1",
+        request_ref="hashi-request:req-1",
+    ) == {
+        "text": "hello",
+        "turn_id": "turn-1",
+        "request_ref": "hashi-request:req-1",
+    }
+    assert await wrapper.cleanup_text_audio() == "cleaned"
 
 
 @pytest.mark.parametrize(

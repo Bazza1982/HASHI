@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import ssl
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -79,12 +80,15 @@ from orchestrator.her_v2.retry import (
 from orchestrator.multimodal_contract import (
     MultimodalContractError,
     attachment_manifest,
+    canonical_request_content,
     native_attachment_reference_aliases,
     route_request_content,
     routing_decisions_payload,
+    request_content_is_voice_origin,
     subset_request_content,
     validate_authorized_media_references,
 )
+from orchestrator.voice_transcript_gate import await_authorized_transcript
 from tools.meter_cost import PerCallUsageLineItem
 from tools.token_tracker import resolve_cost_source
 
@@ -1394,6 +1398,7 @@ class _AdapterDelivery(DeliveryPort):
         provenance: str = "",
         detail: str = "",
         delivery_id: str = "",
+        content: tuple[Mapping[str, Any], ...] = (),
     ) -> DeliveryReceipt:
         if kind in {"commentary", "draft"}:
             raise ValueError("raw commentary cannot enter the HASHI transport boundary")
@@ -1436,6 +1441,7 @@ class _AdapterDelivery(DeliveryPort):
                 provenance=provenance or "model_authored",
                 detail=detail,
                 delivery_id=delivery_id,
+                metadata={"content": [dict(part) for part in content]},
             )
         )
         if kind in {"final", "clarification"}:
@@ -1552,6 +1558,7 @@ class HashiStageProvider(StageProvider):
         retry_policy: ProviderRetryPolicy | None = None,
         audit_log: DurableAuditLog | None = None,
         workzone_ref: str = "",
+        runtime_context: Any = None,
     ) -> None:
         self.backend_manager = backend_manager
         self.tool_registry = tool_registry
@@ -1560,6 +1567,7 @@ class HashiStageProvider(StageProvider):
         self.retry_policy = retry_policy or DEFAULT_PROVIDER_RETRY_POLICY
         self.audit_log = audit_log
         self.workzone_ref = str(workzone_ref or "")
+        self.runtime_context = runtime_context
         self._persona_invocation_serial = 0
         self._persona_audit_contexts: dict[str, tuple[str, str]] = {}
         self.logger = logging.getLogger("HASHI.HERv2.StageProvider")
@@ -1567,10 +1575,280 @@ class HashiStageProvider(StageProvider):
         self.cost_usd = 0.0
         self.tool_call_count = 0
         self.tool_loop_count = 0
+        self._stage_modality_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._derived_text_audio_cache: dict[str, Mapping[str, Any]] = {}
+        self._derived_text_audio_paths: set[Path] = set()
+        self._derived_text_audio_lock = asyncio.Lock()
         # Per-stage cost line items (Zelda /meter contract).  Populated at the
         # moment each stage/Persona invocation returns, while the real
         # profile.engine / profile.model / stage are still known.
         self.usage_line_items: list[PerCallUsageLineItem] = []
+
+    async def resolve_stage_modalities(
+        self, profile: ProviderProfile
+    ) -> Mapping[str, Any]:
+        """Resolve the exact stage model's input/output contract.
+
+        Stage targets can select a different model from the Agent's active
+        backend, so this probe uses the same ephemeral-backend selection and
+        option overlay as the real invocation.  It initializes no provider
+        connection and is cached for the lifetime of this Turn.
+        """
+
+        options_fingerprint = hashlib.sha256(
+            json.dumps(
+                dict(profile.options),
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        cache_key = (profile.engine, profile.model, options_fingerprint)
+        cached = self._stage_modality_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
+        try:
+            backend = self.backend_manager.create_ephemeral_backend(
+                profile.engine, target_model=profile.model
+            )
+        except Exception as exc:
+            raise StageInvocationError(
+                "cannot resolve configured stage modality contract for "
+                f"{profile.engine}/{profile.model}: {exc}",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description=(
+                    "The configured stage model's input capability could not "
+                    "be resolved."
+                ),
+            ) from exc
+
+        try:
+            backend_extra = dict(getattr(backend.config, "extra", None) or {})
+            backend_extra.update(dict(profile.options))
+            backend.config.extra = backend_extra
+            apply_multimodal = getattr(
+                backend, "_apply_declared_multimodal_capabilities", None
+            )
+            if callable(apply_multimodal):
+                apply_multimodal(backend_extra)
+            capability_resolver = getattr(backend, "resolve_input_capability", None)
+            capability = (
+                capability_resolver()
+                if callable(capability_resolver)
+                else getattr(backend, "input_capability", None)
+            )
+            if capability is None:
+                raise StageInvocationError(
+                    "stage backend exposes no exact input capability",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                    human_description=(
+                        "The configured stage model exposes no exact input "
+                        "capability."
+                    ),
+                )
+            backend_capabilities = getattr(backend, "capabilities", None)
+            resolved = {
+                "input_modalities": tuple(sorted(capability.input_modalities)),
+                "output_modalities": tuple(
+                    sorted(
+                        getattr(
+                            backend_capabilities,
+                            "output_modalities",
+                            frozenset({"text"}),
+                        )
+                        or ()
+                    )
+                ),
+                "input_policy": str(
+                    getattr(backend_capabilities, "input_policy", "auto") or "auto"
+                )
+                .strip()
+                .casefold(),
+                "source": str(getattr(capability, "source", "unknown")),
+            }
+            self._stage_modality_cache[cache_key] = dict(resolved)
+            return resolved
+        except StageInvocationError:
+            raise
+        except Exception as exc:
+            raise StageInvocationError(
+                "invalid stage modality contract for "
+                f"{profile.engine}/{profile.model}: {exc}",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description=(
+                    "The configured stage model has an invalid input/output "
+                    "modality declaration."
+                ),
+            ) from exc
+        finally:
+            with suppress(Exception):
+                await backend.shutdown()
+
+    async def materialize_text_audio(
+        self,
+        *,
+        text: str,
+        turn_id: str,
+        request_ref: str,
+    ) -> Mapping[str, Any]:
+        """Create one request-scoped TTS transport asset for a text Turn."""
+
+        authoritative_text = str(text or "").strip()
+        if not authoritative_text:
+            raise StageInvocationError(
+                "text-to-audio adaptation received no authoritative text",
+                retryable=False,
+                code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                human_description=(
+                    "The text request could not be converted to the audio input "
+                    "required by the configured model."
+                ),
+            )
+        cache_key = hashlib.sha256(authoritative_text.encode("utf-8")).hexdigest()
+        async with self._derived_text_audio_lock:
+            cached = self._derived_text_audio_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+            voice_manager = getattr(self.runtime_context, "voice_manager", None)
+            synthesizer = getattr(voice_manager, "synthesize_reply", None)
+            if not callable(synthesizer):
+                raise StageInvocationError(
+                    "no HASHI TTS converter is available for text input adaptation",
+                    retryable=False,
+                    code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                    human_description=(
+                        "The configured model requires audio input, but HASHI's "
+                        "text-to-audio converter is unavailable."
+                    ),
+                )
+            agent_name = str(
+                getattr(self.runtime_context, "name", "hashi") or "hashi"
+            )
+            try:
+                asset = await synthesizer(
+                    agent_name,
+                    f"{turn_id}-input-adaptation",
+                    authoritative_text,
+                    max_retries=0,
+                    force=True,
+                    max_chars_override=len(authoritative_text) + 1,
+                )
+            except Exception as exc:
+                raise StageInvocationError(
+                    f"text-to-audio input conversion failed: {exc}",
+                    retryable=False,
+                    code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                    human_description=(
+                        "The text request could not be converted to the audio input "
+                        "required by the configured model."
+                    ),
+                ) from exc
+            if asset is None:
+                raise StageInvocationError(
+                    "text-to-audio input conversion produced no asset",
+                    retryable=False,
+                    code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                    human_description=(
+                        "The text request could not be converted to the audio input "
+                        "required by the configured model."
+                    ),
+                )
+
+            audio_path = Path(asset.ogg_path).expanduser().resolve()
+            try:
+                payload = audio_path.read_bytes()
+            except OSError as exc:
+                raise StageInvocationError(
+                    f"text-to-audio transport asset is unavailable: {exc}",
+                    retryable=False,
+                    code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                    human_description=(
+                        "HASHI created no readable audio asset for the configured "
+                        "model input."
+                    ),
+                ) from exc
+            if not payload:
+                raise StageInvocationError(
+                    "text-to-audio transport asset is empty",
+                    retryable=False,
+                    code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                    human_description=(
+                        "HASHI created an empty audio asset for the configured "
+                        "model input."
+                    ),
+                )
+
+            for candidate in {
+                audio_path,
+                audio_path.with_suffix(".mp3"),
+                audio_path.with_suffix(".wav"),
+            }:
+                if candidate.exists():
+                    self._derived_text_audio_paths.add(candidate)
+            content = canonical_request_content(
+                [
+                    {
+                        "type": "media",
+                        "item_index": 1,
+                        "attachment_id": f"derived-tts-{cache_key[:24]}",
+                        "modality": "audio",
+                        "kind": "derived_tts",
+                        "semantic_role": "audio_attachment",
+                        "mime_type": str(asset.mime_type or "audio/ogg"),
+                        "filename": audio_path.name,
+                        "caption": "",
+                        "local_ref": str(audio_path),
+                        "size_bytes": len(payload),
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                        "transport": {},
+                    }
+                ]
+            )
+            self._derived_text_audio_cache[cache_key] = content
+            return content
+
+    async def cleanup_text_audio(self) -> None:
+        """Delete request-scoped TTS transport files after every stage settles."""
+
+        paths = tuple(self._derived_text_audio_paths)
+        self._derived_text_audio_paths.clear()
+        self._derived_text_audio_cache.clear()
+        for path in paths:
+            with suppress(OSError):
+                path.unlink()
+
+    def _native_voice_state(self, request: StageRequest) -> dict[str, Any] | None:
+        if not request_content_is_voice_origin(request.request_content):
+            return None
+        request_id = str(request.request_ref or "")
+        if request_id.startswith("hashi-request:"):
+            request_id = request_id.split(":", 1)[1]
+        registry = getattr(self.runtime_context, "_native_voice_transcripts", None)
+        state = registry.get(request_id) if isinstance(registry, dict) else None
+        if not isinstance(state, dict):
+            manifest = attachment_manifest(request.request_content)
+            attachment_id = (
+                str(manifest[0].get("attachment_id") or "") if manifest else ""
+            )
+            state = (
+                registry.get(attachment_id)
+                if isinstance(registry, dict) and attachment_id
+                else None
+            )
+        return state if isinstance(state, dict) else None
+
+    async def _released_voice_transcript(
+        self, request: StageRequest
+    ) -> tuple[str, str]:
+        return await await_authorized_transcript(
+            self._native_voice_state(request),
+            require_confirmation=True,
+        )
 
     def _record_usage_line_item(
         self,
@@ -1716,6 +1994,48 @@ class HashiStageProvider(StageProvider):
     async def invoke(
         self, profile: ProviderProfile, request: StageRequest
     ) -> StageResponse:
+        native_audio_stage = bool(
+            request.stage in {Stage.DIRECT, Stage.IMMEDIATE_RESPONSE}
+            and request_content_is_voice_origin(request.request_content)
+            and profile.options.get("_native_audio_route")
+        )
+        if native_audio_stage and not bool(
+            profile.options.get("audio_model_tools", False)
+        ):
+            # Effort Zero normally owns the complete Direct tool catalogue.
+            # The native-audio proof of concept is a narrower route: the
+            # original audio and PCM are available, but no tool definitions or
+            # side-effect authority reach the audio model.
+            request = replace(
+                request,
+                allow_tools=False,
+                allow_side_effects=False,
+            )
+        if native_audio_stage and (request.allow_tools or request.allow_side_effects):
+            transcript, transcript_state = await self._released_voice_transcript(
+                request
+            )
+            if not transcript or transcript_state != "released":
+                return StageResponse(
+                    text=(
+                        "The actionable voice path was not authorized through "
+                        "Safe Voice, so no tool-capable audio model was invoked."
+                    ),
+                    provider="hashi-runtime",
+                    model="safe-voice-boundary",
+                    media_routing=tuple(
+                        {
+                            "attachment_id": str(item.get("attachment_id") or ""),
+                            "item_index": item.get("item_index"),
+                            "modality": str(item.get("modality") or "audio"),
+                            "route": "transcript_unavailable",
+                            "reason": f"local_stt_{transcript_state}",
+                            "transport": None,
+                        }
+                        for item in request.attachment_manifest
+                    ),
+                    validation_source="runtime_voice_boundary",
+                )
         try:
             backend = self.backend_manager.create_ephemeral_backend(
                 profile.engine, target_model=profile.model
@@ -1736,7 +2056,24 @@ class HashiStageProvider(StageProvider):
             backend_extra["provider_reasoning"] = profile.reasoning
             backend_extra["reasoning_effort"] = profile.reasoning
         backend_extra.update(dict(profile.options))
+        if native_audio_stage:
+            # Provider-created output assets are initially unowned.  Bind their
+            # one-time claim correlation to the outer HASHI request, not the
+            # HER stage invocation ID used for provider tracing.
+            request_ref = str(request.request_ref or "")
+            backend_extra["_native_audio_claim_request_id"] = (
+                request_ref.removeprefix("hashi-request:")
+            )
+        elif request_content_is_voice_origin(request.request_content):
+            # Triage and work stages may hear audio, but they remain text-output
+            # stages.  Only Direct/Immediate may request generated audio.
+            backend_extra["_native_audio_output_disabled"] = True
         backend.config.extra = backend_extra
+        apply_multimodal = getattr(
+            backend, "_apply_declared_multimodal_capabilities", None
+        )
+        if callable(apply_multimodal):
+            apply_multimodal(backend_extra)
         if profile.reasoning is not None and hasattr(backend, "set_reasoning_enabled"):
             normalized = str(profile.reasoning or "").strip().casefold()
             backend.set_reasoning_enabled(
@@ -1848,6 +2185,98 @@ class HashiStageProvider(StageProvider):
             if request.allow_tools
             else frozenset()
         )
+        if (
+            request.stage is Stage.TRIAGE
+            and request_content_is_voice_origin(request.request_content)
+        ):
+            triage_input_policy = str(
+                profile.options.get("_voice_triage_input_policy") or "auto"
+            ).strip().casefold()
+            capability_resolver = getattr(backend, "resolve_input_capability", None)
+            triage_capability = (
+                capability_resolver()
+                if callable(capability_resolver)
+                else getattr(backend, "input_capability", None)
+            )
+            triage_hears_audio = bool(
+                triage_capability is not None
+                and triage_capability.supports("audio")
+            )
+            if triage_input_policy == "native" and not triage_hears_audio:
+                await backend.shutdown()
+                raise StageInvocationError(
+                    "voice Triage is configured native but its exact model cannot consume audio",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                    human_description=(
+                        "The configured native voice Triage model has no verified audio input capability."
+                    ),
+                )
+            needs_text_transcript = (
+                triage_input_policy == "transcript" or not triage_hears_audio
+            )
+            voice_state = self._native_voice_state(request)
+            safe_voice_gate = bool(
+                isinstance(voice_state, dict) and voice_state.get("safe_voice")
+            )
+            transcript = ""
+            transcript_state = ""
+            if safe_voice_gate or needs_text_transcript:
+                transcript, transcript_state = await self._released_voice_transcript(
+                    request
+                )
+                original_manifest = tuple(request.attachment_manifest)
+                if not transcript or transcript_state != "released":
+                    media_routing = tuple(
+                        {
+                            "attachment_id": str(item.get("attachment_id") or ""),
+                            "item_index": item.get("item_index"),
+                            "modality": str(item.get("modality") or "audio"),
+                            "route": "transcript_unavailable",
+                            "reason": f"local_stt_{transcript_state}",
+                            "transport": None,
+                        }
+                        for item in original_manifest
+                    )
+                    await backend.shutdown()
+                    return StageResponse(
+                        data={
+                            "classification": "DIRECT_RESPONSE",
+                            "real_goal": (
+                                "Keep the native no-tool voice chat response; "
+                                "the transcript-dependent path is unavailable."
+                            ),
+                            "relevant_habits": [],
+                            "clarification": "",
+                        },
+                        provider="hashi-runtime",
+                        model="safe-voice-boundary",
+                        media_routing=media_routing,
+                        validation_source="runtime_voice_boundary",
+                    )
+            if needs_text_transcript:
+                original_manifest = tuple(request.attachment_manifest)
+                media_routing = tuple(
+                    {
+                        "attachment_id": str(item.get("attachment_id") or ""),
+                        "item_index": item.get("item_index"),
+                        "modality": str(item.get("modality") or "audio"),
+                        "route": "local_transcript",
+                        "reason": "text_triage_uses_released_local_stt",
+                        "transport": None,
+                    }
+                    for item in original_manifest
+                )
+                request = replace(
+                    request,
+                    goal=(
+                        f"[Local voice transcription]\n{transcript}\n\n"
+                        f"[Original user caption/request]\n{request.goal}"
+                    ),
+                    request_content=None,
+                    attachment_manifest=(),
+                )
+                provider_request_content = None
         if request.attachment_manifest:
             try:
                 canonical_manifest = attachment_manifest(request.request_content)
@@ -2076,7 +2505,10 @@ class HashiStageProvider(StageProvider):
             # Provider-native progress is not the HER v2 commentary contract.
             # Only a validated structured ``commentary`` field may enter the
             # separate Persona packaging pipeline.
-            if event.delivery_class == DELIVERY_USER_COMMENTARY:
+            if (
+                event.delivery_class == DELIVERY_USER_COMMENTARY
+                and event.kind != "voice_warning"
+            ):
                 event.delivery_class = DELIVERY_INTERNAL
             event.origin = event.origin or f"her_v2:{profile.engine}"
             event.phase = event.phase or request.stage.value
@@ -2385,6 +2817,146 @@ class HashiStageProvider(StageProvider):
                 if isinstance(response.stream_metadata, Mapping)
                 else {}
             )
+            native_fallback_attempted = False
+            if (
+                native_audio_stage
+                and not response.is_success
+                and bool(profile.options.get("_voice_fallback_enabled", True))
+                and not response.side_effects_possible
+                and not response.tool_call_count
+                and not provider_tool_activity
+                and not provider_replay_activity
+                and not str(response.text or "").strip()
+                and not response.structured_data
+            ):
+                transcript, transcript_state = await self._released_voice_transcript(
+                    request
+                )
+                if transcript and transcript_state == "released":
+                    native_fallback_attempted = True
+                    if self.on_stream_event is not None:
+                        fallback_base = (
+                            f"{request.turn_id}:{request.stage.value}:native-fallback"
+                        )
+                        await self.on_stream_event(
+                            StreamEvent(
+                                kind="voice_fallback_started",
+                                summary="",
+                                event_id=f"{fallback_base}:started",
+                                delivery_class=DELIVERY_INTERNAL,
+                                origin="her_v2:runtime",
+                                phase=request.stage.value,
+                                provenance="runtime_control",
+                            )
+                        )
+                        await self.on_stream_event(
+                            StreamEvent(
+                                kind="voice_warning",
+                                summary=(
+                                    "Native voice reply was unavailable; HASHI is "
+                                    "using local speech recognition, the text model, "
+                                    "and text-to-speech fallback."
+                                ),
+                                event_id=f"{fallback_base}:warning",
+                                delivery_class=DELIVERY_USER_COMMENTARY,
+                                origin="her_v2:runtime",
+                                phase=request.stage.value,
+                                provenance="runtime_control",
+                            )
+                        )
+                    fallback_provider = str(
+                        profile.options.get("_voice_fallback_provider")
+                        or profile.engine
+                    ).strip()
+                    fallback_model = str(
+                        profile.options.get("_voice_fallback_model")
+                        or profile.model
+                    ).strip()
+                    try:
+                        fallback_backend = (
+                            self.backend_manager.create_ephemeral_backend(
+                                fallback_provider,
+                                target_model=fallback_model,
+                            )
+                        )
+                    except Exception as exc:
+                        raise StageInvocationError(
+                            "cannot create configured native voice fallback "
+                            f"{fallback_provider}/{fallback_model}: {exc}",
+                            retryable=False,
+                            code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                            human_description=(
+                                "The configured native voice fallback model could "
+                                "not be created."
+                            ),
+                        ) from exc
+                    try:
+                        fallback_backend.privacy_level = (
+                            self.backend_manager.privacy_level
+                        )
+                        if hasattr(fallback_backend, "tool_registry"):
+                            fallback_backend.tool_registry = None
+                        if profile.reasoning is not None and hasattr(
+                            fallback_backend, "set_reasoning_enabled"
+                        ):
+                            normalized_reasoning = str(
+                                profile.reasoning or ""
+                            ).strip().casefold()
+                            fallback_backend.set_reasoning_enabled(
+                                normalized_reasoning
+                                not in {
+                                    "",
+                                    "none",
+                                    "off",
+                                    "false",
+                                    "0",
+                                    "disabled",
+                                }
+                            )
+                        if not _install_system_prompt(
+                            fallback_backend, system_prompt
+                        ):
+                            raise StageInvocationError(
+                                "native voice fallback backend cannot isolate the "
+                                "HER v2 system prompt",
+                                retryable=False,
+                                code=(
+                                    ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR
+                                ),
+                            )
+                        if not await fallback_backend.initialize():
+                            raise StageInvocationError(
+                                "native voice fallback backend failed to initialize",
+                                retryable=False,
+                                code=(
+                                    ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR
+                                ),
+                            )
+                        response = await fallback_backend.generate_response(
+                            f"[Local voice transcription]\n{transcript}",
+                            (
+                                f"{request.turn_id}:{request.stage.value}:"
+                                f"{request.attempt}:native-audio-fallback"
+                            ),
+                            is_retry=True,
+                            silent=self.silent,
+                            on_stream_event=_capture,
+                        )
+                    finally:
+                        await fallback_backend.shutdown()
+                    response_metadata = (
+                        dict(response.stream_metadata)
+                        if isinstance(response.stream_metadata, Mapping)
+                        else {}
+                    )
+                    response_metadata.update(
+                        {
+                            "native_audio_fallback": True,
+                            "native_audio_fallback_provider": fallback_provider,
+                            "native_audio_fallback_model": fallback_model,
+                        }
+                    )
+                    response.stream_metadata = response_metadata
             response_media_routing = response_metadata.get("multimodal_routing")
             if isinstance(response_media_routing, (list, tuple)):
                 normalized_response_routing = tuple(
@@ -2507,6 +3079,10 @@ class HashiStageProvider(StageProvider):
                 fallback_metadata["multimodal_routing"] = list(media_routing)
                 fallback_metadata["multimodal_fallback_attempted"] = True
                 response.stream_metadata = fallback_metadata
+            elif native_fallback_attempted:
+                fallback_metadata = dict(response.stream_metadata or {})
+                fallback_metadata["native_audio_fallback"] = True
+                response.stream_metadata = fallback_metadata
             if not response.is_success:
                 raise _backend_response_error(
                     response,
@@ -2568,6 +3144,11 @@ class HashiStageProvider(StageProvider):
                 provider_attempt=request.attempt,
                 tool_receipts=tool_receipts,
                 media_routing=media_routing,
+                content=tuple(
+                    dict(part)
+                    for part in getattr(response, "content", ())
+                    if isinstance(part, Mapping)
+                ),
             )
         except StageInvocationError:
             raise

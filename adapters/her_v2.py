@@ -56,7 +56,10 @@ from orchestrator.her_v2.retry import (
 )
 from orchestrator.her_v2.runtime import HERv2Runtime
 from orchestrator.her_v2.wip_journal import WIPJournal
-from orchestrator.multimodal_contract import resolve_input_capability
+from orchestrator.multimodal_contract import (
+    request_content_is_voice_origin,
+    resolve_input_capability,
+)
 
 HER_V2_DISPLAY_NAME = "HASHI Engine Runtime v2"
 HER_V2_VERSION = "2.0.0-alpha.1"
@@ -80,6 +83,11 @@ class _ExecutionStageCompactionProvider:
         self._base = base
         self._on_execution = on_execution
         self._scheduled = False
+
+    def __getattr__(self, name: str) -> Any:
+        """Preserve optional provider capabilities through this narrow wrapper."""
+
+        return getattr(self._base, name)
 
     def tool_catalogue(
         self,
@@ -213,9 +221,23 @@ class HERv2Adapter(BaseBackend):
             except HERv2ConfigurationError:
                 return False
 
+        normalized_modality = str(modality or "").strip().casefold()
+        if normalized_modality == "audio":
+            runtime = self._runtime_context()
+            voice_manager = getattr(runtime, "voice_manager", None)
+            native_enabled = getattr(voice_manager, "native_audio_enabled", None)
+            if not callable(native_enabled) or not native_enabled():
+                return False
+            policy = getattr(voice_manager, "native_policy", None)
+            try:
+                resolved = resolved.activate_voice_origin(
+                    policy if isinstance(policy, Mapping) else None
+                )
+            except HERv2ConfigurationError:
+                return False
+
         manager = self._backend_manager()
         select_backend = getattr(manager, "_select_backend_cfg", None)
-        normalized_modality = str(modality or "").strip().casefold()
         for profile in resolved.all_provider_profiles():
             capability_config: dict[str, Any] = {}
             if callable(select_backend):
@@ -244,6 +266,98 @@ class HERv2Adapter(BaseBackend):
             if any(
                 capability.supports(normalized_modality, transport)
                 for transport in transports
+            ):
+                return True
+        return False
+
+    def supports_media_output(self, modality: str) -> bool:
+        """Resolve explicit Direct/Immediate output capability by exact profile."""
+
+        resolved = self._v2_config
+        if resolved is None:
+            raw = self._extra.get("her_v2")
+            if not isinstance(raw, Mapping):
+                return False
+            try:
+                resolved = HERv2Config.from_mapping(raw)
+            except HERv2ConfigurationError:
+                return False
+        normalized = str(modality or "").strip().casefold()
+        runtime = self._runtime_context()
+        manager = getattr(runtime, "voice_manager", None)
+        native_enabled = getattr(manager, "native_audio_enabled", None)
+        if not callable(native_enabled) or not native_enabled():
+            return False
+        policy = getattr(manager, "native_policy", None)
+        try:
+            resolved = resolved.activate_voice_origin(
+                policy if isinstance(policy, Mapping) else None
+            )
+        except HERv2ConfigurationError:
+            return False
+        manager = self._backend_manager()
+        select_backend = getattr(manager, "_select_backend_cfg", None)
+        for stage in (Stage.DIRECT, Stage.IMMEDIATE_RESPONSE):
+            profile = resolved.profile_for(stage)
+            options: dict[str, Any] = {}
+            if callable(select_backend):
+                try:
+                    configured = select_backend(
+                        profile.engine, target_model=profile.model
+                    )
+                except (TypeError, ValueError):
+                    configured = None
+                if isinstance(configured, Mapping):
+                    nested_extra = configured.get("extra")
+                    if isinstance(nested_extra, Mapping):
+                        options.update(dict(nested_extra))
+                    options.update(dict(configured))
+            options.update(dict(profile.options))
+            values = options.get("output_modalities")
+            if isinstance(values, str):
+                values = [values]
+            modalities = (
+                {
+                    str(item or "").strip().casefold()
+                    for item in values
+                }
+                if isinstance(values, (list, tuple, set, frozenset))
+                else set()
+            )
+            if normalized not in modalities:
+                continue
+            if normalized != "audio":
+                return True
+            formats = options.get("output_formats")
+            audio_formats = (
+                formats.get("audio") if isinstance(formats, Mapping) else ()
+            )
+            if isinstance(audio_formats, str):
+                audio_formats = [audio_formats]
+            verified_formats = {
+                str(item or "").strip().casefold()
+                for item in audio_formats or ()
+            }
+            requested_format = str(
+                options.get("native_audio_format") or ""
+            ).strip().casefold()
+            stream = str(options.get("output_streaming") or "none").strip().casefold()
+            surface = str(options.get("api_surface") or "unknown").strip().casefold()
+            voices = options.get("supported_voices") or options.get(
+                "native_audio_voices"
+            )
+            if isinstance(voices, str):
+                voices = [voices]
+            has_voice = bool(
+                str(options.get("native_audio_voice") or "").strip()
+                or [item for item in voices or () if str(item or "").strip()]
+            )
+            if (
+                verified_formats
+                and (not requested_format or requested_format in verified_formats)
+                and stream not in {"", "none", "unknown"}
+                and surface not in {"", "none", "unknown"}
+                and has_voice
             ):
                 return True
         return False
@@ -540,6 +654,7 @@ class HERv2Adapter(BaseBackend):
             retry_policy=self._provider_retry_policy(),
             audit_log=self._audit_log,
             workzone_ref=str(self.config.workspace_dir.resolve()),
+            runtime_context=self._runtime_context(),
         )
 
     def _provider_retry_policy(self) -> ProviderRetryPolicy:
@@ -935,10 +1050,11 @@ class HERv2Adapter(BaseBackend):
                     "provider_failure_description": "HER v2 is not initialized."
                 },
             )
+        request_meta = self._runtime_request_meta(request_id)
         try:
             effort_resolution = resolve_request_effort(
                 self.effort,
-                self._runtime_request_meta(request_id),
+                request_meta,
             )
         except ValueError as exc:
             return BackendResponse(
@@ -1004,8 +1120,53 @@ class HERv2Adapter(BaseBackend):
                 "HER v2 Habit pipeline skipped by request eligibility: request=%s",
                 request_id,
             )
+        turn_config = self._v2_config
+        runtime_context = self._runtime_context()
+        voice_manager = getattr(runtime_context, "voice_manager", None)
+        native_enabled = getattr(voice_manager, "native_audio_enabled", None)
+        request_metadata = request_meta.get("request_metadata")
+        terminal = str(
+            request_meta.get("session_surface")
+            or (
+                request_metadata.get("session_surface")
+                if isinstance(request_metadata, Mapping)
+                else ""
+            )
+            or ""
+        ).strip().casefold()
+        policy_resolver = getattr(
+            voice_manager, "native_policy_for_terminal", None
+        )
+        native_policy = (
+            policy_resolver(terminal)
+            if callable(policy_resolver)
+            else getattr(voice_manager, "native_policy", None)
+        )
+        voice_enabled = False
+        if callable(native_enabled):
+            try:
+                voice_enabled = bool(native_enabled(terminal))
+            except TypeError:
+                voice_enabled = bool(native_enabled())
+        if (
+            request_content_is_voice_origin(request_content)
+            and voice_enabled
+        ):
+            try:
+                turn_config = turn_config.activate_voice_origin(
+                    native_policy if isinstance(native_policy, Mapping) else None
+                )
+            except HERv2ConfigurationError as exc:
+                return BackendResponse(
+                    text="",
+                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                    error=f"Invalid native voice route: {exc}",
+                    is_success=False,
+                    error_code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR.value,
+                    error_retryable=False,
+                )
         runtime_config = replace(
-            self._v2_config,
+            turn_config,
             # The shared /timeout command is idle-only.  Bind its live value
             # into the actual HER v2 runtime instead of leaving an unrelated
             # outer adapter setting that cannot affect execution.
@@ -1259,6 +1420,7 @@ class HERv2Adapter(BaseBackend):
             stream_metadata=metadata,
             error_code=terminal_error_code or None,
             error_retryable=False if technical_error else None,
+            content=tuple(result.content),
         )
 
     def record_transport_delivery_receipt(

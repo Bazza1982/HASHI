@@ -146,6 +146,31 @@ _IMMEDIATE_OMITTED_BRIDGE_SECTIONS = frozenset(
 )
 
 
+def extract_authoritative_current_request(goal: str) -> str:
+    """Return only the current user request from a bridge-managed PCM prompt.
+
+    A text-to-audio transport adaptation must never speak the Persona, prior
+    conversation, or other PCM sections.  Prompts without the typed marker are
+    already request-scoped and therefore remain unchanged.
+    """
+
+    rendered = str(goal or "")
+    marker_index = rendered.find(_BRIDGE_CURRENT_REQUEST_MARKER)
+    if marker_index < 0:
+        return rendered.strip()
+
+    current_lines: list[str] = []
+    remainder = rendered[
+        marker_index + len(_BRIDGE_CURRENT_REQUEST_MARKER) :
+    ]
+    for line in remainder.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("--- ") and stripped.endswith(" ---"):
+            break
+        current_lines.append(line)
+    return "\n".join(current_lines).strip()
+
+
 def _immediate_response_goal(goal: str) -> str:
     """Remove identity and /sys packaging that Immediate must not consume."""
 

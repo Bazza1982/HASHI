@@ -100,6 +100,11 @@ class GlobalConfig:
     wiki_provider: Dict[str, Any] = field(default_factory=dict)
     central_memory: Dict[str, Any] = field(default_factory=dict)
     canonical_audit: Dict[str, Any] = field(default_factory=dict)
+    # Additive, fail-closed protocol gates.  Existing installations retain
+    # their current text/STT/TTS behaviour until both are explicitly enabled.
+    persistent_session_v1: bool = False
+    native_audio_chat_v1: bool = False
+    native_audio_retention_seconds: int | str = 3600
 
 @dataclass
 class AgentConfig:
@@ -661,6 +666,15 @@ class ConfigManager:
             wiki_provider=dict(g_raw.get("wiki_provider") or {}),
             central_memory=dict(g_raw.get("central_memory") or {}),
             canonical_audit=canonical_audit_config,
+            persistent_session_v1=_truthy(
+                g_raw.get("persistent_session_v1", False)
+            ),
+            native_audio_chat_v1=_truthy(
+                g_raw.get("native_audio_chat_v1", False)
+            ),
+            native_audio_retention_seconds=g_raw.get(
+                "native_audio_retention_seconds", 3600
+            ),
         )
 
         agents = []

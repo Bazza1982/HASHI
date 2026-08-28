@@ -661,7 +661,7 @@ function EditableAgentIdentity({ agent, onSave, ui, compact = false }) {
   );
 }
 
-function AgentPanel({ agent, session, state, onSend, onSaveIdentity, onRunCommand, commands, ui }) {
+function AgentPanel({ agent, session, state, onSend, onSaveIdentity, onRunCommand, onSafeVoiceDecision, commands, ui }) {
   const displayName = agent.displayName || agent.name;
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState([]);
@@ -910,6 +910,37 @@ function AgentPanel({ agent, session, state, onSend, onSaveIdentity, onRunComman
             </div>
             <div className="msg-content">
               <MarkdownMessage content={message.content} />
+              {message.audioUrl && (
+                <audio
+                  className="native-audio-player"
+                  controls
+                  preload="metadata"
+                  src={message.audioUrl}
+                >
+                  Native audio playback is not supported by this browser.
+                </audio>
+              )}
+              {message.resolution && (
+                <div className="native-audio-resolution">
+                  {message.resolution === 'final' ? 'Final response' : 'Acknowledgement'}
+                </div>
+              )}
+              {message.safeVoice?.state === 'pending_confirmation' && (
+                <div className="safe-voice-actions">
+                  <button
+                    type="button"
+                    onClick={() => onSafeVoiceDecision?.(agent.id, message, 'confirm')}
+                  >
+                    Confirm transcript
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onSafeVoiceDecision?.(agent.id, message, 'discard')}
+                  >
+                    Discard transcript
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         ))}
@@ -974,7 +1005,7 @@ function AgentPanel({ agent, session, state, onSend, onSaveIdentity, onRunComman
   );
 }
 
-function SortableAgentPanel({ agent, session, state, onSend, onSaveIdentity, onRunCommand, commands, ui }) {
+function SortableAgentPanel({ agent, session, state, onSend, onSaveIdentity, onRunCommand, onSafeVoiceDecision, commands, ui }) {
   const {
     attributes,
     listeners,
@@ -1003,6 +1034,7 @@ function SortableAgentPanel({ agent, session, state, onSend, onSaveIdentity, onR
         onSend={onSend}
         onSaveIdentity={onSaveIdentity}
         onRunCommand={onRunCommand}
+        onSafeVoiceDecision={onSafeVoiceDecision}
         commands={commands}
         ui={ui}
       />
@@ -1029,6 +1061,16 @@ const STORAGE_KEY_THEME = 'workbench-theme';
 const STORAGE_KEY_LAYOUT = 'workbench-layout';
 const STORAGE_KEY_TELEGRAM_ACTIVE = 'workbench-telegram-active';
 const STORAGE_KEY_ENTERPRISE_AUTH = 'workbench-enterprise-auth';
+const STORAGE_KEY_NATIVE_AUDIO = 'workbench-native-audio-channels';
+
+function loadNativeAudioChannels() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY_NATIVE_AUDIO) || '{}');
+    return stored && typeof stored === 'object' ? stored : {};
+  } catch {
+    return {};
+  }
+}
 
 const CONNECTOR_PRESETS = {
   slack: {
@@ -1695,6 +1737,9 @@ export default function App() {
   const [activeId, setActiveId] = useState(null);
   const [telegramActiveId, setTelegramActiveId] = useState(() => localStorage.getItem(STORAGE_KEY_TELEGRAM_ACTIVE) || null);
   const pollOffsets = useRef({});
+  const nativeAudioChannels = useRef(loadNativeAudioChannels());
+  const nativeAudioEventIds = useRef(new Set());
+  const nativeAudioPollBusy = useRef(false);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -1885,6 +1930,155 @@ export default function App() {
   }, [agents]);
 
   useEffect(() => {
+    let disposed = false;
+
+    const pollNativeAudio = async () => {
+      if (nativeAudioPollBusy.current) return;
+      nativeAudioPollBusy.current = true;
+      try {
+        for (const [agentId, channel] of Object.entries(nativeAudioChannels.current)) {
+          if (disposed || !channel?.sessionId || !channel?.consumerId) break;
+          try {
+            const query = new URLSearchParams({ consumer_id: channel.consumerId });
+            const response = await fetch(
+              `/api/native-audio/sessions/${encodeURIComponent(channel.sessionId)}/events?${query}`,
+            );
+            if (!response.ok) throw new Error(await response.text());
+            const payload = await response.json();
+            const events = payload.events || [];
+            const freshEvents = events.filter((event) => {
+              if (!event.event_id || nativeAudioEventIds.current.has(event.event_id)) return false;
+              nativeAudioEventIds.current.add(event.event_id);
+              return true;
+            });
+
+            if (freshEvents.length) {
+              setStateMap((prev) => {
+                const current = prev[agentId] || { messages: [] };
+                const messages = [...(current.messages || [])];
+                let isTyping = current.isTyping;
+                for (const event of freshEvents) {
+                  const detail = event.detail || {};
+                  if (event.kind === 'assistant.output.available') {
+                    const parts = Array.isArray(detail.content) ? detail.content : [];
+                    const text = parts
+                      .filter((part) => part.type === 'text' && part.text)
+                      .map((part) => part.text)
+                      .join('\n') || event.summary || 'Audio response';
+                    const audio = parts.find((part) => part.type === 'audio' && part.asset_id);
+                    messages.push({
+                      role: 'assistant',
+                      content: text,
+                      source: 'native-audio',
+                      timestamp: event.created_at,
+                      eventId: event.event_id,
+                      requestId: detail.request_id,
+                      audioUrl: audio
+                        ? `/api/native-audio/sessions/${encodeURIComponent(channel.sessionId)}`
+                          + `/assets/${encodeURIComponent(audio.asset_id)}`
+                        : null,
+                    });
+                    isTyping = false;
+                  } else if (event.kind === 'assistant.output.resolved') {
+                    const index = messages.findLastIndex(
+                      (message) => message.source === 'native-audio'
+                        && message.requestId === detail.request_id,
+                    );
+                    if (index >= 0) {
+                      messages[index] = {
+                        ...messages[index],
+                        resolution: detail.resolution || event.status,
+                      };
+                    }
+                  } else if (event.kind === 'voice.warning') {
+                    messages.push({
+                      role: 'assistant',
+                      content: `⚠️ ${event.summary || 'Native voice path degraded.'}`,
+                      source: 'native-audio-warning',
+                      timestamp: event.created_at,
+                      eventId: event.event_id,
+                    });
+                  } else if (
+                    event.kind === 'voice.input.transcript_pending_confirmation'
+                    || (
+                      event.kind === 'voice.input.transcript_ready'
+                      && detail.safe_voice_state === 'pending_confirmation'
+                    )
+                  ) {
+                    const alreadyPresented = messages.some(
+                      (message) => message.safeVoice?.transcriptId === detail.transcript_id,
+                    );
+                    if (!alreadyPresented) {
+                      messages.push({
+                        role: 'assistant',
+                        content: `🛡️ Safe Voice — confirm or discard this transcript:\n\n${detail.text || ''}`,
+                        source: 'safe-voice',
+                        timestamp: event.created_at,
+                        eventId: event.event_id,
+                        safeVoice: {
+                          sessionId: channel.sessionId,
+                          transcriptId: detail.transcript_id,
+                          state: 'pending_confirmation',
+                        },
+                      });
+                    }
+                  } else if (
+                    event.kind === 'voice.input.transcript_confirmed'
+                    || event.kind === 'voice.input.transcript_released'
+                    || event.kind === 'voice.input.transcript_discarded'
+                  ) {
+                    const index = messages.findLastIndex(
+                      (message) => message.safeVoice?.transcriptId === detail.transcript_id,
+                    );
+                    if (index >= 0) {
+                      messages[index] = {
+                        ...messages[index],
+                        safeVoice: {
+                          ...messages[index].safeVoice,
+                          state: event.kind.endsWith('discarded') ? 'discarded' : 'released',
+                        },
+                      };
+                    }
+                  }
+                }
+                return {
+                  ...prev,
+                  [agentId]: { ...current, messages: messages.slice(-200), isTyping },
+                };
+              });
+            }
+
+            if (events.length) {
+              const sequence = Number(events[events.length - 1].sequence || 0);
+              const ack = await fetch(
+                `/api/native-audio/sessions/${encodeURIComponent(channel.sessionId)}`
+                  + `/consumers/${encodeURIComponent(channel.consumerId)}/ack`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ sequence }),
+                },
+              );
+              if (!ack.ok) throw new Error(await ack.text());
+            }
+          } catch (error) {
+            console.warn(`Native audio polling failed for ${agentId}:`, error);
+          }
+        }
+      } finally {
+        nativeAudioPollBusy.current = false;
+      }
+    };
+
+    pollNativeAudio();
+    const timer = setInterval(pollNativeAudio, 750);
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
     setPanelOrder((currentOrder) => {
       const filtered = currentOrder.filter(id => selected.includes(id));
       const newIds = selected.filter(id => !filtered.includes(id));
@@ -1961,6 +2155,8 @@ export default function App() {
       }
     }
 
+    const nativeAudioTurn = files.length > 0
+      && files.every((file) => String(file.type || '').startsWith('audio/'));
     const form = new FormData();
     form.append('agentId', agent.id);
     if (text) {
@@ -1969,6 +2165,52 @@ export default function App() {
     }
     for (const file of files) {
       form.append('files', file, file.name);
+    }
+
+    if (nativeAudioTurn) {
+      const channel = nativeAudioChannels.current[agent.id] || {};
+      if (channel.sessionId) form.append('session_id', channel.sessionId);
+      if (channel.consumerId) form.append('consumer_id', channel.consumerId);
+      form.append(
+        'idempotency_key',
+        globalThis.crypto?.randomUUID?.()
+          || `workbench-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      );
+      const response = await fetch('/api/native-audio/turn', {
+        method: 'POST',
+        body: form,
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        removeOptimisticMessage();
+        throw new Error(body || `HTTP ${response.status}`);
+      }
+      const accepted = await response.json();
+      nativeAudioChannels.current[agent.id] = {
+        sessionId: accepted.native_audio.session_id,
+        consumerId: accepted.native_audio.consumer_id,
+      };
+      localStorage.setItem(
+        STORAGE_KEY_NATIVE_AUDIO,
+        JSON.stringify(nativeAudioChannels.current),
+      );
+      setStateMap((prev) => {
+        const current = prev[agent.id] || { messages: [] };
+        const marker = {
+          role: 'user',
+          content: text || `Voice message: ${files.map((file) => file.name).join(', ')}`,
+          source: 'native-audio-input',
+          timestamp: new Date().toISOString(),
+        };
+        const messages = optimisticMessage
+          ? current.messages || []
+          : [...(current.messages || []), marker];
+        return {
+          ...prev,
+          [agent.id]: { ...current, messages: messages.slice(-200), isTyping: true },
+        };
+      });
+      return;
     }
 
     const response = await fetch('/api/chat', {
@@ -1991,6 +2233,41 @@ export default function App() {
         [agent.id]: { ...prev[agent.id], isTyping: true },
       }));
     }
+  }
+
+  async function decideSafeVoice(_agentId, message, decision) {
+    const safeVoice = message.safeVoice;
+    if (!safeVoice?.sessionId || !safeVoice?.transcriptId) return;
+    const response = await fetch(
+      `/api/native-audio/sessions/${encodeURIComponent(safeVoice.sessionId)}`
+        + `/transcripts/${encodeURIComponent(safeVoice.transcriptId)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision }),
+      },
+    );
+    if (!response.ok) throw new Error(await response.text());
+    setStateMap((prev) => {
+      const current = prev[_agentId] || { messages: [] };
+      return {
+        ...prev,
+        [_agentId]: {
+          ...current,
+          messages: (current.messages || []).map((candidate) => (
+            candidate.eventId === message.eventId
+              ? {
+                  ...candidate,
+                  safeVoice: {
+                    ...candidate.safeVoice,
+                    state: decision === 'confirm' ? 'released' : 'discarded',
+                  },
+                }
+              : candidate
+          )),
+        },
+      };
+    });
   }
 
   async function saveAgentIdentity(id, fields) {
@@ -2333,6 +2610,7 @@ export default function App() {
                   onSend={sendMessage}
                   onSaveIdentity={saveAgentIdentity}
                   onRunCommand={runAgentCommand}
+                  onSafeVoiceDecision={decideSafeVoice}
                   commands={commandMap[telegramAgent.id] || []}
                   ui={ui}
                 />
@@ -2351,6 +2629,7 @@ export default function App() {
                   onSend={sendMessage}
                   onSaveIdentity={saveAgentIdentity}
                   onRunCommand={runAgentCommand}
+                  onSafeVoiceDecision={decideSafeVoice}
                   commands={commandMap[agent.id] || []}
                   ui={ui}
                 />

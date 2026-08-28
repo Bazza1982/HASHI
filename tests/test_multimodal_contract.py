@@ -126,6 +126,30 @@ def test_native_image_support_does_not_imply_audio_video_or_pdf():
     assert capability.supports("document") is False
 
 
+def test_explicit_audio_only_capability_does_not_implicitly_gain_text():
+    capability = resolve_input_capability(
+        "openrouter-api",
+        "configured/audio-only",
+        config={
+            "input_modalities": ["audio"],
+            "input_transports": {"audio": ["inline"]},
+        },
+    )
+
+    assert capability.input_modalities == frozenset({"audio"})
+    assert capability.supports("text") is False
+    assert capability.supports("audio", "inline") is True
+
+
+def test_explicit_null_input_modalities_fail_instead_of_inventing_text():
+    with pytest.raises(MultimodalContractError):
+        resolve_input_capability(
+            "openrouter-api",
+            "configured/invalid",
+            config={"input_modalities": None},
+        )
+
+
 def test_hashi_api_path_accepts_one_50_mib_original_image():
     capability = resolve_input_capability("hashi-api", "gpt-5.6-luna")
 

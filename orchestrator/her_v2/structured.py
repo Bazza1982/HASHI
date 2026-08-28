@@ -291,6 +291,18 @@ def resolve_stage_response(
                 source="provider_plain_text",
             )
 
+        if bool(getattr(validator, "_allow_audio_only", False)) and any(
+            isinstance(part, Mapping)
+            and part.get("type") == "audio"
+            and str(part.get("asset_id") or "").strip()
+            for part in response.content
+        ):
+            return StructuredResolution(
+                response=response,
+                parsed="",
+                source="provider_audio",
+            )
+
         primary = (
             (_Candidate("provider_data", response.data),)
             if response.data
@@ -342,7 +354,9 @@ def resolve_stage_response(
     raise StructuredOutputError("provider response contains no valid JSON object")
 
 
-def _stage_parser(*, plain_text_field: str | None = None):
+def _stage_parser(
+    *, plain_text_field: str | None = None, allow_audio_only: bool = False
+):
     def decorate(parser: MappingParser):
         @wraps(parser)
         def validate(response: StageResponse):
@@ -350,6 +364,7 @@ def _stage_parser(*, plain_text_field: str | None = None):
 
         setattr(validate, "_mapping_parser", parser)
         setattr(validate, "_plain_text_field", plain_text_field)
+        setattr(validate, "_allow_audio_only", bool(allow_audio_only))
         return validate
 
     return decorate
@@ -387,7 +402,7 @@ def _text_value(*values: Any) -> str:
     return ""
 
 
-@_stage_parser(plain_text_field="message")
+@_stage_parser(plain_text_field="message", allow_audio_only=True)
 def parse_immediate(data: Mapping[str, Any]) -> str:
     text = _text_value(data.get("message"), data.get("response"))
     if not text:
@@ -431,6 +446,13 @@ def parse_direct_message(response: StageResponse) -> str:
             data.get("result"),
         )
     if not text:
+        if any(
+            isinstance(part, Mapping)
+            and part.get("type") == "audio"
+            and str(part.get("asset_id") or "").strip()
+            for part in response.content
+        ):
+            return ""
         raise StructuredOutputError("Direct requires a non-empty final response")
     return text
 

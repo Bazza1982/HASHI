@@ -17,14 +17,19 @@ class _Request:
         query=None,
         match_info=None,
         headers=None,
+        body=b"",
     ):
         self._payload = payload or {}
         self.query = query or {}
         self.match_info = match_info or {}
         self.headers = headers or {}
+        self._body = bytes(body)
 
     async def json(self):
         return self._payload
+
+    async def read(self):
+        return self._body
 
 
 class _Runtime:
@@ -34,6 +39,23 @@ class _Runtime:
     def __init__(self):
         self.server = None
         self.last_request_metadata = None
+        self._safevoice_enabled = False
+        self._native_voice_transcripts = {}
+        self.voice_manager = SimpleNamespace(
+            native_audio_enabled=lambda: True,
+            native_policy={"mode": "auto"},
+        )
+        self.backend_manager = SimpleNamespace(
+            current_backend=SimpleNamespace(
+                capabilities=SimpleNamespace(
+                    input_modalities=frozenset({"text", "audio"}),
+                    output_modalities=frozenset({"text", "audio"}),
+                    output_formats={"audio": ("wav",)},
+                    output_streaming="sse",
+                    api_surface="chat_completions",
+                )
+            )
+        )
 
     def get_display_name(self):
         return "Lily"
@@ -59,9 +81,11 @@ class _Runtime:
             owner_id=request_metadata["owner_id"],
             agent_id=self.name,
             request_id=request_id,
-            text=prompt,
+            text=str(request_metadata.get("session_message_text", prompt)),
             source=source,
             idempotency_key=idempotency_key,
+            content=request_metadata.get("session_message_content"),
+            response_preferences=request_metadata.get("response_preferences"),
         )
         return accepted.request_id
 

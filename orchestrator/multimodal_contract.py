@@ -26,6 +26,9 @@ HASHI_API_MAX_REQUEST_BYTES = 256 * 1024 * 1024
 HASHI_API_MAX_IMAGE_BYTES = 50 * 1024 * 1024
 INPUT_MODALITIES = frozenset({"text", "image", "audio", "video", "document"})
 MEDIA_MODALITIES = INPUT_MODALITIES - {"text"}
+CANONICAL_AUDIO_SEMANTIC_ROLES = frozenset(
+    {"voice_message", "audio_attachment"}
+)
 INPUT_TRANSPORTS = frozenset(
     {"local_path", "data_url", "remote_url", "inline", "provider_file"}
 )
@@ -393,6 +396,43 @@ def canonical_request_content(parts: Sequence[Mapping[str, Any]]) -> dict[str, A
             "sha256": sha256,
             "transport": _normalise_transport(raw.get("transport")),
         }
+        if modality == "audio":
+            semantic_role = str(
+                raw.get("semantic_role") or "audio_attachment"
+            ).strip().casefold()
+            if semantic_role not in CANONICAL_AUDIO_SEMANTIC_ROLES:
+                raise MultimodalContractError(
+                    "audio semantic_role must be voice_message or audio_attachment",
+                    code="INVALID_AUDIO_SEMANTIC_ROLE",
+                    attachment_id=attachment_id,
+                )
+            part["semantic_role"] = semantic_role
+            if raw.get("duration_ms") is not None:
+                duration_ms = raw.get("duration_ms")
+                if isinstance(duration_ms, bool):
+                    raise MultimodalContractError(
+                        "audio duration_ms must be a non-negative integer",
+                        attachment_id=attachment_id,
+                    )
+                try:
+                    duration_ms = int(duration_ms)
+                except (TypeError, ValueError) as exc:
+                    raise MultimodalContractError(
+                        "audio duration_ms must be a non-negative integer",
+                        attachment_id=attachment_id,
+                    ) from exc
+                if duration_ms < 0:
+                    raise MultimodalContractError(
+                        "audio duration_ms must be a non-negative integer",
+                        attachment_id=attachment_id,
+                    )
+                part["duration_ms"] = duration_ms
+        elif raw.get("semantic_role") is not None:
+            raise MultimodalContractError(
+                "semantic_role is only supported for audio media",
+                code="INVALID_AUDIO_SEMANTIC_ROLE",
+                attachment_id=attachment_id,
+            )
         if detail:
             part["detail"] = detail
         normalized_parts.append(part)
@@ -474,6 +514,22 @@ def native_attachment_reference_aliases(
 
 def request_content_has_media(request_content: Mapping[str, Any] | None) -> bool:
     return bool(attachment_manifest(request_content))
+
+
+def request_content_is_voice_origin(
+    request_content: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether the user Turn explicitly originated as a voice message.
+
+    Audio attachments used as files, sound effects, or evidence do not trigger
+    a spoken response.  Only the persistent semantic role is authoritative.
+    """
+
+    return any(
+        part.get("modality") == "audio"
+        and part.get("semantic_role") == "voice_message"
+        for part in attachment_manifest(request_content)
+    )
 
 
 def subset_request_content(
@@ -578,8 +634,13 @@ def _explicit_capability(
     if not has_explicit and not legacy_native:
         return None
 
+    modalities_declared = "input_modalities" in options
     raw_modalities = options.get("input_modalities")
-    modalities: set[str] = {"text"}
+    # An explicit declaration is exact.  In particular, ``["audio"]`` must
+    # remain audio-only so the runtime can adapt a text Turn instead of
+    # silently sending an unsupported text-only request.  Text remains the
+    # fail-closed default only when no explicit modality list exists.
+    modalities: set[str] = set() if modalities_declared else {"text"}
     if isinstance(raw_modalities, str):
         raw_modalities = [raw_modalities]
     if isinstance(raw_modalities, (list, tuple, set, frozenset)):
@@ -589,6 +650,10 @@ def _explicit_capability(
                 modalities.add(modality)
     elif legacy_native:
         modalities.add("image")
+    if not modalities:
+        raise MultimodalContractError(
+            "input_modalities must declare at least one supported modality"
+        )
 
     raw_transports = options.get("input_transports")
     transports: dict[str, tuple[str, ...]] = {}
@@ -810,8 +875,14 @@ def route_request_content(
             and modality in {"audio", "video"}
             and capability.limits.get("duration")
         ):
-            native = False
-            native_reason = "native_duration_limit_exceeded_unverified"
+            duration_ms = part.get("duration_ms")
+            maximum_ms = int(capability.limits["duration"]) * 1000
+            if duration_ms is None:
+                native = False
+                native_reason = "native_duration_limit_unverified"
+            elif int(duration_ms) > maximum_ms:
+                native = False
+                native_reason = "native_duration_limit_exceeded"
         elif (
             native
             and modality == "document"

@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import mimetypes
 import socket
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from aiohttp import web
@@ -68,6 +69,7 @@ from orchestrator.enterprise.scim import (
 )
 from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
 from orchestrator.pathing import resolve_path_value
+from orchestrator.multimodal_contract import canonical_request_content
 from orchestrator.session_store import (
     TERMINAL_RUN_STATES,
     IdempotencyConflict,
@@ -76,13 +78,18 @@ from orchestrator.session_store import (
     SessionStore,
 )
 from orchestrator.transfer_store import TransferStore
+from orchestrator.voice_transcript_gate import state_after_transcription
 
 _SUPPORTED_CONNECTOR_TYPES = frozenset(
     {"github", "slack", "google_chat", "teams", "feishu"}
 )
-# External Session API publication stays fail-closed until the complete
-# qualification gate in the Session architecture contract has passed.
-PERSISTENT_SESSION_V1_QUALIFIED = False
+# The persistent Session contract has passed its code-level qualification.
+# Instance publication remains fail-closed behind ``persistent_session_v1``.
+PERSISTENT_SESSION_V1_QUALIFIED = True
+# Qualification is code-level and remains separately gated by the instance
+# setting ``native_audio_chat_v1``.  Existing installations therefore retain
+# their current text/STT/TTS behaviour until explicitly enabled.
+NATIVE_AUDIO_CHAT_V1_QUALIFIED = True
 _CONNECTOR_REQUIRED_SCOPES = {
     "github": frozenset({"repo:read", "repo:write"}),
     "slack": frozenset({"message.send"}),
@@ -218,6 +225,8 @@ class WorkbenchApiServer:
         self._static_connectors = list(connectors or [])
         self.session_store = SessionStore.from_global_config(self.global_config)
         self.reconciled_session_runs = self.session_store.reconcile_incomplete_runs()
+        self._audio_cleanup_task: asyncio.Task | None = None
+        self._audio_transcript_tasks: set[asyncio.Task] = set()
         self.identity_service = self._build_identity_service()
         self.channel_registry = self._build_channel_registry()
         self.audit_writer = self._build_audit_writer()
@@ -494,6 +503,26 @@ class WorkbenchApiServer:
                 "POST",
                 "/api/v1/sessions/{session_id}/attachments/{attachment_id}/commit",
                 self.handle_v1_attachment_commit,
+            ),
+            (
+                "PUT",
+                "/api/v1/sessions/{session_id}/attachments/{attachment_id}/content",
+                self.handle_v1_attachment_upload,
+            ),
+            (
+                "GET",
+                "/api/v1/sessions/{session_id}/audio-assets/{asset_id}",
+                self.handle_v1_audio_asset_get,
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/{session_id}/audio-assets/{asset_id}/archive",
+                self.handle_v1_audio_asset_archive,
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/{session_id}/voice-transcripts/{transcript_id}",
+                self.handle_v1_voice_transcript_decide,
             ),
             ("POST", "/api/v1/approvals/{approval_id}", self.handle_v1_approval_decide),
             (
@@ -1072,6 +1101,7 @@ class WorkbenchApiServer:
         return getattr(wa, "_client", None) is not None
 
     async def start(self):
+        await asyncio.to_thread(self.session_store.cleanup_audio_assets)
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
         bind_host = self._select_bind_host()
@@ -1080,6 +1110,22 @@ class WorkbenchApiServer:
             self.runner, bind_host, self.global_config.workbench_port
         )
         await self.site.start()
+        self._audio_cleanup_task = asyncio.create_task(
+            self._audio_cleanup_loop(),
+            name="hashi-native-audio-cleanup",
+        )
+
+    async def _audio_cleanup_loop(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await asyncio.to_thread(self.session_store.cleanup_audio_assets)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logging.getLogger("HASHI.Workbench.AudioCleanup").warning(
+                    "Native audio cleanup failed: %s", type(exc).__name__
+                )
 
     def _select_bind_host(self) -> str:
         configured = str(
@@ -1104,6 +1150,19 @@ class WorkbenchApiServer:
             sock.close()
 
     async def shutdown(self):
+        if self._audio_cleanup_task is not None:
+            self._audio_cleanup_task.cancel()
+            await asyncio.gather(
+                self._audio_cleanup_task, return_exceptions=True
+            )
+            self._audio_cleanup_task = None
+        for task in tuple(self._audio_transcript_tasks):
+            task.cancel()
+        if self._audio_transcript_tasks:
+            await asyncio.gather(
+                *self._audio_transcript_tasks, return_exceptions=True
+            )
+            self._audio_transcript_tasks.clear()
         if self.runner:
             await self.runner.cleanup()
 
@@ -3614,6 +3673,37 @@ class WorkbenchApiServer:
             and getattr(self.global_config, "persistent_session_v1", False)
         )
 
+    def _native_audio_chat_v1_ready(self) -> bool:
+        return bool(
+            self._persistent_session_v1_ready()
+            and NATIVE_AUDIO_CHAT_V1_QUALIFIED
+            and getattr(self.global_config, "native_audio_chat_v1", False)
+        )
+
+    def _runtime_native_audio_ready(
+        self, runtime: Any, *, terminal: str | None = None
+    ) -> bool:
+        if not self._native_audio_chat_v1_ready():
+            return False
+        manager = getattr(runtime, "voice_manager", None)
+        native_enabled = getattr(manager, "native_audio_enabled", None)
+        if not callable(native_enabled):
+            return False
+        try:
+            enabled = bool(native_enabled(terminal))
+        except TypeError:
+            enabled = bool(native_enabled())
+        if not enabled:
+            return False
+        from orchestrator.runtime_media import _backend_supports_native_audio_chat
+
+        backend = getattr(
+            getattr(runtime, "backend_manager", None), "current_backend", None
+        )
+        return _backend_supports_native_audio_chat(
+            runtime, backend, terminal=terminal
+        )
+
     async def handle_v1_session_not_ready(self, request):
         del request
         return web.json_response(
@@ -3683,6 +3773,29 @@ class WorkbenchApiServer:
                     },
                 }
             )
+            if self._native_audio_chat_v1_ready():
+                capabilities.update(
+                    {
+                        "message_content_schema_version": "1.1",
+                        "audio_turn_schema_version": "1.0",
+                        "media_output_schema_version": "1.0",
+                        "voice_control_schema_version": "1.0",
+                        "attachment_upload_transport": "direct-multipart-or-octet-stream",
+                        "audio": {
+                            "input": True,
+                            "output": True,
+                            "semantic_roles": [
+                                "voice_message",
+                                "audio_attachment",
+                            ],
+                            "event_delivery": "ordered-at-least-once",
+                            "volatile_audio_delta": False,
+                            "retention_min_seconds": 60,
+                            "retention_default_seconds": 3600,
+                            "retention_indefinite": True,
+                        },
+                    }
+                )
         return web.json_response(capabilities)
 
     async def handle_v1_agents(self, request):
@@ -3696,6 +3809,7 @@ class WorkbenchApiServer:
                 if hasattr(runtime, "get_display_name")
                 else runtime.name,
                 "available": bool(getattr(runtime, "backend_ready", True)),
+                "native_audio_chat": self._runtime_native_audio_ready(runtime),
             }
             for runtime in self._runtime_list()
         ]
@@ -3840,6 +3954,191 @@ class WorkbenchApiServer:
         except Exception as exc:
             return self._v1_error(exc)
 
+    def _begin_session_voice_transcription(
+        self,
+        *,
+        runtime,
+        canonical_content: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        voice_parts = [
+            dict(part)
+            for part in canonical_content.get("parts", ())
+            if isinstance(part, dict)
+            and part.get("type") == "media"
+            and part.get("modality") == "audio"
+            and part.get("semantic_role") == "voice_message"
+        ]
+        if not voice_parts:
+            return None
+        registry = getattr(runtime, "_native_voice_transcripts", None)
+        if not isinstance(registry, dict):
+            registry = {}
+            runtime._native_voice_transcripts = registry
+        attachment_ids = [str(part["attachment_id"]) for part in voice_parts]
+        existing_states = [registry.get(item) for item in attachment_ids]
+        if existing_states and all(
+            isinstance(item, dict) and item is existing_states[0]
+            for item in existing_states
+        ):
+            return existing_states[0]
+
+        async def _transcribe_part(part: dict[str, Any]) -> dict[str, str]:
+            from orchestrator.voice_transcriber import get_transcriber
+
+            transcriber = get_transcriber()
+            result = str(
+                await transcriber.transcribe(Path(str(part["local_ref"])))
+            )
+            return {
+                "attachment_id": str(part["attachment_id"]),
+                "text": (
+                    ""
+                    if result.startswith("[Transcription error]")
+                    else result.strip()
+                ),
+                "error": result if result.startswith("[Transcription error]") else "",
+            }
+
+        async def _transcribe() -> list[dict[str, str]]:
+            return list(
+                await asyncio.gather(
+                    *(_transcribe_part(part) for part in voice_parts)
+                )
+            )
+
+        state: dict[str, Any] = {
+            "task": asyncio.create_task(_transcribe()),
+            "ready_event": asyncio.Event(),
+            "release_event": asyncio.Event(),
+            "gate_lock": asyncio.Lock(),
+            "status": "pending",
+            "attachment_id": attachment_ids[0],
+            "attachment_ids": attachment_ids,
+            "transcript_decisions": {},
+            "safe_voice": bool(getattr(runtime, "_safevoice_enabled", False)),
+            "confirmation_requested": False,
+            "confirmation_presented": False,
+            "native_audio_completed": False,
+            "text": "",
+        }
+        for attachment_id in attachment_ids:
+            registry[attachment_id] = state
+        return state
+
+    def _bind_session_voice_transcription(
+        self,
+        *,
+        runtime,
+        state: dict[str, Any] | None,
+        request_id: str,
+    ) -> None:
+        if state is None:
+            return
+        registry = getattr(runtime, "_native_voice_transcripts", None)
+        if not isinstance(registry, dict):
+            registry = {}
+            runtime._native_voice_transcripts = registry
+        state["request_id"] = str(request_id)
+        registry[str(request_id)] = state
+
+        async def _request_confirmation() -> None:
+            recorded = self.session_store.require_voice_transcript_confirmation(
+                request_id=str(request_id)
+            )
+            state["status"] = "pending_confirmation"
+            decisions = state.get("transcript_decisions")
+            if isinstance(decisions, dict):
+                for transcript_id, decision in tuple(decisions.items()):
+                    if decision == "ready":
+                        decisions[transcript_id] = "pending_confirmation"
+                decisions[str(recorded["transcript_id"])] = "pending_confirmation"
+
+        async def _auto_release() -> None:
+            recorded = self.session_store.release_ready_voice_transcript(
+                request_id=str(request_id)
+            )
+            decisions = state.get("transcript_decisions")
+            if isinstance(decisions, dict):
+                for transcript_id, decision in tuple(decisions.items()):
+                    if decision == "ready":
+                        decisions[transcript_id] = "released"
+                decisions[str(recorded["transcript_id"])] = "released"
+
+        state["request_confirmation"] = _request_confirmation
+        state["auto_release"] = _auto_release
+        if state.get("finalizer_started"):
+            return
+        state["finalizer_started"] = True
+
+        async def _finalize() -> None:
+            try:
+                results = list(await state["task"])
+                unavailable = any(not str(item.get("text") or "") for item in results)
+                state["text"] = "\n".join(
+                    str(item.get("text") or "").strip()
+                    for item in results
+                    if str(item.get("text") or "").strip()
+                )
+                async with state["gate_lock"]:
+                    successful_state = state_after_transcription(state)
+                    state["status"] = (
+                        "unavailable" if unavailable else successful_state
+                    )
+                for result in results:
+                    part_text = str(result.get("text") or "").strip()
+                    part_state = (
+                        "unavailable"
+                        if not part_text
+                        else successful_state
+                    )
+                    recorded = self.session_store.record_voice_transcript(
+                        request_id=str(request_id),
+                        attachment_id=str(result["attachment_id"]),
+                        text=part_text,
+                        provenance="local_stt",
+                        safe_voice_state=part_state,
+                    )
+                    state["transcript_decisions"][
+                        str(recorded["transcript_id"])
+                    ] = part_state
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                state["text"] = ""
+                state["status"] = "unavailable"
+                for attachment_id in state.get("attachment_ids") or [
+                    state["attachment_id"]
+                ]:
+                    try:
+                        self.session_store.record_voice_transcript(
+                            request_id=str(request_id),
+                            attachment_id=str(attachment_id),
+                            text="",
+                            provenance="local_stt",
+                            safe_voice_state="unavailable",
+                        )
+                    except Exception:
+                        pass
+            finally:
+                ready = state.get("ready_event")
+                if isinstance(ready, asyncio.Event):
+                    ready.set()
+                if state.get("status") in {
+                    "released",
+                    "discarded",
+                    "unavailable",
+                }:
+                    release = state.get("release_event")
+                    if isinstance(release, asyncio.Event):
+                        release.set()
+
+        task = asyncio.create_task(
+            _finalize(),
+            name=f"session-voice-transcript:{request_id}",
+        )
+        self._audio_transcript_tasks.add(task)
+        task.add_done_callback(self._audio_transcript_tasks.discard)
+
     async def handle_v1_session_runs_create(self, request):
         owner = self._v1_owner_id(request)
         if owner is None:
@@ -3862,8 +4161,33 @@ class WorkbenchApiServer:
                 if isinstance(block, dict) and block.get("type") == "text"
             ]
             text = "\n".join(part for part in text_blocks if part).strip()
-            if not text:
-                raise ValueError("a non-empty text content block is required")
+            audio_blocks = [
+                dict(block)
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "audio"
+            ]
+            surface = str(payload.get("surface") or "session-api").strip().lower()
+            if (
+                not surface
+                or len(surface) > 80
+                or any(
+                    character not in "abcdefghijklmnopqrstuvwxyz0123456789._-"
+                    for character in surface
+                )
+            ):
+                raise ValueError("surface must be a lowercase protocol identifier")
+            if audio_blocks and not self._native_audio_chat_v1_ready():
+                raise SessionConflict("native audio Session Turns are not enabled")
+            if audio_blocks and not self._runtime_native_audio_ready(
+                runtime, terminal=surface
+            ):
+                raise SessionConflict(
+                    "native audio is not enabled or qualified for this Agent"
+                )
+            if not text and not audio_blocks:
+                raise ValueError(
+                    "message requires text or a committed audio content part"
+                )
             idempotency_key = str(
                 payload.get("idempotency_key")
                 or request.headers.get("Idempotency-Key")
@@ -3876,34 +4200,74 @@ class WorkbenchApiServer:
                 or payload.get("client_id")
                 or "default"
             )
-            surface = str(payload.get("surface") or "session-api").strip().lower()
-            if (
-                not surface
-                or len(surface) > 80
-                or any(
-                    character not in "abcdefghijklmnopqrstuvwxyz0123456789._-"
-                    for character in surface
-                )
-            ):
-                raise ValueError("surface must be a lowercase protocol identifier")
-            request_id = await runtime.enqueue_request(
-                runtime._primary_chat_id(),
-                text,
-                "session-api",
-                text[:160],
-                deliver_to_telegram=False,
-                idempotency_key=idempotency_key,
-                request_metadata={
-                    "session_id": session["session_id"],
-                    "owner_id": owner,
-                    "session_surface": surface,
-                    "session_channel_key": client_id,
-                    "execution_mode": payload.get("execution_mode"),
-                    "parent_run_id": payload.get("parent_run_id"),
-                },
+            canonical_parts: list[dict[str, Any]] = []
+            for item_index, block in enumerate(content, start=1):
+                if not isinstance(block, dict):
+                    raise ValueError("message content parts must be objects")
+                block_type = str(block.get("type") or "").strip().casefold()
+                if block_type == "text":
+                    canonical_parts.append(
+                        {
+                            "type": "text",
+                            "item_index": item_index,
+                            "text": str(block.get("text") or ""),
+                        }
+                    )
+                elif block_type == "audio":
+                    canonical_parts.append(
+                        self.session_store.attachment_canonical_part(
+                            session_id=session["session_id"],
+                            owner_id=owner,
+                            attachment_id=str(block.get("attachment_id") or ""),
+                            item_index=item_index,
+                            semantic_role=str(
+                                block.get("semantic_role") or "audio_attachment"
+                            ),
+                        )
+                    )
+                else:
+                    raise ValueError(f"unsupported message content type {block_type!r}")
+            canonical_content = canonical_request_content(canonical_parts)
+            transcript_state = self._begin_session_voice_transcription(
+                runtime=runtime,
+                canonical_content=canonical_content,
             )
+            try:
+                request_id = await runtime.enqueue_request(
+                    runtime._primary_chat_id(),
+                    text,
+                    "session-api",
+                    text[:160],
+                    deliver_to_telegram=False,
+                    idempotency_key=idempotency_key,
+                    request_metadata={
+                        "session_id": session["session_id"],
+                        "owner_id": owner,
+                        "session_surface": surface,
+                        "session_channel_key": client_id,
+                        "execution_mode": payload.get("execution_mode"),
+                        "parent_run_id": payload.get("parent_run_id"),
+                        "session_message_text": text,
+                        "session_message_content": content,
+                        "response_preferences": dict(
+                            payload.get("response_preferences") or {}
+                        ),
+                    },
+                    request_content=canonical_content,
+                )
+            except Exception:
+                if transcript_state is not None:
+                    transcript_state["task"].cancel()
+                raise
             if not request_id:
+                if transcript_state is not None:
+                    transcript_state["task"].cancel()
                 raise SessionConflict("request was not accepted")
+            self._bind_session_voice_transcription(
+                runtime=runtime,
+                state=transcript_state,
+                request_id=str(request_id),
+            )
             run = self.session_store.get_run_by_request(request_id)
             return web.json_response(
                 {
@@ -4043,13 +4407,58 @@ class WorkbenchApiServer:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
             payload = await request.json()
+            media_type = str(
+                payload.get("media_type") or "application/octet-stream"
+            )
+            if media_type.casefold().startswith("audio/") and not self._native_audio_chat_v1_ready():
+                raise SessionConflict("native audio attachment upload is not enabled")
+            session = self.session_store.get_session(
+                request.match_info["session_id"],
+                owner_id=owner,
+                include_deleted=False,
+            )
+            default_retention: int | str = getattr(
+                self.global_config, "native_audio_retention_seconds", 3600
+            )
+            runtime = self._runtime_map().get(session["agent_id"])
+            manager = getattr(runtime, "voice_manager", None)
+            policy_resolver = getattr(
+                manager, "native_policy_for_terminal", None
+            )
+            policy = (
+                policy_resolver(str(session.get("surface") or "session-api"))
+                if callable(policy_resolver)
+                else getattr(manager, "native_policy", None)
+            )
+            if isinstance(policy, Mapping):
+                default_retention = policy.get(
+                    "retention_seconds", default_retention
+                )
+            requested_retention = payload.get(
+                "retention_seconds", default_retention
+            )
+            retention_indefinite = bool(
+                payload.get("retention_indefinite", False)
+            ) or str(requested_retention).strip().casefold() in {
+                "indefinite",
+                "forever",
+            }
+            retention_seconds = (
+                3600
+                if retention_indefinite
+                else max(60, int(requested_retention or 3600))
+            )
             attachment = self.session_store.stage_attachment(
                 session_id=request.match_info["session_id"],
                 owner_id=owner,
                 filename=str(payload.get("filename") or "attachment"),
-                media_type=str(payload.get("media_type") or "application/octet-stream"),
+                media_type=media_type,
                 size_bytes=int(payload.get("size_bytes") or 0),
                 sha256=str(payload.get("sha256") or ""),
+                semantic_role=str(payload.get("semantic_role") or ""),
+                duration_ms=payload.get("duration_ms"),
+                retention_seconds=retention_seconds,
+                retention_indefinite=retention_indefinite,
             )
             return web.json_response({"ok": True, "attachment": attachment}, status=201)
         except Exception as exc:
@@ -4066,6 +4475,153 @@ class WorkbenchApiServer:
                 attachment_id=request.match_info["attachment_id"],
             )
             return web.json_response({"ok": True, "attachment": attachment})
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def _v1_audio_upload_payload(self, request) -> bytes:
+        content_type = str(getattr(request, "headers", {}).get("Content-Type") or "")
+        if content_type.casefold().startswith("multipart/"):
+            reader = await request.multipart()
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                if str(getattr(part, "name", "") or "") in {
+                    "audio",
+                    "content",
+                    "file",
+                }:
+                    return bytes(await part.read(decode=False))
+            raise ValueError("multipart upload requires an audio file field")
+        read = getattr(request, "read", None)
+        if not callable(read):
+            raise ValueError("request body is unavailable")
+        return bytes(await read())
+
+    async def handle_v1_attachment_upload(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        if not self._native_audio_chat_v1_ready():
+            return self._v1_error(
+                SessionConflict("native audio attachment upload is not enabled"),
+                status=503,
+            )
+        try:
+            attachment = self.session_store.upload_attachment_bytes(
+                session_id=request.match_info["session_id"],
+                owner_id=owner,
+                attachment_id=request.match_info["attachment_id"],
+                payload=await self._v1_audio_upload_payload(request),
+            )
+            return web.json_response({"ok": True, "attachment": attachment})
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_audio_asset_get(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        if not self._native_audio_chat_v1_ready():
+            return self._v1_error(
+                SessionConflict("native audio asset retrieval is not enabled"),
+                status=503,
+            )
+        try:
+            metadata, payload = self.session_store.audio_asset_bytes(
+                session_id=request.match_info["session_id"],
+                owner_id=owner,
+                asset_id=request.match_info["asset_id"],
+            )
+            return web.Response(
+                body=payload,
+                content_type=metadata["mime_type"],
+                headers={
+                    "Cache-Control": "private, no-store",
+                    "X-Content-SHA256": metadata["sha256"],
+                    "X-Audio-Asset-Id": metadata["asset_id"],
+                },
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_audio_asset_archive(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        if not self._native_audio_chat_v1_ready():
+            return self._v1_error(
+                SessionConflict("native audio archive is not enabled"), status=503
+            )
+        try:
+            asset = self.session_store.archive_audio_asset(
+                session_id=request.match_info["session_id"],
+                owner_id=owner,
+                asset_id=request.match_info["asset_id"],
+            )
+            return web.json_response({"ok": True, "asset": asset})
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_voice_transcript_decide(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        if not self._native_audio_chat_v1_ready():
+            return self._v1_error(
+                SessionConflict("native voice transcript control is not enabled"),
+                status=503,
+            )
+        try:
+            payload = await request.json()
+            decision = str(payload.get("decision") or "").strip().casefold()
+            if decision not in {"confirm", "discard"}:
+                raise ValueError("decision must be confirm or discard")
+            transcript = self.session_store.decide_voice_transcript_by_id(
+                session_id=request.match_info["session_id"],
+                owner_id=owner,
+                transcript_id=request.match_info["transcript_id"],
+                confirmed=decision == "confirm",
+            )
+            session = self.session_store.get_session(
+                request.match_info["session_id"],
+                owner_id=owner,
+                include_deleted=False,
+            )
+            runtime = self._runtime_map().get(session["agent_id"])
+            registry = getattr(runtime, "_native_voice_transcripts", None)
+            state = (
+                registry.get(str(transcript.get("request_id") or ""))
+                if isinstance(registry, dict)
+                else None
+            )
+            if isinstance(state, dict):
+                decisions = state.get("transcript_decisions")
+                if isinstance(decisions, dict):
+                    decisions[str(transcript["transcript_id"])] = (
+                        "released" if decision == "confirm" else "discarded"
+                    )
+                if decision == "discard":
+                    state["status"] = "discarded"
+                elif isinstance(decisions, dict) and decisions and all(
+                    value == "released" for value in decisions.values()
+                ):
+                    state["status"] = "released"
+                release = state.get("release_event")
+                if (
+                    isinstance(release, asyncio.Event)
+                    and state.get("status") in {"released", "discarded", "unavailable"}
+                ):
+                    release.set()
+            return web.json_response(
+                {
+                    "ok": True,
+                    "transcript": {
+                        "transcript_id": transcript["transcript_id"],
+                        "safe_voice_state": transcript["safe_voice_state"],
+                    },
+                }
+            )
         except Exception as exc:
             return self._v1_error(exc)
 

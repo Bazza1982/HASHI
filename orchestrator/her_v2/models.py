@@ -255,6 +255,7 @@ class StageResponse:
     tool_receipts: tuple[ToolEvidenceReceipt, ...] = ()
     media_routing: tuple[Mapping[str, Any], ...] = ()
     validation_source: str = ""
+    content: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -355,6 +356,7 @@ class DeliveryRecord:
     kind: str
     text: str
     event_id: str
+    content: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -380,6 +382,7 @@ class TurnResult:
     replan_count: int = 0
     checkpoint_count: int = 0
     assurance_status: str = ""
+    content: tuple[Mapping[str, Any], ...] = ()
 
 
 def terminal_lifecycle(state: TerminalState) -> LifecycleState:

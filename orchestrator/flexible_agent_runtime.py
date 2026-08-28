@@ -310,7 +310,13 @@ class FlexibleAgentRuntime:
                     default_session["session_id"], str(legacy_workzone)
                 )
         self._sync_workzone_to_backend_config()
-        self.voice_manager = VoiceManager(self.workspace_dir, self.media_dir, ffmpeg_cmd="ffmpeg", secrets=self.secrets)
+        self.voice_manager = VoiceManager(
+            self.workspace_dir,
+            self.media_dir,
+            ffmpeg_cmd="ffmpeg",
+            secrets=self.secrets,
+            native_capabilities=list(config.allowed_backends or ()),
+        )
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
         self._active_chat_ids: dict[int, int] = {}  # user_id -> chat_id, populated on first message
         self._channel_gate = self._build_channel_gate()
@@ -318,6 +324,7 @@ class FlexibleAgentRuntime:
         # Safe voice confirmation layer
         self._safevoice_enabled: bool = self._get_skill_state().get("safevoice", True)
         self._pending_voice: dict = {}  # chat_id -> {prompt, summary, media_kind, timestamp}
+        self._native_voice_transcripts: dict[str, dict[str, Any]] = {}
 
         # Command policy
         # - default: allow all commands
@@ -729,9 +736,6 @@ class FlexibleAgentRuntime:
         request_content: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
     ):
-        if not prompt or not prompt.strip():
-            self.error_logger.error(f"Rejected empty prompt from {source} (summary={summary!r})")
-            return None
         normalized_request_content = None
         manifest = ()
         if request_content is not None:
@@ -742,13 +746,20 @@ class FlexibleAgentRuntime:
 
             normalized_request_content = normalize_request_content(request_content)
             manifest = attachment_manifest(normalized_request_content)
+        clean_prompt = str(prompt or "").strip()
+        if not clean_prompt and not manifest:
+            self.error_logger.error(
+                f"Rejected empty prompt from {source} (summary={summary!r})"
+            )
+            return None
+        operational_prompt = clean_prompt or "Respond to the attached voice message."
         request_id = self.next_request_id()
         session, accepted, session_owner, session_surface, session_channel_key = (
             runtime_session.accept_request(
                 self,
                 request_id=request_id,
                 chat_id=chat_id,
-                prompt=prompt,
+                prompt=clean_prompt,
                 source=source,
                 request_metadata=request_metadata,
                 request_content=normalized_request_content,
@@ -761,6 +772,15 @@ class FlexibleAgentRuntime:
             )
             return accepted.request_id
         metadata = dict(request_metadata or {})
+        if normalized_request_content is not None:
+            from orchestrator.multimodal_contract import (
+                request_content_is_voice_origin,
+            )
+
+            metadata.setdefault(
+                "voice_origin",
+                request_content_is_voice_origin(normalized_request_content),
+            )
         metadata.update(
             {
                 "hashi_session_id": session["session_id"],
@@ -780,7 +800,7 @@ class FlexibleAgentRuntime:
         item = runtime_common.QueuedRequest(
             request_id=request_id,
             chat_id=chat_id,
-            prompt=prompt,
+            prompt=operational_prompt,
             source=source,
             summary=summary,
             created_at=datetime.now().isoformat(),
@@ -837,6 +857,9 @@ class FlexibleAgentRuntime:
         # Commit the canonical Session terminal state before any transport or
         # in-memory listener observes the result.
         runtime_session.finish_request_from_listener(self, request_id, payload)
+        await runtime_media.finish_native_voice_transcript_path(
+            self, request_id, payload
+        )
         try:
             self.request_activity.complete(
                 request_id,
@@ -2165,24 +2188,58 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(rows)
 
     def _voice_keyboard(self) -> InlineKeyboardMarkup:
-        enabled = bool(self.voice_manager.get_state().get("enabled"))
+        mode = self.voice_manager.get_reply_mode()
+        native = self.voice_manager.native_policy
+        profile_id = self.voice_manager.get_voice_profile_id()
         rows = [
             [
-                InlineKeyboardButton(selected_label("On", enabled), callback_data="voice:toggle:on"),
-                InlineKeyboardButton(selected_label("Off", not enabled), callback_data="voice:toggle:off"),
-            ]
+                InlineKeyboardButton(
+                    selected_label("Auto", mode == "auto"),
+                    callback_data="voice:mode:auto",
+                ),
+                InlineKeyboardButton(
+                    selected_label("Native", mode == "native"),
+                    callback_data="voice:mode:native",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    selected_label("TTS", mode == "tts"),
+                    callback_data="voice:mode:tts",
+                ),
+                InlineKeyboardButton(
+                    selected_label("Off", mode == "off"),
+                    callback_data="voice:mode:off",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    selected_label(
+                        "Audio + text",
+                        native["reply_content"] == "audio_and_text",
+                    ),
+                    callback_data="voice:content:both",
+                ),
+                InlineKeyboardButton(
+                    selected_label(
+                        "Audio only",
+                        native["reply_content"] == "audio_only",
+                    ),
+                    callback_data="voice:content:audio",
+                ),
+            ],
         ]
-        active_alias = self.voice_manager.get_active_preset_alias()
-        preset_buttons = []
-        for alias, preset, available in self.voice_manager.get_voice_presets():
-            base = preset.get("label") or alias
-            label = selected_label(base, alias == active_alias)
-            if available != "ready":
-                label = f"🔒 {base} ({available})"
-            preset_buttons.append(InlineKeyboardButton(label, callback_data=f"voice:use:{alias}"))
-        for i in range(0, len(preset_buttons), 2):
-            rows.append(preset_buttons[i:i + 2])
-        rows.append([InlineKeyboardButton(REFRESH_LABEL, callback_data="voice:refresh:menu")])
+        profile_buttons = [
+            InlineKeyboardButton(
+                selected_label(str(profile["label"]), candidate == profile_id),
+                callback_data=f"voice:profile:{candidate}",
+            )
+            for candidate, profile in self.voice_manager.get_voice_profiles()
+        ]
+        rows.extend(
+            profile_buttons[index:index + 2]
+            for index in range(0, len(profile_buttons), 2)
+        )
         return InlineKeyboardMarkup(rows)
 
     async def cmd_start(self, update: Update, context: Any):
@@ -2425,8 +2482,18 @@ class FlexibleAgentRuntime:
         value = parts[2] if len(parts) > 2 else ""
         message = None
         try:
-            if action == "toggle":
-                message = self.voice_manager.set_enabled(value == "on")
+            if action == "mode":
+                message = self.voice_manager.set_reply_mode(value)
+            elif action == "profile":
+                message = self.voice_manager.set_voice_profile(value)
+            elif action == "content":
+                message = self.voice_manager.set_native_reply_content(value)
+            # Keep callbacks from already-open legacy menus valid until those
+            # Telegram messages naturally age out.
+            elif action == "toggle":
+                message = self.voice_manager.set_reply_mode(
+                    "tts" if value == "on" else "off"
+                )
             elif action == "use":
                 message = self.voice_manager.apply_voice_preset(value)
         except Exception as e:
@@ -2434,10 +2501,8 @@ class FlexibleAgentRuntime:
             return
 
         text = self.voice_manager.voice_menu_text()
-        if message:
-            text = f"{text}\n\n{message}"
         await query.edit_message_text(text, reply_markup=self._voice_keyboard(), parse_mode="HTML")
-        await query.answer()
+        await query.answer(message or "Updated")
 
     # ── toggle callback ──────────────────────────────────────────────────────────
     # Handles: tgl:verbose:on/off, tgl:think:on/off, tgl:commentary:on/off,
@@ -3256,6 +3321,7 @@ class FlexibleAgentRuntime:
         elif args[0] == "off":
             self._safevoice_enabled = False
             self._set_skill_state("safevoice", False)
+            runtime_media.disable_safe_voice(self)
             runtime_long.discard_pending_voice_confirmations(self)
             self._pending_voice.clear()
             await self._reply_text(
@@ -3278,6 +3344,7 @@ class FlexibleAgentRuntime:
             self._safevoice_enabled = chat_key == "on"
             self._set_skill_state("safevoice", self._safevoice_enabled)
             if not self._safevoice_enabled:
+                runtime_media.disable_safe_voice(self)
                 runtime_long.discard_pending_voice_confirmations(self)
                 self._pending_voice.clear()
             await query.edit_message_text(
@@ -3291,7 +3358,29 @@ class FlexibleAgentRuntime:
         pending = self._pending_voice.pop(chat_key, None)
         is_long_batch_voice = was_long_batch_voice or bool(pending and pending.get("long_batch"))
         if action == "yes" and pending:
-            if is_long_batch_voice:
+            if pending.get("native_audio"):
+                request_id = str(pending.get("request_id") or "")
+                decider = getattr(
+                    getattr(self, "session_store", None),
+                    "decide_voice_transcript",
+                    None,
+                )
+                if request_id and callable(decider):
+                    decider(request_id=request_id, confirmed=True)
+                state = getattr(self, "_native_voice_transcripts", {}).get(
+                    request_id
+                )
+                if isinstance(state, dict):
+                    state["status"] = "released"
+                    release_event = state.get("release_event")
+                    if isinstance(release_event, asyncio.Event):
+                        release_event.set()
+                await query.edit_message_text(
+                    f"✅ Confirmed for the transcript-dependent path:\n\n_{pending['transcript']}_",
+                    parse_mode="Markdown",
+                )
+                await query.answer("Transcript released")
+            elif is_long_batch_voice:
                 added = runtime_long.resolve_voice_confirmation(self, chat_key, pending)
                 if added:
                     await query.edit_message_text(
@@ -3313,10 +3402,31 @@ class FlexibleAgentRuntime:
                     pending["summary"],
                 )
         elif action == "no":
+            if pending and pending.get("native_audio"):
+                request_id = str(pending.get("request_id") or "")
+                decider = getattr(
+                    getattr(self, "session_store", None),
+                    "decide_voice_transcript",
+                    None,
+                )
+                if request_id and callable(decider):
+                    decider(request_id=request_id, confirmed=False)
+                state = getattr(self, "_native_voice_transcripts", {}).get(
+                    request_id
+                )
+                if isinstance(state, dict):
+                    state["status"] = "discarded"
+                    release_event = state.get("release_event")
+                    if isinstance(release_event, asyncio.Event):
+                        release_event.set()
             if is_long_batch_voice:
                 runtime_long.discard_voice_confirmation(self, chat_key)
-            await query.edit_message_text("❌ Voice message discarded.")
-            await query.answer("Discarded")
+            await query.edit_message_text(
+                "❌ Transcript-dependent path discarded. The native chat response is unchanged."
+                if pending and pending.get("native_audio")
+                else "❌ Voice message discarded."
+            )
+            await query.answer("Transcript discarded" if pending and pending.get("native_audio") else "Discarded")
         else:
             if is_long_batch_voice:
                 runtime_long.discard_voice_confirmation(self, chat_key)
@@ -3339,13 +3449,30 @@ class FlexibleAgentRuntime:
         if mode in {"providers", "list"}:
             await self._reply_text(update, self.voice_manager.provider_hints())
             return
-        if mode in {"voices", "menu"}:
+        if mode == "menu":
             await self._reply_text(
                 update,
                 self.voice_manager.voice_menu_text(),
                 reply_markup=self._voice_keyboard(),
                 parse_mode="HTML",
             )
+            return
+        if mode == "voices":
+            await self._reply_text(update, self.voice_manager.list_voice_presets())
+            return
+        if mode == "preset":
+            if len(args) == 1:
+                await self._reply_text(
+                    update,
+                    "Usage: /voice preset <warm_female|clear_female|warm_male|calm_male>",
+                )
+                return
+            try:
+                await self._reply_text(
+                    update, self.voice_manager.set_voice_profile(args[1])
+                )
+            except RuntimeError as exc:
+                await self._reply_text(update, str(exc))
             return
         if mode == "use":
             if len(args) == 1:
@@ -3380,13 +3507,127 @@ class FlexibleAgentRuntime:
             except ValueError:
                 await self._reply_text(update, "Voice rate must be an integer.")
             return
+        if mode == "mode":
+            if len(args) == 1:
+                await self._reply_text(
+                    update, "Usage: /voice mode <off|tts|native|auto>"
+                )
+                return
+            try:
+                await self._reply_text(
+                    update, self.voice_manager.set_reply_mode(args[1])
+                )
+            except RuntimeError as exc:
+                await self._reply_text(update, str(exc))
+            return
+        if mode == "target":
+            if len(args) == 2 and args[1].lower() in {"default", "reset"}:
+                await self._reply_text(
+                    update, self.voice_manager.set_native_target(None, None)
+                )
+                return
+            if len(args) < 3:
+                await self._reply_text(
+                    update, "Usage: /voice target <provider> <model> | reset"
+                )
+                return
+            try:
+                await self._reply_text(
+                    update,
+                    self.voice_manager.set_native_target(args[1], args[2]),
+                )
+            except RuntimeError as exc:
+                await self._reply_text(update, str(exc))
+            return
+        if mode == "native-voice":
+            if len(args) == 1:
+                await self._reply_text(
+                    update, "Usage: /voice native-voice <name|default>"
+                )
+                return
+            value = None if args[1].lower() in {"default", "auto"} else " ".join(args[1:])
+            await self._reply_text(
+                update, self.voice_manager.set_native_voice(value)
+            )
+            return
+        if mode == "native-format":
+            if len(args) == 1:
+                await self._reply_text(
+                    update, "Usage: /voice native-format <format|auto>"
+                )
+                return
+            value = None if args[1].lower() in {"default", "auto"} else args[1]
+            await self._reply_text(
+                update, self.voice_manager.set_native_format(value)
+            )
+            return
+        if mode == "content":
+            if len(args) == 1:
+                await self._reply_text(
+                    update, "Usage: /voice content <both|audio|text>"
+                )
+                return
+            try:
+                await self._reply_text(
+                    update,
+                    self.voice_manager.set_native_reply_content(args[1]),
+                )
+            except RuntimeError as exc:
+                await self._reply_text(update, str(exc))
+            return
+        if mode == "fallback":
+            if len(args) == 1:
+                await self._reply_text(
+                    update, "Usage: /voice fallback <local_chain|native_only>"
+                )
+                return
+            try:
+                await self._reply_text(
+                    update, self.voice_manager.set_native_fallback(args[1])
+                )
+            except RuntimeError as exc:
+                await self._reply_text(update, str(exc))
+            return
+        if mode == "retention":
+            if len(args) == 1:
+                await self._reply_text(
+                    update, "Usage: /voice retention <minutes|indefinite>"
+                )
+                return
+            try:
+                await self._reply_text(
+                    update, self.voice_manager.set_native_retention(args[1])
+                )
+            except RuntimeError as exc:
+                await self._reply_text(update, str(exc))
+            return
+        if mode == "transcript":
+            if len(args) == 1 or args[1].lower() not in {"on", "off"}:
+                await self._reply_text(
+                    update, "Usage: /voice transcript <on|off>"
+                )
+                return
+            await self._reply_text(
+                update,
+                self.voice_manager.set_output_transcript_echo(
+                    args[1].lower() == "on"
+                ),
+            )
+            return
         if mode == "on":
-            await self._reply_text(update, self.voice_manager.set_enabled(True))
+            await self._reply_text(update, self.voice_manager.set_reply_mode("auto"))
             return
         if mode == "off":
-            await self._reply_text(update, self.voice_manager.set_enabled(False))
+            await self._reply_text(update, self.voice_manager.set_reply_mode("off"))
             return
-        await self._reply_text(update, "Usage: /voice [status|on|off|voices|use <alias>|providers|provider <name>|name <voice>|rate <n>]")
+        await self._reply_text(
+            update,
+            "Usage: /voice [status|on|off|menu|preset <profile>|voices|use <alias>|providers|"
+            "provider <name>|name <voice>|rate <n>|mode <off|tts|native|auto>|"
+            "target <provider> <model>|native-voice <name>|native-format <format>|"
+            "content <both|audio|text>|fallback <local_chain|native_only>|"
+            "retention <minutes|indefinite>|transcript <on|off>]",
+        )
 
     async def cmd_say(self, update: Update, context: Any):
         """One-shot TTS: synthesize the last assistant message and send as voice."""

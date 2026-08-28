@@ -103,6 +103,8 @@ def test_settings_cards_keep_current_value_before_facts_and_escape_names() -> No
     _assert_standard_card(timeout, "BACKEND TIMEOUT")
     _assert_standard_card(wol, "WAKE-ON-LAN TARGETS")
     assert "<b>Current</b> · <b>OFF</b>" in safevoice
+    assert "Triage, fallback, and actionable voice paths" in safevoice
+    assert "released automatically" in safevoice
     assert "agent&lt;one&gt;" in timeout
     assert "codex&lt;cli&gt;" in timeout
     assert "user &lt;override&gt;" in timeout

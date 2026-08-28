@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { execSync } from 'node:child_process';
 import { getAgents, getAgentMap, updateAgentMetadata } from './agents.js';
 import { createMinatoMcpRouter } from './minato_mcp.js';
+import { NativeAudioBridge } from './native_audio.js';
 import { parseMinatoContext, stripHeaders, appendEntry, appendLogEntry, appendStructuredActivity, readEntries, listProjects } from './project_log.js';
 
 // Per-agent active project context — updated when an outbound message carries MINATO CONTEXT.
@@ -15,6 +16,7 @@ const PORT = Number(process.env.PORT || 3001);
 const BRIDGE_U_API = process.env.BRIDGE_U_API || 'http://127.0.0.1:18800';
 const KASUMI_MCP_API = process.env.KASUMI_MCP_API || '';
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
+const nativeAudio = new NativeAudioBridge(BRIDGE_U_API);
 
 const app = express();
 app.use(express.json({ limit: '64mb' }));
@@ -626,6 +628,76 @@ app.post('/api/agents/:agentId/command', async (req, res) => {
     return res.status(response.status).type(response.headers.get('content-type') || 'application/json').send(body);
   } catch (error) {
     return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+app.post('/api/native-audio/turn', upload.any(), async (req, res) => {
+  try {
+    const result = await nativeAudio.submitTurn({
+      agentId: req.body.agentId || req.body.agent,
+      caption: req.body.text || req.body.caption || '',
+      files: req.files || [],
+      sessionId: req.body.session_id || '',
+      consumerId: req.body.consumer_id || '',
+      idempotencyKey: req.body.idempotency_key || '',
+    });
+    return res.status(202).json({ ok: true, native_audio: result });
+  } catch (error) {
+    return res.status(Number(error.status) || 500).json({
+      ok: false,
+      error: String(error.message || error),
+    });
+  }
+});
+
+app.get('/api/native-audio/sessions/:sessionId/events', async (req, res) => {
+  try {
+    const result = await nativeAudio.pollEvents(
+      req.params.sessionId,
+      String(req.query.consumer_id || ''),
+    );
+    return res.json(result);
+  } catch (error) {
+    return res.status(Number(error.status) || 500).json({ ok: false, error: String(error.message || error) });
+  }
+});
+
+app.post('/api/native-audio/sessions/:sessionId/consumers/:consumerId/ack', async (req, res) => {
+  try {
+    const result = await nativeAudio.acknowledge(
+      req.params.sessionId,
+      req.params.consumerId,
+      Number(req.body.sequence),
+    );
+    return res.json(result);
+  } catch (error) {
+    return res.status(Number(error.status) || 500).json({ ok: false, error: String(error.message || error) });
+  }
+});
+
+app.post('/api/native-audio/sessions/:sessionId/transcripts/:transcriptId', async (req, res) => {
+  try {
+    const result = await nativeAudio.decideTranscript(
+      req.params.sessionId,
+      req.params.transcriptId,
+      req.body.decision,
+    );
+    return res.json(result);
+  } catch (error) {
+    return res.status(Number(error.status) || 500).json({ ok: false, error: String(error.message || error) });
+  }
+});
+
+app.get('/api/native-audio/sessions/:sessionId/assets/:assetId', async (req, res) => {
+  try {
+    const response = await nativeAudio.fetchAsset(req.params.sessionId, req.params.assetId);
+    const body = Buffer.from(await response.arrayBuffer());
+    res.status(response.status);
+    res.set('Cache-Control', 'private, no-store');
+    res.type(response.headers.get('content-type') || 'application/octet-stream');
+    return res.send(body);
+  } catch (error) {
+    return res.status(Number(error.status) || 500).json({ ok: false, error: String(error.message || error) });
   }
 });
 

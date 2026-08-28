@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from collections import defaultdict, deque
@@ -36,7 +37,10 @@ from orchestrator.her_v2.presentation import (
 )
 from orchestrator.her_v2.progress import ProviderActivityTracker
 from orchestrator.her_v2.runtime import HERv2Runtime
-from orchestrator.multimodal_contract import canonical_request_content
+from orchestrator.multimodal_contract import (
+    attachment_manifest,
+    canonical_request_content,
+)
 
 
 def _config(**overrides):
@@ -211,6 +215,48 @@ class ScriptedProvider:
         )
 
 
+class ModalityScriptedProvider(ScriptedProvider):
+    def __init__(
+        self,
+        scripts,
+        *,
+        tmp_path,
+        conversion_error: Exception | None = None,
+    ):
+        super().__init__(scripts)
+        self.tmp_path = tmp_path
+        self.conversion_error = conversion_error
+        self.text_audio_calls: list[str] = []
+
+    async def materialize_text_audio(self, *, text, turn_id, request_ref):
+        del request_ref
+        self.text_audio_calls.append(text)
+        if self.conversion_error is not None:
+            raise self.conversion_error
+        payload = b"OggS" + b"\0" * 64
+        audio_path = self.tmp_path / f"{turn_id}-derived-input.ogg"
+        audio_path.write_bytes(payload)
+        return canonical_request_content(
+            [
+                {
+                    "type": "media",
+                    "item_index": 1,
+                    "attachment_id": "derived-text-audio",
+                    "modality": "audio",
+                    "kind": "derived_tts",
+                    "semantic_role": "audio_attachment",
+                    "mime_type": "audio/ogg",
+                    "filename": audio_path.name,
+                    "caption": "",
+                    "local_ref": str(audio_path),
+                    "size_bytes": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "transport": {},
+                }
+            ]
+        )
+
+
 class TrackingHabits:
     def __init__(self, *, block_meditation=False):
         self.retrievals = []
@@ -367,6 +413,219 @@ def _initial(
     }
 
 
+def _modality_profiles(
+    *,
+    immediate_inputs,
+    triage_inputs,
+    immediate_policy="auto",
+    triage_outputs=("text",),
+):
+    profiles = {
+        name: {
+            "engine": "fake-api",
+            "model": f"model-{name}",
+            "reasoning": f"reasoning-{name}",
+            "input_modalities": ["text"],
+            "output_modalities": ["text"],
+        }
+        for name in (
+            "lightweight",
+            "triage",
+            "premium",
+            "reviewer",
+            "orchestrator",
+        )
+    }
+    profiles["lightweight"].update(
+        {
+            "input_modalities": list(immediate_inputs),
+            "input_policy": immediate_policy,
+        }
+    )
+    profiles["triage"].update(
+        {
+            "input_modalities": list(triage_inputs),
+            "output_modalities": list(triage_outputs),
+        }
+    )
+    return profiles
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("direct_inputs", "input_policy"),
+    [
+        (("audio",), "auto"),
+        (("text", "audio"), "audio_required"),
+    ],
+)
+async def test_zero_adapts_text_once_for_audio_required_direct_model(
+    tmp_path,
+    direct_inputs,
+    input_policy,
+):
+    provider = ModalityScriptedProvider(
+        {Stage.DIRECT: [{"message": "Adapted direct answer."}]},
+        tmp_path=tmp_path,
+    )
+    profiles = _modality_profiles(
+        immediate_inputs=direct_inputs,
+        triage_inputs=("text",),
+        immediate_policy=input_policy,
+    )
+    request = (
+        "Persona and prior context.\n\n"
+        "--- CURRENT USER REQUEST — AUTHORITATIVE ---\n"
+        "Please answer this text request.\n"
+        "--- OPTIONAL SEARCHED LONG-TERM MEMORY ---\n"
+        "This prior memory must never be spoken.\n"
+        "--- CURRENT USER REQUEST — AUTHORITATIVE ---\n"
+        "A nested historical request must not replace the current one."
+    )
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_config(profiles=profiles),
+    ).run_turn(request, "request-zero-modality", effort=Effort.ZERO)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert provider.text_audio_calls == ["Please answer this text request."]
+    assert [stage_request.stage for _profile, stage_request in provider.requests] == [
+        Stage.DIRECT
+    ]
+    direct_request = provider.requests[0][1]
+    manifest = attachment_manifest(direct_request.request_content)
+    assert len(manifest) == 1
+    assert manifest[0]["kind"] == "derived_tts"
+    assert manifest[0]["semantic_role"] == "audio_attachment"
+    assert direct_request.goal == request
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "immediate_accepts_text",
+        "triage_accepts_text",
+        "expected_stages",
+        "expected_audio_stages",
+        "expected_final_was_immediate",
+    ),
+    [
+        (True, True, {Stage.IMMEDIATE_RESPONSE, Stage.TRIAGE}, set(), True),
+        (False, True, {Stage.TRIAGE, Stage.DIRECT}, {Stage.DIRECT}, False),
+        (
+            True,
+            False,
+            {Stage.IMMEDIATE_RESPONSE, Stage.TRIAGE},
+            {Stage.TRIAGE},
+            True,
+        ),
+        (
+            False,
+            False,
+            {Stage.IMMEDIATE_RESPONSE, Stage.TRIAGE},
+            {Stage.IMMEDIATE_RESPONSE, Stage.TRIAGE},
+            True,
+        ),
+    ],
+)
+async def test_low_text_input_uses_complete_modality_matrix(
+    tmp_path,
+    immediate_accepts_text,
+    triage_accepts_text,
+    expected_stages,
+    expected_audio_stages,
+    expected_final_was_immediate,
+):
+    provider = ModalityScriptedProvider(
+        {
+            Stage.IMMEDIATE_RESPONSE: [{"message": "Immediate answer."}],
+            Stage.TRIAGE: [
+                _triage("DIRECT_RESPONSE", real_goal="Answer directly.")
+            ],
+            Stage.DIRECT: [{"message": "Direct answer after Triage."}],
+        },
+        tmp_path=tmp_path,
+    )
+    profiles = _modality_profiles(
+        immediate_inputs=("text",) if immediate_accepts_text else ("audio",),
+        triage_inputs=("text",) if triage_accepts_text else ("audio",),
+    )
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_config(profiles=profiles),
+    ).run_turn("Route this text.", "request-low-modality", effort=Effort.LOW)
+
+    requests_by_stage = {
+        stage_request.stage: stage_request
+        for _profile, stage_request in provider.requests
+    }
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.final_was_immediate is expected_final_was_immediate
+    assert set(requests_by_stage) == expected_stages
+    assert len(provider.text_audio_calls) == (1 if expected_audio_stages else 0)
+    for stage, stage_request in requests_by_stage.items():
+        manifest = attachment_manifest(stage_request.request_content)
+        assert bool(manifest) is (stage in expected_audio_stages)
+        if manifest:
+            assert manifest[0]["attachment_id"] == "derived-text-audio"
+            assert manifest[0]["semantic_role"] == "audio_attachment"
+
+
+@pytest.mark.asyncio
+async def test_low_rejects_triage_without_structured_text_output(tmp_path):
+    provider = ModalityScriptedProvider(
+        _initial("DIRECT_RESPONSE"),
+        tmp_path=tmp_path,
+    )
+    profiles = _modality_profiles(
+        immediate_inputs=("text",),
+        triage_inputs=("audio",),
+        triage_outputs=("audio",),
+    )
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_config(profiles=profiles),
+    ).run_turn("Classify this.", "request-invalid-triage-output", effort=Effort.LOW)
+
+    assert result.terminal_state is TerminalState.ERROR
+    assert "PROVIDER_CONFIGURATION_ERROR" in result.error
+    assert provider.requests == []
+    assert provider.text_audio_calls == []
+
+
+@pytest.mark.asyncio
+async def test_required_text_to_audio_failure_is_explicit_and_terminal(tmp_path):
+    provider = ModalityScriptedProvider(
+        _initial("DIRECT_RESPONSE"),
+        tmp_path=tmp_path,
+        conversion_error=RuntimeError("tts unavailable"),
+    )
+    profiles = _modality_profiles(
+        immediate_inputs=("text",),
+        triage_inputs=("audio",),
+    )
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_config(profiles=profiles),
+    ).run_turn("Convert this.", "request-conversion-failure", effort=Effort.LOW)
+
+    assert result.terminal_state is TerminalState.ERROR
+    assert "INPUT_MODALITY_CONVERSION_FAILED" in result.error
+    assert provider.text_audio_calls == ["Convert this."]
+    assert all(
+        stage_request.stage is not Stage.TRIAGE
+        for _profile, stage_request in provider.requests
+    )
+
+
 @pytest.mark.asyncio
 async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_path):
     receipt = ToolEvidenceReceipt(
@@ -465,6 +724,72 @@ async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_
         Stage.REVIEW,
         Stage.FINALISATION,
     }.isdisjoint(request.stage for _profile, request in provider.requests)
+
+
+@pytest.mark.asyncio
+async def test_native_audio_direct_disables_tools_in_request_and_audit(tmp_path):
+    audio_path = tmp_path / "voice.wav"
+    payload = b"RIFF" + b"\x00" * 40
+    audio_path.write_bytes(payload)
+    content = canonical_request_content(
+        [
+            {
+                "type": "media",
+                "item_index": 1,
+                "attachment_id": "attachment-voice",
+                "modality": "audio",
+                "kind": "voice",
+                "semantic_role": "voice_message",
+                "mime_type": "audio/wav",
+                "filename": "voice.wav",
+                "caption": "",
+                "local_ref": str(audio_path),
+                "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "transport": {},
+            }
+        ]
+    )
+    profiles = {
+        name: {
+            "engine": "fake-api",
+            "model": f"model-{name}",
+            "reasoning": f"reasoning-{name}",
+        }
+        for name in ("lightweight", "triage", "premium", "reviewer", "orchestrator")
+    }
+    profiles["lightweight"].update(
+        {"_native_audio_route": True, "audio_model_tools": False}
+    )
+    provider = ScriptedProvider(
+        {Stage.DIRECT: [StageResponse(data={"message": "Voice reply."})]}
+    )
+    runtime = _runtime(tmp_path, provider, config=_config(profiles=profiles))
+
+    result = await runtime.run_turn(
+        "Respond to the voice message.",
+        "request-native-tool-isolation",
+        effort=Effort.ZERO,
+        request_content=content,
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    _, request = provider.requests[0]
+    assert request.stage is Stage.DIRECT
+    assert request.allow_tools is False
+    assert request.allow_side_effects is False
+    audit_rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    started = next(
+        row
+        for row in audit_rows
+        if row["event"] == "stage_started" and row["stage"] == "direct"
+    )
+    assert started["payload"]["allow_tools"] is False
+    assert started["payload"]["allow_side_effects"] is False
+    assert started["payload"]["retry_invariants"]["allow_tools"] is False
 
 
 @pytest.mark.asyncio
@@ -881,6 +1206,197 @@ async def test_direct_response_preserves_visible_immediate_content_without_fallb
         and row["stage"] == Stage.IMMEDIATE_RESPONSE.value
     )
     assert compatibility["payload"]["validation_source"] == "provider_plain_text"
+
+
+@pytest.mark.asyncio
+async def test_native_audio_immediate_is_delivered_first_and_resolved_without_duplication(
+    tmp_path,
+):
+    triage_started = asyncio.Event()
+    release_triage = asyncio.Event()
+    immediate_delivered = asyncio.Event()
+    audio_part = {
+        "type": "audio",
+        "asset_id": "asset-native-reply",
+        "mime_type": "audio/wav",
+        "format": "wav",
+        "size_bytes": 44,
+        "sha256": "a" * 64,
+    }
+    media_route = (
+        {
+            "attachment_id": "attachment-voice",
+            "item_index": 1,
+            "modality": "audio",
+            "route": "native",
+            "reason": "native_capability_available",
+            "transport": "inline",
+        },
+    )
+
+    async def blocked_triage(_request):
+        triage_started.set()
+        await release_triage.wait()
+        return StageResponse(
+            data=_triage("DIRECT_RESPONSE", real_goal="Reply to the voice message."),
+            provider="fake-api",
+            model="model-triage",
+            media_routing=media_route,
+        )
+
+    class SignallingDelivery(RecordingDelivery):
+        async def deliver(self, **kwargs):
+            accepted = await super().deliver(**kwargs)
+            if kwargs["kind"] == "immediate":
+                immediate_delivered.set()
+            return accepted
+
+    content = canonical_request_content(
+        [
+            {
+                "type": "media",
+                "item_index": 1,
+                "attachment_id": "attachment-voice",
+                "modality": "audio",
+                "kind": "voice",
+                "semantic_role": "voice_message",
+                "mime_type": "audio/wav",
+                "filename": "voice.wav",
+                "caption": "",
+                "local_ref": str(tmp_path / "voice.wav"),
+                "size_bytes": 44,
+                "sha256": "b" * 64,
+                "transport": {"message_id": 7},
+            }
+        ]
+    )
+    scripts = {
+        Stage.IMMEDIATE_RESPONSE: [
+            StageResponse(
+                text="I heard you.",
+                provider="fake-api",
+                model="model-lightweight",
+                media_routing=media_route,
+                content=(audio_part,),
+            )
+        ],
+        Stage.TRIAGE: [blocked_triage],
+    }
+    delivery = SignallingDelivery()
+    turn = asyncio.create_task(
+        _runtime(tmp_path, ScriptedProvider(scripts), delivery=delivery).run_turn(
+            "Respond to the attached voice message.",
+            "request-native-audio-first-ready",
+            effort="low",
+            request_content=content,
+        )
+    )
+
+    await asyncio.wait_for(triage_started.wait(), timeout=1)
+    await asyncio.wait_for(immediate_delivered.wait(), timeout=1)
+    assert [(record.kind, record.text) for record in delivery.records] == [
+        ("immediate", "I heard you.")
+    ]
+    assert delivery.records[0].content == (audio_part,)
+
+    release_triage.set()
+    result = await asyncio.wait_for(turn, timeout=1)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.final_was_immediate is True
+    assert [(record.kind, record.text) for record in delivery.records] == [
+        ("final", "I heard you.")
+    ]
+    assert delivery.records[0].content == (audio_part,)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_voice_transcript_keeps_native_immediate_as_direct_result(
+    tmp_path,
+):
+    native_route = (
+        {
+            "attachment_id": "attachment-voice",
+            "item_index": 1,
+            "modality": "audio",
+            "route": "native",
+            "reason": "native_capability_available",
+            "transport": "inline",
+        },
+    )
+    unavailable_route = (
+        {
+            **native_route[0],
+            "route": "transcript_unavailable",
+            "reason": "local_stt_unavailable",
+            "transport": None,
+        },
+    )
+    audio_part = {
+        "type": "audio",
+        "asset_id": "asset-native-only",
+        "mime_type": "audio/wav",
+        "format": "wav",
+    }
+    content = canonical_request_content(
+        [
+            {
+                "type": "media",
+                "item_index": 1,
+                "attachment_id": "attachment-voice",
+                "modality": "audio",
+                "kind": "voice",
+                "semantic_role": "voice_message",
+                "mime_type": "audio/wav",
+                "filename": "voice.wav",
+                "caption": "",
+                "local_ref": str(tmp_path / "voice.wav"),
+                "size_bytes": 44,
+                "sha256": "c" * 64,
+                "transport": {},
+            }
+        ]
+    )
+    provider = ScriptedProvider(
+        {
+            Stage.IMMEDIATE_RESPONSE: [
+                StageResponse(
+                    text="The native chat reply remains available.",
+                    provider="fake-api",
+                    model="audio-immediate",
+                    media_routing=native_route,
+                    content=(audio_part,),
+                )
+            ],
+            Stage.TRIAGE: [
+                StageResponse(
+                    data=_triage(
+                        "DIRECT_RESPONSE",
+                        real_goal="Keep the native no-tool voice response.",
+                    ),
+                    provider="hashi-runtime",
+                    model="safe-voice-boundary",
+                    media_routing=unavailable_route,
+                    validation_source="runtime_voice_boundary",
+                )
+            ],
+        }
+    )
+
+    result = await _runtime(tmp_path, provider).run_turn(
+        "Respond to the attached voice message.",
+        "request-native-stt-unavailable",
+        effort="low",
+        request_content=content,
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.final_was_immediate is True
+    assert result.delivery_records[0].content == (audio_part,)
+    assert {request.stage for _profile, request in provider.requests} == {
+        Stage.IMMEDIATE_RESPONSE,
+        Stage.TRIAGE,
+    }
 
 
 @pytest.mark.asyncio

@@ -1574,13 +1574,29 @@ class BridgeContextAssembler:
             sequence = int(exchange.get("sequence") or exchange.get("exchange_id") or 0)
             user_ts = str(exchange.get("user_ts") or "unknown-time")
             assistant_ts = str(exchange.get("assistant_ts") or "unknown-time")
+            user_provenance = str(
+                exchange.get("user_transcript_provenance") or ""
+            ).strip()
+            assistant_provenance = str(
+                exchange.get("assistant_transcript_provenance") or ""
+            ).strip()
+            user_label = (
+                f"USER [transcript provenance={user_provenance}]"
+                if user_provenance
+                else "USER"
+            )
+            assistant_label = (
+                f"ASSISTANT [transcript provenance={assistant_provenance}]"
+                if assistant_provenance
+                else "ASSISTANT"
+            )
             add_section(
                 f"recent_exchange:{sequence}",
                 "RECENT COMPLETED EXCHANGE",
                 (
                     f"Exchange sequence={sequence}; user_ts={user_ts}; assistant_ts={assistant_ts}\n"
-                    f"USER: {exchange.get('user_text', '')}\n"
-                    f"ASSISTANT: {exchange.get('assistant_text', '')}"
+                    f"{user_label}: {exchange.get('user_text', '')}\n"
+                    f"{assistant_label}: {exchange.get('assistant_text', '')}"
                 ),
                 "history",
                 metadata={"sequence": sequence, "exchange_id": exchange.get("exchange_id")},

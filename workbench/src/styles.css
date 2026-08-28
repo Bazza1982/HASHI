@@ -1413,3 +1413,35 @@ select { background: #0f1116; color: var(--text); border: 1px solid var(--border
   border-color: #4df3ff;
   box-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
 }
+
+.native-audio-player {
+  display: block;
+  width: min(100%, 420px);
+  margin-top: 10px;
+}
+
+.native-audio-resolution {
+  display: inline-block;
+  margin-top: 7px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.safe-voice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.safe-voice-actions button {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 6px 10px;
+  cursor: pointer;
+}

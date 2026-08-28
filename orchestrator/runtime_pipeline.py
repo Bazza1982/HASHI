@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +44,17 @@ INTERACTIVE_FEEDBACK_CLEANUP_TIMEOUT_SECONDS = 5.0
 SESSION_SCOPE_PERSISTENT = "persistent"
 SESSION_SCOPE_ISOLATED = "isolated_per_run"
 SESSION_SCOPE_ISOLATED_RESUME = "isolated_resume"
+
+
+def response_has_deliverable_content(response: Any) -> bool:
+    declared = getattr(response, "has_deliverable_content", None)
+    if isinstance(declared, bool):
+        return declared
+    if str(getattr(response, "text", "") or "").strip():
+        return True
+    from orchestrator.native_audio_delivery import audio_parts
+
+    return bool(audio_parts(getattr(response, "content", ())))
 
 _DANGLING_TOOL_MARKERS = (
     "<｜dsml｜tool_calls",
@@ -1431,20 +1443,61 @@ def wrap_her_persona_stream(
         f"delivery_requested={delivery_requested} blocked={delivery_blocked}"
     )
     provisional_messages: dict[str, _ProvisionalTelegramMessage] = {}
+    provisional_audio_events: set[str] = set()
     bot = getattr(getattr(runtime, "app", None), "bot", None)
     initial_resolution_capable = bool(
         callable(getattr(runtime, "_send_text", None))
         and callable(getattr(bot, "edit_message_text", None))
-        and telegram_notifications.notification_mode(runtime) != "quiet"
     )
 
     async def _send_event(event, *, purpose: str, commentary: bool = False):
         await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
+        from orchestrator.native_audio_delivery import (
+            audio_parts,
+            native_reply_content_policy,
+            send_native_audio_parts,
+        )
+
+        typed_content = tuple(
+            dict(part)
+            for part in dict(getattr(event, "metadata", {}) or {}).get(
+                "content", ()
+            )
+            if isinstance(part, Mapping)
+        )
+        has_audio = bool(audio_parts(typed_content))
+        reply_policy = native_reply_content_policy(runtime, item)
+        audio_task = None
+        if has_audio and reply_policy != "text_only":
+            audio_task = asyncio.create_task(
+                send_native_audio_parts(
+                    runtime,
+                    item,
+                    typed_content,
+                    purpose=purpose,
+                )
+            )
         raw_text = str(getattr(event, "summary", "") or "").strip()
-        if not raw_text:
+        if has_audio and reply_policy == "audio_only":
+            raw_text = ""
+        if not raw_text and audio_task is None:
             return False
+        if not raw_text:
+            try:
+                audio_accepted = bool(await audio_task)
+            except Exception as exc:
+                runtime.logger.warning(
+                    "HER native audio delivery failed: request=%s error_type=%s",
+                    item.request_id,
+                    type(exc).__name__,
+                )
+                return False
+            event_id = str(getattr(event, "event_id", "") or "").strip()
+            if audio_accepted and event_id:
+                provisional_audio_events.add(event_id)
+            return audio_accepted
         text = raw_text
-        if commentary and not text.startswith("💬"):
+        if commentary and not has_audio and not text.startswith("💬"):
             text = f"💬 {text}"
         rendered_text = _md_to_html(text)
         runtime.logger.info(
@@ -1479,7 +1532,17 @@ def wrap_her_persona_stream(
                 error_type=type(exc).__name__,
             )
             raise
-        if not transport_accepted:
+        audio_accepted = False
+        if audio_task is not None:
+            try:
+                audio_accepted = bool(await audio_task)
+            except Exception as exc:
+                runtime.logger.warning(
+                    "HER native audio delivery failed: request=%s error_type=%s",
+                    item.request_id,
+                    type(exc).__name__,
+                )
+        if not transport_accepted and not audio_accepted:
             _append_her_message_audit(
                 runtime,
                 item,
@@ -1493,6 +1556,8 @@ def wrap_her_persona_stream(
             )
             return False
         event_id = str(getattr(event, "event_id", "") or "").strip()
+        if audio_accepted and event_id:
+            provisional_audio_events.add(event_id)
         message_id = _transport_message_id(result)
         if event_id and message_id is not None:
             provisional_messages[event_id] = _ProvisionalTelegramMessage(
@@ -1512,9 +1577,13 @@ def wrap_her_persona_stream(
             f"HER {label} accepted by transport: request={item.request_id} "
             f"purpose={purpose} text_len={len(text)}"
         )
-        return True
+        return bool(transport_accepted or audio_accepted)
 
     async def _commentary_presenter(event):
+        if getattr(event, "kind", None) == "voice_warning":
+            return await _send_event(
+                event, purpose="native_audio_fallback_warning", commentary=False
+            )
         purpose = (
             "task_acknowledgement"
             if getattr(event, "kind", None) == KIND_ACKNOWLEDGEMENT
@@ -1531,7 +1600,9 @@ def wrap_her_persona_stream(
         ).strip()
         provisional = provisional_messages.get(target_event_id)
         if provisional is None:
-            return False
+            # A voice message is immutable on Telegram.  Resolution changes
+            # only the internal disposition; the already-delivered audio stays.
+            return target_event_id in provisional_audio_events
         resolution = str(getattr(event, "resolution", "") or "").strip()
         rendered_text = provisional.rendered_text
         parse_mode = provisional.parse_mode
@@ -1618,6 +1689,39 @@ def wrap_her_persona_stream(
             status="generated",
             include_text=True,
         )
+        content = tuple(
+            dict(part)
+            for part in dict(getattr(event, "metadata", {}) or {}).get(
+                "content", ()
+            )
+            if isinstance(part, Mapping)
+        )
+        append_audio_event = getattr(
+            getattr(runtime, "session_store", None),
+            "append_native_audio_runtime_event",
+            None,
+        )
+        if callable(append_audio_event):
+            try:
+                append_audio_event(
+                    request_id=item.request_id,
+                    source_event_id=str(getattr(event, "event_id", "") or ""),
+                    event_kind=str(getattr(event, "kind", "") or ""),
+                    summary=str(getattr(event, "summary", "") or ""),
+                    phase=str(getattr(event, "phase", "") or ""),
+                    content=content,
+                    resolution=str(getattr(event, "resolution", "") or ""),
+                    target_event_id=str(
+                        getattr(event, "target_event_id", "") or ""
+                    ),
+                )
+            except Exception as exc:
+                runtime.logger.warning(
+                    "Session native audio Event projection failed safely: "
+                    "request=%s error_type=%s",
+                    item.request_id,
+                    type(exc).__name__,
+                )
         delivery_class = str(getattr(event, "delivery_class", "") or "")
         suppression_reason = event_suppression_reason
         if not suppression_reason and delivery_class == "user_commentary":
@@ -1625,7 +1729,10 @@ def wrap_her_persona_stream(
                 suppression_reason = "delivery_not_requested"
             elif delivery_blocked:
                 suppression_reason = "delivery_blocked"
-            elif not bool(getattr(runtime, "_commentary", True)):
+            elif (
+                not bool(getattr(event, "required", False))
+                and not bool(getattr(runtime, "_commentary", True))
+            ):
                 suppression_reason = "commentary_disabled"
         elif (
             delivery_class == "control"
@@ -2085,6 +2192,9 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
             core_raw=response.text,
             completion_path=completion_path,
         )
+    from orchestrator.native_audio_delivery import audio_parts, claim_audio_parts
+
+    claim_audio_parts(runtime, item, getattr(response, "content", ()))
     display_text = runtime._strip_transfer_accept_prefix(item, response.text)
     visible_text, wrapper_result = await runtime._apply_wrapper_to_visible_text(
         item,
@@ -2111,7 +2221,8 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
         response.stream_metadata = metadata
         display_text = fallback
         visible_text = fallback
-    if not visible_text.strip():
+    has_typed_audio = bool(audio_parts(getattr(response, "content", ())))
+    if not visible_text.strip() and not has_typed_audio:
         return SuccessfulResponse(
             display_text=display_text,
             visible_text=visible_text,
@@ -2119,13 +2230,14 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
         )
     runtime._mark_success()
     safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
-    runtime._append_core_transcript(
-        item,
-        core_raw=safe_core_raw,
-        visible_text=visible_text,
-        completion_path=completion_path,
-        wrapper_result=wrapper_result,
-    )
+    if visible_text.strip():
+        runtime._append_core_transcript(
+            item,
+            core_raw=safe_core_raw,
+            visible_text=visible_text,
+            completion_path=completion_path,
+            wrapper_result=wrapper_result,
+        )
     await runtime._notify_request_listeners(
         item.request_id,
         {
@@ -2135,6 +2247,11 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
             "error": None,
             "source": item.source,
             "summary": item.summary,
+            "content": [
+                dict(part)
+                for part in getattr(response, "content", ())
+                if isinstance(part, Mapping)
+            ],
             **request_context_warning_fields(runtime, item.request_id),
             **runtime._wrapper_listener_fields(safe_core_raw, visible_text, wrapper_result),
         },
@@ -2808,6 +2925,14 @@ async def handle_success_delivery(
         return
 
     response_text = visible_text
+    from orchestrator.native_audio_delivery import (
+        audio_parts,
+        native_reply_content_policy,
+        send_native_audio_parts,
+    )
+
+    native_parts = audio_parts(getattr(response, "content", ()))
+    native_policy = native_reply_content_policy(runtime, item)
     cos_handled = False
     safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
     await runtime._send_wrapper_verbose_trace(item, safe_core_raw, visible_text, wrapper_result)
@@ -2816,6 +2941,7 @@ async def handle_success_delivery(
         and runtime.name != "lily"
         and not item.source.startswith("cos-query:")
         and response_text
+        and not native_parts
         and response_text.rstrip().endswith(("?", "？"))
     ):
         cos_result = await runtime.cos_query(response_text)
@@ -2828,6 +2954,22 @@ async def handle_success_delivery(
     delivered_at_initial_resolution = bool(
         her_delivery.get("final_already_delivered")
     )
+    native_delivery_task = None
+    native_delivery_attempted = bool(
+        native_parts
+        and native_policy != "text_only"
+        and not delivered_at_initial_resolution
+    )
+    if native_delivery_attempted:
+        native_delivery_task = asyncio.create_task(
+            send_native_audio_parts(
+                runtime,
+                item,
+                getattr(response, "content", ()),
+                purpose="native_audio_final",
+            )
+        )
+    delivery_text = "" if native_policy == "audio_only" and native_parts else response_text
     receipt_disposition = "transport_returned_no_receipt"
     try:
         if delivered_at_initial_resolution:
@@ -2839,12 +2981,19 @@ async def handle_success_delivery(
             send_elapsed_s, chunk_count = 0.0, 0
             receipt_disposition = "initial_resolution_delivered"
         else:
-            stream_finalization = await finalize_streamed_answer(
-                runtime,
-                item,
-                stream_state=answer_stream_state,
-                final_text=response_text,
-            )
+            if delivery_text:
+                stream_finalization = await finalize_streamed_answer(
+                    runtime,
+                    item,
+                    stream_state=answer_stream_state,
+                    final_text=delivery_text,
+                )
+            else:
+                stream_finalization = StreamFinalization(
+                    streamed=False,
+                    final_delivered=False,
+                    fallback_required=False,
+                )
             if stream_finalization.final_delivered:
                 send_elapsed_s = 0.0
                 chunk_count = 1 + stream_finalization.continuation_chunks_sent
@@ -2852,7 +3001,7 @@ async def handle_success_delivery(
             elif stream_finalization.fallback_required:
                 send_elapsed_s, chunk_count = await runtime.send_long_message(
                     chat_id=item.chat_id,
-                    text=response_text,
+                    text=delivery_text,
                     request_id=item.request_id,
                     purpose="response",
                 )
@@ -2869,6 +3018,9 @@ async def handle_success_delivery(
                     else "transport_not_attempted"
                 )
     except Exception as exc:
+        if native_delivery_task is not None:
+            native_delivery_task.cancel()
+            await asyncio.gather(native_delivery_task, return_exceptions=True)
         await record_her_v2_transport_receipt(
             runtime,
             item,
@@ -2878,10 +3030,56 @@ async def handle_success_delivery(
             error_type=type(exc).__name__,
         )
         raise
+    native_delivered = False
+    native_delivery_error = None
+    if native_delivery_task is not None:
+        try:
+            native_delivered = bool(await native_delivery_task)
+        except Exception as exc:
+            native_delivery_error = exc
+            runtime.logger.warning(
+                "Native audio final delivery failed: request=%s error_type=%s",
+                item.request_id,
+                type(exc).__name__,
+            )
+    if native_delivery_attempted and not native_delivered:
+        warning_text = (
+            "Native audio delivery was unavailable; HASHI is using the local "
+            "text-to-speech fallback."
+        )
+        try:
+            await runtime._send_text(
+                item.chat_id,
+                warning_text,
+                _request_id=item.request_id,
+                _purpose="native_audio_fallback_warning",
+            )
+        except Exception:
+            await runtime.send_long_message(
+                item.chat_id,
+                warning_text,
+                request_id=item.request_id,
+                purpose="native_audio_fallback_warning",
+            )
+        if response_text:
+            native_delivered = bool(
+                await runtime._send_voice_reply(
+                    item.chat_id,
+                    response_text,
+                    item.request_id,
+                    force=True,
+                )
+            )
+        receipt_disposition = (
+            "native_audio_fallback_delivered"
+            if native_delivered
+            else "native_audio_fallback_failed"
+        )
     final_delivered = bool(
         delivered_at_initial_resolution
         or stream_finalization.final_delivered
         or (stream_finalization.fallback_required and chunk_count > 0)
+        or native_delivered
     )
     await record_her_v2_transport_receipt(
         runtime,
@@ -2889,7 +3087,12 @@ async def handle_success_delivery(
         response,
         delivered=final_delivered,
         disposition=receipt_disposition,
-        chunk_count=chunk_count,
+        chunk_count=chunk_count + int(native_delivered),
+        error_type=(
+            type(native_delivery_error).__name__
+            if native_delivery_error is not None
+            else ""
+        ),
     )
     runtime_cross_session.record_turn_result(
         runtime,
@@ -2899,7 +3102,40 @@ async def handle_success_delivery(
         delivered=final_delivered,
         completion_path="foreground",
     )
-    await runtime._send_voice_reply(item.chat_id, response_text, item.request_id)
+    if not native_parts:
+        request_metadata = getattr(item, "request_metadata", None)
+        voice_origin = bool(
+            isinstance(request_metadata, Mapping)
+            and request_metadata.get("voice_origin")
+        )
+        raw_response_metadata = getattr(response, "stream_metadata", None)
+        response_metadata = (
+            raw_response_metadata
+            if isinstance(raw_response_metadata, Mapping)
+            else {}
+        )
+        native_fallback = bool(response_metadata.get("native_audio_fallback"))
+        manager = getattr(runtime, "voice_manager", None)
+        native_enabled = getattr(manager, "native_audio_enabled", None)
+        force_voice = bool(
+            native_fallback
+            or (
+                voice_origin
+                and callable(native_enabled)
+                and native_enabled()
+            )
+        )
+        if force_voice:
+            await runtime._send_voice_reply(
+                item.chat_id,
+                response_text,
+                item.request_id,
+                force=True,
+            )
+        else:
+            await runtime._send_voice_reply(
+                item.chat_id, response_text, item.request_id
+            )
     if final_delivered and callable(getattr(runtime, "_send_meter_cost_tail", None)):
         await runtime._send_meter_cost_tail(item)
     runtime._schedule_audit_followup(

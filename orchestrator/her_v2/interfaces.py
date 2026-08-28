@@ -30,6 +30,7 @@ class ProviderFailureCode(str, Enum):
     PROVIDER_STREAM_IDLE_TIMEOUT = "PROVIDER_STREAM_IDLE_TIMEOUT"
     PROVIDER_EMPTY_RESPONSE = "PROVIDER_EMPTY_RESPONSE"
     PROVIDER_MODALITY_UNSUPPORTED = "PROVIDER_MODALITY_UNSUPPORTED"
+    INPUT_MODALITY_CONVERSION_FAILED = "INPUT_MODALITY_CONVERSION_FAILED"
     INVALID_MULTIMODAL_CONTENT = "INVALID_MULTIMODAL_CONTENT"
     INLINE_MEDIA_PERSISTENCE_FORBIDDEN = "INLINE_MEDIA_PERSISTENCE_FORBIDDEN"
     MEDIA_PATH_NOT_AUTHORIZED = "MEDIA_PATH_NOT_AUTHORIZED"
@@ -179,6 +180,20 @@ class TurnStopped(RuntimeError):
 
 
 class StageProvider(Protocol):
+    async def resolve_stage_modalities(
+        self, profile: ProviderProfile
+    ) -> Mapping[str, Any]: ...
+
+    async def materialize_text_audio(
+        self,
+        *,
+        text: str,
+        turn_id: str,
+        request_ref: str,
+    ) -> Mapping[str, Any]: ...
+
+    async def cleanup_text_audio(self) -> None: ...
+
     async def invoke(
         self, profile: ProviderProfile, request: StageRequest
     ) -> StageResponse: ...
@@ -205,6 +220,7 @@ class DeliveryPort(Protocol):
         provenance: str = "",
         detail: str = "",
         delivery_id: str = "",
+        content: tuple[Mapping[str, Any], ...] = (),
     ) -> bool | DeliveryReceipt: ...
 
     async def resolve_initial(
@@ -255,13 +271,16 @@ class RecordingDelivery:
         provenance: str = "",
         detail: str = "",
         delivery_id: str = "",
+        content: tuple[Mapping[str, Any], ...] = (),
     ) -> bool:
         del required, phase, provenance, detail, delivery_id
         if kind in self.fail_kinds:
             return False
         if any(item.event_id == event_id for item in self.records):
             return True
-        self.records.append(DeliveryRecord(kind=kind, text=text, event_id=event_id))
+        self.records.append(
+            DeliveryRecord(kind=kind, text=text, event_id=event_id, content=content)
+        )
         return True
 
     async def deliver_packaged_commentary(self, commentary: Any) -> bool:
@@ -301,7 +320,13 @@ class RecordingDelivery:
             kind = resolution
             if resolution == "commentary" and self.records[index].kind != "draft":
                 kind = "acknowledgement"
-            self.records[index] = DeliveryRecord(kind, text, target_event_id)
+            current = self.records[index]
+            self.records[index] = DeliveryRecord(
+                kind,
+                text,
+                target_event_id,
+                content=tuple(current.content),
+            )
         return DeliveryReceipt(True, True, f"provisional_{resolution}")
 
 

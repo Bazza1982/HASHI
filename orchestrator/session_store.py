@@ -11,6 +11,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from orchestrator.audio_assets import (
+    AudioAssetError,
+    AudioAssetNotFound,
+    AudioAssetStore,
+    DEFAULT_RETENTION_SECONDS,
+    MIN_RETENTION_SECONDS,
+    normalize_audio_format,
+)
+from orchestrator.multimodal_contract import contains_persistent_inline_media
+
 # ``importlib.reload`` reuses the module dictionary.  Preserve the class and
 # exception identities already held by live runtimes; the handoff at the end
 # of this module installs the newly defined implementation onto those objects.
@@ -89,7 +99,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 4
 
     def __init__(self, db_path: str | Path, *, instance_id: str = "HASHI"):
         self.db_path = Path(db_path)
@@ -97,6 +107,9 @@ class SessionStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.workspaces_root = self.db_path.parent / "session_workspaces"
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
+        self.audio_assets = AudioAssetStore(
+            self.db_path.parent / "native_audio_assets"
+        )
         self._lock = threading.RLock()
         self._initialize()
 
@@ -207,6 +220,7 @@ class SessionStore:
                     source TEXT NOT NULL,
                     requested_mode TEXT,
                     effective_mode TEXT,
+                    response_preferences_json TEXT NOT NULL DEFAULT '{}',
                     context_generation INTEGER NOT NULL,
                     state TEXT NOT NULL,
                     attempt INTEGER NOT NULL DEFAULT 0,
@@ -385,9 +399,57 @@ class SessionStore:
                     size_bytes INTEGER NOT NULL,
                     sha256 TEXT NOT NULL,
                     state TEXT NOT NULL DEFAULT 'staged',
+                    semantic_role TEXT NOT NULL DEFAULT '',
+                    duration_ms INTEGER,
+                    retention_seconds INTEGER,
+                    retention_indefinite INTEGER NOT NULL DEFAULT 0,
+                    upload_required INTEGER NOT NULL DEFAULT 0,
+                    asset_id TEXT,
+                    uploaded_at TEXT,
                     created_at TEXT NOT NULL,
                     committed_at TEXT,
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS run_audio_assets (
+                    run_id TEXT NOT NULL,
+                    attachment_id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    direction TEXT NOT NULL DEFAULT 'input',
+                    lease_released INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    released_at TEXT,
+                    PRIMARY KEY(run_id, asset_id),
+                    FOREIGN KEY(run_id) REFERENCES runs(run_id),
+                    FOREIGN KEY(attachment_id) REFERENCES session_attachments(attachment_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS voice_transcripts (
+                    transcript_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT,
+                    message_id TEXT,
+                    attachment_id TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    provenance TEXT NOT NULL,
+                    safe_voice_state TEXT NOT NULL DEFAULT 'released',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(run_id) REFERENCES runs(run_id),
+                    FOREIGN KEY(message_id) REFERENCES messages(message_id),
+                    FOREIGN KEY(attachment_id) REFERENCES session_attachments(attachment_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS runtime_event_correlations (
+                    source_event_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(run_id) REFERENCES runs(run_id),
+                    FOREIGN KEY(event_id) REFERENCES run_events(event_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS run_approvals (
@@ -418,6 +480,35 @@ class SessionStore:
                     "ALTER TABLE event_consumers ADD COLUMN "
                     "issued_through_sequence INTEGER NOT NULL DEFAULT 0"
                 )
+            attachment_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(session_attachments)"
+                ).fetchall()
+            }
+            attachment_migrations = {
+                "semantic_role": "TEXT NOT NULL DEFAULT ''",
+                "duration_ms": "INTEGER",
+                "retention_seconds": "INTEGER",
+                "retention_indefinite": "INTEGER NOT NULL DEFAULT 0",
+                "upload_required": "INTEGER NOT NULL DEFAULT 0",
+                "asset_id": "TEXT",
+                "uploaded_at": "TEXT",
+            }
+            for column, declaration in attachment_migrations.items():
+                if column not in attachment_columns:
+                    connection.execute(
+                        f"ALTER TABLE session_attachments ADD COLUMN {column} {declaration}"
+                    )
+            run_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(runs)").fetchall()
+            }
+            if "response_preferences_json" not in run_columns:
+                connection.execute(
+                    "ALTER TABLE runs ADD COLUMN "
+                    "response_preferences_json TEXT NOT NULL DEFAULT '{}'"
+                )
             connection.execute(
                 "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
@@ -444,7 +535,12 @@ class SessionStore:
 
     @staticmethod
     def _run_dict(row: sqlite3.Row) -> dict[str, Any]:
-        return dict(row)
+        result = dict(row)
+        if "response_preferences_json" in result:
+            result["response_preferences"] = _json_object(
+                result.pop("response_preferences_json")
+            )
+        return result
 
     def _next_ordinal(self, connection: sqlite3.Connection, session_id: str) -> int:
         row = connection.execute(
@@ -760,17 +856,21 @@ class SessionStore:
         execution_mode: str | None = None,
         content: Iterable[Mapping[str, Any]] | None = None,
         parent_run_id: str | None = None,
+        response_preferences: Mapping[str, Any] | None = None,
     ) -> AcceptedRun:
         clean = str(text or "").strip()
-        if not clean:
-            raise ValueError("message text is required")
         blocks = list(content or ({"type": "text", "text": clean},))
-        digest_payload = {
-            "content": blocks,
-            "execution_mode": str(execution_mode or ""),
-            "parent_run_id": str(parent_run_id or ""),
-        }
-        digest = hashlib.sha256(_json(digest_payload).encode("utf-8")).hexdigest()
+        if contains_persistent_inline_media(blocks):
+            raise SessionConflict("Session content cannot contain inline media bytes")
+        if not all(isinstance(block, Mapping) for block in blocks):
+            raise ValueError("message content parts must be objects")
+        if not clean:
+            clean = "\n".join(
+                str(block.get("text") or "").strip()
+                for block in blocks
+                if str(block.get("type") or "").strip().casefold() == "text"
+                and str(block.get("text") or "").strip()
+            ).strip()
         now = _utc_now()
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -784,6 +884,79 @@ class SessionStore:
             ).fetchone()
             if session is None:
                 raise SessionNotFound(session_id)
+            audio_rows: list[sqlite3.Row] = []
+            attachment_fingerprints: list[dict[str, Any]] = []
+            normalized_blocks: list[dict[str, Any]] = []
+            for raw_block in blocks:
+                block = dict(raw_block)
+                block_type = str(block.get("type") or "").strip().casefold()
+                if block_type == "text":
+                    if not isinstance(block.get("text"), str):
+                        raise ValueError("text content parts require text")
+                elif block_type == "audio":
+                    attachment_id = str(block.get("attachment_id") or "").strip()
+                    semantic_role = str(
+                        block.get("semantic_role") or "audio_attachment"
+                    ).strip().casefold()
+                    if not attachment_id:
+                        raise SessionConflict(
+                            "audio content requires a committed attachment"
+                        )
+                    if semantic_role not in {"voice_message", "audio_attachment"}:
+                        raise SessionConflict("invalid audio semantic role")
+                    attachment = connection.execute(
+                        """SELECT * FROM session_attachments
+                           WHERE attachment_id=? AND session_id=? AND owner_id=?""",
+                        (attachment_id, str(session_id), str(owner_id)),
+                    ).fetchone()
+                    if attachment is None:
+                        raise SessionConflict(
+                            "audio attachment is not authorized for this Session"
+                        )
+                    if str(attachment["state"]) != "committed":
+                        raise SessionConflict("audio attachment is not committed")
+                    if not str(attachment["media_type"]).casefold().startswith(
+                        "audio/"
+                    ):
+                        raise SessionConflict("attachment is not audio")
+                    asset_id = str(attachment["asset_id"] or "")
+                    if not asset_id:
+                        raise SessionConflict("audio attachment bytes are unavailable")
+                    declared_mime = str(block.get("mime_type") or "").casefold()
+                    if declared_mime and declared_mime != str(
+                        attachment["media_type"]
+                    ).casefold():
+                        raise SessionConflict("audio MIME does not match committed metadata")
+                    self.audio_assets.describe(
+                        asset_id, owner_id=owner_id, session_id=session_id
+                    )
+                    block["semantic_role"] = semantic_role
+                    block.setdefault("mime_type", str(attachment["media_type"]))
+                    audio_rows.append(attachment)
+                    attachment_fingerprints.append(
+                        {
+                            "attachment_id": attachment_id,
+                            "sha256": str(attachment["sha256"]),
+                            "size_bytes": int(attachment["size_bytes"]),
+                            "semantic_role": semantic_role,
+                        }
+                    )
+                elif not block_type:
+                    raise ValueError("message content parts require a type")
+                normalized_blocks.append(block)
+            blocks = normalized_blocks
+            if not clean and not audio_rows:
+                raise ValueError("message requires text or a committed audio attachment")
+            digest_payload = {
+                "content": blocks,
+                "attachments": attachment_fingerprints,
+                "execution_mode": str(execution_mode or ""),
+                "parent_run_id": str(parent_run_id or ""),
+                "response_preferences": dict(response_preferences or {}),
+            }
+            digest = hashlib.sha256(
+                _json(digest_payload).encode("utf-8")
+            ).hexdigest()
             existing = connection.execute(
                 """
                 SELECT i.request_digest, r.* FROM idempotency_records AS i
@@ -837,9 +1010,10 @@ class SessionStore:
                 INSERT INTO runs(
                     run_id, session_id, user_message_id, agent_id, request_id,
                     idempotency_key, request_digest, source, requested_mode,
-                    effective_mode, context_generation, state, parent_run_id,
+                    effective_mode, response_preferences_json,
+                    context_generation, state, parent_run_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -852,12 +1026,29 @@ class SessionStore:
                     str(source),
                     execution_mode,
                     execution_mode,
+                    _json(dict(response_preferences or {})),
                     generation,
                     parent_run_id,
                     now,
                     now,
                 ),
             )
+            for attachment in audio_rows:
+                asset_id = str(attachment["asset_id"])
+                self.audio_assets.acquire(
+                    asset_id, owner_id=owner_id, session_id=session_id
+                )
+                connection.execute(
+                    """INSERT INTO run_audio_assets(
+                           run_id, attachment_id, asset_id, direction, created_at
+                       ) VALUES (?, ?, ?, 'input', ?)""",
+                    (
+                        run_id,
+                        str(attachment["attachment_id"]),
+                        asset_id,
+                        now,
+                    ),
+                )
             connection.execute(
                 """
                 INSERT INTO idempotency_records(
@@ -950,18 +1141,79 @@ class SessionStore:
             )
             return token
 
+    def _release_run_audio_leases(
+        self, connection: sqlite3.Connection, *, run_id: str, released_at: str
+    ) -> None:
+        rows = connection.execute(
+            """SELECT ra.asset_id, a.owner_id, a.session_id
+               FROM run_audio_assets AS ra
+               JOIN session_attachments AS a
+                 ON a.attachment_id = ra.attachment_id
+               WHERE ra.run_id=? AND ra.lease_released=0""",
+            (str(run_id),),
+        ).fetchall()
+        for row in rows:
+            try:
+                self.audio_assets.release(
+                    str(row["asset_id"]),
+                    owner_id=str(row["owner_id"]),
+                    session_id=str(row["session_id"]),
+                )
+            except AudioAssetNotFound:
+                pass
+        connection.execute(
+            """UPDATE run_audio_assets SET lease_released=1, released_at=?
+               WHERE run_id=? AND lease_released=0""",
+            (released_at, str(run_id)),
+        )
+
     def finish_request(
         self,
         request_id: str,
         *,
         success: bool,
         assistant_text: str | None = None,
+        assistant_content: Iterable[Mapping[str, Any]] | None = None,
         assistant_source: str = "",
         error_text: str | None = None,
         failure_state: str = "failed",
         fencing_token: int | None = None,
     ) -> dict[str, Any] | None:
         now = _utc_now()
+        clean = str(assistant_text or "").strip()
+        supplied_content = list(assistant_content or ())
+        if contains_persistent_inline_media(supplied_content):
+            raise SessionConflict("assistant content cannot contain inline media bytes")
+        normalized_content: list[dict[str, Any]] = []
+        for raw_part in supplied_content:
+            if not isinstance(raw_part, Mapping):
+                raise ValueError("assistant content parts must be objects")
+            part = dict(raw_part)
+            part_type = str(part.get("type") or "").strip().casefold()
+            if part_type == "text":
+                if not isinstance(part.get("text"), str):
+                    raise ValueError("assistant text parts require text")
+                if not clean and str(part.get("text") or "").strip():
+                    clean = str(part["text"]).strip()
+            elif part_type == "audio":
+                asset_id = str(part.get("asset_id") or "").strip()
+                digest = str(part.get("sha256") or "").strip().casefold()
+                if not asset_id:
+                    raise ValueError("assistant audio parts require asset_id")
+                if digest and (
+                    len(digest) != 64
+                    or any(character not in "0123456789abcdef" for character in digest)
+                ):
+                    raise ValueError("assistant audio sha256 is invalid")
+            else:
+                raise ValueError(f"unsupported assistant content type {part_type!r}")
+            normalized_content.append(part)
+        if not normalized_content and clean:
+            normalized_content = [{"type": "text", "text": clean}]
+        deliverable_audio = any(
+            part.get("type") == "audio" and str(part.get("asset_id") or "").strip()
+            for part in normalized_content
+        )
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             run = connection.execute(
@@ -979,38 +1231,70 @@ class SessionStore:
             session_id = str(run["session_id"])
             final_message_id = None
             if success:
-                clean = str(assistant_text or "").strip()
-                if not clean:
+                if not clean and not deliverable_audio:
                     success = False
                     error_text = (
                         error_text or "backend returned no visible final response"
                     )
                 else:
-                    final_message_id = _new_id("msg")
-                    ordinal = self._next_ordinal(connection, session_id)
-                    content = [{"type": "text", "text": clean}]
+                    content = normalized_content
                     content_json = _json(content)
-                    connection.execute(
-                        """
-                        INSERT INTO messages(
-                            message_id, session_id, run_id, ordinal, context_generation,
-                            role, author_id, source, content_json, text, content_hash, created_at
-                        ) VALUES (?, ?, ?, ?, ?, 'assistant', ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            final_message_id,
-                            session_id,
-                            run["run_id"],
-                            ordinal,
-                            int(run["context_generation"]),
-                            str(run["agent_id"]),
-                            str(assistant_source or run["agent_id"]),
-                            content_json,
-                            clean,
-                            hashlib.sha256(content_json.encode("utf-8")).hexdigest(),
-                            now,
-                        ),
-                    )
+                    content_hash = hashlib.sha256(
+                        content_json.encode("utf-8")
+                    ).hexdigest()
+                    existing_output = connection.execute(
+                        """SELECT message_id FROM messages
+                           WHERE run_id=? AND role='assistant' AND content_hash=?
+                           ORDER BY ordinal ASC LIMIT 1""",
+                        (str(run["run_id"]), content_hash),
+                    ).fetchone()
+                    if existing_output is not None:
+                        # Direct native audio was already projected at
+                        # first-ready time.  Reuse that canonical Message when
+                        # the Run later settles instead of duplicating it.
+                        final_message_id = str(existing_output["message_id"])
+                    else:
+                        final_message_id = _new_id("msg")
+                        ordinal = self._next_ordinal(connection, session_id)
+                        connection.execute(
+                            """
+                            INSERT INTO messages(
+                                message_id, session_id, run_id, ordinal,
+                                context_generation, role, author_id, source,
+                                content_json, text, content_hash, created_at
+                            ) VALUES (?, ?, ?, ?, ?, 'assistant', ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                final_message_id,
+                                session_id,
+                                run["run_id"],
+                                ordinal,
+                                int(run["context_generation"]),
+                                str(run["agent_id"]),
+                                str(assistant_source or run["agent_id"]),
+                                content_json,
+                                clean,
+                                content_hash,
+                                now,
+                            ),
+                        )
+                    if deliverable_audio and existing_output is None:
+                        self._append_event(
+                            connection,
+                            session_id=session_id,
+                            run_id=str(run["run_id"]),
+                            kind="assistant.output.available",
+                            status="available",
+                            phase="final",
+                            summary="Assistant audio output available",
+                            detail={
+                                "message_id": final_message_id,
+                                "request_id": str(request_id),
+                                "disposition": "final",
+                                "content": content,
+                            },
+                            outbox=True,
+                        )
             state = "completed" if success else str(failure_state or "failed")
             if state not in TERMINAL_RUN_STATES:
                 state = "failed"
@@ -1079,6 +1363,9 @@ class SessionStore:
                 """,
                 (now, session_id),
             )
+            self._release_run_audio_leases(
+                connection, run_id=str(run["run_id"]), released_at=now
+            )
             result = connection.execute(
                 "SELECT * FROM runs WHERE run_id = ?", (run["run_id"],)
             ).fetchone()
@@ -1120,6 +1407,9 @@ class SessionStore:
                 detail={"reason": str(reason)},
                 outbox=True,
             )
+            self._release_run_audio_leases(
+                connection, run_id=str(run_id), released_at=now
+            )
             row = connection.execute(
                 "SELECT * FROM runs WHERE run_id=?", (str(run_id),)
             ).fetchone()
@@ -1134,24 +1424,54 @@ class SessionStore:
         media_type: str,
         size_bytes: int,
         sha256: str,
+        semantic_role: str = "",
+        duration_ms: int | None = None,
+        retention_seconds: int = DEFAULT_RETENTION_SECONDS,
+        retention_indefinite: bool = False,
+        upload_required: bool | None = None,
     ) -> dict[str, Any]:
         self.get_session(session_id, owner_id=owner_id, include_deleted=False)
         digest = str(sha256).lower()
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             raise ValueError("sha256 must be 64 lowercase hexadecimal characters")
+        normalized_media_type = (
+            str(media_type or "").split(";", 1)[0].strip().casefold()
+        )
+        is_audio = normalized_media_type.startswith("audio/")
+        normalized_role = str(semantic_role or "").strip().casefold()
+        if is_audio:
+            normalized_role = normalized_role or "audio_attachment"
+            if normalized_role not in {"voice_message", "audio_attachment"}:
+                raise ValueError(
+                    "audio semantic_role must be voice_message or audio_attachment"
+                )
+            if duration_ms is not None and int(duration_ms) < 0:
+                raise ValueError("duration_ms must be non-negative")
+            if not retention_indefinite and int(retention_seconds) < MIN_RETENTION_SECONDS:
+                raise ValueError("audio retention must be at least 60 seconds")
+        elif normalized_role:
+            raise ValueError("semantic_role is only supported for audio attachments")
+        requires_upload = is_audio if upload_required is None else bool(upload_required)
         attachment_id, now = _new_id("att"), _utc_now()
         with self._lock, self._connect() as connection:
             connection.execute(
                 """INSERT INTO session_attachments(attachment_id,session_id,owner_id,filename,
-                   media_type,size_bytes,sha256,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                   media_type,size_bytes,sha256,semantic_role,duration_ms,
+                   retention_seconds,retention_indefinite,upload_required,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     attachment_id,
                     str(session_id),
                     str(owner_id),
                     str(filename),
-                    str(media_type),
+                    normalized_media_type,
                     max(0, int(size_bytes)),
                     digest,
+                    normalized_role,
+                    int(duration_ms) if duration_ms is not None else None,
+                    None if retention_indefinite else int(retention_seconds),
+                    int(bool(retention_indefinite)),
+                    int(requires_upload),
                     now,
                 ),
             )
@@ -1159,7 +1479,90 @@ class SessionStore:
                 "SELECT * FROM session_attachments WHERE attachment_id=?",
                 (attachment_id,),
             ).fetchone()
-        return dict(row)
+        result = dict(row)
+        result["retention_indefinite"] = bool(result["retention_indefinite"])
+        result["upload_required"] = bool(result["upload_required"])
+        return result
+
+    def upload_attachment_bytes(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        attachment_id: str,
+        payload: bytes,
+    ) -> dict[str, Any]:
+        """Validate and atomically materialize one staged audio attachment."""
+
+        if not isinstance(payload, bytes):
+            raise ValueError("attachment payload must be bytes")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM session_attachments
+                   WHERE attachment_id=? AND session_id=? AND owner_id=?""",
+                (str(attachment_id), str(session_id), str(owner_id)),
+            ).fetchone()
+        if row is None:
+            raise SessionNotFound("attachment not found")
+        attachment = dict(row)
+        if attachment["state"] != "staged":
+            raise SessionConflict("only staged attachments can be uploaded")
+        actual_digest = hashlib.sha256(payload).hexdigest()
+        if len(payload) != int(attachment["size_bytes"]):
+            raise SessionConflict("attachment size does not match staged metadata")
+        if actual_digest != str(attachment["sha256"]):
+            raise SessionConflict("attachment digest does not match staged metadata")
+        if not str(attachment["media_type"]).casefold().startswith("audio/"):
+            raise SessionConflict("native audio upload requires an audio attachment")
+
+        existing_asset = str(attachment.get("asset_id") or "")
+        if existing_asset:
+            try:
+                self.audio_assets.describe(
+                    existing_asset, owner_id=owner_id, session_id=session_id
+                )
+            except AudioAssetError as exc:
+                raise SessionConflict("staged audio asset is unavailable") from exc
+            return attachment
+
+        audio_format = normalize_audio_format(
+            Path(str(attachment["filename"])).suffix,
+            mime_type=str(attachment["media_type"]),
+        )
+        asset = self.audio_assets.create(
+            payload,
+            owner_id=owner_id,
+            session_id=session_id,
+            direction="input",
+            mime_type=str(attachment["media_type"]),
+            audio_format=audio_format,
+            asset_id=str(attachment_id),
+            filename=str(attachment["filename"]),
+            duration_ms=attachment.get("duration_ms"),
+            retention_seconds=int(
+                attachment.get("retention_seconds") or DEFAULT_RETENTION_SECONDS
+            ),
+            retention_indefinite=bool(attachment.get("retention_indefinite")),
+            correlation={"attachment_id": str(attachment_id)},
+        )
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """UPDATE session_attachments SET asset_id=?, uploaded_at=?,
+                       duration_ms=COALESCE(duration_ms, ?)
+                   WHERE attachment_id=? AND state='staged'""",
+                (
+                    asset["asset_id"],
+                    now,
+                    asset.get("duration_ms"),
+                    str(attachment_id),
+                ),
+            )
+            updated = connection.execute(
+                "SELECT * FROM session_attachments WHERE attachment_id=?",
+                (str(attachment_id),),
+            ).fetchone()
+        return dict(updated)
 
     def commit_attachment(
         self, *, session_id: str, owner_id: str, attachment_id: str
@@ -1173,6 +1576,17 @@ class SessionStore:
             ).fetchone()
             if row is None:
                 raise SessionNotFound("attachment not found")
+            if bool(row["upload_required"]) and not str(row["asset_id"] or ""):
+                raise SessionConflict("attachment bytes must be uploaded before commit")
+            if str(row["asset_id"] or ""):
+                try:
+                    self.audio_assets.describe(
+                        str(row["asset_id"]),
+                        owner_id=owner_id,
+                        session_id=session_id,
+                    )
+                except AudioAssetError as exc:
+                    raise SessionConflict("uploaded attachment is unavailable") from exc
             connection.execute(
                 "UPDATE session_attachments SET state='committed', committed_at=COALESCE(committed_at,?) WHERE attachment_id=?",
                 (now, str(attachment_id)),
@@ -1180,6 +1594,899 @@ class SessionStore:
             updated = connection.execute(
                 "SELECT * FROM session_attachments WHERE attachment_id=?",
                 (str(attachment_id),),
+            ).fetchone()
+        result = dict(updated)
+        result["retention_indefinite"] = bool(result["retention_indefinite"])
+        result["upload_required"] = bool(result["upload_required"])
+        return result
+
+    def attachment_bytes(
+        self, *, session_id: str, owner_id: str, attachment_id: str
+    ) -> tuple[dict[str, Any], bytes]:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM session_attachments
+                   WHERE attachment_id=? AND session_id=? AND owner_id=?
+                     AND state='committed'""",
+                (str(attachment_id), str(session_id), str(owner_id)),
+            ).fetchone()
+        if row is None or not str(row["asset_id"] or ""):
+            raise SessionNotFound("attachment not found")
+        return self.audio_assets.read_bytes(
+            str(row["asset_id"]), owner_id=owner_id, session_id=session_id
+        )
+
+    def attachment_canonical_part(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        attachment_id: str,
+        item_index: int,
+        semantic_role: str | None = None,
+    ) -> dict[str, Any]:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM session_attachments
+                   WHERE attachment_id=? AND session_id=? AND owner_id=?
+                     AND state='committed'""",
+                (str(attachment_id), str(session_id), str(owner_id)),
+            ).fetchone()
+        if row is None or not str(row["asset_id"] or ""):
+            raise SessionNotFound("attachment not found")
+        metadata, local_path = self.audio_assets.authorized_path(
+            str(row["asset_id"]), owner_id=owner_id, session_id=session_id
+        )
+        role = str(semantic_role or row["semantic_role"] or "audio_attachment")
+        return {
+            "type": "media",
+            "item_index": int(item_index),
+            "attachment_id": str(attachment_id),
+            "modality": "audio",
+            "kind": "voice" if role == "voice_message" else "audio",
+            "semantic_role": role,
+            "mime_type": str(row["media_type"]),
+            "filename": str(row["filename"]),
+            "caption": "",
+            "duration_ms": row["duration_ms"],
+            "local_ref": str(local_path),
+            "size_bytes": int(metadata["size_bytes"]),
+            "sha256": str(metadata["sha256"]),
+            "transport": {},
+        }
+
+    def audio_asset_bytes(
+        self, *, session_id: str, owner_id: str, asset_id: str
+    ) -> tuple[dict[str, Any], bytes]:
+        return self.audio_assets.read_bytes(
+            asset_id, owner_id=owner_id, session_id=session_id
+        )
+
+    def claim_output_audio_asset(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        request_id: str,
+        asset_id: str,
+    ) -> dict[str, Any]:
+        return self.audio_assets.claim(
+            asset_id,
+            owner_id=owner_id,
+            session_id=session_id,
+            request_id=request_id,
+        )
+
+    def audio_asset_path(
+        self, *, session_id: str, owner_id: str, asset_id: str
+    ) -> tuple[dict[str, Any], Path]:
+        return self.audio_assets.authorized_path(
+            asset_id, owner_id=owner_id, session_id=session_id
+        )
+
+    def acquire_audio_asset(
+        self, *, session_id: str, owner_id: str, asset_id: str
+    ) -> dict[str, Any]:
+        return self.audio_assets.acquire(
+            asset_id, owner_id=owner_id, session_id=session_id
+        )
+
+    def release_audio_asset(
+        self, *, session_id: str, owner_id: str, asset_id: str
+    ) -> dict[str, Any]:
+        return self.audio_assets.release(
+            asset_id, owner_id=owner_id, session_id=session_id
+        )
+
+    def archive_audio_asset(
+        self, *, session_id: str, owner_id: str, asset_id: str
+    ) -> dict[str, Any]:
+        return self.audio_assets.set_indefinite(
+            asset_id, owner_id=owner_id, session_id=session_id
+        )
+
+    def create_output_audio_asset(
+        self,
+        payload: bytes,
+        *,
+        session_id: str,
+        owner_id: str,
+        run_id: str,
+        request_id: str,
+        mime_type: str,
+        audio_format: str,
+        filename: str = "",
+        duration_ms: int | None = None,
+        retention_seconds: int = DEFAULT_RETENTION_SECONDS,
+        retention_indefinite: bool = False,
+        provider: str = "",
+        model: str = "",
+    ) -> dict[str, Any]:
+        self.get_run(run_id, owner_id=owner_id)
+        asset = self.audio_assets.create(
+            payload,
+            owner_id=owner_id,
+            session_id=session_id,
+            direction="output",
+            mime_type=mime_type,
+            audio_format=audio_format,
+            filename=filename,
+            duration_ms=duration_ms,
+            retention_seconds=retention_seconds,
+            retention_indefinite=retention_indefinite,
+            correlation={
+                "run_id": str(run_id),
+                "request_id": str(request_id),
+                "provider": str(provider),
+                "model": str(model),
+            },
+        )
+        return {
+            "type": "audio",
+            "asset_id": asset["asset_id"],
+            "mime_type": asset["mime_type"],
+            "format": asset["format"],
+            "duration_ms": asset.get("duration_ms"),
+            "size_bytes": asset["size_bytes"],
+            "sha256": asset["sha256"],
+            "retention_expires_at": asset.get("retention_expires_at"),
+            "retention_indefinite": asset["retention_indefinite"],
+        }
+
+    def cleanup_audio_assets(self) -> list[dict[str, Any]]:
+        expired = self.audio_assets.cleanup()
+        if not expired:
+            return []
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for asset in expired:
+                asset_id = str(asset["asset_id"])
+                connection.execute(
+                    """UPDATE session_attachments SET state='expired'
+                       WHERE asset_id=? AND state='committed'""",
+                    (asset_id,),
+                )
+                session_id = str(asset.get("session_id") or "")
+                if not session_id:
+                    continue
+                session_exists = connection.execute(
+                    "SELECT 1 FROM sessions WHERE session_id=?",
+                    (session_id,),
+                ).fetchone()
+                if session_exists is None:
+                    continue
+                run_id = str(
+                    dict(asset.get("correlation") or {}).get("run_id") or ""
+                ) or None
+                if run_id is not None:
+                    run_exists = connection.execute(
+                        "SELECT 1 FROM runs WHERE run_id=? AND session_id=?",
+                        (run_id, session_id),
+                    ).fetchone()
+                    if run_exists is None:
+                        run_id = None
+                self._append_event(
+                    connection,
+                    session_id=session_id,
+                    run_id=run_id,
+                    kind="audio.asset.expired",
+                    status="expired",
+                    phase="retention",
+                    summary="Retained audio bytes expired",
+                    detail={"asset_id": asset_id},
+                    outbox=True,
+                )
+        return expired
+
+    def record_voice_transcript(
+        self,
+        *,
+        request_id: str,
+        attachment_id: str,
+        text: str,
+        provenance: str,
+        safe_voice_state: str,
+    ) -> dict[str, Any]:
+        clean = str(text or "").strip()
+        state = str(safe_voice_state or "released").strip().casefold()
+        if state not in {
+            "released",
+            "ready",
+            "pending_confirmation",
+            "discarded",
+            "unavailable",
+        }:
+            raise ValueError("invalid Safe Voice transcript state")
+        if not clean and state != "unavailable":
+            raise ValueError("voice transcript cannot be empty")
+        now = _utc_now()
+        transcript_id = _new_id("transcript")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                "SELECT * FROM runs WHERE request_id=?", (str(request_id),)
+            ).fetchone()
+            if run is None:
+                raise SessionNotFound(str(request_id))
+            attachment = connection.execute(
+                """SELECT * FROM session_attachments
+                   WHERE attachment_id=? AND session_id=?""",
+                (str(attachment_id), str(run["session_id"])),
+            ).fetchone()
+            if attachment is None:
+                raise SessionConflict("transcript attachment is not part of the Session")
+            existing = connection.execute(
+                """SELECT * FROM voice_transcripts
+                   WHERE run_id=? AND attachment_id=?
+                   ORDER BY created_at ASC LIMIT 1""",
+                (str(run["run_id"]), str(attachment_id)),
+            ).fetchone()
+            if existing is not None:
+                stored_state = str(existing["safe_voice_state"])
+                state_is_compatible = stored_state == state or (
+                    state == "pending_confirmation"
+                    and stored_state in {"released", "discarded"}
+                )
+                if (
+                    str(existing["text"]) != clean
+                    or str(existing["provenance"])
+                    != str(provenance or "local_stt")
+                    or not state_is_compatible
+                ):
+                    raise SessionConflict(
+                        "voice transcript replay conflicts with the stored record"
+                    )
+                return dict(existing)
+            connection.execute(
+                """INSERT INTO voice_transcripts(
+                       transcript_id,session_id,run_id,message_id,attachment_id,
+                       text,provenance,safe_voice_state,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    transcript_id,
+                    str(run["session_id"]),
+                    str(run["run_id"]),
+                    str(run["user_message_id"]),
+                    str(attachment_id),
+                    clean,
+                    str(provenance or "local_stt"),
+                    state,
+                    now,
+                ),
+            )
+            if state == "released":
+                self._append_voice_transcript_projection(
+                    connection,
+                    message_id=str(run["user_message_id"]),
+                    transcript=clean,
+                )
+            transcript_event_kind = (
+                "voice.input.transcript_unavailable"
+                if state == "unavailable"
+                else "voice.input.transcript_ready"
+            )
+            self._append_event(
+                connection,
+                session_id=str(run["session_id"]),
+                run_id=str(run["run_id"]),
+                kind=transcript_event_kind,
+                status=state,
+                phase="transcription",
+                summary=(
+                    "Local input transcript unavailable"
+                    if state == "unavailable"
+                    else "Local input transcript available"
+                ),
+                detail={
+                    "transcript_id": transcript_id,
+                    "attachment_id": str(attachment_id),
+                    "text": clean,
+                    "provenance": str(provenance or "local_stt"),
+                    "safe_voice_state": state,
+                },
+                outbox=True,
+            )
+            if state == "unavailable":
+                self._append_event(
+                    connection,
+                    session_id=str(run["session_id"]),
+                    run_id=str(run["run_id"]),
+                    kind="voice.warning",
+                    status="degraded",
+                    phase="transcription",
+                    summary=(
+                        "Local voice transcription is unavailable; the native "
+                        "audio response will continue."
+                    ),
+                    detail={
+                        "transcript_id": transcript_id,
+                        "attachment_id": str(attachment_id),
+                        "warning_code": "local_stt_unavailable",
+                    },
+                    outbox=True,
+                )
+            if state == "pending_confirmation":
+                self._append_event(
+                    connection,
+                    session_id=str(run["session_id"]),
+                    run_id=str(run["run_id"]),
+                    kind="voice.input.transcript_pending_confirmation",
+                    status=state,
+                    phase="safe_voice",
+                    summary="Safe Voice confirmation required",
+                    detail={
+                        "transcript_id": transcript_id,
+                        "attachment_id": str(attachment_id),
+                        "text": clean,
+                        "provenance": str(provenance or "local_stt"),
+                        "safe_voice_state": state,
+                    },
+                    outbox=True,
+                )
+            row = connection.execute(
+                "SELECT * FROM voice_transcripts WHERE transcript_id=?",
+                (transcript_id,),
+            ).fetchone()
+        return dict(row)
+
+    def require_voice_transcript_confirmation(
+        self, *, request_id: str
+    ) -> dict[str, Any]:
+        """Move deferred native STT to Safe Voice only when a stage needs it."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT vt.* FROM voice_transcripts AS vt
+                   JOIN runs AS r ON r.run_id=vt.run_id
+                   WHERE r.request_id=?
+                   ORDER BY vt.created_at ASC, vt.transcript_id ASC""",
+                (str(request_id),),
+            ).fetchall()
+            if not rows:
+                raise SessionNotFound("voice transcript not found")
+            eligible = [
+                row for row in rows if str(row["safe_voice_state"]) == "ready"
+            ]
+            if not eligible:
+                pending = [
+                    row
+                    for row in rows
+                    if str(row["safe_voice_state"]) == "pending_confirmation"
+                ]
+                if pending:
+                    return dict(pending[-1])
+                raise SessionConflict(
+                    "voice transcript is not awaiting a transcript consumer"
+                )
+            for row in eligible:
+                connection.execute(
+                    "UPDATE voice_transcripts SET safe_voice_state='pending_confirmation' "
+                    "WHERE transcript_id=?",
+                    (str(row["transcript_id"]),),
+                )
+                self._append_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    run_id=str(row["run_id"]),
+                    kind="voice.input.transcript_pending_confirmation",
+                    status="pending_confirmation",
+                    phase="safe_voice",
+                    summary="Safe Voice confirmation required",
+                    detail={
+                        "transcript_id": str(row["transcript_id"]),
+                        "attachment_id": str(row["attachment_id"]),
+                        "text": str(row["text"]),
+                        "provenance": str(row["provenance"]),
+                        "safe_voice_state": "pending_confirmation",
+                    },
+                    outbox=True,
+                )
+            updated = connection.execute(
+                "SELECT * FROM voice_transcripts WHERE transcript_id=?",
+                (str(eligible[-1]["transcript_id"]),),
+            ).fetchone()
+        return dict(updated)
+
+    def release_ready_voice_transcript(
+        self,
+        *,
+        request_id: str,
+        reason: str = "native_audio_direct_completed",
+    ) -> dict[str, Any]:
+        """Release STT after native chat completes without another consumer."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT vt.*, r.user_message_id FROM voice_transcripts AS vt
+                   JOIN runs AS r ON r.run_id=vt.run_id
+                   WHERE r.request_id=?
+                   ORDER BY vt.created_at ASC, vt.transcript_id ASC""",
+                (str(request_id),),
+            ).fetchall()
+            if not rows:
+                raise SessionNotFound("voice transcript not found")
+            eligible = [
+                row for row in rows if str(row["safe_voice_state"]) == "ready"
+            ]
+            if not eligible:
+                released = [
+                    row
+                    for row in rows
+                    if str(row["safe_voice_state"]) == "released"
+                ]
+                if released:
+                    return dict(released[-1])
+                raise SessionConflict(
+                    "voice transcript cannot be auto-released after Safe Voice started"
+                )
+            for row in eligible:
+                connection.execute(
+                    "UPDATE voice_transcripts SET safe_voice_state='released' "
+                    "WHERE transcript_id=?",
+                    (str(row["transcript_id"]),),
+                )
+                self._append_voice_transcript_projection(
+                    connection,
+                    message_id=str(row["user_message_id"]),
+                    transcript=str(row["text"]),
+                )
+                self._append_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    run_id=str(row["run_id"]),
+                    kind="voice.input.transcript_released",
+                    status="released",
+                    phase="transcription",
+                    summary="Local input transcript released after native audio chat",
+                    detail={
+                        "transcript_id": str(row["transcript_id"]),
+                        "attachment_id": str(row["attachment_id"]),
+                        "release_reason": str(reason),
+                    },
+                    outbox=True,
+                )
+            updated = connection.execute(
+                "SELECT * FROM voice_transcripts WHERE transcript_id=?",
+                (str(eligible[-1]["transcript_id"]),),
+            ).fetchone()
+        return dict(updated)
+
+    def reconcile_completed_native_audio_transcript(
+        self, *, request_id: str
+    ) -> dict[str, Any]:
+        """Repair the pre-gate beta state for a completed native audio reply.
+
+        Early native-audio builds opened Safe Voice as soon as STT completed,
+        even when a no-tool Direct response had already answered from original
+        audio.  This narrowly releases only that impossible-to-resume state: a
+        completed Run with a durable assistant audio part.
+        """
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT vt.*, r.user_message_id, r.state AS run_state
+                   FROM voice_transcripts AS vt
+                   JOIN runs AS r ON r.run_id=vt.run_id
+                   WHERE r.request_id=?
+                   ORDER BY vt.created_at ASC, vt.transcript_id ASC""",
+                (str(request_id),),
+            ).fetchall()
+            if not rows:
+                raise SessionNotFound("voice transcript not found")
+            if any(str(row["run_state"]) != "completed" for row in rows):
+                raise SessionConflict(
+                    "only a completed native audio Run can be reconciled"
+                )
+            assistant_rows = connection.execute(
+                """SELECT content_json FROM messages
+                   WHERE run_id=? AND role='assistant'""",
+                (str(rows[0]["run_id"]),),
+            ).fetchall()
+            has_native_audio = False
+            for assistant in assistant_rows:
+                try:
+                    content = json.loads(str(assistant["content_json"] or "[]"))
+                except (TypeError, ValueError):
+                    content = []
+                if isinstance(content, list) and any(
+                    isinstance(part, Mapping)
+                    and str(part.get("type") or "") == "audio"
+                    and bool(str(part.get("asset_id") or "").strip())
+                    for part in content
+                ):
+                    has_native_audio = True
+                    break
+            if not has_native_audio:
+                raise SessionConflict(
+                    "completed Run has no durable native audio response"
+                )
+            eligible = [
+                row
+                for row in rows
+                if str(row["safe_voice_state"]) == "pending_confirmation"
+            ]
+            if not eligible:
+                released = [
+                    row
+                    for row in rows
+                    if str(row["safe_voice_state"]) == "released"
+                ]
+                if released:
+                    return dict(released[-1])
+                raise SessionConflict(
+                    "completed native audio transcript is not reconcilable"
+                )
+            for row in eligible:
+                connection.execute(
+                    "UPDATE voice_transcripts SET safe_voice_state='released' "
+                    "WHERE transcript_id=?",
+                    (str(row["transcript_id"]),),
+                )
+                self._append_voice_transcript_projection(
+                    connection,
+                    message_id=str(row["user_message_id"]),
+                    transcript=str(row["text"]),
+                )
+                self._append_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    run_id=str(row["run_id"]),
+                    kind="voice.input.transcript_released",
+                    status="released",
+                    phase="migration",
+                    summary=(
+                        "Deferred input transcript released after native audio "
+                        "Direct migration"
+                    ),
+                    detail={
+                        "transcript_id": str(row["transcript_id"]),
+                        "attachment_id": str(row["attachment_id"]),
+                        "release_reason": "pre_gate_native_direct_reconciliation",
+                    },
+                    outbox=True,
+                )
+            updated = connection.execute(
+                "SELECT * FROM voice_transcripts WHERE transcript_id=?",
+                (str(eligible[-1]["transcript_id"]),),
+            ).fetchone()
+        return dict(updated)
+
+    @staticmethod
+    def _append_voice_transcript_projection(
+        connection: sqlite3.Connection,
+        *,
+        message_id: str,
+        transcript: str,
+    ) -> None:
+        """Add accepted speech to the user text projection exactly once."""
+
+        clean = str(transcript or "").strip()
+        if not clean:
+            return
+        row = connection.execute(
+            "SELECT text FROM messages WHERE message_id=?", (str(message_id),)
+        ).fetchone()
+        if row is None:
+            raise SessionNotFound("voice transcript Message not found")
+        current = str(row["text"] or "").strip()
+        segments = [segment.strip() for segment in current.split("\n\n")]
+        if clean in segments:
+            return
+        projected = f"{current}\n\n{clean}" if current else clean
+        connection.execute(
+            "UPDATE messages SET text=? WHERE message_id=?",
+            (projected, str(message_id)),
+        )
+
+    def append_native_audio_runtime_event(
+        self,
+        *,
+        request_id: str,
+        source_event_id: str,
+        event_kind: str,
+        summary: str,
+        phase: str,
+        content: Iterable[Mapping[str, Any]] = (),
+        resolution: str = "",
+        target_event_id: str = "",
+    ) -> dict[str, Any] | None:
+        stable_source_id = str(source_event_id or "").strip()
+        if not stable_source_id:
+            return None
+        parts = [dict(part) for part in content if isinstance(part, Mapping)]
+        if contains_persistent_inline_media(parts):
+            raise SessionConflict("runtime audio Event cannot contain inline bytes")
+        has_audio = any(
+            part.get("type") == "audio" and str(part.get("asset_id") or "")
+            for part in parts
+        )
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """SELECT e.* FROM runtime_event_correlations AS c
+                   JOIN run_events AS e ON e.event_id=c.event_id
+                   WHERE c.source_event_id=?""",
+                (stable_source_id,),
+            ).fetchone()
+            if existing is not None:
+                result = dict(existing)
+                result["detail"] = _json_object(result.pop("detail_json"))
+                return result
+            run = connection.execute(
+                """SELECT r.*, s.owner_id FROM runs AS r
+                   JOIN sessions AS s ON s.session_id=r.session_id
+                   WHERE r.request_id=?""",
+                (str(request_id),),
+            ).fetchone()
+            if run is None:
+                return None
+            canonical_kind = ""
+            detail: dict[str, Any] = {}
+            if has_audio:
+                canonical_kind = "assistant.output.available"
+                for part in parts:
+                    if part.get("type") != "audio":
+                        continue
+                    self.audio_assets.claim(
+                        str(part["asset_id"]),
+                        owner_id=str(run["owner_id"]),
+                        session_id=str(run["session_id"]),
+                        request_id=str(request_id),
+                    )
+                content_json = _json(parts)
+                content_hash = hashlib.sha256(
+                    content_json.encode("utf-8")
+                ).hexdigest()
+                existing_message = connection.execute(
+                    """SELECT message_id FROM messages
+                       WHERE run_id=? AND role='assistant' AND content_hash=?
+                       ORDER BY ordinal ASC LIMIT 1""",
+                    (str(run["run_id"]), content_hash),
+                ).fetchone()
+                if existing_message is None:
+                    message_id = _new_id("msg")
+                    text_projection = "\n".join(
+                        str(part.get("text") or "").strip()
+                        for part in parts
+                        if part.get("type") == "text"
+                        and str(part.get("text") or "").strip()
+                    ).strip()
+                    connection.execute(
+                        """
+                        INSERT INTO messages(
+                            message_id, session_id, run_id, ordinal,
+                            context_generation, role, author_id, source,
+                            content_json, text, content_hash, created_at
+                        ) VALUES (?, ?, ?, ?, ?, 'assistant', ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            message_id,
+                            str(run["session_id"]),
+                            str(run["run_id"]),
+                            self._next_ordinal(connection, str(run["session_id"])),
+                            int(run["context_generation"]),
+                            str(run["agent_id"]),
+                            str(run["agent_id"]),
+                            content_json,
+                            text_projection,
+                            content_hash,
+                            now,
+                        ),
+                    )
+                else:
+                    message_id = str(existing_message["message_id"])
+                detail = {
+                    "message_id": message_id,
+                    "request_id": str(request_id),
+                    "phase": str(phase or "immediate"),
+                    "disposition": "unresolved",
+                    "content": parts,
+                }
+            elif str(event_kind) == "voice_fallback_started":
+                canonical_kind = "voice.fallback.started"
+                detail = {"request_id": str(request_id), "phase": str(phase)}
+            elif str(event_kind) == "voice_warning":
+                canonical_kind = "voice.warning"
+                detail = {"request_id": str(request_id), "warning": str(summary)}
+            elif str(event_kind) == "initial_resolution" and target_event_id:
+                target = connection.execute(
+                    """SELECT kind FROM runtime_event_correlations
+                       WHERE source_event_id=?""",
+                    (str(target_event_id),),
+                ).fetchone()
+                if target is None or str(target["kind"]) != "assistant.output.available":
+                    return None
+                canonical_kind = "assistant.output.resolved"
+                detail = {
+                    "request_id": str(request_id),
+                    "target_event_id": str(target_event_id),
+                    "resolution": str(resolution or "acknowledgement"),
+                }
+            else:
+                return None
+            event = self._append_event(
+                connection,
+                session_id=str(run["session_id"]),
+                run_id=str(run["run_id"]),
+                kind=canonical_kind,
+                status=(
+                    str(resolution or "resolved")
+                    if canonical_kind == "assistant.output.resolved"
+                    else "available"
+                ),
+                phase=str(phase or "immediate"),
+                summary=str(summary or canonical_kind),
+                detail=detail,
+                outbox=True,
+            )
+            connection.execute(
+                """INSERT INTO runtime_event_correlations(
+                       source_event_id,session_id,run_id,event_id,kind,created_at
+                   ) VALUES(?,?,?,?,?,?)""",
+                (
+                    stable_source_id,
+                    str(run["session_id"]),
+                    str(run["run_id"]),
+                    event["event_id"],
+                    canonical_kind,
+                    now,
+                ),
+            )
+        return event
+
+    def decide_voice_transcript(
+        self, *, request_id: str, confirmed: bool
+    ) -> dict[str, Any]:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT vt.*, r.user_message_id FROM voice_transcripts AS vt
+                   JOIN runs AS r ON r.run_id=vt.run_id
+                   WHERE r.request_id=?
+                   ORDER BY vt.created_at ASC, vt.transcript_id ASC""",
+                (str(request_id),),
+            ).fetchall()
+            if not rows:
+                raise SessionNotFound("voice transcript not found")
+            state = "released" if confirmed else "discarded"
+            eligible = [
+                row
+                for row in rows
+                if str(row["safe_voice_state"]) == "pending_confirmation"
+            ]
+            if not eligible:
+                matching = [
+                    row for row in rows if str(row["safe_voice_state"]) == state
+                ]
+                if matching:
+                    return dict(matching[-1])
+                raise SessionConflict(
+                    "voice transcript is not waiting for Safe Voice confirmation"
+                )
+            for row in eligible:
+                connection.execute(
+                    "UPDATE voice_transcripts SET safe_voice_state=? WHERE transcript_id=?",
+                    (state, str(row["transcript_id"])),
+                )
+                if confirmed:
+                    self._append_voice_transcript_projection(
+                        connection,
+                        message_id=str(row["user_message_id"]),
+                        transcript=str(row["text"]),
+                    )
+                self._append_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    run_id=str(row["run_id"]),
+                    kind=(
+                        "voice.input.transcript_confirmed"
+                        if confirmed
+                        else "voice.input.transcript_discarded"
+                    ),
+                    status=state,
+                    phase="safe_voice",
+                    summary=(
+                        "Safe Voice transcript confirmed"
+                        if confirmed
+                        else "Safe Voice transcript discarded"
+                    ),
+                    detail={"transcript_id": str(row["transcript_id"])},
+                    outbox=True,
+                )
+            updated = connection.execute(
+                "SELECT * FROM voice_transcripts WHERE transcript_id=?",
+                (str(eligible[-1]["transcript_id"]),),
+            ).fetchone()
+        return dict(updated)
+
+    def decide_voice_transcript_by_id(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        transcript_id: str,
+        confirmed: bool,
+    ) -> dict[str, Any]:
+        """Apply an authenticated generic-client Safe Voice decision."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT vt.*, r.user_message_id, r.request_id
+                   FROM voice_transcripts AS vt
+                   JOIN runs AS r ON r.run_id=vt.run_id
+                   JOIN sessions AS s ON s.session_id=vt.session_id
+                   WHERE vt.transcript_id=? AND vt.session_id=? AND s.owner_id=?""",
+                (str(transcript_id), str(session_id), str(owner_id)),
+            ).fetchone()
+            if row is None:
+                raise SessionNotFound("voice transcript not found")
+            current = str(row["safe_voice_state"])
+            desired = "released" if confirmed else "discarded"
+            if current not in {"pending_confirmation", desired}:
+                raise SessionConflict(
+                    f"voice transcript cannot change from {current} to {desired}"
+                )
+            if current == "pending_confirmation":
+                connection.execute(
+                    "UPDATE voice_transcripts SET safe_voice_state=? "
+                    "WHERE transcript_id=?",
+                    (desired, str(transcript_id)),
+                )
+                if confirmed:
+                    self._append_voice_transcript_projection(
+                        connection,
+                        message_id=str(row["user_message_id"]),
+                        transcript=str(row["text"]),
+                    )
+                self._append_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    run_id=str(row["run_id"]),
+                    kind=(
+                        "voice.input.transcript_confirmed"
+                        if confirmed
+                        else "voice.input.transcript_discarded"
+                    ),
+                    status=desired,
+                    phase="safe_voice",
+                    summary=(
+                        "Safe Voice transcript confirmed"
+                        if confirmed
+                        else "Safe Voice transcript discarded"
+                    ),
+                    detail={"transcript_id": str(transcript_id)},
+                    outbox=True,
+                )
+            updated = connection.execute(
+                """SELECT vt.*, r.request_id FROM voice_transcripts AS vt
+                   JOIN runs AS r ON r.run_id=vt.run_id
+                   WHERE vt.transcript_id=?""",
+                (str(transcript_id),),
             ).fetchone()
         return dict(updated)
 
@@ -1316,6 +2623,9 @@ class SessionStore:
                     WHERE run_id = ? AND state = 'running'
                     """,
                     (now, run_id),
+                )
+                self._release_run_audio_leases(
+                    connection, run_id=run_id, released_at=now
                 )
                 event = self._append_event(
                     connection,
@@ -1496,7 +2806,15 @@ class SessionStore:
                        a.message_id AS assistant_message_id,
                        u.created_at AS user_ts, a.created_at AS assistant_ts,
                        u.source AS user_source, a.source AS assistant_source,
-                       u.text AS user_text, a.text AS assistant_text
+                       u.text AS user_text, a.text AS assistant_text,
+                       (SELECT GROUP_CONCAT(DISTINCT vt.provenance)
+                          FROM voice_transcripts AS vt
+                         WHERE vt.message_id=u.message_id
+                           AND vt.safe_voice_state='released')
+                           AS user_transcript_provenance,
+                       CASE WHEN a.content_json LIKE '%provider_audio_transcript%'
+                            THEN 'provider_audio_transcript' ELSE '' END
+                           AS assistant_transcript_provenance
                 FROM runs AS r
                 JOIN messages AS u ON u.message_id = r.user_message_id
                 JOIN messages AS a ON a.message_id = r.final_message_id
@@ -1557,7 +2875,15 @@ class SessionStore:
                        a.message_id AS assistant_message_id,
                        u.created_at AS user_ts, a.created_at AS assistant_ts,
                        u.source AS user_source, a.source AS assistant_source,
-                       u.text AS user_text, a.text AS assistant_text
+                       u.text AS user_text, a.text AS assistant_text,
+                       (SELECT GROUP_CONCAT(DISTINCT vt.provenance)
+                          FROM voice_transcripts AS vt
+                         WHERE vt.message_id=u.message_id
+                           AND vt.safe_voice_state='released')
+                           AS user_transcript_provenance,
+                       CASE WHEN a.content_json LIKE '%provider_audio_transcript%'
+                            THEN 'provider_audio_transcript' ELSE '' END
+                           AS assistant_transcript_provenance
                 FROM runs AS r
                 JOIN sessions AS s ON s.session_id = r.session_id
                 JOIN messages AS u ON u.message_id = r.user_message_id

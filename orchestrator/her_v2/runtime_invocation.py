@@ -13,6 +13,7 @@ from orchestrator.her_json_repair import render_json_repair_input
 from orchestrator.multimodal_contract import (
     attachment_manifest,
     canonical_request_content,
+    request_content_is_voice_origin,
     subset_request_content,
 )
 
@@ -102,6 +103,7 @@ class RuntimeInvocationMixin:
         retry_on_failure: bool = True,
         checkpoint_coordinator: CompulsoryReplanCoordinator | None = None,
         bound_plan_id: str | None = None,
+        request_content_override: Mapping[str, Any] | None = None,
     ) -> tuple[StageResponse, Any]:
         if checkpoint_coordinator is not None and stage is not Stage.EXECUTION:
             raise ValueError(
@@ -126,7 +128,11 @@ class RuntimeInvocationMixin:
         }:
             base_context["real_goal"] = state.goal
             base_context["relevant_habits"] = list(state.relevant_habits)
-        stage_request_content = copy.deepcopy(state.request_content)
+        stage_request_content = copy.deepcopy(
+            request_content_override
+            if request_content_override is not None
+            else state.request_content
+        )
         authorised_attachment_ids = base_context.get("authorized_attachment_ids")
         if isinstance(authorised_attachment_ids, list):
             stage_request_content = subset_request_content(
@@ -140,6 +146,19 @@ class RuntimeInvocationMixin:
                 stage_request_content,
                 (),
             )
+        native_audio_stage = bool(
+            stage in {Stage.DIRECT, Stage.IMMEDIATE_RESPONSE}
+            and request_content_is_voice_origin(stage_request_content)
+            and selected.options.get("_native_audio_route")
+        )
+        if native_audio_stage and not bool(
+            selected.options.get("audio_model_tools", False)
+        ):
+            # Keep the immutable invocation contract and its audit record in
+            # sync with the provider boundary.  The provider repeats this
+            # fail-closed enforcement before constructing its payload.
+            allow_tools = False
+            allow_side_effects = False
         stage_attachment_manifest = attachment_manifest(stage_request_content)
         stage_goal = state.goal
         if role.startswith("sub_agent:"):

@@ -408,7 +408,10 @@ async def process_queue(runtime: Any) -> None:
                 ),
             )
 
-            if response.is_success and not response.text:
+            has_deliverable_content = runtime_pipeline.response_has_deliverable_content(
+                response
+            )
+            if response.is_success and not has_deliverable_content:
                 runtime._notify_right_brain_interrupted(
                     item,
                     effective_prompt,
@@ -417,7 +420,7 @@ async def process_queue(runtime: Any) -> None:
                     error="backend returned success with empty text",
                 )
                 await runtime_pipeline.handle_empty_success_response(runtime, item)
-            elif response.is_success and response.text:
+            elif response.is_success and has_deliverable_content:
                 success_result = await runtime_pipeline.prepare_successful_response(
                     runtime,
                     item,
@@ -426,7 +429,10 @@ async def process_queue(runtime: Any) -> None:
                 )
                 visible_text = success_result.visible_text
                 wrapper_result = success_result.wrapper_result
-                if not visible_text.strip():
+                if (
+                    not visible_text.strip()
+                    and not runtime_pipeline.response_has_deliverable_content(response)
+                ):
                     runtime._notify_right_brain_interrupted(
                         item,
                         effective_prompt,

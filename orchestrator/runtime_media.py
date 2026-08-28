@@ -17,8 +17,14 @@ from orchestrator.multimodal_contract import (
     canonical_request_content,
     infer_mime_type,
     modality_for_attachment,
+    request_content_is_voice_origin,
 )
 from orchestrator.runtime_common import _print_user_message
+from orchestrator.voice_transcript_gate import (
+    complete_native_audio_response,
+    release_deferred_transcript,
+    state_after_transcription,
+)
 
 
 def build_media_prompt(
@@ -175,11 +181,19 @@ def _transport_metadata(update: Any, filename: str) -> dict[str, Any]:
     message = getattr(update, "message", None)
     caption = str(getattr(message, "caption", "") or "")
     mime_type = ""
+    duration_ms = None
     for attribute in ("document", "audio", "video", "voice"):
         media = getattr(message, attribute, None)
         candidate = str(getattr(media, "mime_type", "") or "").strip()
         if candidate:
             mime_type = candidate
+        raw_duration = getattr(media, "duration", None)
+        if raw_duration is not None:
+            try:
+                duration_ms = max(0, int(float(raw_duration) * 1000))
+            except (TypeError, ValueError):
+                duration_ms = None
+        if candidate or duration_ms is not None:
             break
     if not mime_type and getattr(message, "photo", None):
         mime_type = "image/jpeg"
@@ -190,6 +204,7 @@ def _transport_metadata(update: Any, filename: str) -> dict[str, Any]:
         "update_id": getattr(update, "update_id", None),
         "message_id": getattr(message, "message_id", None),
         "media_group_id": getattr(message, "media_group_id", None),
+        "duration_ms": duration_ms,
     }
 
 
@@ -201,6 +216,7 @@ def _single_attachment_request(
     local_path: Path,
     transport: dict[str, Any],
     attachment_id: str | None = None,
+    semantic_role: str | None = None,
 ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
     digest = hashlib.sha256()
     size_bytes = 0
@@ -216,12 +232,14 @@ def _single_attachment_request(
         mime_type=str(transport.get("mime_type") or ""),
         filename=filename,
     )
-    content = canonical_request_content(
-        [
-            {"type": "text", "item_index": 1, "text": str(prompt)},
-            {
+    parts: list[dict[str, Any]] = []
+    next_index = 1
+    if str(prompt or ""):
+        parts.append({"type": "text", "item_index": next_index, "text": str(prompt)})
+        next_index += 1
+    media_part = {
                 "type": "media",
-                "item_index": 2,
+                "item_index": next_index,
                 "attachment_id": attachment_id or f"attachment-{uuid4().hex}",
                 "modality": modality,
                 "kind": str(media_kind or modality).strip().casefold(),
@@ -239,9 +257,16 @@ def _single_attachment_request(
                     for key in ("update_id", "message_id", "media_group_id")
                     if transport.get(key) not in (None, "")
                 },
-            },
-        ]
-    )
+            }
+    if modality == "audio":
+        media_part["semantic_role"] = str(
+            semantic_role
+            or ("voice_message" if str(media_kind).casefold() == "voice" else "audio_attachment")
+        )
+        if transport.get("duration_ms") is not None:
+            media_part["duration_ms"] = int(transport["duration_ms"])
+    parts.append(media_part)
+    content = canonical_request_content(parts)
     return content, attachment_manifest(content)
 
 
@@ -387,6 +412,310 @@ async def handle_audio(runtime: Any, update: Any, context: Any):
     await runtime._handle_voice_or_audio(update, "Audio", original_name, audio.file_id, caption=caption)
 
 
+def _backend_supports_native_audio_chat(
+    runtime: Any,
+    backend: Any,
+    *,
+    terminal: str | None = None,
+) -> bool:
+    if backend is None:
+        return False
+    global_config = getattr(runtime, "global_config", None)
+    if (
+        global_config is not None
+        and hasattr(global_config, "native_audio_chat_v1")
+        and not bool(getattr(global_config, "native_audio_chat_v1"))
+    ):
+        return False
+    manager = getattr(runtime, "voice_manager", None)
+    native_enabled = getattr(manager, "native_audio_enabled", None)
+    if callable(native_enabled):
+        try:
+            enabled = bool(native_enabled(terminal))
+        except TypeError:
+            enabled = bool(native_enabled())
+        if not enabled:
+            return False
+    capability = None
+    resolver = getattr(backend, "resolve_input_capability", None)
+    if callable(resolver):
+        try:
+            capability = resolver()
+        except (TypeError, ValueError):
+            capability = None
+    accepts_audio = bool(capability and capability.supports("audio"))
+    if not accepts_audio:
+        accepts_audio = "audio" in set(
+            getattr(getattr(backend, "capabilities", None), "input_modalities", ())
+            or ()
+        )
+    if not accepts_audio:
+        ingress_resolver = getattr(backend, "accepts_media_input", None)
+        if callable(ingress_resolver):
+            try:
+                accepts_audio = bool(ingress_resolver("audio"))
+            except (TypeError, ValueError):
+                accepts_audio = False
+    output_modalities = set(
+        getattr(getattr(backend, "capabilities", None), "output_modalities", ())
+        or ()
+    )
+    outputs_audio = "audio" in output_modalities
+    if outputs_audio:
+        output_capability = getattr(backend, "capabilities", None)
+        formats = getattr(output_capability, "output_formats", {}) or {}
+        streams = str(
+            getattr(output_capability, "output_streaming", "none") or "none"
+        ).strip().casefold()
+        surface = str(
+            getattr(output_capability, "api_surface", "unknown") or "unknown"
+        ).strip().casefold()
+        outputs_audio = bool(formats.get("audio")) and streams not in {
+            "",
+            "none",
+            "unknown",
+        } and surface not in {"", "none", "unknown"}
+    if not outputs_audio:
+        output_resolver = getattr(backend, "supports_media_output", None)
+        if callable(output_resolver):
+            try:
+                outputs_audio = bool(output_resolver("audio"))
+            except (TypeError, ValueError):
+                outputs_audio = False
+    return accepts_audio and outputs_audio
+
+
+def _native_audio_retention(
+    runtime: Any, *, terminal: str | None = None
+) -> tuple[int, bool]:
+    manager = getattr(runtime, "voice_manager", None)
+    policy_resolver = getattr(manager, "native_policy_for_terminal", None)
+    policy = (
+        policy_resolver(terminal)
+        if callable(policy_resolver)
+        else getattr(manager, "native_policy", None)
+    )
+    if isinstance(policy, dict):
+        raw = policy.get("retention_seconds", 3600)
+    else:
+        raw = getattr(
+            getattr(runtime, "global_config", None),
+            "native_audio_retention_seconds",
+            3600,
+        )
+    if str(raw).strip().casefold() in {"indefinite", "forever"}:
+        return 3600, True
+    return max(60, int(raw or 3600)), False
+
+
+def _admit_native_telegram_audio(
+    runtime: Any,
+    update: Any,
+    *,
+    local_path: Path,
+    filename: str,
+    media_kind: str,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], dict[str, Any]]:
+    """Use Session attachment admission when available; keep tests lightweight."""
+
+    transport = _transport_metadata(update, filename)
+    semantic_role = (
+        "voice_message" if media_kind.casefold() == "voice" else "audio_attachment"
+    )
+    store = getattr(runtime, "session_store", None)
+    if store is None:
+        content, manifest = _single_attachment_request(
+            "",
+            media_kind=media_kind,
+            filename=filename,
+            local_path=local_path,
+            transport=transport,
+            semantic_role=semantic_role,
+        )
+        return content, manifest, _single_attachment_metadata(content, manifest)
+
+    from orchestrator import runtime_session
+
+    _chat_id, route_metadata, _deliver = runtime_session.request_route_for_update(
+        runtime, update
+    )
+    payload = local_path.read_bytes()
+    retention_seconds, retention_indefinite = _native_audio_retention(
+        runtime, terminal="telegram"
+    )
+    staged = store.stage_attachment(
+        session_id=route_metadata["session_id"],
+        owner_id=route_metadata["owner_id"],
+        filename=filename,
+        media_type=str(transport.get("mime_type") or infer_mime_type(filename)),
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        semantic_role=semantic_role,
+        duration_ms=transport.get("duration_ms"),
+        retention_seconds=retention_seconds,
+        retention_indefinite=retention_indefinite,
+    )
+    store.upload_attachment_bytes(
+        session_id=route_metadata["session_id"],
+        owner_id=route_metadata["owner_id"],
+        attachment_id=staged["attachment_id"],
+        payload=payload,
+    )
+    committed = store.commit_attachment(
+        session_id=route_metadata["session_id"],
+        owner_id=route_metadata["owner_id"],
+        attachment_id=staged["attachment_id"],
+    )
+    part = store.attachment_canonical_part(
+        session_id=route_metadata["session_id"],
+        owner_id=route_metadata["owner_id"],
+        attachment_id=committed["attachment_id"],
+        item_index=1,
+        semantic_role=semantic_role,
+    )
+    content = canonical_request_content([part])
+    manifest = attachment_manifest(content)
+    metadata = {
+        **route_metadata,
+        **_single_attachment_metadata(content, manifest),
+        "session_message_text": "",
+        "session_message_content": [
+            {
+                "type": "audio",
+                "attachment_id": committed["attachment_id"],
+                "semantic_role": semantic_role,
+                "mime_type": committed["media_type"],
+            }
+        ],
+        "voice_origin": request_content_is_voice_origin(content),
+    }
+    return content, manifest, metadata
+
+
+async def _present_safe_voice_transcript(
+    runtime: Any,
+    update: Any,
+    *,
+    transcript: str,
+    prompt: str,
+    summary: str,
+    request_id: str | None = None,
+    attachment_id: str | None = None,
+    native_audio: bool = False,
+) -> None:
+    chat_id = update.effective_chat.id
+    chat_key = str(chat_id)
+    runtime._pending_voice[chat_key] = {
+        "prompt": prompt,
+        "transcript": transcript,
+        "summary": summary,
+        "chat_id": chat_id,
+        "timestamp": datetime.now().isoformat(),
+        "long_batch": False,
+        "native_audio": native_audio,
+        "request_id": request_id,
+        "attachment_id": attachment_id,
+    }
+    preview = (
+        transcript[:3500] + f"\n\n…(共 {len(transcript)} 字，已截断)"
+        if len(transcript) > 3500
+        else transcript
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Send transcript", callback_data=f"safevoice:yes:{chat_key}"
+                ),
+                InlineKeyboardButton(
+                    "Discard transcript", callback_data=f"safevoice:no:{chat_key}"
+                ),
+            ]
+        ]
+    )
+    await runtime._reply_text(
+        update,
+        f"🛡️ *Safe Voice — Confirm transcription:*\n\n_{preview}_",
+        reply_markup=keyboard,
+        parse_mode="Markdown",
+    )
+
+
+def disable_safe_voice(runtime: Any) -> None:
+    """Resolve native transcript waiters when Safe Voice is switched off.
+
+    A transcript that has already reached the confirmation boundary keeps the
+    legacy Safe Voice meaning: clearing the pending challenge discards that
+    transcript-dependent path.  An STT task that is still running, or a ready
+    transcript that no consumer has challenged yet, becomes an automatic
+    (Safe Voice off) transcript.  In every case no HER stage is left waiting
+    on an event whose UI control has disappeared.
+    """
+
+    registry = getattr(runtime, "_native_voice_transcripts", None)
+    if not isinstance(registry, dict):
+        return
+    seen: set[int] = set()
+    for candidate in registry.values():
+        if not isinstance(candidate, dict) or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        status = str(candidate.get("status") or "pending").strip().casefold()
+        if status == "pending":
+            candidate["safe_voice"] = False
+            continue
+        if status == "ready":
+            candidate["safe_voice"] = False
+            task = asyncio.create_task(
+                release_deferred_transcript(candidate),
+                name=(
+                    "native-voice-safevoice-off:"
+                    f"{candidate.get('request_id') or candidate.get('attachment_id') or 'unknown'}"
+                ),
+            )
+            tasks = getattr(runtime, "_audio_transcript_tasks", None)
+            if isinstance(tasks, set):
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+            continue
+        if status != "pending_confirmation":
+            continue
+        request_id = str(candidate.get("request_id") or "").strip()
+        decider = getattr(
+            getattr(runtime, "session_store", None),
+            "decide_voice_transcript",
+            None,
+        )
+        if request_id and callable(decider):
+            try:
+                decider(request_id=request_id, confirmed=False)
+            except Exception as exc:
+                logger = getattr(runtime, "error_logger", None)
+                warning = getattr(logger, "warning", None)
+                if callable(warning):
+                    warning(
+                        "Unable to persist discarded native voice transcript %s: %s",
+                        request_id,
+                        exc,
+                    )
+        candidate["status"] = "discarded"
+        release_event = candidate.get("release_event")
+        if isinstance(release_event, asyncio.Event):
+            release_event.set()
+
+
+async def finish_native_voice_transcript_path(
+    runtime: Any,
+    request_id: str,
+    payload: dict[str, Any],
+) -> bool:
+    """Resolve deferred STT after a no-tool native audio reply completes."""
+
+    registry = getattr(runtime, "_native_voice_transcripts", None)
+    state = registry.get(str(request_id)) if isinstance(registry, dict) else None
+    return await complete_native_audio_response(state, payload)
+
+
 async def handle_voice_or_audio(
     runtime: Any,
     update: Any,
@@ -406,54 +735,158 @@ async def handle_voice_or_audio(
     try:
         local_path = await runtime.download_media(file_id, filename)
         transcriber = get_transcriber()
+        backend = getattr(runtime.backend_manager, "current_backend", None)
+        native_audio = _backend_supports_native_audio_chat(
+            runtime, backend, terminal="telegram"
+        ) and not runtime_long.is_collecting(runtime, update.effective_chat.id)
+        if native_audio:
+            transcript_task = asyncio.create_task(transcriber.transcribe(local_path))
+            request_content, manifest, request_metadata = (
+                _admit_native_telegram_audio(
+                    runtime,
+                    update,
+                    local_path=local_path,
+                    filename=filename,
+                    media_kind=media_kind,
+                )
+            )
+            attachment_id = str(manifest[0]["attachment_id"])
+            registry = getattr(runtime, "_native_voice_transcripts", None)
+            if not isinstance(registry, dict):
+                registry = {}
+                runtime._native_voice_transcripts = registry
+            request_id: str | None = None
+            transcript_state = {
+                "task": transcript_task,
+                "ready_event": asyncio.Event(),
+                "release_event": asyncio.Event(),
+                "gate_lock": asyncio.Lock(),
+                "status": "pending",
+                "attachment_id": attachment_id,
+                "safe_voice": bool(runtime._safevoice_enabled),
+                "confirmation_requested": False,
+                "confirmation_presented": False,
+                "native_audio_completed": False,
+                "text": "",
+            }
+
+            async def _request_confirmation() -> None:
+                current_request_id = str(
+                    transcript_state.get("request_id") or ""
+                ).strip()
+                store = getattr(runtime, "session_store", None)
+                require_confirmation = getattr(
+                    store, "require_voice_transcript_confirmation", None
+                )
+                if current_request_id and callable(require_confirmation):
+                    require_confirmation(request_id=current_request_id)
+                transcript_state["status"] = "pending_confirmation"
+                transcript = str(transcript_state.get("text") or "").strip()
+                prompt = f"[Voice message transcription] {transcript}"
+                if caption:
+                    prompt += f'\nCaption: "{caption}"'
+                await _present_safe_voice_transcript(
+                    runtime,
+                    update,
+                    transcript=transcript,
+                    prompt=prompt,
+                    summary=f"{media_kind}: {filename}",
+                    request_id=current_request_id or None,
+                    attachment_id=attachment_id,
+                    native_audio=True,
+                )
+
+            async def _auto_release() -> None:
+                current_request_id = str(
+                    transcript_state.get("request_id") or ""
+                ).strip()
+                store = getattr(runtime, "session_store", None)
+                release_ready = getattr(
+                    store, "release_ready_voice_transcript", None
+                )
+                if current_request_id and callable(release_ready):
+                    release_ready(request_id=current_request_id)
+
+            transcript_state["request_confirmation"] = _request_confirmation
+            transcript_state["auto_release"] = _auto_release
+            registry[attachment_id] = transcript_state
+            request_metadata["voice_transcript_key"] = attachment_id
+            request_metadata["safe_voice"] = bool(runtime._safevoice_enabled)
+            request_id = await runtime.enqueue_request(
+                update.effective_chat.id,
+                caption,
+                media_kind.casefold(),
+                f"{media_kind}: {filename}",
+                request_metadata=request_metadata,
+                request_content=request_content,
+            )
+            if request_id:
+                transcript_state["request_id"] = str(request_id)
+                registry[str(request_id)] = transcript_state
+
+            transcript = await transcript_task
+            if transcript.startswith("[Transcription error]"):
+                transcript_state["status"] = "unavailable"
+                transcript_state["ready_event"].set()
+                transcript_state["release_event"].set()
+                runtime.error_logger.error(
+                    f"Voice transcription failed for {filename}: {transcript}"
+                )
+                await runtime._reply_text(
+                    update,
+                    "Local voice transcription is unavailable; the native audio response will continue.",
+                )
+                store = getattr(runtime, "session_store", None)
+                recorder = getattr(store, "record_voice_transcript", None)
+                if callable(recorder) and request_id:
+                    recorder(
+                        request_id=str(request_id),
+                        attachment_id=attachment_id,
+                        text="",
+                        provenance="local_stt",
+                        safe_voice_state="unavailable",
+                    )
+                if store is not None:
+                    local_path.unlink(missing_ok=True)
+                return
+
+            async with transcript_state["gate_lock"]:
+                transcript_state["text"] = transcript
+                transcript_state["status"] = state_after_transcription(
+                    transcript_state
+                )
+            _print_user_message(runtime.name, transcript, media_tag="Transcription")
+            runtime.telegram_logger.info(
+                f"Transcribed {media_kind.lower()} ({filename}): {len(transcript)} chars"
+            )
+            store = getattr(runtime, "session_store", None)
+            recorder = getattr(store, "record_voice_transcript", None)
+            if callable(recorder) and request_id:
+                recorder(
+                    request_id=str(request_id),
+                    attachment_id=attachment_id,
+                    text=transcript,
+                    provenance="local_stt",
+                    safe_voice_state=str(transcript_state["status"]),
+                )
+            transcript_state["ready_event"].set()
+            if transcript_state["status"] in {
+                "released",
+                "discarded",
+                "unavailable",
+            }:
+                transcript_state["release_event"].set()
+            if store is not None:
+                local_path.unlink(missing_ok=True)
+            return
+
         transcript = await transcriber.transcribe(local_path)
 
         if transcript.startswith("[Transcription error]"):
             runtime.error_logger.error(f"Voice transcription failed for {filename}: {transcript}")
-            backend = getattr(runtime.backend_manager, "current_backend", None)
-            if (
-                backend
-                and _is_her_backend(runtime, backend)
-                and _backend_accepts_media_bridge(
-                    backend,
-                    media_kind,
-                    filename,
-                )
-            ):
-                prompt = (
-                    f"User sent a voice message (saved at {local_path}). "
-                    "Local direct transcription failed. Use media_read on that exact path; "
-                    "it will normalize the audio before retrying transcription, then respond."
-                )
-                if runtime_long.collect_media(
-                    runtime,
-                    update.effective_chat.id,
-                    prompt,
-                    media_kind.lower(),
-                    filename,
-                    local_path=local_path,
-                    transport_metadata=_transport_metadata(update, filename),
-                ):
-                    return
-                request_content, manifest = _single_attachment_request(
-                    prompt,
-                    media_kind=media_kind,
-                    filename=filename,
-                    local_path=local_path,
-                    transport=_transport_metadata(update, filename),
-                )
-                await runtime.enqueue_request(
-                    update.effective_chat.id,
-                    prompt,
-                    media_kind.lower(),
-                    filename,
-                    request_metadata=_single_attachment_metadata(
-                        request_content, manifest
-                    ),
-                    request_content=request_content,
-                )
-            else:
-                await runtime._reply_text(update, f"Failed to transcribe {media_kind.lower()} message.")
+            await runtime._reply_text(
+                update, f"Failed to transcribe {media_kind.lower()} message."
+            )
             return
 
         _print_user_message(runtime.name, transcript, media_tag="Transcription")

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
+import inspect
 import logging
 import time
 import uuid
@@ -13,7 +15,9 @@ from typing import Any, Callable, Mapping, Sequence
 
 from orchestrator.multimodal_contract import (
     attachment_manifest,
+    canonical_request_content,
     normalize_request_content,
+    resolve_input_capability,
 )
 
 from .audit import AuditPersistenceError, DurableAuditLog
@@ -76,6 +80,7 @@ from .models import (
 from .policy import resolve_policy, terminal_for_execution
 from .presentation import RequiredPersonaRenderer
 from .progress import ProgressTracker
+from .prompts import extract_authoritative_current_request
 from .retry import DEFAULT_PROVIDER_RETRY_POLICY, ProviderRetryPolicy
 from .runtime_invocation import RuntimeInvocationMixin
 from .runtime_support import (
@@ -101,6 +106,14 @@ from .structured import (
 Validator = Callable[[StageResponse], Any]
 
 
+@dataclass(frozen=True)
+class _StageModalityContract:
+    input_modalities: frozenset[str]
+    output_modalities: frozenset[str]
+    input_policy: str = "auto"
+    source: str = "unknown"
+
+
 class _ResumeExecutionAfterReplan(BaseException):
     """A completion-boundary Replan found authorised work still remains."""
 
@@ -124,6 +137,16 @@ def _tool_catalogue_name(entry: Mapping[str, Any]) -> str:
     return str(
         function.get("name") if isinstance(function, Mapping) else ""
     ).strip()
+
+
+def _content_includes_audio(content: Sequence[Mapping[str, Any]]) -> bool:
+    """Return whether typed stage output contains a native audio part."""
+
+    return any(
+        str(part.get("type") or "").strip().lower() == "audio"
+        for part in content
+        if isinstance(part, Mapping)
+    )
 
 
 @dataclass
@@ -366,6 +389,12 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         finally:
             self._controls.pop(identity, None)
             self._turn_tasks.pop(identity, None)
+            cleanup = getattr(self.provider, "cleanup_text_audio", None)
+            if callable(cleanup):
+                with suppress(Exception):
+                    cleanup_result = cleanup()
+                    if inspect.isawaitable(cleanup_result):
+                        await cleanup_result
 
     async def stop_turn(self, turn_id: str, *, reason: str = "USER_STOP") -> bool:
         control = self._controls.get(str(turn_id))
@@ -408,6 +437,224 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
         self._background_tasks.clear()
 
+    async def _stage_modality_contract(
+        self, stage: Stage
+    ) -> _StageModalityContract:
+        def normalized_modalities(value: Any) -> frozenset[str]:
+            if isinstance(value, str):
+                value = (value,)
+            if not isinstance(value, (list, tuple, set, frozenset)):
+                return frozenset()
+            return frozenset(
+                str(item or "").strip().casefold()
+                for item in value
+                if str(item or "").strip()
+            )
+
+        profile = self.config.profile_for(stage)
+        resolver = getattr(self.provider, "resolve_stage_modalities", None)
+        if callable(resolver):
+            raw = resolver(profile)
+            if inspect.isawaitable(raw):
+                raw = await raw
+            if not isinstance(raw, Mapping):
+                raise StageInvocationError(
+                    "stage modality resolver returned no typed contract",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                    human_description=(
+                        "The configured stage model exposes no valid input/output "
+                        "modality contract."
+                    ),
+                )
+            input_modalities = normalized_modalities(raw.get("input_modalities"))
+            output_modalities = normalized_modalities(
+                raw.get("output_modalities")
+            )
+            input_policy = str(raw.get("input_policy") or "auto").strip().casefold()
+            source = str(raw.get("source") or "provider")
+        else:
+            capability = resolve_input_capability(
+                profile.engine,
+                profile.model,
+                config=profile.options,
+            )
+            input_modalities = capability.input_modalities
+            raw_output = profile.options.get("output_modalities")
+            if isinstance(raw_output, str):
+                raw_output = [raw_output]
+            output_modalities = (
+                frozenset(
+                    str(item or "").strip().casefold()
+                    for item in raw_output
+                    if str(item or "").strip()
+                )
+                if isinstance(raw_output, (list, tuple, set, frozenset))
+                else frozenset({"text"})
+            )
+            input_policy = str(
+                profile.options.get("input_policy") or "auto"
+            ).strip().casefold()
+            source = capability.source
+
+        if input_policy not in {"auto", "audio_required"}:
+            raise StageInvocationError(
+                f"invalid input_policy {input_policy!r} for stage {stage.value}",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description=(
+                    "The configured stage model has an invalid text-input "
+                    "adaptation policy."
+                ),
+            )
+        if not input_modalities:
+            raise StageInvocationError(
+                f"stage {stage.value} declares no input modalities",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description=(
+                    "The configured stage model declares no usable input modality."
+                ),
+            )
+        return _StageModalityContract(
+            input_modalities=input_modalities,
+            output_modalities=output_modalities,
+            input_policy=input_policy,
+            source=source,
+        )
+
+    @staticmethod
+    def _text_transport_for_stage(
+        stage: Stage, contract: _StageModalityContract
+    ) -> str:
+        if contract.input_policy == "audio_required":
+            if "audio" in contract.input_modalities:
+                return "audio"
+            raise StageInvocationError(
+                f"stage {stage.value} requires audio input but declares no audio capability",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description=(
+                    "The configured stage input policy requires audio, but its "
+                    "model has no verified audio input capability."
+                ),
+            )
+        if "text" in contract.input_modalities:
+            return "text"
+        if "audio" in contract.input_modalities:
+            return "audio"
+        return "unsupported"
+
+    async def _materialize_text_audio(
+        self,
+        state: _TurnState,
+        *,
+        stages: Sequence[Stage],
+    ) -> Mapping[str, Any]:
+        converter = getattr(self.provider, "materialize_text_audio", None)
+        if not callable(converter):
+            raise StageInvocationError(
+                "stage requires audio input but no text-to-audio converter is available",
+                retryable=False,
+                code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                human_description=(
+                    "The configured model requires audio input, but HASHI could "
+                    "not convert the current text request."
+                ),
+            )
+        authoritative_text = extract_authoritative_current_request(state.request)
+        try:
+            converted = converter(
+                text=authoritative_text,
+                turn_id=state.ledger.turn_id,
+                request_ref=state.request_ref,
+            )
+            if inspect.isawaitable(converted):
+                converted = await converted
+        except StageInvocationError:
+            raise
+        except Exception as exc:
+            raise StageInvocationError(
+                f"text-to-audio input conversion failed: {exc}",
+                retryable=False,
+                code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                human_description=(
+                    "The configured model requires audio input, but HASHI could "
+                    "not convert the current text request."
+                ),
+            ) from exc
+        if not isinstance(converted, Mapping):
+            raise StageInvocationError(
+                "text-to-audio converter returned no canonical content",
+                retryable=False,
+                code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                human_description=(
+                    "HASHI's text-to-audio converter returned no usable audio "
+                    "input."
+                ),
+            )
+        try:
+            derived = normalize_request_content(converted)
+            derived_manifest = attachment_manifest(derived)
+        except Exception as exc:
+            raise StageInvocationError(
+                f"text-to-audio converter returned invalid canonical content: {exc}",
+                retryable=False,
+                code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                human_description=(
+                    "HASHI's text-to-audio converter returned invalid audio input."
+                ),
+            ) from exc
+        if not derived_manifest or any(
+            str(item.get("modality") or "") != "audio"
+            or str(item.get("semantic_role") or "") == "voice_message"
+            for item in derived_manifest
+        ):
+            raise StageInvocationError(
+                "derived text transport must contain non-voice audio attachments only",
+                retryable=False,
+                code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                human_description=(
+                    "HASHI's converted input was not a safe derived audio "
+                    "transport asset."
+                ),
+            )
+
+        original = normalize_request_content(state.request_content)
+        merged_parts = [
+            copy.deepcopy(item)
+            for item in (
+                list(original.get("parts") or []) if original is not None else []
+            )
+        ]
+        merged_parts.extend(copy.deepcopy(list(derived.get("parts") or [])))
+        for index, item in enumerate(merged_parts, start=1):
+            item["item_index"] = index
+        merged = canonical_request_content(merged_parts)
+        stage_key = "-".join(sorted({stage.value for stage in stages})) or "unknown"
+        self._audit(
+            state,
+            stage="input_adaptation",
+            role="runtime",
+            event="text_input_adapted_to_audio",
+            event_id=(
+                f"{state.ledger.turn_id}:input-adaptation:text-to-audio:{stage_key}"
+            ),
+            payload={
+                "authoritative_text_sha256": hashlib.sha256(
+                    authoritative_text.encode("utf-8")
+                ).hexdigest(),
+                "target_stages": [stage.value for stage in stages],
+                "derived_attachment_ids": [
+                    str(item.get("attachment_id") or "")
+                    for item in derived_manifest
+                ],
+                "semantic_role": "audio_attachment",
+                "authoritative_input_remains_text": True,
+            },
+        )
+        return merged
+
     async def _run_turn(self, state: _TurnState) -> TurnResult:
         ref = self._audit(
             state,
@@ -431,8 +678,31 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         state.ledger.add_log_ref(ref)
         self.ledger_store.save(state.ledger)
 
+        text_only_turn = not state.attachment_manifest
         if state.effort is Effort.ZERO:
-            return await self._run_direct(state)
+            direct_content: Mapping[str, Any] | None = None
+            if text_only_turn:
+                direct_contract = await self._stage_modality_contract(Stage.DIRECT)
+                direct_transport = self._text_transport_for_stage(
+                    Stage.DIRECT, direct_contract
+                )
+                if direct_transport == "audio":
+                    direct_content = await self._materialize_text_audio(
+                        state, stages=(Stage.DIRECT,)
+                    )
+                elif direct_transport == "unsupported":
+                    raise StageInvocationError(
+                        "Direct model accepts neither text nor audio input",
+                        retryable=False,
+                        code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                        human_description=(
+                            "The configured Direct model cannot consume the current "
+                            "text request and exposes no audio adaptation route."
+                        ),
+                    )
+            return await self._run_direct(
+                state, request_content_override=direct_content
+            )
 
         habit_catalogue: Sequence[str] = ()
         if self.config.meditation_enabled:
@@ -445,23 +715,115 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             str(item).strip() for item in habit_catalogue if str(item).strip()
         )
 
-        immediate_task = asyncio.create_task(
-            self._invoke_stage(
+        immediate_transport = "text"
+        triage_transport = "text"
+        immediate_skipped_for_modality = False
+        text_audio_task: asyncio.Task | None = None
+        if text_only_turn:
+            immediate_contract, triage_contract = await asyncio.gather(
+                self._stage_modality_contract(Stage.IMMEDIATE_RESPONSE),
+                self._stage_modality_contract(Stage.TRIAGE),
+            )
+            immediate_transport = self._text_transport_for_stage(
+                Stage.IMMEDIATE_RESPONSE, immediate_contract
+            )
+            triage_transport = self._text_transport_for_stage(
+                Stage.TRIAGE, triage_contract
+            )
+            if "text" not in triage_contract.output_modalities:
+                raise StageInvocationError(
+                    "Triage model cannot produce structured text output",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                    human_description=(
+                        "The configured Triage model must provide structured text "
+                        "output for an authoritative classification."
+                    ),
+                )
+            if triage_transport == "unsupported":
+                raise StageInvocationError(
+                    "Triage model accepts neither text nor audio input",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                    human_description=(
+                        "The configured Triage model cannot consume the current text "
+                        "request and exposes no audio adaptation route."
+                    ),
+                )
+            immediate_skipped_for_modality = (
+                immediate_transport == "unsupported"
+                or (
+                    triage_transport == "text"
+                    and immediate_transport != "text"
+                )
+            )
+            audio_stages: list[Stage] = []
+            if triage_transport == "audio":
+                audio_stages.append(Stage.TRIAGE)
+            if (
+                immediate_transport == "audio"
+                and not immediate_skipped_for_modality
+            ):
+                audio_stages.insert(0, Stage.IMMEDIATE_RESPONSE)
+            if audio_stages:
+                text_audio_task = asyncio.create_task(
+                    self._materialize_text_audio(state, stages=tuple(audio_stages))
+                )
+            if immediate_skipped_for_modality:
+                self._audit(
+                    state,
+                    stage=Stage.IMMEDIATE_RESPONSE.value,
+                    role=self.config.stage_roles[Stage.IMMEDIATE_RESPONSE],
+                    event="optional_stage_skipped",
+                    event_id=f"{state.ledger.turn_id}:immediate:modality-skipped",
+                    payload={
+                        "reason": "triage_accepts_authoritative_text_directly",
+                        "immediate_transport": immediate_transport,
+                        "triage_transport": triage_transport,
+                        "tts_avoided": True,
+                    },
+                )
+
+        async def adapted_content(transport: str) -> Mapping[str, Any] | None:
+            if transport != "audio":
+                return None
+            if text_audio_task is None:
+                raise StageInvocationError(
+                    "audio input adaptation was not scheduled",
+                    retryable=False,
+                    code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                    human_description=(
+                        "HASHI could not prepare the audio input required by the "
+                        "configured stage model."
+                    ),
+                )
+            return await text_audio_task
+
+        async def invoke_immediate():
+            return await self._invoke_stage(
                 state,
                 Stage.IMMEDIATE_RESPONSE,
                 parse_immediate,
                 allow_tools=False,
+                request_content_override=await adapted_content(immediate_transport),
             )
-        )
-        triage_task = asyncio.create_task(
-            self._invoke_stage(
+
+        async def invoke_triage():
+            return await self._invoke_stage(
                 state,
                 Stage.TRIAGE,
                 parse_triage,
                 allow_tools=False,
                 context={"habit_catalogue": list(state.habit_catalogue)},
+                request_content_override=await adapted_content(triage_transport),
             )
+
+        immediate_task = (
+            None
+            if immediate_skipped_for_modality
+            else asyncio.create_task(invoke_immediate())
         )
+        triage_task = asyncio.create_task(invoke_triage())
         immediate_pair = None
         triage_pair = None
         immediate_error: StageInvocationError | None = None
@@ -470,32 +832,56 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
 
         async def consume_immediate() -> None:
             nonlocal immediate_pair, immediate_error
+            if immediate_task is None:
+                return
             try:
                 immediate_pair = await immediate_task
             except StageInvocationError as exc:
                 immediate_error = exc
 
         try:
+            race_tasks = {triage_task}
+            if immediate_task is not None:
+                race_tasks.add(immediate_task)
             done, _pending = await asyncio.wait(
-                {immediate_task, triage_task},
+                race_tasks,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if immediate_task in done and triage_task not in done:
+            if (
+                immediate_task is not None
+                and immediate_task in done
+                and triage_task not in done
+            ):
                 await consume_immediate()
                 if immediate_pair is not None:
                     immediate_delivery_attempted_early = True
+                    immediate_content = tuple(immediate_pair[0].content)
                     immediate_delivered_early = await self._deliver(
                         state,
                         kind="immediate",
                         text=immediate_pair[1],
                         event_id=f"{state.ledger.turn_id}:immediate",
-                        required=False,
+                        # Native voice is prescribed reply content, not optional
+                        # Persona commentary.  It must remain first-ready even
+                        # when /commentary is disabled.
+                        required=_content_includes_audio(immediate_content),
+                        content=immediate_content,
                     )
             triage_pair = await triage_task
         except BaseException:
-            immediate_task.cancel()
+            if immediate_task is not None:
+                immediate_task.cancel()
             triage_task.cancel()
-            await asyncio.gather(immediate_task, triage_task, return_exceptions=True)
+            if text_audio_task is not None:
+                text_audio_task.cancel()
+            await asyncio.gather(
+                *(
+                    task
+                    for task in (immediate_task, triage_task, text_audio_task)
+                    if task is not None
+                ),
+                return_exceptions=True,
+            )
             if immediate_delivered_early:
                 with suppress(Exception):
                     await self._resolve_initial(
@@ -522,13 +908,31 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 for item in state.attachment_manifest
             }
 
-            def native_ids(response: StageResponse | None) -> set[str]:
+            def consumed_ids(
+                response: StageResponse | None, *, triage: bool = False
+            ) -> set[str]:
                 if response is None:
                     return set()
+                accepted_routes = {"native"}
+                if triage:
+                    accepted_routes.add("local_transcript")
+                    if (
+                        response.validation_source == "runtime_voice_boundary"
+                        or (
+                            response.provider == "hashi-runtime"
+                            and response.model == "safe-voice-boundary"
+                        )
+                    ):
+                        # STT failure or Safe Voice discard intentionally ends
+                        # the transcript-dependent branch.  The no-tool native
+                        # Immediate remains a valid direct chat result and must
+                        # not be converted into an impossible work run.
+                        accepted_routes.add("transcript_unavailable")
                 return {
                     str(item.get("attachment_id") or "")
                     for item in response.media_routing
-                    if str(item.get("route") or "") == "native"
+                    if str(item.get("route") or "")
+                    in accepted_routes
                 }
 
             immediate_response = (
@@ -536,8 +940,10 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             )
             direct_media_fulfilled = (
                 bool(required_ids)
-                and required_ids.issubset(native_ids(_triage_response))
-                and required_ids.issubset(native_ids(immediate_response))
+                and required_ids.issubset(
+                    consumed_ids(_triage_response, triage=True)
+                )
+                and required_ids.issubset(consumed_ids(immediate_response))
             )
             if not direct_media_fulfilled:
                 triage = replace(
@@ -553,10 +959,10 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     payload={
                         "required_attachment_ids": sorted(required_ids),
                         "triage_native_attachment_ids": sorted(
-                            native_ids(_triage_response)
+                            consumed_ids(_triage_response, triage=True)
                         ),
                         "immediate_native_attachment_ids": sorted(
-                            native_ids(immediate_response)
+                            consumed_ids(immediate_response)
                         ),
                         "immediate_error_code": (
                             immediate_error.error_code
@@ -571,11 +977,21 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         self._record_triage(state, triage)
         state.progress.record("classification", triage.classification.value)
 
+        if (
+            triage.classification is TriageClassification.DIRECT_RESPONSE
+            and immediate_skipped_for_modality
+        ):
+            return await self._run_direct_after_triage(state)
+
         # Triage is authoritative, but winning this race does not cancel a
         # still-useful Immediate Response.  Work begins without waiting while
         # the optional acknowledgement remains owned by this turn.
         immediate_pending_for_work = False
-        if immediate_pair is None and immediate_error is None:
+        if (
+            immediate_task is not None
+            and immediate_pair is None
+            and immediate_error is None
+        ):
             if triage.classification is TriageClassification.DIRECT_RESPONSE:
                 await consume_immediate()
             elif immediate_task.done():
@@ -630,6 +1046,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         if (
             triage.classification is TriageClassification.DIRECT_RESPONSE
             and immediate_pair is None
+            and not immediate_skipped_for_modality
         ):
             if isinstance(immediate_error, StageInvocationError):
                 raise immediate_error.terminal_copy(
@@ -697,12 +1114,19 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         if immediate_text and (
             not immediate_delivery_attempted_early or not immediate_delivered_early
         ):
+            immediate_content = (
+                tuple(immediate_pair[0].content) if immediate_pair else ()
+            )
             await self._deliver(
                 state,
                 kind=immediate_kind,
                 text=immediate_text,
                 event_id=f"{state.ledger.turn_id}:immediate",
-                required=immediate_kind == "final",
+                required=(
+                    immediate_kind == "final"
+                    or _content_includes_audio(immediate_content)
+                ),
+                content=immediate_content,
             )
 
         if triage.classification is TriageClassification.DIRECT_RESPONSE:
@@ -718,6 +1142,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 text=immediate_text,
                 final_was_immediate=True,
                 final_already_delivered=immediate_resolution_delivered,
+                content=tuple(immediate_pair[0].content) if immediate_pair else (),
             )
 
         if triage.classification is TriageClassification.CONFIRMATION_REQUIRED:
@@ -769,7 +1194,12 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 deliver_if_source_ready=False,
             )
 
-    async def _run_direct(self, state: _TurnState) -> TurnResult:
+    async def _run_direct(
+        self,
+        state: _TurnState,
+        *,
+        request_content_override: Mapping[str, Any] | None = None,
+    ) -> TurnResult:
         """Run the zero-orchestration path as one fully capable agent call."""
 
         habits: Sequence[str] = ()
@@ -795,6 +1225,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 "sub_agent_delegation_allowed": False,
             },
             publish_commentary=False,
+            request_content_override=request_content_override,
         )
         assert isinstance(direct_text, str)
         for evidence_ref in response.evidence_refs:
@@ -812,6 +1243,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 "single_direct_invocation=true; orchestration_upgrade=false; "
                 "finalisation_invoked=false"
             ),
+            content=tuple(response.content),
         )
         await self._transition(
             state,
@@ -822,6 +1254,83 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             state,
             terminal=TerminalState.COMPLETED,
             text=direct_text,
+            content=tuple(response.content),
+        )
+
+    async def _run_direct_after_triage(self, state: _TurnState) -> TurnResult:
+        """Generate the required answer when optional Immediate was skipped.
+
+        Triage keeps classification authority.  The configured Direct route
+        supplies the answer only after DIRECT_RESPONSE is known, avoiding an
+        unnecessary TTS conversion for requests that proceed to work.
+        """
+
+        direct_contract = await self._stage_modality_contract(Stage.DIRECT)
+        if "text" not in direct_contract.output_modalities:
+            raise StageInvocationError(
+                "post-Triage Direct model cannot produce text output",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description=(
+                    "The configured Direct model must provide a text answer after "
+                    "Triage classifies the request as DIRECT_RESPONSE."
+                ),
+            )
+        direct_transport = self._text_transport_for_stage(
+            Stage.DIRECT, direct_contract
+        )
+        if direct_transport == "unsupported":
+            raise StageInvocationError(
+                "post-Triage Direct model accepts neither text nor audio input",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
+                human_description=(
+                    "The configured Direct model cannot consume the current text "
+                    "request after Triage."
+                ),
+            )
+        direct_content = (
+            await self._materialize_text_audio(state, stages=(Stage.DIRECT,))
+            if direct_transport == "audio"
+            else None
+        )
+        response, direct_text = await self._invoke_stage(
+            state,
+            Stage.DIRECT,
+            parse_direct_message,
+            allow_tools=False,
+            allow_side_effects=False,
+            context={
+                "triage_direct_response": True,
+                "zero_orchestration": False,
+                "sub_agent_delegation_allowed": False,
+            },
+            publish_commentary=False,
+            request_content_override=direct_content,
+        )
+        assert isinstance(direct_text, str)
+        await self._deliver(
+            state,
+            kind="final",
+            text=direct_text,
+            event_id=f"{state.ledger.turn_id}:direct-after-triage",
+            required=True,
+            provenance="triage_direct_route",
+            detail="triage_classification=DIRECT_RESPONSE; immediate_skipped=true",
+            content=tuple(response.content),
+        )
+        await self._transition(state, LifecycleState.FINALISING)
+        await self._transition(
+            state,
+            LifecycleState.COMPLETED,
+            terminal_reason="direct_response_delivered",
+        )
+        return self._result(
+            state,
+            terminal=TerminalState.COMPLETED,
+            text=direct_text,
+            final_was_immediate=False,
+            content=tuple(response.content),
         )
 
     async def _deliver_pending_immediate(
@@ -832,7 +1341,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         """Deliver a Triage-late Immediate response without blocking work."""
 
         try:
-            _response, immediate_text = await immediate_task
+            immediate_response, immediate_text = await immediate_task
         except asyncio.CancelledError:
             raise
         except TurnStopped:
@@ -856,12 +1365,14 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             )
             return
         assert isinstance(immediate_text, str)
+        immediate_content = tuple(immediate_response.content)
         await self._deliver(
             state,
             kind="acknowledgement",
             text=immediate_text,
             event_id=f"{state.ledger.turn_id}:immediate",
-            required=False,
+            required=_content_includes_audio(immediate_content),
+            content=immediate_content,
         )
 
     async def _settle_late_immediate(

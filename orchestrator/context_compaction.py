@@ -1303,6 +1303,21 @@ def _render_timeline_entry(entry: Mapping[str, Any], *, immediate: bool) -> str:
         )
         user_text = str(entry.get("user_text") or "").strip()
         assistant_text = str(entry.get("assistant_text") or "").strip()
+        user_provenance = str(
+            entry.get("user_transcript_provenance") or ""
+        ).strip()
+        assistant_provenance = str(
+            entry.get("assistant_transcript_provenance") or ""
+        ).strip()
+        if user_provenance:
+            user_text = (
+                f"[transcript provenance={user_provenance}]\n{user_text}"
+            )
+        if assistant_provenance:
+            assistant_text = (
+                f"[transcript provenance={assistant_provenance}]\n"
+                f"{assistant_text}"
+            )
     user_text = user_text or "[no user text recorded]"
     assistant_text = assistant_text or "[no assistant result recorded]"
     return (

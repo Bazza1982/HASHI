@@ -233,6 +233,7 @@ class RuntimeSupportMixin:
         phase: str = "",
         provenance: str = "",
         detail: str = "",
+        content: tuple[Mapping[str, Any], ...] = (),
     ) -> bool:
         if kind in {"commentary", "draft"}:
             raise ValueError(
@@ -257,20 +258,28 @@ class RuntimeSupportMixin:
                 "required": required,
                 "delivery_id": delivery_id or None,
                 "message_event_id": event_id,
+                "content_types": [
+                    str(part.get("type") or "") for part in content
+                ],
             },
         )
         delivered = False
         disposition = "transport_rejected"
         try:
+            delivery_kwargs: dict[str, Any] = {
+                "kind": kind,
+                "text": text,
+                "event_id": event_id,
+                "required": required,
+                "phase": phase,
+                "provenance": provenance,
+                "detail": detail,
+                "delivery_id": delivery_id,
+            }
+            if content:
+                delivery_kwargs["content"] = content
             raw_receipt = await self.delivery.deliver(
-                kind=kind,
-                text=text,
-                event_id=event_id,
-                required=required,
-                phase=phase,
-                provenance=provenance,
-                detail=detail,
-                delivery_id=delivery_id,
+                **delivery_kwargs
             )
             if isinstance(raw_receipt, DeliveryReceipt):
                 accepted = bool(raw_receipt.accepted)
@@ -313,7 +322,7 @@ class RuntimeSupportMixin:
             payload=delivery_payload,
         )
         if accepted:
-            state.deliveries.append(DeliveryRecord(kind, text, event_id))
+            state.deliveries.append(DeliveryRecord(kind, text, event_id, content))
             if kind in {"acknowledgement", "draft", "clarification", "final"}:
                 progress_kind = "delivery" if delivered else "delivery_deferred"
                 state.progress.record(f"{progress_kind}:{kind}", text)
@@ -535,6 +544,7 @@ class RuntimeSupportMixin:
         error: str = "",
         final_was_immediate: bool = False,
         final_already_delivered: bool = False,
+        content: tuple[Mapping[str, Any], ...] = (),
     ) -> TurnResult:
         failure = state.terminal_failure or state.last_execution_failure
         primary_failure = (
@@ -582,6 +592,7 @@ class RuntimeSupportMixin:
             checkpoint_count=state.checkpoint_count,
             assurance_status="",
             replan_count=state.replan_count,
+            content=content,
         )
 
 

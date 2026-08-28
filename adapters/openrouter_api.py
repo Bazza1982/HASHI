@@ -1,17 +1,24 @@
 from __future__ import annotations
 import asyncio
+import base64
+import binascii
+import hashlib
+import io
 import json
 import logging
 import time
+import wave
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
 from typing import Any, Mapping, Optional
+from uuid import uuid4
 
 import httpx
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
 from adapters.stream_events import (
+    DELIVERY_USER_COMMENTARY,
     KIND_FILE_EDIT,
     KIND_FILE_READ,
     KIND_SHELL_EXEC,
@@ -23,15 +30,24 @@ from adapters.stream_events import (
     StreamEvent,
 )
 from orchestrator.enterprise.policy import evaluate_governance_policy
+from orchestrator.audio_assets import (
+    AudioAssetStore,
+    DEFAULT_RETENTION_SECONDS,
+    asset_root_from_global_config,
+    normalize_audio_format,
+    validate_audio_signature,
+)
 from orchestrator.pcm import load_pcm_document
 from orchestrator.multimodal_contract import (
     InputCapability,
     MultimodalContractError,
     attachment_manifest,
+    canonical_request_content,
     materialize_openai_user_content,
     native_attachment_reference_aliases,
     normalize_request_content,
     request_content_has_media,
+    request_content_is_voice_origin,
     routing_decisions_payload,
     validate_authorized_media_references,
 )
@@ -201,6 +217,8 @@ class _APIResult:
     cost_usd: float | None = None
     reasoning_content: str = ""
     structured_data: dict[str, Any] | None = None
+    audio_bytes: bytes = b""
+    audio_transcript: str = ""
 
 
 def _usage_thinking_tokens(usage: Mapping[str, Any]) -> int:
@@ -389,6 +407,62 @@ def _message_structured_data(message: Mapping[str, Any]) -> dict[str, Any] | Non
     return None
 
 
+def _decode_provider_audio(value: Any) -> bytes:
+    if not value:
+        return b""
+    if not isinstance(value, str):
+        raise MultimodalContractError(
+            "provider audio data must be Base64 text",
+            code="INVALID_PROVIDER_AUDIO_OUTPUT",
+        )
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise MultimodalContractError(
+            "provider returned invalid Base64 audio",
+            code="INVALID_PROVIDER_AUDIO_OUTPUT",
+        ) from exc
+
+
+def _pcm16_to_wav(
+    payload: bytes,
+    *,
+    sample_rate_hz: int = 24_000,
+    channels: int = 1,
+) -> bytes:
+    """Wrap provider PCM16 output in a terminal-safe WAV container."""
+
+    if len(payload) % 2:
+        raise MultimodalContractError(
+            "provider returned an incomplete PCM16 sample",
+            code="INVALID_PROVIDER_AUDIO_OUTPUT",
+        )
+    if sample_rate_hz <= 0 or channels <= 0:
+        raise MultimodalContractError(
+            "provider PCM16 output parameters are invalid",
+            code="AUDIO_OUTPUT_CAPABILITY_INCOMPLETE",
+        )
+    output = io.BytesIO()
+    with wave.open(output, "wb") as target:
+        target.setnchannels(channels)
+        target.setsampwidth(2)
+        target.setframerate(sample_rate_hz)
+        target.writeframes(payload)
+    return output.getvalue()
+
+
+def _append_provider_transcript(current: str, delta: Any) -> str:
+    text = str(delta or "")
+    if not text:
+        return current
+    # Providers may send either incremental fragments or a cumulative value.
+    if text.startswith(current):
+        return text
+    if current.endswith(text):
+        return current
+    return current + text
+
+
 def _tool_target_path(arguments: dict) -> str | None:
     for key in ("path", "file_path", "target_path"):
         value = arguments.get(key)
@@ -424,9 +498,128 @@ class OpenRouterAdapter(BaseBackend):
         # distinguishable because some OpenRouter models default reasoning on.
         self.reasoning_enabled: bool | None = None
         self.tool_registry = None   # Injected by FlexibleBackendManager if tools configured
+        self._audio_asset_store: AudioAssetStore | None = None
 
     def set_reasoning_enabled(self, enabled: bool | None) -> None:
         self.reasoning_enabled = None if enabled is None else bool(enabled)
+
+    def _native_audio_output_profile(
+        self, request_content: Mapping[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """Resolve exact, explicitly configured audio output or fail closed."""
+
+        if not request_content_is_voice_origin(request_content):
+            return None
+        extra = dict(getattr(self.config, "extra", {}) or {})
+        if bool(extra.get("_native_audio_output_disabled")):
+            return None
+        if "audio" not in self.capabilities.output_modalities:
+            return None
+        if self.capabilities.api_surface != "chat_completions":
+            raise MultimodalContractError(
+                "native audio output requires a chat_completions capability",
+                code="AUDIO_OUTPUT_CAPABILITY_INCOMPLETE",
+            )
+        if self.capabilities.output_streaming not in {
+            "sse",
+            "openai_sse",
+            "server_sent_events",
+        }:
+            raise MultimodalContractError(
+                "native audio output requires an explicitly verified SSE stream",
+                code="AUDIO_OUTPUT_CAPABILITY_INCOMPLETE",
+            )
+        configured_formats = self.capabilities.output_formats.get("audio", ())
+        configured_format = str(extra.get("native_audio_format") or "").strip()
+        audio_format = (
+            (
+                "pcm16"
+                if configured_format.casefold() == "pcm16"
+                else normalize_audio_format(configured_format)
+            )
+            if configured_format
+            else next(
+                (
+                    candidate
+                    for candidate in (
+                        "pcm16",
+                        "wav",
+                        "mp3",
+                        "ogg",
+                        "opus",
+                        "webm",
+                        "flac",
+                        "m4a",
+                        "mp4",
+                    )
+                    if candidate in configured_formats
+                ),
+                "",
+            )
+        )
+        if not configured_formats or audio_format not in configured_formats:
+            raise MultimodalContractError(
+                "native audio output format is not explicitly supported",
+                code="AUDIO_OUTPUT_CAPABILITY_INCOMPLETE",
+            )
+        voice = str(extra.get("native_audio_voice") or "").strip().casefold()
+        if not voice and self.capabilities.supported_voices:
+            voice = self.capabilities.supported_voices[0]
+        if not voice:
+            raise MultimodalContractError(
+                "native audio output requires a configured voice",
+                code="AUDIO_OUTPUT_CAPABILITY_INCOMPLETE",
+            )
+        if (
+            self.capabilities.supported_voices
+            and voice not in self.capabilities.supported_voices
+        ):
+            raise MultimodalContractError(
+                "native audio voice is not explicitly supported",
+                code="AUDIO_OUTPUT_CAPABILITY_INCOMPLETE",
+            )
+        raw_retention = extra.get(
+            "native_audio_retention_seconds", DEFAULT_RETENTION_SECONDS
+        )
+        retention_indefinite = str(raw_retention).strip().casefold() in {
+            "indefinite",
+            "forever",
+        }
+        retention_seconds = (
+            DEFAULT_RETENTION_SECONDS
+            if retention_indefinite
+            else int(raw_retention)
+        )
+        asset_format = "wav" if audio_format == "pcm16" else audio_format
+        return {
+            "voice": voice,
+            "format": audio_format,
+            "mime_type": {
+                "wav": "audio/wav",
+                "mp3": "audio/mpeg",
+                "ogg": "audio/ogg",
+                "opus": "audio/ogg",
+                "webm": "audio/webm",
+                "flac": "audio/flac",
+                "m4a": "audio/mp4",
+                "mp4": "audio/mp4",
+            }[asset_format],
+            "asset_format": asset_format,
+            "pcm_sample_rate_hz": int(
+                extra.get("native_audio_pcm_sample_rate_hz", 24_000)
+            ),
+            "pcm_channels": int(extra.get("native_audio_pcm_channels", 1)),
+            "tools": bool(extra.get("audio_model_tools", False)),
+            "retention_seconds": retention_seconds,
+            "retention_indefinite": retention_indefinite,
+        }
+
+    def _native_audio_asset_store_instance(self) -> AudioAssetStore:
+        if self._audio_asset_store is None:
+            self._audio_asset_store = AudioAssetStore(
+                asset_root_from_global_config(self.global_config)
+            )
+        return self._audio_asset_store
 
     def _reasoning_payload(self) -> dict[str, Any] | None:
         extra = dict(getattr(self.config, "extra", None) or {})
@@ -600,6 +793,143 @@ class OpenRouterAdapter(BaseBackend):
             routing_decisions_payload(decisions),
         )
 
+    async def _prepare_audio_input_formats(
+        self,
+        request_content: Mapping[str, Any] | None,
+    ) -> tuple[dict[str, Any] | None, tuple[Path, ...], tuple[dict[str, Any], ...]]:
+        """Normalize audio once at the provider boundary when explicitly required."""
+
+        normalized = normalize_request_content(request_content)
+        declared_formats = getattr(
+            getattr(self, "capabilities", None), "input_formats", {}
+        ) or {}
+        allowed_formats = tuple(
+            str(item or "").strip().casefold()
+            for item in declared_formats.get("audio", ())
+            if str(item or "").strip()
+        )
+        if normalized is None or not allowed_formats:
+            return normalized, (), ()
+        validate_authorized_media_references(
+            normalized,
+            authorized_roots=self.authorized_media_roots(),
+        )
+        target_format = next(
+            (
+                candidate
+                for candidate in ("wav", "mp3", "flac", "ogg", "opus", "webm", "m4a", "mp4")
+                if candidate in allowed_formats
+            ),
+            "",
+        )
+        root = Path(
+            getattr(self.global_config, "base_media_dir", None)
+            or self.config.workspace_dir
+        ).resolve()
+        derivative_root = root / "native_audio_derivatives"
+        derivative_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        prepared_parts: list[dict[str, Any]] = []
+        derivatives: list[Path] = []
+        records: list[dict[str, Any]] = []
+        mime_types = {
+            "wav": "audio/wav",
+            "mp3": "audio/mpeg",
+            "flac": "audio/flac",
+            "ogg": "audio/ogg",
+            "opus": "audio/ogg",
+            "webm": "audio/webm",
+            "m4a": "audio/mp4",
+            "mp4": "audio/mp4",
+        }
+        try:
+            for raw_part in normalized["parts"]:
+                part = dict(raw_part)
+                if part.get("type") != "media" or part.get("modality") != "audio":
+                    prepared_parts.append(part)
+                    continue
+                source_format = normalize_audio_format(
+                    Path(str(part.get("filename") or "")).suffix,
+                    mime_type=str(part.get("mime_type") or ""),
+                )
+                if source_format in allowed_formats:
+                    prepared_parts.append(part)
+                    continue
+                if not target_format:
+                    raise MultimodalContractError(
+                        "the declared audio input formats have no supported normalizer",
+                        code="AUDIO_INPUT_FORMAT_UNSUPPORTED",
+                        attachment_id=str(part.get("attachment_id") or ""),
+                    )
+                source_path = Path(str(part["local_ref"])).resolve(strict=True)
+                target = derivative_root / f"audio_{uuid4().hex}.{target_format}"
+                command = [
+                    str(
+                        dict(getattr(self.config, "extra", {}) or {}).get(
+                            "ffmpeg_cmd", "ffmpeg"
+                        )
+                    ),
+                    "-y",
+                    "-i",
+                    str(source_path),
+                    "-vn",
+                    "-ac",
+                    "1",
+                ]
+                if target_format == "wav":
+                    command.extend(["-ar", "16000", "-c:a", "pcm_s16le"])
+                elif target_format == "mp3":
+                    command.extend(["-c:a", "libmp3lame"])
+                elif target_format == "flac":
+                    command.extend(["-c:a", "flac"])
+                elif target_format in {"ogg", "opus", "webm"}:
+                    command.extend(["-c:a", "libopus"])
+                else:
+                    command.extend(["-c:a", "aac"])
+                command.append(str(target))
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _stdout, stderr = await process.communicate()
+                if process.returncode != 0 or not target.exists():
+                    reason = stderr.decode("utf-8", errors="replace").strip()
+                    raise MultimodalContractError(
+                        "audio input normalization failed"
+                        + (f": {reason[-400:]}" if reason else ""),
+                        code="AUDIO_INPUT_NORMALIZATION_FAILED",
+                        attachment_id=str(part.get("attachment_id") or ""),
+                    )
+                payload = target.read_bytes()
+                validate_audio_signature(payload, target_format)
+                derivatives.append(target)
+                part.update(
+                    {
+                        "filename": target.name,
+                        "mime_type": mime_types[target_format],
+                        "local_ref": str(target),
+                        "size_bytes": len(payload),
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                    }
+                )
+                prepared_parts.append(part)
+                records.append(
+                    {
+                        "attachment_id": str(part.get("attachment_id") or ""),
+                        "source_format": source_format,
+                        "provider_format": target_format,
+                    }
+                )
+            return (
+                canonical_request_content(prepared_parts),
+                tuple(derivatives),
+                tuple(records),
+            )
+        except Exception:
+            for derivative in derivatives:
+                derivative.unlink(missing_ok=True)
+            raise
+
     def _can_replay_typed_media_fallback(
         self,
         error: Exception,
@@ -690,6 +1020,8 @@ class OpenRouterAdapter(BaseBackend):
         tool_tiers: list[str] | None = ...,
         *,
         excluded_tool_names: frozenset[str] = frozenset(),
+        audio_output: Mapping[str, Any] | None = None,
+        allow_tools: bool = True,
     ) -> dict:
         payload: dict = {
             "model": self.config.model,
@@ -701,7 +1033,13 @@ class OpenRouterAdapter(BaseBackend):
         if use_streaming:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
-        if self.tool_registry:
+        if audio_output is not None:
+            payload["modalities"] = ["text", "audio"]
+            payload["audio"] = {
+                "voice": str(audio_output["voice"]),
+                "format": str(audio_output["format"]),
+            }
+        if allow_tools and self.tool_registry:
             tiers = self.DEFAULT_TOOL_TIERS if tool_tiers is ... else tool_tiers
             tool_defs = self.tool_registry.get_tool_definitions(tiers=tiers)
             if excluded_tool_names:
@@ -719,9 +1057,16 @@ class OpenRouterAdapter(BaseBackend):
     # Stream event helper
     # ------------------------------------------------------------------
 
-    async def _emit(self, on_stream_event: StreamCallback, kind: str, summary: str,
-                    tool_name: str = "", file_path: str = "",
-                    metadata: Mapping[str, Any] | None = None) -> None:
+    async def _emit(
+        self,
+        on_stream_event: StreamCallback,
+        kind: str,
+        summary: str,
+        tool_name: str = "",
+        file_path: str = "",
+        metadata: Mapping[str, Any] | None = None,
+        delivery_class: str = "",
+    ) -> None:
         if on_stream_event is None:
             return
         try:
@@ -732,6 +1077,7 @@ class OpenRouterAdapter(BaseBackend):
                     tool_name=tool_name,
                     file_path=file_path,
                     metadata=dict(metadata or {}),
+                    delivery_class=delivery_class,
                 )
             )
         except Exception:
@@ -925,6 +1271,14 @@ class OpenRouterAdapter(BaseBackend):
         message = choice.get("message") or {}
         finish_reason = choice.get("finish_reason") or "stop"
         ai_text = _assistant_content_text(message.get("content"))
+        audio = message.get("audio")
+        audio_bytes = b""
+        audio_transcript = ""
+        if isinstance(audio, Mapping):
+            audio_bytes = _decode_provider_audio(audio.get("data"))
+            audio_transcript = str(audio.get("transcript") or "")
+            if audio_transcript:
+                ai_text = audio_transcript
 
         # Emit reasoning if present
         if on_stream_event is not None:
@@ -962,6 +1316,8 @@ class OpenRouterAdapter(BaseBackend):
             thinking_tokens=thinking_tokens,
             cost_usd=_usage_cost_usd(usage),
             structured_data=_message_structured_data(message),
+            audio_bytes=audio_bytes,
+            audio_transcript=audio_transcript,
         )
 
     # ------------------------------------------------------------------
@@ -981,6 +1337,9 @@ class OpenRouterAdapter(BaseBackend):
         stream_usage: dict = {}  # usage from final streaming chunk
         saw_done = False
         provider_activity_observed = False
+        audio_chunks: list[str] = []
+        audio_transcript = ""
+        audio_encoded_size = 0
 
         async with self.client.stream(
             "POST",
@@ -1042,11 +1401,13 @@ class OpenRouterAdapter(BaseBackend):
                 reasoning_text = str(delta.get("reasoning") or "")
                 reasoning_details = delta.get("reasoning_details") or []
                 tool_call_deltas = delta.get("tool_calls") or []
+                audio_delta = delta.get("audio")
                 if (
                     content
                     or reasoning_text
                     or reasoning_details
                     or tool_call_deltas
+                    or audio_delta
                     or finish_reason
                 ):
                     provider_activity_observed = True
@@ -1087,6 +1448,34 @@ class OpenRouterAdapter(BaseBackend):
                             StreamEvent(kind=KIND_TEXT_DELTA, summary=content)
                         )
 
+                if isinstance(audio_delta, Mapping):
+                    raw_chunk = audio_delta.get("data")
+                    if raw_chunk:
+                        if not isinstance(raw_chunk, str):
+                            raise MultimodalContractError(
+                                "provider audio data must be Base64 text",
+                                code="INVALID_PROVIDER_AUDIO_OUTPUT",
+                            )
+                        audio_encoded_size += len(raw_chunk)
+                        if audio_encoded_size > 90 * 1024 * 1024:
+                            raise MultimodalContractError(
+                                "provider audio output exceeds the 64 MiB limit",
+                                code="AUDIO_OUTPUT_LIMIT_EXCEEDED",
+                            )
+                        audio_chunks.append(raw_chunk)
+                    previous_transcript = audio_transcript
+                    audio_transcript = _append_provider_transcript(
+                        audio_transcript, audio_delta.get("transcript")
+                    )
+                    transcript_delta = audio_transcript[len(previous_transcript) :]
+                    if transcript_delta and on_stream_event:
+                        await on_stream_event(
+                            StreamEvent(
+                                kind=KIND_TEXT_DELTA,
+                                summary=transcript_delta,
+                            )
+                        )
+
                 # Accumulate tool_calls deltas
                 for tc_delta in tool_call_deltas:
                     idx = tc_delta.get("index", 0)
@@ -1109,8 +1498,23 @@ class OpenRouterAdapter(BaseBackend):
             raise httpx.RemoteProtocolError(
                 "provider stream ended without a completion marker"
             )
-        full_text = "".join(text_chunks)
+        full_text = audio_transcript or "".join(text_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
+        audio_bytes = b""
+        if audio_chunks:
+            try:
+                audio_bytes = _decode_provider_audio("".join(audio_chunks))
+            except MultimodalContractError:
+                # Compatible providers either split one Base64 stream at
+                # arbitrary boundaries or pad each SSE chunk independently.
+                audio_bytes = b"".join(
+                    _decode_provider_audio(chunk) for chunk in audio_chunks
+                )
+            if len(audio_bytes) > 64 * 1024 * 1024:
+                raise MultimodalContractError(
+                    "provider audio output exceeds the 64 MiB limit",
+                    code="AUDIO_OUTPUT_LIMIT_EXCEEDED",
+                )
         return _APIResult(
             text=full_text,
             tool_calls=tool_calls,
@@ -1119,6 +1523,8 @@ class OpenRouterAdapter(BaseBackend):
             completion_tokens=stream_usage.get("completion_tokens", 0),
             thinking_tokens=_usage_thinking_tokens(stream_usage),
             cost_usd=_usage_cost_usd(stream_usage),
+            audio_bytes=audio_bytes,
+            audio_transcript=audio_transcript,
         )
 
     # ------------------------------------------------------------------
@@ -1137,6 +1543,7 @@ class OpenRouterAdapter(BaseBackend):
         started = time.perf_counter()
         self._ensure_client()
 
+        audio_output = None
         use_streaming = on_stream_event is not None
 
         headers = self._request_headers()
@@ -1155,12 +1562,27 @@ class OpenRouterAdapter(BaseBackend):
         tool_loop_count = 0
         media_routing: tuple[dict[str, Any], ...] = ()
         media_fallback_attempted = False
+        last_audio_bytes = b""
+        last_audio_transcript = ""
+        input_derivatives: tuple[Path, ...] = ()
+        input_normalization: tuple[dict[str, Any], ...] = ()
 
         try:
             self._touch_activity()
-            messages, media_routing = self._initial_messages(prompt, request_content)
+            audio_output = self._native_audio_output_profile(request_content)
+            use_streaming = use_streaming or audio_output is not None
+            (
+                provider_request_content,
+                input_derivatives,
+                input_normalization,
+            ) = await self._prepare_audio_input_formats(request_content)
+            messages, media_routing = self._initial_messages(
+                prompt, provider_request_content
+            )
             self._last_media_routing = media_routing
-            normalized_request_content = normalize_request_content(request_content)
+            normalized_request_content = normalize_request_content(
+                provider_request_content
+            )
             manifest = attachment_manifest(normalized_request_content)
             native_attachment_ids = {
                 str(item.get("attachment_id") or "")
@@ -1184,6 +1606,10 @@ class OpenRouterAdapter(BaseBackend):
                             _MEDIA_FALLBACK_TOOL_NAMES
                             if all_media_native
                             else frozenset()
+                        ),
+                        audio_output=audio_output,
+                        allow_tools=bool(
+                            audio_output is None or audio_output.get("tools")
                         ),
                     )
 
@@ -1215,7 +1641,7 @@ class OpenRouterAdapter(BaseBackend):
                         )
                         messages = self._typed_media_fallback_messages(
                             prompt,
-                            request_content,
+                            provider_request_content,
                         )
                         media_routing = self._typed_media_fallback_routing(
                             media_routing
@@ -1251,6 +1677,8 @@ class OpenRouterAdapter(BaseBackend):
 
                 last_text = result.text
                 last_structured_data = result.structured_data
+                last_audio_bytes = result.audio_bytes
+                last_audio_transcript = result.audio_transcript
 
                 # No tool calls — we're done
                 if not result.tool_calls or not self.tool_registry:
@@ -1287,6 +1715,100 @@ class OpenRouterAdapter(BaseBackend):
                 output_tokens=total_completion,
                 thinking_tokens=total_thinking,
             ) if (total_prompt or total_completion) else None
+            if audio_output is not None and not last_audio_bytes:
+                raise MultimodalContractError(
+                    "provider completed a native voice request without audio output",
+                    code="PROVIDER_AUDIO_OUTPUT_MISSING",
+                )
+            output_content: tuple[Mapping[str, Any], ...] = ()
+            native_audio_metadata: dict[str, Any] | None = None
+            if last_audio_bytes:
+                if audio_output is None:
+                    raise MultimodalContractError(
+                        "provider returned audio without an authorized audio output profile",
+                        code="UNEXPECTED_PROVIDER_AUDIO_OUTPUT",
+                    )
+                asset_payload = last_audio_bytes
+                if str(audio_output["format"]) == "pcm16":
+                    asset_payload = _pcm16_to_wav(
+                        asset_payload,
+                        sample_rate_hz=int(audio_output["pcm_sample_rate_hz"]),
+                        channels=int(audio_output["pcm_channels"]),
+                    )
+                asset = self._native_audio_asset_store_instance().create(
+                    asset_payload,
+                    owner_id="",
+                    session_id="",
+                    direction="output",
+                    mime_type=str(audio_output["mime_type"]),
+                    audio_format=str(audio_output["asset_format"]),
+                    retention_seconds=int(audio_output["retention_seconds"]),
+                    retention_indefinite=bool(
+                        audio_output["retention_indefinite"]
+                    ),
+                    correlation={
+                        "request_id": str(
+                            dict(getattr(self.config, "extra", {}) or {}).get(
+                                "_native_audio_claim_request_id"
+                            )
+                            or request_id
+                        ),
+                        "provider": "openrouter-api",
+                        "model": str(self.config.model),
+                    },
+                )
+                transcript = str(last_audio_transcript or last_text or "").strip()
+                parts: list[Mapping[str, Any]] = []
+                if transcript:
+                    parts.append(
+                        {
+                            "type": "text",
+                            "text": transcript,
+                            "provenance": "provider_audio_transcript",
+                        }
+                    )
+                    last_text = transcript
+                else:
+                    await self._emit(
+                        on_stream_event,
+                        "voice_warning",
+                        (
+                            "The native voice reply has no text transcript; "
+                            "audio is still available."
+                        ),
+                        metadata={
+                            "warning_code": "provider_output_transcript_unavailable"
+                        },
+                        delivery_class=DELIVERY_USER_COMMENTARY,
+                    )
+                parts.append(
+                    {
+                        "type": "audio",
+                        "asset_id": asset["asset_id"],
+                        "mime_type": asset["mime_type"],
+                        "format": asset["format"],
+                        "duration_ms": asset.get("duration_ms"),
+                        "size_bytes": asset["size_bytes"],
+                        "sha256": asset["sha256"],
+                        "retention_expires_at": asset.get(
+                            "retention_expires_at"
+                        ),
+                        "retention_indefinite": asset[
+                            "retention_indefinite"
+                        ],
+                    }
+                )
+                output_content = tuple(parts)
+                native_audio_metadata = {
+                    "asset_id": asset["asset_id"],
+                    "provider": "openrouter-api",
+                    "model": str(self.config.model),
+                    "voice": str(audio_output["voice"]),
+                    "provider_format": str(audio_output["format"]),
+                    "format": str(audio_output["asset_format"]),
+                    "tools_enabled": bool(audio_output["tools"]),
+                    "claimed": False,
+                }
             return BackendResponse(
                 text=last_text,
                 duration_ms=duration_ms,
@@ -1303,9 +1825,12 @@ class OpenRouterAdapter(BaseBackend):
                     "meter": {"provider_calls": provider_calls},
                     "multimodal_routing": list(media_routing),
                     "multimodal_fallback_attempted": media_fallback_attempted,
+                    "native_audio": native_audio_metadata,
+                    "audio_input_normalization": list(input_normalization),
                 },
                 tool_call_count=total_tool_calls,
                 tool_loop_count=tool_loop_count,
+                content=output_content,
             )
 
         except asyncio.CancelledError:
@@ -1326,6 +1851,9 @@ class OpenRouterAdapter(BaseBackend):
                 metadata["attachment_id"] = e.attachment_id
             failure.stream_metadata = metadata
             return failure
+        finally:
+            for derivative in input_derivatives:
+                derivative.unlink(missing_ok=True)
 
     async def shutdown(self):
         if self.client is not None and not getattr(self.client, "is_closed", False):
