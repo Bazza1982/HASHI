@@ -6,7 +6,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator import runtime_pending
+from orchestrator import runtime_pending, ui_language
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
 from orchestrator.command_ui import card_title, confirm_card
 from orchestrator.handoff_builder import HandoffBuilder
@@ -27,21 +27,38 @@ from orchestrator.memory_plus_mode import (
 
 
 def memory_plus_keyboard(enabled: bool) -> InlineKeyboardMarkup:
-    toggle_label = "Pause Memory+" if enabled else "Enable Memory+"
+    toggle_label = ui_language.tr(
+        "memory.button.pause_plus" if enabled else "memory.button.enable_plus"
+    )
     toggle_action = "memory_off" if enabled else "memory_on"
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("View today", callback_data="npad:refresh"),
-                InlineKeyboardButton("View carryover", callback_data="npad:carryover"),
+                InlineKeyboardButton(
+                    ui_language.tr("memory.button.today"),
+                    callback_data="npad:refresh",
+                ),
+                InlineKeyboardButton(
+                    ui_language.tr("memory.button.carryover"),
+                    callback_data="npad:carryover",
+                ),
             ],
             [
-                InlineKeyboardButton("History", callback_data="npad:history"),
-                InlineKeyboardButton("Find", callback_data="npad:help_find"),
+                InlineKeyboardButton(
+                    ui_language.tr("memory.button.history"),
+                    callback_data="npad:history",
+                ),
+                InlineKeyboardButton(
+                    ui_language.tr("memory.button.find"),
+                    callback_data="npad:help_find",
+                ),
             ],
             [
                 InlineKeyboardButton(toggle_label, callback_data=f"npad:{toggle_action}"),
-                InlineKeyboardButton("Compact", callback_data="npad:compact"),
+                InlineKeyboardButton(
+                    ui_language.tr("memory.button.compact"),
+                    callback_data="npad:compact",
+                ),
             ],
         ]
     )
@@ -58,7 +75,7 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         if len(raw_args) < 4:
             await runtime._reply_text(
                 update,
-                "Usage: <code>/memory raw &lt;instance_id&gt; &lt;agent_id&gt; &lt;query&gt;</code>",
+                ui_language.tr("memory.raw_usage"),
                 parse_mode="HTML",
             )
             return
@@ -76,7 +93,7 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         if not connected:
             await runtime._reply_text(
                 update,
-                "❌ Cross-Agent raw memory search is unavailable for the active backend or current Tool policy.",
+                ui_language.tr("memory.raw_unavailable"),
             )
             return
         instance_id, agent_id = raw_args[1], raw_args[2]
@@ -103,7 +120,7 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
             },
         )
         if not request_id:
-            await runtime._reply_text(update, "❌ Raw memory search request could not be queued.")
+            await runtime._reply_text(update, ui_language.tr("memory.raw_queue_failed"))
         return
 
     if args in ("", "status"):
@@ -111,11 +128,23 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
 
         search_enabled = is_memory_search_enabled(runtime.workspace_dir)
         if assembler:
-            turns_state = "ON ✅" if assembler.turns_injection_enabled else "PAUSED ⏸️"
-            search_state = "ON ✅" if search_enabled else "OFF ⬜"
-            state = f"turns={turns_state}, long-term search={search_state} (persistent)"
+            turns_state = (
+                f"{ui_language.tr('common.on')} ✅"
+                if assembler.turns_injection_enabled
+                else f"{ui_language.tr('common.off')} ⏸️"
+            )
+            search_state = (
+                f"{ui_language.tr('common.on')} ✅"
+                if search_enabled
+                else f"{ui_language.tr('common.off')} ⬜"
+            )
+            state = ui_language.tr(
+                "memory.state.turns",
+                turns=turns_state,
+                search=search_state,
+            )
         else:
-            state = "unknown (assembler not ready)"
+            state = ui_language.tr("memory.state.unknown")
         session = runtime_session.current_session_for_update(runtime, update)
         session_messages = runtime_session.ensure_store(runtime).messages(
             session["session_id"], owner_id=runtime_session.owner_id(runtime), limit=1000
@@ -123,29 +152,41 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         stats = runtime.memory_store.get_stats() if hasattr(runtime, "memory_store") else {}
         memories = stats.get("memories", "?")
         sync_on = runtime._get_skill_state().get("memory_sync", False)
-        sync_state = "ON 🔄" if sync_on else "OFF ⬜"
+        sync_state = (
+            f"{ui_language.tr('common.on')} 🔄"
+            if sync_on
+            else f"{ui_language.tr('common.off')} ⬜"
+        )
         continuity = get_memory_plus_status(
             runtime_session.current_session_workspace(runtime, update)
         )
         continuity["enabled"] = is_memory_plus_enabled(runtime.workspace_dir)
-        continuity_state = "ON ✅" if continuity["enabled"] else "OFF ⬜"
-        carryover = continuity.get("carryover_from") or "none"
+        continuity_state = (
+            f"{ui_language.tr('common.on')} ✅"
+            if continuity["enabled"]
+            else f"{ui_language.tr('common.off')} ⬜"
+        )
+        carryover = continuity.get("carryover_from") or ui_language.tr(
+            "status.none"
+        )
         await runtime._reply_text(
             update,
             f"{card_title('🧠', 'Memory controls')}\n\n"
-            f"<b>Current</b> · Memory+ {continuity_state}\n"
-            f"<b>Today</b> · <code>{continuity['today_chars']}</code> chars · "
-            f"<code>{continuity['open_items']}</code> open\n"
-            f"<b>Carryover</b> · <code>{carryover}</code>\n"
-            f"<b>Context injection</b> · {state}\n"
-            f"<b>Session</b> · <code>{session['session_id']}</code> · generation "
+            f"<b>{ui_language.tr('common.current')}</b> · Memory+ {continuity_state}\n"
+            f"<b>{ui_language.tr('memory.today')}</b> · "
+            f"<code>{continuity['today_chars']}</code> {ui_language.tr('status.chars')} · "
+            f"{ui_language.tr('status.memory.open', count=continuity['open_items'])}\n"
+            f"<b>{ui_language.tr('memory.carryover')}</b> · <code>{carryover}</code>\n"
+            f"<b>{ui_language.tr('memory.context_injection')}</b> · {state}\n"
+            f"<b>{ui_language.tr('status.session')}</b> · "
+            f"<code>{session['session_id']}</code> · {ui_language.tr('status.generation')} "
             f"<code>{session['context_generation']}</code>\n"
-            f"<b>Stored</b> · <code>{len(session_messages)}</code> Session messages · "
-            f"<code>{memories}</code> promoted Agent memories\n"
-            f"<b>BGE sync</b> · <code>{sync_state}</code>\n\n"
-            "Changes apply immediately and preserve stored data unless <code>wipe</code> is explicitly used.\n\n"
-            "<code>/memory plus on|off</code> · <code>on</code> · <code>pause</code> · <code>search on|off|status</code> · "
-            "<code>sync on|off</code> · <code>wipe</code>",
+            f"<b>{ui_language.tr('memory.stored')}</b> · "
+            f"<code>{len(session_messages)}</code> {ui_language.tr('memory.session_messages')} · "
+            f"<code>{memories}</code> {ui_language.tr('memory.promoted_memories')}\n"
+            f"<b>{ui_language.tr('memory.bge_sync')}</b> · <code>{sync_state}</code>\n\n"
+            f"{ui_language.tr('memory.effect')}\n\n"
+            f"{ui_language.tr('memory.commands')}",
             parse_mode="HTML",
             reply_markup=memory_plus_keyboard(bool(continuity["enabled"])),
         )
@@ -159,9 +200,9 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         runtime.reload_post_turn_observers()
         await runtime._reply_text(
             update,
-            "✅ Memory+ continuity ON.\n"
-            f"Working mode remains `{runtime.backend_manager.agent_mode}`. "
-            "The compact today/carryover card now follows backend and mode changes.",
+            ui_language.tr(
+                "memory.plus_on", mode=runtime.backend_manager.agent_mode
+            ),
             parse_mode="Markdown",
         )
     elif args in {"plus off", "continuity off"}:
@@ -169,7 +210,7 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         runtime.reload_post_turn_observers()
         await runtime._reply_text(
             update,
-            "⏸️ Memory+ continuity OFF. Today, carryover, and history files were preserved.",
+            ui_language.tr("memory.plus_off"),
         )
     elif args == "on":
         from orchestrator.fresh_context import resume_automatic_context
@@ -179,7 +220,7 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         if assembler:
             assembler.turns_injection_enabled = True
             assembler.saved_memory_injection_enabled = True
-        await runtime._reply_text(update, "✅ Memory injection ON. Recent turns and saved memories will be included in context.")
+        await runtime._reply_text(update, ui_language.tr("memory.injection_on"))
     elif args == "pause":
         set_memory_search_enabled(runtime.workspace_dir, False)
         if assembler:
@@ -187,64 +228,78 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
             assembler.saved_memory_injection_enabled = False
         await runtime._reply_text(
             update,
-            "⏸️ Memory injection PAUSED. Recent turns and saved memories are preserved but not injected into context.\n"
-            "Use /memory on to resume.",
+            ui_language.tr("memory.injection_paused"),
         )
     elif args in {"search on", "saved on"}:
         set_memory_search_enabled(runtime.workspace_dir, True)
         if assembler:
             assembler.saved_memory_injection_enabled = True
-        await runtime._reply_text(update, "✅ Long-term memory search ON (persistent). Relevant saved memories may be retrieved for future turns.")
+        await runtime._reply_text(update, ui_language.tr("memory.search_on"))
     elif args in {"search off", "saved off"}:
         set_memory_search_enabled(runtime.workspace_dir, False)
         if assembler:
             assembler.saved_memory_injection_enabled = False
-        await runtime._reply_text(update, "⬜ Long-term memory search OFF (persistent). Saved memories remain stored and retrieve_memories() is not called per turn.")
+        await runtime._reply_text(update, ui_language.tr("memory.search_off"))
     elif args in {"search status", "saved status"}:
         enabled = is_memory_search_enabled(runtime.workspace_dir)
-        state = "ON ✅" if enabled else "OFF ⬜"
-        await runtime._reply_text(update, f"Long-term memory search: {state} (persistent)")
+        state = (
+            f"{ui_language.tr('common.on')} ✅"
+            if enabled
+            else f"{ui_language.tr('common.off')} ⬜"
+        )
+        await runtime._reply_text(
+            update, ui_language.tr("memory.search_status", state=state)
+        )
     elif args == "wipe":
         if hasattr(runtime, "memory_store"):
             result = runtime.memory_store.clear_all()
             turns = result.get("deleted_turns", 0)
             mems = result.get("deleted_memories", 0)
             if assembler:
-                turns_state = "ON" if assembler.turns_injection_enabled else "PAUSED"
-                saved_state = "ON" if assembler.saved_memory_injection_enabled else "PAUSED"
-                state = f"turns={turns_state}, saved={saved_state}"
+                turns_state = ui_language.tr(
+                    "common.on"
+                    if assembler.turns_injection_enabled
+                    else "memory.state.paused"
+                )
+                saved_state = ui_language.tr(
+                    "common.on"
+                    if assembler.saved_memory_injection_enabled
+                    else "memory.state.paused"
+                )
+                state = ui_language.tr(
+                    "memory.injection_state",
+                    turns=turns_state,
+                    saved=saved_state,
+                )
             else:
-                state = "unknown"
+                state = ui_language.tr("common.unknown")
             await runtime._reply_text(
                 update,
-                f"🗑️ Memory wiped: {turns} turns and {mems} memories deleted.\n"
-                f"Database structure preserved. Injection is still {state}.",
+                ui_language.tr(
+                    "memory.wiped", turns=turns, memories=mems, state=state
+                ),
             )
         else:
-            await runtime._reply_text(update, "❌ Memory store not available.")
+            await runtime._reply_text(update, ui_language.tr("memory.store_unavailable"))
     elif args == "sync on":
         runtime._set_skill_state("memory_sync", True)
         agent = runtime.workspace_dir.name
         await runtime._reply_text(
             update,
-            f"🔄 Memory sync ON for {agent}.\n"
-            f"This agent's important memories will be queued for nightly BGE consolidation.\n"
-            f"Use /memory sync off to opt out.",
+            ui_language.tr("memory.sync_on", agent=agent),
         )
     elif args == "sync off":
         runtime._set_skill_state("memory_sync", False)
         agent = runtime.workspace_dir.name
         await runtime._reply_text(
             update,
-            f"⬜ Memory sync OFF for {agent}.\n"
-            f"This agent will not participate in BGE consolidation.\n"
-            f"Local memories are unaffected. Use /memory sync on to re-enable.",
+            ui_language.tr("memory.sync_off", agent=agent),
         )
     else:
         await runtime._reply_text(
             update,
-            "Usage: /memory [plus on | plus off | on | pause | search on | search off | "
-            "search status | raw <instance_id> <agent_id> <query> | wipe | sync on | sync off | status]",
+            ui_language.tr("memory.usage"),
+            parse_mode="HTML",
         )
 
 
@@ -252,14 +307,17 @@ async def cmd_wipe(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     if runtime._backend_busy():
-        await runtime._reply_text(update, "Wipe is blocked while a request is running or queued. Use /stop first.")
+        await runtime._reply_text(
+            update, ui_language.tr("workspace.blocked.busy.wipe")
+        )
         return
     delayed = await runtime_pending.delayed_count(runtime)
     if delayed:
         await runtime._reply_text(
             update,
-            f"Wipe is blocked while {delayed} delayed message(s) are pending. "
-            "Use /recall first.",
+            ui_language.tr(
+                "workspace.blocked.delayed.wipe", count=delayed
+            ),
         )
         return
 
@@ -271,12 +329,10 @@ async def cmd_wipe(runtime: Any, update: Any, context: Any) -> None:
                 "⚠️",
                 "Wipe workspace",
                 target=f"<code>{runtime.name}</code>",
-                consequence=(
-                    "This permanently deletes persisted memory, transcript, handoff and backend state. "
-                    "Only agent instructions remain."
-                ),
+                consequence=ui_language.tr("workspace.wipe.effect"),
             )
-            + "\n\nType <code>/wipe CONFIRM</code> to proceed.",
+            + "\n\n"
+            + ui_language.tr("workspace.wipe.confirm"),
             parse_mode="HTML",
         )
         return
@@ -292,8 +348,13 @@ async def cmd_wipe(runtime: Any, update: Any, context: Any) -> None:
 
     await runtime._reply_text(
         update,
-        f"✅ Wiped workspace for {runtime.name}. Removed {removed_dirs} dirs and {removed_files} files.\n"
-        "Only agent.md instructions remain. Start fresh with /new.",
+        ui_language.tr(
+            "workspace.wipe.done",
+            agent=runtime.name,
+            dirs=removed_dirs,
+            files=removed_files,
+        ),
+        parse_mode="HTML",
     )
 
 
@@ -301,14 +362,17 @@ async def cmd_reset(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     if runtime._backend_busy():
-        await runtime._reply_text(update, "Reset is blocked while a request is running or queued. Use /stop first.")
+        await runtime._reply_text(
+            update, ui_language.tr("workspace.blocked.busy.reset")
+        )
         return
     delayed = await runtime_pending.delayed_count(runtime)
     if delayed:
         await runtime._reply_text(
             update,
-            f"Reset is blocked while {delayed} delayed message(s) are pending. "
-            "Use /recall first.",
+            ui_language.tr(
+                "workspace.blocked.delayed.reset", count=delayed
+            ),
         )
         return
 
@@ -320,12 +384,10 @@ async def cmd_reset(runtime: Any, update: Any, context: Any) -> None:
                 "⚠️",
                 "Reset workspace",
                 target=f"<code>{runtime.name}</code>",
-                consequence=(
-                    "This clears memory, transcripts and session state. Agent instructions and "
-                    "<code>/sys</code> prompt slots are preserved."
-                ),
+                consequence=ui_language.tr("workspace.reset.effect"),
             )
-            + "\n\nType <code>/reset CONFIRM</code> to proceed.",
+            + "\n\n"
+            + ui_language.tr("workspace.reset.confirm"),
             parse_mode="HTML",
         )
         return
@@ -345,8 +407,13 @@ async def cmd_reset(runtime: Any, update: Any, context: Any) -> None:
 
     await runtime._reply_text(
         update,
-        f"✅ Reset workspace for {runtime.name}. Removed {removed_dirs} dirs and {removed_files} files.\n"
-        "Agent identity, /sys slots, and wrapper config are intact. Start fresh with /new.",
+        ui_language.tr(
+            "workspace.reset.done",
+            agent=runtime.name,
+            dirs=removed_dirs,
+            files=removed_files,
+        ),
+        parse_mode="HTML",
     )
 
 
@@ -366,7 +433,9 @@ async def cmd_clear(runtime: Any, update: Any, context: Any) -> None:
 
     if runtime.backend_manager.current_backend:
         await runtime.backend_manager.current_backend.handle_new_session()
-    await runtime._reply_text(update, f"Cleared {cleared} media files and reset session state for current backend.")
+    await runtime._reply_text(
+        update, ui_language.tr("workspace.clear.done", count=cleared)
+    )
 
 
 async def _wipe_workspace(runtime: Any, keep_names: set[str]) -> tuple[int, int]:

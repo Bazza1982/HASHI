@@ -272,6 +272,84 @@ async def test_codex_mcp_inventory_starts_in_an_isolated_session(
 
 
 @pytest.mark.asyncio
+async def test_codex_mcp_inventory_retries_one_timeout_without_stale_fallback(
+    tmp_path, monkeypatch
+):
+    adapter = _build_adapter(tmp_path)
+
+    class _TimedOutProc(_CompletedProc):
+        def __init__(self):
+            super().__init__()
+            self.returncode = None
+
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+    first = _TimedOutProc()
+    second = _CompletedProc(stdout=b'[{"name":"openaiDeveloperDocs"}]')
+    pending = [first, second]
+    created = []
+    killed = []
+
+    async def create_subprocess(*_args, **_kwargs):
+        proc = pending.pop(0)
+        created.append(proc)
+        return proc
+
+    async def force_kill(proc, **_kwargs):
+        proc.kill()
+        killed.append(proc)
+        return True
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    monkeypatch.setattr(adapter, "force_kill_process_tree", force_kill)
+    monkeypatch.setattr(adapter, "MCP_INVENTORY_TIMEOUT_SEC", 0.001)
+
+    discovered = await adapter._discover_mcp_servers()
+
+    assert discovered == ("openaiDeveloperDocs",)
+    assert created == [first, second]
+    assert killed == [first]
+    assert adapter._external_tool_processes == set()
+
+
+@pytest.mark.asyncio
+async def test_codex_mcp_inventory_fails_closed_after_bounded_timeout_retries(
+    tmp_path, monkeypatch
+):
+    adapter = _build_adapter(tmp_path)
+
+    class _TimedOutProc(_CompletedProc):
+        def __init__(self):
+            super().__init__()
+            self.returncode = None
+
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+    pending = [_TimedOutProc(), _TimedOutProc()]
+    killed = []
+
+    async def create_subprocess(*_args, **_kwargs):
+        return pending.pop(0)
+
+    async def force_kill(proc, **_kwargs):
+        proc.kill()
+        killed.append(proc)
+        return True
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    monkeypatch.setattr(adapter, "force_kill_process_tree", force_kill)
+    monkeypatch.setattr(adapter, "MCP_INVENTORY_TIMEOUT_SEC", 0.001)
+
+    with pytest.raises(RuntimeError, match=r"timed out after 2 attempts"):
+        await adapter._discover_mcp_servers()
+
+    assert len(killed) == 2
+    assert adapter._external_tool_processes == set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group isolation only")
 async def test_force_kill_refuses_hashi_own_process_group(
     tmp_path, monkeypatch, caplog

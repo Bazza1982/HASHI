@@ -11,6 +11,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from adapters import her_habits as _her_habits
+from orchestrator import ui_language
 from orchestrator.command_ui import (
     back_label,
     card_title,
@@ -260,24 +261,25 @@ def _unavailable_view(runtime: Any) -> tuple[str, InlineKeyboardMarkup]:
         setting_card(
             "🧠",
             "HER habits",
-            current="<b>UNAVAILABLE</b>",
+            current=f"<b>{html.escape(ui_language.tr('common.unavailable'))}</b>",
             facts=[
-                f"<b>Backend</b> · <code>{html.escape(backend)}</code>",
-                "<b>Scope</b> · <code>/habit</code> is available only for <code>her</code>",
+                f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · <code>{html.escape(backend)}</code>",
+                f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+                f"{ui_language.tr('habit.unavailable.scope')}",
             ],
-            consequence="No dormant HER Habit data was read or changed.",
-            action="Switch to HER to view and manage this agent's Habits.",
+            consequence=ui_language.tr("habit.unavailable.effect"),
+            action=ui_language.tr("habit.unavailable.action"),
         ),
         InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
-                        "Switch to HER", callback_data="backend:her:plain"
+                        ui_language.tr("habit.button.switch_her"), callback_data="backend:her:plain"
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        "← Keep current backend", callback_data="habit:keep"
+                        ui_language.tr("habit.button.keep_backend"), callback_data="habit:keep"
                     )
                 ],
             ]
@@ -307,29 +309,39 @@ def _home_view(
     lines = [
         card_title("🧠", "HER habits"),
         "",
-        f"<b>Current</b> · <b>{status_label(status.effective)}</b>",
-        f"<b>Backend</b> · <code>{html.escape(_active_engine(runtime) or 'unknown')}</code>",
-        f"<b>Source</b> · {html.escape(status.source)}",
-        f"<b>Active</b> · <code>{len(habits)}</code>",
-        f"<b>Archived</b> · <code>{store.archived_count()}</code>",
-        f"<b>Meditation jobs</b> · <code>{journal_total}</code> total · <code>{pending}</code> pending",
-        f"<b>Habit notices</b> · <code>{pending_notifications}</code> pending delivery",
-        "<b>Changes</b> · immediate and persistent for this agent's HER backend",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <b>{status_label(status.effective)}</b>",
+        f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
+        f"<code>{html.escape(_active_engine(runtime) or ui_language.tr('common.unknown'))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.source'))}</b> · <code>{html.escape(status.source)}</code>",
+        f"<b>{html.escape(ui_language.tr('habit.active'))}</b> · <code>{len(habits)}</code>",
+        f"<b>{html.escape(ui_language.tr('habit.archived'))}</b> · <code>{store.archived_count()}</code>",
+        f"<b>{html.escape(ui_language.tr('habit.meditation_jobs'))}</b> · "
+        + ui_language.tr(
+            "habit.total_pending",
+            total=f"<code>{journal_total}</code>",
+            pending=f"<code>{pending}</code>",
+        ),
+        f"<b>{html.escape(ui_language.tr('habit.notices'))}</b> · "
+        + ui_language.tr("habit.pending_delivery", count=f"<code>{pending_notifications}</code>"),
+        f"<b>{html.escape(ui_language.tr('common.changes'))}</b> · "
+        f"{html.escape(ui_language.tr('habit.changes'))}",
     ]
     if status.environment_locked:
         lines.extend(
             [
                 "",
-                "⚠️ The ON/OFF state is locked by "
-                f"<code>{html.escape(_her_habits.HABIT_MEDITATION_ENV)}</code>="
-                f"<code>{html.escape(str(status.environment_value or ''))}</code>.",
+                ui_language.tr(
+                    "habit.environment_locked",
+                    variable=html.escape(_her_habits.HABIT_MEDITATION_ENV),
+                    value=html.escape(str(status.environment_value or "")),
+                ),
             ]
         )
     if notice:
         lines.extend(["", notice])
-    lines.extend(["", "<b>HABITS</b>"])
+    lines.extend(["", f"<b>{html.escape(ui_language.tr('habit.section').upper())}</b>"])
     if not page:
-        lines.append("No active Habits are stored for this agent.")
+        lines.append(ui_language.tr("habit.none"))
     else:
         for index, habit in enumerate(page, start=offset + 1):
             lock_marker = "🔒 " if habit.protected else ""
@@ -338,19 +350,19 @@ def _home_view(
             )
             lines.append(
                 f"   <code>{html.escape(short_references[habit.habit_id])}</code> · "
-                f"<code>{html.escape(habit.habit_id)}</code> · updated "
+                f"<code>{html.escape(habit.habit_id)}</code> · {ui_language.tr('habit.updated')} "
                 f"<code>{html.escape(habit.updated_at)}</code>"
             )
     lines.extend(
         [
             "",
-            "<b>Use</b>",
-            "<code>/habit view &lt;number|short-ref|habit-id&gt;</code> · view details",
-            "<code>/habit on|off|default</code> · control learning",
-            "<code>/habit protect|unprotect &lt;reference&gt;</code> · control automatic changes",
-            "<code>/habit delete &lt;reference&gt;</code> · archive one Habit",
-            "<code>/habit delete all</code> · archive every active Habit",
-            "<code>/habit reset</code> · snapshot and clear all Habit state",
+            f"<b>{html.escape(ui_language.tr('common.use'))}</b>",
+            f"<code>/habit view &lt;number|short-ref|habit-id&gt;</code> · {ui_language.tr('habit.use.view')}",
+            f"<code>/habit on|off|default</code> · {ui_language.tr('habit.use.control')}",
+            f"<code>/habit protect|unprotect &lt;reference&gt;</code> · {ui_language.tr('habit.use.protection')}",
+            f"<code>/habit delete &lt;reference&gt;</code> · {ui_language.tr('habit.use.delete')}",
+            f"<code>/habit delete all</code> · {ui_language.tr('habit.use.delete_all')}",
+            f"<code>/habit reset</code> · {ui_language.tr('habit.use.reset')}",
         ]
     )
 
@@ -358,24 +370,24 @@ def _home_view(
     if status.environment_locked:
         rows.append(
             [
-                InlineKeyboardButton("🔒 On", callback_data="habit:locked"),
-                InlineKeyboardButton("🔒 Off", callback_data="habit:locked"),
-                InlineKeyboardButton("🔒 Default", callback_data="habit:locked"),
+                InlineKeyboardButton(ui_language.tr("habit.button.locked_on"), callback_data="habit:locked"),
+                InlineKeyboardButton(ui_language.tr("habit.button.locked_off"), callback_data="habit:locked"),
+                InlineKeyboardButton(ui_language.tr("habit.button.locked_default"), callback_data="habit:locked"),
             ]
         )
     else:
         rows.append(
             [
                 InlineKeyboardButton(
-                    selected_label("On", status.override is True),
+                    selected_label(ui_language.tr("habit.button.on"), status.override is True),
                     callback_data="habit:set:on",
                 ),
                 InlineKeyboardButton(
-                    selected_label("Off", status.override is False),
+                    selected_label(ui_language.tr("habit.button.off"), status.override is False),
                     callback_data="habit:set:off",
                 ),
                 InlineKeyboardButton(
-                    selected_label("Default", status.override is None),
+                    selected_label(ui_language.tr("habit.button.default"), status.override is None),
                     callback_data="habit:set:default",
                 ),
             ]
@@ -393,7 +405,7 @@ def _home_view(
     if offset > 0:
         nav.append(
             InlineKeyboardButton(
-                "← Previous",
+                ui_language.tr("habit.button.previous"),
                 callback_data=f"habit:home:{max(0, offset - HABIT_PAGE_SIZE)}",
             )
         )
@@ -403,17 +415,17 @@ def _home_view(
     if offset + HABIT_PAGE_SIZE < len(habits):
         nav.append(
             InlineKeyboardButton(
-                "Next →",
+                ui_language.tr("habit.button.next"),
                 callback_data=f"habit:home:{offset + HABIT_PAGE_SIZE}",
             )
         )
     rows.append(nav)
     if habits:
         rows.append(
-            [InlineKeyboardButton("Delete all", callback_data="habit:delete_all")]
+            [InlineKeyboardButton(ui_language.tr("habit.button.delete_all"), callback_data="habit:delete_all")]
         )
     rows.append(
-        [InlineKeyboardButton("Reset Habit state", callback_data="habit:reset")]
+        [InlineKeyboardButton(ui_language.tr("habit.button.reset"), callback_data="habit:reset")]
     )
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -433,22 +445,24 @@ def _detail_view(
         [
             card_title("🧠", "HER Habit detail"),
             "",
-            f"<b>Current</b> · <b>ACTIVE</b> · <b>{'PROTECTED 🔒' if habit.protected else 'UNPROTECTED'}</b>",
-            "<b>Scope</b> · this agent · <code>her</code> only",
-            f"<b>Reference</b> · <code>{html.escape(short_reference)}</code>",
-            f"<b>ID</b> · <code>{html.escape(habit.habit_id)}</code>",
-            f"<b>Created</b> · <code>{html.escape(habit.created_at)}</code>",
-            f"<b>Updated</b> · <code>{html.escape(habit.updated_at)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            f"<b>{html.escape(ui_language.tr('habit.state.active'))}</b> · "
+            f"<b>{html.escape(ui_language.tr('habit.state.protected' if habit.protected else 'habit.state.unprotected'))}</b>",
+            f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · {ui_language.tr('habit.scope')}",
+            f"<b>{html.escape(ui_language.tr('habit.reference'))}</b> · <code>{html.escape(short_reference)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.id'))}</b> · <code>{html.escape(habit.habit_id)}</code>",
+            f"<b>{html.escape(ui_language.tr('habit.created'))}</b> · <code>{html.escape(habit.created_at)}</code>",
+            f"<b>{html.escape(ui_language.tr('habit.updated'))}</b> · <code>{html.escape(habit.updated_at)}</code>",
             "",
             f"<b>{title}</b>",
             "",
-            "<b>WHEN RELEVANT</b>",
+            f"<b>{html.escape(ui_language.tr('habit.when_relevant').upper())}</b>",
             metadata,
             "",
-            "<b>BEHAVIOUR</b>",
+            f"<b>{html.escape(ui_language.tr('habit.behaviour').upper())}</b>",
             body,
             "",
-            "Delete moves this Habit into the recoverable archive and removes it from future HER Planning.",
+            ui_language.tr("habit.detail_effect"),
         ]
     )
     token = _habit_token(habit.habit_id)
@@ -458,18 +472,20 @@ def _detail_view(
             [
                 [
                     InlineKeyboardButton(
-                        "Show full content",
+                        ui_language.tr("habit.button.full"),
                         callback_data=f"habit:full:{token}:{offset}",
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        "Delete", callback_data=f"habit:delete:{token}:{offset}"
+                        ui_language.tr("habit.button.delete"), callback_data=f"habit:delete:{token}:{offset}"
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        "Unprotect" if habit.protected else "Protect",
+                        ui_language.tr(
+                            "habit.button.unprotect" if habit.protected else "habit.button.protect"
+                        ),
                         callback_data=(
                             f"habit:{'unprotect' if habit.protected else 'protect'}:{token}:{offset}"
                         ),
@@ -492,15 +508,16 @@ def _full_detail_text(habit: _her_habits.HERHabit) -> str:
     return "\n".join(
         [
             f"HER Habit: {habit.title}",
-            f"ID: {habit.habit_id}",
-            f"Created: {habit.created_at}",
-            f"Updated: {habit.updated_at}",
-            f"Protected: {'yes' if habit.protected else 'no'}",
+            f"{ui_language.tr('common.id')}: {habit.habit_id}",
+            f"{ui_language.tr('habit.created')}: {habit.created_at}",
+            f"{ui_language.tr('habit.updated')}: {habit.updated_at}",
+            f"{ui_language.tr('habit.full.protected')}: "
+            f"{ui_language.tr('habit.yes' if habit.protected else 'habit.no')}",
             "",
-            "WHEN RELEVANT",
+            ui_language.tr("habit.when_relevant").upper(),
             habit.metadata,
             "",
-            "BEHAVIOUR",
+            ui_language.tr("habit.behaviour").upper(),
             habit.body,
         ]
     )
@@ -535,21 +552,20 @@ def _delete_confirm_view(
                 f"{html.escape(habit.title)}"
             ),
             consequence=(
-                "This Habit will stop influencing future HER tasks immediately. "
-                "It will be moved to the recoverable archive."
+                ui_language.tr("habit.delete_effect")
             ),
         ),
         InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
-                        "Delete",
+                        ui_language.tr("habit.button.delete"),
                         callback_data=f"habit:confirm_delete:{version_token}:{offset}",
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        "← Keep Habit", callback_data=f"habit:view:{token}:{offset}"
+                        ui_language.tr("habit.button.keep"), callback_data=f"habit:view:{token}:{offset}"
                     )
                 ],
             ]
@@ -565,20 +581,18 @@ def _protection_confirm_view(
 ) -> tuple[str, InlineKeyboardMarkup]:
     token = _habit_token(habit.habit_id)
     version_token = _habit_version_token(habit)
-    action = "Protect" if protected else "Unprotect"
-    consequence = (
-        "Dream and automatic Meditation will no longer rewrite or archive this Habit. "
-        "It remains available to relevant HER Planning."
-        if protected
-        else (
-            "Dream and automatic Meditation may rewrite or archive this Habit when their "
-            "validated evidence supports a change."
-        )
+    action = ui_language.tr(
+        "habit.button.protect" if protected else "habit.button.unprotect"
+    )
+    consequence = ui_language.tr(
+        "habit.protect_effect" if protected else "habit.unprotect_effect"
     )
     return (
         confirm_card(
             "🔒" if protected else "🔓",
-            f"{action} HER Habit",
+            ui_language.tr(
+                "habit.protect_title" if protected else "habit.unprotect_title"
+            ),
             target=(
                 f"<code>{html.escape(habit.habit_id)}</code> · "
                 f"{html.escape(habit.title)}"
@@ -598,7 +612,7 @@ def _protection_confirm_view(
                 ],
                 [
                     InlineKeyboardButton(
-                        "← Keep current protection",
+                        ui_language.tr("habit.button.keep_protection"),
                         callback_data=f"habit:view:{token}:{offset}",
                     )
                 ],
@@ -615,11 +629,12 @@ def _delete_all_confirm_view(
     text = confirm_card(
         "⚠️",
         "Delete all HER Habits",
-        target=f"<code>{html.escape(str(runtime.name))}</code> · all <code>{len(habits)}</code> active Habits",
-        consequence=(
-            "Every active Habit will move to the recoverable archive. Meditation stays "
-            "configured and may form new Habits later."
+        target=ui_language.tr(
+            "habit.delete_all.target",
+            agent=f"<code>{html.escape(str(runtime.name))}</code>",
+            count=f"<code>{len(habits)}</code>",
         ),
+        consequence=ui_language.tr("habit.delete_all.effect"),
     )
     return (
         text,
@@ -627,12 +642,12 @@ def _delete_all_confirm_view(
             [
                 [
                     InlineKeyboardButton(
-                        "Delete all", callback_data=f"habit:confirm_all:{fingerprint}"
+                        ui_language.tr("habit.button.delete_all"), callback_data=f"habit:confirm_all:{fingerprint}"
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        "← Keep all Habits", callback_data="habit:home:0"
+                        ui_language.tr("habit.button.keep_all"), callback_data="habit:home:0"
                     )
                 ],
             ]
@@ -652,16 +667,16 @@ def _reset_confirm_view(
     text = confirm_card(
         "⚠️",
         "Reset HER Habit state",
-        target=f"<code>{html.escape(str(runtime.name))}</code> · HER Habit state",
-        consequence=(
-            "A recoverable snapshot will be created, then active Habits, archived Habits, "
-            "and Meditation jobs will be cleared. The ON/OFF setting and audit log remain."
+        target=ui_language.tr(
+            "habit.reset.target",
+            agent=f"<code>{html.escape(str(runtime.name))}</code>",
         ),
+        consequence=ui_language.tr("habit.reset.effect"),
     )
     text += (
-        f"\n\n<b>Active</b> · <code>{active}</code>"
-        f"\n<b>Archived</b> · <code>{archived}</code>"
-        f"\n<b>Meditation jobs</b> · <code>{jobs}</code>"
+        f"\n\n<b>{html.escape(ui_language.tr('habit.active'))}</b> · <code>{active}</code>"
+        f"\n<b>{html.escape(ui_language.tr('habit.archived'))}</b> · <code>{archived}</code>"
+        f"\n<b>{html.escape(ui_language.tr('habit.meditation_jobs'))}</b> · <code>{jobs}</code>"
     )
     return (
         text,
@@ -669,13 +684,13 @@ def _reset_confirm_view(
             [
                 [
                     InlineKeyboardButton(
-                        "Reset Habit state",
+                        ui_language.tr("habit.button.reset"),
                         callback_data=f"habit:confirm_reset:{fingerprint}",
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        "← Keep current state", callback_data="habit:home:0"
+                        ui_language.tr("habit.button.keep_state"), callback_data="habit:home:0"
                     )
                 ],
             ]
@@ -706,23 +721,28 @@ def _notification_view(job: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
         job.get("notification") if isinstance(job.get("notification"), dict) else {}
     )
     operation_labels = {
-        "created": ("🌱", "FORMED"),
-        "updated": ("✏️", "CHANGED"),
-        "deleted": ("📦", "ARCHIVED"),
+        "created": ("🌱", ui_language.tr("habit.update.formed")),
+        "updated": ("✏️", ui_language.tr("habit.update.changed")),
+        "deleted": ("📦", ui_language.tr("habit.update.archived")),
     }
     lines = [
         card_title("🧠", "HER Habit update"),
         "",
-        f"<b>Current</b> · <b>{len(changes)} CHANGE{'S' if len(changes) != 1 else ''}</b>",
-        f"<b>Meditation job</b> · <code>{html.escape(str(job.get('job_id') or 'unknown'))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <b>"
+        f"{ui_language.tr('habit.update.count.one' if len(changes) == 1 else 'habit.update.count.many', count=len(changes))}</b>",
+        f"<b>{html.escape(ui_language.tr('habit.update.meditation_job'))}</b> · "
+        f"<code>{html.escape(str(job.get('job_id') or ui_language.tr('common.unknown')))}</code>",
     ]
     summary = _html_short(str(notification.get("request_summary") or ""), 500)
     if summary:
-        lines.append(f"<b>Task</b> · {summary}")
-    lines.extend(["", "<b>CHANGES</b>"])
+        lines.append(f"<b>{html.escape(ui_language.tr('habit.update.task'))}</b> · {summary}")
+    lines.extend(["", f"<b>{html.escape(ui_language.tr('habit.update.changes').upper())}</b>"])
     for change in shown_changes:
         operation = str(change.get("operation") or "changed").casefold()
-        icon, label = operation_labels.get(operation, ("•", "CHANGED"))
+        icon, label = operation_labels.get(
+            operation,
+            ("•", ui_language.tr("habit.update.changed")),
+        )
         payload = change.get("after") or change.get("before") or {}
         title = _html_short(
             str(payload.get("title") or change.get("habit_id") or "Habit"),
@@ -734,13 +754,17 @@ def _notification_view(job: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
             lines.append(f"   <code>{html.escape(habit_id)}</code>")
     if len(changes) > len(shown_changes):
         lines.append(
-            f"• <b>PLUS</b> · <code>{len(changes) - len(shown_changes)}</code> more changes"
+            f"• <b>{html.escape(ui_language.tr('habit.update.plus'))}</b> · "
+            + ui_language.tr(
+                "habit.update.more",
+                count=f"<code>{len(changes) - len(shown_changes)}</code>",
+            )
         )
     lines.extend(
         [
             "",
-            "This notice was sent because Verbose was ON when the task started.",
-            "Open <code>/habit</code> to inspect or manage the full HER Habit state.",
+            ui_language.tr("habit.update.verbose_notice"),
+            ui_language.tr("habit.update.open_notice"),
         ]
     )
     rows: list[list[InlineKeyboardButton]] = []
@@ -753,12 +777,17 @@ def _notification_view(job: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        "View Habit",
+                        ui_language.tr("habit.button.view"),
                         callback_data=f"habit:view:{_habit_token(habit_id)}:0",
                     )
                 ]
             )
-    rows.append([InlineKeyboardButton("Open Habit menu", callback_data="habit:home:0")])
+    rows.append([
+        InlineKeyboardButton(
+            ui_language.tr("habit.button.open"),
+            callback_data="habit:home:0",
+        )
+    ])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -846,7 +875,7 @@ async def _set_control(
         return _home_view(
             runtime,
             adapter,
-            notice="⚠️ The environment override locks this setting; no persistent value changed.",
+            notice=ui_language.tr("habit.notice.environment_locked"),
         )
     override = {"on": True, "off": False, "default": None}[value]
     runtime.backend_manager.set_habit_meditation_override(override)
@@ -883,9 +912,10 @@ async def _set_control(
         resumed_meditations=resumed,
         context=context,
     )
-    notice = (
-        f"✅ Habit–Meditation is now <b>{status_label(after.effective)}</b> "
-        f"via {html.escape(after.source)}."
+    notice = ui_language.tr(
+        "habit.notice.control_changed",
+        status=status_label(after.effective),
+        source=html.escape(after.source),
     )
     return _home_view(runtime, adapter, notice=notice)
 
@@ -956,7 +986,9 @@ async def cmd_habit(runtime: Any, update: Any, context: Any) -> None:
                 runtime,
                 update,
                 _home_view(
-                    runtime, adapter, notice="❌ Habit not found; no state changed."
+                    runtime,
+                    adapter,
+                    notice=ui_language.tr("habit.notice.not_found"),
                 ),
             )
             return
@@ -982,7 +1014,7 @@ async def cmd_habit(runtime: Any, update: Any, context: Any) -> None:
                 _home_view(
                     runtime,
                     adapter,
-                    notice="❌ Habit reference not found; no state changed.",
+                    notice=ui_language.tr("habit.notice.reference_not_found"),
                 ),
             )
             return
@@ -995,9 +1027,9 @@ async def cmd_habit(runtime: Any, update: Any, context: Any) -> None:
                     runtime,
                     adapter,
                     notice=(
-                        "ℹ️ That Habit is already protected."
+                        ui_language.tr("habit.notice.already_protected")
                         if desired
-                        else "ℹ️ That Habit is already unprotected."
+                        else ui_language.tr("habit.notice.already_unprotected")
                     ),
                 ),
             )
@@ -1018,7 +1050,7 @@ async def cmd_habit(runtime: Any, update: Any, context: Any) -> None:
                     _home_view(
                         runtime,
                         adapter,
-                        notice="ℹ️ There are no active Habits to delete.",
+                        notice=ui_language.tr("habit.notice.none_to_delete"),
                     ),
                 )
                 return
@@ -1033,7 +1065,9 @@ async def cmd_habit(runtime: Any, update: Any, context: Any) -> None:
                     runtime,
                     update,
                     _home_view(
-                        runtime, adapter, notice="❌ Habit not found; no state changed."
+                        runtime,
+                        adapter,
+                        notice=ui_language.tr("habit.notice.not_found"),
                     ),
                 )
                 return
@@ -1052,7 +1086,7 @@ async def cmd_habit(runtime: Any, update: Any, context: Any) -> None:
         _home_view(
             runtime,
             adapter,
-            notice="⚠️ Unsupported syntax; choose an action below or use the shown commands.",
+            notice=ui_language.tr("habit.notice.unsupported_syntax"),
         ),
     )
 
@@ -1061,7 +1095,7 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
     query = update.callback_query
     command_allowed = getattr(runtime, "_is_command_allowed", None)
     if callable(command_allowed) and not command_allowed("habit"):
-        await query.answer("/habit is disabled for this agent.", show_alert=True)
+        await query.answer(ui_language.tr("habit.command_disabled"), show_alert=True)
         return
     data = str(query.data or "")
     parts = data.split(":")
@@ -1074,20 +1108,20 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
         context=_audit_context(runtime, update, source="callback"),
     )
     if action == "keep":
-        await query.answer("Current backend kept.")
+        await query.answer(ui_language.tr("habit.backend_kept"))
         return
     adapter = _her_adapter(runtime)
     if adapter is None:
         text, markup = _unavailable_view(runtime)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-        await query.answer("HER backend is required.")
+        await query.answer(ui_language.tr("habit.backend_required"))
         return
     store = _habit_store(runtime, adapter)
     habits = _sorted_habits(store)
 
     if action == "locked":
         await query.answer(
-            "The environment override locks this setting.", show_alert=True
+            ui_language.tr("habit.environment_override_locked"), show_alert=True
         )
         return
     if action == "home":
@@ -1130,17 +1164,17 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
                 runtime,
                 adapter,
                 offset=offset,
-                notice="⚠️ That Habit changed or no longer exists; review the refreshed list.",
+                notice=ui_language.tr("habit.notice.stale"),
             )
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
             await query.answer(
                 (
-                    "Habit changed; confirm deletion again."
+                    ui_language.tr("habit.confirm_delete_again")
                     if action == "confirm_delete"
-                    else "Habit changed; confirm the protection change again."
+                    else ui_language.tr("habit.confirm_protection_again")
                 )
                 if action.startswith("confirm_")
-                else "Habit not found.",
+                else ui_language.tr("habit.not_found"),
                 show_alert=True,
             )
             return
@@ -1168,7 +1202,7 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
                 habit=habit.to_payload(),
                 context=context_fields,
             )
-            await query.answer("Full Habit content sent.")
+            await query.answer(ui_language.tr("habit.full_sent"))
             return
         if action == "delete":
             text, markup = _delete_confirm_view(habit, offset=offset)
@@ -1179,9 +1213,9 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
             desired = action == "protect"
             if habit.protected is desired:
                 await query.answer(
-                    "Habit is already protected."
+                    ui_language.tr("habit.already_protected")
                     if desired
-                    else "Habit is already unprotected.",
+                    else ui_language.tr("habit.already_unprotected"),
                     show_alert=True,
                 )
                 return
@@ -1195,7 +1229,7 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
             return
         if _mutation_busy(runtime, adapter):
             await query.answer(
-                "HER is busy; try again when the current work finishes.",
+                ui_language.tr("habit.busy"),
                 show_alert=True,
             )
             return
@@ -1218,7 +1252,7 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
             )
             if change is None:
                 await query.answer(
-                    "Habit protection already has that value.",
+                    ui_language.tr("habit.protection_unchanged"),
                     show_alert=True,
                 )
                 return
@@ -1227,13 +1261,21 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
                 adapter,
                 offset=offset,
                 notice=(
-                    f"✅ Protected <code>{html.escape(habit.habit_id)}</code>."
+                    ui_language.tr(
+                        "habit.notice.protected",
+                        habit_id=html.escape(habit.habit_id),
+                    )
                     if desired
-                    else f"✅ Unprotected <code>{html.escape(habit.habit_id)}</code>."
+                    else ui_language.tr(
+                        "habit.notice.unprotected",
+                        habit_id=html.escape(habit.habit_id),
+                    )
                 ),
             )
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-            await query.answer("Habit protected." if desired else "Habit unprotected.")
+            await query.answer(
+                ui_language.tr("habit.protected" if desired else "habit.unprotected")
+            )
             return
         async with lock:
             outcomes, changes = store.apply_actions_with_changes(
@@ -1255,24 +1297,27 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
                 runtime,
                 adapter,
                 offset=offset,
-                notice="⚠️ The Habit changed before deletion; nothing was archived.",
+                notice=ui_language.tr("habit.notice.changed_before_delete"),
             )
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-            await query.answer("Habit was not archived.", show_alert=True)
+            await query.answer(ui_language.tr("habit.not_archived"), show_alert=True)
             return
         text, markup = _home_view(
             runtime,
             adapter,
             offset=offset,
-            notice=f"✅ Archived <code>{html.escape(habit.habit_id)}</code>.",
+            notice=ui_language.tr(
+                "habit.notice.archived",
+                habit_id=html.escape(habit.habit_id),
+            ),
         )
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-        await query.answer("Habit archived.")
+        await query.answer(ui_language.tr("habit.archived_done"))
         return
 
     if action == "delete_all":
         if not habits:
-            await query.answer("There are no active Habits.", show_alert=True)
+            await query.answer(ui_language.tr("habit.none_active"), show_alert=True)
             return
         text, markup = _delete_all_confirm_view(runtime, habits)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
@@ -1282,14 +1327,14 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
         expected = parts[2] if len(parts) > 2 else ""
         if expected != _active_fingerprint(habits):
             await query.answer(
-                "Habit state changed; review the refreshed list first.", show_alert=True
+                ui_language.tr("habit.state_changed_list"), show_alert=True
             )
             text, markup = _home_view(runtime, adapter)
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
             return
         if _mutation_busy(runtime, adapter):
             await query.answer(
-                "HER is busy; try again when the current work finishes.",
+                ui_language.tr("habit.busy"),
                 show_alert=True,
             )
             return
@@ -1312,19 +1357,20 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
             runtime,
             adapter,
             notice=(
-                f"✅ Archived all <code>{len(changes)}</code> active Habits."
+                ui_language.tr("habit.notice.archived_all", count=len(changes))
                 if len(changes) == len(habits)
-                else (
-                    f"⚠️ Archived <code>{len(changes)}</code> of <code>{len(habits)}</code> "
-                    "Habits; review the audit log for skipped targets."
+                else ui_language.tr(
+                    "habit.notice.archived_some",
+                    changed=len(changes),
+                    total=len(habits),
                 )
             ),
         )
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         await query.answer(
-            "All active Habits archived."
+            ui_language.tr("habit.all_archived")
             if len(changes) == len(habits)
-            else "Some Habits were not archived.",
+            else ui_language.tr("habit.some_not_archived"),
             show_alert=len(changes) != len(habits),
         )
         return
@@ -1339,14 +1385,14 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
         expected = parts[2] if len(parts) > 2 else ""
         if expected != _her_habits.habit_state_fingerprint(runtime.workspace_dir):
             await query.answer(
-                "Habit state changed; review the refreshed state first.",
+                ui_language.tr("habit.state_changed"),
                 show_alert=True,
             )
             text, markup = _home_view(runtime, adapter)
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
             return
         if _mutation_busy(runtime, adapter):
-            await query.answer("HER is busy; reset was not started.", show_alert=True)
+            await query.answer(ui_language.tr("habit.reset_busy"), show_alert=True)
             return
         context_fields = _audit_context(runtime, update, source="callback")
         lock = adapter._habit_execution_lock
@@ -1365,20 +1411,20 @@ async def callback_habit(runtime: Any, update: Any, context: Any) -> None:
                 context=context_fields,
             )
             await query.answer(
-                "Habit reset failed and was rolled back; review the audit log.",
+                ui_language.tr("habit.reset_failed"),
                 show_alert=True,
             )
             return
         text, markup = _home_view(
             runtime,
             adapter,
-            notice=(
-                "✅ Habit state reset into recoverable snapshot "
-                f"<code>{html.escape(result.snapshot_id)}</code>."
+            notice=ui_language.tr(
+                "habit.notice.reset",
+                snapshot_id=html.escape(result.snapshot_id),
             ),
         )
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-        await query.answer("HER Habit state reset.")
+        await query.answer(ui_language.tr("habit.reset_done"))
         return
 
-    await query.answer("Unsupported Habit action.", show_alert=True)
+    await query.answer(ui_language.tr("habit.unsupported_action"), show_alert=True)

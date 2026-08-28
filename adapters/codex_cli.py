@@ -36,6 +36,8 @@ class CodexCLIAdapter(BaseBackend):
     LONG_PROMPT_STDIN_THRESHOLD = 24000
     DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
     POST_TURN_COMPLETION_GRACE_SEC = 15
+    MCP_INVENTORY_TIMEOUT_SEC = 30
+    MCP_INVENTORY_MAX_ATTEMPTS = 2
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -118,35 +120,52 @@ class CodexCLIAdapter(BaseBackend):
             # force_kill_process_tree() terminates subprocess groups.  The MCP
             # inventory process must never inherit HASHI's own process group.
             extra_kwargs["start_new_session"] = True
-        proc = await asyncio.create_subprocess_exec(
-            self.cmd_base,
-            "mcp",
-            "list",
-            "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(self.effective_workdir),
-            **extra_kwargs,
-        )
-        self._external_tool_processes.add(proc)
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
-        except asyncio.TimeoutError:
-            await self.force_kill_process_tree(
-                proc,
-                logger=self.logger,
-                reason="codex-mcp-isolation-preflight-timeout",
+        for attempt in range(1, self.MCP_INVENTORY_MAX_ATTEMPTS + 1):
+            proc = await asyncio.create_subprocess_exec(
+                self.cmd_base,
+                "mcp",
+                "list",
+                "--json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.effective_workdir),
+                **extra_kwargs,
             )
-            raise RuntimeError("codex mcp list timed out")
-        except asyncio.CancelledError:
-            await self.force_kill_process_tree(
-                proc,
-                logger=self.logger,
-                reason="codex-mcp-isolation-preflight-cancelled",
-            )
-            raise
-        finally:
-            self._external_tool_processes.discard(proc)
+            self._external_tool_processes.add(proc)
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=self.MCP_INVENTORY_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                await self.force_kill_process_tree(
+                    proc,
+                    logger=self.logger,
+                    reason="codex-mcp-isolation-preflight-timeout",
+                )
+                if attempt >= self.MCP_INVENTORY_MAX_ATTEMPTS:
+                    raise RuntimeError(
+                        "codex mcp list timed out after "
+                        f"{attempt} attempts "
+                        f"({self.MCP_INVENTORY_TIMEOUT_SEC}s each)"
+                    )
+                self.logger.warning(
+                    "Codex MCP inventory timed out after %ss; retrying (%s/%s).",
+                    self.MCP_INVENTORY_TIMEOUT_SEC,
+                    attempt + 1,
+                    self.MCP_INVENTORY_MAX_ATTEMPTS,
+                )
+                continue
+            except asyncio.CancelledError:
+                await self.force_kill_process_tree(
+                    proc,
+                    logger=self.logger,
+                    reason="codex-mcp-isolation-preflight-cancelled",
+                )
+                raise
+            finally:
+                self._external_tool_processes.discard(proc)
+            break
         if proc.returncode != 0:
             detail = stderr.decode(errors="replace").strip()
             raise RuntimeError(detail or "codex mcp list failed")

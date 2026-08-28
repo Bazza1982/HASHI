@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from orchestrator import ui_language
 from orchestrator.command_registry import RuntimeCommand
 
 
@@ -52,7 +53,7 @@ async def wiki_command(runtime: Any, update: Any, context: Any) -> None:
         if str(value).strip()
     )
     if not query:
-        await _reply(runtime, update, "Usage: <code>/wiki &lt;question&gt;</code>")
+        await _reply(runtime, update, ui_language.tr("wiki.usage"))
         return
 
     provider = dict(getattr(runtime.global_config, "wiki_provider", None) or {})
@@ -62,7 +63,8 @@ async def wiki_command(runtime: Any, update: Any, context: Any) -> None:
         await _reply(
             runtime,
             update,
-            "⚠️ <b>Wiki unavailable.</b> This HASHI instance has no configured Wiki provider.",
+            f"⚠️ <b>{ui_language.tr('wiki.unavailable')}</b> "
+            f"{ui_language.tr('wiki.not_configured')}",
         )
         return
 
@@ -80,8 +82,8 @@ async def wiki_command(runtime: Any, update: Any, context: Any) -> None:
         await _reply(
             runtime,
             update,
-            "⚠️ <b>Wiki unavailable.</b> The configured retrieval capability is not "
-            "authorised or connected for the active backend.",
+            f"⚠️ <b>{ui_language.tr('wiki.unavailable')}</b> "
+            f"{ui_language.tr('wiki.not_connected')}",
         )
         return
 
@@ -101,7 +103,11 @@ async def wiki_command(runtime: Any, update: Any, context: Any) -> None:
         },
     )
     if not request_id:
-        await _reply(runtime, update, "⚠️ <b>Wiki request could not be queued.</b>")
+        await _reply(
+            runtime,
+            update,
+            f"⚠️ <b>{ui_language.tr('wiki.queue_failed')}</b>",
+        )
 
 
 COMMANDS = [

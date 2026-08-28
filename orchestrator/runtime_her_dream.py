@@ -14,7 +14,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from adapters import her_dream, her_habits, her_persona
-from orchestrator import runtime_her_habits
+from orchestrator import runtime_her_habits, ui_language
 from orchestrator.command_ui import card_title, refresh_label, status_label
 from orchestrator.scheduler import next_cron_occurrence, validate_cron_schedule
 
@@ -95,10 +95,7 @@ def _legacy_migration_notice(result: dict[str, Any]) -> str | None:
         and not result.get("backend_is_her", True)
         and int(result.get("legacy_enabled_count") or 0) > 0
     ):
-        return (
-            "⚠️ The enabled legacy Dream schedule was disabled because this "
-            "agent is not on HER. Switch to HER, then use <code>/dream on</code>."
-        )
+        return ui_language.tr("dream.legacy_disabled")
     return None
 
 
@@ -111,12 +108,12 @@ def _timezone_label() -> str:
 
 def _next_run_text(job: dict[str, Any] | None) -> str:
     if not job or not job.get("enabled"):
-        return "disabled"
+        return ui_language.tr("common.disabled_state")
     schedule = str(job.get("schedule") or job.get("time") or "").strip()
     try:
         return next_cron_occurrence(schedule).astimezone().isoformat(timespec="minutes")
     except ValueError as exc:
-        return f"unsupported: {exc}"
+        return ui_language.tr("dream.next_unsupported", reason=str(exc))
 
 
 def _latest_undo_choices(journal: her_dream.HERDreamJournal) -> tuple[str, list[int]]:
@@ -142,26 +139,39 @@ def _status_view(
     )
     enabled = bool(job and job.get("enabled"))
     schedule = str(
-        (job or {}).get("schedule") or (job or {}).get("time") or "not configured"
+        (job or {}).get("schedule")
+        or (job or {}).get("time")
+        or ui_language.tr("dream.not_configured")
     )
     lines = [
         card_title("🌙", "HER Habit Dream"),
         "",
-        f"<b>Current</b> · <b>{status_label(enabled)}</b>",
-        f"<b>Backend</b> · <code>{html.escape(_active_engine(runtime) or 'unknown')}</code>",
-        f"<b>Schedule</b> · <code>{html.escape(schedule)}</code>",
-        f"<b>Timezone</b> · <code>{html.escape(_timezone_label())}</code>",
-        f"<b>Next run</b> · <code>{html.escape(_next_run_text(job))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <b>{status_label(enabled)}</b>",
+        f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
+        f"<code>{html.escape(_active_engine(runtime) or ui_language.tr('common.unknown'))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.schedule'))}</b> · <code>{html.escape(schedule)}</code>",
+        f"<b>{html.escape(ui_language.tr('dream.timezone'))}</b> · <code>{html.escape(_timezone_label())}</code>",
+        f"<b>{html.escape(ui_language.tr('dream.next_run'))}</b> · <code>{html.escape(_next_run_text(job))}</code>",
         (
-            f"<b>Latest run</b> · <code>{html.escape(str((latest or {}).get('run_id') or 'none'))}</code> · "
-            f"{html.escape(str((latest or {}).get('status') or 'no runs'))}"
+            f"<b>{html.escape(ui_language.tr('dream.latest_run'))}</b> · "
+            f"<code>{html.escape(str((latest or {}).get('run_id') or ui_language.tr('dream.none')))}</code> · "
+            f"{html.escape(str((latest or {}).get('status') or ui_language.tr('dream.no_runs')))}"
         ),
-        f"<b>Undo</b> · <code>{html.escape(undo_run_id)}</code>"
-        + (f" · changes {', '.join(map(str, undo_groups))}" if undo_groups else ""),
+        f"<b>{html.escape(ui_language.tr('dream.undo'))}</b> · "
+        f"<code>{html.escape(ui_language.tr('dream.none') if undo_run_id == 'none' else undo_run_id)}</code>"
+        + (
+            " · "
+            + ui_language.tr(
+                "dream.undo_changes",
+                numbers=", ".join(map(str, undo_groups)),
+            )
+            if undo_groups
+            else ""
+        ),
         "",
-        "<b>Commands</b>",
-        "<code>/dream now</code> · run HER Habit maintenance",
-        "<code>/dream on|off</code> · control the schedule",
+        f"<b>{html.escape(ui_language.tr('dream.commands'))}</b>",
+        f"<code>/dream now</code> · {ui_language.tr('dream.command.now')}",
+        f"<code>/dream on|off</code> · {ui_language.tr('dream.command.toggle')}",
         "<code>/dream schedule daily 02:30</code>",
         "<code>/dream schedule weekly sun 02:30</code>",
         "<code>/dream schedule weekdays mon,thu 02:30</code>",
@@ -172,17 +182,17 @@ def _status_view(
         lines.extend(
             [
                 "",
-                "⚠️ Dream execution and Habit inspection are available only while this agent uses HER.",
-                "No dormant Habit files were read.",
+                ui_language.tr("dream.her_only"),
+                ui_language.tr("dream.no_dormant_read"),
             ]
         )
     if notice:
         lines.extend(["", notice])
     rows = [
         [
-            InlineKeyboardButton("Run now", callback_data="dream:now"),
+            InlineKeyboardButton(ui_language.tr("dream.button.run"), callback_data="dream:now"),
             InlineKeyboardButton(
-                "Turn off" if enabled else "Turn on",
+                ui_language.tr("dream.button.off" if enabled else "dream.button.on"),
                 callback_data="dream:off" if enabled else "dream:on",
             ),
         ],
@@ -192,7 +202,7 @@ def _status_view(
         rows.append(
             [
                 InlineKeyboardButton(
-                    "Undo latest Dream",
+                    ui_language.tr("dream.button.undo_latest"),
                     callback_data=f"dream:undo:{undo_run_id}:all",
                 )
             ]
@@ -201,7 +211,7 @@ def _status_view(
             rows.append(
                 [
                     InlineKeyboardButton(
-                        f"Undo change #{number}",
+                        ui_language.tr("dream.button.undo_change", number=number),
                         callback_data=f"dream:undo:{undo_run_id}:{number}",
                     )
                 ]
@@ -279,17 +289,20 @@ def _upsert_schedule(
 def _set_enabled(runtime: Any, enabled: bool) -> tuple[bool, str]:
     manager = getattr(runtime, "skill_manager", None)
     if manager is None:
-        return False, "HASHI task scheduler is unavailable."
+        return False, ui_language.tr("dream.scheduler_unavailable")
     job = _dream_job(runtime)
     if job is None:
         if not enabled:
-            return True, "Dream is not configured; it remains OFF."
+            return True, ui_language.tr("dream.not_configured_off")
         _upsert_schedule(runtime, DREAM_DEFAULT_SCHEDULE, enabled=True)
-        return True, "Dream is ON with the default daily 02:30 local schedule."
+        return True, ui_language.tr("dream.default_enabled")
     setter = getattr(manager, "set_job_enabled", None)
     if not callable(setter):
-        return False, "HASHI task scheduler cannot update this job."
-    return setter("cron", _job_id(runtime), enabled)
+        return False, ui_language.tr("dream.scheduler_update_unavailable")
+    ok, message = setter("cron", _job_id(runtime), enabled)
+    if ok:
+        return True, ui_language.tr("dream.enabled" if enabled else "dream.disabled")
+    return False, message
 
 
 def _read_recent_user_requests(
@@ -457,12 +470,12 @@ async def execute_dream(
         if scheduled:
             return (
                 True,
-                "🌙 Dream skipped\n\nThis agent is not currently using HER. The schedule remains enabled, and no dormant Habit files were read or changed.",
+                ui_language.tr("dream.skipped_report"),
                 None,
             )
         return (
             False,
-            "🌙 Dream is available only while this agent uses HER. No dormant Habit files were read or changed.",
+            ui_language.tr("dream.her_only_report"),
             None,
         )
 
@@ -755,13 +768,13 @@ async def execute_undo(
     if adapter is None:
         return (
             False,
-            "Dream undo is available only while this agent uses HER; no Habit files were inspected.",
+            ui_language.tr("dream.undo.her_only"),
         )
     journal = _journal(runtime, adapter)
     if not run_id:
         latest = her_dream.latest_undoable_run(journal)
         if latest is None:
-            return False, "No HER Dream changes are currently available to undo."
+            return False, ui_language.tr("dream.undo.none")
         run_id = str(latest["run_id"])
     config = getattr(runtime, "config", None)
     persona_source = her_persona.load_configured_persona(
@@ -809,7 +822,7 @@ async def execute_undo(
                 },
             )
     except (ValueError, FileNotFoundError, her_dream.DreamUndoConflict) as exc:
-        return False, f"Dream undo refused: {exc}"
+        return False, ui_language.tr("dream.undo.refused_reason", reason=str(exc))
     facts = [str(item) for item in result["report_facts"]]
     journal.append_audit(
         "dream_undo_persona_source",
@@ -869,12 +882,7 @@ async def invoke_scheduled(
         not migration.get("backend_is_her", True)
         and int(migration.get("legacy_enabled_count") or 0) > 0
     ):
-        report = (
-            "🌙 Legacy Dream schedule disabled\n\n"
-            "This agent is not currently using HER, so the old generic Dream "
-            "job was retired without reading dormant Habits. Switch to HER and "
-            "use /dream on to enable native Habit maintenance."
-        )
+        report = ui_language.tr("dream.legacy_retired_report")
     await runtime.send_long_message(
         chat_id=runtime._primary_chat_id(),
         text=report,
@@ -926,7 +934,10 @@ async def cmd_dream(
             await _reply_view(
                 runtime,
                 update,
-                _status_view(runtime, notice="❌ Switch to HER before enabling Dream."),
+                _status_view(
+                    runtime,
+                    notice="❌ " + ui_language.tr("dream.switch_before_enable"),
+                ),
             )
             return
         ok, message = _set_enabled(runtime, True)
@@ -944,14 +955,18 @@ async def cmd_dream(
                 runtime,
                 update,
                 _status_view(
-                    runtime, notice="❌ Switch to HER before scheduling Dream."
+                    runtime,
+                    notice="❌ " + ui_language.tr("dream.switch_before_schedule"),
                 ),
             )
             return
         try:
             schedule = compile_schedule(args[1:])
             _upsert_schedule(runtime, schedule, enabled=True)
-            notice = f"✅ Dream schedule saved as <code>{html.escape(schedule)}</code>."
+            notice = ui_language.tr(
+                "dream.schedule_saved",
+                schedule=html.escape(schedule),
+            )
         except (ValueError, RuntimeError) as exc:
             notice = f"❌ {html.escape(str(exc))}"
         await _reply_view(runtime, update, _status_view(runtime, notice=notice))
@@ -960,7 +975,7 @@ async def cmd_dream(
         if _her_adapter(runtime) is not None:
             await runtime._reply_text(
                 update,
-                "🌙 Dream started. I will report every validated result here.",
+                ui_language.tr("dream.started_notice"),
             )
         _ok, report, _manifest = await execute_dream(runtime, origin="manual")
         await runtime._reply_text(update, report)
@@ -970,11 +985,11 @@ async def cmd_dream(
         try:
             group_number = int(args[2]) if len(args) >= 3 else None
         except ValueError:
-            await runtime._reply_text(update, "Dream change number must be an integer.")
+            await runtime._reply_text(update, ui_language.tr("dream.change_integer"))
             return
         if len(args) > 3:
             await runtime._reply_text(
-                update, "Usage: /dream undo [run-id] [change-number]"
+                update, ui_language.tr("dream.undo_usage")
             )
             return
         _ok, report = await execute_undo(
@@ -987,7 +1002,7 @@ async def cmd_dream(
     await _reply_view(
         runtime,
         update,
-        _status_view(runtime, notice="⚠️ Unsupported Dream command syntax."),
+        _status_view(runtime, notice=ui_language.tr("dream.unsupported_syntax")),
     )
 
 
@@ -998,7 +1013,7 @@ async def callback_dream(runtime: Any, update: Any, context: Any) -> None:
         return
     command_allowed = getattr(runtime, "_is_command_allowed", None)
     if callable(command_allowed) and not command_allowed("dream"):
-        await query.answer("/dream is disabled for this agent.", show_alert=True)
+        await query.answer(ui_language.tr("dream.command_disabled"), show_alert=True)
         return
     migration_notice = _legacy_migration_notice(migrate_legacy_schedule(runtime))
     parts = str(query.data or "").split(":")
@@ -1010,7 +1025,9 @@ async def callback_dream(runtime: Any, update: Any, context: Any) -> None:
         return
     if action in {"on", "off"}:
         if action == "on" and _her_adapter(runtime) is None:
-            await query.answer("Switch to HER before enabling Dream.", show_alert=True)
+            await query.answer(
+                ui_language.tr("dream.switch_before_enable"), show_alert=True
+            )
             return
         ok, message = _set_enabled(runtime, action == "on")
         text, markup = _status_view(
@@ -1023,11 +1040,11 @@ async def callback_dream(runtime: Any, update: Any, context: Any) -> None:
     if action == "now":
         if _her_adapter(runtime) is None:
             await query.answer(
-                "Dream is available only while this agent uses HER.",
+                ui_language.tr("dream.her_required"),
                 show_alert=True,
             )
             return
-        await query.answer("Dream started.")
+        await query.answer(ui_language.tr("dream.started"))
         _ok, report, _manifest = await execute_dream(runtime, origin="manual-callback")
         await runtime.send_long_message(
             query.message.chat_id,
@@ -1040,7 +1057,7 @@ async def callback_dream(runtime: Any, update: Any, context: Any) -> None:
         try:
             group_number = None if parts[3] == "all" else int(parts[3])
         except ValueError:
-            await query.answer("Invalid Dream change number.", show_alert=True)
+            await query.answer(ui_language.tr("dream.invalid_change"), show_alert=True)
             return
         ok, report = await execute_undo(
             runtime,
@@ -1053,7 +1070,8 @@ async def callback_dream(runtime: Any, update: Any, context: Any) -> None:
             purpose="her_dream_undo",
         )
         await query.answer(
-            "Dream undo completed." if ok else "Dream undo refused.", show_alert=not ok
+            ui_language.tr("dream.undo_completed" if ok else "dream.undo_refused"),
+            show_alert=not ok,
         )
         return
-    await query.answer("Unsupported Dream action.", show_alert=True)
+    await query.answer(ui_language.tr("dream.unsupported_action"), show_alert=True)

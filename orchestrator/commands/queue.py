@@ -5,14 +5,12 @@ import html
 from datetime import datetime
 from typing import Any
 
-from orchestrator import runtime_pending, runtime_session
+from orchestrator import runtime_pending, runtime_session, ui_language
 from orchestrator.command_registry import RuntimeCommand
 from orchestrator.command_ui import card_title
 
-USAGE = (
-    "Usage: /queue [list|show <request_id>|cancel <request_id>|clear|history]\n"
-    "Manages this agent's in-memory pending request queue."
-)
+def _usage() -> str:
+    return ui_language.tr("queue.usage")
 
 
 def _is_authorized(runtime: Any, update: Any) -> bool:
@@ -136,15 +134,25 @@ def _item_line(index: int, item: Any) -> str:
 
 def _current_line(runtime: Any, *, session_id: str | None = None) -> str:
     if not getattr(runtime, "is_generating", False):
-        return "<b>Running</b> · <code>0</code>"
+        return (
+            f"<b>{html.escape(ui_language.tr('common.running'))}</b> · "
+            + ui_language.tr("queue.running_count", count="<code>0</code>")
+        )
     current = getattr(runtime, "current_request_meta", None) or {}
     current_session_id = str(current.get("hashi_session_id") or "")
     if session_id and current_session_id and current_session_id != session_id:
-        return "<b>Running</b> · <code>0</code>"
+        return (
+            f"<b>{html.escape(ui_language.tr('common.running'))}</b> · "
+            + ui_language.tr("queue.running_count", count="<code>0</code>")
+        )
     rid = html.escape(str(current.get("request_id") or "current"))
     source = html.escape(str(current.get("source") or "?"))
     summary = html.escape(_short(current.get("summary") or ""))
-    return f"<b>Running</b> · <code>1</code>\n<code>{rid}</code> · {source} · {summary}"
+    return (
+        f"<b>{html.escape(ui_language.tr('common.running'))}</b> · "
+        + ui_language.tr("queue.running_count", count="<code>1</code>")
+        + f"\n<code>{rid}</code> · {source} · {summary}"
+    )
 
 
 def _delayed_line(index: int, record: dict[str, Any]) -> str:
@@ -157,7 +165,10 @@ def _delayed_line(index: int, record: dict[str, Any]) -> str:
         due_text = due.strftime("%Y-%m-%d %H:%M:%S %Z")
     except (TypeError, ValueError, OSError):
         due_text = "?"
-    return f"{index}. <code>{delay_id}</code> [text] {summary} (due {html.escape(due_text)})"
+    return (
+        f"{index}. <code>{delay_id}</code> [text] {summary} "
+        f"({html.escape(ui_language.tr('common.due'))} {html.escape(due_text)})"
+    )
 
 
 def _build_list(
@@ -174,45 +185,53 @@ def _build_list(
     else:
         delayed_items = list(delayed_items)
     total = len(items) + len(delayed_items)
-    current_line = f"<b>Current</b> · <code>{total}</code> pending"
+    current_line = (
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        + ui_language.tr("queue.current", count=f"<code>{total}</code>")
+    )
     if delayed_items:
-        current_line += (
-            f" · <code>{len(items)}</code> ready · "
-            f"<code>{len(delayed_items)}</code> delayed"
+        current_line += " · " + ui_language.tr(
+            "queue.counts",
+            ready=f"<code>{len(items)}</code>",
+            delayed=f"<code>{len(delayed_items)}</code>",
         )
     lines = [
         card_title("📥", "Request queue"),
         "",
         current_line,
         _current_line(runtime, session_id=session_id),
-        f"<b>Agent</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
-        "<b>Scope</b> · current Session",
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · {html.escape(ui_language.tr('queue.scope'))}",
     ]
     if items:
         lines.append("")
-        lines.append("<b>PENDING</b>")
+        lines.append(f"<b>{html.escape(ui_language.tr('common.pending'))}</b>")
         for index, item in enumerate(items[:25], 1):
             lines.append(_item_line(index, item))
         if len(items) > 25:
-            lines.append(f"<i>... and {len(items) - 25} more</i>")
+            lines.append(
+                f"<i>{html.escape(ui_language.tr('queue.more', count=len(items) - 25))}</i>"
+            )
     if delayed_items:
         lines.append("")
-        lines.append("<b>DELAYED</b>")
+        lines.append(f"<b>{html.escape(ui_language.tr('common.delayed'))}</b>")
         for index, record in enumerate(delayed_items[:25], 1):
             lines.append(_delayed_line(index, record))
         if len(delayed_items) > 25:
-            lines.append(f"<i>... and {len(delayed_items) - 25} more delayed</i>")
+            lines.append(
+                f"<i>{html.escape(ui_language.tr('queue.more_delayed', count=len(delayed_items) - 25))}</i>"
+            )
     if not items and not delayed_items:
         lines.append("")
-        lines.append("Queue is empty.")
+        lines.append(ui_language.tr("queue.empty"))
     lines.append("")
     lines.extend(
         [
-            "<b>Use</b>",
-            "<code>/queue show &lt;id&gt;</code> · inspect one request",
-            "<code>/queue cancel &lt;id&gt;</code> · remove one pending request",
-            "<code>/queue clear</code> · remove all pending requests",
-            "<code>/queue history</code> · show recent request caches",
+            f"<b>{html.escape(ui_language.tr('common.use'))}</b>",
+            f"<code>/queue show &lt;id&gt;</code> · {html.escape(ui_language.tr('queue.use.show'))}",
+            f"<code>/queue cancel &lt;id&gt;</code> · {html.escape(ui_language.tr('queue.use.cancel'))}",
+            f"<code>/queue clear</code> · {html.escape(ui_language.tr('queue.use.clear'))}",
+            f"<code>/queue history</code> · {html.escape(ui_language.tr('queue.use.history'))}",
         ]
     )
     return "\n".join(lines)
@@ -244,19 +263,21 @@ def _format_detail(item: Any) -> str:
     lines = [
         card_title("📥", "Queue item"),
         "",
-        "<b>Current</b> · <b>PENDING</b>",
-        f"<b>ID</b> · <code>{html.escape(_item_id(item))}</code>",
-        f"<b>Source</b> · <code>{html.escape(str(getattr(item, 'source', '?') or '?'))}</code>",
-        f"<b>Summary</b> · {html.escape(str(getattr(item, 'summary', '') or ''))}",
-        f"<b>Created</b> · <code>{html.escape(str(getattr(item, 'created_at', '') or ''))}</code>",
-        f"<b>Silent</b> · <code>{'YES' if bool(getattr(item, 'silent', False)) else 'NO'}</code>",
-        f"<b>Retry</b> · <code>{'YES' if bool(getattr(item, 'is_retry', False)) else 'NO'}</code>",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <b>{html.escape(ui_language.tr('common.pending'))}</b>",
+        f"<b>{html.escape(ui_language.tr('common.id'))}</b> · <code>{html.escape(_item_id(item))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.source'))}</b> · <code>{html.escape(str(getattr(item, 'source', '?') or '?'))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.summary'))}</b> · {html.escape(str(getattr(item, 'summary', '') or ''))}",
+        f"<b>{html.escape(ui_language.tr('common.created'))}</b> · <code>{html.escape(str(getattr(item, 'created_at', '') or ''))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.silent'))}</b> · <code>{html.escape(ui_language.tr('common.yes') if bool(getattr(item, 'silent', False)) else ui_language.tr('common.no'))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.retry'))}</b> · <code>{html.escape(ui_language.tr('common.yes') if bool(getattr(item, 'is_retry', False)) else ui_language.tr('common.no'))}</code>",
         "",
-        "<b>PROMPT</b>",
+        f"<b>{html.escape(ui_language.tr('common.prompt'))}</b>",
         f"<pre>{html.escape(clipped)}</pre>",
     ]
     if len(prompt) > len(clipped):
-        lines.append(f"<i>... ({len(prompt)} chars total)</i>")
+        lines.append(
+            f"<i>{html.escape(ui_language.tr('queue.chars_total', count=len(prompt)))}</i>"
+        )
     return "\n".join(lines)
 
 
@@ -321,17 +342,19 @@ def _format_delayed_detail(record: dict[str, Any]) -> str:
     lines = [
         card_title("⏳", "Delayed queue item"),
         "",
-        "<b>Current</b> · <b>DELAYED</b>",
-        f"<b>ID</b> · <code>{html.escape(str(record.get('id') or 'unknown'))}</code>",
-        "<b>Source</b> · <code>text</code>",
-        f"<b>Due</b> · <code>{html.escape(due)}</code>",
-        f"<b>Attempts</b> · <code>{int(record.get('attempts') or 0)}</code>",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <b>{html.escape(ui_language.tr('common.delayed'))}</b>",
+        f"<b>{html.escape(ui_language.tr('common.id'))}</b> · <code>{html.escape(str(record.get('id') or ui_language.tr('common.unknown')))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.source'))}</b> · <code>text</code>",
+        f"<b>{html.escape(ui_language.tr('common.due'))}</b> · <code>{html.escape(due)}</code>",
+        f"<b>{html.escape(ui_language.tr('common.attempts'))}</b> · <code>{int(record.get('attempts') or 0)}</code>",
         "",
-        "<b>PROMPT</b>",
+        f"<b>{html.escape(ui_language.tr('common.prompt'))}</b>",
         f"<pre>{html.escape(clipped)}</pre>",
     ]
     if len(prompt) > len(clipped):
-        lines.append(f"<i>... ({len(prompt)} chars total)</i>")
+        lines.append(
+            f"<i>{html.escape(ui_language.tr('queue.chars_total', count=len(prompt)))}</i>"
+        )
     return "\n".join(lines)
 
 
@@ -349,15 +372,23 @@ async def _cancel(
         await _send(
             runtime,
             update,
-            f"Item <code>{html.escape(request_id)}</code> not found in pending queue.",
+            ui_language.tr(
+                "queue.not_found_pending", item_id=html.escape(request_id)
+            ),
         )
         return
-    kind = "delayed" if removed.delayed else "ready"
+    kind = ui_language.tr(
+        "queue.kind.delayed" if removed.delayed else "queue.kind.ready"
+    )
     await _send(
         runtime,
         update,
-        f"Cancelled {removed.total} pending item(s): "
-        f"<code>{html.escape(request_id)}</code> ({kind}).",
+        ui_language.tr(
+            "queue.cancelled",
+            count=removed.total,
+            item_id=html.escape(request_id),
+            kind=html.escape(kind),
+        ),
     )
 
 
@@ -369,11 +400,13 @@ async def _clear(
     )
     detail = ""
     if removed.delayed:
-        detail = f" ({removed.ready} ready, {removed.delayed} delayed)"
+        detail = ui_language.tr(
+            "queue.clear_detail", ready=removed.ready, delayed=removed.delayed
+        )
     await _send(
         runtime,
         update,
-        f"Cleared {removed.total} pending item(s){detail}. Running request was not interrupted.",
+        ui_language.tr("queue.cleared", count=removed.total, detail=detail),
     )
 
 
@@ -395,23 +428,34 @@ def _history(runtime: Any, *, session_id: str | None = None) -> str:
     lines = [
         card_title("📥", "Queue history"),
         "",
-        f"<b>Current</b> · prompt <code>{'CACHED' if last_prompt is not None else 'EMPTY'}</code> · response <code>{'CACHED' if last_response else 'EMPTY'}</code>",
-        f"<b>Agent</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        + ui_language.tr(
+            "queue.cache_state",
+            prompt=f"<code>{html.escape(ui_language.tr('queue.cached') if last_prompt is not None else ui_language.tr('queue.empty_state'))}</code>",
+            response=f"<code>{html.escape(ui_language.tr('queue.cached') if last_response else ui_language.tr('queue.empty_state'))}</code>",
+        ),
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
         "",
     ]
     if last_prompt is not None:
-        lines.append("<b>Last prompt</b>")
+        lines.append(f"<b>{html.escape(ui_language.tr('queue.last_prompt'))}</b>")
         lines.append(_item_line(1, last_prompt))
     else:
-        lines.append("Last prompt: none")
+        lines.append(
+            f"{html.escape(ui_language.tr('queue.last_prompt'))}: "
+            f"{html.escape(ui_language.tr('queue.none'))}"
+        )
     if last_response:
         rid = html.escape(str(last_response.get("request_id") or "unknown"))
         text = html.escape(_short(last_response.get("text") or ""))
         lines.append("")
-        lines.append("<b>Last response</b>")
+        lines.append(f"<b>{html.escape(ui_language.tr('queue.last_response'))}</b>")
         lines.append(f"• <code>{rid}</code> {text}")
     else:
-        lines.append("Last response: none")
+        lines.append(
+            f"{html.escape(ui_language.tr('queue.last_response'))}: "
+            f"{html.escape(ui_language.tr('queue.none'))}"
+        )
     return "\n".join(lines)
 
 
@@ -426,7 +470,7 @@ async def queue_command(runtime: Any, update: Any, context: Any) -> None:
     sub = args[0].lower() if args else "list"
     session_id = _command_session_id(runtime, update)
     if sub in {"help", "-h", "--help"}:
-        await _send(runtime, update, html.escape(USAGE))
+        await _send(runtime, update, _usage())
         return
     if sub in {"list", "ls", "status"}:
         delayed = await runtime_pending.delayed_messages(
@@ -457,7 +501,7 @@ async def queue_command(runtime: Any, update: Any, context: Any) -> None:
             update,
             _format_delayed_detail(delayed_matches[0])
             if len(delayed_matches) == 1
-            else f"Item <code>{html.escape(args[1])}</code> not found.",
+            else ui_language.tr("queue.not_found", item_id=html.escape(args[1])),
         )
         return
     if sub == "cancel" and len(args) >= 2:
@@ -469,7 +513,7 @@ async def queue_command(runtime: Any, update: Any, context: Any) -> None:
     if sub == "history":
         await _send(runtime, update, _history(runtime, session_id=session_id))
         return
-    await _send(runtime, update, html.escape(USAGE))
+    await _send(runtime, update, _usage())
 
 
 COMMANDS = [

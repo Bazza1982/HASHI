@@ -10,8 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from orchestrator.command_ui import back_label, card_title
-from orchestrator import remote_lifecycle, runtime_pending
+from orchestrator.command_ui import back_label, card_title, status_label
+from orchestrator import remote_lifecycle, runtime_pending, ui_language
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
@@ -42,7 +42,7 @@ async def move_show_agent_picker(runtime: Any, update: Any, instances: dict) -> 
         agent_names = []
 
     if not agent_names:
-        await runtime._reply_text(update, "No agents found in this instance.")
+        await runtime._reply_text(update, ui_language.tr("remote.move.no_agents"))
         return
 
     rows = [[InlineKeyboardButton(f"🤖 {name}", callback_data=f"move:agent:{name}")] for name in agent_names]
@@ -53,8 +53,9 @@ async def move_show_agent_picker(runtime: Any, update: Any, instances: dict) -> 
     await runtime._reply_text(
         update,
         f"{card_title('📦', 'Move agent')}\n\n"
-        f"<b>Current</b> · source is <code>{html.escape(instance_id)}</code>\n\n"
-        "Moving transfers configuration and workspace data. Select the exact agent:",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        f"{ui_language.tr('remote.move.current_source', instance=f'<code>{html.escape(instance_id)}</code>')}\n\n"
+        f"{ui_language.tr('remote.move.select_agent')}",
         parse_mode="HTML",
         reply_markup=markup,
     )
@@ -70,8 +71,8 @@ async def move_show_target_picker(runtime: Any, update: Any, agent_id: str, inst
     await runtime._reply_text(
         update,
         f"{card_title('📦', 'Move agent')}\n\n"
-        f"<b>Agent</b> · <code>{html.escape(agent_id)}</code>\n\n"
-        "Select the target instance:",
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n\n"
+        f"{ui_language.tr('remote.move.select_target')}",
         parse_mode="HTML",
         reply_markup=markup,
     )
@@ -81,20 +82,20 @@ async def move_show_options(runtime: Any, update: Any, agent_id: str, target: st
     """Step 3: show move options."""
     markup = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Move encrypted", callback_data=f"move:exec:{agent_id}:{target}:enc"),
-            InlineKeyboardButton("Move plain", callback_data=f"move:exec:{agent_id}:{target}:plain"),
+            InlineKeyboardButton(ui_language.tr("remote.move.button.encrypted"), callback_data=f"move:exec:{agent_id}:{target}:enc"),
+            InlineKeyboardButton(ui_language.tr("remote.move.button.plain"), callback_data=f"move:exec:{agent_id}:{target}:plain"),
         ],
         [
-            InlineKeyboardButton("Copy; keep source", callback_data=f"move:exec:{agent_id}:{target}:keep"),
-            InlineKeyboardButton("Sync memories", callback_data=f"move:exec:{agent_id}:{target}:sync"),
+            InlineKeyboardButton(ui_language.tr("remote.move.button.copy"), callback_data=f"move:exec:{agent_id}:{target}:keep"),
+            InlineKeyboardButton(ui_language.tr("remote.move.button.sync"), callback_data=f"move:exec:{agent_id}:{target}:sync"),
         ],
-        [InlineKeyboardButton("← Keep current location", callback_data="move:cancel")],
+        [InlineKeyboardButton(ui_language.tr("remote.move.button.keep"), callback_data="move:cancel")],
     ])
     await update.callback_query.edit_message_text(
         f"{card_title('📦', 'Move agent')}\n\n"
-        f"<b>Agent</b> · <code>{html.escape(agent_id)}</code>\n"
-        f"<b>Target</b> · <code>{html.escape(target)}</code>\n\n"
-        "Choose the transfer mode. Moving can remove the source after a successful transfer.",
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n"
+        f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(target)}</code>\n\n"
+        f"{ui_language.tr('remote.move.choose_destructive')}",
         parse_mode="HTML",
         reply_markup=markup,
     )
@@ -161,7 +162,7 @@ async def do_move(
         status = "✅" if result.returncode == 0 else "❌"
         await runtime._send_text(
             chat_id,
-            f"{status} <b>Migration result:</b>\n<pre>{output}</pre>",
+            f"{status} <b>{html.escape(ui_language.tr('remote.migration_result'))}：</b>\n<pre>{output}</pre>",
             parse_mode="HTML",
         )
     except Exception as exc:
@@ -191,19 +192,24 @@ def render_remote_peer_lines(
             counts["attention"] += 1
         else:
             counts["offline"] += 1
+    online_count = f"<code>{counts['online']}</code>"
     lines = [card_title("📡", "Remote instances"), ""] if include_title else []
     lines.extend(
         [
-            f"<b>Current</b> · <code>{counts['online']}</code> online",
-            f"<b>Attention</b> · <code>{counts['attention']}</code>",
-            f"<b>Offline</b> · <code>{counts['offline']}</code>",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            f"{ui_language.tr('remote.peers.online', count=online_count)}",
+            f"<b>{html.escape(ui_language.tr('remote.peers.attention'))}</b> · <code>{counts['attention']}</code>",
+            f"<b>{html.escape(ui_language.tr('remote.peers.offline'))}</b> · <code>{counts['offline']}</code>",
         ]
     )
     if include_refreshed_at:
-        lines.append(f"<b>Refreshed</b> · <code>{datetime.now().strftime('%H:%M:%S')}</code>")
+        lines.append(
+            f"<b>{html.escape(ui_language.tr('remote.peers.refreshed'))}</b> · "
+            f"<code>{datetime.now().strftime('%H:%M:%S')}</code>"
+        )
     lines.append("")
     if not peers:
-        lines.append("No remote peers are currently visible.")
+        lines.append(ui_language.tr("remote.peers.none"))
     for idx, peer in enumerate(peers):
         lines.extend(runtime._render_remote_peer_block(peer))
         if idx != len(peers) - 1:
@@ -228,7 +234,7 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
     action = parts[1] if len(parts) > 1 else ""
 
     if action == "cancel":
-        await query.edit_message_text("Move cancelled.")
+        await query.edit_message_text(ui_language.tr("remote.move.cancelled"))
         return
 
     if action == "agent" and len(parts) >= 3:
@@ -242,8 +248,8 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
         markup = InlineKeyboardMarkup(rows)
         await query.edit_message_text(
             f"{card_title('📦', 'Move agent')}\n\n"
-            f"<b>Agent</b> · <code>{html.escape(agent_id)}</code>\n\n"
-            "Select the target instance:",
+            f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n\n"
+            f"{ui_language.tr('remote.move.select_target')}",
             parse_mode="HTML",
             reply_markup=markup,
         )
@@ -254,20 +260,20 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
         target = parts[3]
         markup = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("Move plain", callback_data=f"move:exec:{agent_id}:{target}:plain"),
-                InlineKeyboardButton("Copy; keep source", callback_data=f"move:exec:{agent_id}:{target}:keep"),
+                InlineKeyboardButton(ui_language.tr("remote.move.button.plain"), callback_data=f"move:exec:{agent_id}:{target}:plain"),
+                InlineKeyboardButton(ui_language.tr("remote.move.button.copy"), callback_data=f"move:exec:{agent_id}:{target}:keep"),
             ],
             [
-                InlineKeyboardButton("Sync memories", callback_data=f"move:exec:{agent_id}:{target}:sync"),
-                InlineKeyboardButton("Preview only", callback_data=f"move:exec:{agent_id}:{target}:dry"),
+                InlineKeyboardButton(ui_language.tr("remote.move.button.sync"), callback_data=f"move:exec:{agent_id}:{target}:sync"),
+                InlineKeyboardButton(ui_language.tr("remote.move.button.preview"), callback_data=f"move:exec:{agent_id}:{target}:dry"),
             ],
-            [InlineKeyboardButton("← Keep current location", callback_data="move:cancel")],
+            [InlineKeyboardButton(ui_language.tr("remote.move.button.keep"), callback_data="move:cancel")],
         ])
         await query.edit_message_text(
             f"{card_title('📦', 'Move agent')}\n\n"
-            f"<b>Agent</b> · <code>{html.escape(agent_id)}</code>\n"
-            f"<b>Target</b> · <code>{html.escape(target)}</code>\n\n"
-            "Choose the transfer mode. Preview makes no changes.",
+            f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n"
+            f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(target)}</code>\n\n"
+            f"{ui_language.tr('remote.move.choose_preview')}",
             parse_mode="HTML",
             reply_markup=markup,
         )
@@ -303,26 +309,39 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
                 await runtime._reply_text(
                     update,
                     f"{card_title('📡', 'Hashi remote')}\n\n"
-                    "<b>Current</b> · <code>ATTENTION</code>\n"
-                    "The process is running, but its API did not respond.\n\n"
-                    f"<b>PID</b> · <code>{runtime._remote_process.pid}</code>\n"
-                    f"<b>Port</b> · <code>{cfg['port']}</code>\n"
-                    f"<b>TLS</b> · <code>{'ON' if cfg['use_tls'] else 'OFF'}</code>",
+                    f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+                    f"<code>{html.escape(ui_language.tr('remote.status.attention'))}</code>\n"
+                    f"{ui_language.tr('remote.status.api_unresponsive')}\n\n"
+                    f"<b>{html.escape(ui_language.tr('remote.status.pid'))}</b> · "
+                    f"<code>{runtime._remote_process.pid}</code>\n"
+                    f"<b>{html.escape(ui_language.tr('remote.status.port'))}</b> · <code>{cfg['port']}</code>\n"
+                    f"<b>{html.escape(ui_language.tr('remote.status.tls'))}</b> · "
+                    f"<code>{status_label(bool(cfg['use_tls']))}</code>",
                     parse_mode="HTML",
                 )
             else:
                 lines = [
                     card_title("📡", "Hashi remote"),
                     "",
-                    "<b>Current</b> · <code>OFF</code>",
-                    f"Lifecycle: <code>{'enabled' if lifecycle.enabled else 'disabled_by_config'}</code>",
-                    f"Supervisor: <code>{'requested' if lifecycle.supervised else 'child_fallback'}</code>",
-                    f"Disabled state: <code>{'yes' if disabled else 'no'}</code>",
+                    f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+                    f"<code>{html.escape(ui_language.tr('common.off'))}</code>",
+                    f"{html.escape(ui_language.tr('remote.status.lifecycle'))}: "
+                    f"<code>{'enabled' if lifecycle.enabled else 'disabled_by_config'}</code>",
+                    f"{html.escape(ui_language.tr('remote.status.supervisor'))}: "
+                    f"<code>{'requested' if lifecycle.supervised else 'child_fallback'}</code>",
+                    f"{html.escape(ui_language.tr('remote.status.disabled_state'))}: "
+                    f"<code>{'yes' if disabled else 'no'}</code>",
                 ]
                 if disabled:
-                    lines.append(f"Reason: <code>{html.escape(str(disabled.get('reason') or 'unknown'))}</code>")
-                    lines.append(f"State file: <code>{html.escape(str(lifecycle.disabled_path))}</code>")
-                lines.append("Use /remote on to start.")
+                    lines.append(
+                        f"{html.escape(ui_language.tr('remote.status.reason'))}: "
+                        f"<code>{html.escape(str(disabled.get('reason') or ui_language.tr('common.unknown')))}</code>"
+                    )
+                    lines.append(
+                        f"{html.escape(ui_language.tr('remote.status.state_file'))}: "
+                        f"<code>{html.escape(str(lifecycle.disabled_path))}</code>"
+                    )
+                lines.append(ui_language.tr("remote.status.start_help"))
                 await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
             return
         instance = health.get("instance") or {}
@@ -330,24 +349,41 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         lines = [
             card_title("📡", "Hashi remote"),
             "",
-            "<b>Current</b> · <code>ON</code>",
-            f"<b>Instance</b> · <code>{html.escape(str(instance.get('instance_id') or runtime.global_config.project_root.name.upper()))}</code>",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            f"<code>{html.escape(ui_language.tr('common.on'))}</code>",
+            f"<b>{html.escape(ui_language.tr('remote.status.instance'))}</b> · "
+            f"<code>{html.escape(str(instance.get('instance_id') or runtime.global_config.project_root.name.upper()))}</code>",
             f"<b>API</b> · <code>{html.escape(str(health_url))}</code>",
         ]
         if disabled:
-            lines.append("Remote: <code>disabled</code>")
-            lines.append(f"Disabled reason: <code>{html.escape(str(disabled.get('reason') or 'unknown'))}</code>")
+            lines.append(f"{ui_language.tr('remote.status.disabled')}: <code>disabled</code>")
+            lines.append(
+                f"{ui_language.tr('remote.status.disabled_reason')}: "
+                f"<code>{html.escape(str(disabled.get('reason') or ui_language.tr('common.unknown')))}</code>"
+            )
         if status:
             shared_token = bool(status.get("shared_token_configured") or health.get("shared_token_configured"))
             lan_mode = bool(status.get("lan_mode") if "lan_mode" in status else health.get("lan_mode"))
             if not shared_token:
-                lines.append("Security: <code>discovery-only</code> — trusted protocol messaging is unavailable.")
+                lines.append(
+                    f"{ui_language.tr('remote.status.security')}: <code>discovery-only</code> — "
+                    f"{ui_language.tr('remote.status.discovery_unavailable')}"
+                )
             elif lan_mode:
-                lines.append("Security: <code>token ok</code>  ·  LAN relaxed mode: <code>on</code>")
+                lines.append(
+                    f"{ui_language.tr('remote.status.security')}: <code>token ok</code>  ·  "
+                    f"{ui_language.tr('remote.status.lan_relaxed')}: <code>on</code>"
+                )
             route_diagnostics = status.get("route_diagnostics") or {}
             conflicts = list(route_diagnostics.get("port_conflicts") or [])
             if conflicts:
-                lines.append(f"Route warnings: <code>{len(conflicts)}</code> same-host port conflict(s)")
+                lines.append(
+                    f"{ui_language.tr('remote.status.route_warnings')}: "
+                    + ui_language.tr(
+                        "remote.status.port_conflicts",
+                        count=f"<code>{len(conflicts)}</code>",
+                    )
+                )
         if peers:
             lines.extend(
                 [
@@ -363,7 +399,7 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         lines.extend(
             [
                 "",
-                "Use <code>/remote on|off</code> to control the service or <code>/remote list</code> to refresh peers.",
+                ui_language.tr("remote.status.control_help"),
             ]
         )
         await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
@@ -374,15 +410,15 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         if data is None:
             await runtime._reply_text(
                 update,
-                "⚠️ Remote peer view is currently unavailable.",
+                ui_language.tr("remote.status.unavailable"),
             )
             return
         peers = list((data or {}).get("peers") or [])
         if not peers:
             if data and data.get("trusted_view") is False:
-                await runtime._reply_text(update, "⚪ Peer detail is not available from this view. Use local loopback or trusted auth.")
+                await runtime._reply_text(update, ui_language.tr("remote.status.untrusted"))
             else:
-                await runtime._reply_text(update, "⚪ No remote peers are currently visible.")
+                await runtime._reply_text(update, ui_language.tr("remote.status.none"))
             return
         await runtime._reply_text(
             update,
@@ -396,9 +432,10 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         if runtime._remote_process is None or runtime._remote_process.returncode is not None:
             await runtime._reply_text(
                 update,
-                "🔴 Hashi Remote disabled.\n"
-                "Process: <code>not running</code>\n"
-                f"State: <code>{html.escape(str(state_path))}</code>",
+                ui_language.tr(
+                    "remote.lifecycle.disabled",
+                    state=html.escape(str(state_path)),
+                ),
                 parse_mode="HTML",
             )
             return
@@ -410,8 +447,10 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         runtime._remote_process = None
         await runtime._reply_text(
             update,
-            "🔴 Hashi Remote stopped and disabled.\n"
-            f"State: <code>{html.escape(str(state_path))}</code>",
+            ui_language.tr(
+                "remote.lifecycle.stopped",
+                state=html.escape(str(state_path)),
+            ),
             parse_mode="HTML",
         )
         return
@@ -419,7 +458,13 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
     if arg == "on":
         remote_lifecycle.clear_disabled_state(cfg["root"])
         if alive:
-            await runtime._reply_text(update, "🟢 Already running (PID %d)." % runtime._remote_process.pid)
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "remote.lifecycle.already_running",
+                    pid=runtime._remote_process.pid,
+                ),
+            )
             return
 
         root = cfg["root"]
@@ -429,7 +474,10 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         if not venv_python.exists():
             await runtime._reply_text(
                 update,
-                f"🔴 Hashi Remote could not start.\nMissing interpreter: <code>{html.escape(str(venv_python))}</code>",
+                ui_language.tr(
+                    "remote.lifecycle.missing_interpreter",
+                    path=html.escape(str(venv_python)),
+                ),
                 parse_mode="HTML",
             )
             return
@@ -466,10 +514,16 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
             return
         await runtime._reply_text(
             update,
-            f"🟢 Hashi Remote started (PID {runtime._remote_process.pid})\n"
-            f"   Port {cfg['port']} · TLS {'on' if cfg['use_tls'] else 'off'} · discovery {cfg['backend']}\n"
-            f"   API <code>{html.escape(detail)}</code>\n"
-            "   Use /remote off to stop.",
+            ui_language.tr(
+                "remote.lifecycle.started",
+                pid=runtime._remote_process.pid,
+                port=cfg["port"],
+                tls=ui_language.tr(
+                    "remote.lifecycle.on" if cfg["use_tls"] else "remote.lifecycle.off"
+                ),
+                discovery=html.escape(str(cfg["backend"])),
+                api=html.escape(detail),
+            ),
             parse_mode="HTML",
         )
         return
@@ -477,7 +531,8 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
     await runtime._reply_text(
         update,
         f"{card_title('📡', 'Hashi remote')}\n\n"
-        "<b>Current</b> · invalid option\n\n"
-        "Use <code>/remote on|off|status</code>. <code>/remote list</code> remains supported.",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        f"{html.escape(ui_language.tr('remote.invalid'))}\n\n"
+        f"{ui_language.tr('remote.invalid_help')}",
         parse_mode="HTML",
     )

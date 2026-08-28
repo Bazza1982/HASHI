@@ -4,7 +4,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator import telegram_notifications
+from orchestrator import telegram_notifications, ui_language
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
 from orchestrator.command_ui import refresh_label, selected_label, setting_card
 
@@ -22,24 +22,22 @@ def _is_authorized(runtime: Any, update: Any) -> bool:
 
 def _menu_text(runtime: Any, *, notice: str | None = None) -> str:
     mode = telegram_notifications.notification_mode(runtime)
-    facts = ["<b>Scope</b> · Telegram messages from this agent"]
+    facts = [
+        f"<b>{ui_language.tr('common.scope')}</b> · {ui_language.tr('notify.scope')}"
+    ]
     if notice:
         facts.insert(0, f"✅ {notice}")
     return setting_card(
         "🔔",
         "Telegram notifications",
-        current=f"<b>{mode.upper()}</b>",
-        facts=facts,
-        consequence=(
-            "All messages use normal Telegram notification sound."
-            if mode == "on"
-            else (
-                "Only final answers, errors, and important alerts notify; interim messages are silent."
-                if mode == "quiet"
-                else "Messages are still delivered, but Telegram receives them silently."
-            )
+        current=(
+            f"<b>{mode.upper()}</b>"
+            if ui_language.current_locale() == ui_language.DEFAULT_LOCALE
+            else f"<b>{ui_language.tr(f'notify.mode.{mode}')}</b> · <code>{mode}</code>"
         ),
-        action="Choose a state below. Changes persist in this workspace.",
+        facts=facts,
+        consequence=ui_language.tr(f"notify.effect.{mode}"),
+        action=ui_language.tr("notify.action"),
     )
 
 
@@ -48,9 +46,9 @@ def _keyboard(runtime: Any) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(selected_label("On", mode == "on"), callback_data="notify:on"),
-                InlineKeyboardButton(selected_label("Quiet", mode == "quiet"), callback_data="notify:quiet"),
-                InlineKeyboardButton(selected_label("Off", mode == "off"), callback_data="notify:off"),
+                InlineKeyboardButton(selected_label(ui_language.tr("notify.mode.on"), mode == "on"), callback_data="notify:on"),
+                InlineKeyboardButton(selected_label(ui_language.tr("notify.mode.quiet"), mode == "quiet"), callback_data="notify:quiet"),
+                InlineKeyboardButton(selected_label(ui_language.tr("notify.mode.off"), mode == "off"), callback_data="notify:off"),
             ],
             [InlineKeyboardButton(refresh_label(), callback_data="notify:refresh")],
         ]
@@ -85,7 +83,7 @@ async def notify_command(runtime: Any, update: Any, context: Any) -> None:
         await _send(
             runtime,
             update,
-            _menu_text(runtime, notice="Notification sound enabled."),
+            _menu_text(runtime, notice=ui_language.tr("notify.notice.on")),
             reply_markup=_keyboard(runtime),
         )
         return
@@ -94,7 +92,7 @@ async def notify_command(runtime: Any, update: Any, context: Any) -> None:
         await _send(
             runtime,
             update,
-            _menu_text(runtime, notice="Notification sound disabled."),
+            _menu_text(runtime, notice=ui_language.tr("notify.notice.off")),
             reply_markup=_keyboard(runtime),
         )
         return
@@ -103,7 +101,7 @@ async def notify_command(runtime: Any, update: Any, context: Any) -> None:
         await _send(
             runtime,
             update,
-            _menu_text(runtime, notice="Quiet notifications enabled."),
+            _menu_text(runtime, notice=ui_language.tr("notify.notice.quiet")),
             reply_markup=_keyboard(runtime),
         )
         return
@@ -119,13 +117,13 @@ async def notify_callback(runtime: Any, update: Any, context: Any) -> None:
     notice = None
     if action == "on":
         telegram_notifications.set_notification_mode(runtime, "on")
-        notice = "Notification sound enabled."
+        notice = ui_language.tr("notify.notice.on")
     elif action == "quiet":
         telegram_notifications.set_notification_mode(runtime, "quiet")
-        notice = "Quiet notifications enabled."
+        notice = ui_language.tr("notify.notice.quiet")
     elif action == "off":
         telegram_notifications.set_notification_mode(runtime, "off")
-        notice = "Notification sound disabled."
+        notice = ui_language.tr("notify.notice.off")
     await query.edit_message_text(
         _menu_text(runtime, notice=notice),
         parse_mode="HTML",

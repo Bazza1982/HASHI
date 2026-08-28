@@ -4,7 +4,7 @@ import html
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from orchestrator import runtime_menu_views
+from orchestrator import runtime_menu_views, ui_language
 from orchestrator.command_ui import card_title
 
 Reply = Callable[..., Awaitable[Any]]
@@ -43,27 +43,28 @@ def _help_text(runtime) -> str:
     lines = [
         card_title("🧰", "Skills reference"),
         "",
-        f"<b>Current</b> · <code>{len(skills)}</code> available",
-        f"<b>Agent</b> · <code>{html.escape(runtime.name)}</code>",
-        f"<b>Invalid</b> · <code>{len(errors)}</code>",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        + ui_language.tr("skill.help.available", count=f"<code>{len(skills)}</code>"),
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(runtime.name)}</code>",
+        f"<b>{html.escape(ui_language.tr('skill.help.invalid'))}</b> · <code>{len(errors)}</code>",
         "",
-        "<b>MAINTENANCE</b>",
-        "<code>/skill install &lt;directory&gt;</code> · validate and copy",
-        "<code>/skill link &lt;directory&gt;</code> · validate and link",
-        "<code>/skill enable|disable &lt;id&gt;</code> · per-agent state",
-        "<code>/skill validate [id]</code> · package diagnostics",
-        "<code>/skill delete &lt;id&gt;</code> · recoverably remove any package",
-        "<code>/skill uninstall &lt;id&gt;</code> · alias; linked packages are unlinked",
-        "<code>/skill find &lt;text&gt;</code> · search ID and description",
-        "<code>/skill rescan</code> · rebuild the visible catalog",
+        f"<b>{html.escape(ui_language.tr('skill.help.maintenance'))}</b>",
+        f"<code>/skill install &lt;directory&gt;</code> · {html.escape(ui_language.tr('skill.help.install'))}",
+        f"<code>/skill link &lt;directory&gt;</code> · {html.escape(ui_language.tr('skill.help.link'))}",
+        f"<code>/skill enable|disable &lt;id&gt;</code> · {html.escape(ui_language.tr('skill.help.toggle'))}",
+        f"<code>/skill validate [id]</code> · {html.escape(ui_language.tr('skill.help.validate'))}",
+        f"<code>/skill delete &lt;id&gt;</code> · {html.escape(ui_language.tr('skill.help.delete'))}",
+        f"<code>/skill uninstall &lt;id&gt;</code> · {html.escape(ui_language.tr('skill.help.uninstall'))}",
+        f"<code>/skill find &lt;text&gt;</code> · {html.escape(ui_language.tr('skill.help.find'))}",
+        f"<code>/skill rescan</code> · {html.escape(ui_language.tr('skill.help.rescan'))}",
         "",
-        "<b>CATALOG</b>",
+        f"<b>{html.escape(ui_language.tr('skill.help.catalog'))}</b>",
     ]
     for skill in skills:
         lines.append(
             f"<code>{html.escape(skill.id)}</code> · {html.escape(skill.description)}"
         )
-    lines.extend(["", "Jobs: <code>/jobs</code> · EXP: <code>/exp</code>"])
+    lines.extend(["", ui_language.tr("skill.help.links")])
     return "\n".join(lines)
 
 
@@ -88,7 +89,9 @@ async def handle_standard_skill_command(
         await reply(_help_text(runtime), parse_mode="HTML")
         return
     if sub in {"rescan", "reload", "refresh"}:
-        await _render_catalog(runtime, reply, notice="Catalog rescanned and validated.")
+        await _render_catalog(
+            runtime, reply, notice=ui_language.tr("skill.rescanned")
+        )
         return
     if sub in {"invalid", "errors", "doctor"}:
         await reply(
@@ -155,7 +158,7 @@ async def handle_standard_skill_command(
             return
         skill = manager.get_skill(rest[0])
         if skill is None:
-            await reply(f"Unknown Skill: {rest[0]}")
+            await reply(ui_language.tr("skill.unknown", skill_id=rest[0]))
             return
         await reply(
             runtime_menu_views.skill_validation_text(skill, manager=manager),
@@ -166,12 +169,16 @@ async def handle_standard_skill_command(
     if sub in {"enable", "disable"}:
         if not rest:
             await reply(
-                f"Usage: /skill {sub} <id>{' --force' if sub == 'disable' else ''}"
+                ui_language.tr(
+                    "skill.usage.toggle",
+                    action=sub,
+                    force=" --force" if sub == "disable" else "",
+                )
             )
             return
         skill = manager.get_skill(rest[0])
         if skill is None:
-            await reply(f"Unknown Skill: {rest[0]}")
+            await reply(ui_language.tr("skill.unknown", skill_id=rest[0]))
             return
         enabled = sub == "enable"
         if not enabled:
@@ -180,8 +187,12 @@ async def handle_standard_skill_command(
             if dependencies and not forced:
                 labels = ", ".join(item["id"] for item in dependencies[:5])
                 await reply(
-                    f"Skill '{skill.id}' has enabled Job dependencies: {labels}. "
-                    f"Use /skill disable {skill.id} --force to confirm."
+                    ui_language.tr(
+                        "skill.dependencies",
+                        skill_id=html.escape(skill.id),
+                        dependencies=html.escape(labels),
+                    ),
+                    parse_mode="HTML",
                 )
                 return
         ok, message = manager.set_skill_enabled(
@@ -194,16 +205,26 @@ async def handle_standard_skill_command(
         return
     if sub in {"uninstall", "unlink", "remove", "delete"}:
         if not rest:
-            await reply("Usage: /skill delete <id>")
+            await reply(ui_language.tr("skill.usage.delete"), parse_mode="HTML")
             return
         ok, message, recovery_path = manager.uninstall_skill(rest[0])
-        suffix = f" Recovery: {recovery_path}" if recovery_path is not None else ""
+        suffix = (
+            " "
+            + ui_language.tr(
+                "skill.recovery", path=html.escape(str(recovery_path))
+            )
+            if recovery_path is not None
+            else ""
+        )
         await reply(("✅ " if ok else "❌ ") + message + suffix)
         return
 
     skill = manager.get_skill(sub)
     if skill is None:
-        await reply(f"Unknown Skill: {sub}. Use /skill help or /skill find <text>.")
+        await reply(
+            ui_language.tr("skill.unknown_help", skill_id=html.escape(sub)),
+            parse_mode="HTML",
+        )
         return
     prompt_text = " ".join(rest).strip()
     if not prompt_text:
@@ -215,13 +236,16 @@ async def handle_standard_skill_command(
         return
     if not manager.is_skill_enabled(workspace, skill.id):
         await reply(
-            f"Skill '{skill.id}' is disabled for this agent. "
-            f"Use /skill enable {skill.id} first."
+            ui_language.tr("skill.disabled", skill_id=html.escape(skill.id)),
+            parse_mode="HTML",
         )
         return
 
     prompt = manager.build_prompt_for_skill(skill, prompt_text)
-    await reply(f"Running skill {skill.id}...")
+    await reply(
+        ui_language.tr("skill.running", skill_id=html.escape(skill.id)),
+        parse_mode="HTML",
+    )
     await runtime.enqueue_request(
         update.effective_chat.id,
         prompt,

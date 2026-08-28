@@ -7,6 +7,7 @@ from typing import Any
 
 from orchestrator.command_registry import RuntimeCommand
 from orchestrator.command_ui import card_title
+from orchestrator import ui_language
 
 
 def _is_authorized(runtime: Any, update: Any) -> bool:
@@ -49,21 +50,29 @@ async def xaiauth_command(runtime: Any, update: Any, context: Any) -> None:
         logged_in = bool(status.get("logged_in"))
         relogin_required = bool(status.get("relogin_required"))
         client_configured = bool(status.get("client_id_configured"))
+        if relogin_required:
+            detail = ui_language.tr("xai.detail.relogin")
+        elif logged_in:
+            detail = ui_language.tr("xai.detail.logged_in")
+        elif status.get("has_refresh_token") or status.get("has_access_token"):
+            detail = ui_language.tr("xai.detail.token_missing")
+        else:
+            detail = ui_language.tr("xai.detail.not_logged_in")
         lines = [
             card_title("🔐", "xAI authorization"),
             "",
-            f"<b>Current</b> · <b>{'SIGNED IN' if logged_in else 'SIGNED OUT'}</b>",
-            f"<b>Relogin required</b> · <code>{'YES' if relogin_required else 'NO'}</code>",
-            f"<b>Client configured</b> · <code>{'YES' if client_configured else 'NO'}</code>",
-            f"<b>Credential store</b> · <code>{html.escape(str(status.get('auth_store') or 'unknown'))}</code>",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <b>{html.escape(ui_language.tr('xai.signed_in') if logged_in else ui_language.tr('xai.signed_out'))}</b>",
+            f"<b>{html.escape(ui_language.tr('xai.relogin_required'))}</b> · <code>{html.escape(ui_language.tr('common.yes') if relogin_required else ui_language.tr('common.no'))}</code>",
+            f"<b>{html.escape(ui_language.tr('xai.client_configured'))}</b> · <code>{html.escape(ui_language.tr('common.yes') if client_configured else ui_language.tr('common.no'))}</code>",
+            f"<b>{html.escape(ui_language.tr('xai.credential_store'))}</b> · <code>{html.escape(str(status.get('auth_store') or ui_language.tr('common.unknown')))}</code>",
             "",
-            html.escape(str(status.get("message") or "No authorization detail available.")),
+            detail,
             "",
-            "Login is completed on the host shell; this card is read-only.",
+            ui_language.tr("xai.read_only"),
             "",
-            "<b>Use</b>",
-            "<code>python hashi.py auth xai login</code> · sign in from the host shell",
-            "<code>/backend her grok-4.5</code> · select xAI through HER after login",
+            f"<b>{html.escape(ui_language.tr('common.use'))}</b>",
+            f"<code>python hashi.py auth xai login</code> · {html.escape(ui_language.tr('xai.use.login'))}",
+            f"<code>/backend her grok-4.5</code> · {html.escape(ui_language.tr('xai.use.backend'))}",
         ]
         await _send(runtime, update, "\n".join(lines))
         return
@@ -72,9 +81,8 @@ async def xaiauth_command(runtime: Any, update: Any, context: Any) -> None:
         runtime,
         update,
         f"{card_title('🔐', 'xAI authorization')}\n\n"
-        "<b>Current</b> · invalid option\n\n"
-        "Use <code>/xaiauth status</code>. Device-code login must be completed on the host shell with "
-        "<code>python hashi.py auth xai login</code>.",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · {html.escape(ui_language.tr('xai.invalid'))}\n\n"
+        f"{ui_language.tr('xai.invalid_help')}",
     )
 
 

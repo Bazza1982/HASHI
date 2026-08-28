@@ -29,6 +29,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from orchestrator import ui_language
 from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
     canonical_backend_engine,
@@ -3008,43 +3009,46 @@ def compact_status_text(runtime: Any, *, coordinator: Any | None = None) -> str:
         use_last_runtime_measurement=False,
     )
     capacity_text = (
-        f"{route.capacity.context_window_tokens:,} tokens ({route.capacity.provenance})"
+        f"{route.capacity.context_window_tokens:,} {ui_language.tr('compact.tokens')} "
+        f"({route.capacity.provenance})"
         if route.capacity
-        else "unknown"
+        else ui_language.tr("compact.unknown")
     )
     target_text = (
-        f"{target.provider}/{target.model} · {target.context_window_tokens:,} tokens ({target.provenance})"
+        f"{target.provider}/{target.model} · {target.context_window_tokens:,} "
+        f"{ui_language.tr('compact.tokens')} ({target.provenance})"
         if target
-        else "unknown (does not change the Compact window)"
+        else ui_language.tr("compact.target_unknown")
     )
-    eligibility = "READY" if not status["state_error"] else "ERROR"
+    eligibility = ui_language.tr(
+        "compact.ready" if not status["state_error"] else "compact.error"
+    )
     reason = html.escape(
         str(
             status["state_error"]
-            or "uses the active HER v2 Quick/Light target directly"
+            or ui_language.tr("compact.active_route_reason")
         )
     )
     return (
-        "🗜️ <b>HASHI Context Compact</b>\n\n"
-        f"<b>Status</b> · <code>{eligibility}</code>\n"
-        f"<b>Mode</b> · <code>{html.escape(route.config.mode)}</code>\n"
-        f"<b>Compact route</b> · <code>{html.escape(route.provider or '-')} / {html.escape(route.model or '-')}</code>\n"
-        f"<b>HER effort</b> · <code>{html.escape(route.her_effort or 'high')}</code>\n"
-        f"<b>Provider reasoning</b> · <code>{html.escape(route.reasoning or '-')}</code>\n"
-        f"<b>Timeout tier</b> · <code>{html.escape(route.timeout_tier or route.config.timeout_tier)}</code>\n"
-        f"<b>Compact capacity</b> · <code>{html.escape(capacity_text)}</code>\n"
-        f"<b>Target capacity</b> · <code>{html.escape(target_text)}</code>\n"
-        f"<b>Current context</b> · <code>{current_tokens:,} tokens</code>\n"
-        f"<b>Manual window</b> · <code>{policy.manual_min_tokens:,}–{policy.auto_trigger_tokens:,} tokens</code>\n"
-        f"<b>Automatic trigger</b> · <code>&gt; {trigger_budget.high_projected_tokens:,} tokens · Execution stage · non-blocking</code>\n"
-        f"<b>Compact target</b> · <code>{trigger_budget.low_input_tokens:,} tokens</code>\n"
-        f"<b>Cross-provider</b> · <code>{'YES' if route.crosses_provider else 'NO'}</code>\n"
-        f"<b>Generation</b> · <code>{status['generation'] if status['generation'] is not None else '-'}</code>\n"
-        f"<b>Covered through turn</b> · <code>{status['covered_through_turn_id'] if status['covered_through_turn_id'] is not None else '-'}</code>\n"
-        f"<b>Eligible turns now</b> · <code>{status['eligible_turn_count'] if status['eligible_turn_count'] is not None else '-'}</code>\n"
-        f"<b>Reason</b> · {reason}\n\n"
-        "Use <code>/compact</code> to compact eligible history now, or "
-        "<code>/compact status</code> to inspect without changing state."
+        f"{ui_language.tr('compact.status_title')}\n\n"
+        f"<b>{html.escape(ui_language.tr('common.status'))}</b> · <code>{html.escape(eligibility)}</code>\n"
+        f"<b>{html.escape(ui_language.tr('common.mode'))}</b> · <code>{html.escape(route.config.mode)}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.route'))}</b> · <code>{html.escape(route.provider or '-')} / {html.escape(route.model or '-')}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.her_effort'))}</b> · <code>{html.escape(route.her_effort or 'high')}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.provider_reasoning'))}</b> · <code>{html.escape(route.reasoning or '-')}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.timeout_tier'))}</b> · <code>{html.escape(route.timeout_tier or route.config.timeout_tier)}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.capacity'))}</b> · <code>{html.escape(capacity_text)}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.target_capacity'))}</b> · <code>{html.escape(target_text)}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.current_context'))}</b> · <code>{current_tokens:,} {html.escape(ui_language.tr('compact.tokens'))}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.manual_window'))}</b> · <code>{policy.manual_min_tokens:,}–{policy.auto_trigger_tokens:,} {html.escape(ui_language.tr('compact.tokens'))}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.automatic_trigger'))}</b> · <code>&gt; {html.escape(ui_language.tr('compact.execution_trigger', tokens=f'{trigger_budget.high_projected_tokens:,}'))}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.target'))}</b> · <code>{trigger_budget.low_input_tokens:,} {html.escape(ui_language.tr('compact.tokens'))}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.cross_provider'))}</b> · <code>{html.escape(ui_language.tr('common.yes') if route.crosses_provider else ui_language.tr('common.no'))}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.generation'))}</b> · <code>{status['generation'] if status['generation'] is not None else '-'}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.covered_turn'))}</b> · <code>{status['covered_through_turn_id'] if status['covered_through_turn_id'] is not None else '-'}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.eligible_turns'))}</b> · <code>{status['eligible_turn_count'] if status['eligible_turn_count'] is not None else '-'}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.reason'))}</b> · {reason}\n\n"
+        f"{ui_language.tr('compact.status_help')}"
     )
 
 
@@ -3067,10 +3071,10 @@ def capacity_warning_text(error: ContextCapacityError) -> str:
         "compaction_code",
     )
     lines = [
-        "⚠️ <b>HER v2 context compaction warning</b>",
+        ui_language.tr("compact.warning_title"),
         "",
-        f"<b>Code</b> · <code>{html.escape(error.code)}</code>",
-        f"<b>Reason</b> · {html.escape(_redact_control_text(error))}",
+        f"<b>{html.escape(ui_language.tr('compact.code'))}</b> · <code>{html.escape(error.code)}</code>",
+        f"<b>{html.escape(ui_language.tr('compact.reason'))}</b> · {html.escape(_redact_control_text(error))}",
     ]
     for key in ordered:
         if facts.get(key) not in {None, ""}:
@@ -3080,10 +3084,7 @@ def capacity_warning_text(error: ContextCapacityError) -> str:
     lines.extend(
         [
             "",
-            "Protected authority and the current request were not trimmed. "
-            "The original raw history remains available, and this model request is "
-            "continuing with the best context HASHI could safely assemble. The target "
-            "provider may still reject the request if its own context limit is exceeded.",
+            ui_language.tr("compact.warning_effect"),
         ]
     )
     return "\n".join(lines)

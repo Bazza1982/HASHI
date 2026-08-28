@@ -19,6 +19,7 @@ from orchestrator.audit_mode import (
 )
 from orchestrator.runtime_common import QueuedRequest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from orchestrator import ui_language
 from orchestrator.command_ui import back_label, card_title, refresh_label, selected_label, setting_card
 
 
@@ -96,8 +97,14 @@ def audit_model_keyboard(runtime: Any, cfg: Any, *, target: str) -> InlineKeyboa
         rows.append(row)
     rows.append(
         [
-            InlineKeyboardButton("Core model", callback_data="acfg:menu:core"),
-            InlineKeyboardButton("Audit model", callback_data="acfg:menu:auditmodel"),
+            InlineKeyboardButton(
+                ui_language.tr("audit.button.core_model"),
+                callback_data="acfg:menu:core",
+            ),
+            InlineKeyboardButton(
+                ui_language.tr("audit.button.audit_model"),
+                callback_data="acfg:menu:auditmodel",
+            ),
         ]
     )
     rows.append([InlineKeyboardButton(back_label(), callback_data="acfg:menu:audit")])
@@ -109,12 +116,12 @@ def audit_core_text(cfg: Any) -> str:
         "🧠",
         "Audit core model",
         current=f"<code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
-        facts=["<b>Role</b> · performs the user task before audit review"],
-        consequence="Changing this selection updates the active core model used in Audit mode.",
-        action=(
-            "Choose a model below or use "
-            "<code>/core backend=&lt;backend&gt; model=&lt;model&gt;</code>."
-        ),
+        facts=[
+            f"<b>{html.escape(ui_language.tr('audit.role'))}</b> · "
+            f"{html.escape(ui_language.tr('audit.core.role'))}"
+        ],
+        consequence=ui_language.tr("audit.core.effect"),
+        action=ui_language.tr("audit.core.action"),
     )
 
 
@@ -124,15 +131,15 @@ def audit_auditor_text(cfg: Any) -> str:
         "Audit reviewer model",
         current=f"<code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
         facts=[
-            f"<b>Delivery</b> · <code>{html.escape(cfg.delivery)}</code>",
-            f"<b>Threshold</b> · <code>{html.escape(cfg.severity_threshold)}</code>",
-            "<b>Role</b> · reviews observable core actions and output",
+            f"<b>{html.escape(ui_language.tr('common.delivery'))}</b> · "
+            f"<code>{html.escape(cfg.delivery)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.threshold'))}</b> · "
+            f"<code>{html.escape(cfg.severity_threshold)}</code>",
+            f"<b>{html.escape(ui_language.tr('audit.role'))}</b> · "
+            f"{html.escape(ui_language.tr('audit.reviewer.role'))}",
         ],
-        consequence="A stronger reviewer can improve risk detection but may add latency and cost.",
-        action=(
-            "Choose a model below or use "
-            "<code>/audit model backend=&lt;backend&gt; model=&lt;model&gt;</code>."
-        ),
+        consequence=ui_language.tr("audit.reviewer.effect"),
+        action=ui_language.tr("audit.reviewer.action"),
     )
 
 
@@ -143,9 +150,9 @@ def audit_config_keyboard(cfg: Any) -> InlineKeyboardMarkup:
             callback_data=f"acfg:delivery:{value}",
         )
         for value, label in (
-            ("always", "Always report"),
-            ("issues_only", "Issues only"),
-            ("silent", "Silent log"),
+            ("always", ui_language.tr("audit.delivery.always")),
+            ("issues_only", ui_language.tr("audit.delivery.issues_only")),
+            ("silent", ui_language.tr("audit.delivery.silent")),
         )
     ]
     threshold_row = [
@@ -154,10 +161,10 @@ def audit_config_keyboard(cfg: Any) -> InlineKeyboardMarkup:
             callback_data=f"acfg:threshold:{value}",
         )
         for value, label in (
-            ("low", "Low+"),
-            ("medium", "Medium+"),
-            ("high", "High+"),
-            ("critical", "Critical"),
+            ("low", ui_language.tr("audit.threshold.low")),
+            ("medium", ui_language.tr("audit.threshold.medium")),
+            ("high", ui_language.tr("audit.threshold.high")),
+            ("critical", ui_language.tr("audit.threshold.critical")),
         )
     ]
     return InlineKeyboardMarkup(
@@ -165,8 +172,14 @@ def audit_config_keyboard(cfg: Any) -> InlineKeyboardMarkup:
             delivery_row,
             threshold_row,
             [
-                InlineKeyboardButton("Core model", callback_data="acfg:menu:core"),
-                InlineKeyboardButton("Audit model", callback_data="acfg:menu:auditmodel"),
+                InlineKeyboardButton(
+                    ui_language.tr("audit.button.core_model"),
+                    callback_data="acfg:menu:core",
+                ),
+                InlineKeyboardButton(
+                    ui_language.tr("audit.button.audit_model"),
+                    callback_data="acfg:menu:auditmodel",
+                ),
             ],
             [InlineKeyboardButton(refresh_label(), callback_data="acfg:menu:audit")],
         ]
@@ -197,25 +210,30 @@ def audit_status_text(state: dict, criteria: dict) -> str:
     lines = [
         card_title("🔎", "Hashi audit"),
         "",
-        f"<b>Current</b> · <b>{cfg.delivery.upper()}</b>",
-        f"• Core: <code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
-        f"• Audit: <code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
-        f"• Delivery: <code>{cfg.delivery}</code>",
-        f"• Severity threshold: <code>{cfg.severity_threshold}</code>",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        f"<b>{html.escape(cfg.delivery.upper())}</b>",
+        f"• {html.escape(ui_language.tr('common.core'))}: "
+        f"<code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
+        f"• {html.escape(ui_language.tr('common.auditor'))}: "
+        f"<code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
+        f"• {html.escape(ui_language.tr('common.delivery'))}: "
+        f"<code>{cfg.delivery}</code>",
+        f"• {html.escape(ui_language.tr('audit.severity_threshold'))}: "
+        f"<code>{cfg.severity_threshold}</code>",
         "",
-        "Default testing posture is <code>always</code> delivery and <code>low</code> threshold.",
-        "Tap buttons below to change audit visibility/sensitivity, core model, or audit model.",
-        "Use <code>/audit model backend=&lt;backend&gt; model=&lt;model&gt;</code> to set the audit model.",
-        "Use <code>/audit delivery &lt;always|issues_only|silent&gt;</code> and <code>/audit threshold &lt;low|medium|high|critical&gt;</code> for text control.",
-        "Use <code>/audit set &lt;slot&gt; &lt;text&gt;</code> to edit audit criteria.",
+        ui_language.tr("audit.default_posture"),
+        ui_language.tr("audit.action.buttons"),
+        ui_language.tr("audit.action.model"),
+        ui_language.tr("audit.action.controls"),
+        ui_language.tr("audit.action.criteria"),
         "",
-        "Audit criteria:",
+        ui_language.tr("audit.criteria"),
     ]
     if visible_criteria:
         for key in sorted(visible_criteria, key=lambda value: (not str(value).isdigit(), int(value) if str(value).isdigit() else str(value))):
             lines.append(f"• <code>{html.escape(str(key))}</code>: {html.escape(str(visible_criteria[key]))}")
     else:
-        lines.append("• default risk sensors")
+        lines.append(ui_language.tr("status.default_risk_sensors"))
     return "\n".join(lines)
 
 

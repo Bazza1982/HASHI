@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 
+from orchestrator import ui_language
 from orchestrator.command_ui import card_title
 
 
@@ -77,15 +78,15 @@ def get_browser_menu_text() -> str:
 def get_browser_examples_text() -> str:
     return (
         f"{card_title('🌐', 'Browser examples')}\n\n"
-        "<b>Current</b> · reference\n\n"
-        "<b>1 · Headless page work</b>\n"
-        "<code>/browser 1 Inspect this public dashboard and summarize the visible table.</code>\n\n"
-        "<b>2 · CLI-native browsing</b>\n"
-        "<code>/browser 2 Research this topic using the CLI backend's own browsing tools.</code>\n\n"
-        "<b>3 · Brave search research</b>\n"
-        "<code>/browser 3 Find recent sources about mandatory CSR assurance and cite the strongest ones.</code>\n\n"
-        "<b>4 · Logged-in browser work</b>\n"
-        "<code>/browser 4 Open the logged-in library page and download the PDF I may access.</code>"
+        f"<b>{ui_language.tr('common.current')}</b> · {ui_language.tr('browser.reference')}\n\n"
+        f"<b>{ui_language.tr('browser.example.headless')}</b>\n"
+        f"{ui_language.tr('browser.example.headless_command')}\n\n"
+        f"<b>{ui_language.tr('browser.example.native')}</b>\n"
+        f"{ui_language.tr('browser.example.native_command')}\n\n"
+        f"<b>{ui_language.tr('browser.example.search')}</b>\n"
+        f"{ui_language.tr('browser.example.search_command')}\n\n"
+        f"<b>{ui_language.tr('browser.example.logged_in')}</b>\n"
+        f"{ui_language.tr('browser.example.logged_in_command')}"
     )
 
 
@@ -96,41 +97,52 @@ def get_browser_status_text(
     extension_bridge_configured: bool | None = None,
 ) -> str:
     backend = (active_backend or "unknown").strip() or "unknown"
-    native_status = "available for this backend" if backend in CLI_NATIVE_BROWSER_BACKENDS else "not confirmed for this backend"
+    native_status = ui_language.tr(
+        "browser.native.available"
+        if backend in CLI_NATIVE_BROWSER_BACKENDS
+        else "browser.native.unknown"
+    )
 
     if brave_configured is None:
         brave_icon = "🟡"
-        brave_status = "not checked"
+        brave_status = ui_language.tr("browser.not_checked")
     else:
         brave_icon = "🟢" if brave_configured else "🔴"
-        brave_status = "configured" if brave_configured else "missing `brave_api_key`"
+        brave_status = ui_language.tr(
+            "browser.configured" if brave_configured else "browser.missing_brave"
+        )
 
     if extension_bridge_configured is None:
         extension_icon = "🟡"
-        extension_status = "not checked"
+        extension_status = ui_language.tr("browser.not_checked")
     else:
         extension_icon = "🟢" if extension_bridge_configured else "🔴"
-        extension_status = "extension bridge connected" if extension_bridge_configured else "extension bridge unavailable"
+        extension_status = ui_language.tr(
+            "browser.extension.connected"
+            if extension_bridge_configured
+            else "browser.extension.unavailable"
+        )
 
     native_icon = "🟢" if backend in CLI_NATIVE_BROWSER_BACKENDS else "🟡"
     headless_icon = "🟢"
-    headless_status = "available"
+    headless_status = ui_language.tr("browser.available")
 
     return (
         f"{card_title('🌐', 'Browser routes')}\n\n"
-        f"<b>Current</b> · backend <code>{escape(backend)}</code>\n"
-        "<b>Changes</b> · route selection applies to this request only\n\n"
-        "🟢 confirmed online • 🟡 not checked / unknown • 🔴 offline or misconfigured\n\n"
-        "<b>ROUTES</b>\n"
-        f"{headless_icon} <b>1 · HEADLESS</b> · {headless_status}\n"
-        "   Public web, JS pages, screenshots. Uses HASHI standalone Playwright/browser tools.\n"
-        f"{native_icon} <b>2 · NATIVE</b> · {native_status}\n"
-        f"   Backend-owned browsing/search. Active backend: <code>{escape(backend)}</code>.\n"
-        f"{brave_icon} <b>3 · SEARCH</b> · {escape(brave_status)}\n"
-        "   Public research with citations. Uses Brave search and source pages.\n"
-        f"{extension_icon} <b>4 · LOGGED-IN</b> · {escape(extension_status)}\n"
-        "   Real Windows browser session via HASHI extension for authenticated pages.\n\n"
-        "<b>Use</b>\n"
+        f"<b>{ui_language.tr('common.current')}</b> · "
+        f"{ui_language.tr('common.backend')} <code>{escape(backend)}</code>\n"
+        f"<b>{ui_language.tr('common.changes')}</b> · {ui_language.tr('browser.changes')}\n\n"
+        f"{ui_language.tr('browser.legend')}\n\n"
+        f"<b>{ui_language.tr('browser.routes')}</b>\n"
+        f"{headless_icon} <b>1 · {ui_language.tr('browser.route.headless')}</b> · {headless_status}\n"
+        f"   {ui_language.tr('browser.route.headless_desc')}\n"
+        f"{native_icon} <b>2 · {ui_language.tr('browser.route.native')}</b> · {native_status}\n"
+        f"   {ui_language.tr('browser.route.native_desc', backend=f'<code>{escape(backend)}</code>')}\n"
+        f"{brave_icon} <b>3 · {ui_language.tr('browser.route.search')}</b> · {brave_status}\n"
+        f"   {ui_language.tr('browser.route.search_desc')}\n"
+        f"{extension_icon} <b>4 · {ui_language.tr('browser.route.logged_in')}</b> · {extension_status}\n"
+        f"   {ui_language.tr('browser.route.logged_in_desc')}\n\n"
+        f"<b>{ui_language.tr('common.use')}</b>\n"
         "<code>/browser &lt;1-4&gt; &lt;task&gt;</code>\n"
         "<code>/browser examples</code>"
     )

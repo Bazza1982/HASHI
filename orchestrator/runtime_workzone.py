@@ -4,6 +4,7 @@ import html
 from pathlib import Path
 from typing import Any
 
+from orchestrator import ui_language
 from orchestrator.command_ui import setting_card
 from orchestrator.workzone import (
     access_root_for_workzone,
@@ -20,22 +21,24 @@ def workzone_status_text(
 ) -> str:
     active = current is not None
     facts = [
-        f"<b>Directory</b> · <code>{html.escape(str(current or home_workspace))}</code>",
-        f"<b>Agent home</b> · <code>{html.escape(str(home_workspace))}</code>",
+        f"<b>{html.escape(ui_language.tr('workzone.directory'))}</b> · "
+        f"<code>{html.escape(str(current or home_workspace))}</code>",
+        f"<b>{html.escape(ui_language.tr('workzone.agent_home'))}</b> · "
+        f"<code>{html.escape(str(home_workspace))}</code>",
     ]
     if notice:
         facts.insert(0, f"✅ {html.escape(notice)}")
     return setting_card(
         "📁",
         "Workzone",
-        current=f"<b>{'ON' if active else 'OFF'}</b>",
-        facts=facts,
-        consequence=(
-            "Future file-aware requests run from this directory. Session-capable backends start a fresh session when it changes."
-            if active
-            else "Future requests use the agent home workspace."
+        current=(
+            f"<b>{html.escape(ui_language.tr('common.on' if active else 'common.off'))}</b>"
         ),
-        action="Use <code>/workzone &lt;path&gt;</code> to set a directory or <code>/workzone off</code> to return home.",
+        facts=facts,
+        consequence=ui_language.tr(
+            "workzone.enabled" if active else "workzone.disabled"
+        ),
+        action=ui_language.tr("workzone.action"),
     )
 
 
@@ -99,7 +102,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
         return
     arg_text = " ".join(args).strip()
     if runtime._backend_busy():
-        await runtime._reply_text(update, "Workzone change is blocked while a request is running or queued.")
+        await runtime._reply_text(update, ui_language.tr("workzone.busy"))
         return
     if arg_text.lower() == "off":
         runtime_session.ensure_store(runtime).set_workzone(session["session_id"], None)
@@ -113,7 +116,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
             workzone_status_text(
                 home_workspace=runtime.workspace_dir,
                 current=None,
-                notice="Workzone returned to the agent home workspace.",
+                notice=ui_language.tr("workzone.returned"),
             ),
             parse_mode="HTML",
         )
@@ -121,7 +124,13 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
     try:
         zone = resolve_workzone_input(arg_text, runtime.global_config.project_root, runtime.workspace_dir)
     except ValueError as exc:
-        await runtime._reply_text(update, f"Workzone not changed: {html.escape(str(exc))}", parse_mode="HTML")
+        await runtime._reply_text(
+            update,
+            ui_language.tr(
+                "workzone.not_changed", reason=html.escape(str(exc))
+            ),
+            parse_mode="HTML",
+        )
         return
     runtime_session.ensure_store(runtime).set_workzone(session["session_id"], str(zone))
     runtime._workzone_dir = zone
@@ -134,7 +143,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
         workzone_status_text(
             home_workspace=runtime.workspace_dir,
             current=zone,
-            notice="Workzone updated.",
+            notice=ui_language.tr("workzone.updated"),
         ),
         parse_mode="HTML",
     )

@@ -5,6 +5,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator import ui_language
 from orchestrator.command_ui import back_label, card_title, confirm_card
 
 
@@ -18,9 +19,9 @@ def group_detail_view(directory: Any, group_name: str) -> tuple[str, InlineKeybo
     if is_dynamic:
         resolved = directory.resolve_group(group_name)
         member_display = (
-            "🔄 <i>Dynamic — all active agents</i>\n  " + ", ".join(resolved)
+            f"🔄 <i>{ui_language.tr('group.dynamic_active')}</i>\n  " + ", ".join(resolved)
             if resolved
-            else "🔄 <i>Dynamic — (none running)</i>"
+            else f"🔄 <i>{ui_language.tr('group.dynamic_none')}</i>"
         )
     elif members:
         rows = []
@@ -31,13 +32,16 @@ def group_detail_view(directory: Any, group_name: str) -> tuple[str, InlineKeybo
             rows.append(f"{emoji} {display}")
         member_display = "  " + "  ·  ".join(rows)
     else:
-        member_display = "  <i>(empty)</i>"
+        member_display = f"  <i>{ui_language.tr('common.empty')}</i>"
 
     text = (
         f"{card_title('📦', 'Agent group')}\n\n"
-        f"<b>Current</b> · <code>{html.escape(group_name)}</code>\n"
-        f"<b>Description</b> · {html.escape(str(description or 'None'))}\n\n"
-        f"<b>MEMBERS</b> · {len(directory.resolve_group(group_name))}\n"
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        f"<code>{html.escape(group_name)}</code>\n"
+        f"<b>{html.escape(ui_language.tr('group.description'))}</b> · "
+        f"{html.escape(str(description or ui_language.tr('common.none')))}\n\n"
+        f"<b>{html.escape(ui_language.tr('group.members').upper())}</b> · "
+        f"{len(directory.resolve_group(group_name))}\n"
         f"{member_display}\n"
     )
     if is_dynamic:
@@ -45,20 +49,20 @@ def group_detail_view(directory: Any, group_name: str) -> tuple[str, InlineKeybo
     else:
         buttons = [
             [
-                InlineKeyboardButton("＋ Add", callback_data=f"group:add:{group_name}"),
-                InlineKeyboardButton("－ Remove", callback_data=f"group:remove:{group_name}"),
-                InlineKeyboardButton("✏️ Rename", callback_data=f"group:rename:{group_name}"),
+                InlineKeyboardButton(ui_language.tr("group.button.add"), callback_data=f"group:add:{group_name}"),
+                InlineKeyboardButton(ui_language.tr("group.button.remove"), callback_data=f"group:remove:{group_name}"),
+                InlineKeyboardButton(ui_language.tr("group.button.rename"), callback_data=f"group:rename:{group_name}"),
             ],
             [
-                InlineKeyboardButton("🗑 Delete", callback_data=f"group:delete:{group_name}"),
+                InlineKeyboardButton(ui_language.tr("group.button.delete"), callback_data=f"group:delete:{group_name}"),
                 InlineKeyboardButton(back_label(), callback_data="group:back"),
             ],
             [
-                InlineKeyboardButton("Start all", callback_data=f"group:start:{group_name}"),
-                InlineKeyboardButton("Stop all", callback_data=f"group:stop:{group_name}"),
-                InlineKeyboardButton("Reboot all", callback_data=f"group:reboot:{group_name}"),
+                InlineKeyboardButton(ui_language.tr("group.button.start_all"), callback_data=f"group:start:{group_name}"),
+                InlineKeyboardButton(ui_language.tr("group.button.stop_all"), callback_data=f"group:stop:{group_name}"),
+                InlineKeyboardButton(ui_language.tr("group.button.reboot_all"), callback_data=f"group:reboot:{group_name}"),
             ],
-            [InlineKeyboardButton("💬 Broadcast", callback_data=f"group:broadcast:{group_name}")],
+            [InlineKeyboardButton(ui_language.tr("group.button.broadcast"), callback_data=f"group:broadcast:{group_name}")],
         ]
     return text, InlineKeyboardMarkup(buttons)
 
@@ -69,7 +73,8 @@ def group_list_view(directory: Any) -> tuple[str, InlineKeyboardMarkup]:
         lines = [
             card_title("📦", "Agent groups"),
             "",
-            f"<b>Current</b> · <code>{len(groups)}</code> groups",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            f"{ui_language.tr('group.current_count', count=f'<code>{len(groups)}</code>')}",
             "",
         ]
         for name, group in groups.items():
@@ -78,20 +83,24 @@ def group_list_view(directory: Any) -> tuple[str, InlineKeyboardMarkup]:
             count = len(directory.resolve_group(name)) if is_dynamic else len(members)
             description = group.get("description", "")
             tag = " 🔄" if is_dynamic else ""
-            lines.append(f"• <b>{name}</b>{tag}  ({count} agents) — {description}")
+            lines.append(
+                f"• <b>{name}</b>{tag}  "
+                f"({ui_language.tr('group.member_count', count=count)}) — {description}"
+            )
     else:
         lines = [
             card_title("📦", "Agent groups"),
             "",
-            "<b>Current</b> · <code>0</code> groups",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            f"{ui_language.tr('group.current_count', count='<code>0</code>')}",
             "",
-            "No groups are defined yet.",
+            ui_language.tr("group.none_defined"),
         ]
     buttons = [
         [InlineKeyboardButton(f"📦 {name}", callback_data=f"group:view:{name}")]
         for name in groups
     ]
-    buttons.append([InlineKeyboardButton("New group", callback_data="group:new")])
+    buttons.append([InlineKeyboardButton(ui_language.tr("group.button.new"), callback_data="group:new")])
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
@@ -100,7 +109,7 @@ async def cmd_group(runtime: Any, update: Any, context: Any) -> None:
         return
     directory = getattr(runtime, "agent_directory", None)
     if directory is None:
-        await runtime._reply_text(update, "❌ Agent directory unavailable.")
+        await runtime._reply_text(update, ui_language.tr("group.error.directory"))
         return
     args = [arg.strip() for arg in (context.args or []) if arg.strip()]
 
@@ -108,7 +117,7 @@ async def cmd_group(runtime: Any, update: Any, context: Any) -> None:
         if len(args) < 2:
             await runtime._reply_text(
                 update,
-                "Usage: <code>/group new &lt;name&gt;</code>",
+                ui_language.tr("group.usage.new"),
                 parse_mode="HTML",
             )
             return
@@ -131,14 +140,19 @@ async def cmd_group(runtime: Any, update: Any, context: Any) -> None:
         if len(args) < 2:
             await runtime._reply_text(
                 update,
-                "Usage: <code>/group del &lt;name&gt;</code>",
+                ui_language.tr("group.usage.delete"),
                 parse_mode="HTML",
             )
             return
         name = args[1].lower()
         buttons = [
-            [InlineKeyboardButton(f"Delete {name}", callback_data=f"group:delete_confirm:{name}")],
-            [InlineKeyboardButton("← Keep group", callback_data="group:back")],
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("group.button.delete_named", name=name),
+                    callback_data=f"group:delete_confirm:{name}",
+                )
+            ],
+            [InlineKeyboardButton(ui_language.tr("group.button.keep"), callback_data="group:back")],
         ]
         await runtime._reply_text(
             update,
@@ -146,7 +160,7 @@ async def cmd_group(runtime: Any, update: Any, context: Any) -> None:
                 "⚠️",
                 "Delete group",
                 target=f"<code>{html.escape(name)}</code>",
-                consequence="This deletes only the group definition. The agents themselves are unchanged.",
+                consequence=ui_language.tr("group.delete_effect"),
             ),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -156,7 +170,7 @@ async def cmd_group(runtime: Any, update: Any, context: Any) -> None:
     if args:
         name = args[0].lower()
         if not directory.group_exists(name):
-            await runtime._reply_text(update, f"❌ Group '{name}' not found.")
+            await runtime._reply_text(update, ui_language.tr("group.error.not_found", name=name))
             return
         text, markup = group_detail_view(directory, name)
         await runtime._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
@@ -172,7 +186,7 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
         return
     directory = getattr(runtime, "agent_directory", None)
     if directory is None:
-        await query.answer("Agent directory unavailable", show_alert=True)
+        await query.answer(ui_language.tr("group.error.directory_short"), show_alert=True)
         return
 
     parts = (query.data or "").split(":", 3)
@@ -191,7 +205,7 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
         return
     if action == "new":
         await query.edit_message_text(
-            "To create a new group, send:\n<code>/group new &lt;name&gt; [description]</code>",
+            ui_language.tr("group.create_help"),
             parse_mode="HTML",
         )
         return
@@ -199,18 +213,23 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
         buttons = [
             [
                 InlineKeyboardButton(
-                    f"Delete {group_name}",
+                    ui_language.tr("group.button.delete_named", name=group_name),
                     callback_data=f"group:delete_confirm:{group_name}",
                 )
             ],
-            [InlineKeyboardButton("← Keep group", callback_data=f"group:view:{group_name}")],
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("group.button.keep"),
+                    callback_data=f"group:view:{group_name}",
+                )
+            ],
         ]
         await query.edit_message_text(
             confirm_card(
                 "⚠️",
                 "Delete group",
                 target=f"<code>{html.escape(group_name)}</code>",
-                consequence="This deletes only the group definition. The agents themselves are unchanged.",
+                consequence=ui_language.tr("group.delete_effect"),
             ),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -233,7 +252,7 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
         available = [name for name in directory._agent_rows if name not in current]
         if not available:
             await query.edit_message_text(
-                f"All active agents are already in <b>{group_name}</b>.",
+                ui_language.tr("group.all_already_members", name=group_name),
                 parse_mode="HTML",
             )
             return
@@ -251,7 +270,7 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
             )
         buttons.append([InlineKeyboardButton(back_label(), callback_data=f"group:view:{group_name}")])
         await query.edit_message_text(
-            f"➕ Add to <b>{group_name}</b>\nSelect agents to add:",
+            ui_language.tr("group.add_title", name=group_name),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -269,7 +288,7 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
         current = directory.list_groups().get(group_name, {}).get("members", [])
         if not current:
             await query.edit_message_text(
-                f"Group <b>{group_name}</b> is empty.",
+                ui_language.tr("group.empty", name=group_name),
                 parse_mode="HTML",
             )
             return
@@ -287,7 +306,7 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
             )
         buttons.append([InlineKeyboardButton(back_label(), callback_data=f"group:view:{group_name}")])
         await query.edit_message_text(
-            f"➖ Remove from <b>{group_name}</b>\nSelect agents to remove:",
+            ui_language.tr("group.remove_title", name=group_name),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -303,8 +322,7 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
         return
     if action == "rename":
         await query.edit_message_text(
-            f"To rename group <b>{group_name}</b>, send:\n"
-            f"<code>/group rename {group_name} &lt;new_name&gt;</code>",
+            ui_language.tr("group.rename_help", name=group_name),
             parse_mode="HTML",
         )
         return
@@ -313,16 +331,24 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
         members = directory.resolve_group(group_name, exclude_self=runtime.name)
         if not members:
             await query.edit_message_text(
-                f"Group <b>{group_name}</b> has no members to act on.",
+                ui_language.tr("group.no_members_action", name=group_name),
                 parse_mode="HTML",
             )
             return
         action_label = {
-            "start": "▶ Starting",
-            "stop": "⏹ Stopping",
-            "reboot": "🔄 Rebooting",
+            "start": ui_language.tr("group.action.starting"),
+            "stop": ui_language.tr("group.action.stopping"),
+            "reboot": ui_language.tr("group.action.rebooting"),
         }[action]
-        lines = [f"<b>{action_label} group {group_name}</b> ({len(members)} agents)\n"]
+        lines = [
+            ui_language.tr(
+                "group.action_heading",
+                action=action_label,
+                name=group_name,
+                count=len(members),
+            )
+            + "\n"
+        ]
         if action == "reboot" and orchestrator:
             all_names = orchestrator.configured_agent_names()
             for name in members:
@@ -332,9 +358,9 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
                         agent_name=runtime.name,
                         agent_number=all_names.index(name) + 1,
                     )
-                    lines.append(f"  🔄 {name} — reboot queued")
+                    lines.append(f"  🔄 {name} — {ui_language.tr('group.reboot_queued')}")
                 else:
-                    lines.append(f"  ⚠️ {name} — not found")
+                    lines.append(f"  ⚠️ {name} — {ui_language.tr('group.not_found')}")
         elif action == "start" and orchestrator:
             for name in members:
                 ok, message = await orchestrator.start_agent(name)
@@ -346,23 +372,26 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
                 backend = getattr(manager, "current_backend", None)
                 if backend is not None:
                     await backend.shutdown()
-                    lines.append(f"  ⏹ {name} — stopped")
+                    lines.append(f"  ⏹ {name} — {ui_language.tr('group.stopped')}")
                 else:
-                    lines.append(f"  ⚠️ {name} — not running or unavailable")
+                    lines.append(f"  ⚠️ {name} — {ui_language.tr('group.not_running')}")
         else:
-            lines.append("⚠️ Orchestrator unavailable.")
+            lines.append(ui_language.tr("group.orchestrator_unavailable"))
         await query.edit_message_text("\n".join(lines), parse_mode="HTML")
         return
     if action == "broadcast":
         members = directory.resolve_group(group_name, exclude_self=runtime.name)
         if not members:
             await query.edit_message_text(
-                f"Group <b>{group_name}</b> has no members to broadcast to.",
+                ui_language.tr("group.no_members_broadcast", name=group_name),
                 parse_mode="HTML",
             )
             return
         await query.edit_message_text(
-            f"📢 Broadcast to group <b>{group_name}</b> ({len(members)} agents)\n\n"
-            f"Use: <code>/hchat @{group_name} &lt;your intent&gt;</code>",
+            ui_language.tr(
+                "group.broadcast_help",
+                name=group_name,
+                count=len(members),
+            ),
             parse_mode="HTML",
         )

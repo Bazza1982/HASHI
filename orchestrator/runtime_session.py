@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from orchestrator import ui_language
 from orchestrator.flexible_backend_registry import is_cli_backend
 from orchestrator.session_store import SessionConflict, SessionNotFound, SessionStore
 
@@ -600,7 +601,7 @@ async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     if runtime_busy(runtime):
-        await runtime._reply_text(update, "Session change is blocked while a request is running or queued.")
+        await runtime._reply_text(update, ui_language.tr("session.busy"))
         return
     _surface, _channel_key, resolved_owner, _explicit_session_id = (
         _update_session_route(runtime, update)
@@ -645,12 +646,14 @@ async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
                 )
         await runtime._reply_text(
             update,
-            "Could not start a new Session. The previous channel binding remains active.",
+            ui_language.tr("session.new_failed"),
         )
         return
     await runtime._reply_text(
         update,
-        f"New Session active: <code>{html.escape(session['session_id'])}</code>",
+        ui_language.tr(
+            "session.new_active", session_id=html.escape(session["session_id"])
+        ),
         parse_mode="HTML",
     )
 
@@ -660,7 +663,7 @@ async def cmd_fresh(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     if runtime_busy(runtime):
-        await runtime._reply_text(update, "Fresh context is blocked while a request is running or queued.")
+        await runtime._reply_text(update, ui_language.tr("session.fresh_busy"))
         return
     session = current_session_for_update(runtime, update)
     updated = ensure_store(runtime).start_fresh_generation(
@@ -678,7 +681,9 @@ async def cmd_fresh(runtime: Any, update: Any, context: Any) -> None:
     await _reset_cli_backend(runtime, reason="cmd_fresh_context_generation")
     await runtime._reply_text(
         update,
-        f"Fresh context generation {updated['context_generation']} started. Session records were retained.",
+        ui_language.tr(
+            "session.fresh_started", generation=updated["context_generation"]
+        ),
     )
 
 
@@ -693,10 +698,12 @@ async def cmd_sessions(runtime: Any, update: Any, context: Any) -> None:
     rows = ensure_store(runtime).list_sessions(
         owner_id=resolved_owner, agent_id=runtime.name, include_archived=True
     )
-    lines = ["<b>Sessions</b>"]
+    lines = [f"<b>{html.escape(ui_language.tr('session.list'))}</b>"]
     for index, row in enumerate(rows, start=1):
         marker = "*" if row["session_id"] == current["session_id"] else " "
-        default = " default" if row["is_default"] else ""
+        default = (
+            " " + ui_language.tr("session.default") if row["is_default"] else ""
+        )
         lines.append(
             f"{marker} {index}. <code>{html.escape(row['session_id'])}</code> "
             f"{html.escape(row['title'])} [{html.escape(row['status'])}{default}]"
@@ -732,10 +739,12 @@ async def cmd_use(runtime: Any, update: Any, context: Any) -> None:
         return
     args = list(getattr(context, "args", None) or [])
     if not args:
-        await runtime._reply_text(update, "Usage: /use <Session number or ID>")
+        await runtime._reply_text(
+            update, ui_language.tr("session.usage_use"), parse_mode="HTML"
+        )
         return
     if runtime_busy(runtime):
-        await runtime._reply_text(update, "Session change is blocked while a request is running or queued.")
+        await runtime._reply_text(update, ui_language.tr("session.busy"))
         return
     try:
         _surface, _channel_key, resolved_owner, _explicit_session_id = (
@@ -747,7 +756,7 @@ async def cmd_use(runtime: Any, update: Any, context: Any) -> None:
             explicit_owner_id=resolved_owner,
         )
     except SessionNotFound:
-        await runtime._reply_text(update, "Session not found or selection is ambiguous.")
+        await runtime._reply_text(update, ui_language.tr("session.not_found"))
         return
     await _bind_session(runtime, update, session["session_id"])
     _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
@@ -758,7 +767,11 @@ async def cmd_use(runtime: Any, update: Any, context: Any) -> None:
         sync()
     await runtime._reply_text(
         update,
-        f"Using Session <code>{html.escape(session['session_id'])}</code>: {html.escape(session['title'])}",
+        ui_language.tr(
+            "session.using",
+            session_id=html.escape(session["session_id"]),
+            title=html.escape(session["title"]),
+        ),
         parse_mode="HTML",
     )
 
@@ -771,9 +784,9 @@ async def cmd_current(runtime: Any, update: Any, context: Any) -> None:
     await runtime._reply_text(
         update,
         (
-            f"Current Session: <code>{html.escape(session['session_id'])}</code>\n"
-            f"Title: {html.escape(session['title'])}\n"
-            f"Context generation: {session['context_generation']}"
+            f"{html.escape(ui_language.tr('session.current'))}: <code>{html.escape(session['session_id'])}</code>\n"
+            f"{html.escape(ui_language.tr('session.title'))}: {html.escape(session['title'])}\n"
+            f"{html.escape(ui_language.tr('session.generation'))}: {session['context_generation']}"
         ),
         parse_mode="HTML",
     )
@@ -803,7 +816,7 @@ async def cmd_archive(runtime: Any, update: Any, context: Any) -> None:
         sync()
     await runtime._reply_text(
         update,
-        "Session archived. Its messages, logs, and promoted memories were retained; the default Session is active.",
+        ui_language.tr("session.archived"),
     )
 
 
@@ -870,9 +883,17 @@ async def cmd_promote(runtime: Any, update: Any, context: Any) -> None:
         await runtime._reply_text(
             update,
             (
-                f"Promotion: {'on' if schedule.get('enabled') else 'off'} at "
-                f"{schedule.get('local_time')} ({schedule.get('timezone')}); "
-                f"{status['pending_count']} pending, {status['promoted_count']} promoted."
+                f"{ui_language.tr('session.promotion')}: "
+                + ui_language.tr(
+                    "session.promotion_status",
+                    state=ui_language.tr(
+                        "common.on" if schedule.get("enabled") else "common.off"
+                    ),
+                    time=schedule.get("local_time"),
+                    timezone=schedule.get("timezone"),
+                    pending=status["pending_count"],
+                    promoted=status["promoted_count"],
+                )
             ),
         )
         return
@@ -883,14 +904,20 @@ async def cmd_promote(runtime: Any, update: Any, context: Any) -> None:
         )
         await runtime._reply_text(
             update,
-            f"Promoted {result['promoted_count']} completed exchange(s); {result['pending_count']} remain.",
+            ui_language.tr(
+                "session.promoted_current",
+                promoted=result["promoted_count"],
+                pending=result["pending_count"],
+            ),
         )
         return
     if action == "all" and len(args) >= 2 and args[1].lower() == "now":
         result = promote_sessions(runtime, trigger="manual_all")
         await runtime._reply_text(
             update,
-            f"Promoted {result['promoted_count']} completed exchange(s) across all Sessions.",
+            ui_language.tr(
+                "session.promoted_all", promoted=result["promoted_count"]
+            ),
         )
         return
     if action == "auto" and len(args) >= 2 and args[1].lower() in {"on", "off"}:
@@ -898,7 +925,15 @@ async def cmd_promote(runtime: Any, update: Any, context: Any) -> None:
             agent_id=runtime.name, enabled=args[1].lower() == "on"
         )
         await runtime._reply_text(
-            update, f"Automatic promotion {'enabled' if schedule['enabled'] else 'disabled'}."
+            update,
+            ui_language.tr(
+                "session.promotion_auto",
+                state=ui_language.tr(
+                    "session.promotion_enabled"
+                    if schedule["enabled"]
+                    else "session.promotion_disabled"
+                ),
+            ),
         )
         return
     if action in {"time", "manual"} and len(args) >= 2:
@@ -910,12 +945,16 @@ async def cmd_promote(runtime: Any, update: Any, context: Any) -> None:
         )
         await runtime._reply_text(
             update,
-            f"Automatic promotion set to {schedule['local_time']} ({schedule['timezone']}).",
+            ui_language.tr(
+                "session.promotion_time",
+                time=schedule["local_time"],
+                timezone=schedule["timezone"],
+            ),
         )
         return
     await runtime._reply_text(
         update,
-        "Usage: /promote status|now|all now|auto on|auto off|time HH:MM [timezone]",
+        ui_language.tr("session.promotion_usage"),
     )
 
 

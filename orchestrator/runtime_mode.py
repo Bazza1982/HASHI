@@ -5,6 +5,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator import ui_language
 from orchestrator.command_ui import card_title, selected_label
 from orchestrator.audit_mode import load_audit_config
 from orchestrator.dual_brain_mode import ensure_dual_brain_observer, load_dual_brain_config
@@ -15,6 +16,26 @@ from orchestrator.memory_plus_mode import (
     set_memory_plus_enabled,
 )
 from orchestrator.wrapper_mode import load_wrapper_config
+
+
+def _mode_key(mode: str) -> str:
+    return "dual_brain" if mode == "dual-brain" else mode.replace("+", "_plus")
+
+
+def _mode_label(mode: str) -> str:
+    key = f"mode.label.{_mode_key(mode)}"
+    translated = ui_language.tr(key)
+    return mode if translated == key else translated
+
+
+def _choice_line(mode: str) -> str:
+    label = _mode_label(mode)
+    description = ui_language.tr(f"mode.description.{_mode_key(mode)}")
+    if ui_language.current_locale() == ui_language.DEFAULT_LOCALE:
+        name = mode
+    else:
+        name = f"{escape(label)} <code>{escape(mode)}</code>"
+    return f"• <b>{name}</b> — {escape(description)}"
 
 
 def activate_flex_mode(runtime: Any) -> str:
@@ -34,16 +55,16 @@ def mode_keyboard(current: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(selected_label("Fixed", current == "fixed"), callback_data="tgl:mode:fixed"),
-                InlineKeyboardButton(selected_label("Flex", current == "flex"), callback_data="tgl:mode:flex"),
+                InlineKeyboardButton(selected_label(_mode_label("fixed"), current == "fixed"), callback_data="tgl:mode:fixed"),
+                InlineKeyboardButton(selected_label(_mode_label("flex"), current == "flex"), callback_data="tgl:mode:flex"),
             ],
             [
-                InlineKeyboardButton(selected_label("Wrapper", current == "wrapper"), callback_data="tgl:mode:wrapper"),
-                InlineKeyboardButton(selected_label("Audit", current == "audit"), callback_data="tgl:mode:audit"),
+                InlineKeyboardButton(selected_label(_mode_label("wrapper"), current == "wrapper"), callback_data="tgl:mode:wrapper"),
+                InlineKeyboardButton(selected_label(_mode_label("audit"), current == "audit"), callback_data="tgl:mode:audit"),
             ],
             [
                 InlineKeyboardButton(
-                    selected_label("Dual brain", current == "dual-brain"),
+                    selected_label(_mode_label("dual-brain"), current == "dual-brain"),
                     callback_data="tgl:mode:dual-brain",
                 ),
             ],
@@ -69,10 +90,7 @@ async def cmd_mode(runtime: Any, update: Any, context: Any) -> None:
         runtime.reload_post_turn_observers()
         await runtime._reply_text(
             update,
-            "Memory+ continuity is now **ON**.\n"
-            f"• Working mode remains **{current}**\n"
-            "• Memory+ now works across Flex, Fixed, Wrapper, Audit, and Dual Brain\n"
-            "• Use `/memory plus off` to pause it",
+            ui_language.tr("mode.memory.enabled", mode=current),
             parse_mode="Markdown",
         )
         return
@@ -82,22 +100,27 @@ async def cmd_mode(runtime: Any, update: Any, context: Any) -> None:
         await runtime._reply_text(
             update,
             f"{card_title('🧭', 'Hashi mode')}\n\n"
-            f"<b>Current</b> · <code>{escape(str(current))}</code>\n"
-            f"<b>Memory+</b> · <code>{continuity}</code> · independent continuity layer\n\n"
-            f"<b>CHOOSE A WORKING MODE</b>\n"
-            f"• <b>fixed</b> — continuous CLI session, incremental prompts\n"
-            f"• <b>flex</b> — multi-backend switching, full context injection\n"
-            f"• <b>wrapper</b> — configure core/wrapper model pair with /core and /wrap\n"
-            f"• <b>audit</b> — configure core/audit model pair with /core and /audit\n"
-            f"• <b>dual-brain</b> — left-brain memory preflight + right-brain execution; configure with /brain\n\n"
-            "Working-mode changes persist; Memory+ remains independent. Use <code>/memory plus on|off</code>.",
+            f"<b>{escape(ui_language.tr('common.current'))}</b> · <code>{escape(str(current))}</code>\n"
+            f"<b>Memory+</b> · <code>{escape(continuity)}</code> · "
+            f"{escape(ui_language.tr('mode.memory_independent'))}\n\n"
+            f"<b>{escape(ui_language.tr('mode.choose'))}</b>\n"
+            f"{_choice_line('fixed')}\n"
+            f"{_choice_line('flex')}\n"
+            f"{_choice_line('wrapper')}\n"
+            f"{_choice_line('audit')}\n"
+            f"{_choice_line('dual-brain')}\n\n"
+            f"{ui_language.tr('mode.effect')}",
             parse_mode="HTML",
             reply_markup=mode_keyboard(current),
         )
         return
 
     if args == current:
-        await runtime._reply_text(update, f"Already in **{current}** mode.", parse_mode="Markdown")
+        await runtime._reply_text(
+            update,
+            ui_language.tr("mode.already", mode=current),
+            parse_mode="Markdown",
+        )
         return
 
     await switch_mode_from_command(runtime, update, args)
@@ -110,9 +133,10 @@ async def switch_mode_from_command(runtime: Any, update: Any, target_mode: str) 
         if capabilities is not None and not getattr(capabilities, "supports_sessions", False):
             await runtime._reply_text(
                 update,
-                "Fixed mode requires a backend with real persistent-session support.\n"
-                f"`{runtime.config.active_backend}` is stateless, so the current mode was kept.\n"
-                "Use `/mode flex`, or choose Codex CLI, Claude CLI, or Grok CLI first.",
+                ui_language.tr(
+                    "mode.fixed.requires_session",
+                    backend=runtime.config.active_backend,
+                ),
                 parse_mode="Markdown",
             )
             return
@@ -122,11 +146,7 @@ async def switch_mode_from_command(runtime: Any, update: Any, target_mode: str) 
             backend.set_session_mode(True)
         await runtime._reply_text(
             update,
-            "Switched to **fixed** mode.\n"
-            "• CLI session will persist across messages\n"
-            "• Bridge sends incremental prompts (no history re-injection)\n"
-            "• `/backend` is disabled; use `/mode flex` to re-enable\n"
-            "• `/new` will terminate the current session and start fresh",
+            ui_language.tr("mode.fixed.switched"),
             parse_mode="Markdown",
         )
         return
@@ -135,9 +155,7 @@ async def switch_mode_from_command(runtime: Any, update: Any, target_mode: str) 
         activate_flex_mode(runtime)
         await runtime._reply_text(
             update,
-            "Switched to **flex** mode.\n"
-            "• Full context injection per request\n"
-            "• `/backend` switching re-enabled",
+            ui_language.tr("mode.flex.switched"),
             parse_mode="Markdown",
         )
         return
@@ -161,9 +179,12 @@ async def switch_mode_from_command(runtime: Any, update: Any, target_mode: str) 
         if not switch_ok:
             await runtime._reply_text(
                 update,
-                "Dual-brain mode was not activated.\n"
-                f"• Right brain: `{cfg.right_backend}` / `{cfg.right_model}`\n"
-                f"• Reason: {switch_message}",
+                ui_language.tr(
+                    "mode.dual_brain.failed",
+                    backend=cfg.right_backend,
+                    model=cfg.right_model,
+                    reason=switch_message,
+                ),
                 parse_mode="Markdown",
             )
             return
@@ -173,12 +194,14 @@ async def switch_mode_from_command(runtime: Any, update: Any, target_mode: str) 
         runtime.backend_manager._save_state()
         await runtime._reply_text(
             update,
-            "Switched to **dual-brain** mode.\n"
-            f"• Left brain: `{cfg.left_backend}` / `{cfg.left_model}`\n"
-            f"• Right brain: `{cfg.right_backend}` / `{cfg.right_model}`\n"
-            f"{switch_message}\n"
-            "• Use `/brain` to configure left/right models and custom prompts\n"
-            "• Active `/sys` slots remain part of the right-brain runtime prompt",
+            ui_language.tr(
+                "mode.dual_brain.switched",
+                left_backend=cfg.left_backend,
+                left_model=cfg.left_model,
+                right_backend=cfg.right_backend,
+                right_model=cfg.right_model,
+                detail=switch_message,
+            ),
             parse_mode="Markdown",
         )
         return
@@ -193,9 +216,12 @@ async def switch_mode_from_command(runtime: Any, update: Any, target_mode: str) 
         if not switch_ok:
             await runtime._reply_text(
                 update,
-                "Wrapper mode was not activated.\n"
-                f"• Core: `{cfg.core_backend}` / `{cfg.core_model}`\n"
-                f"• Reason: {switch_message}",
+                ui_language.tr(
+                    "mode.wrapper.failed",
+                    backend=cfg.core_backend,
+                    model=cfg.core_model,
+                    reason=switch_message,
+                ),
                 parse_mode="Markdown",
             )
             return
@@ -203,13 +229,17 @@ async def switch_mode_from_command(runtime: Any, update: Any, target_mode: str) 
         runtime.backend_manager._save_state()
         await runtime._reply_text(
             update,
-            "Switched to **wrapper** mode.\n"
-            f"• Core: `{cfg.core_backend}` / `{cfg.core_model}`\n"
-            f"• Wrapper: `{cfg.wrapper_backend}` / `{cfg.wrapper_model}`\n"
-            f"• Active core: {'ready' if switch_ok else 'not changed'}\n"
-            f"{switch_message}\n"
-            "• Use `/core`, `/wrap`, and `/wrapper` to configure\n"
-            "• User-visible responses are rewritten through the wrapper model",
+            ui_language.tr(
+                "mode.wrapper.switched",
+                core_backend=cfg.core_backend,
+                core_model=cfg.core_model,
+                wrapper_backend=cfg.wrapper_backend,
+                wrapper_model=cfg.wrapper_model,
+                core_state=ui_language.tr(
+                    "mode.core.ready" if switch_ok else "mode.core.unchanged"
+                ),
+                detail=switch_message,
+            ),
             parse_mode="Markdown",
         )
         return
@@ -223,9 +253,12 @@ async def switch_mode_from_command(runtime: Any, update: Any, target_mode: str) 
     if not switch_ok:
         await runtime._reply_text(
             update,
-            "Audit mode was not activated.\n"
-            f"• Core: `{cfg.core_backend}` / `{cfg.core_model}`\n"
-            f"• Reason: {switch_message}",
+            ui_language.tr(
+                "mode.audit.failed",
+                backend=cfg.core_backend,
+                model=cfg.core_model,
+                reason=switch_message,
+            ),
             parse_mode="Markdown",
         )
         return
@@ -233,14 +266,16 @@ async def switch_mode_from_command(runtime: Any, update: Any, target_mode: str) 
     runtime.backend_manager._save_state()
     await runtime._reply_text(
         update,
-        "Switched to **audit** mode.\n"
-        f"• Core: `{cfg.core_backend}` / `{cfg.core_model}`\n"
-        f"• Audit: `{cfg.audit_backend}` / `{cfg.audit_model}`\n"
-        f"• Delivery: `{cfg.delivery}`\n"
-        f"• Threshold: `{cfg.severity_threshold}`\n"
-        f"{switch_message}\n"
-        "• Use `/core` and `/audit` to configure\n"
-        "• Core responses are delivered unchanged; audit findings follow separately",
+        ui_language.tr(
+            "mode.audit.switched",
+            core_backend=cfg.core_backend,
+            core_model=cfg.core_model,
+            audit_backend=cfg.audit_backend,
+            audit_model=cfg.audit_model,
+            delivery=cfg.delivery,
+            threshold=cfg.severity_threshold,
+            detail=switch_message,
+        ),
         parse_mode="Markdown",
     )
 
@@ -253,16 +288,14 @@ async def callback_mode_toggle(runtime: Any, query: Any, value: str) -> None:
         ensure_memory_plus_notepad(runtime.workspace_dir)
         runtime.reload_post_turn_observers()
         await query.edit_message_text(
-            f"Mode: <b>{current}</b>\n"
-            "Memory+ continuity: <b>ON</b>\n"
-            "The working mode was not changed. Use <code>/memory plus off</code> to pause continuity.",
+            ui_language.tr("mode.callback.memory", mode=escape(str(current))),
             parse_mode="HTML",
             reply_markup=mode_keyboard(current),
         )
-        await query.answer("Memory+ enabled")
+        await query.answer(ui_language.tr("mode.callback.memory_enabled"))
         return
     if value == current:
-        await query.answer(f"Already in {current} mode.")
+        await query.answer(ui_language.tr("mode.callback.already", mode=current))
         return
 
     backend = runtime.backend_manager.current_backend
@@ -276,11 +309,14 @@ async def callback_mode_toggle(runtime: Any, query: Any, value: str) -> None:
         if capabilities is not None and not getattr(capabilities, "supports_sessions", False):
             runtime.backend_manager.agent_mode = current
             runtime.backend_manager._save_state()
-            await query.answer("Fixed mode requires a session-capable backend.", show_alert=True)
+            await query.answer(
+                ui_language.tr("mode.callback.fixed_requires_session"),
+                show_alert=True,
+            )
             return
         if hasattr(backend, "set_session_mode"):
             backend.set_session_mode(True)
-        detail = "CLI session persists · /backend disabled"
+        detail = ui_language.tr("mode.callback.detail.fixed")
     elif value in {"wrapper", "audit", "dual-brain"}:
         if hasattr(backend, "set_session_mode"):
             backend.set_session_mode(False)
@@ -294,9 +330,13 @@ async def callback_mode_toggle(runtime: Any, query: Any, value: str) -> None:
             )
             if not switch_ok:
                 value = _restore_mode_after_failed_switch(runtime, current)
-                detail = f"Wrapper not activated · core switch failed ({switch_message})"
+                detail = ui_language.tr(
+                    "mode.callback.detail.wrapper_failed", reason=switch_message
+                )
             else:
-                detail = f"Core/wrapper mode · use /core and /wrap · core ready ({switch_message})"
+                detail = ui_language.tr(
+                    "mode.callback.detail.wrapper", detail=switch_message
+                )
         elif value == "audit":
             cfg = load_audit_config(state)
             switch_ok, switch_message = await runtime._activate_wrapper_core_backend(
@@ -306,9 +346,13 @@ async def callback_mode_toggle(runtime: Any, query: Any, value: str) -> None:
             )
             if not switch_ok:
                 value = _restore_mode_after_failed_switch(runtime, current)
-                detail = f"Audit not activated · core switch failed ({switch_message})"
+                detail = ui_language.tr(
+                    "mode.callback.detail.audit_failed", reason=switch_message
+                )
             else:
-                detail = f"Core/audit mode · use /core and /audit · core ready ({switch_message})"
+                detail = ui_language.tr(
+                    "mode.callback.detail.audit", detail=switch_message
+                )
         else:
             cfg = load_dual_brain_config(
                 state,
@@ -322,20 +366,28 @@ async def callback_mode_toggle(runtime: Any, query: Any, value: str) -> None:
             )
             if not switch_ok:
                 value = _restore_mode_after_failed_switch(runtime, current)
-                detail = f"Dual-brain not activated · right brain switch failed ({switch_message})"
+                detail = ui_language.tr(
+                    "mode.callback.detail.dual_failed", reason=switch_message
+                )
             else:
                 ensure_dual_brain_observer(runtime.workspace_dir)
                 runtime.reload_post_turn_observers()
-                detail = f"Left/right brain mode · use /brain · right brain ready ({switch_message})"
+                detail = ui_language.tr(
+                    "mode.callback.detail.dual", detail=switch_message
+                )
     else:
-        detail = "Full context injection · /backend enabled"
+        detail = ui_language.tr("mode.callback.detail.flex")
 
     await query.edit_message_text(
-        f"Mode: <b>{value}</b>\n{detail}",
+        ui_language.tr(
+            "mode.callback.result",
+            mode=escape(str(value)),
+            detail=detail,
+        ),
         parse_mode="HTML",
         reply_markup=mode_keyboard(value),
     )
-    await query.answer(f"Switched to {value}")
+    await query.answer(ui_language.tr("mode.callback.switched", mode=value))
 
 
 def _restore_mode_after_failed_switch(runtime: Any, mode: str) -> str:

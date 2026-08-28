@@ -7,6 +7,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator import ui_language
 from orchestrator.command_ui import back_label, card_title, refresh_label, selected_label
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
 from orchestrator.human_restart import build_human_restart_proof, human_restart_secret_path, load_human_restart_secret
@@ -40,7 +41,7 @@ def _authorized(runtime: Any, update: Any) -> bool:
 def _gateway_status_text(runtime: Any) -> str:
     service_manager = _service_manager(runtime)
     if service_manager is None:
-        return "API Gateway control is unavailable."
+        return ui_language.tr("api.control_unavailable")
     snapshot = service_manager.api_gateway_state_snapshot()
     state_icon = "🟢" if snapshot["running"] else ("🟡" if snapshot["enabled"] else "⚪")
     base_url = snapshot.get("base_url") or "http://127.0.0.1:18801"
@@ -48,15 +49,18 @@ def _gateway_status_text(runtime: Any) -> str:
         [
             card_title("🔌", "Hashi API gateway"),
             "",
-            f"<b>Current</b> · <b>{'ON' if snapshot['running'] else 'OFF'}</b> · {state_icon}",
-            f"<b>Starts after reboot</b> · <code>{'yes' if snapshot['enabled'] else 'no'}</code>",
-            f"<b>Default model</b> · <code>{html.escape(snapshot['default_model'])}</code>",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            f"<b>{html.escape(ui_language.tr('common.on' if snapshot['running'] else 'common.off'))}</b> · {state_icon}",
+            f"<b>{html.escape(ui_language.tr('api.starts_after_reboot'))}</b> · "
+            f"<code>{html.escape(ui_language.tr('api.yes' if snapshot['enabled'] else 'api.no'))}</code>",
+            f"<b>{html.escape(ui_language.tr('api.default_model'))}</b> · "
+            f"<code>{html.escape(snapshot['default_model'])}</code>",
             "",
-            f"<b>Address</b> · <code>{html.escape(base_url)}</code>",
-            f"Chat · <code>{html.escape(base_url)}/v1/chat/completions</code>",
-            f"Images · <code>{html.escape(base_url)}/v1/images/generations</code>",
-            f"Videos · <code>{html.escape(base_url)}/v1/videos/generations</code>",
-            f"Models · <code>{html.escape(base_url)}/v1/models</code>",
+            f"<b>{html.escape(ui_language.tr('api.address'))}</b> · <code>{html.escape(base_url)}</code>",
+            f"{html.escape(ui_language.tr('api.endpoint.chat'))} · <code>{html.escape(base_url)}/v1/chat/completions</code>",
+            f"{html.escape(ui_language.tr('api.endpoint.images'))} · <code>{html.escape(base_url)}/v1/images/generations</code>",
+            f"{html.escape(ui_language.tr('api.endpoint.videos'))} · <code>{html.escape(base_url)}/v1/videos/generations</code>",
+            f"{html.escape(ui_language.tr('api.endpoint.models'))} · <code>{html.escape(base_url)}/v1/models</code>",
         ]
     )
 
@@ -66,11 +70,11 @@ def _gateway_status_keyboard(runtime: Any) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(selected_label("On", snapshot["enabled"]), callback_data="apigw:on"),
-                InlineKeyboardButton(selected_label("Off", not snapshot["enabled"]), callback_data="apigw:off"),
+                InlineKeyboardButton(selected_label(ui_language.tr("api.button.on"), snapshot["enabled"]), callback_data="apigw:on"),
+                InlineKeyboardButton(selected_label(ui_language.tr("api.button.off"), not snapshot["enabled"]), callback_data="apigw:off"),
             ],
             [
-                InlineKeyboardButton("Choose model", callback_data="apigw:menu:model"),
+                InlineKeyboardButton(ui_language.tr("api.button.default_model"), callback_data="apigw:menu:model"),
                 InlineKeyboardButton(refresh_label(), callback_data="apigw:refresh"),
             ],
         ]
@@ -108,7 +112,7 @@ async def api_command(runtime: Any, update: Any, context: Any) -> None:
         return
     service_manager = _service_manager(runtime)
     if service_manager is None:
-        await runtime._reply_text(update, "API Gateway control is unavailable.")
+        await runtime._reply_text(update, ui_language.tr("api.control_unavailable"))
         return
     args = [str(arg).strip() for arg in (getattr(context, "args", []) or []) if str(arg).strip()]
     action = (args[0].lower() if args else "status")
@@ -154,7 +158,11 @@ async def api_command(runtime: Any, update: Any, context: Any) -> None:
             reply_markup=_gateway_model_keyboard(runtime),
         )
         return
-    await runtime._reply_text(update, "Usage: /api [status|on|off|model <name>]")
+    await runtime._reply_text(
+        update,
+        ui_language.tr("api.usage"),
+        parse_mode="HTML",
+    )
 
 
 def _restart_auth_kwargs() -> dict[str, str | None]:
@@ -214,22 +222,31 @@ def _restart_status_text(payload: dict[str, Any] | None = None, *, error: str | 
     lines = [
         card_title("🛠️", "Hard restart"),
         "",
-        "<b>Current</b> · controlled by WatchTower",
-        f"Controller: <code>{WATCHTOWER_INSTANCE}</code>",
-        f"WatchTower API: <code>{html.escape(_watchtower_address())}</code>",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · {ui_language.tr('restart.current')}",
+        f"{ui_language.tr('restart.controller')}: <code>{WATCHTOWER_INSTANCE}</code>",
+        f"{ui_language.tr('restart.watchtower_api')}: <code>{html.escape(_watchtower_address())}</code>",
     ]
     if error:
         lines.append(f"Status: <code>{html.escape(error)}</code>")
         return "\n".join(lines)
     if payload:
-        lines.append(f"Controlled state: <code>{html.escape(str(payload.get('state') or 'unknown'))}</code>")
+        lines.append(
+            f"{ui_language.tr('restart.controlled_state')}: "
+            f"<code>{html.escape(str(payload.get('state') or ui_language.tr('common.unknown')))}</code>"
+        )
         workbench_url = payload.get("workbench_url")
         if workbench_url:
-            lines.append(f"Controlled workbench: <code>{html.escape(str(workbench_url))}</code>")
+            lines.append(
+                f"{ui_language.tr('restart.controlled_workbench')}: "
+                f"<code>{html.escape(str(workbench_url))}</code>"
+            )
         if payload.get("pid"):
             lines.append(f"PID: <code>{int(payload['pid'])}</code>")
     else:
-        lines.append("Controlled state: <code>unknown</code>")
+        lines.append(
+            f"{ui_language.tr('restart.controlled_state')}: "
+            f"<code>{html.escape(ui_language.tr('common.unknown'))}</code>"
+        )
     return "\n".join(lines)
 
 
@@ -237,8 +254,8 @@ def _restart_status_keyboard(confirm: bool = False, *, available: bool = True) -
     if confirm:
         return InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("Restart Hashi", callback_data="hardrestart:confirm")],
-                [InlineKeyboardButton("← Keep Hashi running", callback_data="hardrestart:cancel")],
+                [InlineKeyboardButton(ui_language.tr("restart.button.restart"), callback_data="hardrestart:confirm")],
+                [InlineKeyboardButton(ui_language.tr("restart.button.keep"), callback_data="hardrestart:cancel")],
             ]
         )
     if not available:
@@ -246,7 +263,7 @@ def _restart_status_keyboard(confirm: bool = False, *, available: bool = True) -
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Hard Restart", callback_data="hardrestart:arm"),
+                InlineKeyboardButton(ui_language.tr("restart.button.hard"), callback_data="hardrestart:arm"),
                 InlineKeyboardButton(refresh_label(), callback_data="hardrestart:refresh"),
             ]
         ]
@@ -257,13 +274,15 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
     if not _authorized(runtime, update):
         return
     if getattr(runtime, "_watchtower_restart_inflight", False):
-        await runtime._reply_text(update, "Restart is already in progress.")
+        await runtime._reply_text(update, ui_language.tr("api.restart.in_progress"))
         return
     available, error, _payload = await _watchtower_restart_available()
     if not available:
         await runtime._reply_text(
             update,
-            _restart_status_text(error=error or "WatchTower unavailable"),
+            _restart_status_text(
+                error=error or ui_language.tr("api.restart.watchtower_unavailable")
+            ),
             parse_mode="HTML",
         )
         return
@@ -277,7 +296,9 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
         logger.warning("Failed to build Telegram restart payload: %s", exc)
         await runtime._reply_text(
             update,
-            f"❌ WatchTower restart is not configured safely:\n<code>{html.escape(str(exc))}</code>",
+            ui_language.tr(
+                "api.restart.setup_error", reason=html.escape(str(exc))
+            ),
             parse_mode="HTML",
         )
         return
@@ -285,7 +306,7 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
     chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
     await runtime._reply_text(
         update,
-        "🔁 WatchTower hard restart requested.\nThis bot may go quiet briefly while HASHI stops and comes back.",
+        ui_language.tr("api.restart.requested"),
     )
     asyncio.create_task(_dispatch_watchtower_restart(runtime, chat_id, request_payload))
 
@@ -318,13 +339,19 @@ async def _dispatch_watchtower_restart(runtime: Any, chat_id: int | None, reques
         except Exception as exc:
             logger.warning("WatchTower restart HTTP call failed or timed out: %s", exc)
             if chat_id is not None:
-                await runtime._send_text(chat_id, f"WatchTower restart request failed: {exc}")
+                await runtime._send_text(
+                    chat_id,
+                    ui_language.tr("api.restart.failed", reason=str(exc)),
+                )
             return
         if code != 0:
             detail = payload.get("error") or payload.get("detail") or "remote error"
             logger.warning("WatchTower hard restart rejected: %s", detail)
             if chat_id is not None:
-                await runtime._send_text(chat_id, f"WatchTower restart request failed: {detail}")
+                await runtime._send_text(
+                    chat_id,
+                    ui_language.tr("api.restart.failed", reason=str(detail)),
+                )
     finally:
         setattr(runtime, "_watchtower_restart_inflight", False)
 
@@ -332,12 +359,12 @@ async def _dispatch_watchtower_restart(runtime: Any, chat_id: int | None, reques
 async def api_callback(runtime: Any, update: Any, context: Any) -> None:
     query = update.callback_query
     if not runtime._is_authorized_user(query.from_user.id):
-        await query.answer("Not authorized.", show_alert=True)
+        await query.answer(ui_language.tr("api.restart.not_authorized"), show_alert=True)
         return
     data = query.data or ""
     service_manager = _service_manager(runtime)
     if service_manager is None:
-        await query.answer("API Gateway control unavailable.", show_alert=True)
+        await query.answer(ui_language.tr("api.control_unavailable"), show_alert=True)
         return
     try:
         if data == "apigw:on":
@@ -362,11 +389,14 @@ async def api_callback(runtime: Any, update: Any, context: Any) -> None:
                 reply_markup=_gateway_model_keyboard(runtime),
             )
         else:
-            await query.answer("Unknown API control.", show_alert=True)
+            await query.answer(ui_language.tr("api.control_unknown"), show_alert=True)
             return
     except Exception as exc:
         logger.exception("API gateway callback failed")
-        await query.answer(f"Error: {exc}", show_alert=True)
+        await query.answer(
+            ui_language.tr("model.callback_error", reason=str(exc)),
+            show_alert=True,
+        )
         return
     await query.answer()
 
@@ -374,29 +404,35 @@ async def api_callback(runtime: Any, update: Any, context: Any) -> None:
 async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
     query = update.callback_query
     if not runtime._is_authorized_user(query.from_user.id):
-        await query.answer("Not authorized.", show_alert=True)
+        await query.answer(ui_language.tr("api.restart.not_authorized"), show_alert=True)
         return
     data = query.data or ""
     if data == "hardrestart:cancel":
-        await query.edit_message_text("Hard restart cancelled.")
+        await query.edit_message_text(ui_language.tr("api.restart.cancelled"))
         await query.answer()
         return
     if data == "hardrestart:arm":
         available, error, _payload = await _watchtower_restart_available()
         if not available:
             await query.edit_message_text(
-                _restart_status_text(error=error or "WatchTower unavailable"),
+                _restart_status_text(
+                    error=error
+                    or ui_language.tr("api.restart.watchtower_unavailable")
+                ),
                 parse_mode="HTML",
                 reply_markup=_restart_status_keyboard(confirm=False, available=False),
             )
-            await query.answer("WatchTower unavailable.", show_alert=True)
+            await query.answer(
+                ui_language.tr("api.restart.watchtower_unavailable"),
+                show_alert=True,
+            )
             return
         instance_id = html.escape(_instance_id(runtime))
         await query.edit_message_text(
             f"{card_title('⚠️', 'Confirm hard restart')}\n\n"
-            f"<b>Target</b> · <code>{instance_id}</code>\n\n"
-            f"WatchTower will stop this {instance_id} process, restart it, and verify health.\n\n"
-            f"Confirm below, or keep {instance_id} running.",
+            f"<b>{html.escape(ui_language.tr('api.restart.confirm_target'))}</b> · <code>{instance_id}</code>\n\n"
+            f"{ui_language.tr('api.restart.confirm_effect', instance=instance_id)}\n\n"
+            f"{ui_language.tr('api.restart.confirm_action', instance=instance_id)}",
             parse_mode="HTML",
             reply_markup=_restart_status_keyboard(confirm=True),
         )
@@ -411,7 +447,15 @@ async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
                 **_restart_auth_kwargs(),
             )
             restart_available = code == 0
-            text = _restart_status_text(payload, error=None if restart_available else payload.get("error") or "remote error")
+            text = _restart_status_text(
+                payload,
+                error=(
+                    None
+                    if restart_available
+                    else payload.get("error")
+                    or ui_language.tr("api.restart.remote_error")
+                ),
+            )
         except Exception as exc:
             text = _restart_status_text(error=str(exc))
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=_restart_status_keyboard(confirm=False, available=restart_available))
@@ -419,16 +463,24 @@ async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
         return
     if data == "hardrestart:confirm":
         if getattr(runtime, "_watchtower_restart_inflight", False):
-            await query.answer("Restart is already in progress.", show_alert=True)
+            await query.answer(
+                ui_language.tr("api.restart.in_progress"), show_alert=True
+            )
             return
         available, error, _payload = await _watchtower_restart_available()
         if not available:
             await query.edit_message_text(
-                _restart_status_text(error=error or "WatchTower unavailable"),
+                _restart_status_text(
+                    error=error
+                    or ui_language.tr("api.restart.watchtower_unavailable")
+                ),
                 parse_mode="HTML",
                 reply_markup=_restart_status_keyboard(confirm=False, available=False),
             )
-            await query.answer("WatchTower unavailable.", show_alert=True)
+            await query.answer(
+                ui_language.tr("api.restart.watchtower_unavailable"),
+                show_alert=True,
+            )
             return
         try:
             request_payload = _build_watchtower_restart_payload(
@@ -439,22 +491,26 @@ async def restart_callback(runtime: Any, update: Any, context: Any) -> None:
         except Exception as exc:
             logger.warning("Failed to build Telegram restart payload: %s", exc)
             await query.edit_message_text(
-                f"❌ WatchTower restart is not configured safely:\n<code>{html.escape(str(exc))}</code>",
+                ui_language.tr(
+                    "api.restart.setup_error", reason=html.escape(str(exc))
+                ),
                 parse_mode="HTML",
                 reply_markup=_restart_status_keyboard(confirm=False, available=True),
             )
-            await query.answer("Restart setup incomplete.", show_alert=True)
+            await query.answer(
+                ui_language.tr("api.restart.setup_incomplete"), show_alert=True
+            )
             return
         setattr(runtime, "_watchtower_restart_inflight", True)
         await query.edit_message_text(
-            "🔁 WatchTower hard restart requested.\nThis bot may go quiet briefly while HASHI stops and comes back.",
+            ui_language.tr("api.restart.requested"),
             reply_markup=None,
         )
         chat_id = getattr(getattr(query, "message", None), "chat_id", None)
         asyncio.create_task(_dispatch_watchtower_restart(runtime, chat_id, request_payload))
-        await query.answer("Restart requested.")
+        await query.answer(ui_language.tr("api.restart.requested_short"))
         return
-    await query.answer("Unknown restart control.", show_alert=True)
+    await query.answer(ui_language.tr("api.restart.unknown"), show_alert=True)
 
 
 async def request_whatsapp_restart(runtime: Any, *, reason: str = "whatsapp /restart hard restart") -> tuple[bool, str]:

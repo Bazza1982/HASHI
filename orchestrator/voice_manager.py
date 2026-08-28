@@ -7,6 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from orchestrator import ui_language
 from orchestrator.tts_providers import build_provider, list_provider_names
 from orchestrator.voice_synthesizer import VoiceAsset
 from orchestrator.command_ui import setting_card
@@ -467,24 +468,29 @@ class VoiceManager:
         mode = self.get_reply_mode()
         profile_id = self._voice_profile_from_state(state)
         profile_label = (
-            self.VOICE_PROFILES[profile_id]["label"]
+            ui_language.tr(f"voice.profile.{profile_id}")
             if profile_id
-            else "Custom"
+            else ui_language.tr("voice.profile.custom")
         )
         reply_labels = {
-            "audio_and_text": "Audio + text",
-            "audio_only": "Audio only",
-            "text_only": "Text only",
+            key: ui_language.tr(f"voice.reply.{key}")
+            for key in ("audio_and_text", "audio_only", "text_only")
         }
+        mode_label = ui_language.tr(f"voice.mode.{mode}")
+        current = f"<b>{html.escape(mode.upper())}</b>"
+        if ui_language.current_locale() != ui_language.DEFAULT_LOCALE:
+            current = f"<b>{html.escape(mode_label)}</b> · <code>{html.escape(mode)}</code>"
         return setting_card(
             "🔊",
             "Voice",
-            current=f"<b>{html.escape(mode.upper())}</b>",
+            current=current,
             facts=[
-                f"<b>Voice</b> · {html.escape(str(profile_label))}",
-                f"<b>Reply</b> · {html.escape(reply_labels[native['reply_content']])}",
+                f"<b>{html.escape(ui_language.tr('voice.field.voice'))}</b> · "
+                f"{html.escape(str(profile_label))}",
+                f"<b>{html.escape(ui_language.tr('voice.field.reply'))}</b> · "
+                f"{html.escape(reply_labels[native['reply_content']])}",
             ],
-            action="Choose a mode and voice below. Advanced typed commands remain available.",
+            action=ui_language.tr("voice.action"),
         )
 
     def _load(self) -> dict:

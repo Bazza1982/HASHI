@@ -7,7 +7,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator import runtime_menu_views
+from orchestrator import runtime_menu_views, ui_language
 from orchestrator.bridge_memory import SysPromptManager, global_sys_prompt_state_path
 from orchestrator.command_ui import confirm_card, selected_label
 from orchestrator.slash_command_audit import (
@@ -112,15 +112,20 @@ def _mutate_slot(
 ) -> str:
     before = manager.get_slot(slot)
     if action == "on":
-        notice = manager.activate(slot)
+        manager.activate(slot)
+        notice_key = "activated"
     elif action == "off":
-        notice = manager.deactivate(slot)
+        manager.deactivate(slot)
+        notice_key = "deactivated"
     elif action == "delete":
-        notice = manager.delete(slot)
+        manager.delete(slot)
+        notice_key = "cleared"
     elif action == "save":
-        notice = manager.save(slot, text or "")
+        manager.save(slot, text or "")
+        notice_key = "saved"
     elif action == "replace":
-        notice = manager.replace(slot, text or "")
+        manager.replace(slot, text or "")
+        notice_key = "updated"
     else:
         raise ValueError(f"unsupported /sys mutation: {action}")
     after = manager.get_slot(slot)
@@ -134,14 +139,14 @@ def _mutate_slot(
             after=after,
             source_channel=source_channel,
         )
-    return notice
+    return ui_language.tr(f"sys.notice.{notice_key}.{scope}", slot=slot)
 
 
 def _scope_keyboard_row(runtime: Any, scope: str) -> list[InlineKeyboardButton]:
     instance_id = _instance_id(runtime)
     return [
         InlineKeyboardButton(
-            selected_label("👤 Local", scope == "local"),
+            selected_label(ui_language.tr("sys.button.local"), scope == "local"),
             callback_data="sys:menu:local",
         ),
         InlineKeyboardButton(
@@ -180,19 +185,19 @@ def sys_slot_keyboard(runtime: Any, scope: str, slot: str) -> InlineKeyboardMark
         _scope_keyboard_row(runtime, scope),
         [
             InlineKeyboardButton(
-                selected_label("On", active),
+                selected_label(ui_language.tr("common.on"), active),
                 callback_data=f"sys:on:{scope}:{slot}",
             ),
             InlineKeyboardButton(
-                selected_label("Off", not active),
+                selected_label(ui_language.tr("common.off"), not active),
                 callback_data=f"sys:off:{scope}:{slot}",
             ),
         ],
         [
-            InlineKeyboardButton("Output", callback_data=f"sys:output:{scope}:{slot}"),
-            InlineKeyboardButton("Delete", callback_data=f"sys:delete:{scope}:{slot}"),
+            InlineKeyboardButton(ui_language.tr("common.output"), callback_data=f"sys:output:{scope}:{slot}"),
+            InlineKeyboardButton(ui_language.tr("common.delete"), callback_data=f"sys:delete:{scope}:{slot}"),
         ],
-        [InlineKeyboardButton("← Slots", callback_data=f"sys:menu:{scope}")],
+        [InlineKeyboardButton(ui_language.tr("sys.button.slots"), callback_data=f"sys:menu:{scope}")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -205,11 +210,13 @@ def _confirm_keyboard(
     slot: str,
 ) -> InlineKeyboardMarkup:
     if action == "on" and scope == "global":
-        confirm_label = f"Activate across {_instance_id(runtime)}"
+        confirm_label = ui_language.tr(
+            "sys.button.activate_global", instance=_instance_id(runtime)
+        )
     elif action == "delete" and scope == "global":
-        confirm_label = f"Delete global slot {slot}"
+        confirm_label = ui_language.tr("sys.button.delete_global", slot=slot)
     else:
-        confirm_label = f"Delete local slot {slot}"
+        confirm_label = ui_language.tr("sys.button.delete_local", slot=slot)
     return InlineKeyboardMarkup(
         [
             [
@@ -220,7 +227,8 @@ def _confirm_keyboard(
             ],
             [
                 InlineKeyboardButton(
-                    "← Keep current state", callback_data=f"sys:view:{scope}:{slot}"
+                    ui_language.tr("sys.button.keep_state"),
+                    callback_data=f"sys:view:{scope}:{slot}",
                 )
             ],
         ]
@@ -286,16 +294,17 @@ async def _reply_confirmation(
 ) -> None:
     if action == "on":
         title = "Activate global system prompt"
-        consequence = (
-            f"This activates the slot for every configured Agent in "
-            f"<code>{html.escape(_instance_id(runtime))}</code> on its next request."
+        consequence = ui_language.tr(
+            "sys.confirm.activate_consequence",
+            instance=html.escape(_instance_id(runtime)),
         )
     else:
         title = "Delete system prompt"
-        scope_text = (
-            "every Agent in this HASHI instance" if scope == "global" else "this Agent"
+        consequence = ui_language.tr(
+            "sys.confirm.delete_consequence_global"
+            if scope == "global"
+            else "sys.confirm.delete_consequence_local"
         )
-        consequence = f"This permanently clears the configured text and disables the slot for {scope_text}."
     await _reply(
         runtime,
         update,
@@ -311,16 +320,7 @@ async def _reply_confirmation(
 
 
 def _usage() -> str:
-    return (
-        "Usage:\n"
-        "/sys — show local slots\n"
-        "/sys <n> — show local slot\n"
-        "/sys <n> on|off|delete\n"
-        "/sys <n> save|replace <message>\n"
-        "/sys output <n>\n\n"
-        "/sys global … — manage instance-global slots\n"
-        "/sys g … — short alias for /sys global …"
-    )
+    return ui_language.tr("sys.usage.full")
 
 
 async def cmd_sys(runtime: Any, update: Any, context: Any) -> None:
@@ -345,17 +345,27 @@ async def cmd_sys(runtime: Any, update: Any, context: Any) -> None:
             await _reply(
                 runtime,
                 update,
-                f"Usage: {'/sys global' if scope == 'global' else '/sys'} output <1-10>",
+                ui_language.tr(
+                    "sys.usage.output",
+                    prefix="/sys global" if scope == "global" else "/sys",
+                ),
             )
             return
         text = str(manager.get_slot(slot).get("text") or "")
-        await _reply(runtime, update, text if text else "(empty)", parse_mode=None)
+        await _reply(
+            runtime,
+            update,
+            text if text else ui_language.tr("common.empty"),
+            parse_mode=None,
+        )
         return
 
     slot = args[0]
     if slot not in manager.SLOTS:
         await _reply(
-            runtime, update, f"Invalid slot '{slot}'. Use 1-10, /sys global, or /sys g."
+            runtime,
+            update,
+            ui_language.tr("sys.error.invalid_slot", slot=slot),
         )
         return
 
@@ -369,7 +379,9 @@ async def cmd_sys(runtime: Any, update: Any, context: Any) -> None:
     if action == "on":
         if not manager.get_slot(slot).get("text"):
             await _reply(
-                runtime, update, f"Slot {slot} is empty — save a message first."
+                runtime,
+                update,
+                ui_language.tr("sys.error.empty_slot", slot=slot),
             )
             return
         if scope == "global" and not confirmed:
@@ -421,14 +433,17 @@ async def cmd_sys(runtime: Any, update: Any, context: Any) -> None:
             await _reply(
                 runtime,
                 update,
-                f"Global slot {slot} is already configured. Use /sys global {slot} "
-                "replace <message>; an active slot also requires CONFIRM.",
+                ui_language.tr("sys.error.global_already_configured", slot=slot),
             )
             return
         text = " ".join(args[2:]).strip()
         if not text:
             prefix = "/sys global" if scope == "global" else "/sys"
-            await _reply(runtime, update, f"Usage: {prefix} <slot> save <message>")
+            await _reply(
+                runtime,
+                update,
+                ui_language.tr("sys.usage.save", prefix=prefix),
+            )
             return
         notice = _mutate_slot(
             runtime,
@@ -452,8 +467,7 @@ async def cmd_sys(runtime: Any, update: Any, context: Any) -> None:
             await _reply(
                 runtime,
                 update,
-                "This global slot is active. To change every Agent immediately, use "
-                f"/sys global {slot} replace CONFIRM <message>, or turn it off first.",
+                ui_language.tr("sys.error.active_global_replace", slot=slot),
             )
             return
         if is_active_global and confirmed:
@@ -461,7 +475,11 @@ async def cmd_sys(runtime: Any, update: Any, context: Any) -> None:
         text = " ".join(text_args).strip()
         if not text:
             prefix = "/sys global" if scope == "global" else "/sys"
-            await _reply(runtime, update, f"Usage: {prefix} <slot> replace <message>")
+            await _reply(
+                runtime,
+                update,
+                ui_language.tr("sys.usage.replace", prefix=prefix),
+            )
             return
         notice = _mutate_slot(
             runtime,
@@ -513,18 +531,18 @@ async def callback_sys(runtime: Any, update: Any, context: Any) -> None:
         return
     allowed = getattr(runtime, "_is_command_allowed", None)
     if callable(allowed) and not allowed("sys"):
-        await query.answer("/sys is disabled for this Agent.", show_alert=True)
+        await query.answer(ui_language.tr("sys.error.disabled"), show_alert=True)
         return
 
     parts = str(getattr(query, "data", None) or "").split(":")
     if len(parts) not in {3, 4} or parts[0] != "sys":
-        await query.answer("Invalid /sys action.", show_alert=True)
+        await query.answer(ui_language.tr("sys.error.invalid_action"), show_alert=True)
         return
     action = parts[1]
     scope = parts[2]
     slot = parts[3] if len(parts) == 4 else ""
     if scope not in {"local", "global"}:
-        await query.answer("Invalid /sys scope.", show_alert=True)
+        await query.answer(ui_language.tr("sys.error.invalid_scope"), show_alert=True)
         return
     manager = _manager_for_scope(runtime, scope)
 
@@ -533,16 +551,20 @@ async def callback_sys(runtime: Any, update: Any, context: Any) -> None:
         await query.answer()
         return
     if slot not in manager.SLOTS:
-        await query.answer("Invalid /sys slot.", show_alert=True)
+        await query.answer(
+            ui_language.tr("sys.error.invalid_callback_slot"), show_alert=True
+        )
         return
     if action == "view":
         await _edit_slot(runtime, query, scope, slot)
     elif action == "output":
         text = str(manager.get_slot(slot).get("text") or "")
-        await query.message.reply_text(text if text else "(empty)", parse_mode=None)
+        await query.message.reply_text(
+            text if text else ui_language.tr("common.empty"), parse_mode=None
+        )
     elif action == "on":
         if not manager.get_slot(slot).get("text"):
-            await query.answer("Save a message first.", show_alert=True)
+            await query.answer(ui_language.tr("sys.error.save_first"), show_alert=True)
             return
         if scope == "global":
             await query.edit_message_text(
@@ -550,9 +572,9 @@ async def callback_sys(runtime: Any, update: Any, context: Any) -> None:
                     "⚠️",
                     "Activate global system prompt",
                     target=f"<code>global / {html.escape(slot)}</code>",
-                    consequence=(
-                        f"This activates the slot for every configured Agent in "
-                        f"<code>{html.escape(_instance_id(runtime))}</code> on its next request."
+                    consequence=ui_language.tr(
+                        "sys.confirm.activate_consequence",
+                        instance=html.escape(_instance_id(runtime)),
                     ),
                 ),
                 parse_mode="HTML",
@@ -599,13 +621,10 @@ async def callback_sys(runtime: Any, update: Any, context: Any) -> None:
                 "⚠️",
                 "Delete system prompt",
                 target=f"<code>{html.escape(scope)} / {html.escape(slot)}</code>",
-                consequence=(
-                    "This permanently clears the configured text and disables the slot for "
-                    + (
-                        "every Agent in this HASHI instance."
-                        if scope == "global"
-                        else "this Agent."
-                    )
+                consequence=ui_language.tr(
+                    "sys.confirm.delete_consequence_global"
+                    if scope == "global"
+                    else "sys.confirm.delete_consequence_local"
                 ),
             ),
             parse_mode="HTML",
@@ -625,6 +644,6 @@ async def callback_sys(runtime: Any, update: Any, context: Any) -> None:
         )
         await _edit_slot(runtime, query, scope, slot, notice=notice)
     else:
-        await query.answer("Invalid /sys action.", show_alert=True)
+        await query.answer(ui_language.tr("sys.error.invalid_action"), show_alert=True)
         return
     await query.answer()

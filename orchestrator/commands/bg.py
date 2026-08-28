@@ -6,18 +6,13 @@ from typing import Any
 from orchestrator.background_jobs import TERMINAL_STATES
 from orchestrator.command_ui import card_title
 from orchestrator.command_registry import RuntimeCommand
+from orchestrator import ui_language
 
 
 RESERVED_SUBCOMMANDS = {"run", "status", "tail", "cancel", "list", "ls", "help", "-h", "--help"}
 
-USAGE = (
-    "Usage:\n"
-    "/bg <task>              Start a background-capable agent task\n"
-    "/bg status [job_id]     Show background job status\n"
-    "/bg tail <job_id>       Show recent background job output\n"
-    "/bg cancel <job_id>     Cancel a running background job\n"
-    "/bg list                List recent background jobs"
-)
+def _usage() -> str:
+    return ui_language.tr("bg.usage")
 
 BG_INSTRUCTION = """This request was sent with /bg, meaning the user wants background-safe handling.
 
@@ -104,38 +99,40 @@ def _job_line(record: Any) -> str:
 
 
 def _help_text(runtime: Any) -> str:
-    manager_state = "READY" if _manager(runtime) is not None else "UNAVAILABLE"
+    manager_state = ui_language.tr(
+        "bg.manager.ready" if _manager(runtime) is not None else "bg.manager.unavailable"
+    )
     return "\n".join(
         [
             card_title("🧵", "Background jobs"),
             "",
-            f"<b>Current</b> · <b>{manager_state}</b>",
-            "<b>Scope</b> · background-capable agent tasks and managed OS jobs",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <b>{html.escape(manager_state)}</b>",
+            f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · {html.escape(ui_language.tr('bg.scope'))}",
             "",
-            "A task is queued to the agent first; long OS work uses the managed background-job service when needed.",
+            ui_language.tr("bg.help.summary"),
             "",
-            "<b>Use</b>",
-            "<code>/bg &lt;task&gt;</code> · start a background-capable task",
-            "<code>/bg status [job_id]</code> · inspect status",
-            "<code>/bg tail &lt;job_id&gt;</code> · view recent output",
-            "<code>/bg cancel &lt;job_id&gt;</code> · cancel a running job",
-            "<code>/bg list</code> · list recent jobs",
+            f"<b>{html.escape(ui_language.tr('common.use'))}</b>",
+            f"<code>/bg &lt;task&gt;</code> · {html.escape(ui_language.tr('bg.help.run'))}",
+            f"<code>/bg status [job_id]</code> · {html.escape(ui_language.tr('bg.help.status'))}",
+            f"<code>/bg tail &lt;job_id&gt;</code> · {html.escape(ui_language.tr('bg.help.tail'))}",
+            f"<code>/bg cancel &lt;job_id&gt;</code> · {html.escape(ui_language.tr('bg.help.cancel'))}",
+            f"<code>/bg list</code> · {html.escape(ui_language.tr('bg.help.list'))}",
         ]
     )
 
 
 async def _run_task(runtime: Any, update: Any, task_text: str) -> None:
     if not task_text:
-        await _send(runtime, update, USAGE)
+        await _send(runtime, update, _usage())
         return
     chat = getattr(update, "effective_chat", None)
     chat_id = getattr(chat, "id", None)
     if chat_id is None:
-        await _send(runtime, update, "Cannot start /bg task: missing chat id.")
+        await _send(runtime, update, ui_language.tr("bg.error.missing_chat"))
         return
     enqueue = getattr(runtime, "enqueue_request", None)
     if not callable(enqueue):
-        await _send(runtime, update, "Cannot start /bg task: runtime does not support queued requests.")
+        await _send(runtime, update, ui_language.tr("bg.error.queue_unsupported"))
         return
     prompt = (
         f"{BG_INSTRUCTION}\n\n"
@@ -148,20 +145,25 @@ async def _run_task(runtime: Any, update: Any, task_text: str) -> None:
         "background:prompt",
         f"Background task: {_short(task_text)}",
     )
-    suffix = f"\nRequest: <code>{html.escape(str(request_id))}</code>" if request_id else ""
+    suffix = (
+        f"\n{html.escape(ui_language.tr('bg.request'))}: "
+        f"<code>{html.escape(str(request_id))}</code>"
+        if request_id
+        else ""
+    )
     await _send(
         runtime,
         update,
-        "Background-capable task queued.\n"
-        f"Task: <code>{html.escape(_short(task_text))}</code>{suffix}\n"
-        "The agent received /bg instructions: use managed background jobs for long OS work and report success/failure notification details.",
+        f"{ui_language.tr('bg.queued')}\n"
+        f"{html.escape(ui_language.tr('bg.task'))}: <code>{html.escape(_short(task_text))}</code>{suffix}\n"
+        f"{ui_language.tr('bg.queued_effect')}",
     )
 
 
 async def _list_jobs(runtime: Any, update: Any, _arg: str) -> None:
     manager = _manager(runtime)
     if manager is None:
-        await _send(runtime, update, "BackgroundJobManager is not running in this runtime.")
+        await _send(runtime, update, ui_language.tr("bg.manager_missing"))
         return
     records = manager.list(limit=20)
     if not records:
@@ -172,12 +174,12 @@ async def _list_jobs(runtime: Any, update: Any, _arg: str) -> None:
                 [
                     card_title("🧵", "Background jobs"),
                     "",
-                    "<b>Current</b> · <code>0</code> recorded",
-                    "<b>Scope</b> · managed background processes",
+                    f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <code>0</code>",
+                    f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · {html.escape(ui_language.tr('bg.scope.processes'))}",
                     "",
-                    "No background jobs are recorded.",
+                    ui_language.tr("bg.none"),
                     "",
-                    "Use <code>/bg &lt;task&gt;</code> to start a background-capable task.",
+                    ui_language.tr("bg.start_help"),
                 ]
             ),
         )
@@ -186,10 +188,11 @@ async def _list_jobs(runtime: Any, update: Any, _arg: str) -> None:
     lines = [
         card_title("🧵", "Background jobs"),
         "",
-        f"<b>Current</b> · <code>{active}</code> active · <code>{len(records)}</code> recent",
-        "<b>Scope</b> · managed background processes",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        + ui_language.tr("bg.count", active=f"<code>{active}</code>", recent=f"<code>{len(records)}</code>"),
+        f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · {html.escape(ui_language.tr('bg.scope.processes'))}",
         "",
-        "<b>JOBS</b>",
+        f"<b>{html.escape(ui_language.tr('bg.jobs'))}</b>",
     ]
     lines.extend(_job_line(record) for record in records)
     await _send(runtime, update, "\n".join(lines))
@@ -198,7 +201,7 @@ async def _list_jobs(runtime: Any, update: Any, _arg: str) -> None:
 async def _status(runtime: Any, update: Any, arg: str) -> None:
     manager = _manager(runtime)
     if manager is None:
-        await _send(runtime, update, "BackgroundJobManager is not running in this runtime.")
+        await _send(runtime, update, ui_language.tr("bg.manager_missing"))
         return
     job_id = arg.strip()
     if not job_id:
@@ -208,9 +211,10 @@ async def _status(runtime: Any, update: Any, arg: str) -> None:
         lines = [
             card_title("🧵", "Background job status"),
             "",
-            f"<b>Current</b> · <code>{len(running)}</code> active",
-            f"<b>Recent</b> · <code>{len(records)}</code>",
-            f"<b>Failed or timed out</b> · <code>{len(failed)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            + ui_language.tr("bg.active_count", count=f"<code>{len(running)}</code>"),
+            f"<b>{html.escape(ui_language.tr('common.recent'))}</b> · <code>{len(records)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.failed_or_timed_out'))}</b> · <code>{len(failed)}</code>",
         ]
         if records:
             lines.append("")
@@ -219,45 +223,52 @@ async def _status(runtime: Any, update: Any, arg: str) -> None:
         return
     record = manager.get(job_id)
     if record is None:
-        await _send(runtime, update, f"Background job not found: <code>{html.escape(job_id)}</code>")
+        await _send(
+            runtime,
+            update,
+            ui_language.tr("bg.not_found", job_id=html.escape(job_id)),
+        )
         return
     lines = [
         card_title("🧵", "Background job"),
         "",
-        f"<b>Current</b> · <b>{html.escape(str(record.state).upper())}</b>",
-        f"<b>ID</b> · <code>{html.escape(record.job_id)}</code>",
-        f"<b>Return code</b> · <code>{html.escape(str(record.returncode))}</code>",
-        f"<b>Created</b> · <code>{html.escape(str(record.created_at))}</code>",
-        f"<b>Updated</b> · <code>{html.escape(str(record.updated_at))}</code>",
-        f"<b>Command</b> · <code>{html.escape(_short(record.command.get('display', ''), 300))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <b>{html.escape(str(record.state).upper())}</b>",
+        f"<b>{html.escape(ui_language.tr('common.id'))}</b> · <code>{html.escape(record.job_id)}</code>",
+        f"<b>{html.escape(ui_language.tr('common.return_code'))}</b> · <code>{html.escape(str(record.returncode))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.created'))}</b> · <code>{html.escape(str(record.created_at))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.updated'))}</b> · <code>{html.escape(str(record.updated_at))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.command'))}</b> · <code>{html.escape(_short(record.command.get('display', ''), 300))}</code>",
     ]
     if record.error:
-        lines.append(f"<b>Error</b> · {html.escape(str(record.error))}")
+        lines.append(
+            f"<b>{html.escape(ui_language.tr('common.error'))}</b> · "
+            f"{html.escape(str(record.error))}"
+        )
     await _send(runtime, update, "\n".join(lines))
 
 
 async def _tail(runtime: Any, update: Any, arg: str) -> None:
     manager = _manager(runtime)
     if manager is None:
-        await _send(runtime, update, "BackgroundJobManager is not running in this runtime.")
+        await _send(runtime, update, ui_language.tr("bg.manager_missing"))
         return
     parts = arg.split()
     if not parts:
-        await _send(runtime, update, "Usage: /bg tail <job_id>")
+        await _send(runtime, update, ui_language.tr("bg.tail_usage"))
         return
     job_id = parts[0]
     try:
         text = manager.tail(job_id, lines=80)
     except KeyError:
-        await _send(runtime, update, f"Background job not found: <code>{html.escape(job_id)}</code>")
+        await _send(runtime, update, ui_language.tr("bg.not_found", job_id=html.escape(job_id)))
         return
-    body = html.escape(text[-3500:] if text else "(no stdout yet)")
+    body = html.escape(text[-3500:] if text else ui_language.tr("bg.no_stdout"))
     await _send(
         runtime,
         update,
         f"{card_title('🧵', 'Background job output')}\n\n"
-        f"<b>Current</b> · <code>{html.escape(job_id)}</code>\n"
-        "<b>View</b> · last 80 lines\n\n"
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <code>{html.escape(job_id)}</code>\n"
+        f"<b>{html.escape(ui_language.tr('common.view'))}</b> · {html.escape(ui_language.tr('bg.last_lines'))}\n\n"
         f"<pre>{body}</pre>",
     )
 
@@ -265,18 +276,26 @@ async def _tail(runtime: Any, update: Any, arg: str) -> None:
 async def _cancel(runtime: Any, update: Any, arg: str) -> None:
     manager = _manager(runtime)
     if manager is None:
-        await _send(runtime, update, "BackgroundJobManager is not running in this runtime.")
+        await _send(runtime, update, ui_language.tr("bg.manager_missing"))
         return
     job_id = arg.strip().split()[0] if arg.strip() else ""
     if not job_id:
-        await _send(runtime, update, "Usage: /bg cancel <job_id>")
+        await _send(runtime, update, ui_language.tr("bg.cancel_usage"))
         return
     try:
         record = await manager.cancel(job_id)
     except KeyError:
-        await _send(runtime, update, f"Background job not found: <code>{html.escape(job_id)}</code>")
+        await _send(runtime, update, ui_language.tr("bg.not_found", job_id=html.escape(job_id)))
         return
-    await _send(runtime, update, f"Cancelled <code>{html.escape(record.job_id)}</code>; state={html.escape(record.state)}")
+    await _send(
+        runtime,
+        update,
+        ui_language.tr(
+            "bg.cancelled",
+            job_id=html.escape(record.job_id),
+            state=html.escape(record.state),
+        ),
+    )
 
 
 async def bg_command(runtime: Any, update: Any, context: Any) -> None:
@@ -302,7 +321,7 @@ async def bg_command(runtime: Any, update: Any, context: Any) -> None:
     if action == "cancel":
         await _cancel(runtime, update, rest)
         return
-    await _send(runtime, update, USAGE)
+    await _send(runtime, update, _usage())
 
 
 COMMANDS = [

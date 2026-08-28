@@ -64,12 +64,15 @@ def response_has_deliverable_content(response: Any) -> bool:
 def observe_terminal_response(runtime, item, response) -> None:
     """Capture content-free response metrics before terminal completion."""
 
-    terminal_console.observe_response(runtime.name, item.request_id, response)
+    runtime_name = getattr(runtime, "name", None)
+    if not runtime_name:
+        return
+    terminal_console.observe_response(runtime_name, item.request_id, response)
     if getattr(response, "usage", None) is not None:
         return
     response_text = str(getattr(response, "text", "") or "")
     terminal_console.observe_estimated_usage(
-        runtime.name,
+        runtime_name,
         item.request_id,
         input_tokens=None,
         output_tokens=(len(response_text) + 3) // 4,

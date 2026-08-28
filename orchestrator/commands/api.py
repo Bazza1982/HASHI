@@ -5,6 +5,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator import ui_language
 from orchestrator.command_ui import back_label, card_title, refresh_label, selected_label
 from orchestrator.api_gateway_config import (
     available_api_models,
@@ -13,9 +14,6 @@ from orchestrator.api_gateway_config import (
     save_api_gateway_config,
 )
 from orchestrator.command_registry import RuntimeCallback
-
-
-USAGE = "Usage: /api [on|off|model <model>]"
 
 
 def _is_authorized(runtime: Any, update: Any) -> bool:
@@ -66,10 +64,16 @@ def _keyboard(runtime: Any) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(selected_label("On", running), callback_data="api:on"),
-                InlineKeyboardButton(selected_label("Off", not running), callback_data="api:off"),
+                InlineKeyboardButton(
+                    selected_label(ui_language.tr("api.button.on"), running),
+                    callback_data="api:on",
+                ),
+                InlineKeyboardButton(
+                    selected_label(ui_language.tr("api.button.off"), not running),
+                    callback_data="api:off",
+                ),
             ],
-            [InlineKeyboardButton("Choose default model", callback_data="api:model")],
+            [InlineKeyboardButton(ui_language.tr("api.button.default_model"), callback_data="api:model")],
             [InlineKeyboardButton(refresh_label(), callback_data="api:status")],
         ]
     )
@@ -89,9 +93,10 @@ def _model_text(runtime: Any) -> str:
     current = load_api_gateway_config(runtime.global_config)["default_model"]
     return (
         f"{card_title('🔌', 'API default model')}\n\n"
-        f"<b>Current</b> · <code>{html.escape(current)}</code>\n\n"
-        "This persistent default applies when an API request does not provide its own model.\n\n"
-        "Choose a model:"
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        f"<code>{html.escape(current)}</code>\n\n"
+        f"{ui_language.tr('api.model_effect')}\n\n"
+        f"{ui_language.tr('api.model_action')}"
     )
 
 
@@ -109,17 +114,20 @@ def _status_text(runtime: Any, *, prefix: str = "") -> str:
         [
             card_title("🔌", "Hashi API gateway"),
             "",
-            f"<b>Current</b> · <b>{'ON' if running else 'OFF'}</b>",
-            f"<b>Starts after reboot</b> · <code>{'yes' if configured else 'no'}</code>",
-            f"<b>Default model</b> · <code>{html.escape(cfg['default_model'])}</code>",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            f"<b>{html.escape(ui_language.tr('common.on' if running else 'common.off'))}</b>",
+            f"<b>{html.escape(ui_language.tr('api.starts_after_reboot'))}</b> · "
+            f"<code>{html.escape(ui_language.tr('api.yes' if configured else 'api.no'))}</code>",
+            f"<b>{html.escape(ui_language.tr('api.default_model'))}</b> · "
+            f"<code>{html.escape(cfg['default_model'])}</code>",
             "",
-            f"<b>Address</b> · <code>{html.escape(address)}</code>",
-            f"Models · <code>{html.escape(address)}/v1/models</code>",
-            f"Chat · <code>{html.escape(address)}/v1/chat/completions</code>",
-            f"Images · <code>{html.escape(address)}/v1/images/generations</code>",
-            f"Videos · <code>{html.escape(address)}/v1/videos/generations</code>",
+            f"<b>{html.escape(ui_language.tr('api.address'))}</b> · <code>{html.escape(address)}</code>",
+            f"{html.escape(ui_language.tr('api.endpoint.models'))} · <code>{html.escape(address)}/v1/models</code>",
+            f"{html.escape(ui_language.tr('api.endpoint.chat'))} · <code>{html.escape(address)}/v1/chat/completions</code>",
+            f"{html.escape(ui_language.tr('api.endpoint.images'))} · <code>{html.escape(address)}/v1/images/generations</code>",
+            f"{html.escape(ui_language.tr('api.endpoint.videos'))} · <code>{html.escape(address)}/v1/videos/generations</code>",
             "",
-            "API callers may override this default by sending a request-level <code>model</code>.",
+            ui_language.tr("api.override_effect"),
         ]
     )
     return "\n".join(lines)
@@ -140,19 +148,24 @@ async def api_command(runtime: Any, update: Any, context: Any) -> None:
     args = [str(arg).strip() for arg in (getattr(context, "args", []) or []) if str(arg).strip()]
     sub = args[0].lower() if args else "status"
     if sub in {"help", "-h", "--help"}:
-        await _send(runtime, update, html.escape(USAGE), reply_markup=_keyboard(runtime))
+        await _send(runtime, update, ui_language.tr("api.usage"), reply_markup=_keyboard(runtime))
         return
 
     if sub == "on":
         save_api_gateway_config(runtime.global_config, enabled=True, updated_by=_updated_by(update))
         manager = _service_manager(runtime)
-        ok, message = (False, "Runtime service manager is unavailable.")
+        ok, message = (False, ui_language.tr("api.runtime_manager_unavailable"))
         if manager is not None:
             ok, message = await manager.set_api_gateway_enabled(True)
+        prefix = (
+            ui_language.tr("api.enabled")
+            if ok
+            else ui_language.tr("api.failed", reason=message)
+        )
         await _send(
             runtime,
             update,
-            _status_text(runtime, prefix=message if ok else f"Failed: {message}"),
+            _status_text(runtime, prefix=prefix),
             reply_markup=_keyboard(runtime),
         )
         return
@@ -160,13 +173,18 @@ async def api_command(runtime: Any, update: Any, context: Any) -> None:
     if sub == "off":
         save_api_gateway_config(runtime.global_config, enabled=False, updated_by=_updated_by(update))
         manager = _service_manager(runtime)
-        ok, message = (False, "Runtime service manager is unavailable.")
+        ok, message = (False, ui_language.tr("api.runtime_manager_unavailable"))
         if manager is not None:
             ok, message = await manager.set_api_gateway_enabled(False)
+        prefix = (
+            ui_language.tr("api.disabled")
+            if ok
+            else ui_language.tr("api.failed", reason=message)
+        )
         await _send(
             runtime,
             update,
-            _status_text(runtime, prefix=message if ok else f"Failed: {message}"),
+            _status_text(runtime, prefix=prefix),
             reply_markup=_keyboard(runtime),
         )
         return
@@ -175,16 +193,32 @@ async def api_command(runtime: Any, update: Any, context: Any) -> None:
         if len(args) >= 2:
             model = normalize_api_model(args[1])
             if model is None:
-                await _send(runtime, update, f"Unknown API model: <code>{html.escape(args[1])}</code>", reply_markup=_model_keyboard(runtime))
+                await _send(
+                    runtime,
+                    update,
+                    ui_language.tr(
+                        "api.unknown_model",
+                        model=f"<code>{html.escape(args[1])}</code>",
+                    ),
+                    reply_markup=_model_keyboard(runtime),
+                )
                 return
             save_api_gateway_config(runtime.global_config, default_model=model, updated_by=_updated_by(update))
-            await _send(runtime, update, _status_text(runtime, prefix=f"Default API model set to: {model}"), reply_markup=_keyboard(runtime))
+            await _send(
+                runtime,
+                update,
+                _status_text(
+                    runtime,
+                    prefix=ui_language.tr("api.model_set", model=model),
+                ),
+                reply_markup=_keyboard(runtime),
+            )
             return
         await _send(runtime, update, _model_text(runtime), reply_markup=_model_keyboard(runtime))
         return
 
     if sub not in {"status", "show"}:
-        await _send(runtime, update, html.escape(USAGE), reply_markup=_keyboard(runtime))
+        await _send(runtime, update, ui_language.tr("api.usage"), reply_markup=_keyboard(runtime))
         return
 
     await _send(runtime, update, _status_text(runtime), reply_markup=_keyboard(runtime))
@@ -201,17 +235,35 @@ async def api_callback(runtime: Any, update: Any, context: Any) -> None:
         if data == "api:on":
             save_api_gateway_config(runtime.global_config, enabled=True, updated_by=_updated_by(update))
             manager = _service_manager(runtime)
-            ok, message = (False, "Runtime service manager is unavailable.")
+            ok, message = (False, ui_language.tr("api.runtime_manager_unavailable"))
             if manager is not None:
                 ok, message = await manager.set_api_gateway_enabled(True)
-            await query.edit_message_text(_status_text(runtime, prefix=message if ok else f"Failed: {message}"), parse_mode="HTML", reply_markup=_keyboard(runtime))
+            prefix = (
+                ui_language.tr("api.enabled")
+                if ok
+                else ui_language.tr("api.failed", reason=message)
+            )
+            await query.edit_message_text(
+                _status_text(runtime, prefix=prefix),
+                parse_mode="HTML",
+                reply_markup=_keyboard(runtime),
+            )
         elif data == "api:off":
             save_api_gateway_config(runtime.global_config, enabled=False, updated_by=_updated_by(update))
             manager = _service_manager(runtime)
-            ok, message = (False, "Runtime service manager is unavailable.")
+            ok, message = (False, ui_language.tr("api.runtime_manager_unavailable"))
             if manager is not None:
                 ok, message = await manager.set_api_gateway_enabled(False)
-            await query.edit_message_text(_status_text(runtime, prefix=message if ok else f"Failed: {message}"), parse_mode="HTML", reply_markup=_keyboard(runtime))
+            prefix = (
+                ui_language.tr("api.disabled")
+                if ok
+                else ui_language.tr("api.failed", reason=message)
+            )
+            await query.edit_message_text(
+                _status_text(runtime, prefix=prefix),
+                parse_mode="HTML",
+                reply_markup=_keyboard(runtime),
+            )
         elif data == "api:model":
             await query.edit_message_text(
                 _model_text(runtime),
@@ -222,11 +274,20 @@ async def api_callback(runtime: Any, update: Any, context: Any) -> None:
             model = data.split(":", 2)[2]
             normalized = normalize_api_model(model)
             if normalized is None:
-                await query.answer(f"Unknown API model: {model}", show_alert=True)
+                await query.answer(
+                    ui_language.tr("api.unknown_model", model=model), show_alert=True
+                )
                 answered = True
                 return
             save_api_gateway_config(runtime.global_config, default_model=normalized, updated_by=_updated_by(update))
-            await query.edit_message_text(_status_text(runtime, prefix=f"Default API model set to: {normalized}"), parse_mode="HTML", reply_markup=_keyboard(runtime))
+            await query.edit_message_text(
+                _status_text(
+                    runtime,
+                    prefix=ui_language.tr("api.model_set", model=normalized),
+                ),
+                parse_mode="HTML",
+                reply_markup=_keyboard(runtime),
+            )
         else:
             await query.edit_message_text(_status_text(runtime), parse_mode="HTML", reply_markup=_keyboard(runtime))
     finally:

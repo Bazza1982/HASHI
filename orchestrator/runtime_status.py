@@ -4,7 +4,7 @@ import html
 from datetime import datetime
 from typing import Any, Mapping
 
-from orchestrator import runtime_pending, telegram_delivery_failover
+from orchestrator import runtime_pending, telegram_delivery_failover, ui_language
 from orchestrator import telegram_stream_policy
 from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
 from orchestrator.command_ui import card_title
@@ -29,22 +29,31 @@ def _format_duration(seconds: float | int) -> str:
     hours, rem = divmod(rem, 3600)
     minutes, secs = divmod(rem, 60)
     if days:
-        return f"{days}d {hours}h"
+        return ui_language.tr(
+            "status.duration.days", days=days, hours=hours
+        )
     if hours:
-        return f"{hours}h {minutes}m"
+        return ui_language.tr(
+            "status.duration.hours", hours=hours, minutes=minutes
+        )
     if minutes:
-        return f"{minutes}m {secs}s"
-    return f"{secs}s"
+        return ui_language.tr(
+            "status.duration.minutes", minutes=minutes, seconds=secs
+        )
+    return ui_language.tr("status.duration.seconds", seconds=secs)
 
 
 def _delivery_line(delivery: Mapping[str, Any] | None) -> str:
     if not delivery:
-        return "<b>Delivery</b> · <code>HEALTHY</code>"
+        return (
+            f"<b>{html.escape(ui_language.tr('common.delivery'))}</b> · "
+            f"<code>{html.escape(ui_language.tr('status.delivery.healthy'))}</code>"
+        )
 
     blocked_until_raw = delivery.get("blocked_until")
     failover_agent = delivery.get("active_failover_agent") or "failover"
     status = str(delivery.get("status") or "blocked")
-    remaining_text = "remaining unknown"
+    remaining_text = ui_language.tr("status.delivery.remaining_unknown")
 
     if blocked_until_raw:
         try:
@@ -54,23 +63,33 @@ def _delivery_line(delivery: Mapping[str, Any] | None) -> str:
                 blocked_until = blocked_until.replace(tzinfo=now.tzinfo)
             remaining = (blocked_until.astimezone() - now).total_seconds()
             if remaining > 0:
-                remaining_text = f"~{_format_duration(remaining)} remaining"
+                remaining_text = ui_language.tr(
+                    "status.delivery.remaining",
+                    duration=_format_duration(remaining),
+                )
             else:
-                remaining_text = "recovery due now"
+                remaining_text = ui_language.tr("status.delivery.due")
         except Exception:
-            remaining_text = "remaining unknown"
+            remaining_text = ui_language.tr("status.delivery.remaining_unknown")
     elif status == "recovery_due":
-        remaining_text = "recovery due now"
+        remaining_text = ui_language.tr("status.delivery.due")
 
     if blocked_until_raw:
         return (
-            f"<b>Delivery</b> · <code>{html.escape(status.upper())}</code> · "
-            f"{html.escape(remaining_text)} · until <code>{html.escape(str(blocked_until_raw))}</code> "
-            f"· via <code>{html.escape(str(failover_agent))}</code>"
+            f"<b>{html.escape(ui_language.tr('common.delivery'))}</b> · "
+            f"<code>{html.escape(status.upper())}</code> · "
+            f"{html.escape(remaining_text)} · "
+            f"{html.escape(ui_language.tr('status.delivery.until'))} "
+            f"<code>{html.escape(str(blocked_until_raw))}</code> · "
+            f"{html.escape(ui_language.tr('status.delivery.via'))} "
+            f"<code>{html.escape(str(failover_agent))}</code>"
         )
     return (
-        f"<b>Delivery</b> · <code>{html.escape(status.upper())}</code> · "
-        f"{html.escape(remaining_text)} · via <code>{html.escape(str(failover_agent))}</code>"
+        f"<b>{html.escape(ui_language.tr('common.delivery'))}</b> · "
+        f"<code>{html.escape(status.upper())}</code> · "
+        f"{html.escape(remaining_text)} · "
+        f"{html.escape(ui_language.tr('status.delivery.via'))} "
+        f"<code>{html.escape(str(failover_agent))}</code>"
     )
 
 
@@ -90,22 +109,44 @@ def job_counts(runtime) -> tuple[int, int]:
     return heartbeat_count, cron_count
 
 
+def _status_value(value: str) -> str:
+    key = f"status.state.{str(value).strip().lower().replace('-', '_')}"
+    translated = ui_language.tr(key)
+    return value.upper() if translated == key else translated
+
+
+def _source_value(value: Any) -> str:
+    normalized = str(value or "").strip().lower().replace(" ", "_")
+    key = f"status.source.{normalized}"
+    translated = ui_language.tr(key)
+    return str(value) if translated == key else translated
+
+
 def format_status_mode_block(mode: str, state: Mapping[str, Any], detailed: bool) -> list[str]:
     if mode == "audit":
         cfg = load_audit_config(state)
         lines = [
             "",
-            "🧪 <b>AUDIT</b>",
-            f"<b>Core</b> · <code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
-            f"<b>Auditor</b> · <code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
-            f"<b>Delivery</b> · <code>{html.escape(cfg.delivery)}</code>",
-            f"<b>Threshold</b> · <code>{html.escape(cfg.severity_threshold)}</code>",
+            f"🧪 <b>{html.escape(ui_language.tr('status.mode.audit'))}</b>",
+            f"<b>{html.escape(ui_language.tr('common.core'))}</b> · "
+            f"<code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.auditor'))}</b> · "
+            f"<code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.delivery'))}</b> · "
+            f"<code>{html.escape(cfg.delivery)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.threshold'))}</b> · "
+            f"<code>{html.escape(cfg.severity_threshold)}</code>",
             "",
         ]
         if detailed:
             lines.pop()
             criteria = visible_audit_criteria(state.get("audit_criteria"))
-            lines.extend(["", "🧪 <b>AUDIT CRITERIA</b>"])
+            lines.extend(
+                [
+                    "",
+                    f"🧪 <b>{html.escape(ui_language.tr('status.audit_criteria'))}</b>",
+                ]
+            )
             if criteria:
                 for key in sorted(
                     criteria,
@@ -118,7 +159,7 @@ def format_status_mode_block(mode: str, state: Mapping[str, Any], detailed: bool
                         f"<code>{html.escape(str(key))}</code> · {html.escape(str(criteria[key]))}"
                     )
             else:
-                lines.append("• default risk sensors")
+                lines.append(ui_language.tr("status.default_risk_sensors"))
             lines.append("")
         return lines
 
@@ -128,16 +169,26 @@ def format_status_mode_block(mode: str, state: Mapping[str, Any], detailed: bool
         slot_count = len(slots)
         lines = [
             "",
-            "🎭 <b>WRAPPER</b>",
-            f"<b>Core</b> · <code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
-            f"<b>Wrapper</b> · <code>{html.escape(cfg.wrapper_backend)} / {html.escape(cfg.wrapper_model)}</code>",
-            f"<b>Context window</b> · <code>{cfg.context_window}</code>",
-            f"<b>Slots</b> · <code>{slot_count}</code> configured",
+            f"🎭 <b>{html.escape(ui_language.tr('status.mode.wrapper'))}</b>",
+            f"<b>{html.escape(ui_language.tr('common.core'))}</b> · "
+            f"<code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.wrapper'))}</b> · "
+            f"<code>{html.escape(cfg.wrapper_backend)} / {html.escape(cfg.wrapper_model)}</code>",
+            f"<b>{html.escape(ui_language.tr('status.context_window'))}</b> · "
+            f"<code>{cfg.context_window}</code>",
+            f"<b>{html.escape(ui_language.tr('common.slots'))}</b> · "
+            f"<code>{slot_count}</code> "
+            f"{html.escape(ui_language.tr('status.configured_suffix'))}",
             "",
         ]
         if detailed:
             lines.pop()
-            lines.extend(["", "🎭 <b>WRAPPER SLOTS</b>"])
+            lines.extend(
+                [
+                    "",
+                    f"🎭 <b>{html.escape(ui_language.tr('status.wrapper_slots'))}</b>",
+                ]
+            )
             if slots:
                 for key in sorted(
                     slots,
@@ -150,7 +201,7 @@ def format_status_mode_block(mode: str, state: Mapping[str, Any], detailed: bool
                         f"<code>{html.escape(str(key))}</code> · {html.escape(str(slots[key]))}"
                     )
             else:
-                lines.append("• none")
+                lines.append(f"• {html.escape(ui_language.tr('status.none'))}")
             lines.append("")
         return lines
 
@@ -166,22 +217,25 @@ def build_status_text(runtime, detailed: bool = False, *, update: Any | None = N
     recall_on = "recall" in active_skills
     heartbeat_count, cron_count = runtime._job_counts()
     active_job = runtime.skill_manager.get_active_heartbeat_job(runtime.name) if runtime.skill_manager else None
-    active_mode = "ON" if active_job and active_job.get("enabled") else "OFF"
+    active_mode = ui_language.tr(
+        "common.on" if active_job and active_job.get("enabled") else "common.off"
+    )
     active_interval = (
-        f"{max(1, int(active_job.get('interval_seconds', 600) // 60))} min"
+        f"{max(1, int(active_job.get('interval_seconds', 600) // 60))} "
+        f"{ui_language.tr('common.minutes_short')}"
         if active_job
-        else "10 min"
+        else f"10 {ui_language.tr('common.minutes_short')}"
     )
     current = runtime.current_request_meta or {}
     current_line = (
         f"{current.get('request_id')} • {current.get('source')} • {current.get('summary')}"
         if current
-        else "none"
+        else ui_language.tr("status.none")
     )
     health_line = (
         f"⚠️ {runtime.last_error_summary} ({runtime._format_age(runtime.last_error_at)})"
         if runtime.last_error_summary
-        else "✅ healthy"
+        else f"✅ {ui_language.tr('status.state.healthy')}"
     )
     delivery = telegram_delivery_failover.delivery_status_summary(runtime)
     display_policy = telegram_stream_policy.get_display_policy(runtime)
@@ -189,7 +243,11 @@ def build_status_text(runtime, detailed: bool = False, *, update: Any | None = N
     commentary_enabled = bool(getattr(runtime, "_commentary", True))
     tg_status = "✓" if runtime.telegram_connected else "✗"
     wa_status = "✓" if runtime._get_whatsapp_connected() else "✗"
-    channel_line = f"Telegram {tg_status} • WhatsApp {wa_status} • Workbench ✓"
+    channel_line = ui_language.tr(
+        "status.channel_line",
+        telegram=tg_status,
+        whatsapp=wa_status,
+    )
     mode_str = getattr(runtime.backend_manager, "agent_mode", "flex")
     try:
         state_snapshot = runtime.backend_manager.get_state_snapshot()
@@ -216,63 +274,88 @@ def build_status_text(runtime, detailed: bool = False, *, update: Any | None = N
             current_effort = effort_display_label(current_effort)
         except ValueError:
             pass
-    effort_heading = "HER execution mode" if her_backend else "Effort"
+    effort_heading = ui_language.tr(
+        "status.her_execution_mode" if her_backend else "common.effort"
+    )
     session_id_short = (
         str(hashi_session["session_id"])
         if hashi_session is not None
-        else "unresolved"
+        else ui_language.tr("status.unresolved")
     )
     status = (
-        compute_status_string(runtime).upper()
+        _status_value(compute_status_string(runtime))
         if hasattr(runtime, "backend_ready")
-        else ("ONLINE" if runtime.telegram_connected else "LOCAL")
+        else _status_value("online" if runtime.telegram_connected else "local")
     )
     delayed_count = runtime_pending.delayed_count_now(runtime)
     runtime_line = (
-        f"<b>Runtime</b> · <code>{'BUSY' if runtime.is_generating else 'IDLE'}</code> "
-        f"· queue <code>{runtime.queue.qsize()}</code> · delayed <code>{delayed_count}</code> "
-        f"· process <code>{html.escape(str(runtime._process_info()))}</code>"
+        f"<b>{html.escape(ui_language.tr('status.runtime'))}</b> · "
+        f"<code>{html.escape(_status_value('busy' if runtime.is_generating else 'idle'))}</code> "
+        f"· {html.escape(ui_language.tr('status.queue'))} "
+        f"<code>{runtime.queue.qsize()}</code> · "
+        f"{html.escape(ui_language.tr('status.delayed'))} "
+        f"<code>{delayed_count}</code> · "
+        f"{html.escape(ui_language.tr('status.process'))} "
+        f"<code>{html.escape(str(runtime._process_info()))}</code>"
     )
     lines = [
         card_title("📊", "Hashi status"),
         "",
-        f"<b>Current</b> · <b>{html.escape(status)}</b>",
-        f"<b>Agent</b> · <code>{html.escape(str(runtime.name))}</code>",
-        f"<b>Mode</b> · <code>{html.escape(str(mode_str))}</code>",
-        f"<b>Backend</b> · <code>{html.escape(str(runtime.config.active_backend))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <b>{html.escape(status)}</b>",
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · "
+        f"<code>{html.escape(str(runtime.name))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.mode'))}</b> · "
+        f"<code>{html.escape(str(mode_str))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
+        f"<code>{html.escape(str(runtime.config.active_backend))}</code>",
     ]
     provider_getter = getattr(runtime, "get_current_provider", None)
     provider = provider_getter() if callable(provider_getter) else None
     if provider:
-        lines.append(f"<b>Provider</b> · <code>{html.escape(str(provider))}</code>")
+        lines.append(
+            f"<b>{html.escape(ui_language.tr('common.provider'))}</b> · "
+            f"<code>{html.escape(str(provider))}</code>"
+        )
     lines.extend(
         [
-            f"<b>Model</b> · <code>{html.escape(str(runtime.get_current_model()))}</code>",
+            f"<b>{html.escape(ui_language.tr('common.model'))}</b> · "
+            f"<code>{html.escape(str(runtime.get_current_model()))}</code>",
             f"<b>{effort_heading}</b> · <code>{html.escape(str(current_effort))}</code>",
             (
-                f"<b>Memory+</b> · <code>{'ON' if memory_plus['enabled'] else 'OFF'}</code>"
-                f" · <code>{memory_plus['open_items']}</code> open"
+                f"<b>Memory+</b> · "
+                f"<code>{html.escape(ui_language.tr('common.on' if memory_plus['enabled'] else 'common.off'))}</code>"
+                f" · {html.escape(ui_language.tr('status.memory.open', count=memory_plus['open_items']))}"
                 + (
-                    f" · carried from <code>{html.escape(str(memory_plus['carryover_from']))}</code>"
+                    " · "
+                    + ui_language.tr(
+                        "status.memory.carried",
+                        date=(
+                            f"<code>{html.escape(str(memory_plus['carryover_from']))}</code>"
+                        ),
+                    )
                     if memory_plus["carryover_from"]
                     else ""
                 )
             ),
-            f"<b>Think</b> · <code>{'ON' if think_enabled else 'OFF'}</code>",
+            f"<b>{html.escape(ui_language.tr('status.think'))}</b> · "
+            f"<code>{html.escape(ui_language.tr('common.on' if think_enabled else 'common.off'))}</code>",
             (
-                "<b>Commentary</b> · "
-                f"<code>{'ON' if commentary_enabled else 'OFF'}</code>"
+                f"<b>{html.escape(ui_language.tr('status.commentary'))}</b> · "
+                f"<code>{html.escape(ui_language.tr('common.on' if commentary_enabled else 'common.off'))}</code>"
             ),
             (
-                f"<b>Typing</b> · <code>{'ON' if display_policy.typing_enabled else 'OFF'}</code>"
-                f" · {html.escape(str(display_policy.source))}"
+                f"<b>{html.escape(ui_language.tr('status.typing'))}</b> · "
+                f"<code>{html.escape(ui_language.tr('common.on' if display_policy.typing_enabled else 'common.off'))}</code>"
+                f" · {html.escape(_source_value(display_policy.source))}"
             ),
         ]
     )
     lines.append(
-        f"<b>Session</b> · <code>{html.escape(str(session_id_short))}</code>"
+        f"<b>{html.escape(ui_language.tr('status.session'))}</b> · "
+        f"<code>{html.escape(str(session_id_short))}</code>"
         + (
-            f" · generation <code>{int(hashi_session['context_generation'])}</code>"
+            f" · {html.escape(ui_language.tr('status.generation'))} "
+            f"<code>{int(hashi_session['context_generation'])}</code>"
             if hashi_session is not None
             else ""
         )
@@ -281,17 +364,35 @@ def build_status_text(runtime, detailed: bool = False, *, update: Any | None = N
     lines.extend(
         [
             "",
-            "<b>CONNECTIONS</b>",
-            f"<b>Channels</b> · {html.escape(channel_line)}",
+            f"<b>{html.escape(ui_language.tr('status.section.connections'))}</b>",
+            f"<b>{html.escape(ui_language.tr('status.channels'))}</b> · "
+            f"{html.escape(channel_line)}",
             _delivery_line(delivery),
             "",
-            "<b>ACTIVITY</b>",
+            f"<b>{html.escape(ui_language.tr('status.section.activity'))}</b>",
             runtime_line,
-            f"<b>Request</b> · {html.escape(str(current_line))}",
-            f"<b>Memory</b> · runtime settings {html.escape(', '.join(active_skills) if active_skills else 'none')} · recall <code>{'ON' if recall_on else 'OFF'}</code> · FYI <code>{'ARMED' if runtime._pending_session_primer else 'CLEAR'}</code>",
-            f"<b>Proactive</b> · <code>{active_mode}</code> · every {html.escape(active_interval)} · hb <code>{heartbeat_count}</code> · cron <code>{cron_count}</code>",
-            f"<b>Health</b> · {html.escape(health_line)}",
-            f"<b>Last activity</b> · success {html.escape(runtime._format_age(runtime.last_success_at))} · activity {html.escape(runtime._format_age(runtime.last_activity_at))}",
+            f"<b>{html.escape(ui_language.tr('status.request'))}</b> · "
+            f"{html.escape(str(current_line))}",
+            f"<b>{html.escape(ui_language.tr('status.memory'))}</b> · "
+            f"{html.escape(ui_language.tr('status.runtime_settings', settings=', '.join(active_skills) if active_skills else ui_language.tr('status.none')))} "
+            f"· {html.escape(ui_language.tr('status.recall'))} "
+            f"<code>{html.escape(ui_language.tr('common.on' if recall_on else 'common.off'))}</code> "
+            f"· {html.escape(ui_language.tr('status.fyi'))} "
+            f"<code>{html.escape(ui_language.tr('status.state.armed' if runtime._pending_session_primer else 'status.state.clear'))}</code>",
+            f"<b>{html.escape(ui_language.tr('status.proactive'))}</b> · "
+            f"<code>{html.escape(active_mode)}</code> · "
+            f"{html.escape(ui_language.tr('status.every', interval=active_interval))} · "
+            f"{html.escape(ui_language.tr('status.heartbeat_short'))} "
+            f"<code>{heartbeat_count}</code> · "
+            f"{html.escape(ui_language.tr('status.cron_short'))} "
+            f"<code>{cron_count}</code>",
+            f"<b>{html.escape(ui_language.tr('status.health'))}</b> · "
+            f"{html.escape(health_line)}",
+            f"<b>{html.escape(ui_language.tr('status.last_activity'))}</b> · "
+            f"{html.escape(ui_language.tr('status.success'))} "
+            f"{html.escape(runtime._format_age(runtime.last_success_at))} · "
+            f"{html.escape(ui_language.tr('status.activity'))} "
+            f"{html.escape(runtime._format_age(runtime.last_activity_at))}",
         ]
     )
     if detailed:
@@ -302,32 +403,62 @@ def build_status_text(runtime, detailed: bool = False, *, update: Any | None = N
         lines.extend(
             [
                 "",
-                "<b>DETAILS</b>",
-                f"<b>Workspace</b> · <code>{html.escape(str(runtime.workspace_dir))}</code>",
-                f"<b>Transcript</b> · <code>{html.escape(runtime.transcript_log_path.name)}</code>",
-                f"<b>Started</b> · <code>{html.escape(runtime.session_started_at.isoformat(timespec='seconds'))}</code>",
-                f"<b>Allowed backends</b> · {html.escape(allowed or 'none')}",
-                f"<b>HASHI Session ID</b> · <code>{html.escape(str(session_id))}</code>",
-                f"<b>Retry cache</b> · prompt <code>{'YES' if runtime.last_prompt else 'NO'}</code> · response <code>{'YES' if runtime.last_response else 'NO'}</code>",
-                f"<b>Primers</b> · FYI <code>{'ARMED' if runtime._pending_session_primer else 'CLEAR'}</code> · auto-recall <code>{'ARMED' if runtime._pending_auto_recall_context else 'CLEAR'}</code>",
-                f"<b>Bridge memory</b> · <code>{runtime.memory_store.get_stats()['turns']}</code> turns · <code>{runtime.memory_store.get_stats()['memories']}</code> memories",
-                f"<b>Memory+ card</b> · <code>{memory_plus['today_chars']}</code> chars · "
-                f"<code>{memory_plus['history_days']}</code> archived days · <code>{html.escape(str(memory_plus['state_path']))}</code>",
-                f"<b>Handoff files</b> · recent <code>{'YES' if runtime.recent_context_path.exists() else 'NO'}</code> · handoff <code>{'YES' if runtime.handoff_path.exists() else 'NO'}</code>",
-                f"<b>Verbose</b> · <code>{'ON' if runtime._verbose else 'OFF'}</code>",
-                f"<b>Last switch</b> · {html.escape(runtime._format_age(runtime.last_backend_switch_at))}",
+                f"<b>{html.escape(ui_language.tr('status.section.details'))}</b>",
+                f"<b>{html.escape(ui_language.tr('status.workspace'))}</b> · "
+                f"<code>{html.escape(str(runtime.workspace_dir))}</code>",
+                f"<b>{html.escape(ui_language.tr('status.transcript'))}</b> · "
+                f"<code>{html.escape(runtime.transcript_log_path.name)}</code>",
+                f"<b>{html.escape(ui_language.tr('status.started'))}</b> · "
+                f"<code>{html.escape(runtime.session_started_at.isoformat(timespec='seconds'))}</code>",
+                f"<b>{html.escape(ui_language.tr('status.allowed_backends'))}</b> · "
+                f"{html.escape(allowed or ui_language.tr('status.none'))}",
+                f"<b>{html.escape(ui_language.tr('status.session_id'))}</b> · "
+                f"<code>{html.escape(str(session_id))}</code>",
+                f"<b>{html.escape(ui_language.tr('status.retry_cache'))}</b> · "
+                f"{html.escape(ui_language.tr('status.prompt'))} "
+                f"<code>{html.escape(ui_language.tr('common.yes' if runtime.last_prompt else 'common.no'))}</code> · "
+                f"{html.escape(ui_language.tr('status.response'))} "
+                f"<code>{html.escape(ui_language.tr('common.yes' if runtime.last_response else 'common.no'))}</code>",
+                f"<b>{html.escape(ui_language.tr('status.primers'))}</b> · "
+                f"{html.escape(ui_language.tr('status.fyi'))} "
+                f"<code>{html.escape(ui_language.tr('status.state.armed' if runtime._pending_session_primer else 'status.state.clear'))}</code> · "
+                f"{html.escape(ui_language.tr('status.auto_recall'))} "
+                f"<code>{html.escape(ui_language.tr('status.state.armed' if runtime._pending_auto_recall_context else 'status.state.clear'))}</code>",
+                f"<b>{html.escape(ui_language.tr('status.bridge_memory'))}</b> · "
+                f"<code>{runtime.memory_store.get_stats()['turns']}</code> "
+                f"{html.escape(ui_language.tr('status.turns'))} · "
+                f"<code>{runtime.memory_store.get_stats()['memories']}</code> "
+                f"{html.escape(ui_language.tr('status.memories'))}",
+                f"<b>{html.escape(ui_language.tr('status.memory_card'))}</b> · "
+                f"<code>{memory_plus['today_chars']}</code> "
+                f"{html.escape(ui_language.tr('status.chars'))} · "
+                f"<code>{memory_plus['history_days']}</code> "
+                f"{html.escape(ui_language.tr('status.archived_days'))} · "
+                f"<code>{html.escape(str(memory_plus['state_path']))}</code>",
+                f"<b>{html.escape(ui_language.tr('status.handoff_files'))}</b> · "
+                f"{html.escape(ui_language.tr('status.recent'))} "
+                f"<code>{html.escape(ui_language.tr('common.yes' if runtime.recent_context_path.exists() else 'common.no'))}</code> · "
+                f"{html.escape(ui_language.tr('status.handoff'))} "
+                f"<code>{html.escape(ui_language.tr('common.yes' if runtime.handoff_path.exists() else 'common.no'))}</code>",
+                f"<b>{html.escape(ui_language.tr('status.verbose'))}</b> · "
+                f"<code>{html.escape(ui_language.tr('common.on' if runtime._verbose else 'common.off'))}</code>",
+                f"<b>{html.escape(ui_language.tr('status.last_switch'))}</b> · "
+                f"{html.escape(runtime._format_age(runtime.last_backend_switch_at))}",
             ]
         )
         try:
             from tools.token_tracker import format_status_line, get_summary
 
             usage_summary = get_summary(runtime.workspace_dir, session_id=runtime.session_id_dt)
-            lines.append(f"<b>Tokens</b> · {html.escape(format_status_line(usage_summary))}")
+            lines.append(
+                f"<b>{html.escape(ui_language.tr('status.tokens'))}</b> · "
+                f"{html.escape(format_status_line(usage_summary))}"
+            )
         except Exception:
             pass
     else:
         lines.append("")
-        lines.append("Use <code>/status full</code> for more detail.")
+        lines.append(ui_language.tr("status.more"))
     return "\n".join(lines)
 
 

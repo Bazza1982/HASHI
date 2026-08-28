@@ -21,7 +21,7 @@ from orchestrator.memory_plus_mode import (
     write_memory_plus_update,
 )
 from orchestrator.telegram_notifications import disable_notification
-from orchestrator import telegram_stream_policy
+from orchestrator import telegram_stream_policy, ui_language
 
 
 def wrapper_enabled(runtime: Any) -> bool:
@@ -155,7 +155,7 @@ async def send_wrapper_polishing_placeholder(runtime: Any, item: Any):
     try:
         return await bot.send_message(
             chat_id=item.chat_id,
-            text="✨ Polishing the final voice...",
+            text=ui_language.tr("wrapper.polishing"),
             disable_notification=disable_notification(runtime),
         )
     except Exception as exc:

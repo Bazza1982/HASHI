@@ -6,6 +6,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator import ui_language
 from orchestrator.command_ui import (
     card_title,
     confirm_card,
@@ -19,21 +20,44 @@ def _command(command: str, description: str) -> str:
     return f"<code>{html.escape(command)}</code> · {html.escape(description)}"
 
 
+def _tr(key: str, **values: Any) -> str:
+    return ui_language.tr(key, **values)
+
+
+def _label(key: str) -> str:
+    return f"<b>{html.escape(_tr(key))}</b>"
+
+
+def _state(key: str) -> str:
+    return f"<b>{html.escape(_tr(key))}</b>"
+
+
+def _fact(label_key: str, value: str) -> str:
+    return f"{_label(label_key)} · {value}"
+
+
+def _command_key(command: str, description_key: str) -> str:
+    return _command(command, _tr(description_key))
+
+
 def parked_topics_text(topics: Sequence[dict[str, Any]]) -> str:
     lines = [
         card_title("🅿️", "Parked topics"),
         "",
-        f"<b>Current</b> · <code>{len(topics)}</code> saved",
-        "<b>Changes</b> · saved immediately in this workspace",
+        _fact(
+            "common.current",
+            _tr("menu.park.current", count=f"<code>{len(topics)}</code>"),
+        ),
+        _fact("common.changes", html.escape(_tr("menu.park.changes"))),
     ]
     if not topics:
-        lines.extend(["", "No parked topics are available."])
+        lines.extend(["", html.escape(_tr("menu.park.none"))])
     else:
-        lines.extend(["", "<b>TOPICS</b>"])
+        lines.extend(["", _label("menu.park.section")])
         for topic in topics:
             slot_id = int(topic.get("slot_id", 0) or 0)
-            title = topic.get("title") or f"Topic {slot_id}"
-            short = topic.get("summary_short") or "(no short summary)"
+            title = topic.get("title") or _tr("menu.park.topic_default", slot=slot_id)
+            short = topic.get("summary_short") or _tr("menu.park.no_summary")
             followup = topic.get("followup") or {}
             reminder_status = followup.get("status") or "scheduled"
             attempts = int(followup.get("attempts", 0) or 0)
@@ -44,10 +68,12 @@ def parked_topics_text(topics: Sequence[dict[str, Any]]) -> str:
                     f"<b><code>{slot_id}</code> · {html.escape(str(title))}</b>",
                     html.escape(str(short)),
                     (
-                        f"Reminders · <code>{html.escape(str(reminder_status))}</code> "
+                        f"{html.escape(_tr('menu.park.reminders'))} · "
+                        f"<code>{html.escape(str(reminder_status))}</code> "
                         f"· <code>{attempts}/3</code>"
                         + (
-                            f" · next <code>{html.escape(str(next_at))}</code>"
+                            f" · {html.escape(_tr('menu.park.next'))} "
+                            f"<code>{html.escape(str(next_at))}</code>"
                             if next_at
                             else ""
                         )
@@ -57,10 +83,10 @@ def parked_topics_text(topics: Sequence[dict[str, Any]]) -> str:
     lines.extend(
         [
             "",
-            "<b>Use</b>",
-            _command("/park chat [title]", "park the current topic"),
-            _command("/load <slot>", "restore a parked topic"),
-            _command("/park delete <slot>", "remove a parked topic"),
+            _label("common.use"),
+            _command_key("/park chat [title]", "menu.park.action.park"),
+            _command_key("/load <slot>", "menu.park.action.restore"),
+            _command_key("/park delete <slot>", "menu.park.action.remove"),
         ]
     )
     return "\n".join(lines)
@@ -74,13 +100,16 @@ def ticket_list_text(
     lines = [
         card_title("🎫", "Support tickets"),
         "",
-        f"<b>Current</b> · <code>{total}</code> active",
-        f"<b>Open</b> · <code>{len(open_tickets)}</code>",
-        f"<b>In progress</b> · <code>{len(in_progress_tickets)}</code>",
+        _fact(
+            "common.current",
+            _tr("menu.ticket.current", count=f"<code>{total}</code>"),
+        ),
+        _fact("menu.ticket.open", f"<code>{len(open_tickets)}</code>"),
+        _fact("menu.ticket.in_progress", f"<code>{len(in_progress_tickets)}</code>"),
     ]
     for heading, tickets in (
-        ("OPEN", open_tickets),
-        ("IN PROGRESS", in_progress_tickets),
+        (_tr("menu.ticket.section.open"), open_tickets),
+        (_tr("menu.ticket.section.in_progress"), in_progress_tickets),
     ):
         if not tickets:
             continue
@@ -91,11 +120,11 @@ def ticket_list_text(
             summary = html.escape(str(ticket.get("summary") or "")[:90])
             lines.append(f"<code>{ticket_id}</code> · {source} · {summary}")
     if not total:
-        lines.extend(["", "No open or in-progress tickets."])
+        lines.extend(["", html.escape(_tr("menu.ticket.none"))])
     lines.extend(
         [
             "",
-            _command("/ticket <description>", "create a support ticket"),
+            _command_key("/ticket <description>", "menu.ticket.action.create"),
         ]
     )
     return "\n".join(lines)
@@ -135,40 +164,49 @@ def sys_slots_text(
     lines = [
         card_title("🌐" if is_global else "🧾", "Global system prompt slots" if is_global else "System prompt slots"),
         "",
-        f"<b>Current</b> · <code>{active_count}</code> active",
-        f"<b>Configured</b> · <code>{configured_count}/{len(slots)}</code>",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        f"<code>{active_count}</code> {html.escape(ui_language.tr('sys.active_suffix'))}",
+        f"<b>{html.escape(ui_language.tr('common.configured'))}</b> · "
+        f"<code>{configured_count}/{len(slots)}</code>",
         (
-            f"<b>Scope</b> · every Agent in <code>{html.escape(instance_id or 'this HASHI instance')}</code>"
+            f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+            + ui_language.tr(
+                "sys.scope.global",
+                instance=f"<code>{html.escape(instance_id or 'this HASHI instance')}</code>",
+            )
             if is_global
-            else "<b>Scope</b> · this Agent only"
+            else f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+            f"{html.escape(ui_language.tr('sys.scope.local'))}"
         ),
         (
-            "<b>Changes</b> · visible to all Agents on their next request"
+            f"<b>{html.escape(ui_language.tr('common.changes'))}</b> · "
+            f"{html.escape(ui_language.tr('sys.changes.global'))}"
             if is_global
-            else "<b>Changes</b> · immediate and persistent in this workspace"
+            else f"<b>{html.escape(ui_language.tr('common.changes'))}</b> · "
+            f"{html.escape(ui_language.tr('sys.changes.local'))}"
         ),
         "",
-        "<b>SLOTS</b>",
+        f"<b>{html.escape(ui_language.tr('sys.section.slots'))}</b>",
     ]
     for slot_id, active, text in slots:
         state = status_label(active)
         preview = text[:70].strip() + ("…" if len(text) > 70 else "")
         lines.append(
             f"<code>{slot_id}</code> · <b>{state}</b> · "
-            f"{html.escape(preview or '(empty)')}"
+            f"{html.escape(preview or ui_language.tr('common.empty'))}"
         )
     lines.extend(
         [
             "",
-            "<b>Use</b>",
-            _command(f"{prefix} <slot>", "view one slot"),
-            _command(f"{prefix} <slot> on|off", "change its active state"),
-            _command(f"{prefix} <slot> save|replace <text>", "update its content"),
-            _command(f"{prefix} output <slot>", "return its raw content"),
+            f"<b>{html.escape(ui_language.tr('common.use'))}</b>",
+            _command(f"{prefix} <slot>", ui_language.tr("sys.action.view_slot")),
+            _command(f"{prefix} <slot> on|off", ui_language.tr("sys.action.change_state")),
+            _command(f"{prefix} <slot> save|replace <text>", ui_language.tr("sys.action.update_content")),
+            _command(f"{prefix} output <slot>", ui_language.tr("sys.action.raw_content")),
         ]
     )
     if is_global:
-        lines.append(_command("/sys g …", "short alias for /sys global …"))
+        lines.append(_command("/sys g …", ui_language.tr("sys.action.global_alias")))
     return "\n".join(lines)
 
 
@@ -188,21 +226,27 @@ def sys_slot_text(
         [
             card_title("🌐" if is_global else "🧾", "Global system prompt slot" if is_global else "System prompt slot"),
             "",
-            f"<b>Current</b> · <b>{status_label(active)}</b>",
-            f"<b>Slot</b> · <code>{html.escape(slot_id)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · <b>{status_label(active)}</b>",
+            f"<b>{html.escape(ui_language.tr('common.slot'))}</b> · <code>{html.escape(slot_id)}</code>",
             (
-                f"<b>Scope</b> · every Agent in <code>{html.escape(instance_id or 'this HASHI instance')}</code>"
+                f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+                + ui_language.tr(
+                    "sys.scope.global",
+                    instance=f"<code>{html.escape(instance_id or 'this HASHI instance')}</code>",
+                )
                 if is_global
-                else "<b>Scope</b> · this Agent only"
+                else f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+                f"{html.escape(ui_language.tr('sys.scope.local'))}"
             ),
-            f"<b>Size</b> · <code>{len(text)}</code> chars",
+            f"<b>{html.escape(ui_language.tr('common.size'))}</b> · <code>{len(text)}</code> "
+            f"{html.escape(ui_language.tr('sys.characters_suffix'))}",
             "",
-            f"<pre>{html.escape(text or '(empty)')}</pre>",
+            f"<pre>{html.escape(text or ui_language.tr('common.empty'))}</pre>",
             "",
-            "<b>Use</b>",
-            _command(f"{prefix} {slot_id} on|off", "change its active state"),
-            _command(f"{prefix} {slot_id} replace <text>", "replace its content"),
-            _command(f"{prefix} output {slot_id}", "return its raw content"),
+            f"<b>{html.escape(ui_language.tr('common.use'))}</b>",
+            _command(f"{prefix} {slot_id} on|off", ui_language.tr("sys.action.change_state")),
+            _command(f"{prefix} {slot_id} replace <text>", ui_language.tr("sys.action.replace_content")),
+            _command(f"{prefix} output {slot_id}", ui_language.tr("sys.action.raw_content")),
         ]
     )
 
@@ -212,15 +256,30 @@ def credit_status_text(data: dict[str, Any]) -> str:
     return setting_card(
         "💳",
         "OpenRouter credit",
-        current=f"<code>{html.escape(str(data.get('limit_remaining', 'unknown')))}</code> remaining",
+        current=(
+            f"<code>{html.escape(str(data.get('limit_remaining', _tr('common.unknown'))))}</code> "
+            f"{html.escape(_tr('menu.credit.remaining'))}"
+        ),
         facts=[
-            f"<b>Key</b> · <code>{html.escape(str(data.get('label', 'unknown')))}</code>",
-            f"<b>Usage</b> · <code>{html.escape(str(data.get('usage', 'unknown')))}</code>",
-            f"<b>Limit</b> · <code>{html.escape(str(data.get('limit', 'unknown')))}</code>",
-            f"<b>Free tier</b> · <code>{'YES' if free_tier else 'NO'}</code>",
+            _fact(
+                "common.key",
+                f"<code>{html.escape(str(data.get('label', _tr('common.unknown'))))}</code>",
+            ),
+            _fact(
+                "common.usage",
+                f"<code>{html.escape(str(data.get('usage', _tr('common.unknown'))))}</code>",
+            ),
+            _fact(
+                "common.limit",
+                f"<code>{html.escape(str(data.get('limit', _tr('common.unknown'))))}</code>",
+            ),
+            _fact(
+                "common.free_tier",
+                f"<code>{html.escape(_tr('common.yes' if free_tier else 'common.no'))}</code>",
+            ),
         ],
-        consequence="Values come from the active OpenRouter key and are read-only.",
-        action="Run <code>/credit</code> again to refresh.",
+        consequence=_tr("menu.credit.read_only"),
+        action=_tr("menu.credit.refresh"),
     )
 
 
@@ -232,24 +291,27 @@ def model_menu_text(
     persists: bool,
     provider: str | None = None,
 ) -> str:
-    facts = [f"<b>Backend</b> · <code>{html.escape(backend)}</code>"]
+    facts = [_fact("common.backend", f"<code>{html.escape(backend)}</code>")]
     if provider:
-        facts.append(f"<b>Provider</b> · <code>{html.escape(provider)}</code>")
+        facts.append(_fact("common.provider", f"<code>{html.escape(provider)}</code>"))
     return setting_card(
         "🧠",
         "Hashi model",
         current=f"<code>{html.escape(model)}</code>",
         facts=facts,
         consequence=(
-            "The selection applies immediately to the next request"
-            + (" and persists." if persists else ".")
+            _tr(
+                "menu.model.selection_persistent"
+                if persists
+                else "menu.model.selection_temporary"
+            )
             if has_choices
-            else "This backend accepts a model name through the typed command."
+            else _tr("menu.model.typed")
         ),
         action=(
-            "Choose a model below."
+            _tr("menu.model.choose")
             if has_choices
-            else "Use <code>/model &lt;name&gt;</code> to switch."
+            else _tr("menu.model.typed_action")
         ),
     )
 
@@ -264,46 +326,42 @@ def thinking_output_text(
     """Render backend-aware reasoning ownership without growing the runtime."""
 
     commentary_fact = (
-        "<b>HER Persona commentary</b> · <code>OWNED BY /commentary</code>"
+        _fact(
+            "menu.think.her_commentary_label",
+            f"<code>{html.escape(_tr('menu.think.owned_commentary'))}</code>",
+        )
         if her_backend
         else (
-            "<b>Model commentary</b> · "
-            f"<code>{'AVAILABLE' if commentary_available else 'NOT EXPOSED'}</code>"
+            _fact(
+                "menu.think.model_commentary_label",
+                f"<code>{html.escape(_tr('common.available' if commentary_available else 'common.not_exposed'))}</code>",
+            )
         )
     )
     if enabled and her_backend:
-        consequence = (
-            "For HER, shows genuine provider-returned reasoning only; "
-            "Persona reports stay under /commentary."
-        )
+        consequence = _tr("menu.think.enabled_her")
     elif enabled:
-        consequence = (
-            "Shows model-authored interim commentary and genuine "
-            "provider-returned reasoning when available."
-        )
+        consequence = _tr("menu.think.enabled_other")
     elif her_backend:
-        consequence = (
-            "HER provider reasoning is hidden; /commentary and /verbose are unaffected."
-        )
+        consequence = _tr("menu.think.disabled_her")
     else:
-        consequence = (
-            "Model commentary and provider reasoning are hidden. "
-            "Progress and typing are unaffected."
-        )
+        consequence = _tr("menu.think.disabled_other")
     return setting_card(
         "💭",
         "Thinking output",
         current=f"<b>{status_label(enabled)}</b>",
         facts=[
             (
-                "<b>Provider reasoning</b> · "
-                f"<code>{'AVAILABLE' if reasoning_available else 'NOT EXPOSED'}</code>"
+                _fact(
+                    "menu.think.reasoning_label",
+                    f"<code>{html.escape(_tr('common.available' if reasoning_available else 'common.not_exposed'))}</code>",
+                )
             ),
             commentary_fact,
-            "<b>Saved</b> · workspace setting",
+            _fact("common.saved", html.escape(_tr("menu.setting.workspace"))),
         ],
         consequence=consequence,
-        action="Changes apply immediately and persist across reboot.",
+        action=_tr("menu.setting.immediate_persistent_reboot"),
     )
 
 
@@ -322,26 +380,33 @@ def her_commentary_text(*, enabled: bool, effort: str) -> str:
         "HER commentary",
         current=f"<b>{status_label(enabled)}</b>",
         facts=[
-            f"<b>HER execution mode</b> · <code>{html.escape(effort)}</code>",
-            "<b>Direct</b> · <code>zero</code> · no HER acknowledgement or "
-            "commentary stage; normal /verbose provider and tool updates remain available",
-            "<b>Planned</b> · <code>medium</code> · may emit the model-authored "
-            "Persona acknowledgement",
-            "<b>Adaptive+</b> · <code>high+</code> · may also emit model-authored "
-            "material progress/Replan reports",
-            "<b>Delivery</b> · one durable message per stable event identity",
-            "<b>Neutral runtime leases</b> · technical /verbose only",
-            "<b>Independent</b> · does not change /think or /verbose",
-            "<b>Saved</b> · workspace setting",
+            _fact(
+                "menu.commentary.execution_mode",
+                f"<code>{html.escape(effort)}</code>",
+            ),
+            f"<b>{html.escape(_tr('menu.commentary.level.direct'))}</b> · <code>zero</code> · {html.escape(_tr('menu.commentary.direct'))}",
+            f"<b>{html.escape(_tr('menu.commentary.level.planned'))}</b> · <code>medium</code> · {html.escape(_tr('menu.commentary.planned'))}",
+            f"<b>{html.escape(_tr('menu.commentary.level.adaptive'))}</b> · <code>high+</code> · {html.escape(_tr('menu.commentary.adaptive'))}",
+            _fact(
+                "menu.commentary.delivery_label",
+                html.escape(_tr("menu.commentary.delivery")),
+            ),
+            _fact(
+                "menu.commentary.leases_label",
+                html.escape(_tr("menu.commentary.leases")),
+            ),
+            _fact(
+                "menu.commentary.independent_label",
+                html.escape(_tr("menu.commentary.independent")),
+            ),
+            _fact("common.saved", html.escape(_tr("menu.setting.workspace"))),
         ],
         consequence=(
-            "HER shows only explicit model-authored Persona reports here; "
-            "technical telemetry and provider reasoning stay separate."
+            _tr("menu.commentary.enabled")
             if enabled
-            else "Optional HER Persona acknowledgements and interim reports are "
-            "hidden; final and required control messages remain visible."
+            else _tr("menu.commentary.disabled")
         ),
-        action="Use /commentary on, /commentary off, or the buttons below.",
+        action=_tr("menu.commentary.action"),
     )
 
 
@@ -352,13 +417,20 @@ def her_v2_provider_menu_text(
     unavailable: Sequence[tuple[str, str]] = (),
 ) -> str:
     facts = [
-        "<b>Backend</b> · <code>her-v2</code>",
-        f"<b>Instance configured</b> · <code>{available_count}</code> call providers",
-        "<b>Modes</b> · one provider, or Hybrid Quick/Pro targets",
+        _fact("common.backend", "<code>her-v2</code>"),
+        _fact(
+            "menu.provider.instance_configured",
+            f"<code>{available_count}</code> {html.escape(_tr('menu.provider.call_providers'))}",
+        ),
+        _fact(
+            "menu.provider.modes_label",
+            html.escape(_tr("menu.provider.modes")),
+        ),
     ]
     if unavailable:
         facts.append(
-            "<b>Unavailable</b> · "
+            _label("menu.provider.unavailable_label")
+            + " · "
             + ", ".join(
                 f"{html.escape(name)} ({html.escape(reason)})"
                 for name, reason in unavailable
@@ -369,15 +441,11 @@ def her_v2_provider_menu_text(
         "HER v2 provider",
         current=f"<code>{html.escape(current_provider)}</code>",
         facts=facts,
-        consequence=(
-            "A provider selection atomically assigns valid defaults to both model "
-            "slots. Hybrid opens a draft where each target can use a different "
-            "provider/model. Task-route reasoning and HER effort stay untouched."
-        ),
+        consequence=_tr("menu.provider.effect"),
         action=(
-            "Choose a call provider below."
+            _tr("menu.provider.choose")
             if available_count
-            else "No usable HER v2 call provider is configured on this instance."
+            else _tr("menu.provider.none")
         ),
     )
 
@@ -386,13 +454,13 @@ def her_v2_provider_unavailable_text(*, backend: str) -> str:
     return setting_card(
         "🔌",
         "HER v2 provider",
-        current="<b>UNAVAILABLE</b>",
+        current=_state("common.unavailable"),
         facts=[
-            f"<b>Backend</b> · <code>{html.escape(backend)}</code>",
-            "<b>Scope</b> · <code>/provider</code> is available only for <code>her-v2</code>",
+            _fact("common.backend", f"<code>{html.escape(backend)}</code>"),
+            _fact("common.scope", _tr("menu.provider.her_only")),
         ],
-        consequence="No backend, provider, model slot, or reasoning setting was changed.",
-        action="Use <code>/backend her-v2</code> first.",
+        consequence=_tr("menu.provider.unchanged"),
+        action=_tr("menu.provider.use_her"),
     )
 
 
@@ -413,22 +481,24 @@ def her_v2_model_menu_text(
         "HER v2 models",
         current=(
             f"<code>{html.escape(routing_mode.upper())}</code>"
-            + (" · <b>DRAFT</b>" if draft else "")
+            + (f" · {_state('common.draft')}" if draft else "")
         ),
         facts=[
-            f"<b>Provider</b> · <code>{html.escape(provider)}</code>",
-            f"<b>Quick target</b> · <code>{html.escape(fast_provider)} / {html.escape(fast_model)}</code>",
-            f"<b>Pro target</b> · <code>{html.escape(pro_provider)} / {html.escape(pro_model)}</code>",
+            _fact("common.provider", f"<code>{html.escape(provider)}</code>"),
+            _fact(
+                "menu.her.quick_target",
+                f"<code>{html.escape(fast_provider)} / {html.escape(fast_model)}</code>",
+            ),
+            _fact(
+                "menu.her.pro_target",
+                f"<code>{html.escape(pro_provider)} / {html.escape(pro_model)}</code>",
+            ),
         ],
-        consequence=(
-            "Quick and Pro are complete provider/model targets. Each task route "
-            "follows one target or uses a Custom target; reasoning stays independent. "
-            "No automatic cross-provider failover is added."
-        ),
+        consequence=_tr("menu.her.model_effect"),
         action=(
-            "Review the draft and press Apply once."
+            _tr("menu.her.review_apply")
             if draft
-            else "Choose a target, or open task routes."
+            else _tr("menu.her.choose_target")
         ),
     )
 
@@ -443,15 +513,15 @@ def her_v2_slot_model_text(
     display_slot = "Quick" if slot == "fast" else "Pro"
     return setting_card(
         "🧠",
-        f"HER v2 {display_slot} model",
+        _tr("menu.her.slot_title", slot=display_slot),
         current=f"<code>{html.escape(current_model)}</code>",
         facts=[
-            f"<b>Provider</b> · <code>{html.escape(provider)}</code>",
-            f"<b>Slot</b> · <code>{display_slot}</code>",
-            f"<b>Allowed models</b> · <code>{model_count}</code>",
+            _fact("common.provider", f"<code>{html.escape(provider)}</code>"),
+            _fact("menu.her.slot_label", f"<code>{display_slot}</code>"),
+            _fact("menu.her.allowed_models", f"<code>{model_count}</code>"),
         ],
-        consequence="Only this model slot changes; the other slot and all reasoning settings are preserved.",
-        action="Choose an allowed model below.",
+        consequence=_tr("menu.her.slot_effect"),
+        action=_tr("menu.her.choose_model"),
     )
 
 
@@ -466,20 +536,24 @@ def her_v2_routes_text(
         "🧭",
         "HER v2 task routes",
         current=(
-            f"<code>{route_count}</code> effective routes"
-            + (" · <b>DRAFT</b>" if draft else "")
+            f"<code>{route_count}</code> {html.escape(_tr('menu.her.effective_routes'))}"
+            + (f" · {_state('common.draft')}" if draft else "")
         ),
         facts=[
-            "<b>Target</b> · Direct is fixed to <code>Quick</code>; other routes select <code>Quick</code>, <code>Pro</code>, or <code>Custom</code>",
-            f"<b>Custom targets</b> · <code>{custom_target_count}</code>",
-            "<b>Reasoning</b> · each route independently selects provider reasoning",
-            f"<b>Custom reasoning</b> · <code>{explicit_reasoning_count}</code> route overrides",
+            _fact("common.target", _tr("menu.her.route_target")),
+            _fact("menu.her.custom_targets", f"<code>{custom_target_count}</code>"),
+            _fact(
+                "menu.her.reasoning_label",
+                html.escape(_tr("menu.her.reasoning")),
+            ),
+            _fact(
+                "menu.her.custom_reasoning",
+                f"<code>{explicit_reasoning_count}</code> "
+                f"{html.escape(_tr('menu.her.route_overrides'))}",
+            ),
         ],
-        consequence=(
-            "Changing one route never changes either model definition or another "
-            "route. HER orchestration effort remains separate."
-        ),
-        action="Choose a task route below.",
+        consequence=_tr("menu.her.routes_effect"),
+        action=_tr("menu.her.choose_route"),
     )
 
 
@@ -491,25 +565,35 @@ def her_v2_route_text(
     reasoning: str,
     reasoning_inherited: bool,
 ) -> str:
-    reasoning_source = "inherited default" if reasoning_inherited else "explicit route"
+    reasoning_source = _tr(
+        "menu.her.reasoning_source.inherited"
+        if reasoning_inherited
+        else "menu.her.reasoning_source.explicit"
+    )
     return setting_card(
         "🧭",
-        f"HER v2 route · {label}",
+        _tr("menu.her.route_title", label=label),
         current=(
             f"<code>{html.escape(model_slot)}</code> + "
             f"<code>{html.escape(reasoning)}</code>"
         ),
         facts=[
-            f"<b>Target mode</b> · <code>{html.escape(model_slot)}</code>",
-            f"<b>Effective target</b> · <code>{html.escape(effective_model)}</code>",
-            f"<b>Provider reasoning</b> · <code>{html.escape(reasoning)}</code>",
-            f"<b>Reasoning source</b> · <code>{reasoning_source}</code>",
+            _fact("menu.her.target_mode", f"<code>{html.escape(model_slot)}</code>"),
+            _fact(
+                "menu.her.effective_target",
+                f"<code>{html.escape(effective_model)}</code>",
+            ),
+            _fact(
+                "menu.think.reasoning_label",
+                f"<code>{html.escape(reasoning)}</code>",
+            ),
+            _fact(
+                "menu.her.reasoning_source_label",
+                f"<code>{html.escape(reasoning_source)}</code>",
+            ),
         ],
-        consequence=(
-            "Provider/model target and provider reasoning are independent. Changing either "
-            "setting affects only this route; /effort is not read or modified."
-        ),
-        action="Choose a model slot or reasoning value below.",
+        consequence=_tr("menu.her.route_effect"),
+        action=_tr("menu.her.choose_route_values"),
     )
 
 
@@ -519,10 +603,13 @@ def her_v2_backend_selected_text(*, with_context: bool) -> str:
         "HER v2 selected",
         current="<code>her-v2</code>",
         facts=[
-            f"<b>Context</b> · <code>{'HANDOFF' if with_context else 'FRESH'}</code>",
+            _fact(
+                "common.context",
+                f"<code>{'HANDOFF' if with_context else 'FRESH'}</code>",
+            ),
         ],
-        consequence="The backend changed without changing provider, model slots, reasoning, or effort.",
-        action="Use <code>/provider</code>, <code>/model</code>, or <code>/effort</code> independently.",
+        consequence=_tr("menu.her.backend_changed"),
+        action=_tr("menu.her.independent_controls"),
     )
 
 
@@ -531,8 +618,8 @@ def backend_menu_text(*, active_backend: str) -> str:
         "🧠",
         "Hashi backend",
         current=f"<code>{html.escape(active_backend)}</code>",
-        consequence="Selecting with context first rebuilds a continuity handoff.",
-        action="Choose a backend to select its model and switch.",
+        consequence=_tr("menu.backend.context_effect"),
+        action=_tr("menu.backend.choose"),
     )
 
 
@@ -542,16 +629,20 @@ def backend_model_prompt_text(
     current_model: str,
     with_context: bool,
 ) -> str:
-    mode_text = "with handoff context" if with_context else "without handoff context"
+    mode_text = _tr(
+        "menu.backend.with_handoff"
+        if with_context
+        else "menu.backend.without_handoff"
+    )
     return setting_card(
         "🧠",
         "Choose model",
         current=f"<code>{html.escape(current_model or 'auto')}</code>",
         facts=[
-            f"<b>Backend</b> · <code>{html.escape(backend)}</code>",
-            f"<b>Switch</b> · {html.escape(mode_text)}",
+            _fact("common.backend", f"<code>{html.escape(backend)}</code>"),
+            _fact("common.switch", html.escape(mode_text)),
         ],
-        action="Select a model to complete the switch.",
+        action=_tr("menu.backend.select_model"),
     )
 
 
@@ -559,15 +650,15 @@ def loop_manager_text() -> str:
     return setting_card(
         "🔄",
         "Loop manager",
-        current="<b>READY</b>",
-        facts=["<b>Scope</b> · recurring cron and heartbeat tasks"],
-        consequence="New loops and state changes are saved immediately in the task scheduler.",
+        current=_state("common.ready"),
+        facts=[_fact("common.scope", html.escape(_tr("menu.loop.scope")))],
+        consequence=_tr("menu.loop.effect"),
         action=(
-            _command("/loop <task>", "create a loop")
+            _command_key("/loop <task>", "menu.loop.action.create")
             + "\n"
-            + _command("/loop list", "list configured loops")
+            + _command_key("/loop list", "menu.loop.action.list")
             + "\n"
-            + _command("/loop stop [id]", "stop one or all active loops")
+            + _command_key("/loop stop [id]", "menu.loop.action.stop")
         ),
     )
 
@@ -578,22 +669,32 @@ def loop_list_text(loops: Iterable[tuple[str, dict[str, Any]]]) -> str:
     lines = [
         card_title("🔄", "Loops"),
         "",
-        f"<b>Current</b> · <code>{enabled_count}</code> active · <code>{len(rows)}</code> configured",
-        "<b>Changes</b> · immediate and persistent",
+        _fact(
+            "common.current",
+            _tr(
+                "menu.loop.current",
+                active=f"<code>{enabled_count}</code>",
+                configured=f"<code>{len(rows)}</code>",
+            ),
+        ),
+        _fact("common.changes", html.escape(_tr("menu.loop.changes"))),
     ]
     if not rows:
-        lines.extend(["", "No loops are configured for this agent."])
+        lines.extend(["", html.escape(_tr("menu.loop.none"))])
     for job_kind, job in rows:
         meta = job.get("loop_meta") or {}
         enabled = bool(job.get("enabled"))
         count = int(meta.get("count", 0) or 0)
         maximum = int(meta.get("max", 100) or 100)
         schedule = (
-            f"every {job.get('interval_seconds', '?')}s"
+            _tr(
+                "menu.loop.every_seconds",
+                seconds=job.get("interval_seconds", "?"),
+            )
             if job_kind == "heartbeat"
-            else str(job.get("schedule") or "unknown")
+            else str(job.get("schedule") or _tr("common.unknown"))
         )
-        job_id = html.escape(str(job.get("id") or "unknown"))
+        job_id = html.escape(str(job.get("id") or _tr("common.unknown")))
         summary = html.escape(
             str(meta.get("task_summary") or job.get("note") or "")[:90]
         )
@@ -601,16 +702,20 @@ def loop_list_text(loops: Iterable[tuple[str, dict[str, Any]]]) -> str:
         lines.extend(
             [
                 "",
-                f"<b>{'ON' if enabled else 'OFF'}</b> · <code>{job_id}</code>",
-                f"<b>Schedule</b> · <code>{html.escape(schedule)}</code> · {html.escape(job_kind)}",
-                f"<b>Progress</b> · <code>{count}/{maximum}</code>",
+                f"<b>{status_label(enabled)}</b> · <code>{job_id}</code>",
+                _fact(
+                    "common.schedule",
+                    f"<code>{html.escape(schedule)}</code> · "
+                    f"{html.escape(_tr(f'menu.loop.kind.{job_kind}') if job_kind in {'heartbeat', 'cron'} else job_kind)}",
+                ),
+                _fact("common.progress", f"<code>{count}/{maximum}</code>"),
             ]
         )
         if summary:
             lines.append(summary)
         if reason:
             lines.append(f"⚠️ {reason}")
-    lines.extend(["", _command("/jobs", "open full scheduler controls")])
+    lines.extend(["", _command_key("/jobs", "menu.loop.open_jobs")])
     return "\n".join(lines)
 
 
@@ -619,12 +724,12 @@ def debug_menu_text(*, enabled: bool) -> str:
         "🐛",
         "Debug mode",
         current=f"<b>{status_label(enabled)}</b>",
-        facts=["<b>Scope</b> · strict debugging skill context"],
-        consequence="The toggle persists in this workspace; prompt runs use the debug skill immediately.",
+        facts=[_fact("common.scope", html.escape(_tr("menu.debug.scope")))],
+        consequence=_tr("menu.debug.effect"),
         action=(
-            _command("/debug on|off", "change the persistent toggle")
+            _command_key("/debug on|off", "menu.debug.action.toggle")
             + "\n"
-            + _command("/debug <prompt>", "run one debugging task")
+            + _command_key("/debug <prompt>", "menu.debug.action.run")
         ),
     )
 
@@ -640,22 +745,22 @@ def skills_menu_text(
     return setting_card(
         "🧰",
         "Skills",
-        current=f"<code>{count}</code> available",
+        current=_tr("menu.skill.count_available", count=f"<code>{count}</code>"),
         facts=[
-            f"<b>Agent</b> · <code>{html.escape(agent_name)}</code>",
-            f"<b>Enabled here</b> · <code>{enabled_count}/{count}</code>",
-            f"<b>Invalid</b> · <code>{invalid_count}</code>",
-            "<b>Format</b> · standard <code>SKILL.md</code> instruction packages",
+            _fact("common.agent", f"<code>{html.escape(agent_name)}</code>"),
+            _fact("menu.skill.enabled_here", f"<code>{enabled_count}/{count}</code>"),
+            _fact("menu.skill.invalid_label", f"<code>{invalid_count}</code>"),
+            _fact("common.format", _tr("menu.skill.standard_format")),
         ],
-        consequence="Skills add focused instructions to a request; Jobs and runtime settings stay on their own control surfaces.",
-        action="Choose a Skill to inspect or manage it, or use the maintenance actions below.",
+        consequence=_tr("menu.skill.effect"),
+        action=_tr("menu.skill.choose"),
     )
 
 
 def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
-    skill_id = str(getattr(skill, "id", "unknown") or "unknown")
+    skill_id = str(getattr(skill, "id", _tr("common.unknown")) or _tr("common.unknown"))
     skill_name = str(getattr(skill, "name", skill_id) or skill_id)
-    description = str(getattr(skill, "description", "") or "No description.")
+    description = str(getattr(skill, "description", "") or _tr("menu.skill.no_description"))
     enabled_method = getattr(manager, "is_skill_enabled", None)
     enabled = (
         bool(enabled_method(workspace_dir, skill_id))
@@ -666,9 +771,9 @@ def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
     scope = str(getattr(skill, "scope", "project") or "project")
     source = str(getattr(skill, "source", "") or "")
     source_labels = {
-        "project": "PROJECT · built-in",
-        "installed": "INSTALLED · managed",
-        "linked": "LINKED",
+        "project": _tr("menu.skill.source.project"),
+        "installed": _tr("menu.skill.source.installed"),
+        "linked": _tr("menu.skill.source.linked"),
     }
     resource_method = getattr(manager, "skill_resource_counts", None)
     resources = (
@@ -685,47 +790,58 @@ def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
         else {"total": 0, "agents": 0}
     )
     facts = [
-        f"<b>ID</b> · <code>{html.escape(skill_id)}</code>",
-        f"<b>Source</b> · <code>{html.escape(source_labels.get(source_type, source_type.upper()))}</code>",
-        f"<b>Scope</b> · <code>{html.escape(scope)}</code>",
-        "<b>Format</b> · <code>SKILL.md</code>",
-        (
-            "<b>Uses</b> · "
-            f"<code>{int(usage_stats.get('total', 0))}</code> cumulative · "
-            f"<code>{int(usage_stats.get('agents', 0))}</code> agents"
+        _fact("common.id", f"<code>{html.escape(skill_id)}</code>"),
+        _fact(
+            "common.source",
+            f"<code>{html.escape(source_labels.get(source_type, source_type.upper()))}</code>",
         ),
-        "<b>Usage log</b> · <code>state/skill_usage.jsonl</code>",
+        _fact("common.scope", f"<code>{html.escape(scope)}</code>"),
+        _fact("common.format", "<code>SKILL.md</code>"),
         (
-            "<b>Resources</b> · "
-            f"scripts <code>{int(resources.get('scripts', 0))}</code> · "
-            f"references <code>{int(resources.get('references', 0))}</code> · "
-            f"assets <code>{int(resources.get('assets', 0))}</code>"
+            _label("menu.skill.uses")
+            + " · "
+            + f"<code>{int(usage_stats.get('total', 0))}</code> "
+            + html.escape(_tr("menu.skill.cumulative"))
+            + " · "
+            + f"<code>{int(usage_stats.get('agents', 0))}</code> "
+            + html.escape(_tr("menu.skill.agents_suffix"))
         ),
-        f"<b>Job references</b> · <code>{len(dependencies)}</code>",
+        _fact("menu.skill.usage_log", "<code>state/skill_usage.jsonl</code>"),
+        (
+            _label("menu.skill.resources")
+            + " · "
+            + f"{html.escape(_tr('menu.skill.scripts'))} <code>{int(resources.get('scripts', 0))}</code> · "
+            + f"{html.escape(_tr('menu.skill.references'))} <code>{int(resources.get('references', 0))}</code> · "
+            + f"{html.escape(_tr('menu.skill.assets'))} <code>{int(resources.get('assets', 0))}</code>"
+        ),
+        _fact("menu.skill.job_references", f"<code>{len(dependencies)}</code>"),
     ]
     version = str(getattr(skill, "version", "") or "")
     if version:
-        facts.append(f"<b>Version</b> · <code>{html.escape(version[:120])}</code>")
+        facts.append(_fact("common.version", f"<code>{html.escape(version[:120])}</code>"))
     author = str((getattr(skill, "metadata", {}) or {}).get("author") or "")
     if author:
-        facts.append(f"<b>Author</b> · <code>{html.escape(author[:120])}</code>")
+        facts.append(_fact("common.author", f"<code>{html.escape(author[:120])}</code>"))
     license_name = str(getattr(skill, "license", "") or "")
     if license_name:
-        facts.append(f"<b>License</b> · <code>{html.escape(license_name[:120])}</code>")
+        facts.append(_fact("common.license", f"<code>{html.escape(license_name[:120])}</code>"))
     compatibility = str(getattr(skill, "compatibility", "") or "")
     if compatibility:
-        facts.append(f"<b>Compatibility</b> · {html.escape(compatibility[:240])}")
+        facts.append(_fact("common.compatibility", html.escape(compatibility[:240])))
     allowed_tools = str(getattr(skill, "allowed_tools", "") or "")
     if allowed_tools:
         facts.append(
-            f"<b>Declared tools</b> · <code>{html.escape(allowed_tools[:180])}</code>"
+            _fact(
+                "menu.skill.declared_tools",
+                f"<code>{html.escape(allowed_tools[:180])}</code>",
+            )
         )
     if source:
-        facts.append(f"<b>Path</b> · <code>{html.escape(source[:240])}</code>")
+        facts.append(_fact("common.path", f"<code>{html.escape(source[:240])}</code>"))
     if enabled is None:
-        current = "<b>READY</b>"
+        current = _state("common.ready")
     else:
-        current = f"<b>{'ENABLED' if enabled else 'DISABLED'}</b>"
+        current = _state("common.enabled_state" if enabled else "common.disabled_state")
     usage = f"/skill {skill_id} <request>"
 
     text = setting_card(
@@ -734,35 +850,39 @@ def skill_detail_text(skill: Any, workspace_dir: Any, *, manager: Any) -> str:
         current=current,
         facts=facts,
         consequence=html.escape(description),
-        action=f"Use <code>{html.escape(usage)}</code> or choose an action below.",
+        action=_tr("menu.skill.action", usage=html.escape(usage)),
     )
     body = str(getattr(skill, "body", "") or "").strip()
     if body:
-        preview = body if len(body) <= 700 else body[:700].rstrip() + "\n\n[truncated]"
-        text += f"\n\n<b>REFERENCE</b>\n<pre>{html.escape(preview)}</pre>"
+        preview = (
+            body
+            if len(body) <= 700
+            else body[:700].rstrip() + "\n\n" + _tr("menu.skill.truncated")
+        )
+        text += f"\n\n{_label('menu.skill.reference')}\n<pre>{html.escape(preview)}</pre>"
     return text
 
 
 def skill_validation_text(skill: Any, *, manager: Any) -> str:
-    skill_id = str(getattr(skill, "id", "unknown") or "unknown")
+    skill_id = str(getattr(skill, "id", _tr("common.unknown")) or _tr("common.unknown"))
     validate = getattr(manager, "validate_skill", None)
     ok, errors = validate(skill_id) if callable(validate) else (True, [])
     lines = [
         card_title("🧪", "Skill validation"),
         "",
-        f"<b>Current</b> · <b>{'VALID' if ok else 'INVALID'}</b>",
-        f"<b>Skill</b> · <code>{html.escape(skill_id)}</code>",
-        "<b>Contract</b> · standard <code>SKILL.md</code> package",
+        _fact("common.current", _state("common.valid" if ok else "common.invalid")),
+        _fact("menu.skill.skill_label", f"<code>{html.escape(skill_id)}</code>"),
+        _fact("menu.skill.contract", _tr("menu.skill.contract_value")),
     ]
     if errors:
-        lines.extend(["", "<b>ERRORS</b>"])
+        lines.extend(["", _label("menu.skill.errors")])
         for error in errors[:8]:
             lines.append(f"• {html.escape(str(error)[:500])}")
     else:
         lines.extend(
             [
                 "",
-                "Frontmatter, package name, directory name, and instruction body are valid.",
+                _tr("menu.skill.valid_body"),
             ]
         )
     return "\n".join(lines)
@@ -772,19 +892,22 @@ def skill_invalid_packages_text(errors: Sequence[str]) -> str:
     lines = [
         card_title("⚠️", "Invalid Skill packages"),
         "",
-        f"<b>Current</b> · <code>{len(errors)}</code> invalid",
-        "Invalid packages are skipped and cannot execute.",
+        _fact(
+            "common.current",
+            _tr("menu.skill.invalid_count", count=f"<code>{len(errors)}</code>"),
+        ),
+        _tr("menu.skill.invalid_effect"),
     ]
     if not errors:
-        lines.extend(["", "✅ No validation errors found."])
+        lines.extend(["", _tr("menu.skill.no_validation_errors")])
     else:
-        lines.extend(["", "<b>ERRORS</b>"])
+        lines.extend(["", _label("menu.skill.errors")])
         used = 0
         for error in errors:
             rendered = f"• {html.escape(str(error)[:600])}"
             if used + len(rendered) > 3000:
                 lines.append(
-                    "• Additional errors clipped; run <code>/skill invalid</code> after repairs."
+                    _tr("menu.skill.errors_clipped")
                 )
                 break
             lines.append(rendered)
@@ -797,17 +920,15 @@ def skill_install_help_text() -> str:
         [
             card_title("➕", "Install Skill"),
             "",
-            "<b>Current</b> · <b>READY</b>",
-            "<b>Scope</b> · this HASHI project; enable state remains per agent",
+            _fact("common.current", _state("common.ready")),
+            _fact("common.scope", html.escape(_tr("menu.skill.install_scope"))),
             "",
-            "The source must be a local standard Skill directory containing <code>SKILL.md</code>.",
-            "Copied packages are recoverable after uninstall; linked packages keep their source files.",
+            _tr("menu.skill.install_source"),
+            _tr("menu.skill.install_recovery"),
             "",
-            "<b>Use</b>",
-            _command("/skill install <directory>", "validate and copy a package"),
-            _command(
-                "/skill link <directory>", "validate and link a development package"
-            ),
+            _label("common.use"),
+            _command_key("/skill install <directory>", "menu.skill.action.install"),
+            _command_key("/skill link <directory>", "menu.skill.action.link"),
         ]
     )
 
@@ -816,9 +937,14 @@ def skill_find_help_text() -> str:
     return setting_card(
         "🔎",
         "Find Skills",
-        current="<b>READY</b>",
-        facts=["<b>Search fields</b> · ID and description"],
-        action=_command("/skill find <text>", "search the current catalog"),
+        current=_state("common.ready"),
+        facts=[
+            _fact(
+                "menu.skill.search_fields",
+                html.escape(_tr("menu.skill.search_fields_value")),
+            )
+        ],
+        action=_command_key("/skill find <text>", "menu.skill.action.search"),
     )
 
 
@@ -826,15 +952,15 @@ def skill_search_results_text(query: str, skills: Sequence[Any]) -> str:
     lines = [
         card_title("🔎", "Skill search"),
         "",
-        f"<b>Query</b> · <code>{html.escape(query)}</code>",
-        f"<b>Matches</b> · <code>{len(skills)}</code>",
+        _fact("common.query", f"<code>{html.escape(query)}</code>"),
+        _fact("common.matches", f"<code>{len(skills)}</code>"),
         "",
     ]
     if not skills:
-        lines.append("No matching Skills.")
+        lines.append(_tr("menu.skill.none_matching"))
     else:
         for skill in skills[:30]:
-            skill_id = html.escape(str(getattr(skill, "id", "unknown")))
+            skill_id = html.escape(str(getattr(skill, "id", _tr("common.unknown"))))
             description = html.escape(str(getattr(skill, "description", ""))[:160])
             lines.append(f"• <code>{skill_id}</code> · {description}")
     return "\n".join(lines)
@@ -843,13 +969,14 @@ def skill_search_results_text(query: str, skills: Sequence[Any]) -> str:
 def skill_disable_confirm_text(
     skill: Any, dependencies: Sequence[dict[str, Any]]
 ) -> str:
-    skill_id = str(getattr(skill, "id", "unknown") or "unknown")
-    consequence = "This agent will stop executing the Skill until it is enabled again."
+    skill_id = str(getattr(skill, "id", _tr("common.unknown")) or _tr("common.unknown"))
+    consequence = _tr("menu.skill.disable_effect")
     if dependencies:
         labels = ", ".join(
-            html.escape(str(item.get("id") or "unknown")) for item in dependencies[:5]
+            html.escape(str(item.get("id") or _tr("common.unknown")))
+            for item in dependencies[:5]
         )
-        consequence += f" Enabled Jobs that would be affected: <code>{labels}</code>."
+        consequence += " " + _tr("menu.skill.jobs_affected", jobs=labels)
     return confirm_card(
         "⏸",
         "Disable Skill",
@@ -861,26 +988,20 @@ def skill_disable_confirm_text(
 def skill_uninstall_confirm_text(
     skill: Any, dependencies: Sequence[dict[str, Any]]
 ) -> str:
-    skill_id = str(getattr(skill, "id", "unknown") or "unknown")
+    skill_id = str(getattr(skill, "id", _tr("common.unknown")) or _tr("common.unknown"))
     source_type = str(getattr(skill, "source_type", "project") or "project")
     if dependencies:
         labels = ", ".join(
-            html.escape(str(item.get("id") or "unknown")) for item in dependencies[:5]
+            html.escape(str(item.get("id") or _tr("common.unknown")))
+            for item in dependencies[:5]
         )
-        consequence = f"Removal is blocked while Jobs reference this package: <code>{labels}</code>."
+        consequence = _tr("menu.skill.remove_blocked", jobs=labels)
     elif source_type == "linked":
-        consequence = (
-            "This removes only the HASHI link. The source directory is preserved."
-        )
+        consequence = _tr("menu.skill.unlink_effect")
     elif source_type == "project":
-        consequence = (
-            "This removes the built-in package for every agent and moves it to "
-            "HASHI's recovery area. Usage history is preserved."
-        )
+        consequence = _tr("menu.skill.delete_builtin_effect")
     else:
-        consequence = (
-            "This removes the active copy and moves it to HASHI's recovery area."
-        )
+        consequence = _tr("menu.skill.uninstall_effect")
     titles = {
         "project": "Delete Skill",
         "linked": "Unlink Skill",
@@ -899,18 +1020,20 @@ def hchat_help_text() -> str:
         [
             card_title("💬", "Hashi chat"),
             "",
-            "<b>Current</b> · <b>READY</b>",
-            "<b>Scope</b> · local agents, remote instances, groups, or all active local agents",
+            _fact("common.current", _state("common.ready")),
+            _fact("common.scope", html.escape(_tr("menu.hchat.scope"))),
             "",
-            "Messages are composed by this agent before delivery. Remote targets use <code>agent@INSTANCE</code>.",
+            _tr("menu.hchat.effect"),
             "",
-            "<b>Use</b>",
-            _command("/hchat <agent> <intent>", "message one local agent"),
-            _command("/hchat <agent>@<INSTANCE> <intent>", "message a remote agent"),
-            _command("/hchat @<group> <intent>", "message a local group"),
-            _command("/hchat all <intent>", "message all active local agents"),
+            _label("common.use"),
+            _command_key("/hchat <agent> <intent>", "menu.hchat.action.local"),
+            _command_key(
+                "/hchat <agent>@<INSTANCE> <intent>", "menu.hchat.action.remote"
+            ),
+            _command_key("/hchat @<group> <intent>", "menu.hchat.action.group"),
+            _command_key("/hchat all <intent>", "menu.hchat.action.all"),
             "",
-            "<b>Example</b>",
+            _label("common.example"),
             "<code>/hchat arale review the latest test result</code>",
         ]
     )
@@ -921,13 +1044,13 @@ def cos_menu_text(*, enabled: bool) -> str:
         "🌸",
         "Chief of Staff routing",
         current=f"<b>{status_label(enabled)}</b>",
-        facts=["<b>Route</b> · human-in-the-loop decisions through Lily"],
+        facts=[_fact("common.route", html.escape(_tr("menu.cos.route")))],
         consequence=(
-            "Eligible decisions are routed to Lily before the user is asked."
+            _tr("menu.cos.enabled")
             if enabled
-            else "Decisions are sent directly to the user."
+            else _tr("menu.cos.disabled")
         ),
-        action="Use <code>/cos on</code> or <code>/cos off</code>. Changes persist in this workspace.",
+        action=_tr("menu.cos.action"),
     )
 
 
@@ -936,15 +1059,13 @@ def safevoice_menu_text(*, enabled: bool) -> str:
         "🛡️",
         "Safe voice",
         current=f"<b>{status_label(enabled)}</b>",
-        facts=["<b>Scope</b> · Triage, fallback, and actionable voice paths"],
+        facts=[_fact("common.scope", html.escape(_tr("menu.safevoice.scope")))],
         consequence=(
-            "Confirmation is requested only when another model path will "
-            "classify, act on, or fall back through the voice. No-tool native "
-            "audio chat remains direct."
+            _tr("menu.safevoice.enabled")
             if enabled
-            else "Voice inputs and local transcripts are released automatically."
+            else _tr("menu.safevoice.disabled")
         ),
-        action="Choose below or use <code>/safevoice on|off</code>. Changes persist in this workspace.",
+        action=_tr("menu.safevoice.action"),
     )
 
 
@@ -953,10 +1074,11 @@ def safevoice_keyboard(*, enabled: bool) -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    selected_label("On", enabled), callback_data="safevoice:set:on"
+                    selected_label(_tr("common.on"), enabled),
+                    callback_data="safevoice:set:on",
                 ),
                 InlineKeyboardButton(
-                    selected_label("Off", not enabled),
+                    selected_label(_tr("common.off"), not enabled),
                     callback_data="safevoice:set:off",
                 ),
             ]
@@ -975,23 +1097,25 @@ def timeout_menu_text(
     return setting_card(
         "⏱️",
         "Backend timeout",
-        current=f"idle <code>{idle_minutes} min</code>",
-        facts=[
-            f"<b>Default idle window</b> · <code>{default_idle_minutes} min</code>",
-            f"<b>Agent</b> · <code>{html.escape(agent_name)}</code>",
-            f"<b>Backend</b> · <code>{html.escape(backend_name)}</code>",
-            f"<b>Source</b> · <code>{html.escape(idle_source)}</code>",
-            "<b>Scope</b> · this agent and backend",
-        ],
-        consequence=(
-            "This is a no-progress detector, not a total execution clock. Any "
-            "meaningful model or tool activity refreshes it. The override survives "
-            "steering, backend recreation, hot reload and restart until /timeout reset."
+        current=(
+            f"{html.escape(_tr('menu.timeout.idle'))} "
+            f"<code>{idle_minutes} {html.escape(_tr('menu.timeout.minutes'))}</code>"
         ),
+        facts=[
+            _fact(
+                "menu.timeout.default_idle",
+                f"<code>{default_idle_minutes} {html.escape(_tr('menu.timeout.minutes'))}</code>",
+            ),
+            _fact("common.agent", f"<code>{html.escape(agent_name)}</code>"),
+            _fact("common.backend", f"<code>{html.escape(backend_name)}</code>"),
+            _fact("common.source", f"<code>{html.escape(idle_source)}</code>"),
+            _fact("common.scope", html.escape(_tr("menu.timeout.scope"))),
+        ],
+        consequence=_tr("menu.timeout.effect"),
         action=(
-            _command("/timeout 60", "set idle to 60 minutes")
+            _command_key("/timeout 60", "menu.timeout.action.set")
             + "\n"
-            + _command("/timeout reset", "clear the user override")
+            + _command_key("/timeout reset", "menu.timeout.action.reset")
         ),
     )
 
@@ -1002,14 +1126,17 @@ def wol_targets_text(
     lines = [
         card_title("🪄", "Wake-on-LAN targets"),
         "",
-        f"<b>Current</b> · <code>{len(targets)}</code> available",
-        f"<b>Instance</b> · <code>{html.escape(instance_id or 'local')}</code>",
-        "<b>Changes</b> · sending a packet does not change HASHI configuration",
+        _fact(
+            "common.current",
+            _tr("menu.wol.current", count=f"<code>{len(targets)}</code>"),
+        ),
+        _fact("common.instance", f"<code>{html.escape(instance_id or 'local')}</code>"),
+        _fact("common.changes", html.escape(_tr("menu.wol.changes"))),
     ]
     if targets:
-        lines.extend(["", "<b>TARGETS</b>"])
+        lines.extend(["", _label("menu.wol.section")])
         for row in targets:
-            name = html.escape(str(row.get("name") or "unknown"))
+            name = html.escape(str(row.get("name") or _tr("common.unknown")))
             label = html.escape(str(row.get("label") or name))
             description = html.escape(str(row.get("description") or ""))
             lines.append(
@@ -1017,6 +1144,6 @@ def wol_targets_text(
                 + (f" · {description}" if description else "")
             )
     else:
-        lines.extend(["", "No Wake-on-LAN targets are configured."])
-    lines.extend(["", _command("/wol <pc_name>", "send a Wake-on-LAN packet")])
+        lines.extend(["", _tr("menu.wol.none")])
+    lines.extend(["", _command_key("/wol <pc_name>", "menu.wol.action.send")])
     return "\n".join(lines)

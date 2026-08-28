@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 import pytest
 
 from adapters.stream_events import KIND_FILE_READ, StreamEvent
-from orchestrator import runtime_command_binding, ui_language
+from orchestrator import (
+    runtime_command_binding,
+    runtime_groups,
+    runtime_menu_views,
+    ui_language,
+)
 from orchestrator.activity_digest import ActivityDigest
 from orchestrator.command_ui import back_label, card_title, help_menu_text, refresh_label
 from orchestrator.config import GlobalConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.runtime_delivery import format_backend_error_for_user
+from orchestrator.voice_manager import VoiceManager
 
 
 def _runtime(tmp_path, *, user_id: int = 42):
@@ -41,7 +48,13 @@ def test_catalogs_are_complete_and_keep_formal_chinese_agent_term() -> None:
     assert chinese.strings["reboot.all_active"] == "所有已启用的代理"
     assert chinese.strings["reboot.all_running"] == "所有正在运行的代理"
     assert all(
-        "agent" not in value.casefold().replace("{agent}", "")
+        "agent"
+        not in re.sub(
+            r"<code>.*?</code>|\{[^{}]+\}|/[a-z][a-z0-9_-]*",
+            "",
+            value,
+            flags=re.DOTALL,
+        ).casefold()
         for mapping in (chinese.strings, chinese.commands, chinese.titles)
         for value in mapping.values()
     )
@@ -80,6 +93,49 @@ def test_common_cards_and_navigation_follow_active_language(tmp_path) -> None:
         assert back_label() == "← 返回"
         assert refresh_label() == "↻ 刷新"
         assert card_title("🤖", "Hashi agents").startswith("🤖 <b>HASHI 代理</b>")
+
+
+def test_chinese_menu_bodies_and_buttons_do_not_keep_english_shells(tmp_path) -> None:
+    class Slots:
+        def list_slots(self):
+            return [
+                {"slot": str(index), "active": index <= 2, "text": "已配置" if index <= 6 else ""}
+                for index in range(1, 11)
+            ]
+
+    class Directory:
+        def list_groups(self):
+            return {}
+
+    runtime = object.__new__(FlexibleAgentRuntime)
+    voice = VoiceManager(tmp_path / "workspace", tmp_path / "media")
+    runtime.voice_manager = voice
+
+    with ui_language.language_scope(SimpleNamespace(), locale="zh-CN"):
+        sys_text = runtime_menu_views.sys_slots_text(Slots())
+        group_text, group_keyboard = runtime_groups.group_list_view(Directory())
+        voice_text = voice.voice_menu_text()
+        voice_keyboard = runtime._voice_keyboard().inline_keyboard
+        wrapper_text = runtime._wrapper_status_text({}, {"1": "保持简洁"})
+
+    assert "<b>当前</b> · <code>2</code> 个已启用" in sys_text
+    assert "<b>已配置</b> · <code>6/10</code>" in sys_text
+    assert "<b>作用范围</b> · 仅限当前代理" in sys_text
+    assert "<b>槽位</b>" in sys_text
+    for old_label in ("Current", "Configured", "Scope", "Changes", "SLOTS"):
+        assert old_label not in sys_text
+
+    assert "<b>当前</b> · <code>0</code> 个群组" in group_text
+    assert "尚未定义任何群组。" in group_text
+    assert group_keyboard.inline_keyboard[-1][0].text == "新建群组"
+
+    assert "<b>语音风格</b> · 自定义" in voice_text
+    assert "<b>回复内容</b> · 语音和文字" in voice_text
+    assert [button.text for button in voice_keyboard[0]] == ["自动", "原生语音"]
+
+    assert "<b>当前</b> · 核心模型" in wrapper_text
+    assert "<b>角色 / 风格槽位</b>" in wrapper_text
+    assert "Model changes" not in wrapper_text
 
 
 def test_help_and_telegram_command_menu_use_chinese_catalog(tmp_path) -> None:

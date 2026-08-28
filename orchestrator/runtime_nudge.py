@@ -4,6 +4,7 @@ import html
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator import ui_language
 from orchestrator.command_ui import card_title
 from orchestrator.runtime_jobs import mint_callback_token, resolve_callback_token
 
@@ -16,16 +17,16 @@ def parse_nudge_create_args(args_text: str) -> tuple[int, str]:
     raw = (args_text or "").strip()
     parts = raw.split(None, 1)
     if len(parts) < 2:
-        raise ValueError("Usage: /nudge <minutes> <exit condition>")
+        raise ValueError(ui_language.tr("nudge.error.usage"))
     try:
         minutes = int(parts[0])
     except ValueError as exc:
-        raise ValueError("Minutes must be a whole number, e.g. /nudge 5 until done") from exc
+        raise ValueError(ui_language.tr("nudge.error.minutes_number")) from exc
     if minutes < 1:
-        raise ValueError("Minutes must be at least 1.")
+        raise ValueError(ui_language.tr("nudge.error.minutes_min"))
     exit_condition = parts[1].strip()
     if not exit_condition:
-        raise ValueError("Exit condition is required.")
+        raise ValueError(ui_language.tr("nudge.error.exit_required"))
     return minutes, exit_condition
 
 
@@ -35,29 +36,35 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
     Returns (text: str, markup: InlineKeyboardMarkup | None).
     """
     if not skill_manager:
-        return "Skill manager not available.", None
+        return ui_language.tr("nudge.error.manager"), None
 
     jobs = [j for j in skill_manager.list_jobs("nudge", agent_name=agent_name) if j.get("nudge_meta")]
 
     lines = [
         card_title("🫧", "Nudge manager"),
         "",
-        f"<b>Current</b> · <code>{sum(bool(job.get('enabled')) for job in jobs)}</code> active · <code>{len(jobs)}</code> configured",
-        f"<b>Agent</b> · <code>{html.escape(agent_name)}</code>",
-        "<b>Changes</b> · immediate and persistent",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        + ui_language.tr(
+            "nudge.current",
+            active=f"<code>{sum(bool(job.get('enabled')) for job in jobs)}</code>",
+            configured=f"<code>{len(jobs)}</code>",
+        ),
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_name)}</code>",
+        f"<b>{html.escape(ui_language.tr('common.changes'))}</b> · "
+        f"{html.escape(ui_language.tr('nudge.changes'))}",
     ]
     buttons: list = []
 
     if not jobs:
-        lines.append("\nNo nudge jobs for this agent.")
-        lines.append("\n<i>Create one: <code>/nudge &lt;minutes&gt; &lt;exit condition&gt;</code></i>")
-        lines.append("<i>e.g. <code>/nudge 5 until the scan is done</code></i>")
+        lines.append("\n" + ui_language.tr("nudge.none"))
+        lines.append("\n<i>" + ui_language.tr("nudge.create") + "</i>")
+        lines.append("<i>" + ui_language.tr("nudge.example") + "</i>")
         return "\n".join(lines), None
 
     for job in jobs:
         meta = job.get("nudge_meta", {})
         enabled = job.get("enabled", False)
-        status = "ON" if enabled else "OFF"
+        status = ui_language.tr("common.on" if enabled else "common.off")
         count = int(meta.get("count", 0) or 0)
         max_count = int(meta.get("max", 0) or 0)
         max_label = "∞" if max_count <= 0 else str(max_count)
@@ -69,15 +76,23 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
         short_id = jid[:24]
 
         lines.append(f"\n<b>{status}</b> · <code>{html.escape(jid)}</code>")
-        lines.append(f"<b>Schedule</b> · every <code>{minutes} min</code>")
-        lines.append(f"<b>Progress</b> · <code>{count}/{max_label}</code>")
+        lines.append(
+            f"<b>{html.escape(ui_language.tr('common.schedule'))}</b> · "
+            f"{ui_language.tr('nudge.every_minutes', minutes=minutes)}"
+        )
+        lines.append(
+            f"<b>{html.escape(ui_language.tr('common.progress'))}</b> · "
+            f"<code>{count}/{max_label}</code>"
+        )
         if exit_condition:
-            lines.append(f"<b>Exit</b> · {exit_condition}")
+            lines.append(f"<b>{html.escape(ui_language.tr('nudge.exit'))}</b> · {exit_condition}")
         if reason:
             lines.append(f"⚠️ {html.escape(str(reason))}")
 
         toggle_mode = "off" if enabled else "on"
-        toggle_label = "⏸ Pause" if enabled else "▶ Resume"
+        toggle_label = ui_language.tr(
+            "nudge.button.pause" if enabled else "nudge.button.resume"
+        )
         if runtime is None:
             trigger_callback = "noop"
             toggle_callback = "noop"
@@ -121,18 +136,18 @@ def build_nudge_with_buttons(skill_manager, agent_name: str, runtime=None):
 
         buttons.append([InlineKeyboardButton(f"🫧 {short_id}", callback_data="noop")])
         buttons.append([
-            InlineKeyboardButton("Trigger now", callback_data=trigger_callback),
-            InlineKeyboardButton(toggle_label.replace("⏸ ", "").replace("▶ ", ""), callback_data=toggle_callback),
-            InlineKeyboardButton("Delete", callback_data=delete_callback),
+            InlineKeyboardButton(ui_language.tr("nudge.button.trigger"), callback_data=trigger_callback),
+            InlineKeyboardButton(toggle_label, callback_data=toggle_callback),
+            InlineKeyboardButton(ui_language.tr("nudge.button.delete"), callback_data=delete_callback),
         ])
         buttons.append([
-            InlineKeyboardButton("Max -100", callback_data=max_minus_callback),
-            InlineKeyboardButton("Max +100", callback_data=max_plus_callback),
-            InlineKeyboardButton("Max ∞", callback_data=max_unlimited_callback),
+            InlineKeyboardButton(ui_language.tr("nudge.button.max_minus"), callback_data=max_minus_callback),
+            InlineKeyboardButton(ui_language.tr("nudge.button.max_plus"), callback_data=max_plus_callback),
+            InlineKeyboardButton(ui_language.tr("nudge.button.max_unlimited"), callback_data=max_unlimited_callback),
         ])
 
-    lines.append("\n<i>Add: <code>/nudge &lt;minutes&gt; &lt;exit condition&gt;</code></i>")
-    lines.append("<i>Adjust max: <code>/nudge max &lt;id&gt; +100</code> or <code>/nudge max &lt;id&gt; unlimited</code></i>")
+    lines.append("\n<i>" + ui_language.tr("nudge.add") + "</i>")
+    lines.append("<i>" + ui_language.tr("nudge.adjust") + "</i>")
     markup = InlineKeyboardMarkup(buttons) if buttons else None
     return "\n".join(lines), markup
 
@@ -148,15 +163,15 @@ def stop_nudges(skill_manager, agent_name: str, stop_arg: str) -> str:
         if j.get("nudge_meta") and j.get("enabled")
     ]
     if not jobs:
-        return "No active nudges to stop."
+        return ui_language.tr("nudge.stop.none")
     stopped = []
     for job in jobs:
         if not stop_arg or stop_arg in job["id"]:
             skill_manager.set_job_enabled("nudge", job["id"], enabled=False)
             stopped.append(job["id"])
     if stopped:
-        return f"⏹ Stopped nudges: {', '.join(stopped)}"
-    return f"No nudge matching '{html.escape(stop_arg)}' found."
+        return ui_language.tr("nudge.stop.done", ids=", ".join(stopped))
+    return ui_language.tr("nudge.stop.not_found", selector=html.escape(stop_arg))
 
 
 async def handle_nudge_callback(runtime, query, data: str) -> bool:
@@ -166,17 +181,17 @@ async def handle_nudge_callback(runtime, query, data: str) -> bool:
 
     parts = data.split(":", 3)
     if len(parts) != 4:
-        await query.answer("Malformed nudge callback.", show_alert=True)
+        await query.answer(ui_language.tr("nudge.error.malformed"), show_alert=True)
         return True
 
     _, action, task_id, value = parts
     if action == "key":
         selection = resolve_callback_token(runtime, "nudgejob_action", task_id)
         if not selection:
-            await query.answer("This nudge action expired. Open /nudge again.", show_alert=True)
+            await query.answer(ui_language.tr("nudge.error.expired"), show_alert=True)
             return True
         if selection.get("action") != value:
-            await query.answer("Invalid nudge action. Open /nudge again.", show_alert=True)
+            await query.answer(ui_language.tr("nudge.error.invalid_action"), show_alert=True)
             return True
         task_id = selection["task_id"]
         action = selection["action"]
@@ -199,7 +214,7 @@ async def handle_nudge_callback(runtime, query, data: str) -> bool:
         try:
             delta = int(value)
         except ValueError:
-            await query.answer("Invalid max adjustment.", show_alert=True)
+            await query.answer(ui_language.tr("nudge.error.max_adjustment"), show_alert=True)
             return True
         ok, message = runtime.skill_manager.adjust_nudge_max(task_id, delta)
         await query.answer(message, show_alert=not ok)
@@ -210,7 +225,7 @@ async def handle_nudge_callback(runtime, query, data: str) -> bool:
         try:
             max_value = int(value)
         except ValueError:
-            await query.answer("Invalid max value.", show_alert=True)
+            await query.answer(ui_language.tr("nudge.error.max_value"), show_alert=True)
             return True
         ok, message = runtime.skill_manager.set_nudge_max(task_id, max_value)
         await query.answer(message, show_alert=not ok)
@@ -220,9 +235,9 @@ async def handle_nudge_callback(runtime, query, data: str) -> bool:
     if action == "trigger":
         job = runtime.skill_manager.get_job("nudge", task_id)
         if not job:
-            await query.answer("Nudge job not found.", show_alert=True)
+            await query.answer(ui_language.tr("nudge.error.not_found"), show_alert=True)
             return True
-        await query.answer("Triggering nudge now…")
+        await query.answer(ui_language.tr("nudge.triggering"))
         prompt = job.get("prompt", "SYSTEM: Idle nudge continuation.")
         message = getattr(query, "message", None)
         chat_id = getattr(message, "chat_id", None)
@@ -249,11 +264,11 @@ def _resolve_nudge_selector(skill_manager, agent_name: str, selector: str) -> tu
     selector = (selector or "").strip()
     jobs = [job for job in skill_manager.list_jobs("nudge", agent_name=agent_name) if job.get("nudge_meta")]
     if not jobs:
-        return None, "No nudge jobs for this agent."
+        return None, ui_language.tr("nudge.selector.none")
     if not selector:
         if len(jobs) == 1:
             return jobs[0], None
-        return None, "Multiple nudges exist. Specify a job id fragment."
+        return None, ui_language.tr("nudge.selector.multiple")
     matches = [job for job in jobs if selector in str(job.get("id", ""))]
     if len(matches) == 1:
         return matches[0], None
@@ -304,7 +319,7 @@ def set_nudge_max_from_command(skill_manager, agent_name: str, args_text: str) -
 
 async def handle_nudge_command(runtime, update, args_text: str) -> None:
     if not runtime.skill_manager:
-        await runtime._reply_text(update, "Skill manager not available.")
+        await runtime._reply_text(update, ui_language.tr("nudge.error.manager"))
         return
 
     raw = (args_text or "").strip()
@@ -340,10 +355,11 @@ async def handle_nudge_command(runtime, update, args_text: str) -> None:
         exit_condition=exit_condition,
     )
     created_text = (
-        "🫧 <b>Nudge created</b>\n\n"
-        f"Job: <code>{html.escape(job['id'])}</code>\n"
-        f"Every: <b>{minutes} min</b> when idle\n"
-        f"Exit: {html.escape(exit_condition)}\n"
+        f"{ui_language.tr('nudge.created')}\n\n"
+        f"{html.escape(ui_language.tr('nudge.created_task'))}: <code>{html.escape(job['id'])}</code>\n"
+        f"{html.escape(ui_language.tr('nudge.created_interval'))}: "
+        f"<b>{html.escape(ui_language.tr('nudge.created_every', minutes=minutes))}</b>\n"
+        f"{html.escape(ui_language.tr('nudge.created_exit'))}: {html.escape(exit_condition)}\n"
     )
     list_text, markup = build_nudge_with_buttons(runtime.skill_manager, runtime.name, runtime=runtime)
     await runtime._reply_text(

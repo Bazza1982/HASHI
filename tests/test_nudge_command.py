@@ -275,7 +275,7 @@ async def test_scheduler_skips_stale_missed_cron_and_notifies(tmp_path):
 
     assert runtime.enqueued == []
     assert len(runtime.notices) == 1
-    assert "1 个任务共错过" in runtime.notices[0]["text"]
+    assert "1 task(s) missed 1 trigger(s)" in runtime.notices[0]["text"]
     assert "run stale task" in runtime.notices[0]["text"]
     assert scheduler.state["missed_crons"]["daily-old"]["agent"] == "zelda"
 

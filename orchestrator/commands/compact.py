@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from orchestrator import ui_language
 from orchestrator.command_registry import RuntimeCommand
 from orchestrator.context_compaction import (
     compact_status_text,
@@ -59,14 +60,17 @@ def _wip_journals(runtime: Any, session_workspace: Path) -> list[WIPJournal]:
 def _wip_status_text(runtime: Any, session_workspace: Path) -> str:
     journals = _wip_journals(runtime, session_workspace)
     if not journals:
-        return "<b>WIP recovery</b> · <code>CLEAR</code>"
+        return (
+            f"<b>{html.escape(ui_language.tr('compact.wip'))}</b> · "
+            f"<code>{html.escape(ui_language.tr('compact.wip.clear'))}</code>"
+        )
     snapshots = [journal.snapshot() for journal in journals]
     return (
-        "<b>WIP recovery</b> · <code>ACTIVE</code>\n"
-        f"<b>Recovery records</b> · <code>{sum(row.record_count for row in snapshots):,}</code>\n"
-        f"<b>Journal bytes</b> · <code>{sum(row.size_bytes for row in snapshots):,}</code>\n"
-        "Use <code>/compact</code> to preserve a deterministic recovery capsule "
-        "in this Session and clear the active Journal."
+        f"<b>{html.escape(ui_language.tr('compact.wip'))}</b> · "
+        f"<code>{html.escape(ui_language.tr('compact.wip.active'))}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.recovery_records'))}</b> · <code>{sum(row.record_count for row in snapshots):,}</code>\n"
+        f"<b>{html.escape(ui_language.tr('compact.journal_bytes'))}</b> · <code>{sum(row.size_bytes for row in snapshots):,}</code>\n"
+        f"{ui_language.tr('compact.wip_help')}"
     )
 
 
@@ -119,10 +123,10 @@ def _compact_wip_journals(
             )
             recorder = getattr(memory_store, "record_recovery_capsule", None)
             if not callable(recorder):
-                raise RuntimeError("session memory store cannot record recovery capsules")
+                raise RuntimeError(ui_language.tr("compact.wip.store_missing"))
             turn_id = recorder(encoded, origin_ref=snapshot.file_sha256)
             if not turn_id:
-                raise RuntimeError("recovery capsule was not durably recorded")
+                raise RuntimeError(ui_language.tr("compact.wip.commit_missing"))
             coordinator.store.append_audit(
                 "wip_recovery_capsule_committed",
                 compaction_id=compaction_id,
@@ -134,9 +138,7 @@ def _compact_wip_journals(
                 },
             )
             if not journal.clear_if_unchanged(snapshot.file_sha256):
-                raise RuntimeError(
-                    "WIP Journal changed while its recovery capsule was being committed"
-                )
+                raise RuntimeError(ui_language.tr("compact.wip.changed"))
             try:
                 coordinator.store.append_audit(
                     "wip_recovery_completed",
@@ -180,10 +182,7 @@ def _compact_wip_journals(
                 record_count=record_count,
                 source_bytes=source_bytes,
                 capsule_chars=capsule_chars,
-                message=(
-                    "WIP recovery could not be committed safely. The active Journal "
-                    "was preserved and normal history compaction was not started."
-                ),
+                message=ui_language.tr("compact.wip.failed_message"),
             )
         committed += 1
         record_count += snapshot.record_count
@@ -196,10 +195,7 @@ def _compact_wip_journals(
         record_count=record_count,
         source_bytes=source_bytes,
         capsule_chars=capsule_chars,
-        message=(
-            "Unfinished HER v2 work was converted into deterministic quoted "
-            "Session context, then its active Journal was cleared."
-        ),
+        message=ui_language.tr("compact.wip.completed_message"),
     )
 
 
@@ -244,50 +240,54 @@ def _outcome_text(
     if wip is not None and wip.changed:
         lines.extend(
             [
-                "<b>✅ WIP recovery compacted</b>",
-                f"<b>Code</b> · <code>{html.escape(wip.code)}</code>",
-                f"<b>Recovery records</b> · <code>{wip.record_count:,}</code>",
-                f"<b>Journal bytes</b> · <code>{wip.source_bytes:,}</code>",
-                f"<b>Recovery capsule</b> · <code>{wip.capsule_chars:,} chars</code>",
+                f"<b>{ui_language.tr('compact.wip.completed')}</b>",
+                f"<b>{html.escape(ui_language.tr('compact.code'))}</b> · <code>{html.escape(wip.code)}</code>",
+                f"<b>{html.escape(ui_language.tr('compact.recovery_records'))}</b> · <code>{wip.record_count:,}</code>",
+                f"<b>{html.escape(ui_language.tr('compact.journal_bytes'))}</b> · <code>{wip.source_bytes:,}</code>",
+                f"<b>{html.escape(ui_language.tr('compact.recovery_capsule'))}</b> · <code>{wip.capsule_chars:,} {html.escape(ui_language.tr('compact.chars'))}</code>",
                 "",
             ]
         )
     elif wip is not None and wip.status == "failed":
         lines.extend(
             [
-                "<b>⚠️ WIP recovery failed safely</b>",
-                f"<b>Code</b> · <code>{html.escape(wip.code)}</code>",
+                f"<b>{ui_language.tr('compact.wip.failed')}</b>",
+                f"<b>{html.escape(ui_language.tr('compact.code'))}</b> · <code>{html.escape(wip.code)}</code>",
                 "",
                 html.escape(wip.message),
             ]
         )
         return "\n".join(lines)
     title = {
-        "completed": "✅ Context compaction completed",
-        "not_needed": "ℹ️ Context compaction not needed",
-        "locked": "🔒 Context compaction locked",
-        "failed": "⚠️ Context compaction failed safely",
-    }.get(str(outcome.status), "ℹ️ Context compaction result")
+        "completed": ui_language.tr("compact.outcome.completed"),
+        "not_needed": ui_language.tr("compact.outcome.not_needed"),
+        "locked": ui_language.tr("compact.outcome.locked"),
+        "failed": ui_language.tr("compact.outcome.failed"),
+    }.get(str(outcome.status), ui_language.tr("compact.outcome.result"))
     lines.append(f"<b>{title}</b>")
     if outcome.code:
-        lines.append(f"<b>Code</b> · <code>{html.escape(str(outcome.code))}</code>")
+        lines.append(
+            f"<b>{html.escape(ui_language.tr('compact.code'))}</b> · "
+            f"<code>{html.escape(str(outcome.code))}</code>"
+        )
     if outcome.changed:
         saved = max(0, int(outcome.before_tokens) - int(outcome.after_tokens))
         lines.extend(
             [
-                f"<b>Selected history before</b> · <code>{int(outcome.before_tokens):,} tokens</code>",
-                f"<b>Selected history after</b> · <code>{int(outcome.after_tokens):,} tokens</code>",
-                f"<b>Reduced by</b> · <code>{saved:,} tokens</code>",
+                f"<b>{html.escape(ui_language.tr('compact.history_before'))}</b> · <code>{int(outcome.before_tokens):,} {html.escape(ui_language.tr('compact.tokens'))}</code>",
+                f"<b>{html.escape(ui_language.tr('compact.history_after'))}</b> · <code>{int(outcome.after_tokens):,} {html.escape(ui_language.tr('compact.tokens'))}</code>",
+                f"<b>{html.escape(ui_language.tr('compact.reduced_by'))}</b> · <code>{saved:,} {html.escape(ui_language.tr('compact.tokens'))}</code>",
             ]
         )
     elif int(getattr(outcome, "before_tokens", 0) or 0) > 0:
         lines.append(
-            f"<b>Current context</b> · <code>{int(outcome.before_tokens):,} tokens</code>"
+            f"<b>{html.escape(ui_language.tr('compact.current_context'))}</b> · "
+            f"<code>{int(outcome.before_tokens):,} {html.escape(ui_language.tr('compact.tokens'))}</code>"
         )
     if outcome.message:
         lines.extend(["", html.escape(str(outcome.message))])
     if outcome.changed:
-        lines.extend(["", "Raw transcript records were retained."])
+        lines.extend(["", ui_language.tr("compact.raw_retained")])
     return "\n".join(lines)
 
 
@@ -298,7 +298,7 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
         await _send(
             runtime,
             update,
-            "🔒 <b>/compact is available only while HER v2 is active.</b>",
+            ui_language.tr("compact.active_only"),
         )
         return
 
@@ -324,9 +324,8 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
                 type(exc).__name__,
             )
             context_status = (
-                "⚠️ <b>Conversation Compact status unavailable</b>\n\n"
-                "The model-based route could not be resolved. WIP recovery state "
-                "is reported independently below."
+                f"{ui_language.tr('compact.status_unavailable')}\n\n"
+                f"{ui_language.tr('compact.status_unavailable_effect')}"
             )
         await _send(
             runtime,
@@ -340,10 +339,10 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
             runtime,
             update,
             (
-                "🛑 <b>Active context compaction cancelled.</b>\n\n"
-                "The active pointer was left unchanged."
+                f"{ui_language.tr('compact.cancelled')}\n\n"
+                f"{ui_language.tr('compact.cancelled_effect')}"
                 if cancelled
-                else "ℹ️ <b>No active context compaction is running.</b>"
+                else ui_language.tr("compact.none_running")
             ),
         )
         return
@@ -351,16 +350,15 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
         await _send(
             runtime,
             update,
-            "Usage: <code>/compact</code> | <code>/compact status</code> | "
-            "<code>/compact cancel</code>",
+            ui_language.tr("compact.usage"),
         )
         return
     if _coordinator_running(coordinator):
         await _send(
             runtime,
             update,
-            "⏳ <b>Context compaction is already running.</b>\n\n"
-            "Use <code>/compact status</code> or <code>/compact cancel</code>.",
+            f"{ui_language.tr('compact.already_running')}\n\n"
+            f"{ui_language.tr('compact.running_help')}",
         )
         return
 
@@ -392,10 +390,10 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
     await _send(
         runtime,
         update,
-        "🗜️ <b>Context compaction started</b>\n\n"
-        f"Current context · <code>{current_tokens:,} tokens</code>\n"
-        f"Manual threshold · <code>{policy.manual_min_tokens:,} tokens</code>\n"
-        f"Automatic trigger · <code>&gt; {policy.auto_trigger_tokens:,} tokens</code>",
+        f"{ui_language.tr('compact.started')}\n\n"
+        f"{html.escape(ui_language.tr('compact.current_context'))} · <code>{current_tokens:,} {html.escape(ui_language.tr('compact.tokens'))}</code>\n"
+        f"{html.escape(ui_language.tr('compact.manual_threshold'))} · <code>{policy.manual_min_tokens:,} {html.escape(ui_language.tr('compact.tokens'))}</code>\n"
+        f"{html.escape(ui_language.tr('compact.automatic_trigger'))} · <code>&gt; {policy.auto_trigger_tokens:,} {html.escape(ui_language.tr('compact.tokens'))}</code>",
     )
     outcome = await coordinator.compact(
         trigger="manual_command",

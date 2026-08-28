@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from orchestrator import runtime_pending, runtime_session
+from orchestrator import runtime_pending, runtime_session, ui_language
 from orchestrator.command_registry import RuntimeCommand
 from orchestrator.command_ui import card_title
 from orchestrator.scheduler import MAX_DELAY_MINUTES
@@ -16,13 +16,8 @@ _DELAY_COMMAND_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-USAGE = (
-    "Usage:\n"
-    "/delay &lt;minutes&gt; &lt;message&gt;\n"
-    "/delay list\n"
-    "/delay cancel &lt;delay-id&gt;\n\n"
-    "Example: /delay 5 send me a message to say hi"
-)
+def _usage() -> str:
+    return ui_language.tr("delay.usage")
 
 
 def _is_authorized(runtime: Any, update: Any) -> bool:
@@ -71,15 +66,17 @@ def _command_body(update: Any, context: Any) -> str:
 def parse_delay_request(body: str) -> tuple[int, str]:
     parts = str(body or "").strip().split(None, 1)
     if len(parts) != 2:
-        raise ValueError("Provide whole minutes followed by a non-empty message.")
+        raise ValueError(ui_language.tr("delay.error.format"))
     if not re.fullmatch(r"[1-9]\d*", parts[0]):
-        raise ValueError("Minutes must be a positive whole number.")
+        raise ValueError(ui_language.tr("delay.error.minutes"))
     minutes = int(parts[0])
     if minutes > MAX_DELAY_MINUTES:
-        raise ValueError(f"Minutes cannot exceed {MAX_DELAY_MINUTES} (7 days).")
+        raise ValueError(
+            ui_language.tr("delay.error.maximum", maximum=MAX_DELAY_MINUTES)
+        )
     message = parts[1].strip()
     if not message:
-        raise ValueError("Delayed message cannot be empty.")
+        raise ValueError(ui_language.tr("delay.error.empty"))
     return minutes, message
 
 
@@ -111,12 +108,13 @@ def _list_text(runtime: Any, records: list[dict[str, Any]]) -> str:
     lines = [
         card_title("⏳", "Delayed messages"),
         "",
-        f"<b>Current</b> · <code>{len(records)}</code> pending",
-        f"<b>Agent</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
-        "<b>Queue</b> · FUTURE; enters the normal FIFO only when due",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        + ui_language.tr("delay.current", count=f"<code>{len(records)}</code>"),
+        f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(str(getattr(runtime, 'name', 'agent')))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.queue'))}</b> · {html.escape(ui_language.tr('delay.queue_scope'))}",
     ]
     if not records:
-        lines.extend(["", "No delayed messages."])
+        lines.extend(["", ui_language.tr("delay.none")])
     else:
         lines.append("")
         for index, record in enumerate(records, 1):
@@ -125,7 +123,11 @@ def _list_text(runtime: Any, records: list[dict[str, Any]]) -> str:
             prompt = html.escape(_excerpt(str(record.get("prompt") or "")))
             lines.extend(
                 [
-                    f"{index}. <code>{delay_id}</code> · in <code>{_format_remaining(due_at)}</code>",
+                    f"{index}. <code>{delay_id}</code> · "
+                    + ui_language.tr(
+                        "delay.in",
+                        remaining=f"<code>{_format_remaining(due_at)}</code>",
+                    ),
                     f"   <code>{html.escape(_format_due(due_at))}</code> · {prompt}",
                 ]
             )
@@ -134,7 +136,7 @@ def _list_text(runtime: Any, records: list[dict[str, Any]]) -> str:
             "",
             "<code>/delay &lt;minutes&gt; &lt;message&gt;</code>",
             "<code>/delay cancel &lt;delay-id&gt;</code>",
-            "<code>/recall [count]</code> also recalls delayed messages.",
+            ui_language.tr("delay.recall_help"),
         ]
     )
     return "\n".join(lines)
@@ -180,7 +182,7 @@ async def delay_command(runtime: Any, update: Any, context: Any) -> None:
     scheduler = _scheduler(runtime)
     if scheduler is None:
         await _send(
-            runtime, update, "Delay service is unavailable; nothing was scheduled."
+            runtime, update, ui_language.tr("delay.unavailable")
         )
         return
 
@@ -195,7 +197,7 @@ async def delay_command(runtime: Any, update: Any, context: Any) -> None:
         await _send(runtime, update, _list_text(runtime, records))
         return
     if normalized in {"help", "-h", "--help"}:
-        await _send(runtime, update, USAGE)
+        await _send(runtime, update, _usage())
         return
 
     if normalized.startswith("cancel "):
@@ -213,14 +215,16 @@ async def delay_command(runtime: Any, update: Any, context: Any) -> None:
             await _send(
                 runtime,
                 update,
-                f"Delayed message <code>{html.escape(requested)}</code> was not found.",
+                ui_language.tr(
+                    "delay.not_found", delay_id=html.escape(requested)
+                ),
             )
             return
         if len(matches) > 1:
             await _send(
                 runtime,
                 update,
-                "Delay ID is ambiguous; use the full ID. Nothing was cancelled.",
+                ui_language.tr("delay.ambiguous"),
             )
             return
         async with runtime_pending.pending_lock(runtime):
@@ -232,29 +236,32 @@ async def delay_command(runtime: Any, update: Any, context: Any) -> None:
             await _send(
                 runtime,
                 update,
-                f"Cancelled delayed message <code>{html.escape(str(matches[0]['id']))}</code>.",
+                ui_language.tr(
+                    "delay.cancelled",
+                    delay_id=html.escape(str(matches[0]["id"])),
+                ),
             )
         else:
             await _send(
                 runtime,
                 update,
-                "The delayed message was already dispatched or cancelled.",
+                ui_language.tr("delay.already_gone"),
             )
         return
     if normalized == "cancel":
-        await _send(runtime, update, USAGE)
+        await _send(runtime, update, _usage())
         return
 
     try:
         minutes, message = parse_delay_request(body)
     except ValueError as exc:
-        await _send(runtime, update, f"{html.escape(str(exc))}\n\n{USAGE}")
+        await _send(runtime, update, f"{html.escape(str(exc))}\n\n{_usage()}")
         return
 
     chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
     if chat_id is None:
         await _send(
-            runtime, update, "Could not resolve the target chat; nothing was scheduled."
+            runtime, update, ui_language.tr("delay.error.chat")
         )
         return
     try:
@@ -273,19 +280,20 @@ async def delay_command(runtime: Any, update: Any, context: Any) -> None:
             )
     except (RuntimeError, ValueError) as exc:
         await _send(
-            runtime, update, f"Delay was not scheduled: {html.escape(str(exc))}"
+            runtime,
+            update,
+            ui_language.tr("delay.error.schedule", reason=html.escape(str(exc))),
         )
         return
 
-    duplicate = " Existing schedule reused." if record.get("deduplicated") else ""
+    duplicate = ui_language.tr("delay.reused") if record.get("deduplicated") else ""
     await _send(
         runtime,
         update,
-        "⏳ Delayed message scheduled."
-        f"{duplicate}\n"
-        f"<b>ID</b> · <code>{html.escape(str(record['id']))}</code>\n"
-        f"<b>Due</b> · <code>{html.escape(_format_due(float(record['due_at'])))}</code>\n"
-        "It will join the normal FIFO no earlier than the due time; current work and scheduled jobs are unchanged.",
+        ui_language.tr("delay.scheduled") + f"{duplicate}\n"
+        f"<b>{html.escape(ui_language.tr('common.id'))}</b> · <code>{html.escape(str(record['id']))}</code>\n"
+        f"<b>{html.escape(ui_language.tr('common.due'))}</b> · <code>{html.escape(_format_due(float(record['due_at'])))}</code>\n"
+        f"{ui_language.tr('delay.effect')}",
     )
 
 

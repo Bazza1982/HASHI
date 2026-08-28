@@ -7,6 +7,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator import ui_language
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
 from orchestrator.command_ui import card_title, refresh_label, selected_label
 from tools.anatta_diagnostics import build_report
@@ -75,9 +76,12 @@ def _status_text(
     lines = [
         card_title("🪷", "Anatta diagnostics"),
         "",
-        f"<b>Current</b> · <code>{html.escape(_current_mode(workspace).upper())}</code>",
-        f"<b>View</b> · <code>{'FULL' if full else 'SUMMARY'}</code>",
-        "<b>Changes</b> · mode changes persist in this workspace",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        f"<code>{html.escape(_current_mode(workspace).upper())}</code>",
+        f"<b>{html.escape(ui_language.tr('anatta.view'))}</b> · "
+        f"<code>{html.escape(ui_language.tr('anatta.view.full' if full else 'anatta.view.summary'))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.changes'))}</b> · "
+        f"{html.escape(ui_language.tr('anatta.changes'))}",
     ]
     if notice:
         lines.extend(["", f"✅ {html.escape(notice)}"])
@@ -90,12 +94,12 @@ def _keyboard(workspace: Path) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(selected_label("Off", current == "off"), callback_data="anatta:off"),
-                InlineKeyboardButton(selected_label("Shadow", current == "shadow"), callback_data="anatta:shadow"),
-                InlineKeyboardButton(selected_label("On", current == "on"), callback_data="anatta:on"),
+                InlineKeyboardButton(selected_label(ui_language.tr("anatta.mode.off"), current == "off"), callback_data="anatta:off"),
+                InlineKeyboardButton(selected_label(ui_language.tr("anatta.mode.shadow"), current == "shadow"), callback_data="anatta:shadow"),
+                InlineKeyboardButton(selected_label(ui_language.tr("anatta.mode.on"), current == "on"), callback_data="anatta:on"),
             ],
             [
-                InlineKeyboardButton("Full report", callback_data="anatta:full"),
+                InlineKeyboardButton(ui_language.tr("anatta.button.full"), callback_data="anatta:full"),
                 InlineKeyboardButton(refresh_label(), callback_data="anatta:status"),
             ],
         ]
@@ -105,9 +109,20 @@ def _keyboard(workspace: Path) -> InlineKeyboardMarkup:
 def _apply_mode(runtime: Any, workspace: Path, mode: str) -> str:
     changed = _set_anatta_mode(workspace, mode)
     reloaded = _reload_observers(runtime)
-    observer_line = "observer ensured" if changed["observer_ensured"] else "observer unchanged"
-    reload_line = "observers reloaded" if reloaded else "observer reload unavailable"
-    return f"Mode set to {mode}: {observer_line}; {reload_line}."
+    observer_line = ui_language.tr(
+        "anatta.observer.ensured"
+        if changed["observer_ensured"]
+        else "anatta.observer.unchanged"
+    )
+    reload_line = ui_language.tr(
+        "anatta.reload.done" if reloaded else "anatta.reload.unavailable"
+    )
+    return ui_language.tr(
+        "anatta.mode_set",
+        mode=mode,
+        observer=observer_line,
+        reload=reload_line,
+    )
 
 
 async def anatta_callback(runtime: Any, update: Any, context: Any) -> None:

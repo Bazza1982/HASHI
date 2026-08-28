@@ -4,7 +4,7 @@ from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator import runtime_menu_views
+from orchestrator import runtime_menu_views, ui_language
 from orchestrator.command_ui import back_label, refresh_label
 
 
@@ -58,13 +58,16 @@ def build_skill_catalog_keyboard(manager, workspace_dir: Path) -> InlineKeyboard
     rows.extend(
         [
             [
-                InlineKeyboardButton("➕ Install", callback_data="skill:i:all"),
-                InlineKeyboardButton("🔎 Find", callback_data="skill:f:all"),
+                InlineKeyboardButton(ui_language.tr("menu.skill.button.install"), callback_data="skill:i:all"),
+                InlineKeyboardButton(ui_language.tr("menu.skill.button.find"), callback_data="skill:f:all"),
             ],
             [
                 InlineKeyboardButton(refresh_label(), callback_data="skill:r:all"),
                 InlineKeyboardButton(
-                    f"⚠️ Invalid {len(manager.skill_validation_errors())}",
+                    ui_language.tr(
+                        "menu.skill.button.invalid",
+                        count=len(manager.skill_validation_errors()),
+                    ),
                     callback_data="skill:z:all",
                 ),
             ],
@@ -80,23 +83,25 @@ def build_skill_action_keyboard(
     enabled = manager.is_skill_enabled(workspace_dir, skill.id)
     rows: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton("▶️ Use", callback_data=f"skill:u:{key}"),
-            InlineKeyboardButton("🧪 Validate", callback_data=f"skill:v:{key}"),
+            InlineKeyboardButton(ui_language.tr("menu.skill.button.use"), callback_data=f"skill:u:{key}"),
+            InlineKeyboardButton(ui_language.tr("menu.skill.button.validate"), callback_data=f"skill:v:{key}"),
         ],
         [
             InlineKeyboardButton(
-                "⏸ Disable" if enabled else "✅ Enable",
+                ui_language.tr(
+                    "menu.skill.button.disable" if enabled else "menu.skill.button.enable"
+                ),
                 callback_data=f"skill:{'d' if enabled else 'e'}:{key}",
             )
         ],
     ]
     if manager.can_uninstall_skill(skill):
         labels = {
-            "project": "🗑️ Delete",
-            "linked": "🔗 Unlink",
-            "installed": "🗑️ Uninstall",
+            "project": ui_language.tr("menu.skill.button.delete"),
+            "linked": ui_language.tr("menu.skill.button.unlink"),
+            "installed": ui_language.tr("menu.skill.button.uninstall"),
         }
-        label = labels.get(skill.source_type, "🗑️ Delete")
+        label = labels.get(skill.source_type, ui_language.tr("menu.skill.button.delete"))
         rows.append([InlineKeyboardButton(label, callback_data=f"skill:x:{key}")])
     rows.append([InlineKeyboardButton(back_label(), callback_data="skill:b:all")])
     return InlineKeyboardMarkup(rows)
@@ -149,22 +154,22 @@ async def handle_skill_callback(runtime, query, data: str) -> bool:
 
     parts = data.split(":", 2)
     if len(parts) != 3:
-        await query.answer("Invalid Skill action", show_alert=True)
+        await query.answer(ui_language.tr("menu.skill.error.invalid_action"), show_alert=True)
         return True
     _, action, reference = parts
 
     if action in {"toggle", "run", "jobs"}:
         await query.answer(
-            "This legacy Skill action is disabled. Use /jobs or the runtime command.",
+            ui_language.tr("menu.skill.error.legacy_action"),
             show_alert=True,
         )
         return True
 
     if action in {"r", "rescan"}:
         await _render_catalog(
-            runtime, query, notice="✅ Catalog rescanned and validated."
+            runtime, query, notice=ui_language.tr("menu.skill.notice.rescanned")
         )
-        await query.answer("Skill catalog rescanned")
+        await query.answer(ui_language.tr("menu.skill.answer.rescanned"))
         return True
     if action in {"z", "invalid"}:
         errors = manager.skill_validation_errors()
@@ -194,7 +199,7 @@ async def handle_skill_callback(runtime, query, data: str) -> bool:
 
     skill = _resolve_skill(manager, reference)
     if skill is None:
-        await query.answer("Unknown skill", show_alert=True)
+        await query.answer(ui_language.tr("menu.skill.error.unknown"), show_alert=True)
         return True
     action = {"show": "s"}.get(action, action)
     workspace = _workspace_dir(runtime)
@@ -204,7 +209,10 @@ async def handle_skill_callback(runtime, query, data: str) -> bool:
         await query.answer()
         return True
     if action == "u":
-        await query.answer(f"Use /skill {skill.id} <request>", show_alert=True)
+        await query.answer(
+            ui_language.tr("menu.skill.answer.use", skill=skill.id),
+            show_alert=True,
+        )
         return True
     if action == "v":
         await query.edit_message_text(
@@ -212,7 +220,7 @@ async def handle_skill_callback(runtime, query, data: str) -> bool:
             parse_mode="HTML",
             reply_markup=_back_to_skill_keyboard(manager, skill),
         )
-        await query.answer("Validation complete")
+        await query.answer(ui_language.tr("menu.skill.answer.validated"))
         return True
     if action == "e":
         ok, message = manager.set_skill_enabled(workspace, skill.id, enabled=True)
@@ -233,13 +241,13 @@ async def handle_skill_callback(runtime, query, data: str) -> bool:
                     [
                         [
                             InlineKeyboardButton(
-                                "Disable Skill",
+                                ui_language.tr("menu.skill.button.disable_confirm"),
                                 callback_data=f"skill:dc:{key}",
                             )
                         ],
                         [
                             InlineKeyboardButton(
-                                "← Keep enabled",
+                                ui_language.tr("menu.skill.button.keep_enabled"),
                                 callback_data=f"skill:s:{key}",
                             )
                         ],
@@ -266,7 +274,7 @@ async def handle_skill_callback(runtime, query, data: str) -> bool:
     if action == "x":
         if not manager.can_uninstall_skill(skill):
             await query.answer(
-                "This Skill source cannot be removed.",
+                ui_language.tr("menu.skill.error.remove_source"),
                 show_alert=True,
             )
             return True
@@ -275,14 +283,22 @@ async def handle_skill_callback(runtime, query, data: str) -> bool:
         rows = []
         if not dependencies:
             labels = {
-                "project": "Delete Skill",
-                "linked": "Unlink Skill",
-                "installed": "Uninstall Skill",
+                "project": ui_language.tr("menu.skill.button.delete_confirm"),
+                "linked": ui_language.tr("menu.skill.button.unlink_confirm"),
+                "installed": ui_language.tr("menu.skill.button.uninstall_confirm"),
             }
-            label = labels.get(skill.source_type, "Delete Skill")
+            label = labels.get(
+                skill.source_type,
+                ui_language.tr("menu.skill.button.delete_confirm"),
+            )
             rows.append([InlineKeyboardButton(label, callback_data=f"skill:xc:{key}")])
         rows.append(
-            [InlineKeyboardButton("← Keep Skill", callback_data=f"skill:s:{key}")]
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("menu.skill.button.keep"),
+                    callback_data=f"skill:s:{key}",
+                )
+            ]
         )
         await query.edit_message_text(
             runtime_menu_views.skill_uninstall_confirm_text(skill, dependencies),
@@ -301,5 +317,5 @@ async def handle_skill_callback(runtime, query, data: str) -> bool:
         await query.answer(message)
         return True
 
-    await query.answer("Unknown Skill action", show_alert=True)
+    await query.answer(ui_language.tr("menu.skill.error.invalid_action"), show_alert=True)
     return True

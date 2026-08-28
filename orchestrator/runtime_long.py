@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from orchestrator import ui_language
 from orchestrator.multimodal_contract import (
     MultimodalContractError,
     attachment_manifest,
@@ -649,12 +650,12 @@ async def cmd_long(runtime: Any, update: Any, context: Any) -> None:
             if getattr(runtime, "_long_buffer_state", LONG_BATCH_IDLE) == LONG_BATCH_CLOSING:
                 await runtime._reply_text(
                     update,
-                    "⏳ The previous /long batch is still finalizing its media intake.",
+                    ui_language.tr("long.previous_finalizing"),
                 )
             else:
-                await runtime._reply_text(update, "⏳ Already in /long mode. Send /end to finish.")
+                await runtime._reply_text(update, ui_language.tr("long.already_here"))
         else:
-            await runtime._reply_text(update, "⏳ A /long batch is already active in another chat.")
+            await runtime._reply_text(update, ui_language.tr("long.active_elsewhere"))
         return
 
     args_text = " ".join(context.args).strip() if context.args else ""
@@ -665,7 +666,7 @@ async def cmd_long(runtime: Any, update: Any, context: Any) -> None:
     runtime._long_buffer_timeout_task = asyncio.create_task(long_buffer_timeout(runtime))
     await runtime._reply_text(
         update,
-        "📝 /long batch started. Send text, documents, photos, audio, video, or stickers, then send /end to submit everything as one request.",
+        ui_language.tr("long.started"),
     )
 
 
@@ -698,11 +699,14 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
         submission = consume_batch(runtime, int(chat_id))
     except MultimodalContractError as exc:
         attachment = (
-            f" for attachment {exc.attachment_id}" if exc.attachment_id else ""
+            ui_language.tr("long.attachment", attachment_id=exc.attachment_id)
+            if exc.attachment_id
+            else ""
         )
-        message = (
-            "⚠️ /long media validation failed"
-            f"{attachment} ({exc.code}). Nothing was submitted."
+        message = ui_language.tr(
+            "long.validation_failed",
+            attachment=attachment,
+            code=exc.code,
         )
         logger = getattr(runtime, "logger", None)
         if logger is not None:
@@ -720,42 +724,54 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
     if submission is None:
         if reason == "timeout":
             suffix = (
-                f" {discarded_voice} unconfirmed voice transcript(s) were discarded."
+                ui_language.tr("long.discarded_voice", count=discarded_voice)
                 if discarded_voice
                 else ""
             )
             await runtime.send_long_message(
                 int(chat_id),
-                f"⏰ /long timed out with empty buffer. Cancelled.{suffix}",
+                ui_language.tr("long.timeout_empty", suffix=suffix),
                 request_id=f"long-timeout-{uuid4().hex[:8]}",
                 purpose="long-timeout",
             )
         elif update is not None:
-            await runtime._reply_text(update, "⚠️ /long buffer was empty, nothing to submit.")
+            await runtime._reply_text(update, ui_language.tr("long.empty"))
         return
 
     if submission.media_count:
-        details = (
-            f"✅ Collected {submission.text_count} text message(s) and "
-            f"{submission.media_count} media item(s). Submitting as one request..."
+        details = ui_language.tr(
+            "long.collected_media",
+            text_count=submission.text_count,
+            media_count=submission.media_count,
         )
     else:
-        details = f"✅ Collected {submission.line_count} lines. Submitting..."
+        details = ui_language.tr("long.collected_lines", count=submission.line_count)
 
     if reason == "timeout":
         timeout_details = (
-            f"{submission.text_count} text message(s), {submission.media_count} media item(s)"
+            ui_language.tr(
+                "long.timeout_detail_media",
+                text_count=submission.text_count,
+                media_count=submission.media_count,
+            )
             if submission.media_count
-            else f"{submission.line_count} lines"
+            else ui_language.tr(
+                "long.timeout_detail_lines",
+                count=submission.line_count,
+            )
         )
         suffix = (
-            f"; discarded {discarded_voice} unconfirmed voice transcript(s)"
+            ui_language.tr("long.timeout_discarded", count=discarded_voice)
             if discarded_voice
             else ""
         )
         await runtime.send_long_message(
             submission.chat_id,
-            f"⏰ /long auto-submitted after 5min timeout ({timeout_details}{suffix}).",
+            ui_language.tr(
+                "long.timeout_submitted",
+                details=timeout_details,
+                suffix=suffix,
+            ),
             request_id=f"long-timeout-{uuid4().hex[:8]}",
             purpose="long-timeout",
         )
@@ -803,16 +819,16 @@ async def cmd_end(runtime: Any, update: Any, context: Any) -> None:
         return
     chat_id = update.effective_chat.id
     if not is_batch_active(runtime, chat_id):
-        await runtime._reply_text(update, "No /long session active in this chat.")
+        await runtime._reply_text(update, ui_language.tr("long.none_active"))
         return
     if getattr(runtime, "_long_buffer_state", LONG_BATCH_IDLE) == LONG_BATCH_CLOSING:
-        await runtime._reply_text(update, "⏳ /long is already finalizing media intake.")
+        await runtime._reply_text(update, ui_language.tr("long.finalizing"))
         return
     unconfirmed = pending_voice_count(runtime)
     if unconfirmed:
         await runtime._reply_text(
             update,
-            f"⚠️ Confirm or discard {unconfirmed} pending voice transcript(s) before /end.",
+            ui_language.tr("long.voice_pending", count=unconfirmed),
         )
         return
 
@@ -824,7 +840,7 @@ async def cmd_end(runtime: Any, update: Any, context: Any) -> None:
     batch_id = str(runtime._long_batch_id or "")
     await runtime._reply_text(
         update,
-        "⏳ Finishing /long media intake; late items from the same album will stay in this batch...",
+        ui_language.tr("long.finishing"),
     )
     if _quiet_seconds(runtime) <= 0 and not runtime._long_pending_media_ids:
         await _finish_batch(runtime, batch_id)

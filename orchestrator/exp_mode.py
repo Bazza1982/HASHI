@@ -4,6 +4,7 @@ import html
 from pathlib import Path
 
 from exp.loader import ExpStore
+from orchestrator import ui_language
 from orchestrator.command_ui import card_title
 
 
@@ -74,37 +75,43 @@ def get_exp_usage_text(exp_root: str | Path | None = None) -> str:
         try:
             manifest = store.get_manifest(exp_id)
         except Exception as exc:
+            unavailable = ui_language.tr("exp.unavailable")
             entries.append(
-                f"<code>{html.escape(str(exp_id))}</code> · unavailable "
+                f"<code>{html.escape(str(exp_id))}</code> · {unavailable} "
                 f"({html.escape(type(exc).__name__)})"
             )
             continue
-        summary = str(manifest.get("summary") or "").strip() or "No summary."
+        summary = str(manifest.get("summary") or "").strip() or ui_language.tr("exp.no_summary")
         playbooks = manifest.get("playbooks", {})
-        playbook_names = ", ".join(sorted(playbooks)) if isinstance(playbooks, dict) else "none"
+        playbook_names = (
+            ", ".join(sorted(playbooks))
+            if isinstance(playbooks, dict)
+            else ui_language.tr("exp.none")
+        )
         entries.append(
             f"<code>{html.escape(str(exp_id))}</code> · {html.escape(summary)}\n"
-            f"Playbooks · <code>{html.escape(playbook_names or 'none')}</code>"
+            f"{ui_language.tr('exp.playbooks')} · "
+            f"<code>{html.escape(playbook_names or ui_language.tr('exp.none'))}</code>"
         )
     if not entries:
-        entries.append("No EXP entries are available.")
+        entries.append(ui_language.tr("exp.no_entries"))
     return "\n".join(
         [
             card_title("🧭", "EXP guidebook"),
             "",
-            "<b>Current</b> · <b>READY</b>",
-            "<b>Scope</b> · context-specific expertise and playbooks",
-            "<b>Assets</b> · large training/evidence files install on demand",
+            f"<b>{ui_language.tr('common.current')}</b> · <b>{ui_language.tr('common.ready')}</b>",
+            f"<b>{ui_language.tr('common.scope')}</b> · {ui_language.tr('exp.scope')}",
+            f"<b>{ui_language.tr('exp.assets')}</b> · {ui_language.tr('exp.assets_value')}",
             "",
-            "The agent selects the most relevant EXP material for the task; command behavior is unchanged.",
+            ui_language.tr("exp.effect"),
             "",
-            "<b>Use</b>",
+            f"<b>{ui_language.tr('common.use')}</b>",
             "<code>/exp &lt;task&gt;</code>",
             "",
-            "<b>Example</b>",
-            "<code>/exp prepare council presentation slides using the council template</code>",
+            f"<b>{ui_language.tr('common.example')}</b>",
+            ui_language.tr("exp.example"),
             "",
-            "<b>AVAILABLE EXP</b>",
+            f"<b>{ui_language.tr('exp.available')}</b>",
             *entries,
         ]
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from orchestrator import ui_language
 from orchestrator.bridge_memory import SysPromptManager
 from orchestrator.command_ui import card_title, setting_card
 
@@ -34,14 +35,12 @@ def ensure_usecomputer_slot(sys_prompt_manager: SysPromptManager) -> str:
 def set_usecomputer_mode(sys_prompt_manager: SysPromptManager, enabled: bool) -> str:
     if enabled:
         ensure_usecomputer_slot(sys_prompt_manager)
-        return (
-            f"/usecomputer is ON via /sys {USECOMPUTER_SLOT}.\n"
-            "The agent will treat desktop/GUI control as an available operating mode, not a forced one."
+        return ui_language.tr(
+            "computer.enabled",
+            slot=USECOMPUTER_SLOT,
         )
     sys_prompt_manager.delete(USECOMPUTER_SLOT)
-    return (
-        f"/usecomputer is OFF. /sys {USECOMPUTER_SLOT} has been cleared."
-    )
+    return ui_language.tr("computer.disabled", slot=USECOMPUTER_SLOT)
 
 
 def get_usecomputer_status(sys_prompt_manager: SysPromptManager) -> str:
@@ -49,31 +48,24 @@ def get_usecomputer_status(sys_prompt_manager: SysPromptManager) -> str:
     active = bool(slot.get("active"))
     configured = slot.get("text") == USECOMPUTER_SYSTEM_PROMPT
     if active and configured:
-        current = "<b>ON</b>"
-        consequence = (
-            "GUI-aware guidance is available for future requests, but direct tools remain preferred when more reliable."
-        )
+        current = f"<b>{ui_language.tr('common.on')}</b>"
+        consequence = ui_language.tr("computer.effect.on")
     elif slot.get("text"):
-        current = "<b>CUSTOM</b>"
-        consequence = (
-            "The reserved system slot contains custom text rather than the managed computer-use prompt."
-        )
+        current = f"<b>{ui_language.tr('computer.state.custom')}</b>"
+        consequence = ui_language.tr("computer.effect.custom")
     else:
-        current = "<b>OFF</b>"
-        consequence = "Managed GUI-aware guidance is inactive."
+        current = f"<b>{ui_language.tr('common.off')}</b>"
+        consequence = ui_language.tr("computer.effect.off")
     return setting_card(
         "🖥️",
         "Computer use",
         current=current,
         facts=[
-            f"<b>System slot</b> · <code>/sys {USECOMPUTER_SLOT}</code>",
-            "<b>Alias</b> · <code>/usercomputer</code>",
+            f"<b>{ui_language.tr('computer.system_slot')}</b> · <code>/sys {USECOMPUTER_SLOT}</code>",
+            f"<b>{ui_language.tr('computer.alias')}</b> · <code>/usercomputer</code>",
         ],
         consequence=consequence,
-        action=(
-            "Use <code>/usecomputer on</code>, <code>/usecomputer off</code>, or "
-            "<code>/usecomputer examples</code>. Send <code>/usecomputer &lt;task&gt;</code> to run a task."
-        ),
+        action=ui_language.tr("computer.action"),
     )
 
 
@@ -89,11 +81,11 @@ def build_usecomputer_task_prompt(task: str) -> str:
 def get_usecomputer_examples_text() -> str:
     return (
         f"{card_title('🖥️', 'Computer use examples')}\n\n"
-        "<b>Current</b> · reference\n\n"
+        f"<b>{ui_language.tr('common.current')}</b> · {ui_language.tr('computer.reference')}\n\n"
         "<code>/usecomputer status</code>\n"
         "<code>/usecomputer on</code>\n\n"
-        "<code>/usecomputer Please code this material in NVivo; use mouse and keyboard if needed.</code>\n\n"
-        "<code>/usecomputer Verify this Chrome extension on the real Windows desktop.</code>\n\n"
-        "<code>/usecomputer Finish this form in the Linux virtual desktop when no reliable API exists.</code>\n\n"
-        "Alias · <code>/usercomputer</code>"
+        f"{ui_language.tr('computer.example.nvivo')}\n\n"
+        f"{ui_language.tr('computer.example.extension')}\n\n"
+        f"{ui_language.tr('computer.example.form')}\n\n"
+        f"{ui_language.tr('computer.alias')} · <code>/usercomputer</code>"
     )

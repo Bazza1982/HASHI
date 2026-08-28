@@ -9,6 +9,7 @@ from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from orchestrator import ui_language
 from orchestrator.command_ui import back_label, card_title
 from orchestrator.her_v2.request_policy import job_effort_policy
 from orchestrator.her_v2.models import effort_display_label
@@ -21,7 +22,10 @@ MAX_CALLBACK_TOKENS = 256
 
 def _her_v2_job_effort_label(job: dict) -> str:
     policy = job_effort_policy(job)
-    return f"{effort_display_label(policy['effective'])} · fixed scheduler policy"
+    return (
+        f"{effort_display_label(policy['effective'])} · "
+        f"{ui_language.tr('jobs.fixed_policy')}"
+    )
 
 
 def _runtime_logger(runtime):
@@ -106,16 +110,16 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
     Returns (text: str, markup: InlineKeyboardMarkup | None).
     """
     if skill_manager is None or not hasattr(skill_manager, "tasks_path"):
-        return "No task scheduler configured.", None
+        return ui_language.tr("jobs.no_scheduler"), None
     try:
         if not skill_manager.tasks_path.exists():
             data = {"heartbeats": [], "crons": []}
         else:
             data = json.loads(skill_manager.tasks_path.read_text(encoding="utf-8"))
     except Exception:
-        return "Could not read tasks.json.", None
+        return ui_language.tr("jobs.read_failed"), None
 
-    scope = filter_agent or "all agents"
+    scope = filter_agent or ui_language.tr("jobs.scope.all")
     buttons: list = []
 
     all_jobs: list[tuple[str, dict]] = []
@@ -134,34 +138,49 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
     lines = [
         card_title("📋", "Scheduled jobs"),
         "",
-        f"<b>Current</b> · <code>{active_count}</code> active · <code>{len(all_jobs)}</code> configured",
-        f"<b>Scope</b> · <code>{html.escape(scope)}</code>",
-        "<b>Changes</b> · immediate and persistent",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        + ui_language.tr(
+            "jobs.current",
+            active=f"<code>{active_count}</code>",
+            configured=f"<code>{len(all_jobs)}</code>",
+        ),
+        f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+        f"<code>{html.escape(scope)}</code>",
+        f"<b>{html.escape(ui_language.tr('common.changes'))}</b> · "
+        f"{html.escape(ui_language.tr('jobs.changes'))}",
     ]
 
     for kind, job in all_jobs:
         enabled = bool(job.get("enabled"))
         icon = "⏱" if kind == "heartbeat" else "📅"
-        status = "ON" if enabled else "OFF"
+        status = ui_language.tr("common.on" if enabled else "common.off")
         jid = str(job.get("id") or "unknown")
         owner = str(job.get("agent") or "?")
         if kind == "heartbeat":
             interval = int(job.get("interval_seconds", 0) or 0)
             if interval >= 3600:
-                schedule = f"every {interval // 3600}h"
+                schedule = ui_language.tr(
+                    "jobs.every_hours", count=interval // 3600
+                )
             elif interval >= 60:
-                schedule = f"every {interval // 60}m"
+                schedule = ui_language.tr(
+                    "jobs.every_minutes", count=interval // 60
+                )
             else:
-                schedule = f"every {interval}s"
+                schedule = ui_language.tr(
+                    "jobs.every_seconds", count=interval
+                )
         else:
             schedule = str(job.get("schedule") or job.get("time") or "unknown")
         lines.extend(
             [
                 "",
                 f"{icon} <b>{status}</b> · <code>{html.escape(jid)}</code>",
-                f"<b>Schedule</b> · <code>{html.escape(schedule)}</code>",
-                f"<b>Owner</b> · <code>{html.escape(owner)}</code>",
-                "<b>HER execution mode</b> · "
+                f"<b>{html.escape(ui_language.tr('jobs.schedule'))}</b> · "
+                f"<code>{html.escape(schedule)}</code>",
+                f"<b>{html.escape(ui_language.tr('jobs.owner'))}</b> · "
+                f"<code>{html.escape(owner)}</code>",
+                f"<b>{html.escape(ui_language.tr('jobs.her_mode'))}</b> · "
                 f"<code>{html.escape(_her_v2_job_effort_label(job))}</code>",
             ]
         )
@@ -176,7 +195,9 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
         jid = job["id"]
         enabled = job.get("enabled", False)
         toggle_mode = "off" if enabled else "on"
-        toggle_label = "Turn off" if enabled else "Turn on"
+        toggle_label = ui_language.tr(
+            "jobs.button.turn_off" if enabled else "jobs.button.turn_on"
+        )
         icon = "⏱" if kind == "heartbeat" else "📅"
         short_id = str(jid)[:22]
         run_token = mint_callback_token(runtime, "skilljob_action", {"kind": kind, "task_id": jid, "action": "run"}, prefix="j")
@@ -200,14 +221,14 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
         )
         buttons.append([InlineKeyboardButton(f"{icon} {short_id}", callback_data="noop")])
         buttons.append([
-            InlineKeyboardButton("Run now", callback_data=f"skilljob:{kind}:key:{run_token}:run"),
+            InlineKeyboardButton(ui_language.tr("jobs.button.run"), callback_data=f"skilljob:{kind}:key:{run_token}:run"),
             InlineKeyboardButton(toggle_label, callback_data=f"skilljob:{kind}:key:{toggle_token}:toggle"),
-            InlineKeyboardButton("Transfer", callback_data=f"skilljob:{kind}:key:{transfer_token}:transfer"),
-            InlineKeyboardButton("Delete", callback_data=f"skilljob:{kind}:key:{delete_token}:delete"),
+            InlineKeyboardButton(ui_language.tr("jobs.button.transfer"), callback_data=f"skilljob:{kind}:key:{transfer_token}:transfer"),
+            InlineKeyboardButton(ui_language.tr("jobs.button.delete"), callback_data=f"skilljob:{kind}:key:{delete_token}:delete"),
         ])
 
     if not all_jobs:
-        lines.append("\nNo jobs configured.")
+        lines.append("\n" + ui_language.tr("jobs.none"))
 
     markup = InlineKeyboardMarkup(buttons) if buttons else None
     return "\n".join(lines), markup
@@ -216,14 +237,14 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
 def _build_jobs_text(agent_name: str, skill_manager) -> str:
     """Build a formatted jobs listing for a single agent."""
     if skill_manager is None or not hasattr(skill_manager, "tasks_path"):
-        return "No task scheduler configured."
+        return ui_language.tr("jobs.no_scheduler")
     try:
         if not skill_manager.tasks_path.exists():
             data = {"heartbeats": [], "crons": []}
         else:
             data = json.loads(skill_manager.tasks_path.read_text(encoding="utf-8"))
     except Exception:
-        return "Could not read tasks.json."
+        return ui_language.tr("jobs.read_failed")
 
     hbs = [h for h in data.get("heartbeats", []) if h.get("agent") == agent_name]
     crons = [c for c in data.get("crons", []) if c.get("agent") == agent_name]
@@ -232,15 +253,22 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
     lines = [
         card_title("📋", "Scheduled jobs"),
         "",
-        f"<b>Current</b> · <code>{active_count}</code> active · <code>{len(all_jobs)}</code> configured",
-        f"<b>Scope</b> · <code>{html.escape(str(agent_name))}</code>",
-        "<b>Changes</b> · immediate and persistent",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        + ui_language.tr(
+            "jobs.current",
+            active=f"<code>{active_count}</code>",
+            configured=f"<code>{len(all_jobs)}</code>",
+        ),
+        f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+        f"<code>{html.escape(str(agent_name))}</code>",
+        f"<b>{html.escape(ui_language.tr('common.changes'))}</b> · "
+        f"{html.escape(ui_language.tr('jobs.changes'))}",
         "",
     ]
     found = False
 
     if hbs:
-        lines.append("<b>Heartbeats</b>")
+        lines.append(f"<b>{html.escape(ui_language.tr('jobs.heartbeats'))}</b>")
         for h in hbs:
             enabled = "✓" if h.get("enabled") else "✗"
             interval = h.get("interval_seconds", 0)
@@ -253,11 +281,18 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
             note = h.get("note", h.get("id", ""))
             action = h.get("action", "enqueue_prompt")
             job_id = str(h.get("id") or "unknown")
-            lines.append(f"  {enabled} <code>{html.escape(job_id)}</code> · every {html.escape(interval_s)}")
-            if action != "enqueue_prompt":
-                lines.append(f"      action · <code>{html.escape(str(action))}</code>")
+            every = ui_language.tr("status.every", interval=interval_s)
             lines.append(
-                "      HER execution mode · "
+                f"  {enabled} <code>{html.escape(job_id)}</code> · "
+                f"{html.escape(every)}"
+            )
+            if action != "enqueue_prompt":
+                lines.append(
+                    f"      {html.escape(ui_language.tr('jobs.action'))} · "
+                    f"<code>{html.escape(str(action))}</code>"
+                )
+            lines.append(
+                f"      {html.escape(ui_language.tr('jobs.her_mode'))} · "
                 f"<code>{html.escape(_her_v2_job_effort_label(h))}</code>"
             )
             if note and note != job_id:
@@ -269,18 +304,24 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
         found = True
 
     if crons:
-        lines.append("<b>Crons</b>")
+        lines.append(f"<b>{html.escape(ui_language.tr('jobs.crons'))}</b>")
         for c in crons:
             enabled = "✓" if c.get("enabled") else "✗"
             time_s = c.get("time", "??:??")
             action = c.get("action", "enqueue_prompt")
             note = c.get("note", c.get("id", ""))
             job_id = str(c.get("id") or "unknown")
-            lines.append(f"  {enabled} <code>{html.escape(job_id)}</code> · at {html.escape(str(time_s))}")
-            if action != "enqueue_prompt":
-                lines.append(f"      action · <code>{html.escape(str(action))}</code>")
             lines.append(
-                "      HER execution mode · "
+                f"  {enabled} <code>{html.escape(job_id)}</code> · "
+                f"{html.escape(ui_language.tr('jobs.at', time=time_s))}"
+            )
+            if action != "enqueue_prompt":
+                lines.append(
+                    f"      {html.escape(ui_language.tr('jobs.action'))} · "
+                    f"<code>{html.escape(str(action))}</code>"
+                )
+            lines.append(
+                f"      {html.escape(ui_language.tr('jobs.her_mode'))} · "
                 f"<code>{html.escape(_her_v2_job_effort_label(c))}</code>"
             )
             if note and note != job_id:
@@ -292,7 +333,7 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
         found = True
 
     if not found:
-        lines.append("No jobs configured for this agent.")
+        lines.append(ui_language.tr("jobs.none_agent"))
 
     return "\n".join(lines)
 
@@ -310,7 +351,14 @@ def build_job_transfer_keyboard(runtime, kind: str, task_id: str) -> InlineKeybo
                 local_agents.append(name)
 
     if local_agents:
-        buttons.append([InlineKeyboardButton("── This instance ──", callback_data="noop")])
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("jobs.this_instance"),
+                    callback_data="noop",
+                )
+            ]
+        )
         row = []
         for agent in sorted(local_agents):
             row.append(
@@ -414,17 +462,17 @@ async def handle_skill_job_callback(runtime, query, data: str) -> bool:
 
     parts = data.split(":", 4)
     if len(parts) != 5:
-        await query.answer("Malformed jobs callback.", show_alert=True)
+        await query.answer(ui_language.tr("jobs.malformed_callback"), show_alert=True)
         return True
     _, kind, action, task_id, value = parts
     if action == "key":
         _runtime_logger(runtime).debug("Handling tokenized jobs callback: %s", data)
         selection = resolve_callback_token(runtime, "skilljob_action", task_id)
         if not selection:
-            await query.answer("This jobs action expired. Open /jobs again.", show_alert=True)
+            await query.answer(ui_language.tr("jobs.action_expired"), show_alert=True)
             return True
         if selection.get("kind") != kind or selection.get("action") != value:
-            await query.answer("Invalid jobs action. Open /jobs again.", show_alert=True)
+            await query.answer(ui_language.tr("jobs.invalid_action"), show_alert=True)
             return True
         task_id = selection["task_id"]
         action = selection["action"]
@@ -442,13 +490,16 @@ async def handle_skill_job_callback(runtime, query, data: str) -> bool:
     if action == "run":
         job = runtime.skill_manager.get_job(kind, task_id)
         if not job:
-            await query.answer("Unknown job", show_alert=True)
+            await query.answer(ui_language.tr("jobs.unknown"), show_alert=True)
             return True
         mismatch = ownership_mismatch_label(job)
         if mismatch:
-            await query.answer(f"Refusing to run: {mismatch}.", show_alert=True)
+            await query.answer(
+                ui_language.tr("jobs.run_refused", reason=mismatch),
+                show_alert=True,
+            )
             return True
-        await query.answer("Running job now")
+        await query.answer(ui_language.tr("jobs.running_now"))
         await runtime._run_job_now(job, kind=kind)
         return True
     if action == "transfer":
@@ -456,7 +507,9 @@ async def handle_skill_job_callback(runtime, query, data: str) -> bool:
         job = runtime.skill_manager.get_job(kind, task_id)
         job_label = (job.get("note") or task_id) if job else task_id
         await query.edit_message_text(
-            f"📤 <b>Transfer job</b>\n<code>{job_label[:60]}</code>\n\nSelect target agent:",
+            f"📤 <b>{html.escape(ui_language.tr('jobs.transfer_title'))}</b>\n"
+            f"<code>{html.escape(str(job_label)[:60])}</code>\n\n"
+            f"{html.escape(ui_language.tr('jobs.select_target'))}",
             parse_mode="HTML",
             reply_markup=markup,
         )
@@ -466,69 +519,85 @@ async def handle_skill_job_callback(runtime, query, data: str) -> bool:
         target_agent = value
         job = runtime.skill_manager.get_job(kind, task_id)
         if not job:
-            await query.answer("Job not found", show_alert=True)
+            await query.answer(ui_language.tr("jobs.not_found"), show_alert=True)
             return True
         ok, message, _ = runtime.skill_manager.transfer_job(kind, task_id, target_agent)
         await query.answer(message, show_alert=not ok)
         if ok:
             await query.edit_message_text(
-                f"✅ Job transferred to <b>{target_agent}</b> (disabled — review before enabling).",
+                ui_language.tr(
+                    "jobs.transferred_local", agent=html.escape(target_agent)
+                ),
                 parse_mode="HTML",
             )
         return True
     if action == "xfer_remote":
         parts = value.split(":", 1)
         if len(parts) != 2:
-            await query.answer("Invalid target", show_alert=True)
+            await query.answer(ui_language.tr("jobs.invalid_target"), show_alert=True)
             return True
         target_agent, instance_id = parts
         job = runtime.skill_manager.get_job(kind, task_id)
         if not job:
-            await query.answer("Job not found", show_alert=True)
+            await query.answer(ui_language.tr("jobs.not_found"), show_alert=True)
             return True
-        await query.answer("Sending to remote instance…")
+        await query.answer(ui_language.tr("jobs.sending_remote"))
         ok, msg = await runtime._transfer_job_remote(kind, job, target_agent, instance_id)
         if ok:
             runtime.skill_manager.set_job_enabled(kind, task_id, enabled=False)
             await query.edit_message_text(
-                f"✅ Job transferred to <b>{target_agent}@{instance_id}</b> (original disabled).",
+                ui_language.tr(
+                    "jobs.transferred_remote",
+                    agent=html.escape(target_agent),
+                    instance=html.escape(instance_id),
+                ),
                 parse_mode="HTML",
             )
         else:
-            await query.edit_message_text(f"❌ Transfer failed: {msg}")
+            await query.edit_message_text(
+                ui_language.tr("jobs.transfer_failed", reason=str(msg))
+            )
         return True
     if action == "xferkey":
         selection = resolve_callback_token(runtime, "skilljob_transfer", task_id)
         if not selection:
             selection = getattr(runtime, "_job_transfer_selections", {}).get(task_id)
         if not selection:
-            await query.answer("Transfer selection expired. Open /jobs and try again.", show_alert=True)
+            await query.answer(ui_language.tr("jobs.transfer_expired"), show_alert=True)
             return True
         target_kind = selection["kind"]
         target_task_id = selection["task_id"]
         target_agent = selection["target_agent"]
         job = runtime.skill_manager.get_job(target_kind, target_task_id)
         if not job:
-            await query.answer("Job not found", show_alert=True)
+            await query.answer(ui_language.tr("jobs.not_found"), show_alert=True)
             return True
         if selection.get("remote"):
             instance_id = selection["instance_id"]
-            await query.answer("Sending to remote instance…")
+            await query.answer(ui_language.tr("jobs.sending_remote"))
             ok, msg = await runtime._transfer_job_remote(target_kind, job, target_agent, instance_id)
             if ok:
                 runtime.skill_manager.set_job_enabled(target_kind, target_task_id, enabled=False)
                 await query.edit_message_text(
-                    f"✅ Job transferred to <b>{target_agent}@{instance_id}</b> (original disabled).",
+                    ui_language.tr(
+                        "jobs.transferred_remote",
+                        agent=html.escape(target_agent),
+                        instance=html.escape(instance_id),
+                    ),
                     parse_mode="HTML",
                 )
             else:
-                await query.edit_message_text(f"❌ Transfer failed: {msg}")
+                await query.edit_message_text(
+                    ui_language.tr("jobs.transfer_failed", reason=str(msg))
+                )
             return True
         ok, message, _ = runtime.skill_manager.transfer_job(target_kind, target_task_id, target_agent)
         await query.answer(message, show_alert=not ok)
         if ok:
             await query.edit_message_text(
-                f"✅ Job transferred to <b>{target_agent}</b> (disabled — review before enabling).",
+                ui_language.tr(
+                    "jobs.transferred_local", agent=html.escape(target_agent)
+                ),
                 parse_mode="HTML",
             )
         return True

@@ -6,7 +6,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator import runtime_menu_views, runtime_mode
+from orchestrator import runtime_menu_views, runtime_mode, ui_language
 from orchestrator.command_ui import back_label, selected_label, setting_card
 from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
@@ -78,7 +78,7 @@ def backend_keyboard(runtime) -> InlineKeyboardMarkup:
                     callback_data=f"backend:{engine}:plain",
                 ),
                 InlineKeyboardButton(
-                    f"{base} · with context",
+                    f"{base} · {ui_language.tr('menu.backend.with_handoff')}",
                     callback_data=f"backend:{engine}:context",
                 ),
             ]
@@ -91,7 +91,10 @@ def her_v2_provider_keyboard(runtime) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                selected_label("Hybrid routing", current.routing_mode == "hybrid"),
+                selected_label(
+                    ui_language.tr("menu.her.hybrid_routing"),
+                    current.routing_mode == "hybrid",
+                ),
                 callback_data="her_provider_hybrid",
             )
         ]
@@ -146,13 +149,13 @@ def her_v2_model_keyboard(runtime) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    "Task routes · model + reasoning",
+                    ui_language.tr("menu.her.task_routes"),
                     callback_data="her_routes",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "Compact · Quick/Light history maintenance",
+                    ui_language.tr("menu.her.compact_route"),
                     callback_data="her_model_compact",
                 )
             ],
@@ -162,11 +165,11 @@ def her_v2_model_keyboard(runtime) -> InlineKeyboardMarkup:
             [
                 [
                     InlineKeyboardButton(
-                        "✅ Apply draft",
+                        ui_language.tr("menu.her.apply_draft"),
                         callback_data="her_model_apply",
                     ),
                     InlineKeyboardButton(
-                        "Discard",
+                        ui_language.tr("menu.her.discard"),
                         callback_data="her_model_discard",
                     ),
                 ]
@@ -204,15 +207,24 @@ def her_v2_compact_keyboard(runtime) -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    selected_label("Tier · auto", current.timeout_tier == "auto"),
+                    selected_label(
+                        ui_language.tr("menu.her.tier_auto"),
+                        current.timeout_tier == "auto",
+                    ),
                     callback_data="her_model_compact_tier:auto",
                 ),
                 InlineKeyboardButton(
-                    selected_label("Tier 2", current.timeout_tier == "tier_2"),
+                    selected_label(
+                        ui_language.tr("menu.her.tier_2"),
+                        current.timeout_tier == "tier_2",
+                    ),
                     callback_data="her_model_compact_tier:tier_2",
                 ),
                 InlineKeyboardButton(
-                    selected_label("Tier 3", current.timeout_tier == "tier_3"),
+                    selected_label(
+                        ui_language.tr("menu.her.tier_3"),
+                        current.timeout_tier == "tier_3",
+                    ),
                     callback_data="her_model_compact_tier:tier_3",
                 ),
             ],
@@ -280,7 +292,9 @@ def her_v2_compact_reasoning_keyboard(
     buttons = [
         [
             InlineKeyboardButton(
-                f"Reasoning · {reasoning}",
+                ui_language.tr(
+                    "menu.her.reasoning_value", reasoning=reasoning
+                ),
                 callback_data=f"{prefix}:{reasoning}",
             )
         ]
@@ -310,17 +324,17 @@ def _her_v2_compact_callback_selection(
     options = runtime.backend_manager.get_her_v2_provider_options()
     provider_index, option = _her_v2_indexed_choice(options, raw_provider_index)
     if not option.get("available"):
-        raise ValueError("Compact provider is no longer available")
+        raise ValueError(ui_language.tr("model.menu.stale"))
     provider = str(option["engine"])
     if provider_token != _her_v2_callback_token(provider):
-        raise ValueError("This Compact provider menu is stale")
+        raise ValueError(ui_language.tr("model.provider_menu.stale"))
     model_index, model = _her_v2_indexed_choice(
         list(option.get("models") or []),
         raw_model_index,
     )
     model = str(model)
     if model_token != _her_v2_callback_token(model):
-        raise ValueError("This Compact model menu is stale")
+        raise ValueError(ui_language.tr("model.model_menu.stale"))
     return provider_index, provider, model_index, model
 
 
@@ -357,7 +371,7 @@ def her_v2_slot_model_keyboard(runtime, slot: str) -> InlineKeyboardMarkup:
             0,
             [
                 InlineKeyboardButton(
-                    "Change provider",
+                    ui_language.tr("menu.her.change_provider"),
                     callback_data=f"her_target_providers:{slot}",
                 )
             ],
@@ -438,12 +452,15 @@ def _her_v2_route(raw: Route | str) -> Route:
 
 
 def _her_v2_route_slot_label(slot: str) -> str:
-    return {
-        "fast": "Quick",
-        "pro": "Pro",
-        "custom": "Custom",
-        "inherit": "Follow source",
-    }.get(slot, slot)
+    key = f"menu.her.slot.{slot}"
+    translated = ui_language.tr(key)
+    return slot if translated == key else translated
+
+
+def _her_v2_route_label(route: Route) -> str:
+    key = f"menu.her.route.{route.value}"
+    translated = ui_language.tr(key)
+    return HER_V2_ROUTE_LABELS[route] if translated == key else translated
 
 
 def _her_v2_route_effective_model(runtime, route: Route) -> str:
@@ -475,7 +492,7 @@ def her_v2_routes_keyboard(runtime) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(
                 (
-                    f"{HER_V2_ROUTE_LABELS[route]} · "
+                    f"{_her_v2_route_label(route)} · "
                     f"{_her_v2_route_slot_label(selected.route_target_mode(route))} · "
                     f"{_her_v2_route_effective_reasoning(runtime, route)}"
                 ),
@@ -506,7 +523,10 @@ def her_v2_route_keyboard(runtime, route: Route | str) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(
                 selected_label(
-                    f"Model · {_her_v2_route_slot_label(slot)}",
+                    ui_language.tr(
+                        "menu.her.route_model",
+                        slot=_her_v2_route_slot_label(slot),
+                    ),
                     slot == current_slot,
                 ),
                 callback_data=f"her_route_slot:{parsed.value}:{slot}",
@@ -518,7 +538,13 @@ def her_v2_route_keyboard(runtime, route: Route | str) -> InlineKeyboardMarkup:
         buttons.append(
             [
                 InlineKeyboardButton(
-                    selected_label("Model · Custom", current_slot == "custom"),
+                    selected_label(
+                        ui_language.tr(
+                            "menu.her.route_model",
+                            slot=_her_v2_route_slot_label("custom"),
+                        ),
+                        current_slot == "custom",
+                    ),
                     callback_data=f"her_route_custom:{parsed.value}",
                 )
             ]
@@ -530,9 +556,11 @@ def her_v2_route_keyboard(runtime, route: Route | str) -> InlineKeyboardMarkup:
             value == explicit if explicit is not None else value == "inherit"
         )
         label = (
-            f"Reasoning · Inherit ({current_reasoning})"
+            ui_language.tr(
+                "menu.her.reasoning_inherit", reasoning=current_reasoning
+            )
             if value == "inherit"
-            else f"Reasoning · {value}"
+            else ui_language.tr("menu.her.reasoning_value", reasoning=value)
         )
         buttons.append(
             [
@@ -554,7 +582,7 @@ def her_v2_route_text(runtime, route: Route | str) -> str:
     selected = _her_v2_edit_configuration(runtime)
     slot = selected.route_target_mode(parsed)
     return runtime_menu_views.her_v2_route_text(
-        label=HER_V2_ROUTE_LABELS[parsed],
+        label=_her_v2_route_label(parsed),
         model_slot=_her_v2_route_slot_label(slot),
         effective_model=_her_v2_route_effective_model(runtime, parsed),
         reasoning=_her_v2_route_effective_reasoning(runtime, parsed),
@@ -620,9 +648,9 @@ def her_v2_route_model_keyboard(
 
 def apply_her_v2_configuration(runtime, selected) -> str | None:
     if runtime.config.active_backend != HER_V2_ENGINE:
-        return "HER v2 configuration is available only while HER v2 is active."
+        return ui_language.tr("menu.her.configuration_active_only")
     if runtime._backend_busy():
-        return "HER v2 configuration is blocked while a request is running or queued."
+        return ui_language.tr("menu.her.configuration_busy")
     try:
         runtime.backend_manager.apply_her_v2_configuration(selected)
     except (OSError, TypeError, ValueError) as exc:
@@ -634,9 +662,9 @@ def save_her_v2_candidate(runtime, selected) -> str | None:
     """Stage Hybrid edits; preserve immediate Single-provider compatibility."""
 
     if runtime.config.active_backend != HER_V2_ENGINE:
-        return "HER v2 configuration is available only while HER v2 is active."
+        return ui_language.tr("menu.her.configuration_active_only")
     if runtime._backend_busy():
-        return "HER v2 configuration is blocked while a request is running or queued."
+        return ui_language.tr("menu.her.configuration_busy")
     try:
         if (
             selected.routing_mode == "hybrid"
@@ -699,13 +727,20 @@ async def cmd_provider(runtime, update, context: Any) -> None:
             setting_card(
                 "🔌",
                 "HER v2 provider",
-                current="<b>MANAGED</b>",
+                current=(
+                    f"<b>{html.escape(ui_language.tr('menu.her.managed'))}</b>"
+                ),
                 facts=[
-                    "<b>Backend</b> · <code>her-v2</code>",
-                    f"<b>Mode</b> · <code>{html.escape(managed_mode)}</code>",
+                    f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
+                    "<code>her-v2</code>",
+                    f"<b>{html.escape(ui_language.tr('common.mode'))}</b> · "
+                    f"<code>{html.escape(managed_mode)}</code>",
                 ],
-                consequence="Provider and model-slot changes are controlled by this mode's model configuration.",
-                action=f"Use {managed_commands[managed_mode]}, or switch to <code>/mode flex</code>.",
+                consequence=ui_language.tr("menu.her.managed_effect"),
+                action=ui_language.tr(
+                    "menu.her.managed_action",
+                    commands=managed_commands[managed_mode],
+                ),
             ),
             parse_mode="HTML",
         )
@@ -725,9 +760,7 @@ async def cmd_provider(runtime, update, context: Any) -> None:
     try:
         if provider.casefold() == "hybrid":
             if runtime._backend_busy():
-                raise ValueError(
-                    "HER v2 configuration is blocked while a request is running or queued."
-                )
+                raise ValueError(ui_language.tr("menu.her.configuration_busy"))
             runtime.backend_manager.begin_her_v2_hybrid_draft()
             await runtime._reply_text(
                 update,
@@ -746,7 +779,11 @@ async def cmd_provider(runtime, update, context: Any) -> None:
     if error:
         text = her_v2_provider_menu_text(runtime)
         reason = error
-        text += f"\n\n❌ {html.escape(provider)} is unavailable: {html.escape(reason)}."
+        text += "\n\n❌ " + ui_language.tr(
+            "menu.her.provider_unavailable",
+            provider=html.escape(provider),
+            reason=html.escape(reason),
+        )
         await runtime._reply_text(
             update,
             text,
@@ -781,19 +818,18 @@ async def _cmd_her_v2_compact(runtime, update, args: list[str]) -> None:
         if action in {"inherit", "inherit_pro", "pro", "quick", "inherit_quick"}:
             tier = args[1] if len(args) == 2 else current.timeout_tier
             if len(args) > 2:
-                raise ValueError("inherit_quick accepts only an optional timeout tier")
+                raise ValueError(ui_language.tr("model.compact.optional_tier"))
             configure_route(runtime, mode="inherit_quick", timeout_tier=tier)
         elif action in {"tier", "timeout"} and len(args) == 2:
             configure_route(runtime, mode=current.mode, timeout_tier=args[1])
         else:
-            raise ValueError(
-                "Usage: /model compact [status|inherit_quick [tier]|"
-                "tier <auto|tier_2|tier_3>]"
-            )
+            raise ValueError(ui_language.tr("model.compact_usage"))
     except (OSError, TypeError, ValueError) as exc:
         await runtime._reply_text(
             update,
-            f"Compact policy was not changed: {html.escape(str(exc))}",
+            ui_language.tr(
+                "model.compact_unchanged", reason=html.escape(str(exc))
+            ),
             parse_mode="HTML",
         )
         return
@@ -821,13 +857,16 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
         if runtime._backend_busy():
             await runtime._reply_text(
                 update,
-                "HER v2 draft was not applied: a request is running or queued.",
+                ui_language.tr("model.draft_busy"),
             )
             return
         try:
             runtime.backend_manager.apply_her_v2_configuration_draft()
         except (OSError, TypeError, ValueError) as exc:
-            await runtime._reply_text(update, f"HER v2 draft was not applied: {exc}")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("model.draft_apply_failed", reason=str(exc)),
+            )
             return
         await runtime._reply_text(
             update,
@@ -840,7 +879,10 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
         try:
             runtime.backend_manager.discard_her_v2_configuration_draft()
         except OSError as exc:
-            await runtime._reply_text(update, f"HER v2 draft was not discarded: {exc}")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("model.draft_discard_failed", reason=str(exc)),
+            )
             return
         await runtime._reply_text(
             update,
@@ -861,7 +903,10 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
         if selected.routing_mode == "hybrid":
             await runtime._reply_text(
                 update,
-                f"Select the {('Quick' if slot == 'fast' else 'Pro')} provider.",
+                ui_language.tr(
+                    "model.select_provider_for_slot",
+                    slot=_her_v2_route_slot_label(slot),
+                ),
                 reply_markup=her_v2_target_provider_keyboard(runtime, slot),
             )
             return
@@ -883,7 +928,9 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
         except (TypeError, ValueError) as exc:
             error = str(exc)
         if error:
-            await runtime._reply_text(update, f"HER v2 model was not changed: {error}")
+            await runtime._reply_text(
+                update, ui_language.tr("model.change_failed", reason=error)
+            )
             return
         await runtime._reply_text(
             update,
@@ -904,7 +951,9 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
         except (TypeError, ValueError) as exc:
             error = str(exc)
         if error:
-            await runtime._reply_text(update, f"HER v2 target was not changed: {error}")
+            await runtime._reply_text(
+                update, ui_language.tr("model.target_failed", reason=error)
+            )
             return
         await runtime._reply_text(
             update,
@@ -934,9 +983,7 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
                 )
                 error = save_her_v2_candidate(runtime, selected)
             elif len(args) == 5:
-                raise ValueError(
-                    "custom route syntax is: custom <provider> <model>"
-                )
+                raise ValueError(ui_language.tr("model.custom_syntax"))
             elif len(args) == 3:
                 selected = runtime.backend_manager.prepare_her_v2_route_model_slot(
                     route.value,
@@ -950,7 +997,9 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
             error = str(exc)
             route = None
         if error or route is None:
-            await runtime._reply_text(update, f"HER v2 route was not changed: {error}")
+            await runtime._reply_text(
+                update, ui_language.tr("model.route_failed", reason=error)
+            )
             return
         await runtime._reply_text(
             update,
@@ -984,7 +1033,9 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
             error = str(exc)
             route = None
         if error or route is None:
-            await runtime._reply_text(update, f"HER v2 reasoning was not changed: {error}")
+            await runtime._reply_text(
+                update, ui_language.tr("model.reasoning_failed", reason=error)
+            )
             return
         await runtime._reply_text(
             update,
@@ -996,11 +1047,8 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
 
     await runtime._reply_text(
         update,
-        "Usage: /model | /model quick|pro [provider] [model] | "
-        "/model routes | /model route <route> [quick|pro] | "
-        "/model route <route> custom <provider> <model> | "
-        "/model reasoning <route> [value|inherit] | /model apply|discard | "
-        "/model compact [status|...]",
+        ui_language.tr("model.usage"),
+        parse_mode="HTML",
     )
 
 
@@ -1012,22 +1060,19 @@ async def cmd_model(runtime, update, context: Any) -> None:
     if runtime.backend_manager.agent_mode == "wrapper":
         await runtime._reply_text(
             update,
-            "Model switching is managed by `/core` and `/wrap` in **wrapper** mode.\nUse `/mode flex` for normal `/model` switching.",
-            parse_mode="Markdown",
+            ui_language.tr("model.managed.wrapper"),
         )
         return
     if runtime.backend_manager.agent_mode == "audit":
         await runtime._reply_text(
             update,
-            "Model switching is managed by `/core` and `/audit` in **audit** mode.\nUse `/mode flex` for normal `/model` switching.",
-            parse_mode="Markdown",
+            ui_language.tr("model.managed.audit"),
         )
         return
     if runtime.backend_manager.agent_mode == "dual-brain":
         await runtime._reply_text(
             update,
-            "Model switching is managed by `/brain` in **dual-brain** mode.\nUse `/mode flex` for normal `/model` switching.",
-            parse_mode="Markdown",
+            ui_language.tr("model.managed.dual_brain"),
         )
         return
 
@@ -1047,7 +1092,7 @@ async def cmd_model(runtime, update, context: Any) -> None:
         if available and requested not in available:
             await runtime._reply_text(
                 update,
-                f"Unknown model: {requested}\nUse /model to see available options.",
+                ui_language.tr("model.unknown", model=requested),
             )
             return
 
@@ -1105,7 +1150,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         and runtime.backend_manager.agent_mode in {"wrapper", "audit", "dual-brain"}
     ):
         await query.answer(
-            "HER v2 provider and model controls are managed by the active mode.",
+            ui_language.tr("model.managed_by_mode"),
             show_alert=True,
         )
         return
@@ -1114,7 +1159,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         and runtime.config.active_backend != HER_V2_ENGINE
     ):
         await query.answer(
-            "Compact control is available only while HER v2 is active.",
+            ui_language.tr("model.compact.active_only"),
             show_alert=True,
         )
         return
@@ -1137,13 +1182,14 @@ async def callback_model(runtime, update, context: Any) -> None:
                     "Backend unchanged",
                     current=f"<code>{html.escape(current_mode)}</code>",
                     facts=[
-                        f"<b>Backend</b> · <code>{html.escape(runtime.config.active_backend)}</code>"
+                        f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
+                        f"<code>{html.escape(runtime.config.active_backend)}</code>"
                     ],
-                    consequence="No mode, backend, model, or saved configuration was changed.",
+                    consequence=ui_language.tr("model.backend_unchanged_effect"),
                     action=(
-                        "The mode changed elsewhere before this button was used."
+                        ui_language.tr("model.backend_unchanged.changed_elsewhere")
                         if current_mode != expected_mode
-                        else "The current mode remains active."
+                        else ui_language.tr("model.backend_unchanged.current")
                     ),
                 ),
                 parse_mode="HTML",
@@ -1151,7 +1197,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data == "her_model_compact":
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
-                    "Compact control is available only while HER v2 is active.",
+                    ui_language.tr("model.compact.active_only"),
                     show_alert=True,
                 )
                 return
@@ -1163,7 +1209,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data == "her_model_apply":
             if runtime._backend_busy():
                 await query.answer(
-                    "A request is running or queued; the draft remains saved.",
+                    ui_language.tr("model.draft_saved_busy"),
                     show_alert=True,
                 )
                 return
@@ -1199,7 +1245,7 @@ async def callback_model(runtime, update, context: Any) -> None:
             )
         ):
             await query.answer(
-                "Compact now follows the active HER v2 Quick/Light model at high effort.",
+                ui_language.tr("model.compact.follows_quick"),
                 show_alert=True,
             )
             return
@@ -1232,13 +1278,13 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data == "her_provider_hybrid":
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
-                    "Provider control is available only while HER v2 is active.",
+                    ui_language.tr("model.control.active_only"),
                     show_alert=True,
                 )
                 return
             if runtime._backend_busy():
                 await query.answer(
-                    "A request is running or queued; configuration is unchanged.",
+                    ui_language.tr("model.configuration_busy"),
                     show_alert=True,
                 )
                 return
@@ -1255,7 +1301,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data.startswith("her_provider_locked:"):
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
-                    "Provider control is available only while HER v2 is active.",
+                    ui_language.tr("model.control.active_only"),
                     show_alert=True,
                 )
                 return
@@ -1268,17 +1314,24 @@ async def callback_model(runtime, update, context: Any) -> None:
                 if token != _her_v2_callback_token(option["engine"]):
                     raise ValueError("stale provider option")
             except (IndexError, TypeError, ValueError):
-                await query.answer("This provider option is no longer available.", show_alert=True)
+                await query.answer(
+                    ui_language.tr("model.provider_option_gone"), show_alert=True
+                )
                 return
             await query.answer(
-                f"{option['label']}: {option.get('reason') or 'unavailable'}",
+                ui_language.tr(
+                    "model.provider_unavailable_reason",
+                    provider=option["label"],
+                    reason=option.get("reason")
+                    or ui_language.tr("common.unavailable"),
+                ),
                 show_alert=True,
             )
             return
         elif data.startswith("her_provider:"):
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
-                    "Provider control is available only while HER v2 is active.",
+                    ui_language.tr("model.control.active_only"),
                     show_alert=True,
                 )
                 return
@@ -1289,7 +1342,7 @@ async def callback_model(runtime, update, context: Any) -> None:
                     raw_index,
                 )
                 if token != _her_v2_callback_token(option["engine"]):
-                    raise ValueError("This provider menu is stale.")
+                    raise ValueError(ui_language.tr("model.menu.stale"))
                 selected = runtime.backend_manager.prepare_her_v2_provider(
                     str(option["engine"]),
                     current=_her_v2_edit_configuration(runtime),
@@ -1308,19 +1361,20 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data.startswith("her_model_slot:"):
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
-                    "Model-slot control is available only while HER v2 is active.",
+                    ui_language.tr("model.control.active_only"),
                     show_alert=True,
                 )
                 return
             slot = data.split(":", 1)[1]
             if slot not in {"fast", "pro"}:
-                await query.answer("Invalid HER v2 model slot.", show_alert=True)
+                await query.answer(ui_language.tr("model.slot.invalid"), show_alert=True)
                 return
             selected = _her_v2_edit_configuration(runtime)
             if selected.routing_mode == "hybrid":
                 await query.edit_message_text(
-                    "🧠 <b>Select target provider</b>\n\n"
-                    f"<b>Slot</b> · <code>{'Quick' if slot == 'fast' else 'Pro'}</code>",
+                    f"🧠 <b>{html.escape(ui_language.tr('model.select_target_provider'))}</b>\n\n"
+                    f"<b>{html.escape(ui_language.tr('model.slot'))}</b> · "
+                    f"<code>{html.escape(_her_v2_route_slot_label(slot))}</code>",
                     parse_mode="HTML",
                     reply_markup=her_v2_target_provider_keyboard(runtime, slot),
                 )
@@ -1333,11 +1387,12 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data.startswith("her_target_providers:"):
             slot = data.split(":", 1)[1]
             if slot not in {"fast", "pro"}:
-                await query.answer("Invalid HER v2 target slot.", show_alert=True)
+                await query.answer(ui_language.tr("model.slot.invalid"), show_alert=True)
                 return
             await query.edit_message_text(
-                "🧠 <b>Select target provider</b>\n\n"
-                f"<b>Slot</b> · <code>{'Quick' if slot == 'fast' else 'Pro'}</code>",
+                f"🧠 <b>{html.escape(ui_language.tr('model.select_target_provider'))}</b>\n\n"
+                f"<b>{html.escape(ui_language.tr('model.slot'))}</b> · "
+                f"<code>{html.escape(_her_v2_route_slot_label(slot))}</code>",
                 parse_mode="HTML",
                 reply_markup=her_v2_target_provider_keyboard(runtime, slot),
             )
@@ -1345,7 +1400,7 @@ async def callback_model(runtime, update, context: Any) -> None:
             try:
                 _, slot, raw_index, token = data.split(":", 3)
                 if slot not in {"fast", "pro"}:
-                    raise ValueError("Invalid HER v2 target slot")
+                    raise ValueError(ui_language.tr("model.slot.invalid"))
                 provider_index, option = _her_v2_indexed_choice(
                     runtime.backend_manager.get_her_v2_provider_options(),
                     raw_index,
@@ -1355,13 +1410,13 @@ async def callback_model(runtime, update, context: Any) -> None:
                     token != _her_v2_callback_token(provider)
                     or not option.get("available")
                 ):
-                    raise ValueError("This target-provider menu is stale")
+                    raise ValueError(ui_language.tr("model.menu.stale"))
             except (IndexError, TypeError, ValueError) as exc:
                 await query.answer(str(exc), show_alert=True)
                 return
             await query.edit_message_text(
-                "🧠 <b>Select target model</b>\n\n"
-                f"<b>Provider</b> · <code>{html.escape(provider)}</code>",
+                f"🧠 <b>{html.escape(ui_language.tr('model.select_target_model'))}</b>\n\n"
+                f"<b>{html.escape(ui_language.tr('common.provider'))}</b> · <code>{html.escape(provider)}</code>",
                 parse_mode="HTML",
                 reply_markup=her_v2_target_model_keyboard(
                     runtime,
@@ -1389,13 +1444,13 @@ async def callback_model(runtime, update, context: Any) -> None:
                     provider_token != _her_v2_callback_token(provider)
                     or not option.get("available")
                 ):
-                    raise ValueError("This target-provider menu is stale")
+                    raise ValueError(ui_language.tr("model.menu.stale"))
                 _model_index, model = _her_v2_indexed_choice(
                     list(option.get("models") or []),
                     raw_model_index,
                 )
                 if model_token != _her_v2_callback_token(model):
-                    raise ValueError("This target-model menu is stale")
+                    raise ValueError(ui_language.tr("model.menu.stale"))
                 candidate = runtime.backend_manager.prepare_her_v2_model(
                     slot,
                     model,
@@ -1416,7 +1471,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data.startswith("her_model:"):
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
-                    "Model-slot control is available only while HER v2 is active.",
+                    ui_language.tr("model.control.active_only"),
                     show_alert=True,
                 )
                 return
@@ -1440,15 +1495,13 @@ async def callback_model(runtime, update, context: Any) -> None:
                     option.get("engine") != target.provider
                     or provider_token != _her_v2_callback_token(option["engine"])
                 ):
-                    raise ValueError(
-                        "This model menu is stale because the HER v2 provider changed."
-                    )
+                    raise ValueError(ui_language.tr("model.provider_menu.stale"))
                 _model_index, model = _her_v2_indexed_choice(
                     list(option["models"]),
                     raw_model_index,
                 )
                 if model_token != _her_v2_callback_token(model):
-                    raise ValueError("This HER v2 model menu is stale.")
+                    raise ValueError(ui_language.tr("model.model_menu.stale"))
                 candidate = runtime.backend_manager.prepare_her_v2_model(
                     slot,
                     model,
@@ -1468,7 +1521,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data == "her_routes" or data == "her_reasoning_stages":
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
-                    "Task-route control is available only while HER v2 is active.",
+                    ui_language.tr("model.control.active_only"),
                     show_alert=True,
                 )
                 return
@@ -1480,14 +1533,14 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data.startswith("her_route_menu:"):
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
-                    "Task-route control is available only while HER v2 is active.",
+                    ui_language.tr("model.control.active_only"),
                     show_alert=True,
                 )
                 return
             try:
                 route = _her_v2_route(data.split(":", 1)[1])
             except ValueError:
-                await query.answer("Invalid HER v2 task route.", show_alert=True)
+                await query.answer(ui_language.tr("model.route.invalid"), show_alert=True)
                 return
             await query.edit_message_text(
                 her_v2_route_text(runtime, route),
@@ -1498,13 +1551,13 @@ async def callback_model(runtime, update, context: Any) -> None:
             try:
                 route = _her_v2_route(data.split(":", 1)[1])
                 if _her_v2_edit_configuration(runtime).routing_mode != "hybrid":
-                    raise ValueError("Custom task-route targets require Hybrid mode")
+                    raise ValueError(ui_language.tr("model.custom_requires_hybrid"))
             except ValueError as exc:
                 await query.answer(str(exc), show_alert=True)
                 return
             await query.edit_message_text(
-                "🧭 <b>Select Custom route provider</b>\n\n"
-                f"<b>Route</b> · {html.escape(HER_V2_ROUTE_LABELS[route])}",
+                f"🧭 <b>{html.escape(ui_language.tr('model.select_custom_provider'))}</b>\n\n"
+                f"<b>{html.escape(ui_language.tr('common.route'))}</b> · {html.escape(_her_v2_route_label(route))}",
                 parse_mode="HTML",
                 reply_markup=her_v2_route_provider_keyboard(runtime, route),
             )
@@ -1521,13 +1574,13 @@ async def callback_model(runtime, update, context: Any) -> None:
                     token != _her_v2_callback_token(provider)
                     or not option.get("available")
                 ):
-                    raise ValueError("This Custom provider menu is stale")
+                    raise ValueError(ui_language.tr("model.menu.stale"))
             except (IndexError, TypeError, ValueError) as exc:
                 await query.answer(str(exc), show_alert=True)
                 return
             await query.edit_message_text(
-                "🧭 <b>Select Custom route model</b>\n\n"
-                f"<b>Provider</b> · <code>{html.escape(provider)}</code>",
+                f"🧭 <b>{html.escape(ui_language.tr('model.select_custom_model'))}</b>\n\n"
+                f"<b>{html.escape(ui_language.tr('common.provider'))}</b> · <code>{html.escape(provider)}</code>",
                 parse_mode="HTML",
                 reply_markup=her_v2_route_model_keyboard(
                     runtime,
@@ -1556,13 +1609,13 @@ async def callback_model(runtime, update, context: Any) -> None:
                     provider_token != _her_v2_callback_token(provider)
                     or not option.get("available")
                 ):
-                    raise ValueError("This Custom provider menu is stale")
+                    raise ValueError(ui_language.tr("model.menu.stale"))
                 _model_index, model = _her_v2_indexed_choice(
                     list(option.get("models") or []),
                     raw_model_index,
                 )
                 if model_token != _her_v2_callback_token(model):
-                    raise ValueError("This Custom model menu is stale")
+                    raise ValueError(ui_language.tr("model.menu.stale"))
                 candidate = runtime.backend_manager.prepare_her_v2_route_target(
                     route.value,
                     provider,
@@ -1584,7 +1637,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data.startswith("her_route_slot:"):
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
-                    "Task-route control is available only while HER v2 is active.",
+                    ui_language.tr("model.control.active_only"),
                     show_alert=True,
                 )
                 return
@@ -1601,7 +1654,9 @@ async def callback_model(runtime, update, context: Any) -> None:
                 error = str(exc)
                 route = None
             if error or route is None:
-                await query.answer(error or "Invalid HER v2 task route.", show_alert=True)
+                await query.answer(
+                    error or ui_language.tr("model.route.invalid"), show_alert=True
+                )
                 return
             await query.edit_message_text(
                 her_v2_route_text(runtime, route),
@@ -1611,7 +1666,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data.startswith("her_route_reasoning:"):
             if runtime.config.active_backend != HER_V2_ENGINE:
                 await query.answer(
-                    "Task-route control is available only while HER v2 is active.",
+                    ui_language.tr("model.control.active_only"),
                     show_alert=True,
                 )
                 return
@@ -1621,7 +1676,7 @@ async def callback_model(runtime, update, context: Any) -> None:
                 _current, choices = _her_v2_route_reasoning_choices(runtime, route)
                 _index, reasoning = _her_v2_indexed_choice(choices, raw_index)
                 if token != _her_v2_callback_token(reasoning):
-                    raise ValueError("This HER v2 task-route menu is stale.")
+                    raise ValueError(ui_language.tr("model.menu.stale"))
                 candidate = runtime.backend_manager.prepare_her_v2_route_reasoning(
                     route.value,
                     None if reasoning == "inherit" else reasoning,
@@ -1641,7 +1696,7 @@ async def callback_model(runtime, update, context: Any) -> None:
             )
         elif data.startswith(("her_reasoning_menu:", "her_reasoning:")):
             await query.answer(
-                "This old reasoning menu was retired. Reopen /model and choose a task route.",
+                ui_language.tr("model.old_reasoning_retired"),
                 show_alert=True,
             )
             return
@@ -1671,7 +1726,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data.startswith("model:"):
             if runtime.config.active_backend == HER_V2_ENGINE:
                 await query.answer(
-                    "Use the HER v2 Quick/Pro model controls.",
+                    ui_language.tr("model.use_her_controls"),
                     show_alert=True,
                 )
                 return
@@ -1683,7 +1738,7 @@ async def callback_model(runtime, update, context: Any) -> None:
                 await query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
             else:
                 await query.answer(
-                    "Model is not available for the active provider.",
+                    ui_language.tr("model.unavailable_provider"),
                     show_alert=True,
                 )
                 return
@@ -1696,12 +1751,12 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data.startswith("backend:"):
             parts = data.split(":", 2)
             if len(parts) != 3:
-                await query.answer("Invalid callback data", show_alert=True)
+                await query.answer(ui_language.tr("model.invalid_callback"), show_alert=True)
                 return
             _, target_engine, mode = parts
             if not is_selectable_backend(target_engine):
                 await query.answer(
-                    "This provider is available through HER v2 only.",
+                    ui_language.tr("model.provider_her_only"),
                     show_alert=True,
                 )
                 return
@@ -1731,7 +1786,7 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data.startswith("bmodel:"):
             parts = data.split(":", 3)
             if len(parts) != 4:
-                await query.answer("Invalid callback data", show_alert=True)
+                await query.answer(ui_language.tr("model.invalid_callback"), show_alert=True)
                 return
             _, target_engine, mode_flag, model = parts
             with_context = mode_flag == "c"
@@ -1761,7 +1816,7 @@ async def callback_model(runtime, update, context: Any) -> None:
                     runtime._build_model_configuration_summary(),
                     parse_mode="HTML",
                 )
-                await query.answer("Current effort kept")
+                await query.answer(ui_language.tr("model.effort_kept"))
                 return
             if requested in runtime._get_available_efforts():
                 runtime._set_active_effort(requested)
@@ -1774,18 +1829,23 @@ async def callback_model(runtime, update, context: Any) -> None:
                     if runtime.config.active_backend == HER_V2_ENGINE:
                         from orchestrator.her_v2.models import effort_display_label
 
-                        switched_text = (
-                            "HER execution mode switched to: "
-                            f"{effort_display_label(requested)}"
+                        switched_text = ui_language.tr(
+                            "model.execution_mode_switched",
+                            mode=effort_display_label(requested),
                         )
                     else:
-                        switched_text = f"Effort switched to: {requested}"
+                        switched_text = ui_language.tr(
+                            "model.effort_switched", effort=requested
+                        )
                     await query.edit_message_text(
                         switched_text,
                         reply_markup=runtime._effort_keyboard(requested),
                     )
     except Exception as exc:
         runtime.error_logger.exception("callback_model error")
-        await query.answer(f"Error: {exc}", show_alert=True)
+        await query.answer(
+            ui_language.tr("model.callback_error", reason=str(exc)),
+            show_alert=True,
+        )
         return
     await query.answer()

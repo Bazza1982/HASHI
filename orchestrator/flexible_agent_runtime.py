@@ -545,11 +545,16 @@ class FlexibleAgentRuntime:
         if query is not None:
             answer = getattr(query, "answer", None)
             if callable(answer):
-                maybe_awaitable = answer("Telegram access is not enabled for this enterprise HASHI workspace.")
+                maybe_awaitable = answer(
+                    ui_language.tr("runtime.telegram_enterprise_disabled")
+                )
                 if inspect.isawaitable(maybe_awaitable):
                     await maybe_awaitable
         else:
-            await self._reply_text(update, "Telegram access is not enabled for this enterprise HASHI workspace.")
+            await self._reply_text(
+                update,
+                ui_language.tr("runtime.telegram_enterprise_disabled"),
+            )
         return False
 
     def _wrap_callback(self, handler_kind: str, handler):
@@ -1814,7 +1819,12 @@ class FlexibleAgentRuntime:
 
         if not self.skill_manager:
             return InlineKeyboardMarkup(
-                [[InlineKeyboardButton("No skills", callback_data="skill:noop:none")]]
+                [[
+                    InlineKeyboardButton(
+                        ui_language.tr("menu.skill.button.none"),
+                        callback_data="skill:noop:none",
+                    )
+                ]]
             )
         return build_skill_catalog_keyboard(self.skill_manager, self.workspace_dir)
 
@@ -2365,7 +2375,14 @@ class FlexibleAgentRuntime:
         if not names:
             return None
         rows = [[InlineKeyboardButton(name, callback_data=f"startagent:{name}")] for name in names]
-        rows.append([InlineKeyboardButton("Start all", callback_data="startagent:__all__")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("start.button.all"),
+                    callback_data="startagent:__all__",
+                )
+            ]
+        )
         return InlineKeyboardMarkup(rows)
 
     def _voice_keyboard(self) -> InlineKeyboardMarkup:
@@ -2375,35 +2392,35 @@ class FlexibleAgentRuntime:
         rows = [
             [
                 InlineKeyboardButton(
-                    selected_label("Auto", mode == "auto"),
+                    selected_label(ui_language.tr("voice.mode.auto"), mode == "auto"),
                     callback_data="voice:mode:auto",
                 ),
                 InlineKeyboardButton(
-                    selected_label("Native", mode == "native"),
+                    selected_label(ui_language.tr("voice.mode.native"), mode == "native"),
                     callback_data="voice:mode:native",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    selected_label("TTS", mode == "tts"),
+                    selected_label(ui_language.tr("voice.mode.tts"), mode == "tts"),
                     callback_data="voice:mode:tts",
                 ),
                 InlineKeyboardButton(
-                    selected_label("Off", mode == "off"),
+                    selected_label(ui_language.tr("voice.mode.off"), mode == "off"),
                     callback_data="voice:mode:off",
                 ),
             ],
             [
                 InlineKeyboardButton(
                     selected_label(
-                        "Audio + text",
+                        ui_language.tr("voice.reply.audio_and_text"),
                         native["reply_content"] == "audio_and_text",
                     ),
                     callback_data="voice:content:both",
                 ),
                 InlineKeyboardButton(
                     selected_label(
-                        "Audio only",
+                        ui_language.tr("voice.reply.audio_only"),
                         native["reply_content"] == "audio_only",
                     ),
                     callback_data="voice:content:audio",
@@ -2412,7 +2429,10 @@ class FlexibleAgentRuntime:
         ]
         profile_buttons = [
             InlineKeyboardButton(
-                selected_label(str(profile["label"]), candidate == profile_id),
+                selected_label(
+                    ui_language.tr(f"voice.profile.{candidate}"),
+                    candidate == profile_id,
+                ),
                 callback_data=f"voice:profile:{candidate}",
             )
             for candidate, profile in self.voice_manager.get_voice_profiles()
@@ -2428,13 +2448,13 @@ class FlexibleAgentRuntime:
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
-            await self._reply_text(update, "Dynamic lifecycle control is unavailable.")
+            await self._reply_text(update, ui_language.tr("start.unavailable"))
             return
         arg = " ".join(context.args).strip().lower() if context.args else ""
         if arg == "all":
             names = orchestrator.get_startable_agent_names(exclude_name=self.name)
             if not names:
-                await self._reply_text(update, "All agents are running.")
+                await self._reply_text(update, ui_language.tr("start.all_running"))
                 return
             lines = []
             for name in names:
@@ -2444,16 +2464,19 @@ class FlexibleAgentRuntime:
             return
         keyboard = self._startable_agent_keyboard()
         if keyboard is None:
-            await self._reply_text(update, "All agents are running.")
+            await self._reply_text(update, ui_language.tr("start.all_running"))
             return
         await self._reply_text(
             update,
             setting_card(
                 "▶️",
                 "Start agents",
-                current=f"<code>{html.escape(self.name)}</code> running",
-                consequence="Starting an agent launches its configured runtime immediately.",
-                action="Choose an agent to start.",
+                current=ui_language.tr(
+                    "start.current",
+                    agent=f"<code>{html.escape(self.name)}</code>",
+                ),
+                consequence=ui_language.tr("start.effect"),
+                action=ui_language.tr("start.action"),
             ),
             parse_mode="HTML",
             reply_markup=keyboard,
@@ -2465,20 +2488,28 @@ class FlexibleAgentRuntime:
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
-            await query.answer("Lifecycle control unavailable", show_alert=True)
+            await query.answer(
+                ui_language.tr("start.alert.unavailable"), show_alert=True
+            )
             return
         _, agent_name = (query.data or "").split(":", 1)
         if agent_name == "__all__":
-            await query.answer("Starting all agents...")
+            await query.answer(ui_language.tr("start.alert.all"))
             names = orchestrator.get_startable_agent_names(exclude_name=self.name)
             lines = []
             for name in names:
                 ok, msg = await orchestrator.start_agent(name)
                 lines.append(msg)
-            result_text = "\n".join(lines) if lines else "All agents are already running."
+            result_text = (
+                "\n".join(lines)
+                if lines
+                else ui_language.tr("start.alert.already")
+            )
             await query.edit_message_text(result_text)
             return
-        await query.answer(f"Starting {agent_name}...")
+        await query.answer(
+            ui_language.tr("start.alert.one", agent=agent_name)
+        )
         ok, message = await orchestrator.start_agent(agent_name)
         await query.edit_message_text(message, reply_markup=self._startable_agent_keyboard())
 
@@ -2492,10 +2523,16 @@ class FlexibleAgentRuntime:
         lines = [
             card_title("🤖", "Hashi agents"),
             "",
-            f"<b>Current</b> · <code>{len(running_names)}</code> running · <code>{len(all_agents)}</code> configured",
-            "<b>Changes</b> · activation state persists; lifecycle actions apply immediately",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            + ui_language.tr(
+                "agents.current",
+                running=f"<code>{len(running_names)}</code>",
+                configured=f"<code>{len(all_agents)}</code>",
+            ),
+            f"<b>{html.escape(ui_language.tr('common.changes'))}</b> · "
+            f"{html.escape(ui_language.tr('agents.changes'))}",
             "",
-            "<b>AGENTS</b>",
+            f"<b>{html.escape(ui_language.tr('agents.section'))}</b>",
         ]
         rows = []
 
@@ -2505,13 +2542,21 @@ class FlexibleAgentRuntime:
             is_active = agent.get("is_active", True)
 
             if name in starting_names:
-                status_icon, status_text = "⏳", "starting"
+                status_icon, status_text = "⏳", ui_language.tr(
+                    "agents.state.starting"
+                )
             elif name in running_names:
-                status_icon, status_text = "🟢", "running"
+                status_icon, status_text = "🟢", ui_language.tr(
+                    "agents.state.running"
+                )
             elif is_active:
-                status_icon, status_text = "⚪", "stopped"
+                status_icon, status_text = "⚪", ui_language.tr(
+                    "agents.state.stopped"
+                )
             else:
-                status_icon, status_text = "🔴", "inactive"
+                status_icon, status_text = "🔴", ui_language.tr(
+                    "agents.state.inactive"
+                )
 
             lines.append(
                 f"{status_icon} <b>{html.escape(name)}</b> · "
@@ -2520,18 +2565,43 @@ class FlexibleAgentRuntime:
 
             btn_row = []
             if is_active:
-                btn_row.append(InlineKeyboardButton(f"Deactivate {name}", callback_data=f"agents:deactivate:{name}"))
+                btn_row.append(
+                    InlineKeyboardButton(
+                        ui_language.tr("agents.button.deactivate", agent=name),
+                        callback_data=f"agents:deactivate:{name}",
+                    )
+                )
             else:
-                btn_row.append(InlineKeyboardButton(f"Activate {name}", callback_data=f"agents:activate:{name}"))
+                btn_row.append(
+                    InlineKeyboardButton(
+                        ui_language.tr("agents.button.activate", agent=name),
+                        callback_data=f"agents:activate:{name}",
+                    )
+                )
 
             if name in starting_names:
                 btn_row.append(InlineKeyboardButton("⏳", callback_data="agents:noop"))
             elif name in running_names:
-                btn_row.append(InlineKeyboardButton("Stop", callback_data=f"agents:stop:{name}"))
+                btn_row.append(
+                    InlineKeyboardButton(
+                        ui_language.tr("agents.button.stop"),
+                        callback_data=f"agents:stop:{name}",
+                    )
+                )
             elif is_active:
-                btn_row.append(InlineKeyboardButton("Start", callback_data=f"agents:start:{name}"))
+                btn_row.append(
+                    InlineKeyboardButton(
+                        ui_language.tr("agents.button.start"),
+                        callback_data=f"agents:start:{name}",
+                    )
+                )
 
-            btn_row.append(InlineKeyboardButton("Delete", callback_data=f"agents:delete:{name}"))
+            btn_row.append(
+                InlineKeyboardButton(
+                    ui_language.tr("agents.button.delete"),
+                    callback_data=f"agents:delete:{name}",
+                )
+            )
             rows.append(btn_row)
 
         rows.append([InlineKeyboardButton(refresh_label(), callback_data="agents:refresh")])
@@ -2546,7 +2616,7 @@ class FlexibleAgentRuntime:
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
-            await self._reply_text(update, "Agent management unavailable.")
+            await self._reply_text(update, ui_language.tr("agents.unavailable"))
             return
         text, markup = self._build_agents_view(orchestrator)
         await self._reply_text(update, text, reply_markup=markup, parse_mode="HTML")
@@ -2555,16 +2625,18 @@ class FlexibleAgentRuntime:
         import re as _re
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
-            await self._reply_text(update, "Agent management unavailable.")
+            await self._reply_text(update, ui_language.tr("agents.unavailable"))
             return
         args = context.args or []
         # args: ["add", "<id>", "<display_name_parts...>", "[token]"]
         if len(args) < 3:
-            await self._reply_text(update, "Usage: /agents add <id> <display_name> [telegram_token]")
+            await self._reply_text(update, ui_language.tr("agents.add.usage"))
             return
         new_id = args[1]
         if not _re.match(r'^[a-zA-Z0-9_]+$', new_id):
-            await self._reply_text(update, "Agent ID must be alphanumeric with underscores only.")
+            await self._reply_text(
+                update, ui_language.tr("agents.add.invalid_id")
+            )
             return
         # If last arg looks like a Telegram token (digits:letters) treat as token
         if len(args) >= 4 and _re.match(r'^\d+:[A-Za-z0-9_-]+$', args[-1]):
@@ -2584,7 +2656,9 @@ class FlexibleAgentRuntime:
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
-            await query.answer("Agent management unavailable.", show_alert=True)
+            await query.answer(
+                ui_language.tr("agents.unavailable"), show_alert=True
+            )
             return
         data = query.data or ""
         parts = data.split(":", 2)
@@ -2598,22 +2672,33 @@ class FlexibleAgentRuntime:
             return
 
         if action == "activate":
-            await query.answer(f"Activating {name}…")
+            await query.answer(
+                ui_language.tr("agents.alert.activating", agent=name)
+            )
             orchestrator.set_agent_active(name, True)
         elif action == "deactivate":
             if name in orchestrator._runtime_map():
-                await query.answer(f"Stop {name} first.", show_alert=True)
+                await query.answer(
+                    ui_language.tr("agents.alert.stop_first", agent=name),
+                    show_alert=True,
+                )
                 return
-            await query.answer(f"Deactivating {name}…")
+            await query.answer(
+                ui_language.tr("agents.alert.deactivating", agent=name)
+            )
             orchestrator.set_agent_active(name, False)
         elif action == "start":
-            await query.answer(f"Starting {name}…")
+            await query.answer(
+                ui_language.tr("agents.alert.starting", agent=name)
+            )
             ok, msg = await orchestrator.start_agent(name)
             if not ok:
                 await query.answer(msg, show_alert=True)
                 return
         elif action == "stop":
-            await query.answer(f"Stopping {name}…")
+            await query.answer(
+                ui_language.tr("agents.alert.stopping", agent=name)
+            )
             ok, msg = await orchestrator.stop_agent(name)
             if not ok:
                 await query.answer(msg, show_alert=True)
@@ -2622,8 +2707,20 @@ class FlexibleAgentRuntime:
             await query.answer()
             confirm_markup = InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton(f"Delete {name}", callback_data=f"agents:confirmdelete:{name}")],
-                    [InlineKeyboardButton("← Keep agent", callback_data="agents:refresh")],
+                    [
+                        InlineKeyboardButton(
+                            ui_language.tr(
+                                "agents.button.delete_named", agent=name
+                            ),
+                            callback_data=f"agents:confirmdelete:{name}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            ui_language.tr("agents.button.keep"),
+                            callback_data="agents:refresh",
+                        )
+                    ],
                 ]
             )
             await query.edit_message_text(
@@ -2631,7 +2728,7 @@ class FlexibleAgentRuntime:
                     "⚠️",
                     "Delete agent",
                     target=f"<code>{html.escape(name)}</code>",
-                    consequence="This removes the agent from configuration. Its workspace files are kept.",
+                    consequence=ui_language.tr("agents.delete.effect"),
                 ),
                 reply_markup=confirm_markup,
                 parse_mode="HTML",
@@ -2639,16 +2736,25 @@ class FlexibleAgentRuntime:
             return
         elif action == "confirmdelete":
             if name in orchestrator._runtime_map():
-                await query.answer(f"Stop {name} first.", show_alert=True)
+                await query.answer(
+                    ui_language.tr("agents.alert.stop_first", agent=name),
+                    show_alert=True,
+                )
                 return
             delayed = await runtime_pending.delayed_count(self, agent_name=name)
             if delayed:
                 await query.answer(
-                    f"Recall {delayed} delayed message(s) from {name} first.",
+                    ui_language.tr(
+                        "agents.alert.recall_first",
+                        count=delayed,
+                        agent=name,
+                    ),
                     show_alert=True,
                 )
                 return
-            await query.answer(f"Deleted {name}.")
+            await query.answer(
+                ui_language.tr("agents.alert.deleted", agent=name)
+            )
             orchestrator.delete_agent_from_config(name)
 
         text, markup = self._build_agents_view(orchestrator)
@@ -2683,7 +2789,7 @@ class FlexibleAgentRuntime:
 
         text = self.voice_manager.voice_menu_text()
         await query.edit_message_text(text, reply_markup=self._voice_keyboard(), parse_mode="HTML")
-        await query.answer(message or "Updated")
+        await query.answer(message or ui_language.tr("common.updated"))
 
     # ── toggle callback ──────────────────────────────────────────────────────────
     # Handles: tgl:terminal:quiet/activity/debug/raw, tgl:verbose:on/off,
@@ -2705,7 +2811,9 @@ class FlexibleAgentRuntime:
 
         if target == "terminal":
             if value not in terminal_console.LEVELS:
-                await query.answer("Unknown terminal level", show_alert=True)
+                await query.answer(
+                    ui_language.tr("menu.terminal.unknown"), show_alert=True
+                )
                 return
             try:
                 terminal_console.set_level(
@@ -2718,7 +2826,10 @@ class FlexibleAgentRuntime:
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 await query.answer(
-                    f"Setting failed: {type(exc).__name__}", show_alert=True
+                    ui_language.tr(
+                        "menu.terminal.failed", error=type(exc).__name__
+                    ),
+                    show_alert=True,
                 )
                 return
             await query.edit_message_text(
@@ -2726,7 +2837,17 @@ class FlexibleAgentRuntime:
                 parse_mode="HTML",
                 reply_markup=self._terminal_keyboard(),
             )
-            await query.answer(f"Terminal: {value}")
+            await query.answer(
+                ui_language.tr(
+                    "menu.terminal.changed",
+                    level=(
+                        value
+                        if ui_language.current_locale()
+                        == ui_language.DEFAULT_LOCALE
+                        else ui_language.tr(f"menu.terminal.level.{value}")
+                    ),
+                )
+            )
 
         elif target == "verbose":
             self._verbose = value == "on"
@@ -2741,7 +2862,11 @@ class FlexibleAgentRuntime:
                 parse_mode="HTML",
                 reply_markup=self._verbose_keyboard(),
             )
-            await query.answer(f"Verbose {status_label(self._verbose)}")
+            await query.answer(
+                ui_language.tr(
+                    "menu.verbose.changed", state=status_label(self._verbose)
+                )
+            )
 
         elif target == "think":
             self._think = value == "on"
@@ -2756,7 +2881,12 @@ class FlexibleAgentRuntime:
                 parse_mode="HTML",
                 reply_markup=self._think_keyboard(),
             )
-            await query.answer(f"Think {status_label(self._think)}")
+            await query.answer(
+                ui_language.tr(
+                    "menu.think.changed",
+                    state=status_label(self._think),
+                )
+            )
 
         elif target == "commentary":
             if not self._commentary_available():
@@ -2764,7 +2894,9 @@ class FlexibleAgentRuntime:
                     self._commentary_unavailable_text(),
                     parse_mode="HTML",
                 )
-                await query.answer("HER commentary is unavailable for this backend")
+                await query.answer(
+                    ui_language.tr("menu.commentary.unavailable_alert")
+                )
                 return
             self._set_commentary_enabled(value == "on")
             await query.edit_message_text(
@@ -2772,7 +2904,12 @@ class FlexibleAgentRuntime:
                 parse_mode="HTML",
                 reply_markup=self._commentary_keyboard(),
             )
-            await query.answer(f"Commentary {status_label(self._commentary)}")
+            await query.answer(
+                ui_language.tr(
+                    "menu.commentary.changed",
+                    state=status_label(self._commentary),
+                )
+            )
 
         elif target == "typing":
             enabled = value == "on"
@@ -2782,7 +2919,11 @@ class FlexibleAgentRuntime:
                 parse_mode="HTML",
                 reply_markup=self._typing_keyboard(),
             )
-            await query.answer(f"Typing {status_label(enabled)}")
+            await query.answer(
+                ui_language.tr(
+                    "menu.typing.changed", state=status_label(enabled)
+                )
+            )
 
         elif target == "meter":
             enabled = value == "on"
@@ -2793,11 +2934,15 @@ class FlexibleAgentRuntime:
                 parse_mode="HTML",
                 reply_markup=self._meter_keyboard(),
             )
-            await query.answer(f"Meter {status_label(enabled)}")
+            await query.answer(
+                ui_language.tr(
+                    "menu.meter.changed", state=status_label(enabled)
+                )
+            )
 
         elif target == "stream":
             await query.answer(
-                "Stream controls moved to /typing, /verbose and /think.",
+                ui_language.tr("menu.stream.moved"),
                 show_alert=True,
             )
 
@@ -2812,7 +2957,9 @@ class FlexibleAgentRuntime:
             mapping = {"small": "small", "medium": "medium", "large": "large-v3"}
             new_size = mapping.get(value)
             if not new_size:
-                await query.answer("Unknown size.", show_alert=True)
+                await query.answer(
+                    ui_language.tr("menu.whisper.usage"), show_alert=True
+                )
                 return
             transcriber = get_transcriber()
             transcriber.model_size = new_size
@@ -2822,23 +2969,40 @@ class FlexibleAgentRuntime:
                 parse_mode="HTML",
                 reply_markup=self._whisper_keyboard(new_size),
             )
-            await query.answer(f"Set to {new_size}")
+            await query.answer(
+                ui_language.tr("menu.whisper.notice", size=new_size)
+            )
 
         elif target == "active":
             if not self.skill_manager:
-                await query.answer("Skill manager not available.", show_alert=True)
+                await query.answer(
+                    ui_language.tr("menu.active.error.manager"), show_alert=True
+                )
                 return
             if value == "off":
-                _, msg = self.skill_manager.set_active_heartbeat(self.name, enabled=False)
+                self.skill_manager.set_active_heartbeat(self.name, enabled=False)
+                msg = ui_language.tr(
+                    "menu.active.notice.off",
+                    minutes=self.skill_manager.ACTIVE_HEARTBEAT_DEFAULT_MINUTES,
+                )
             elif value == "on":
-                _, msg = self.skill_manager.set_active_heartbeat(self.name, enabled=True,
-                                                                  minutes=self.skill_manager.ACTIVE_HEARTBEAT_DEFAULT_MINUTES)
+                minutes = self.skill_manager.ACTIVE_HEARTBEAT_DEFAULT_MINUTES
+                self.skill_manager.set_active_heartbeat(
+                    self.name, enabled=True, minutes=minutes
+                )
+                msg = ui_language.tr("menu.active.notice.on", minutes=minutes)
             else:
                 try:
                     mins = int(value)
-                    _, msg = self.skill_manager.set_active_heartbeat(self.name, enabled=True, minutes=mins)
+                    self.skill_manager.set_active_heartbeat(
+                        self.name, enabled=True, minutes=mins
+                    )
+                    msg = ui_language.tr("menu.active.notice.on", minutes=mins)
                 except ValueError:
-                    await query.answer("Invalid value.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("menu.active.error.minutes"),
+                        show_alert=True,
+                    )
                     return
             await query.edit_message_text(
                 self._active_menu_text(notice=msg),
@@ -2890,8 +3054,14 @@ class FlexibleAgentRuntime:
         enabled = "OFF" not in status.upper() and "DISABLED" not in status.upper()
         return InlineKeyboardMarkup([
             [
-                InlineKeyboardButton(selected_label("On", enabled), callback_data="tgl:active:on"),
-                InlineKeyboardButton(selected_label("Off", not enabled), callback_data="tgl:active:off"),
+                InlineKeyboardButton(
+                    selected_label(ui_language.tr("menu.toggle.on"), enabled),
+                    callback_data="tgl:active:on",
+                ),
+                InlineKeyboardButton(
+                    selected_label(ui_language.tr("menu.toggle.off"), not enabled),
+                    callback_data="tgl:active:off",
+                ),
             ],
             [
                 InlineKeyboardButton("10m", callback_data="tgl:active:10"),
@@ -2901,17 +3071,47 @@ class FlexibleAgentRuntime:
         ])
 
     def _active_menu_text(self, *, notice: str | None = None) -> str:
-        status = self.skill_manager.describe_active_heartbeat(self.name) if self.skill_manager else "Unavailable"
-        facts = [f"<b>Agent</b> · <code>{html.escape(self.name)}</code>"]
+        job = (
+            self.skill_manager.get_active_heartbeat_job(self.name)
+            if self.skill_manager
+            else None
+        )
+        default_minutes = (
+            self.skill_manager.ACTIVE_HEARTBEAT_DEFAULT_MINUTES
+            if self.skill_manager
+            else 10
+        )
+        enabled = bool(job and job.get("enabled"))
+        minutes = max(
+            1,
+            int(
+                (job or {}).get("interval_seconds", default_minutes * 60)
+                // 60
+            ),
+        )
+        current = status_label(enabled) if self.skill_manager else ui_language.tr(
+            "menu.active.unavailable"
+        )
+        facts = [
+            f"<b>{html.escape(ui_language.tr('menu.active.fact_agent'))}</b> · "
+            f"<code>{html.escape(self.name)}</code>",
+            f"<b>{html.escape(ui_language.tr('menu.active.interval'))}</b> · "
+            f"<code>{minutes}</code> {html.escape(ui_language.tr('common.minutes_short'))}",
+        ]
+        if job:
+            facts.append(
+                f"<b>{html.escape(ui_language.tr('menu.active.job'))}</b> · "
+                f"<code>{html.escape(str(job.get('id') or ''))}</code>"
+            )
         if notice:
             facts.append(f"✅ {html.escape(str(notice))}")
         return setting_card(
             "🫧",
             "Active continuation",
-            current=html.escape(status),
+            current=f"<b>{html.escape(current)}</b>",
             facts=facts,
-            consequence="Changes take effect immediately and are stored by the task manager.",
-            action="Choose the active state or continuation interval.",
+            consequence=ui_language.tr("menu.active.effect"),
+            action=ui_language.tr("menu.active.action"),
         )
 
     # ── lifecycle commands ───────────────────────────────────────────────────────
@@ -3008,16 +3208,16 @@ class FlexibleAgentRuntime:
 
         instances = self._load_instances()
         if not instances:
-            await self._reply_text(update, "⚠️ No instances.json found. Create one at the project root.")
+            await self._reply_text(update, ui_language.tr("move.instances_missing"))
             return
 
         args = context.args or []
 
         # /move list
         if args and args[0].lower() == "list":
-            lines = ["<b>Known HASHI Instances:</b>"]
+            lines = [f"<b>{html.escape(ui_language.tr('move.known_instances'))}:</b>"]
             for name, inst in instances.items():
-                root = inst.get("root") or "(auto)"
+                root = inst.get("root") or f"({ui_language.tr('move.auto')})"
                 lines.append(f"  • <code>{name}</code> — {inst.get('display_name', '')}  <i>{root}</i>")
             await self._reply_text(update, "\n".join(lines), parse_mode="HTML")
             return
@@ -3092,23 +3292,32 @@ class FlexibleAgentRuntime:
 
     async def _cmd_bridge_handoff(self, update: Update, context: Any, *, mode: str) -> None:
         action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"
-        label = "Fork" if action == "fork" else "Transfer"
+        action_text = ui_language.tr(f"transfer.action.{action}")
+        label = ui_language.tr(f"transfer.label.{action}")
         if not self._is_authorized_user(update.effective_user.id):
             return
         args = [a.strip() for a in (context.args or []) if a.strip()]
         if len(args) not in {1, 2}:
-            await self._reply_text(update, f"Usage: /{action} <target_agent> [HASHI instance]")
+            await self._reply_text(
+                update,
+                ui_language.tr("transfer.usage", action=action),
+            )
             return
         if action == "transfer" and self.has_active_transfer():
-            await self._reply_text(update, f"Transfer already active.\n{self._transfer_redirect_text()}")
+            await self._reply_text(
+                update,
+                ui_language.tr(
+                    "transfer.already_active",
+                    redirect=self._transfer_redirect_text(),
+                ),
+            )
             return
         if action == "transfer":
             delayed = await runtime_pending.delayed_count(self)
             if delayed:
                 await self._reply_text(
                     update,
-                    f"Transfer is blocked while {delayed} delayed message(s) are pending. "
-                    "Use /recall first.",
+                    ui_language.tr("transfer.delayed_blocked", count=delayed),
                 )
                 return
 
@@ -3116,14 +3325,20 @@ class FlexibleAgentRuntime:
         target_instance = self._normalize_instance_name(args[1] if len(args) > 1 else self._detect_instance_name())
         current_instance = self._normalize_instance_name(self._detect_instance_name())
         if target_agent == self.name and target_instance == current_instance:
-            await self._reply_text(update, f"Cannot {action} to the same agent on the same instance.")
+            await self._reply_text(
+                update,
+                ui_language.tr("transfer.same_target", action=action_text),
+            )
             return
 
         package = self._build_handoff_payload(
             target_agent, target_instance, action, update=update
         )
         if int(package.get("exchange_count") or 0) <= 0:
-            await self._reply_text(update, f"No recent bridge transcript was available to {action}.")
+            await self._reply_text(
+                update,
+                ui_language.tr("transfer.no_transcript", action=action_text),
+            )
             return
 
         if action == "transfer":
@@ -3140,7 +3355,13 @@ class FlexibleAgentRuntime:
             self._persist_transfer_state()
         await self._reply_text(
             update,
-            f"Preparing {action} to {target_agent}@{target_instance}.\n{label} ID: {package['transfer_id']}",
+            ui_language.tr(
+                "transfer.preparing",
+                action=action_text,
+                target=f"{target_agent}@{target_instance}",
+                label=label,
+                transfer_id=package["transfer_id"],
+            ),
         )
 
         try:
@@ -3165,12 +3386,12 @@ class FlexibleAgentRuntime:
                 self._clear_transfer_state()
                 await self._send_text(
                     update.effective_chat.id,
-                    f"Transfer failed: {e}\nSession remains here.",
+                    ui_language.tr("transfer.failed", reason=str(e)),
                 )
                 return
             await self._send_text(
                 update.effective_chat.id,
-                f"Fork failed: {e}",
+                ui_language.tr("transfer.fork_failed", reason=str(e)),
             )
             return
 
@@ -3182,14 +3403,17 @@ class FlexibleAgentRuntime:
             self._suppressed_transfer_results.clear()
             if final_status == "accepted_but_chat_offline":
                 target_status = body.get("target_chat_status") or "offline"
-                message = (
-                    f"Transfer accepted by {target_agent}@{target_instance}, but the target chat is {target_status}.\n"
-                    f"Continue there once it reconnects. Transfer ID: {package['transfer_id']}"
+                message = ui_language.tr(
+                    "transfer.accepted_offline",
+                    target=f"{target_agent}@{target_instance}",
+                    status=target_status,
+                    transfer_id=package["transfer_id"],
                 )
             else:
-                message = (
-                    f"Transfer accepted by {target_agent}@{target_instance}.\n"
-                    f"Continue there. Transfer ID: {package['transfer_id']}"
+                message = ui_language.tr(
+                    "transfer.accepted",
+                    target=f"{target_agent}@{target_instance}",
+                    transfer_id=package["transfer_id"],
                 )
             await self._send_text(
                 update.effective_chat.id,
@@ -3199,14 +3423,17 @@ class FlexibleAgentRuntime:
 
         if final_status == "accepted_but_chat_offline":
             target_status = body.get("target_chat_status") or "offline"
-            message = (
-                f"Fork accepted by {target_agent}@{target_instance}, but the target chat is {target_status}.\n"
-                f"Both sessions remain usable. Fork ID: {package['transfer_id']}"
+            message = ui_language.tr(
+                "transfer.fork_accepted_offline",
+                target=f"{target_agent}@{target_instance}",
+                status=target_status,
+                transfer_id=package["transfer_id"],
             )
         else:
-            message = (
-                f"Fork accepted by {target_agent}@{target_instance}.\n"
-                f"Both sessions can continue from the same context. Fork ID: {package['transfer_id']}"
+            message = ui_language.tr(
+                "transfer.fork_accepted",
+                target=f"{target_agent}@{target_instance}",
+                transfer_id=package["transfer_id"],
             )
         await self._send_text(
             update.effective_chat.id,
@@ -3224,7 +3451,7 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         if self.name == "lily":
-            await self._reply_text(update, "Lily cannot use /cos — that would go in circles 🌸")
+            await self._reply_text(update, ui_language.tr("cos.self_blocked"))
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
         if not args:
@@ -3237,13 +3464,13 @@ class FlexibleAgentRuntime:
         if args[0] == "on":
             self._cos_enabled = True
             (self.workspace_dir / ".cos_on").touch()
-            await self._reply_text(update, "Chief of Staff routing enabled ✅\nHuman-in-the-loop decisions will be routed to Lily first.")
+            await self._reply_text(update, ui_language.tr("cos.enabled"))
         elif args[0] == "off":
             self._cos_enabled = False
             (self.workspace_dir / ".cos_on").unlink(missing_ok=True)
-            await self._reply_text(update, "Chief of Staff routing disabled.\nDecisions will go directly to the user.")
+            await self._reply_text(update, ui_language.tr("cos.disabled"))
         else:
-            await self._reply_text(update, "Usage: /cos [on|off]")
+            await self._reply_text(update, ui_language.tr("cos.usage"))
 
     async def cos_query(self, question: str) -> dict[str, Any]:
         """Send a decision query to Lily (Chief of Staff) via hchat and wait for response.
@@ -3308,7 +3535,9 @@ class FlexibleAgentRuntime:
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
-            await self._reply_text(update, "WhatsApp lifecycle control is unavailable.")
+            await self._reply_text(
+                update, ui_language.tr("whatsapp.lifecycle_unavailable")
+            )
             return
         ok, message = await orchestrator.start_whatsapp_transport(persist_enabled=True)
         await self._reply_text(update, message)
@@ -3318,7 +3547,9 @@ class FlexibleAgentRuntime:
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
-            await self._reply_text(update, "WhatsApp lifecycle control is unavailable.")
+            await self._reply_text(
+                update, ui_language.tr("whatsapp.lifecycle_unavailable")
+            )
             return
         ok, message = await orchestrator.stop_whatsapp_transport(persist_enabled=True)
         await self._reply_text(update, message)
@@ -3328,16 +3559,16 @@ class FlexibleAgentRuntime:
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
-            await self._reply_text(update, "WhatsApp send control is unavailable.")
+            await self._reply_text(update, ui_language.tr("whatsapp.send_unavailable"))
             return
         args = context.args or []
         if len(args) < 2:
-            await self._reply_text(update, "Usage: /wa_send <+number> <message>")
+            await self._reply_text(update, ui_language.tr("whatsapp.send_usage"))
             return
         phone_number = args[0].strip()
         text = " ".join(args[1:]).strip()
         if not text:
-            await self._reply_text(update, "Usage: /wa_send <+number> <message>")
+            await self._reply_text(update, ui_language.tr("whatsapp.send_usage"))
             return
         ok, message = await orchestrator.send_whatsapp_text(phone_number, text)
         await self._reply_text(update, message)
@@ -3346,7 +3577,7 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         prompt = self._build_fyi_request_prompt(" ".join(context.args or []))
-        await self._reply_text(update, "Refreshing AGENT FYI...")
+        await self._reply_text(update, ui_language.tr("fyi.refreshing"))
         await self.enqueue_request(
             update.effective_chat.id,
             prompt,
@@ -3430,7 +3661,7 @@ class FlexibleAgentRuntime:
 
         task = " ".join(args).strip()
         set_usecomputer_mode(self.sys_prompt_manager, True)
-        await self._reply_text(update, "Running in /usecomputer mode...")
+        await self._reply_text(update, ui_language.tr("usecomputer.running"))
         await self.enqueue_request(
             update.effective_chat.id,
             build_usecomputer_task_prompt(task),
@@ -3493,7 +3724,10 @@ class FlexibleAgentRuntime:
             await reply_browser_status()
             return
 
-        await self._reply_text(update, f"Running in /browser route {sub}...")
+        await self._reply_text(
+            update,
+            ui_language.tr("browser.running", route=sub),
+        )
         await self.enqueue_request(
             update.effective_chat.id,
             prompt,
@@ -3507,11 +3741,11 @@ class FlexibleAgentRuntime:
             return
         backend = self.backend_manager.current_backend
         if not backend or not hasattr(backend, "get_key_info"):
-            await update.message.reply_text("Credit info is only available for OpenRouter backends.")
+            await update.message.reply_text(ui_language.tr("credit.openrouter_only"))
             return
         key_info = await backend.get_key_info()
         if not key_info:
-            await update.message.reply_text("Failed to fetch credit info.")
+            await update.message.reply_text(ui_language.tr("credit.fetch_failed"))
             return
         data = key_info.get("data", {})
         await self._reply_text(
@@ -3555,7 +3789,7 @@ class FlexibleAgentRuntime:
                 reply_markup=runtime_menu_views.safevoice_keyboard(enabled=False),
             )
         else:
-            await self._reply_text(update, "Usage: /safevoice on | off")
+            await self._reply_text(update, ui_language.tr("safevoice.usage"))
 
     async def callback_safevoice(self, update: Update, context: Any):
         query = update.callback_query
@@ -3576,7 +3810,7 @@ class FlexibleAgentRuntime:
                 parse_mode="HTML",
                 reply_markup=runtime_menu_views.safevoice_keyboard(enabled=self._safevoice_enabled),
             )
-            await query.answer("Safe Voice updated")
+            await query.answer(ui_language.tr("safevoice.updated"))
             return
         was_long_batch_voice = chat_key in self._long_pending_voice_keys
         pending = self._pending_voice.pop(chat_key, None)
@@ -3600,24 +3834,38 @@ class FlexibleAgentRuntime:
                     if isinstance(release_event, asyncio.Event):
                         release_event.set()
                 await query.edit_message_text(
-                    f"✅ Confirmed for the transcript-dependent path:\n\n_{pending['transcript']}_",
+                    ui_language.tr(
+                        "safevoice.confirmed_native",
+                        transcript=pending["transcript"],
+                    ),
                     parse_mode="Markdown",
                 )
-                await query.answer("Transcript released")
+                await query.answer(ui_language.tr("safevoice.transcript_released"))
             elif is_long_batch_voice:
                 added = runtime_long.resolve_voice_confirmation(self, chat_key, pending)
                 if added:
                     await query.edit_message_text(
-                        f"✅ Confirmed and added to the active /long batch:\n\n_{pending['transcript']}_",
+                        ui_language.tr(
+                            "safevoice.confirmed_long",
+                            transcript=pending["transcript"],
+                        ),
                         parse_mode="Markdown",
                     )
-                    await query.answer("Added to /long batch")
+                    await query.answer(ui_language.tr("safevoice.added_long"))
                 else:
-                    await query.edit_message_text("⏰ The /long batch is no longer active. Voice message discarded.")
-                    await query.answer("Expired")
+                    await query.edit_message_text(
+                        ui_language.tr("safevoice.long_expired")
+                    )
+                    await query.answer(ui_language.tr("safevoice.expired"))
             else:
-                await query.edit_message_text(f"✅ Confirmed. Sending to agent:\n\n_{pending['transcript']}_", parse_mode="Markdown")
-                await query.answer("Sending...")
+                await query.edit_message_text(
+                    ui_language.tr(
+                        "safevoice.confirmed_send",
+                        transcript=pending["transcript"],
+                    ),
+                    parse_mode="Markdown",
+                )
+                await query.answer(ui_language.tr("safevoice.sending"))
                 pending_chat_id = int(pending.get("chat_id") or chat_key)
                 await self.enqueue_request(
                     pending_chat_id,
@@ -3646,16 +3894,22 @@ class FlexibleAgentRuntime:
             if is_long_batch_voice:
                 runtime_long.discard_voice_confirmation(self, chat_key)
             await query.edit_message_text(
-                "❌ Transcript-dependent path discarded. The native chat response is unchanged."
+                ui_language.tr("safevoice.native_discarded")
                 if pending and pending.get("native_audio")
-                else "❌ Voice message discarded."
+                else ui_language.tr("safevoice.voice_discarded")
             )
-            await query.answer("Transcript discarded" if pending and pending.get("native_audio") else "Discarded")
+            await query.answer(
+                ui_language.tr("safevoice.transcript_discarded")
+                if pending and pending.get("native_audio")
+                else ui_language.tr("safevoice.discarded")
+            )
         else:
             if is_long_batch_voice:
                 runtime_long.discard_voice_confirmation(self, chat_key)
-            await query.edit_message_text("⏰ Voice confirmation expired.")
-            await query.answer("Expired")
+            await query.edit_message_text(
+                ui_language.tr("safevoice.confirmation_expired")
+            )
+            await query.answer(ui_language.tr("safevoice.expired"))
 
     async def cmd_voice(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -3688,7 +3942,10 @@ class FlexibleAgentRuntime:
             if len(args) == 1:
                 await self._reply_text(
                     update,
-                    "Usage: /voice preset <warm_female|clear_female|warm_male|calm_male>",
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice preset <warm_female|clear_female|warm_male|calm_male>",
+                    ),
                 )
                 return
             try:
@@ -3700,7 +3957,13 @@ class FlexibleAgentRuntime:
             return
         if mode == "use":
             if len(args) == 1:
-                await self._reply_text(update, "Usage: /voice use <alias>")
+                await self._reply_text(
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice use <alias>",
+                    ),
+                )
                 return
             try:
                 await self._reply_text(update, self.voice_manager.apply_voice_preset(args[1]))
@@ -3709,7 +3972,13 @@ class FlexibleAgentRuntime:
             return
         if mode == "provider":
             if len(args) == 1:
-                await self._reply_text(update, f"Current voice provider: {self.voice_manager.get_provider_name()}")
+                await self._reply_text(
+                    update,
+                    ui_language.tr(
+                        "voice.current_provider",
+                        provider=self.voice_manager.get_provider_name(),
+                    ),
+                )
                 return
             try:
                 await self._reply_text(update, self.voice_manager.set_provider(args[1]))
@@ -3718,23 +3987,39 @@ class FlexibleAgentRuntime:
             return
         if mode == "name":
             if len(args) == 1:
-                await self._reply_text(update, "Usage: /voice name <voice-name>")
+                await self._reply_text(
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice name <voice-name>",
+                    ),
+                )
                 return
             await self._reply_text(update, self.voice_manager.set_voice_name(" ".join(args[1:])))
             return
         if mode == "rate":
             if len(args) == 1:
-                await self._reply_text(update, "Usage: /voice rate <integer>")
+                await self._reply_text(
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice rate <integer>",
+                    ),
+                )
                 return
             try:
                 await self._reply_text(update, self.voice_manager.set_rate(int(args[1])))
             except ValueError:
-                await self._reply_text(update, "Voice rate must be an integer.")
+                await self._reply_text(update, ui_language.tr("voice.rate_integer"))
             return
         if mode == "mode":
             if len(args) == 1:
                 await self._reply_text(
-                    update, "Usage: /voice mode <off|tts|native|auto>"
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice mode <off|tts|native|auto>",
+                    ),
                 )
                 return
             try:
@@ -3752,7 +4037,11 @@ class FlexibleAgentRuntime:
                 return
             if len(args) < 3:
                 await self._reply_text(
-                    update, "Usage: /voice target <provider> <model> | reset"
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice target <provider> <model> | reset",
+                    ),
                 )
                 return
             try:
@@ -3766,7 +4055,11 @@ class FlexibleAgentRuntime:
         if mode == "native-voice":
             if len(args) == 1:
                 await self._reply_text(
-                    update, "Usage: /voice native-voice <name|default>"
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice native-voice <name|default>",
+                    ),
                 )
                 return
             value = None if args[1].lower() in {"default", "auto"} else " ".join(args[1:])
@@ -3777,7 +4070,11 @@ class FlexibleAgentRuntime:
         if mode == "native-format":
             if len(args) == 1:
                 await self._reply_text(
-                    update, "Usage: /voice native-format <format|auto>"
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice native-format <format|auto>",
+                    ),
                 )
                 return
             value = None if args[1].lower() in {"default", "auto"} else args[1]
@@ -3788,7 +4085,11 @@ class FlexibleAgentRuntime:
         if mode == "content":
             if len(args) == 1:
                 await self._reply_text(
-                    update, "Usage: /voice content <both|audio|text>"
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice content <both|audio|text>",
+                    ),
                 )
                 return
             try:
@@ -3802,7 +4103,11 @@ class FlexibleAgentRuntime:
         if mode == "fallback":
             if len(args) == 1:
                 await self._reply_text(
-                    update, "Usage: /voice fallback <local_chain|native_only>"
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice fallback <local_chain|native_only>",
+                    ),
                 )
                 return
             try:
@@ -3815,7 +4120,11 @@ class FlexibleAgentRuntime:
         if mode == "retention":
             if len(args) == 1:
                 await self._reply_text(
-                    update, "Usage: /voice retention <minutes|indefinite>"
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice retention <minutes|indefinite>",
+                    ),
                 )
                 return
             try:
@@ -3828,7 +4137,11 @@ class FlexibleAgentRuntime:
         if mode == "transcript":
             if len(args) == 1 or args[1].lower() not in {"on", "off"}:
                 await self._reply_text(
-                    update, "Usage: /voice transcript <on|off>"
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice transcript <on|off>",
+                    ),
                 )
                 return
             await self._reply_text(
@@ -3846,11 +4159,16 @@ class FlexibleAgentRuntime:
             return
         await self._reply_text(
             update,
-            "Usage: /voice [status|on|off|menu|preset <profile>|voices|use <alias>|providers|"
-            "provider <name>|name <voice>|rate <n>|mode <off|tts|native|auto>|"
-            "target <provider> <model>|native-voice <name>|native-format <format>|"
-            "content <both|audio|text>|fallback <local_chain|native_only>|"
-            "retention <minutes|indefinite>|transcript <on|off>]",
+            ui_language.tr(
+                "voice.usage_command",
+                command=(
+                    "/voice [status|on|off|menu|preset <profile>|voices|use <alias>|providers|"
+                    "provider <name>|name <voice>|rate <n>|mode <off|tts|native|auto>|"
+                    "target <provider> <model>|native-voice <name>|native-format <format>|"
+                    "content <both|audio|text>|fallback <local_chain|native_only>|"
+                    "retention <minutes|indefinite>|transcript <on|off>]"
+                ),
+            ),
         )
 
     async def cmd_say(self, update: Update, context: Any):
@@ -3859,13 +4177,13 @@ class FlexibleAgentRuntime:
             return
         text = self._load_last_text_from_transcript("assistant")
         if not text:
-            await self._reply_text(update, "No recent message to read.")
+            await self._reply_text(update, ui_language.tr("voice.no_recent"))
             return
         chat_id = update.effective_chat.id
         request_id = f"say-{int(time.time())}"
         ok = await self._send_voice_reply(chat_id, text, request_id, force=True)
         if not ok:
-            await self._reply_text(update, "Voice synthesis failed. Check /voice status for provider settings.")
+            await self._reply_text(update, ui_language.tr("voice.synthesis_failed"))
 
     # ── /loop — recurring task management ──────────────────────────
 
@@ -3898,7 +4216,9 @@ class FlexibleAgentRuntime:
         # --- /loop list ---
         if sub_lower == "list":
             if not self.skill_manager:
-                await self._reply_text(update, "Skill manager not available.")
+                await self._reply_text(
+                    update, ui_language.tr("skill.manager_unavailable")
+                )
                 return
             jobs = (
                 [("heartbeat", j) for j in self.skill_manager.list_jobs("heartbeat", agent_name=self.name)] +
@@ -3916,7 +4236,9 @@ class FlexibleAgentRuntime:
         if sub_lower.startswith("stop"):
             stop_arg = sub_lower[4:].strip()
             if not self.skill_manager:
-                await self._reply_text(update, "Skill manager not available.")
+                await self._reply_text(
+                    update, ui_language.tr("skill.manager_unavailable")
+                )
                 return
             jobs = (
                 [("heartbeat", j) for j in self.skill_manager.list_jobs("heartbeat", agent_name=self.name)] +
@@ -3924,7 +4246,7 @@ class FlexibleAgentRuntime:
             )
             loops = [(job_kind, j) for job_kind, j in jobs if j.get("loop_meta") and j.get("enabled")]
             if not loops:
-                await self._reply_text(update, "No active loops to stop.")
+                await self._reply_text(update, ui_language.tr("loop.none_active"))
                 return
             stopped = []
             for job_kind, j in loops:
@@ -3932,9 +4254,15 @@ class FlexibleAgentRuntime:
                     self.skill_manager.set_job_enabled(job_kind, j["id"], enabled=False)
                     stopped.append(j["id"])
             if stopped:
-                await self._reply_text(update, f"⏹ Stopped: {', '.join(stopped)}")
+                await self._reply_text(
+                    update,
+                    ui_language.tr("loop.stopped", ids=", ".join(stopped)),
+                )
             else:
-                await self._reply_text(update, f"No loop matching '{stop_arg}' found.")
+                await self._reply_text(
+                    update,
+                    ui_language.tr("loop.not_found", selector=stop_arg),
+                )
             return
 
         # --- /loop <task> — skill injection: let agent comprehend and set up ---
@@ -4053,9 +4381,21 @@ class FlexibleAgentRuntime:
 
     def _whisper_keyboard(self, current: str) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton(selected_label("Small", current == "small"), callback_data="tgl:whisper:small"),
-            InlineKeyboardButton(selected_label("Medium", current == "medium"), callback_data="tgl:whisper:medium"),
-            InlineKeyboardButton(selected_label("Large", current.startswith("large")), callback_data="tgl:whisper:large"),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.whisper.small"), current == "small"),
+                callback_data="tgl:whisper:small",
+            ),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.whisper.medium"), current == "medium"),
+                callback_data="tgl:whisper:medium",
+            ),
+            InlineKeyboardButton(
+                selected_label(
+                    ui_language.tr("menu.whisper.large"),
+                    current.startswith("large"),
+                ),
+                callback_data="tgl:whisper:large",
+            ),
         ]])
 
     def _whisper_menu_text(self, current: str) -> str:
@@ -4063,9 +4403,12 @@ class FlexibleAgentRuntime:
             "🎙️",
             "Whisper transcription",
             current=f"<code>{html.escape(current)}</code>",
-            facts=["<b>Scope</b> · local Telegram voice transcription"],
-            consequence="Larger models improve accuracy but use more memory and load more slowly.",
-            action="The next transcription loads the selected model. This setting does not require a reboot.",
+            facts=[
+                f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+                f"{html.escape(ui_language.tr('menu.whisper.scope'))}"
+            ],
+            consequence=ui_language.tr("menu.whisper.effect"),
+            action=ui_language.tr("menu.whisper.action"),
         )
 
     async def cmd_whisper(self, update: Update, context: Any):
@@ -4108,7 +4451,7 @@ class FlexibleAgentRuntime:
             "large-v3": "large-v3",
         }
         if value not in mapping:
-            await self._reply_text(update, "Usage: /whisper [small|medium|large]")
+            await self._reply_text(update, ui_language.tr("menu.whisper.usage"))
             return
 
         new_size = mapping[value]
@@ -4125,24 +4468,35 @@ class FlexibleAgentRuntime:
 
     async def _invoke_prompt_skill_from_command(self, update: Update, skill_id: str, args: list[str]):
         if not self.skill_manager:
-            await self._reply_text(update, "Skill system is not configured.")
+            await self._reply_text(update, ui_language.tr("skill.system_unconfigured"))
             return
         skill = self.skill_manager.get_skill(skill_id)
         if skill is None:
-            await self._reply_text(update, f"Unknown skill: {skill_id}")
+            await self._reply_text(
+                update,
+                ui_language.tr("skill.unknown", skill_id=skill_id),
+            )
             return
         if not self.skill_manager.is_skill_enabled(self.workspace_dir, skill.id):
             await self._reply_text(
                 update,
-                f"Skill '{skill.id}' is disabled for this agent. Use /skill enable {skill.id} first.",
+                ui_language.tr("skill.disabled", skill_id=skill.id),
+                parse_mode="HTML",
             )
             return
         prompt_text = " ".join(args or []).strip()
         if not prompt_text:
-            await self._reply_text(update, f"Usage: /{skill_id} <prompt>")
+            await self._reply_text(
+                update,
+                ui_language.tr("skill.usage.prompt", skill_id=skill_id),
+            )
             return
         prompt = self.skill_manager.build_prompt_for_skill(skill, prompt_text)
-        await self._reply_text(update, f"Running skill {skill.id}...")
+        await self._reply_text(
+            update,
+            ui_language.tr("skill.running", skill_id=skill.id),
+            parse_mode="HTML",
+        )
         await self.enqueue_request(
             update.effective_chat.id,
             prompt,
@@ -4160,17 +4514,28 @@ class FlexibleAgentRuntime:
             enabled = args[0] == "on"
             if self.skill_manager:
                 _, msg = self.skill_manager.set_toggle_state(self.workspace_dir, "debug", enabled=enabled)
-                state_str = "ON 🔴" if enabled else "OFF"
-                await self._reply_text(update, f"🐛 Debug mode: {state_str}\n{msg}")
+                await self._reply_text(
+                    update,
+                    ui_language.tr(
+                        "skill.debug_state",
+                        state=status_label(enabled),
+                        message=msg,
+                    ),
+                )
             else:
-                await self._reply_text(update, "Skill manager not available.")
+                await self._reply_text(
+                    update, ui_language.tr("skill.manager_unavailable")
+                )
             return
         if not self.skill_manager:
-            await self._reply_text(update, "Skill system is not configured.")
+            await self._reply_text(update, ui_language.tr("skill.system_unconfigured"))
             return
         skill = self.skill_manager.get_skill("debug")
         if skill is None:
-            await self._reply_text(update, "Unknown skill: debug")
+            await self._reply_text(
+                update,
+                ui_language.tr("skill.unknown", skill_id="debug"),
+            )
             return
         prompt_text = " ".join(raw_args).strip()
         if not prompt_text:
@@ -4184,11 +4549,16 @@ class FlexibleAgentRuntime:
         if not self.skill_manager.is_skill_enabled(self.workspace_dir, skill.id):
             await self._reply_text(
                 update,
-                "Skill 'debug' is disabled for this agent. Use /skill enable debug first.",
+                ui_language.tr("skill.disabled", skill_id="debug"),
+                parse_mode="HTML",
             )
             return
         prompt = self.skill_manager.build_prompt_for_skill(skill, prompt_text)
-        await self._reply_text(update, f"Running skill {skill.id}...")
+        await self._reply_text(
+            update,
+            ui_language.tr("skill.running", skill_id=skill.id),
+            parse_mode="HTML",
+        )
         await self.enqueue_request(
             update.effective_chat.id,
             prompt,
@@ -4214,17 +4584,17 @@ class FlexibleAgentRuntime:
             )
             return
         if not self.skill_manager:
-            await self._reply_text(update, "Skill system is not configured.")
+            await self._reply_text(update, ui_language.tr("skill.system_unconfigured"))
             return
 
         sub = args[0].strip().lower() if args else ""
         if sub in {"cron", "heartbeat"}:
-            await self._reply_text(update, "Cron and heartbeat controls moved to /jobs.")
+            await self._reply_text(update, ui_language.tr("skill.jobs_moved"))
             return
         if sub == "recall":
             rest = " ".join(args[1:]).strip().lower()
             if rest not in {"on", "off"}:
-                await self._reply_text(update, "Recall is a runtime setting. Usage: /skill recall on|off")
+                await self._reply_text(update, ui_language.tr("skill.recall_usage"))
                 return
             _, message = self.skill_manager.set_toggle_state(
                 self.workspace_dir,
@@ -4257,7 +4627,7 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, get_exp_usage_text(), parse_mode="HTML")
             return
         prompt = build_exp_task_prompt(task)
-        await self._reply_text(update, "Running with EXP guidebook...")
+        await self._reply_text(update, ui_language.tr("exp.running"))
         await self.enqueue_request(
             update.effective_chat.id,
             prompt,
@@ -4427,13 +4797,17 @@ class FlexibleAgentRuntime:
             )
         prompt = job.get("prompt", "")
         if not prompt.strip():
+            no_prompt = ui_language.tr(
+                "jobs.no_prompt",
+                task_id=job.get("id"),
+            )
             await self.send_long_message(
                 chat_id=self._primary_chat_id(),
-                text=f"Job {job.get('id')} has no prompt.",
+                text=no_prompt,
                 request_id=f"job-{job.get('id')}",
                 purpose="skill-job-run",
             )
-            return False, f"Job {job.get('id')} has no prompt."
+            return False, no_prompt
         try:
             resolved_kind = infer_scheduler_job_kind(job, kind)
             scheduler_context = build_scheduler_request_context(
@@ -4459,7 +4833,9 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         if not self.skill_manager:
-            await self._reply_text(update, "No task scheduler configured.")
+            await self._reply_text(
+                update, ui_language.tr("jobs.scheduler_unconfigured")
+            )
             return
         if not args or args[0].strip().lower() in {"list", "show"}:
             from orchestrator.runtime_jobs import _build_jobs_with_buttons
@@ -4467,14 +4843,27 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
             return
         if args[0].strip().lower() != "run" or len(args) < 2:
-            await self._reply_text(update, f"Usage: /{kind} [list] | /{kind} run <job_id>")
+            await self._reply_text(
+                update,
+                ui_language.tr("jobs.usage_kind", kind=kind),
+            )
             return
         task_id = args[1].strip()
         job = self.skill_manager.get_job(kind, task_id)
         if not job or job.get("agent") != self.name:
-            await self._reply_text(update, f"{kind} job not found for this agent: {task_id}")
+            await self._reply_text(
+                update,
+                ui_language.tr(
+                    "jobs.not_found_for_agent",
+                    kind=kind,
+                    task_id=task_id,
+                ),
+            )
             return
-        await self._reply_text(update, f"Running {kind} job now: {task_id}")
+        await self._reply_text(
+            update,
+            ui_language.tr("jobs.running_kind", kind=kind, task_id=task_id),
+        )
         await self._run_job_now(job, kind=kind)
 
     async def cmd_cron(self, update: Update, context: Any):
@@ -4492,21 +4881,33 @@ class FlexibleAgentRuntime:
             [
                 [
                     InlineKeyboardButton(
-                        selected_label("Quiet", current == "quiet"),
+                        selected_label(
+                            ui_language.tr("menu.terminal.level.quiet"),
+                            current == "quiet",
+                        ),
                         callback_data="tgl:terminal:quiet",
                     ),
                     InlineKeyboardButton(
-                        selected_label("Activity", current == "activity"),
+                        selected_label(
+                            ui_language.tr("menu.terminal.level.activity"),
+                            current == "activity",
+                        ),
                         callback_data="tgl:terminal:activity",
                     ),
                 ],
                 [
                     InlineKeyboardButton(
-                        selected_label("Debug", current == "debug"),
+                        selected_label(
+                            ui_language.tr("menu.terminal.level.debug"),
+                            current == "debug",
+                        ),
                         callback_data="tgl:terminal:debug",
                     ),
                     InlineKeyboardButton(
-                        selected_label("Raw", current == "raw"),
+                        selected_label(
+                            ui_language.tr("menu.terminal.level.raw"),
+                            current == "raw",
+                        ),
                         callback_data="tgl:terminal:raw",
                     ),
                 ],
@@ -4515,36 +4916,35 @@ class FlexibleAgentRuntime:
 
     def _terminal_menu_text(self) -> str:
         current = terminal_console.get_level()
-        instance = html.escape(
-            str(getattr(self.global_config, "instance_id", "HASHI") or "HASHI")
+        instance = str(
+            getattr(self.global_config, "instance_id", "HASHI") or "HASHI"
         )
-        descriptions = {
-            "quiet": "Lifecycle, failures, and events that need operator attention.",
-            "activity": "Adds content-free request phases, timing, tool counts, and token counts.",
-            "debug": "Adds sanitised technical events and failure clues, without chat or reasoning text.",
-            "raw": "Shows the historical plaintext console, including chat and visible provider reasoning.",
-        }
-        description = descriptions[current]
-        if current == terminal_console.LEVEL_RAW:
-            description = (
-                "Raw may expose user messages, assistant replies, and provider reasoning "
-                "in plaintext."
+        description = ui_language.tr(f"menu.terminal.description.{current}")
+        level_label = ui_language.tr(f"menu.terminal.level.{current}")
+        if ui_language.current_locale() == ui_language.DEFAULT_LOCALE:
+            current_text = f"<b>{html.escape(current.upper())}</b>"
+        else:
+            current_text = (
+                f"<b>{html.escape(level_label)}</b> · "
+                f"<code>{html.escape(current)}</code>"
             )
         return setting_card(
             "🖥️",
             "Terminal detail",
-            current=f"<b>{html.escape(current.upper())}</b>",
+            current=current_text,
             facts=[
-                f"<b>Scope</b> · <code>{instance}</code> instance",
-                "<b>Saved</b> · instance setting",
-                "<b>Default</b> · <code>QUIET</code>",
+                f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+                f"<code>{html.escape(instance)}</code> "
+                f"{html.escape(ui_language.tr('menu.terminal.instance_suffix'))}",
+                f"<b>{html.escape(ui_language.tr('common.saved'))}</b> · "
+                f"{html.escape(ui_language.tr('menu.terminal.saved'))}",
+                f"<b>{html.escape(ui_language.tr('common.default'))}</b> · "
+                f"<code>{html.escape(ui_language.tr('menu.terminal.level.quiet'))}</code>",
             ],
-            consequence=(
-                f"{description}\n\n"
-                "This controls terminal stdout only. Workbench, TUI chat, Telegram, "
-                "transcripts, and file logs are unchanged."
+            consequence=ui_language.tr(
+                "menu.terminal.effect", description=description
             ),
-            action="Choose a level below. Changes apply immediately and persist across reboot.",
+            action=ui_language.tr("menu.terminal.action"),
         )
 
     async def cmd_terminal(self, update: Update, context: Any):
@@ -4555,7 +4955,7 @@ class FlexibleAgentRuntime:
             if len(args) != 1 or args[0] not in terminal_console.LEVELS:
                 await self._reply_text(
                     update,
-                    "Usage: /terminal [quiet|activity|debug|raw]",
+                    ui_language.tr("menu.terminal.usage"),
                 )
                 return
             try:
@@ -4570,7 +4970,10 @@ class FlexibleAgentRuntime:
             except (OSError, RuntimeError, ValueError) as exc:
                 await self._reply_text(
                     update,
-                    f"Terminal setting was not changed: {html.escape(type(exc).__name__)}",
+                    ui_language.tr(
+                        "menu.terminal.error",
+                        error=html.escape(type(exc).__name__),
+                    ),
                     parse_mode="HTML",
                 )
                 return
@@ -4583,8 +4986,14 @@ class FlexibleAgentRuntime:
 
     def _verbose_keyboard(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton(selected_label("On", self._verbose), callback_data="tgl:verbose:on"),
-            InlineKeyboardButton(selected_label("Off", not self._verbose), callback_data="tgl:verbose:off"),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.toggle.on"), self._verbose),
+                callback_data="tgl:verbose:on",
+            ),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.toggle.off"), not self._verbose),
+                callback_data="tgl:verbose:off",
+            ),
         ]])
 
     def _verbose_menu_text(self) -> str:
@@ -4597,17 +5006,17 @@ class FlexibleAgentRuntime:
             "Verbose display",
             current=f"<b>{status_label(self._verbose)}</b>",
             facts=[
-                f"<b>Progress events</b> · <code>{'AVAILABLE' if progress_available else 'BASIC TIMER ONLY'}</code>",
-                f"<b>Tool summaries</b> · <code>{'AVAILABLE' if tools_available else 'NOT EXPOSED'}</code>",
-                "<b>Saved</b> · workspace setting",
+                f"<b>{html.escape(ui_language.tr('menu.verbose.progress_events'))}</b> · "
+                f"<code>{html.escape(ui_language.tr('common.available') if progress_available else ui_language.tr('menu.verbose.basic_timer'))}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.verbose.tool_summaries'))}</b> · "
+                f"<code>{html.escape(ui_language.tr('common.available') if tools_available else ui_language.tr('common.not_exposed'))}</code>",
+                f"<b>{html.escape(ui_language.tr('common.saved'))}</b> · "
+                f"{html.escape(ui_language.tr('menu.setting.workspace'))}",
             ],
-            consequence=(
-                "Shows a temporary progress card with timing and available tool-result summaries. "
-                "Model reasoning and answer drafts stay out of this view."
-                if self._verbose
-                else "Progress and tool summaries are hidden."
+            consequence=ui_language.tr(
+                "menu.verbose.enabled" if self._verbose else "menu.verbose.disabled"
             ),
-            action="Changes apply immediately and persist across reboot.",
+            action=ui_language.tr("menu.setting.immediate_persistent_reboot"),
         )
 
     async def cmd_verbose(self, update: Update, context: Any):
@@ -4636,8 +5045,14 @@ class FlexibleAgentRuntime:
 
     def _think_keyboard(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton(selected_label("On", self._think), callback_data="tgl:think:on"),
-            InlineKeyboardButton(selected_label("Off", not self._think), callback_data="tgl:think:off"),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.toggle.on"), self._think),
+                callback_data="tgl:think:on",
+            ),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.toggle.off"), not self._think),
+                callback_data="tgl:think:off",
+            ),
         ]])
 
     def _think_menu_text(self) -> str:
@@ -4699,11 +5114,11 @@ class FlexibleAgentRuntime:
     def _commentary_keyboard(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[
             InlineKeyboardButton(
-                selected_label("On", self._commentary),
+                selected_label(ui_language.tr("menu.toggle.on"), self._commentary),
                 callback_data="tgl:commentary:on",
             ),
             InlineKeyboardButton(
-                selected_label("Off", not self._commentary),
+                selected_label(ui_language.tr("menu.toggle.off"), not self._commentary),
                 callback_data="tgl:commentary:off",
             ),
         ]])
@@ -4713,16 +5128,15 @@ class FlexibleAgentRuntime:
         return setting_card(
             "🌿",
             "HER commentary",
-            current="<b>UNAVAILABLE</b>",
+            current=f"<b>{html.escape(ui_language.tr('common.unavailable'))}</b>",
             facts=[
-                "<b>Availability</b> · <code>HER ONLY</code>",
-                f"<b>Current backend</b> · <code>{html.escape(backend)}</code>",
+                f"<b>{html.escape(ui_language.tr('common.availability'))}</b> · "
+                f"<code>{html.escape(ui_language.tr('menu.commentary.availability'))}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.commentary.current_backend'))}</b> · "
+                f"<code>{html.escape(backend)}</code>",
             ],
-            consequence=(
-                "This switch is available only for the HER backend. The current backend "
-                "continues to follow its own commentary, reasoning, and display rules."
-            ),
-            action="Nothing was changed.",
+            consequence=ui_language.tr("menu.commentary.unavailable_effect"),
+            action=ui_language.tr("menu.commentary.unchanged"),
         )
 
     def _commentary_menu_text(self) -> str:
@@ -4758,8 +5172,14 @@ class FlexibleAgentRuntime:
     def _typing_keyboard(self) -> InlineKeyboardMarkup:
         enabled = telegram_stream_policy.get_display_policy(self).typing_enabled
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton(selected_label("On", enabled), callback_data="tgl:typing:on"),
-            InlineKeyboardButton(selected_label("Off", not enabled), callback_data="tgl:typing:off"),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.toggle.on"), enabled),
+                callback_data="tgl:typing:on",
+            ),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.toggle.off"), not enabled),
+                callback_data="tgl:typing:off",
+            ),
         ]])
 
     def _typing_menu_text(self) -> str:
@@ -4769,17 +5189,21 @@ class FlexibleAgentRuntime:
             "Telegram typing",
             current=f"<b>{status_label(policy.typing_enabled)}</b>",
             facts=[
-                '<b>Temporary bubble</b> · <code>Agent is typing...</code>',
-                "<b>Telegram header</b> · native typing indicator",
-                f"<b>Source</b> · <code>{html.escape(str(policy.source))}</code>",
-                "<b>Saved</b> · workspace setting",
+                f"<b>{html.escape(ui_language.tr('menu.typing.temporary_bubble'))}</b> · "
+                f"<code>{html.escape(ui_language.tr('menu.typing.bubble_value'))}</code>",
+                f"<b>{html.escape(ui_language.tr('menu.typing.telegram_header'))}</b> · "
+                f"{html.escape(ui_language.tr('menu.typing.native_indicator'))}",
+                f"<b>{html.escape(ui_language.tr('common.source'))}</b> · "
+                f"<code>{html.escape(str(policy.source))}</code>",
+                f"<b>{html.escape(ui_language.tr('common.saved'))}</b> · "
+                f"{html.escape(ui_language.tr('menu.setting.workspace'))}",
             ],
-            consequence=(
-                "Both typing indicators appear while a Telegram request is running."
+            consequence=ui_language.tr(
+                "menu.typing.enabled"
                 if policy.typing_enabled
-                else "Both typing indicators are hidden. Verbose progress and thinking remain independent."
+                else "menu.typing.disabled"
             ),
-            action="Changes apply immediately and persist across reboot.",
+            action=ui_language.tr("menu.setting.immediate_persistent_reboot"),
         )
 
     async def cmd_typing(self, update: Update, context: Any):
@@ -4812,8 +5236,14 @@ class FlexibleAgentRuntime:
     def _meter_keyboard(self) -> InlineKeyboardMarkup:
         enabled = self._meter_enabled()
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton(selected_label("On", enabled), callback_data="tgl:meter:on"),
-            InlineKeyboardButton(selected_label("Off", not enabled), callback_data="tgl:meter:off"),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.toggle.on"), enabled),
+                callback_data="tgl:meter:on",
+            ),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.toggle.off"), not enabled),
+                callback_data="tgl:meter:off",
+            ),
         ]])
 
     def _meter_menu_text(self) -> str:
@@ -4823,16 +5253,17 @@ class FlexibleAgentRuntime:
             "Turn cost tail",
             current=f"<b>{status_label(enabled)}</b>",
             facts=[
-                "<b>Default</b> · <code>OFF</code>",
-                "<b>Scope</b> · foreground turn cost only",
-                "<b>Saved</b> · workspace setting",
+                f"<b>{html.escape(ui_language.tr('common.default'))}</b> · "
+                f"<code>{html.escape(ui_language.tr('common.off'))}</code>",
+                f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+                f"{html.escape(ui_language.tr('menu.meter.scope'))}",
+                f"<b>{html.escape(ui_language.tr('common.saved'))}</b> · "
+                f"{html.escape(ui_language.tr('menu.setting.workspace'))}",
             ],
-            consequence=(
-                "A short cost tail is sent after each answer is delivered."
-                if enabled
-                else "No cost tail is sent after answers."
+            consequence=ui_language.tr(
+                "menu.meter.enabled" if enabled else "menu.meter.disabled"
             ),
-            action="Changes apply immediately and persist across reboot.",
+            action=ui_language.tr("menu.setting.immediate_persistent_reboot"),
         )
 
     async def cmd_meter(self, update: Update, context: Any):
@@ -4843,7 +5274,7 @@ class FlexibleAgentRuntime:
         if len(args) > 1 or (args and args[0] not in {"on", "off", "status"}):
             await self._reply_text(
                 update,
-                "Usage: <code>/meter [on|off|status]</code>",
+                ui_language.tr("menu.meter.usage"),
                 parse_mode="HTML",
             )
             return
@@ -4869,11 +5300,9 @@ class FlexibleAgentRuntime:
         await self._reply_text(
             update,
             (
-                "📡 <b>Telegram stream menu retired</b>\n\n"
-                "Use <code>/typing</code> for the temporary typing bubble and Telegram header, "
-                "<code>/verbose</code> for progress and tool summaries, and "
-                "<code>/think</code> for model commentary and provider reasoning.\n\n"
-                "Answers are delivered once, when complete."
+                f"📡 <b>{ui_language.tr('stream.retired_title')}</b>\n\n"
+                f"{ui_language.tr('stream.retired_effect')}\n\n"
+                f"{ui_language.tr('stream.retired_delivery')}"
             ),
             parse_mode="HTML",
         )
@@ -4884,9 +5313,8 @@ class FlexibleAgentRuntime:
         await self._reply_text(
             update,
             (
-                "👁️ <b>Live answer preview retired</b>\n\n"
-                "Telegram now receives only the completed answer. Use <code>/verbose</code> "
-                "for temporary progress and tool-result summaries."
+                f"👁️ <b>{ui_language.tr('preview.retired_title')}</b>\n\n"
+                f"{ui_language.tr('preview.retired_effect')}"
             ),
             parse_mode="HTML",
         )
@@ -4940,23 +5368,31 @@ class FlexibleAgentRuntime:
                 ]
             except Exception:
                 broadcast_targets = []
-            broadcast_label = "ALL active agents"
+            broadcast_label = ui_language.tr("hchat.label.all_active")
 
         elif target_name.startswith("@"):
             group_name = target_name[1:]
             directory = getattr(self, "agent_directory", None) or getattr(getattr(self, "orchestrator", None), "agent_directory", None)
             if directory is None:
-                await self._reply_text(update, "❌ Agent directory unavailable for group resolution.")
+                await self._reply_text(
+                    update, ui_language.tr("hchat.directory_unavailable")
+                )
                 return
             if not directory.group_exists(group_name):
-                await self._reply_text(update, f"❌ Group '{group_name}' not found. Use /group to list groups.")
+                await self._reply_text(
+                    update,
+                    ui_language.tr("hchat.group_not_found", name=group_name),
+                )
                 return
             broadcast_targets = directory.resolve_group(group_name, exclude_self=self.name)
-            broadcast_label = f"group @{group_name}"
+            broadcast_label = ui_language.tr("hchat.label.group", name=group_name)
 
         if broadcast_targets is not None:
             if not broadcast_targets:
-                await self._reply_text(update, f"❌ No agents found in {broadcast_label}.")
+                await self._reply_text(
+                    update,
+                    ui_language.tr("hchat.no_agents", target=broadcast_label),
+                )
                 return
             agent_list = ", ".join(broadcast_targets)
             send_cmds = "\n".join(
@@ -4979,10 +5415,25 @@ class FlexibleAgentRuntime:
                 f"IMPORTANT: When you later receive messages starting with '[hchat reply from ...]', "
                 f"just report the reply content to the user. Do NOT send another hchat message back."
             )
-            await self._reply_text(update, f"📢 Broadcasting Hchat to <b>{len(broadcast_targets)}</b> agents ({broadcast_label})...", parse_mode="HTML")
+            await self._reply_text(
+                update,
+                ui_language.tr(
+                    "hchat.broadcasting",
+                    count=len(broadcast_targets),
+                    target=html.escape(broadcast_label),
+                ),
+                parse_mode="HTML",
+            )
         elif self._hchat_draft_delivery_enabled():
             self_prompt = self._build_hchat_draft_prompt(target_name, intent)
-            await self._reply_text(update, f"💬 Drafting Hchat message to <b>{target_name}</b>...", parse_mode="HTML")
+            await self._reply_text(
+                update,
+                ui_language.tr(
+                    "hchat.drafting",
+                    agent=html.escape(target_name),
+                ),
+                parse_mode="HTML",
+            )
             await self.enqueue_api_text(
                 self_prompt,
                 source="bridge:hchat-draft",
@@ -5007,7 +5458,14 @@ class FlexibleAgentRuntime:
                 f"just report the reply content to the user. Do NOT send another hchat message back — "
                 f"the conversation ends there."
             )
-            await self._reply_text(update, f"💬 Composing Hchat message to <b>{target_name}</b>...", parse_mode="HTML")
+            await self._reply_text(
+                update,
+                ui_language.tr(
+                    "hchat.composing",
+                    agent=html.escape(target_name),
+                ),
+                parse_mode="HTML",
+            )
 
         await self.enqueue_api_text(
             self_prompt,
@@ -5169,7 +5627,7 @@ class FlexibleAgentRuntime:
         from orchestrator.runtime_display import _show_logo_animation
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _show_logo_animation)
-        await self._reply_text(update, "Logo displayed in console.")
+        await self._reply_text(update, ui_language.tr("runtime.logo_displayed"))
 
     async def cmd_backend(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -5212,22 +5670,25 @@ class FlexibleAgentRuntime:
         if not is_selectable_backend(target_engine):
             await self._reply_text(
                 update,
-                f"{target_engine} is a HER v2 provider, not a selectable backend. "
-                "Use /backend her-v2, then choose the provider with /model.",
+                ui_language.tr(
+                    "backend.provider_not_selectable",
+                    provider=target_engine,
+                ),
             )
             return
 
         if target_engine not in allowed_engines:
-            await self._reply_text(update, f"Backend not allowed: {target_engine}")
+            await self._reply_text(
+                update,
+                ui_language.tr("backend.not_allowed", backend=target_engine),
+            )
             return
 
         if target_engine == HER_V2_ENGINE:
             if requested_model:
                 await self._reply_text(
                     update,
-                    "HER v2 does not select a single backend model. "
-                    "Use /backend her-v2 [+], then configure Quick/Pro and task "
-                    "routes with /model.",
+                    ui_language.tr("backend.her_single_model_invalid"),
                 )
                 return
             success, message = await self._switch_backend_mode(
@@ -5254,7 +5715,11 @@ class FlexibleAgentRuntime:
             if not allows_custom_models(target_engine) and available and requested_model not in available:
                 await self._reply_text(
                     update,
-                    f"Unknown model for {target_engine}: {requested_model}\nUse /backend {target_engine} to see available options.",
+                    ui_language.tr(
+                        "backend.unknown_model",
+                        backend=target_engine,
+                        model=requested_model,
+                    ),
                 )
                 return
 
@@ -5284,10 +5749,10 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         if self._backend_busy():
-            await self._reply_text(update, "Handoff is blocked while a request is running or queued.")
+            await self._reply_text(update, ui_language.tr("handoff.busy"))
             return
 
-        await self._reply_text(update, "Starting a fresh session with recent bridge history...")
+        await self._reply_text(update, ui_language.tr("handoff.starting"))
         bridge_exchanges = runtime_session.bridge_recent_exchanges(
             self, update, limit=10
         )
@@ -5299,7 +5764,10 @@ class FlexibleAgentRuntime:
             )
         )
         if exchange_count <= 0:
-            await self._send_text(update.effective_chat.id, "No recent bridge transcript was available for handoff.")
+            await self._send_text(
+                update.effective_chat.id,
+                ui_language.tr("handoff.no_transcript"),
+            )
             return
 
         self._arm_session_primer(
@@ -5313,7 +5781,11 @@ class FlexibleAgentRuntime:
 
         await self._send_text(
             update.effective_chat.id,
-            f"Handoff prepared from {exchange_count} recent exchanges ({word_count} words). Restoring continuity now...",
+            ui_language.tr(
+                "handoff.prepared",
+                exchanges=exchange_count,
+                words=word_count,
+            ),
         )
         await self.enqueue_request(
             update.effective_chat.id,
@@ -5359,8 +5831,7 @@ class FlexibleAgentRuntime:
         # Confirm to the submitting agent
         await self._reply_text(
             update,
-            f"🎫 Ticket {ticket['ticket_id']} created.\n"
-            f"Arale has been notified and will investigate.",
+            ui_language.tr("ticket.created", ticket_id=ticket["ticket_id"]),
         )
 
         # Notify Arale via bridge (local) or hchat (cross-instance)
@@ -5421,37 +5892,44 @@ class FlexibleAgentRuntime:
         action = args[0].lower()
         if action == "delete":
             if len(args) < 2 or not args[1].isdigit():
-                await self._reply_text(update, "Usage: /park delete <slot>")
+                await self._reply_text(update, ui_language.tr("park.usage.delete"))
                 return
             slot_id = int(args[1])
             removed = self.parked_topics.delete_topic(slot_id)
             if not removed:
-                await self._reply_text(update, f"Parked topic [{slot_id}] was not found.")
+                await self._reply_text(
+                    update,
+                    ui_language.tr("park.not_found", slot=slot_id),
+                )
                 return
-            await self._reply_text(update, f"Deleted parked topic [{slot_id}] {removed.get('title') or ''}".strip())
+            await self._reply_text(
+                update,
+                ui_language.tr(
+                    "park.deleted",
+                    slot=slot_id,
+                    title=removed.get("title") or "",
+                ).strip(),
+            )
             return
 
         if action != "chat":
             await self._reply_text(
                 update,
-                "Usage:\n"
-                "/park - list parked topics\n"
-                "/park chat [optional title] - park the current topic\n"
-                "/park delete <slot> - delete a parked topic",
+                ui_language.tr("park.usage"),
             )
             return
 
         if self._backend_busy():
-            await self._reply_text(update, "Parking is blocked while a request is running or queued.")
+            await self._reply_text(update, ui_language.tr("park.busy"))
             return
 
         title_override = " ".join(args[1:]).strip() or None
-        await self._reply_text(update, "Parking the current topic and writing a resume summary...")
+        await self._reply_text(update, ui_language.tr("park.summarizing"))
         summary = await self._summarize_current_topic_for_parking(
             title_override=title_override, update=update
         )
         if not summary:
-            await self._reply_text(update, "No recent bridge transcript was available to park.")
+            await self._reply_text(update, ui_language.tr("park.no_transcript"))
             return
 
         topic = self.parked_topics.create_topic(
@@ -5468,10 +5946,12 @@ class FlexibleAgentRuntime:
         slot_id = int(topic["slot_id"])
         await self._reply_text(
             update,
-            f"Parked as [{slot_id}] {topic['title']}\n"
-            f"{topic['summary_short']}\n\n"
-            f"Follow-up reminders are scheduled for this parked topic (up to 3 attempts).\n"
-            f"Use /load {slot_id} to resume or /park delete {slot_id} to remove it.",
+            ui_language.tr(
+                "park.saved",
+                slot=slot_id,
+                title=topic["title"],
+                summary=topic["summary_short"],
+            ),
         )
 
     async def cmd_load(self, update: Update, context: Any):
@@ -5479,20 +5959,25 @@ class FlexibleAgentRuntime:
             return
         args = [a.strip() for a in (context.args or []) if a.strip()]
         if len(args) != 1 or not args[0].isdigit():
-            await self._reply_text(update, "Usage: /load <slot>")
+            await self._reply_text(update, ui_language.tr("park.load_usage"))
             return
         if self._backend_busy():
-            await self._reply_text(update, "Load is blocked while a request is running or queued.")
+            await self._reply_text(update, ui_language.tr("park.load_busy"))
             return
 
         slot_id = int(args[0])
         topic = self.parked_topics.get_topic(slot_id)
         if not topic:
-            await self._reply_text(update, f"Parked topic [{slot_id}] was not found.")
+            await self._reply_text(
+                update,
+                ui_language.tr("park.not_found", slot=slot_id),
+            )
             return
 
         self.parked_topics.mark_loaded(slot_id)
-        title = topic.get("title") or f"Topic {slot_id}"
+        title = topic.get("title") or ui_language.tr(
+            "park.topic_default", slot=slot_id
+        )
         summary_short = topic.get("summary_short") or ""
         summary_long = topic.get("summary_long") or ""
         recent_context = topic.get("recent_context") or ""
@@ -5515,7 +6000,10 @@ class FlexibleAgentRuntime:
             f"Loading parked topic [{slot_id}] {title}. Resume it as the active working context.",
             session_id=active_session_id,
         )
-        await self._reply_text(update, f"Loading parked topic [{slot_id}] {title} and restoring continuity...")
+        await self._reply_text(
+            update,
+            ui_language.tr("park.loading", slot=slot_id, title=title),
+        )
         await self.enqueue_request(
             update.effective_chat.id,
             (
@@ -5532,7 +6020,9 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         if not self.skill_manager:
-            await self._reply_text(update, "Active mode is unavailable because the skill manager is not configured.")
+            await self._reply_text(
+                update, ui_language.tr("menu.active.error.manager")
+            )
             return
 
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
@@ -5547,7 +6037,11 @@ class FlexibleAgentRuntime:
 
         mode = args[0]
         if mode == "off":
-            _, message = self.skill_manager.set_active_heartbeat(self.name, enabled=False)
+            self.skill_manager.set_active_heartbeat(self.name, enabled=False)
+            message = ui_language.tr(
+                "menu.active.notice.off",
+                minutes=self.skill_manager.ACTIVE_HEARTBEAT_DEFAULT_MINUTES,
+            )
             await self._reply_text(
                 update,
                 self._active_menu_text(notice=message),
@@ -5556,7 +6050,7 @@ class FlexibleAgentRuntime:
             )
             return
         if mode != "on":
-            await self._reply_text(update, "Usage: /active on [minutes] | /active off")
+            await self._reply_text(update, ui_language.tr("menu.active.usage"))
             return
 
         minutes = self.skill_manager.ACTIVE_HEARTBEAT_DEFAULT_MINUTES
@@ -5564,10 +6058,15 @@ class FlexibleAgentRuntime:
             try:
                 minutes = max(1, int(args[1]))
             except ValueError:
-                await self._reply_text(update, "Minutes must be a positive integer. Usage: /active on [minutes]")
+                await self._reply_text(
+                    update, ui_language.tr("menu.active.error.minutes")
+                )
                 return
 
-        _, message = self.skill_manager.set_active_heartbeat(self.name, enabled=True, minutes=minutes)
+        self.skill_manager.set_active_heartbeat(
+            self.name, enabled=True, minutes=minutes
+        )
+        message = ui_language.tr("menu.active.notice.on", minutes=minutes)
         await self._reply_text(
             update,
             self._active_menu_text(notice=message),
@@ -5661,37 +6160,50 @@ class FlexibleAgentRuntime:
         self.backend_manager.persist_state()
 
     def _backend_flex_confirmation_text(self, current_mode: str) -> str:
-        consequences = {
-            "fixed": "The persistent CLI-session behavior will stop. Full context injection resumes.",
-            "memory+": "Legacy Memory+ mode will move to Flex while Memory+ continuity remains enabled.",
-            "wrapper": "The core-and-wrapper response flow will stop, but its configuration is kept.",
-            "audit": "The audit follow-up flow will stop, but its configuration is kept.",
-            "dual-brain": "The left/right-brain flow will stop, but its configuration is kept.",
-        }
-        consequence = consequences.get(
-            current_mode,
-            "The current specialized mode will stop, but its saved configuration is kept.",
+        consequence_key = {
+            "fixed": "menu.backend.flex_consequence.fixed",
+            "memory+": "menu.backend.flex_consequence.memory_plus",
+            "wrapper": "menu.backend.flex_consequence.wrapper",
+            "audit": "menu.backend.flex_consequence.audit",
+            "dual-brain": "menu.backend.flex_consequence.dual_brain",
+        }.get(
+            current_mode, "menu.backend.flex_consequence.default"
         )
+        consequence = ui_language.tr(consequence_key)
         continuity = get_memory_plus_status(self.workspace_dir)
-        facts = [f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>"]
+        facts = [
+            f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
+            f"<code>{html.escape(self.config.active_backend)}</code>"
+        ]
         if continuity["enabled"] or current_mode == "memory+":
-            facts.append("<b>Memory+</b> · remains <code>ON</code> after switching")
+            facts.append(
+                f"<b>Memory+</b> · {ui_language.tr('menu.backend.memory_remains')}"
+            )
         return setting_card(
             "🧠",
             "Switch backend",
             current=f"<code>{html.escape(current_mode)}</code>",
             facts=facts,
-            consequence=f"Backend switching requires Flex mode. {consequence}",
-            action="Switch to Flex and continue to the backend menu, or keep the current mode.",
+            consequence=ui_language.tr(
+                "menu.backend.flex_required", consequence=consequence
+            ),
+            action=ui_language.tr("menu.backend.flex_action"),
         )
 
     def _backend_flex_confirmation_keyboard(self, current_mode: str) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("Switch to Flex and choose backend", callback_data="backend_mode_confirm")],
                 [
                     InlineKeyboardButton(
-                        f"← Keep {current_mode}",
+                        ui_language.tr("menu.backend.flex_confirm"),
+                        callback_data="backend_mode_confirm",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        ui_language.tr(
+                            "menu.backend.flex_keep", mode=current_mode
+                        ),
                         callback_data=f"backend_mode_cancel:{current_mode}",
                     )
                 ],
@@ -5731,7 +6243,10 @@ class FlexibleAgentRuntime:
             buttons.append(
                 [
                     InlineKeyboardButton(
-                        f"Keep {active or 'default'}",
+                        ui_language.tr(
+                            "menu.effort.keep",
+                            effort=active or ui_language.tr("common.default"),
+                        ),
                         callback_data=f"effort:{source}:keep",
                     )
                 ]
@@ -5744,22 +6259,19 @@ class FlexibleAgentRuntime:
         available = self._get_available_efforts()
         current = self._get_current_effort() or (available[0] if available else "n/a")
         if self.config.active_backend == HER_V2_ENGINE:
-            consequence = (
-                "Direct runs one Quick agent with no orchestration stages. Higher HER "
-                "execution modes add Planning, Replanning, independent Review, and "
-                "Assured Verification. /effort never changes provider reasoning."
-            )
+            consequence = ui_language.tr("menu.effort.her_effect")
         else:
-            consequence = (
-                "This optional step controls reasoning depth. If no selection is made, "
-                "the current value remains active."
-            )
+            consequence = ui_language.tr("menu.effort.standard_effect")
         facts = [
-            f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
+            f"<code>{html.escape(self.config.active_backend)}</code>",
         ]
         provider = self.get_current_provider()
         if provider:
-            facts.append(f"<b>Provider</b> · <code>{html.escape(provider)}</code>")
+            facts.append(
+                f"<b>{html.escape(ui_language.tr('common.provider'))}</b> · "
+                f"<code>{html.escape(provider)}</code>"
+            )
         if self.config.active_backend == HER_V2_ENGINE:
             selected = self.backend_manager.get_her_v2_configuration()
             facts.extend(
@@ -5769,17 +6281,20 @@ class FlexibleAgentRuntime:
                 ]
             )
         else:
-            facts.append(f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>")
+            facts.append(
+                f"<b>{html.escape(ui_language.tr('common.model'))}</b> · "
+                f"<code>{html.escape(self.get_current_model())}</code>"
+            )
         if self.config.active_backend == HER_V2_ENGINE:
             from orchestrator.her_v2.models import effort_display_label
 
             current_display = effort_display_label(current)
             title = "HER execution mode"
-            action = "Choose an execution mode, or keep the current value."
+            action = ui_language.tr("menu.effort.her_action")
         else:
             current_display = current
             title = "Choose effort"
-            action = "Choose an effort level, or keep the current value."
+            action = ui_language.tr("menu.effort.standard_action")
         return setting_card(
             "🎛️",
             title,
@@ -5796,18 +6311,25 @@ class FlexibleAgentRuntime:
         lines = [
             card_title("✅", "Model configuration"),
             "",
-            f"<b>Mode</b> · <code>{html.escape(self.backend_manager.agent_mode)}</code>",
-            f"<b>Backend</b> · <code>{html.escape(self.config.active_backend)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.mode'))}</b> · "
+            f"<code>{html.escape(self.backend_manager.agent_mode)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
+            f"<code>{html.escape(self.config.active_backend)}</code>",
         ]
         provider = self.get_current_provider()
         if provider:
-            lines.append(f"<b>Provider</b> · <code>{html.escape(provider)}</code>")
+            lines.append(
+                f"<b>{html.escape(ui_language.tr('common.provider'))}</b> · "
+                f"<code>{html.escape(provider)}</code>"
+            )
         lines.extend(
             [
-                f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>",
-                f"<b>Effort</b> · <code>{html.escape(effort or 'n/a')}</code>",
+                f"<b>{html.escape(ui_language.tr('common.model'))}</b> · "
+                f"<code>{html.escape(self.get_current_model())}</code>",
+                f"<b>{html.escape(ui_language.tr('common.effort'))}</b> · "
+                f"<code>{html.escape(effort or 'n/a')}</code>",
                 "",
-                "Configuration saved and active immediately.",
+                ui_language.tr("menu.model.configuration_saved"),
             ]
         )
         return "\n".join(lines)
@@ -5971,7 +6493,9 @@ class FlexibleAgentRuntime:
 
         available = self._get_available_efforts()
         if not available:
-            await self._reply_text(update, "Effort control is not available for the active backend/model.")
+            await self._reply_text(
+                update, ui_language.tr("menu.effort.unavailable")
+            )
             return
 
         args = context.args
@@ -5987,29 +6511,35 @@ class FlexibleAgentRuntime:
                 except ValueError:
                     pass
             if requested not in available:
-                await self._reply_text(update, f"Unknown effort level: {requested}\nAvailable: {', '.join(available)}")
+                await self._reply_text(
+                    update,
+                    ui_language.tr(
+                        "menu.effort.unknown",
+                        effort=requested,
+                        available=", ".join(available),
+                    ),
+                )
                 return
             self._set_active_effort(requested)
             if self.config.active_backend == HER_V2_ENGINE:
                 from orchestrator.her_v2.models import effort_display_label
 
-                switched = f"HER execution mode switched to: {effort_display_label(requested)}"
+                switched = ui_language.tr(
+                    "menu.effort.her_switched",
+                    effort=effort_display_label(requested),
+                )
             else:
-                switched = f"Effort switched to: {requested}"
+                switched = ui_language.tr(
+                    "menu.effort.switched", effort=requested
+                )
             await self._reply_text(update, switched)
             return
 
         current_effort = self._get_current_effort() or available[0]
         if self.config.active_backend == HER_V2_ENGINE:
-            consequence = (
-                "Direct runs one Quick agent with no orchestration stages. Higher HER "
-                "execution modes add Planning, Replanning, independent Review, and "
-                "Assured Verification. /effort does not change provider reasoning."
-            )
+            consequence = ui_language.tr("menu.effort.her_effect")
         else:
-            consequence = (
-                "Higher effort may improve difficult work but takes longer and can use more tokens."
-            )
+            consequence = ui_language.tr("menu.effort.standard_effect_direct")
         if self.config.active_backend == HER_V2_ENGINE:
             selected = self.backend_manager.get_her_v2_configuration()
             effort_facts = [
@@ -6018,7 +6548,8 @@ class FlexibleAgentRuntime:
             ]
         else:
             effort_facts = [
-                f"<b>Model</b> · <code>{html.escape(self.get_current_model())}</code>"
+                f"<b>{html.escape(ui_language.tr('common.model'))}</b> · "
+                f"<code>{html.escape(self.get_current_model())}</code>"
             ]
         if self.config.active_backend == HER_V2_ENGINE:
             from orchestrator.her_v2.models import effort_display_label
@@ -6036,7 +6567,7 @@ class FlexibleAgentRuntime:
                 current=f"<code>{html.escape(current_display)}</code>",
                 facts=effort_facts,
                 consequence=consequence,
-                action="The selection applies immediately and persists.",
+                action=ui_language.tr("menu.effort.immediate"),
             ),
             parse_mode="HTML",
             reply_markup=self._effort_keyboard(current_effort),
@@ -6059,7 +6590,7 @@ class FlexibleAgentRuntime:
             return True
         await self._reply_text(
             update,
-            f"`/{command_name}` only applies in **wrapper** mode.\nUse `/mode wrapper` first.",
+            ui_language.tr("advanced.require_wrapper", command=command_name),
             parse_mode="Markdown",
         )
         return False
@@ -6069,7 +6600,7 @@ class FlexibleAgentRuntime:
             return True
         await self._reply_text(
             update,
-            f"`/{command_name}` only applies in **wrapper** or **audit** mode.\nUse `/mode wrapper` or `/mode audit` first.",
+            ui_language.tr("advanced.require_managed", command=command_name),
             parse_mode="Markdown",
         )
         return False
@@ -6099,11 +6630,61 @@ class FlexibleAgentRuntime:
     def _validate_wrapper_backend_model(self, engine: str, model: str) -> str | None:
         if not self._allowed_wrapper_engine(engine):
             allowed = ", ".join(b.get("engine", "?") for b in self.config.allowed_backends)
-            return f"Backend not allowed for this agent: {engine}\nAllowed: {allowed}"
+            return ui_language.tr(
+                "advanced.backend_not_allowed",
+                backend=engine,
+                allowed=allowed,
+            )
         available = self._get_available_models_for(engine)
         if not allows_custom_models(engine) and available and model not in available:
-            return f"Unknown model for {engine}: {model}"
+            return ui_language.tr(
+                "advanced.unknown_model",
+                backend=engine,
+                model=model,
+            )
         return None
+
+    @staticmethod
+    def _advanced_mode_label(mode: str) -> str:
+        return ui_language.tr(f"advanced.mode.{mode}")
+
+    @staticmethod
+    def _advanced_core_updated_text(
+        *,
+        mode: str,
+        backend: str,
+        model: str,
+        switch_ok: bool,
+        switch_message: str,
+    ) -> str:
+        return ui_language.tr(
+            "advanced.core_updated",
+            mode=FlexibleAgentRuntime._advanced_mode_label(mode),
+            backend=backend,
+            model=model,
+            state=ui_language.tr(
+                "advanced.active_core.updated"
+                if switch_ok
+                else "advanced.active_core.not_changed"
+            ),
+            message=switch_message,
+        )
+
+    @staticmethod
+    def _wrapper_translator_updated_text(
+        *,
+        backend: str,
+        model: str,
+        context_window: int,
+        fallback: str,
+    ) -> str:
+        return ui_language.tr(
+            "advanced.translator_updated",
+            backend=backend,
+            model=model,
+            context_window=context_window,
+            fallback=fallback,
+        )
 
     def _wrapper_core_keyboard(self, cfg) -> InlineKeyboardMarkup:
         models = [
@@ -6123,7 +6704,10 @@ class FlexibleAgentRuntime:
             )
             rows.append([InlineKeyboardButton(label, callback_data=f"wcfg:core:codex-cli:{model}")])
         rows.append([
-            InlineKeyboardButton("Wrapper model", callback_data="wcfg:menu:wrap"),
+            InlineKeyboardButton(
+                ui_language.tr("wrapper.button.wrapper_model"),
+                callback_data="wcfg:menu:wrap",
+            ),
             InlineKeyboardButton(back_label(), callback_data="wcfg:menu:wrapper"),
         ])
         return InlineKeyboardMarkup(rows)
@@ -6166,13 +6750,17 @@ class FlexibleAgentRuntime:
             rows.append(row)
         rows.append([
             InlineKeyboardButton(
-                f"ctx {value}{' ✅' if cfg.context_window == value else ''}",
+                f"{ui_language.tr('wrapper.context_button', value=value)}"
+                f"{' ✅' if cfg.context_window == value else ''}",
                 callback_data=f"wcfg:wrapctx:{value}",
             )
             for value in (0, 3, 5)
         ])
         rows.append([
-            InlineKeyboardButton("Core model", callback_data="wcfg:menu:core"),
+            InlineKeyboardButton(
+                ui_language.tr("wrapper.button.core_model"),
+                callback_data="wcfg:menu:core",
+            ),
             InlineKeyboardButton(back_label(), callback_data="wcfg:menu:wrapper"),
         ])
         return InlineKeyboardMarkup(rows)
@@ -6181,8 +6769,14 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("Core model", callback_data="wcfg:menu:core"),
-                    InlineKeyboardButton("Wrapper model", callback_data="wcfg:menu:wrap"),
+                    InlineKeyboardButton(
+                        ui_language.tr("wrapper.button.core_model"),
+                        callback_data="wcfg:menu:core",
+                    ),
+                    InlineKeyboardButton(
+                        ui_language.tr("wrapper.button.wrapper_model"),
+                        callback_data="wcfg:menu:wrap",
+                    ),
                 ],
                 [InlineKeyboardButton(refresh_label(), callback_data="wcfg:menu:wrapper")],
             ]
@@ -6193,12 +6787,12 @@ class FlexibleAgentRuntime:
             "🧠",
             "Wrapper core model",
             current=f"<code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
-            facts=["<b>Role</b> · performs the task before response translation"],
-            consequence="Changing this selection updates the active core model used in Wrapper mode.",
-            action=(
-                "Choose a model below or use "
-                "<code>/core backend=codex-cli model=gpt-5.6-sol</code>."
-            ),
+            facts=[
+                f"<b>{html.escape(ui_language.tr('wrapper.role'))}</b> · "
+                f"{ui_language.tr('wrapper.core_role')}"
+            ],
+            consequence=ui_language.tr("wrapper.core_effect"),
+            action=ui_language.tr("wrapper.core_action"),
         )
 
     def _audit_core_model_choices(self) -> list[tuple[str, str, str, str]]:
@@ -6265,15 +6859,15 @@ class FlexibleAgentRuntime:
             "Wrapper translator model",
             current=f"<code>{html.escape(cfg.wrapper_backend)} / {html.escape(cfg.wrapper_model)}</code>",
             facts=[
-                f"<b>Context window</b> · <code>{cfg.context_window}</code> visible turns",
-                f"<b>Fallback</b> · <code>{html.escape(cfg.fallback)}</code>",
-                "<b>Recommended</b> · <code>claude-cli / claude-haiku-4-5</code>",
+                f"<b>{html.escape(ui_language.tr('wrapper.context_window'))}</b> · "
+                f"<code>{cfg.context_window}</code> {ui_language.tr('wrapper.visible_turns')}",
+                f"<b>{html.escape(ui_language.tr('wrapper.fallback'))}</b> · "
+                f"<code>{html.escape(cfg.fallback)}</code>",
+                f"<b>{html.escape(ui_language.tr('wrapper.recommended'))}</b> · "
+                "<code>claude-cli / claude-haiku-4-5</code>",
             ],
-            consequence="Model choices update backend and model together; context buttons only change visible history.",
-            action=(
-                "Choose below or use "
-                "<code>/wrap backend=&lt;backend&gt; model=&lt;model&gt; context=3</code>."
-            ),
+            consequence=ui_language.tr("wrapper.model_effect"),
+            action=ui_language.tr("wrapper.model_action"),
         )
 
     def _wrapper_status_text(self, state: dict, slots: dict) -> str:
@@ -6282,24 +6876,28 @@ class FlexibleAgentRuntime:
         lines = [
             card_title("🎭", "Wrapper configuration"),
             "",
-            f"<b>Current</b> · core <code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
-            f"<b>Wrapper</b> · <code>{html.escape(cfg.wrapper_backend)} / {html.escape(cfg.wrapper_model)}</code>",
-            f"<b>Context window</b> · <code>{cfg.context_window}</code> visible turns",
-            f"<b>Slots</b> · <code>{len(visible_slots)}</code> configured",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            f"{ui_language.tr('wrapper.current_core', backend_model=f'<code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>')}",
+            f"<b>{html.escape(ui_language.tr('common.wrapper'))}</b> · "
+            f"<code>{html.escape(cfg.wrapper_backend)} / {html.escape(cfg.wrapper_model)}</code>",
+            f"<b>{html.escape(ui_language.tr('wrapper.context_window'))}</b> · "
+            f"<code>{cfg.context_window}</code> {ui_language.tr('wrapper.visible_turns')}",
+            f"<b>{html.escape(ui_language.tr('common.slot'))}</b> · "
+            f"{ui_language.tr('wrapper.slots_count', count=f'<code>{len(visible_slots)}</code>')}",
             "",
-            "Model changes apply immediately in Wrapper mode; persona/style slot changes persist.",
+            ui_language.tr("wrapper.status_effect"),
             "",
-            "<b>PERSONA / STYLE SLOTS</b>",
+            f"<b>{html.escape(ui_language.tr('wrapper.slots_heading').upper())}</b>",
         ]
         if visible_slots:
             for key in sorted(visible_slots, key=lambda value: (not str(value).isdigit(), int(value) if str(value).isdigit() else str(value))):
                 lines.append(f"• <code>{html.escape(str(key))}</code>: {html.escape(str(visible_slots[key]))}")
         else:
-            lines.append("• none")
+            lines.append(f"• {ui_language.tr('common.none')}")
         lines.extend(
             [
                 "",
-                "Choose a model page below or use <code>/wrapper set &lt;slot&gt; &lt;text&gt;</code>.",
+                ui_language.tr("wrapper.status_action"),
             ]
         )
         return "\n".join(lines)
@@ -6313,7 +6911,7 @@ class FlexibleAgentRuntime:
     ) -> tuple[bool, str]:
         current_model = self.get_current_model() if self.backend_manager.current_backend else None
         if self.config.active_backend == backend and current_model == model:
-            return True, "Core backend already active."
+            return True, ui_language.tr("advanced.core_already_active")
         return await self._switch_backend_mode(
             chat_id,
             backend,
@@ -6364,11 +6962,13 @@ class FlexibleAgentRuntime:
         )
         await self._reply_text(
             update,
-            f"{mode.capitalize()} core updated:\n"
-            f"• Backend: `{backend}`\n"
-            f"• Model: `{model}`\n"
-            f"• Active core: {'updated' if switch_ok else 'not changed'}\n"
-            f"{switch_message}",
+            self._advanced_core_updated_text(
+                mode=mode,
+                backend=backend,
+                model=model,
+                switch_ok=switch_ok,
+                switch_message=switch_message,
+            ),
             parse_mode="Markdown",
         )
 
@@ -6408,7 +7008,7 @@ class FlexibleAgentRuntime:
             try:
                 context_window = max(0, min(int(context_value), 20))
             except ValueError:
-                await self._reply_text(update, "Context window must be an integer.")
+                await self._reply_text(update, ui_language.tr("advanced.context_integer"))
                 return
 
         self.backend_manager.update_wrapper_blocks(
@@ -6421,11 +7021,12 @@ class FlexibleAgentRuntime:
         )
         await self._reply_text(
             update,
-            "Wrapper translator updated:\n"
-            f"• Backend: `{backend}`\n"
-            f"• Model: `{model}`\n"
-            f"• Context window: `{context_window}`\n"
-            f"• Fallback: `{fallback}`",
+            self._wrapper_translator_updated_text(
+                backend=backend,
+                model=model,
+                context_window=context_window,
+                fallback=fallback,
+            ),
             parse_mode="Markdown",
         )
 
@@ -6453,37 +7054,41 @@ class FlexibleAgentRuntime:
 
         if action == "set":
             if len(args) < 3:
-                await self._reply_text(update, "Usage: /wrapper set <slot> <text>")
+                await self._reply_text(update, ui_language.tr("wrapper.usage.set"))
                 return
             slot = args[1].strip()
             text = " ".join(args[2:]).strip()
             if not slot or not text:
-                await self._reply_text(update, "Usage: /wrapper set <slot> <text>")
+                await self._reply_text(update, ui_language.tr("wrapper.usage.set"))
                 return
             slots[slot] = text
             self.backend_manager.update_wrapper_blocks(wrapper_slots=slots)
-            await self._reply_text(update, f"Wrapper slot `{slot}` updated.", parse_mode="Markdown")
+            await self._reply_text(
+                update,
+                ui_language.tr("wrapper.slot_updated", slot=slot),
+                parse_mode="Markdown",
+            )
             return
 
         if action == "clear":
             if len(args) < 2:
-                await self._reply_text(update, "Usage: /wrapper clear <slot|all>")
+                await self._reply_text(update, ui_language.tr("wrapper.usage.clear"))
                 return
             target = args[1].strip()
             if target.lower() == "all":
                 slots = {"9": ""}
-                message = "All wrapper slots cleared."
+                message = ui_language.tr("wrapper.slots_cleared")
             else:
                 if target == "9":
                     slots[target] = ""
                 else:
                     slots.pop(target, None)
-                message = f"Wrapper slot `{target}` cleared."
+                message = ui_language.tr("wrapper.slot_cleared", slot=target)
             self.backend_manager.update_wrapper_blocks(wrapper_slots=slots)
             await self._reply_text(update, message, parse_mode="Markdown")
             return
 
-        await self._reply_text(update, "Usage: /wrapper [list|set <slot> <text>|clear <slot|all>]")
+        await self._reply_text(update, ui_language.tr("wrapper.usage.full"))
 
     def _audit_status_text(self, state: dict, criteria: dict) -> str:
         return runtime_audit.audit_status_text(state, criteria)
@@ -6497,7 +7102,7 @@ class FlexibleAgentRuntime:
         if not self._is_audit_mode():
             await self._reply_text(
                 update,
-                "`/audit` only applies in **audit** mode.\nUse `/mode audit` first.",
+                ui_language.tr("advanced.require_audit"),
                 parse_mode="Markdown",
             )
             return
@@ -6549,69 +7154,86 @@ class FlexibleAgentRuntime:
             )
             await self._reply_text(
                 update,
-                "Audit model updated:\n"
-                f"• Backend: `{backend}`\n"
-                f"• Model: `{model}`",
+                ui_language.tr(
+                    "audit.model_updated",
+                    backend=backend,
+                    model=model,
+                ),
                 parse_mode="Markdown",
             )
             return
 
         if action in {"delivery", "threshold"}:
             if len(args) < 2:
-                await self._reply_text(update, f"Usage: /audit {action} <value>")
+                await self._reply_text(
+                    update,
+                    ui_language.tr("audit.usage.setting", action=action),
+                )
                 return
             value = args[1].strip().lower()
             audit_block = self._audit_block_with(cfg)
             if action == "delivery":
                 if value not in {"silent", "issues_only", "always"}:
-                    await self._reply_text(update, "Delivery must be one of: silent, issues_only, always")
+                    await self._reply_text(update, ui_language.tr("audit.delivery.invalid"))
                     return
                 audit_block["delivery"] = value
             elif action == "threshold":
                 if value not in {"low", "medium", "high", "critical"}:
-                    await self._reply_text(update, "Threshold must be one of: low, medium, high, critical")
+                    await self._reply_text(update, ui_language.tr("audit.threshold.invalid"))
                     return
                 audit_block["severity_threshold"] = value
             self.backend_manager.update_audit_blocks(audit=audit_block)
             result_key = {"delivery": "delivery", "threshold": "severity_threshold"}[action]
-            await self._reply_text(update, f"Audit {action} updated to `{audit_block[result_key]}`.", parse_mode="Markdown")
+            await self._reply_text(
+                update,
+                ui_language.tr(
+                    "audit.setting_updated",
+                    action=action,
+                    value=audit_block[result_key],
+                ),
+                parse_mode="Markdown",
+            )
             return
 
         if action == "set":
             if len(args) < 3:
-                await self._reply_text(update, "Usage: /audit set <slot> <text>")
+                await self._reply_text(update, ui_language.tr("audit.usage.set"))
                 return
             slot = args[1].strip()
             text = " ".join(args[2:]).strip()
             if not slot or not text:
-                await self._reply_text(update, "Usage: /audit set <slot> <text>")
+                await self._reply_text(update, ui_language.tr("audit.usage.set"))
                 return
             criteria[slot] = text
             self.backend_manager.update_audit_blocks(audit_criteria=criteria)
-            await self._reply_text(update, f"Audit criterion `{slot}` updated.", parse_mode="Markdown")
+            await self._reply_text(
+                update,
+                ui_language.tr("audit.criterion_updated", slot=slot),
+                parse_mode="Markdown",
+            )
             return
 
         if action == "clear":
             if len(args) < 2:
-                await self._reply_text(update, "Usage: /audit clear <slot|all>")
+                await self._reply_text(update, ui_language.tr("audit.usage.clear"))
                 return
             target = args[1].strip()
             if target.lower() == "all":
                 criteria = {"9": ""}
-                message = "All audit criteria cleared."
+                message = ui_language.tr("audit.criteria_cleared")
             else:
                 if target == "9":
                     criteria[target] = ""
                 else:
                     criteria.pop(target, None)
-                message = f"Audit criterion `{target}` cleared."
+                message = ui_language.tr("audit.criterion_cleared", slot=target)
             self.backend_manager.update_audit_blocks(audit_criteria=criteria)
             await self._reply_text(update, message, parse_mode="Markdown")
             return
 
         await self._reply_text(
             update,
-            "Usage: /audit [list|model backend=<backend> model=<model>|delivery <silent|issues_only|always>|threshold <low|medium|high|critical>|timeout <seconds>|set <slot> <text>|clear <slot|all>]",
+            ui_language.tr("audit.usage.full"),
         )
 
     def _dual_brain_config(self):
@@ -6625,11 +7247,11 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("Left brain", callback_data="bcfg:menu:left"),
-                    InlineKeyboardButton("Right brain", callback_data="bcfg:menu:right"),
+                    InlineKeyboardButton(ui_language.tr("brain.left"), callback_data="bcfg:menu:left"),
+                    InlineKeyboardButton(ui_language.tr("brain.right"), callback_data="bcfg:menu:right"),
                 ],
                 [
-                    InlineKeyboardButton("Prompts", callback_data="bcfg:menu:prompts"),
+                    InlineKeyboardButton(ui_language.tr("brain.prompts"), callback_data="bcfg:menu:prompts"),
                     InlineKeyboardButton(refresh_label(), callback_data="bcfg:menu:status"),
                 ],
             ]
@@ -6667,79 +7289,109 @@ class FlexibleAgentRuntime:
             active = selected_backend == current_backend and model == current_model
             label = selected_label(model, active)
             rows.append([InlineKeyboardButton(label, callback_data=f"bcfg:modelidx:{target}:{selected_backend}:{index}")])
-        rows.append([InlineKeyboardButton("← Back to backends", callback_data=f"bcfg:menu:{target}")])
+        rows.append([
+            InlineKeyboardButton(
+                ui_language.tr("brain.back_backends"),
+                callback_data=f"bcfg:menu:{target}",
+            )
+        ])
         rows.append([InlineKeyboardButton(back_label(), callback_data="bcfg:menu:status")])
         return InlineKeyboardMarkup(rows)
 
     def _dual_brain_status_text(self, cfg) -> str:
-        memory_prompt = "default" if cfg.left_prompt == DEFAULT_LEFT_PROMPT else "custom"
-        notepad_prompt = "default" if cfg.after_action_prompt == DEFAULT_AFTER_ACTION_PROMPT else "custom"
+        memory_prompt = ui_language.tr(
+            "brain.prompt.default" if cfg.left_prompt == DEFAULT_LEFT_PROMPT else "brain.prompt.custom"
+        )
+        notepad_prompt = ui_language.tr(
+            "brain.prompt.default"
+            if cfg.after_action_prompt == DEFAULT_AFTER_ACTION_PROMPT
+            else "brain.prompt.custom"
+        )
         return setting_card(
             "🧠",
             "Dual-brain configuration",
             current=f"<b>{html.escape(str(self.backend_manager.agent_mode).upper())}</b>",
             facts=[
-                f"<b>Left brain</b> · <code>{html.escape(cfg.left_backend)} / {html.escape(cfg.left_model)}</code>",
-                f"<b>Right brain</b> · <code>{html.escape(cfg.right_backend)} / {html.escape(cfg.right_model)}</code>",
-                f"<b>Memory briefing prompt</b> · <code>{memory_prompt}</code>",
-                f"<b>Notepad update prompt</b> · <code>{notepad_prompt}</code>",
+                f"<b>{html.escape(ui_language.tr('brain.left'))}</b> · "
+                f"<code>{html.escape(cfg.left_backend)} / {html.escape(cfg.left_model)}</code>",
+                f"<b>{html.escape(ui_language.tr('brain.right'))}</b> · "
+                f"<code>{html.escape(cfg.right_backend)} / {html.escape(cfg.right_model)}</code>",
+                f"<b>{html.escape(ui_language.tr('brain.memory_prompt'))}</b> · "
+                f"<code>{memory_prompt}</code>",
+                f"<b>{html.escape(ui_language.tr('brain.notepad_prompt'))}</b> · "
+                f"<code>{notepad_prompt}</code>",
             ],
-            consequence="Left-brain memory work and right-brain execution remain separate; <code>/sys</code> applies to the right brain.",
-            action="Choose a brain or prompt page below. Advanced text control remains available through <code>/brain</code>.",
+            consequence=ui_language.tr("brain.status_effect"),
+            action=ui_language.tr("brain.status_action"),
         )
 
     def _dual_brain_model_text(self, cfg, *, target: str) -> str:
         backend = cfg.left_backend if target == "left" else cfg.right_backend
         model = cfg.left_model if target == "left" else cfg.right_model
-        label = "Left brain" if target == "left" else "Right brain"
+        label = ui_language.tr("brain.left" if target == "left" else "brain.right")
         return setting_card(
             "🧠",
-            f"{label} backend",
+            ui_language.tr("brain.backend_title", brain=label),
             current=f"<code>{html.escape(backend)} / {html.escape(model)}</code>",
-            facts=[f"<b>Target</b> · <code>{target}</code> brain"],
-            consequence="Choose a backend first; the next page shows its available HASHI models.",
-            action=f"Choose below or use <code>/brain {target} backend=&lt;backend&gt; model=&lt;model&gt;</code>.",
+            facts=[
+                f"<b>{html.escape(ui_language.tr('common.target'))}</b> · "
+                f"<code>{ui_language.tr('brain.target_value', target=label)}</code>"
+            ],
+            consequence=ui_language.tr("brain.backend_effect"),
+            action=ui_language.tr("brain.backend_action", target=target),
         )
 
     def _dual_brain_backend_model_text(self, cfg, *, target: str, backend: str) -> str:
         current_backend = cfg.left_backend if target == "left" else cfg.right_backend
         current_model = cfg.left_model if target == "left" else cfg.right_model
-        label = "Left brain" if target == "left" else "Right brain"
-        active = "current" if backend == current_backend else "not current"
+        label = ui_language.tr("brain.left" if target == "left" else "brain.right")
+        active = ui_language.tr(
+            "brain.state.current" if backend == current_backend else "brain.state.not_current"
+        )
         return setting_card(
             "🧠",
-            f"{label} model",
+            ui_language.tr("brain.model_title", brain=label),
             current=f"<code>{html.escape(current_backend)} / {html.escape(current_model)}</code>",
             facts=[
-                f"<b>Selected backend</b> · <code>{html.escape(backend)}</code>",
-                f"<b>Backend state</b> · <code>{active.upper()}</code>",
+                f"<b>{html.escape(ui_language.tr('brain.selected_backend'))}</b> · "
+                f"<code>{html.escape(backend)}</code>",
+                f"<b>{html.escape(ui_language.tr('brain.backend_state'))}</b> · "
+                f"<code>{active}</code>",
             ],
-            consequence="Choosing a model saves the backend and model together for this brain.",
-            action="Choose a model below.",
+            consequence=ui_language.tr("brain.model_effect"),
+            action=ui_language.tr("brain.model_action"),
         )
 
     def _dual_brain_prompts_text(self, cfg) -> str:
         def section(title: str, command_target: str, value: str) -> str:
-            text = value or "(empty)"
+            text = value or ui_language.tr("common.empty")
+            char_count = f"<code>{len(value or '')}</code>"
             max_chars = 1100
             if len(text) > max_chars:
                 text = (
                     text[:max_chars]
-                    + f"\n... [truncated; use /brain prompt {command_target} show for full text]"
+                    + "\n"
+                    + ui_language.tr("brain.prompt_truncated", target=command_target)
                 )
-            return f"<b>{title}</b> · <code>{len(value or '')}</code> chars\n<pre>{html.escape(text)}</pre>"
+            return (
+                f"<b>{title}</b> · "
+                f"{ui_language.tr('brain.prompt_chars', count=char_count)}\n"
+                f"<pre>{html.escape(text)}</pre>"
+            )
 
         return (
             f"{card_title('🧠', 'Dual-brain prompts')}\n\n"
-            "<b>Current</b> · memory briefing and notepad update prompts\n"
-            "<b>Scope</b> · left-brain pre-turn memory and post-turn continuity\n\n"
-            f"{section('Memory briefing prompt', 'memory', cfg.left_prompt)}\n\n"
-            f"{section('Notepad update prompt', 'notepad', cfg.after_action_prompt)}\n\n"
-            "<b>Use</b>\n"
-            "<code>/brain prompt memory &lt;text&gt;</code> · replace the briefing prompt\n"
-            "<code>/brain prompt notepad &lt;text&gt;</code> · replace the update prompt\n"
-            "<code>/brain prompt memory|notepad show|clear</code> · inspect or clear\n\n"
-            "Aliases <code>left</code> and <code>after</code> remain supported."
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            f"{ui_language.tr('brain.prompts_current')}\n"
+            f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+            f"{ui_language.tr('brain.prompts_scope')}\n\n"
+            f"{section(ui_language.tr('brain.memory_prompt'), 'memory', cfg.left_prompt)}\n\n"
+            f"{section(ui_language.tr('brain.notepad_prompt'), 'notepad', cfg.after_action_prompt)}\n\n"
+            f"<b>{html.escape(ui_language.tr('common.use'))}</b>\n"
+            f"<code>/brain prompt memory &lt;text&gt;</code> · {ui_language.tr('brain.use.memory')}\n"
+            f"<code>/brain prompt notepad &lt;text&gt;</code> · {ui_language.tr('brain.use.notepad')}\n"
+            f"<code>/brain prompt memory|notepad show|clear</code> · {ui_language.tr('brain.use.inspect')}\n\n"
+            f"{ui_language.tr('brain.aliases')}"
         )
 
     async def cmd_brain(self, update: Update, context: Any):
@@ -6773,7 +7425,10 @@ class FlexibleAgentRuntime:
             backend = values.get("backend") or (args[1] if len(args) > 1 and "=" not in args[1] else "")
             model = values.get("model") or (args[2] if len(args) > 2 and "=" not in args[2] else "")
             if not backend or not model:
-                await self._reply_text(update, f"Usage: /brain {action} backend=<backend> model=<model>")
+                await self._reply_text(
+                    update,
+                    ui_language.tr("brain.usage.model", side=action),
+                )
                 return
             backend = backend.strip().lower()
             model = self._normalize_wrapper_model(backend, model.strip())
@@ -6794,14 +7449,26 @@ class FlexibleAgentRuntime:
                     model=model,
                 )
                 if not switch_ok:
-                    await self._reply_text(update, f"Right brain saved but active backend switch failed: {switch_message}")
+                    await self._reply_text(
+                        update,
+                        ui_language.tr("brain.switch_failed", message=switch_message),
+                    )
                     return
-            await self._reply_text(update, f"{action.title()} brain model saved: `{backend}` / `{model}`", parse_mode="Markdown")
+            await self._reply_text(
+                update,
+                ui_language.tr(
+                    "brain.model_saved",
+                    side=ui_language.tr(f"brain.{action}"),
+                    backend=backend,
+                    model=model,
+                ),
+                parse_mode="Markdown",
+            )
             return
 
         if action == "prompt":
             if len(args) < 3:
-                await self._reply_text(update, "Usage: /brain prompt memory|notepad <text|show|clear>")
+                await self._reply_text(update, ui_language.tr("brain.usage.prompt"))
                 return
             target = args[1].lower()
             prompt_aliases = {
@@ -6815,7 +7482,10 @@ class FlexibleAgentRuntime:
             }
             key = prompt_aliases.get(target)
             if key is None:
-                await self._reply_text(update, "Prompt target must be memory or notepad. Use /sys for right-brain execution instructions.")
+                await self._reply_text(
+                    update,
+                    ui_language.tr("brain.prompt_target_invalid"),
+                )
                 return
             sub = args[2].lower()
             current = {
@@ -6823,7 +7493,11 @@ class FlexibleAgentRuntime:
                 "after_action": cfg.after_action_prompt,
             }[key]
             if sub == "show":
-                await self._reply_text(update, current or "(empty)", parse_mode=None)
+                await self._reply_text(
+                    update,
+                    current or ui_language.tr("brain.empty"),
+                    parse_mode=None,
+                )
                 return
             new_prompt = "" if sub == "clear" else " ".join(args[2:]).strip()
             block = dual_brain_block_with(
@@ -6832,12 +7506,19 @@ class FlexibleAgentRuntime:
                 after_action_prompt=new_prompt if key == "after_action" else None,
             )
             self.backend_manager.update_dual_brain_block(block)
-            await self._reply_text(update, f"Dual-brain {key} prompt updated ({len(new_prompt)} chars).")
+            await self._reply_text(
+                update,
+                ui_language.tr(
+                    "brain.prompt_updated",
+                    target=key,
+                    count=len(new_prompt),
+                ),
+            )
             return
 
         await self._reply_text(
             update,
-            "Usage: /brain [status|left backend=<backend> model=<model>|right backend=<backend> model=<model>|prompt memory|notepad <text|show|clear>]",
+            ui_language.tr("brain.usage.full"),
         )
 
     async def callback_audit_config(self, update: Update, context: Any):
@@ -6845,7 +7526,10 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(query.from_user.id):
             return
         if not self._is_audit_mode():
-            await query.answer("Audit controls require /mode audit.", show_alert=True)
+            await query.answer(
+                ui_language.tr("advanced.require_audit_controls"),
+                show_alert=True,
+            )
             return
 
         data = query.data or ""
@@ -6877,13 +7561,19 @@ class FlexibleAgentRuntime:
             elif data.startswith("acfg:coreid:") or data.startswith("acfg:auditid:"):
                 parts = data.split(":", 2)
                 if len(parts) != 3:
-                    await query.answer("Invalid model selection.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.invalid_model_selection"),
+                        show_alert=True,
+                    )
                     return
                 _, target_raw, choice_id = parts
                 target = "core" if target_raw == "coreid" else "audit"
                 choice = self._audit_choice_by_id(target, choice_id)
                 if choice is None:
-                    await query.answer("Unknown model choice.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.unknown_model_choice"),
+                        show_alert=True,
+                    )
                     return
                 _, _label, backend, model = choice
                 error = self._validate_wrapper_backend_model(backend, model)
@@ -6899,11 +7589,13 @@ class FlexibleAgentRuntime:
                     )
                     refreshed = load_audit_config(self.backend_manager.get_state_snapshot())
                     await query.edit_message_text(
-                        "Audit core updated:\n"
-                        f"• Backend: `{backend}`\n"
-                        f"• Model: `{model}`\n"
-                        f"• Active core: {'updated' if switch_ok else 'not changed'}\n"
-                        f"{switch_message}",
+                        self._advanced_core_updated_text(
+                            mode="audit",
+                            backend=backend,
+                            model=model,
+                            switch_ok=switch_ok,
+                            switch_message=switch_message,
+                        ),
                         parse_mode="Markdown",
                         reply_markup=self._audit_core_keyboard(refreshed),
                     )
@@ -6911,27 +7603,38 @@ class FlexibleAgentRuntime:
                     self.backend_manager.update_audit_blocks(audit=self._audit_block_with(cfg, backend=backend, model=model))
                     refreshed = load_audit_config(self.backend_manager.get_state_snapshot())
                     await query.edit_message_text(
-                        "Audit model updated:\n"
-                        f"• Backend: `{backend}`\n"
-                        f"• Model: `{model}`",
+                        ui_language.tr(
+                            "audit.model_updated",
+                            backend=backend,
+                            model=model,
+                        ),
                         parse_mode="Markdown",
                         reply_markup=self._audit_auditor_keyboard(refreshed),
                     )
             elif data.startswith("acfg:delivery:") or data.startswith("acfg:threshold:"):
                 parts = data.split(":", 2)
                 if len(parts) != 3:
-                    await query.answer("Invalid audit setting.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.invalid_audit_setting"),
+                        show_alert=True,
+                    )
                     return
                 _, setting, value = parts
                 value = value.strip().lower()
                 if setting == "delivery":
                     if value not in {"silent", "issues_only", "always"}:
-                        await query.answer("Invalid delivery.", show_alert=True)
+                        await query.answer(
+                            ui_language.tr("callback.invalid_delivery"),
+                            show_alert=True,
+                        )
                         return
                     self.backend_manager.update_audit_blocks(audit=self._audit_block_with(cfg, delivery=value))
                 else:
                     if value not in {"low", "medium", "high", "critical"}:
-                        await query.answer("Invalid threshold.", show_alert=True)
+                        await query.answer(
+                            ui_language.tr("callback.invalid_threshold"),
+                            show_alert=True,
+                        )
                         return
                     self.backend_manager.update_audit_blocks(audit=self._audit_block_with(cfg, severity_threshold=value))
                 refreshed_state = self.backend_manager.get_state_snapshot()
@@ -6947,7 +7650,10 @@ class FlexibleAgentRuntime:
             elif data.startswith("acfg:core:"):
                 parts = data.split(":", 3)
                 if len(parts) != 4:
-                    await query.answer("Invalid core selection.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.invalid_core_selection"),
+                        show_alert=True,
+                    )
                     return
                 _, _, backend, model = parts
                 backend = backend.strip().lower()
@@ -6964,20 +7670,28 @@ class FlexibleAgentRuntime:
                 )
                 refreshed = load_audit_config(self.backend_manager.get_state_snapshot())
                 await query.edit_message_text(
-                    "Audit core updated:\n"
-                    f"• Backend: `{backend}`\n"
-                    f"• Model: `{model}`\n"
-                    f"• Active core: {'updated' if switch_ok else 'not changed'}\n"
-                    f"{switch_message}",
+                    self._advanced_core_updated_text(
+                        mode="audit",
+                        backend=backend,
+                        model=model,
+                        switch_ok=switch_ok,
+                        switch_message=switch_message,
+                    ),
                     parse_mode="Markdown",
                     reply_markup=self._audit_core_keyboard(refreshed),
                 )
             else:
-                await query.answer("Unknown audit control.", show_alert=True)
+                await query.answer(
+                    ui_language.tr("callback.unknown_audit_control"),
+                    show_alert=True,
+                )
                 return
         except Exception as e:
             self.error_logger.error(f"callback_audit_config error: {e}", exc_info=True)
-            await query.answer(f"Error: {e}", show_alert=True)
+            await query.answer(
+                ui_language.tr("callback.error", reason=e),
+                show_alert=True,
+            )
             return
         await query.answer()
 
@@ -7017,18 +7731,33 @@ class FlexibleAgentRuntime:
             elif data.startswith("bcfg:backend:"):
                 parts = data.split(":", 3)
                 if len(parts) != 4:
-                    await query.answer("Invalid backend selection.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.invalid_backend_selection"),
+                        show_alert=True,
+                    )
                     return
                 _, _, target, backend = parts
                 if target not in {"left", "right"}:
-                    await query.answer("Invalid brain target.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.invalid_brain_target"),
+                        show_alert=True,
+                    )
                     return
                 backend = backend.strip()
                 if not self._allowed_wrapper_engine(backend):
-                    await query.answer(f"Backend not allowed: {backend}", show_alert=True)
+                    await query.answer(
+                        ui_language.tr(
+                            "callback.backend_not_allowed",
+                            backend=backend,
+                        ),
+                        show_alert=True,
+                    )
                     return
                 if not self._get_available_models_for(backend):
-                    await query.answer(f"No registered models for {backend}.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.no_models", backend=backend),
+                        show_alert=True,
+                    )
                     return
                 await query.edit_message_text(
                     self._dual_brain_backend_model_text(cfg, target=target, backend=backend),
@@ -7038,17 +7767,26 @@ class FlexibleAgentRuntime:
             elif data.startswith("bcfg:modelidx:"):
                 parts = data.split(":", 4)
                 if len(parts) != 5:
-                    await query.answer("Invalid model selection.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.invalid_model_selection"),
+                        show_alert=True,
+                    )
                     return
                 _, _, target, backend, raw_index = parts
                 if target not in {"left", "right"}:
-                    await query.answer("Invalid brain target.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.invalid_brain_target"),
+                        show_alert=True,
+                    )
                     return
                 models = self._get_available_models_for(backend)
                 try:
                     model = models[int(raw_index)]
                 except (ValueError, IndexError):
-                    await query.answer("Unknown model choice.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.unknown_model_choice"),
+                        show_alert=True,
+                    )
                     return
                 error = self._validate_wrapper_backend_model(backend, model)
                 if error:
@@ -7067,7 +7805,13 @@ class FlexibleAgentRuntime:
                         model=model,
                     )
                     if not switch_ok:
-                        await query.answer(f"Saved, but switch failed: {switch_message}", show_alert=True)
+                        await query.answer(
+                            ui_language.tr(
+                                "callback.saved_switch_failed",
+                                message=switch_message,
+                            ),
+                            show_alert=True,
+                        )
                 refreshed = self._dual_brain_config()
                 await query.edit_message_text(
                     self._dual_brain_backend_model_text(refreshed, target=target, backend=backend),
@@ -7075,11 +7819,17 @@ class FlexibleAgentRuntime:
                     reply_markup=self._dual_brain_model_keyboard(refreshed, target=target, backend=backend),
                 )
             else:
-                await query.answer("Unknown dual-brain control.", show_alert=True)
+                await query.answer(
+                    ui_language.tr("callback.unknown_brain_control"),
+                    show_alert=True,
+                )
                 return
         except Exception as e:
             self.error_logger.error(f"callback_brain_config error: {e}", exc_info=True)
-            await query.answer(f"Error: {e}", show_alert=True)
+            await query.answer(
+                ui_language.tr("callback.error", reason=e),
+                show_alert=True,
+            )
             return
         await query.answer()
 
@@ -7088,7 +7838,10 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(query.from_user.id):
             return
         if not self._is_wrapper_mode():
-            await query.answer("Wrapper controls require /mode wrapper.", show_alert=True)
+            await query.answer(
+                ui_language.tr("advanced.require_wrapper_controls"),
+                show_alert=True,
+            )
             return
 
         data = query.data or ""
@@ -7120,7 +7873,10 @@ class FlexibleAgentRuntime:
             elif data.startswith("wcfg:core:"):
                 parts = data.split(":", 3)
                 if len(parts) != 4:
-                    await query.answer("Invalid core selection.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.invalid_core_selection"),
+                        show_alert=True,
+                    )
                     return
                 _, _, backend, model = parts
                 backend = backend.strip().lower()
@@ -7137,18 +7893,23 @@ class FlexibleAgentRuntime:
                 )
                 refreshed = load_wrapper_config(self.backend_manager.get_state_snapshot())
                 await query.edit_message_text(
-                    "Wrapper core updated:\n"
-                    f"• Backend: `{backend}`\n"
-                    f"• Model: `{model}`\n"
-                    f"• Active core: {'updated' if switch_ok else 'not changed'}\n"
-                    f"{switch_message}",
+                    self._advanced_core_updated_text(
+                        mode="wrapper",
+                        backend=backend,
+                        model=model,
+                        switch_ok=switch_ok,
+                        switch_message=switch_message,
+                    ),
                     parse_mode="Markdown",
                     reply_markup=self._wrapper_core_keyboard(refreshed),
                 )
             elif data.startswith("wcfg:wrap:"):
                 parts = data.split(":", 4)
                 if len(parts) != 5:
-                    await query.answer("Invalid wrapper selection.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.invalid_wrapper_selection"),
+                        show_alert=True,
+                    )
                     return
                 _, _, backend, model, context_value = parts
                 backend = backend.strip().lower()
@@ -7160,7 +7921,10 @@ class FlexibleAgentRuntime:
                 try:
                     context_window = max(0, min(int(context_value), 20))
                 except ValueError:
-                    await query.answer("Context window must be an integer.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("advanced.context_integer"),
+                        show_alert=True,
+                    )
                     return
                 self.backend_manager.update_wrapper_blocks(
                     wrapper={
@@ -7172,23 +7936,30 @@ class FlexibleAgentRuntime:
                 )
                 refreshed = load_wrapper_config(self.backend_manager.get_state_snapshot())
                 await query.edit_message_text(
-                    "Wrapper translator updated:\n"
-                    f"• Backend: `{backend}`\n"
-                    f"• Model: `{model}`\n"
-                    f"• Context window: `{context_window}`\n"
-                    f"• Fallback: `{cfg.fallback}`",
+                    self._wrapper_translator_updated_text(
+                        backend=backend,
+                        model=model,
+                        context_window=context_window,
+                        fallback=cfg.fallback,
+                    ),
                     parse_mode="Markdown",
                     reply_markup=self._wrapper_wrap_keyboard(refreshed),
                 )
             elif data.startswith("wcfg:wrapid:"):
                 parts = data.split(":", 3)
                 if len(parts) != 4:
-                    await query.answer("Invalid wrapper selection.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.invalid_wrapper_selection"),
+                        show_alert=True,
+                    )
                     return
                 _, _, choice_id, context_value = parts
                 choice = self._wrapper_model_choice(choice_id)
                 if choice is None:
-                    await query.answer("Unknown wrapper choice.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.unknown_wrapper_choice"),
+                        show_alert=True,
+                    )
                     return
                 _, _label, backend, model = choice
                 error = self._validate_wrapper_backend_model(backend, model)
@@ -7198,7 +7969,10 @@ class FlexibleAgentRuntime:
                 try:
                     context_window = max(0, min(int(context_value), 20))
                 except ValueError:
-                    await query.answer("Context window must be an integer.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("advanced.context_integer"),
+                        show_alert=True,
+                    )
                     return
                 self.backend_manager.update_wrapper_blocks(
                     wrapper={
@@ -7210,23 +7984,30 @@ class FlexibleAgentRuntime:
                 )
                 refreshed = load_wrapper_config(self.backend_manager.get_state_snapshot())
                 await query.edit_message_text(
-                    "Wrapper translator updated:\n"
-                    f"• Backend: `{backend}`\n"
-                    f"• Model: `{model}`\n"
-                    f"• Context window: `{context_window}`\n"
-                    f"• Fallback: `{cfg.fallback}`",
+                    self._wrapper_translator_updated_text(
+                        backend=backend,
+                        model=model,
+                        context_window=context_window,
+                        fallback=cfg.fallback,
+                    ),
                     parse_mode="Markdown",
                     reply_markup=self._wrapper_wrap_keyboard(refreshed),
                 )
             elif data.startswith("wcfg:wrapctx:"):
                 parts = data.split(":", 2)
                 if len(parts) != 3:
-                    await query.answer("Invalid context selection.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("callback.invalid_context_selection"),
+                        show_alert=True,
+                    )
                     return
                 try:
                     context_window = max(0, min(int(parts[2]), 20))
                 except ValueError:
-                    await query.answer("Context window must be an integer.", show_alert=True)
+                    await query.answer(
+                        ui_language.tr("advanced.context_integer"),
+                        show_alert=True,
+                    )
                     return
                 self.backend_manager.update_wrapper_blocks(
                     wrapper={
@@ -7238,20 +8019,27 @@ class FlexibleAgentRuntime:
                 )
                 refreshed = load_wrapper_config(self.backend_manager.get_state_snapshot())
                 await query.edit_message_text(
-                    "Wrapper translator updated:\n"
-                    f"• Backend: `{refreshed.wrapper_backend}`\n"
-                    f"• Model: `{refreshed.wrapper_model}`\n"
-                    f"• Context window: `{context_window}`\n"
-                    f"• Fallback: `{refreshed.fallback}`",
+                    self._wrapper_translator_updated_text(
+                        backend=refreshed.wrapper_backend,
+                        model=refreshed.wrapper_model,
+                        context_window=context_window,
+                        fallback=refreshed.fallback,
+                    ),
                     parse_mode="Markdown",
                     reply_markup=self._wrapper_wrap_keyboard(refreshed),
                 )
             else:
-                await query.answer("Unknown wrapper control.", show_alert=True)
+                await query.answer(
+                    ui_language.tr("callback.unknown_wrapper_control"),
+                    show_alert=True,
+                )
                 return
         except Exception as e:
             self.error_logger.error(f"callback_wrapper_config error: {e}", exc_info=True)
-            await query.answer(f"Error: {e}", show_alert=True)
+            await query.answer(
+                ui_language.tr("callback.error", reason=e),
+                show_alert=True,
+            )
             return
         await query.answer()
 
@@ -7352,7 +8140,9 @@ class FlexibleAgentRuntime:
             text, markup = self._notepad_view_payload(workspace)
             await self._reply_text(
                 update,
-                "✅ Memory+ card compacted and de-duplicated.\n\n" + text,
+                ui_language.tr("notepad.notice.compacted_full")
+                + "\n\n"
+                + text,
                 parse_mode="HTML",
                 reply_markup=markup,
             )
@@ -7371,7 +8161,9 @@ class FlexibleAgentRuntime:
             path = append_memory_plus_manual_note(workspace, text)
             await self._reply_text(
                 update,
-                f"✅ Memory+ notepad updated.\nPath: <code>{html.escape(str(path))}</code>",
+                ui_language.tr(
+                    "notepad.notice.updated", path=html.escape(str(path))
+                ),
                 parse_mode="HTML",
                 reply_markup=self._notepad_keyboard(),
             )
@@ -7390,7 +8182,9 @@ class FlexibleAgentRuntime:
             path = replace_memory_plus_notepad(workspace, text)
             await self._reply_text(
                 update,
-                f"✅ Memory+ notepad replaced.\nPath: <code>{html.escape(str(path))}</code>",
+                ui_language.tr(
+                    "notepad.notice.replaced", path=html.escape(str(path))
+                ),
                 parse_mode="HTML",
                 reply_markup=self._notepad_keyboard(),
             )
@@ -7400,7 +8194,10 @@ class FlexibleAgentRuntime:
             path = clear_memory_plus_notepad(workspace)
             await self._reply_text(
                 update,
-                f"🧹 Memory+ notepad cleared for today.\nPath: <code>{html.escape(str(path))}</code>",
+                ui_language.tr(
+                    "notepad.notice.cleared_today",
+                    path=html.escape(str(path)),
+                ),
                 parse_mode="HTML",
                 reply_markup=self._notepad_keyboard(),
             )
@@ -7417,20 +8214,44 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("Today", callback_data="npad:refresh"),
-                    InlineKeyboardButton("Carryover", callback_data="npad:carryover"),
+                    InlineKeyboardButton(
+                        ui_language.tr("notepad.button.today"),
+                        callback_data="npad:refresh",
+                    ),
+                    InlineKeyboardButton(
+                        ui_language.tr("notepad.button.carryover"),
+                        callback_data="npad:carryover",
+                    ),
                 ],
                 [
-                    InlineKeyboardButton("History", callback_data="npad:history"),
-                    InlineKeyboardButton("Find", callback_data="npad:help_find"),
+                    InlineKeyboardButton(
+                        ui_language.tr("notepad.button.history"),
+                        callback_data="npad:history",
+                    ),
+                    InlineKeyboardButton(
+                        ui_language.tr("notepad.button.find"),
+                        callback_data="npad:help_find",
+                    ),
                 ],
                 [
-                    InlineKeyboardButton("Add note", callback_data="npad:help_edit"),
-                    InlineKeyboardButton("Compact", callback_data="npad:compact"),
+                    InlineKeyboardButton(
+                        ui_language.tr("notepad.button.add"),
+                        callback_data="npad:help_edit",
+                    ),
+                    InlineKeyboardButton(
+                        ui_language.tr("notepad.button.compact"),
+                        callback_data="npad:compact",
+                    ),
                 ],
                 [
-                    InlineKeyboardButton("Replace today", callback_data="npad:help_replace"),
-                    InlineKeyboardButton("Clear today", callback_data="npad:clear_confirm"),
+                    InlineKeyboardButton(
+                        ui_language.tr("notepad.button.replace"),
+                        callback_data="npad:help_replace",
+                    ),
+                    InlineKeyboardButton(
+                        ui_language.tr("notepad.button.clear"),
+                        callback_data="npad:clear_confirm",
+                    ),
                 ],
             ]
         )
@@ -7441,8 +8262,18 @@ class FlexibleAgentRuntime:
     def _notepad_clear_confirm_keyboard(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("Clear today's notepad", callback_data="npad:clear_now")],
-                [InlineKeyboardButton("← Keep notepad", callback_data="npad:refresh")],
+                [
+                    InlineKeyboardButton(
+                        ui_language.tr("notepad.button.clear_confirm"),
+                        callback_data="npad:clear_now",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        ui_language.tr("notepad.button.keep"),
+                        callback_data="npad:refresh",
+                    )
+                ],
             ]
         )
 
@@ -7461,38 +8292,57 @@ class FlexibleAgentRuntime:
         status["enabled"] = is_memory_plus_enabled(self.workspace_dir)
         body = view.body.strip()
         if not body:
-            body = "(empty)"
+            body = ui_language.tr("common.empty")
         max_body_chars = 2400
         truncated = len(body) > max_body_chars
         if truncated:
-            body = body[:max_body_chars].rstrip() + "\n[clipped]"
+            body = (
+                body[:max_body_chars].rstrip()
+                + "\n["
+                + ui_language.tr("menu.skill.truncated")
+                + "]"
+            )
         header = [
             card_title("📝", "Memory+ today"),
             "",
-            f"<b>Current</b> · <code>{'EMPTY' if view.is_empty else 'ACTIVE'}</code>",
-            f"<b>Continuity</b> · <code>{'ON' if status['enabled'] else 'OFF'}</code>",
-            f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
-            f"<b>Date</b> · <code>{html.escape(view.date or 'unknown')}</code>",
-            f"<b>Size</b> · <code>{view.today_chars}</code> chars",
-            f"<b>Open items</b> · <code>{view.open_items_count}</code>",
-            f"<b>History</b> · <code>{view.history_count}</code> days",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            f"<code>{html.escape(ui_language.tr('notepad.state.empty' if view.is_empty else 'notepad.state.active'))}</code>",
+            f"<b>{html.escape(ui_language.tr('notepad.continuity'))}</b> · "
+            f"<code>{html.escape(ui_language.tr('common.on' if status['enabled'] else 'common.off'))}</code>",
+            f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · "
+            f"<code>{html.escape(self.name)}</code>",
+            f"<b>{html.escape(ui_language.tr('notepad.date'))}</b> · "
+            f"<code>{html.escape(view.date or ui_language.tr('common.unknown'))}</code>",
+            f"<b>{html.escape(ui_language.tr('common.size'))}</b> · "
+            f"<code>{view.today_chars}</code> "
+            f"{html.escape(ui_language.tr('status.chars'))}",
+            f"<b>{html.escape(ui_language.tr('notepad.open_items'))}</b> · "
+            f"<code>{view.open_items_count}</code>",
+            f"<b>{html.escape(ui_language.tr('notepad.history'))}</b> · "
+            f"<code>{view.history_count}</code> "
+            f"{html.escape(ui_language.tr('notepad.days'))}",
             "",
-            "This compact card is read-only background, not a queue of instructions.",
+            ui_language.tr("notepad.background"),
         ]
         if truncated:
-            header.append(f"• Showing first <code>{max_body_chars}</code> chars")
+            header.append(
+                ui_language.tr("notepad.clipped", count=max_body_chars)
+            )
         return "\n".join(header) + "\n\n<pre>" + html.escape(body) + "</pre>", self._notepad_keyboard()
 
     def _notepad_carryover_payload(
         self, workspace: Path | None = None
     ) -> tuple[str, InlineKeyboardMarkup]:
         view = read_memory_plus_notepad(workspace or self._notepad_workspace())
-        body = view.carryover.strip() or "(none)"
+        empty_value = ui_language.tr("notepad.none")
+        body = view.carryover.strip() or empty_value
         return (
             f"{card_title('🌙', 'Memory+ carryover')}\n\n"
-            f"<b>Current</b> · <code>{'EMPTY' if body == '(none)' else 'AVAILABLE'}</code>\n"
-            f"<b>Agent</b> · <code>{html.escape(self.name)}</code>\n"
-            "Only a high-level previous-work passage is carried across midnight.\n\n"
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            f"<code>{html.escape(ui_language.tr('notepad.state.empty' if body == empty_value else 'common.available'))}</code>\n"
+            f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · "
+            f"<code>{html.escape(self.name)}</code>\n"
+            f"{ui_language.tr('notepad.carryover_effect')}\n\n"
             f"<pre>{html.escape(body)}</pre>",
             self._notepad_keyboard(),
         )
@@ -7506,18 +8356,22 @@ class FlexibleAgentRuntime:
         lines = [
             card_title("🗂️", "Memory+ history"),
             "",
-            f"<b>Current</b> · <code>{len(rows)}</code> archived days",
-            f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            + ui_language.tr(
+                "notepad.archived_days", count=f"<code>{len(rows)}</code>"
+            ),
+            f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · "
+            f"<code>{html.escape(self.name)}</code>",
             "",
-            "History is indexed by date. Full archives are loaded only when requested.",
+            ui_language.tr("notepad.history_effect"),
             "",
         ]
         if not rows:
-            lines.append("(no archived days)")
+            lines.append(ui_language.tr("notepad.no_archives"))
         for row in rows:
             summary = " · ".join(str(item) for item in (row.get("summary") or [])[:2])
             lines.append(
-                f"• <code>{html.escape(str(row.get('date') or 'unknown'))}</code>"
+                f"• <code>{html.escape(str(row.get('date') or ui_language.tr('common.unknown')))}</code>"
                 + (f" · {html.escape(summary)}" if summary else "")
             )
             if row.get("archive"):
@@ -7533,12 +8387,16 @@ class FlexibleAgentRuntime:
         lines = [
             card_title("🔎", "Find continuity"),
             "",
-            f"<b>Current</b> · <code>{len(rows)}</code> matches",
-            f"<b>Query</b> · <code>{html.escape(query_text)}</code>",
+            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+            + ui_language.tr(
+                "notepad.matches", count=f"<code>{len(rows)}</code>"
+            ),
+            f"<b>{html.escape(ui_language.tr('common.query'))}</b> · "
+            f"<code>{html.escape(query_text)}</code>",
             "",
         ]
         if not rows:
-            lines.append("No matching archived continuity was found.")
+            lines.append(ui_language.tr("notepad.no_matches"))
         for row in rows:
             lines.extend(
                 [
@@ -7553,41 +8411,45 @@ class FlexibleAgentRuntime:
         if action == "edit":
             return (
                 f"{card_title('📝', 'Add notepad note')}\n\n"
-                "<b>Current</b> · <b>READY</b>\n\n"
-                "This appends to today's Memory+ notepad without replacing automatic notes.\n\n"
-                "<b>Example</b>\n"
-                "<code>/notepad edit Dad prefers short operational summaries.</code>\n\n"
-                "Use the Back button to return without changing the notepad."
+                f"<b>{ui_language.tr('common.current')}</b> · "
+                f"<b>{ui_language.tr('common.ready')}</b>\n\n"
+                f"{ui_language.tr('notepad.help.edit')}\n\n"
+                f"<b>{ui_language.tr('common.example')}</b>\n"
+                f"<code>{html.escape(ui_language.tr('notepad.help.edit_example'))}</code>\n\n"
+                f"{ui_language.tr('notepad.help.back_unchanged')}"
             )
         if action == "replace":
             return (
                 f"{card_title('📝', 'Replace notepad')}\n\n"
-                "<b>Current</b> · <b>READY</b>\n\n"
-                "This replaces today's continuity body, so use it when the current notepad is wrong or noisy.\n\n"
-                "<b>Example</b>\n"
-                "<code>/notepad replace - Manual: Dad prefers jasmine rice and avoids eggplant.</code>\n\n"
-                "Use the Back button to return without changing the notepad."
+                f"<b>{ui_language.tr('common.current')}</b> · "
+                f"<b>{ui_language.tr('common.ready')}</b>\n\n"
+                f"{ui_language.tr('notepad.help.replace')}\n\n"
+                f"<b>{ui_language.tr('common.example')}</b>\n"
+                f"<code>{html.escape(ui_language.tr('notepad.help.replace_example'))}</code>\n\n"
+                f"{ui_language.tr('notepad.help.back_unchanged')}"
             )
         if action == "find":
             return (
                 f"{card_title('🔎', 'Find continuity')}\n\n"
-                "<b>Current</b> · <b>READY</b>\n\n"
-                "Only matching daily checkpoints are returned; full history is not injected.\n\n"
-                "<b>Example</b>\n"
-                "<code>/notepad find backend effort menu</code>\n\n"
-                "Use the Back button to return without searching."
+                f"<b>{ui_language.tr('common.current')}</b> · "
+                f"<b>{ui_language.tr('common.ready')}</b>\n\n"
+                f"{ui_language.tr('notepad.help.find')}\n\n"
+                f"<b>{ui_language.tr('common.example')}</b>\n"
+                f"<code>{html.escape(ui_language.tr('notepad.help.find_example'))}</code>\n\n"
+                f"{ui_language.tr('notepad.help.back_search')}"
             )
         return (
             f"{card_title('📝', 'Memory+ notepad controls')}\n\n"
-            "<b>Current</b> · <b>READY</b>\n\n"
-            "<code>/notepad today</code> · current compact work card\n"
-            "<code>/notepad carryover</code> · previous-day handover\n"
-            "<code>/notepad history</code> · archived-day index\n"
-            "<code>/notepad find &lt;text&gt;</code> · search archived checkpoints\n"
-            "<code>/notepad edit &lt;text&gt;</code> · append a manual note\n"
-            "<code>/notepad replace &lt;text&gt;</code> · replace today's body\n"
-            "<code>/notepad compact</code> · de-duplicate and enforce limits\n"
-            "<code>/notepad clear</code> · clear today's body"
+            f"<b>{ui_language.tr('common.current')}</b> · "
+            f"<b>{ui_language.tr('common.ready')}</b>\n\n"
+            f"<code>/notepad today</code> · {ui_language.tr('notepad.menu.today')}\n"
+            f"<code>/notepad carryover</code> · {ui_language.tr('notepad.menu.carryover')}\n"
+            f"<code>/notepad history</code> · {ui_language.tr('notepad.menu.history')}\n"
+            f"<code>/notepad find &lt;text&gt;</code> · {ui_language.tr('notepad.menu.find')}\n"
+            f"<code>/notepad edit &lt;text&gt;</code> · {ui_language.tr('notepad.menu.edit')}\n"
+            f"<code>/notepad replace &lt;text&gt;</code> · {ui_language.tr('notepad.menu.replace')}\n"
+            f"<code>/notepad compact</code> · {ui_language.tr('notepad.menu.compact')}\n"
+            f"<code>/notepad clear</code> · {ui_language.tr('notepad.menu.clear')}"
         )
 
     def _notepad_command_tail(self, update: Update, context: Any, action: str) -> str:
@@ -7621,7 +8483,7 @@ class FlexibleAgentRuntime:
             compact_memory_plus(workspace)
             text, markup = self._notepad_view_payload(workspace)
             await query.edit_message_text(
-                "✅ Compacted.\n\n" + text,
+                ui_language.tr("notepad.notice.compacted") + "\n\n" + text,
                 parse_mode="HTML",
                 reply_markup=markup,
             )
@@ -7633,7 +8495,7 @@ class FlexibleAgentRuntime:
             self.reload_post_turn_observers()
             text, markup = self._notepad_view_payload(workspace)
             await query.edit_message_text(
-                "✅ Memory+ continuity enabled.\n\n" + text,
+                ui_language.tr("notepad.notice.enabled") + "\n\n" + text,
                 parse_mode="HTML",
                 reply_markup=markup,
             )
@@ -7642,7 +8504,7 @@ class FlexibleAgentRuntime:
             self.reload_post_turn_observers()
             text, markup = self._notepad_view_payload(workspace)
             await query.edit_message_text(
-                "⏸️ Memory+ continuity paused; all files were preserved.\n\n" + text,
+                ui_language.tr("notepad.notice.paused") + "\n\n" + text,
                 parse_mode="HTML",
                 reply_markup=markup,
             )
@@ -7669,8 +8531,11 @@ class FlexibleAgentRuntime:
                 confirm_card(
                     "⚠️",
                     "Clear notepad",
-                    target=f"<code>{html.escape(self.name)}</code> · today",
-                    consequence="This removes today's Memory+ context layer for this agent.",
+                    target=ui_language.tr(
+                        "notepad.clear.target",
+                        agent=f"<code>{html.escape(self.name)}</code>",
+                    ),
+                    consequence=ui_language.tr("notepad.clear.effect"),
                 ),
                 parse_mode="HTML",
                 reply_markup=self._notepad_clear_confirm_keyboard(),
@@ -7678,9 +8543,15 @@ class FlexibleAgentRuntime:
         elif action == "clear_now":
             clear_memory_plus_notepad(workspace)
             text, markup = self._notepad_view_payload(workspace)
-            await query.edit_message_text("🧹 Cleared.\n\n" + text, parse_mode="HTML", reply_markup=markup)
+            await query.edit_message_text(
+                ui_language.tr("notepad.notice.cleared") + "\n\n" + text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
         else:
-            await query.answer("Unknown notepad action.", show_alert=True)
+            await query.answer(
+                ui_language.tr("notepad.error.unknown"), show_alert=True
+            )
             return
         await query.answer()
 
@@ -8982,7 +9853,10 @@ class FlexibleAgentRuntime:
                 )
                 _elapsed, chunk_count = await self.send_long_message(
                     item.chat_id,
-                    f"⚠️ Background task [{item.summary}] was cancelled before completing.",
+                    ui_language.tr(
+                        "background.cancelled",
+                        summary=item.summary,
+                    ),
                     request_id=item.request_id,
                     purpose="bg-cancelled",
                 )
@@ -9019,7 +9893,11 @@ class FlexibleAgentRuntime:
                 )
                 _elapsed, chunk_count = await self.send_long_message(
                     item.chat_id,
-                    f"⚠️ Background task error ({self.config.active_backend}): {exc}",
+                    ui_language.tr(
+                        "background.error",
+                        backend=self.config.active_backend,
+                        error=exc,
+                    ),
                     request_id=item.request_id,
                     purpose="bg-error",
                 )
@@ -9302,10 +10180,19 @@ class FlexibleAgentRuntime:
                     self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     return
                 self.error_logger.error(f"Background task {item.request_id} failed: {err_msg}")
-                clipped = err_msg if len(err_msg) <= 3000 else err_msg[:2800].rstrip() + "\n\n[truncated]"
+                clipped = (
+                    err_msg
+                    if len(err_msg) <= 3000
+                    else err_msg[:2800].rstrip()
+                    + f"\n\n[{ui_language.tr('error.truncated')}]"
+                )
                 _elapsed, chunk_count = await self.send_long_message(
                     item.chat_id,
-                    f"⚠️ Background task error ({self.config.active_backend}): {clipped}",
+                    ui_language.tr(
+                        "background.error",
+                        backend=self.config.active_backend,
+                        error=clipped,
+                    ),
                     request_id=item.request_id,
                     purpose="bg-error",
                 )

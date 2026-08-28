@@ -6,7 +6,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
-from orchestrator import runtime_pending, runtime_retry, runtime_session
+from orchestrator import runtime_pending, runtime_retry, runtime_session, ui_language
 
 _STEER_CMD_RE = re.compile(r"^/steer(?:@\w+)?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 
@@ -388,10 +388,12 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
         )
         await runtime._reply_text(
             update,
-            f"No active request belongs to this Session. Cleared {dropped} queued "
-            "message(s); work in the other Session continues."
+            ui_language.tr("control.stop.other_session", count=dropped)
             + (
-                f" Preserved {delayed_preserved} delayed message(s); use /recall to cancel them."
+                ui_language.tr(
+                    "control.stop.delayed_preserved",
+                    count=delayed_preserved,
+                )
                 if delayed_preserved
                 else ""
             ),
@@ -435,19 +437,22 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     )
 
     continuation_note = (
-        " The unfinished task was saved; send “continue” or “继续” to resume it."
+        ui_language.tr("control.stop.continuation_saved")
         if interrupted_task is not None
         else ""
     )
     await runtime._reply_text(
         update,
         (
-            f"Stopped execution. Cleared {dropped} queued messages and killed active backend process tree."
+            ui_language.tr("control.stop.stopped", count=dropped)
             if busy
-            else f"Cleared {dropped} queued messages in this Session; no request was running."
+            else ui_language.tr("control.stop.cleared_idle", count=dropped)
         )
         + (
-            f" Preserved {delayed_preserved} delayed message(s); use /recall to cancel them."
+            ui_language.tr(
+                "control.stop.delayed_preserved",
+                count=delayed_preserved,
+            )
             if delayed_preserved
             else ""
         )
@@ -999,7 +1004,7 @@ async def cmd_resend(runtime: Any, update: Any, context: Any) -> None:
         session_id=_command_session_id(runtime, update),
     )
     if snapshot is None:
-        await _reply(runtime, update, "Nothing to resend — no previous model or Bridge output was found.")
+        await _reply(runtime, update, ui_language.tr("control.resend_none"))
         return
     await runtime.send_long_message(
         chat_id=update.effective_chat.id,
@@ -1021,9 +1026,9 @@ async def callback_retry_toggle(runtime: Any, query: Any, value: str) -> None:
             session_id=_command_session_id(runtime, update),
         )
         if snapshot is None:
-            await query.answer("Nothing to resend.", show_alert=True)
+            await query.answer(ui_language.tr("control.resend_none_short"), show_alert=True)
             return
-        await query.answer("Resending previous output...")
+        await query.answer(ui_language.tr("control.resending"))
         await runtime.send_long_message(
             chat_id=chat_id,
             text=snapshot.text,
@@ -1033,9 +1038,9 @@ async def callback_retry_toggle(runtime: Any, query: Any, value: str) -> None:
         return
 
     if value not in {"prompt", "req", "request"}:
-        await query.answer("This old retry menu is no longer supported.", show_alert=True)
+        await query.answer(ui_language.tr("control.retry_retired"), show_alert=True)
         return
-    await query.answer("Starting recovery retry...")
+    await query.answer(ui_language.tr("control.retry_starting"))
     update = SimpleNamespace(
         effective_user=query.from_user,
         effective_chat=SimpleNamespace(id=chat_id),

@@ -88,6 +88,12 @@ def build_media_prompt(
     return f'User sent a file "{filename}" (saved at {{local_path}}). Read it if possible and respond.', filename
 
 
+def _media_kind_label(media_kind: str) -> str:
+    key = f"safevoice.kind.{str(media_kind or '').strip().casefold()}"
+    translated = ui_language.tr(key)
+    return str(media_kind or "").strip().lower() if translated == key else translated
+
+
 def _log_warning(runtime: Any, message: str) -> None:
     logger = getattr(runtime, "logger", None)
     warning = getattr(logger, "warning", None)
@@ -322,7 +328,10 @@ async def handle_media_message(
         return
     backend = getattr(runtime.backend_manager, "current_backend", None)
     if backend and not _backend_accepts_media_bridge(backend, media_kind, filename):
-        await runtime._reply_text(update, f"Current backend does not support {media_kind.lower()} attachments yet.")
+        await runtime._reply_text(
+            update,
+            ui_language.tr("media.unsupported", kind=_media_kind_label(media_kind)),
+        )
         return
     _print_user_message(runtime.name, summary, media_tag=media_kind)
     chat_id = update.effective_chat.id
@@ -367,7 +376,10 @@ async def handle_media_message(
             runtime_long.discard_media_reservation(runtime, reservation_id)
         runtime.error_logger.exception(f"{media_kind} handler failed for '{filename}': {e}")
         try:
-            await runtime._reply_text(update, f"Failed to process {media_kind.lower()} message.")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("media.failed", kind=_media_kind_label(media_kind)),
+            )
         except Exception:
             pass
 
@@ -843,7 +855,7 @@ async def handle_voice_or_audio(
                 )
                 await runtime._reply_text(
                     update,
-                    "Local voice transcription is unavailable; the native audio response will continue.",
+                    ui_language.tr("media.local_transcription_unavailable"),
                 )
                 store = getattr(runtime, "session_store", None)
                 recorder = getattr(store, "record_voice_transcript", None)
@@ -988,7 +1000,10 @@ async def handle_voice_or_audio(
     except Exception as e:
         runtime.error_logger.exception(f"{media_kind} voice handler failed for '{filename}': {e}")
         try:
-            await runtime._reply_text(update, f"Failed to process {media_kind.lower()} message.")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("media.failed", kind=_media_kind_label(media_kind)),
+            )
         except Exception:
             pass
 

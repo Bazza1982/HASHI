@@ -419,22 +419,39 @@ def _add(acc: dict, record: dict) -> None:
     acc["requests"] += 1
 
 
-def format_summary_text(summary: dict, agent_name: str = "") -> str:
+def format_summary_text(
+    summary: dict,
+    agent_name: str = "",
+    *,
+    labels: dict[str, str] | None = None,
+) -> str:
     """Format usage summary as human-readable text for /usage command."""
-    lines = [f"<b>📊 Token Usage{' — ' + agent_name if agent_name else ''}</b>"]
+    labels = labels or {}
 
-    def fmt_block(label: str, data: dict) -> str:
+    def label(key: str, fallback: str) -> str:
+        return str(labels.get(key) or fallback)
+
+    title = label("title", "📊 Token Usage")
+    lines = [f"<b>{title}{' — ' + agent_name if agent_name else ''}</b>"]
+
+    def fmt_block(block_label: str, data: dict) -> str:
         tokens = int(
             data.get("total_tokens")
             or (data["input"] + data["output"] + data["thinking"])
         )
         cost = data["cost_usd"]
         req = data["requests"]
-        thinking_note = f" + {_fmt_tokens(data['thinking'])} thinking" if data["thinking"] > 0 else ""
+        thinking_note = (
+            f" + {_fmt_tokens(data['thinking'])} {label('thinking', 'thinking')}"
+            if data["thinking"] > 0
+            else ""
+        )
         return (
-            f"<b>{label}</b>\n"
-            f"  {_fmt_tokens(data['input'])} in + {_fmt_tokens(data['output'])} out{thinking_note}\n"
-            f"  {_fmt_tokens(tokens)} total · {req} requests · <b>${cost:.4f}</b>"
+            f"<b>{block_label}</b>\n"
+            f"  {_fmt_tokens(data['input'])} {label('input', 'in')} + "
+            f"{_fmt_tokens(data['output'])} {label('output', 'out')}{thinking_note}\n"
+            f"  {_fmt_tokens(tokens)} {label('total', 'total')} · "
+            f"{label('requests', '{count} requests').format(count=req)} · <b>${cost:.4f}</b>"
         )
 
     all_t = summary.get("all_time", {})
@@ -442,23 +459,24 @@ def format_summary_text(summary: dict, agent_name: str = "") -> str:
     by_model = summary.get("by_model", {})
 
     if all_t.get("requests", 0) == 0:
-        lines.append("<i>No usage recorded yet.</i>")
+        lines.append(f"<i>{label('no_record', 'No usage recorded yet.')}</i>")
         return "\n".join(lines)
 
     lines.append("")
-    lines.append(fmt_block("🗄 All Time", all_t))
+    lines.append(fmt_block(label("all_time", "🗄 All Time"), all_t))
 
     if sess and sess.get("requests", 0) > 0:
         lines.append("")
-        lines.append(fmt_block("🔄 This Session", sess))
+        lines.append(fmt_block(label("session", "🔄 This Session"), sess))
 
     if by_model:
         lines.append("")
-        lines.append("<b>By Model:</b>")
+        lines.append(f"<b>{label('by_model', 'By Model')}:</b>")
         for model, data in sorted(by_model.items(), key=lambda x: -x[1]["cost_usd"]):
             tokens = data["input"] + data["output"]
             lines.append(
-                f"  <code>{model}</code>  {_fmt_tokens(tokens)} tokens  ${data['cost_usd']:.4f}"
+                f"  <code>{model}</code>  {_fmt_tokens(tokens)} "
+                f"{label('tokens', 'tokens')}  ${data['cost_usd']:.4f}"
             )
 
     return "\n".join(lines)

@@ -59,7 +59,7 @@ def _template_cards(store: SuperloopStore) -> list[dict[str, str]]:
     cards: list[dict[str, str]] = []
     for template_dir in sorted((item for item in templates_root.iterdir() if item.is_dir()), key=lambda item: item.name.lower()):
         title = template_dir.name.replace("_", " ").strip() or template_dir.name
-        purpose = "No README summary found."
+        purpose = ui_language.tr("superloop.no_readme")
         readme_path = template_dir / "README.md"
         if readme_path.exists():
             try:
@@ -100,7 +100,7 @@ def _template_cards(store: SuperloopStore) -> list[dict[str, str]]:
                 "slug": template_dir.name,
                 "title": title,
                 "purpose": purpose,
-                "includes": " · ".join(includes) if includes else "template files",
+                "includes": " · ".join(includes) if includes else ui_language.tr("superloop.template_files"),
             }
         )
     return cards
@@ -141,12 +141,12 @@ def _loop_counts(store: SuperloopStore) -> tuple[int, int]:
 def _menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Browse templates", callback_data="superloop:list:0")],
+            [InlineKeyboardButton(ui_language.tr("superloop.button.templates"), callback_data="superloop:list:0")],
             [
-                InlineKeyboardButton("Recording guide", callback_data="superloop:recording"),
-                InlineKeyboardButton("Loop controls", callback_data="superloop:loops"),
+                InlineKeyboardButton(ui_language.tr("superloop.button.recording"), callback_data="superloop:recording"),
+                InlineKeyboardButton(ui_language.tr("superloop.button.controls"), callback_data="superloop:loops"),
             ],
-            [InlineKeyboardButton("Tasks, issues & waits", callback_data="superloop:collaboration")],
+            [InlineKeyboardButton(ui_language.tr("superloop.button.collaboration"), callback_data="superloop:collaboration")],
             [InlineKeyboardButton(refresh_label(), callback_data="superloop:menu")],
         ]
     )
@@ -167,24 +167,30 @@ def _menu_view(store: SuperloopStore) -> tuple[str, InlineKeyboardMarkup]:
     loop_total, running = _loop_counts(store)
     recording_total = _directory_count(store.recordings_dir)
     template_total = len(_template_cards(store))
-    current = "ACTIVE" if running else "READY"
+    current = ui_language.tr("superloop.active" if running else "common.ready")
     lines = [
         card_title("🧭", "Superloop"),
         "",
-        f"<b>Current</b> · <code>{current}</code>",
-        "<b>Scope</b> · <code>local project</code>",
-        f"<b>Loops</b> · <code>{loop_total}</code> total · <code>{running}</code> running",
-        f"<b>Recordings</b> · <code>{recording_total}</code>",
-        f"<b>Templates</b> · <code>{template_total}</code>",
-        "<b>Changes</b> · immediate and persistent",
+        f"<b>{escape(ui_language.tr('common.current'))}</b> · <code>{escape(current)}</code>",
+        f"<b>{escape(ui_language.tr('common.scope'))}</b> · "
+        f"<code>{escape(ui_language.tr('superloop.scope'))}</code>",
+        f"<b>{escape(ui_language.tr('superloop.loops'))}</b> · "
+        + ui_language.tr(
+            "superloop.counts",
+            total=f"<code>{loop_total}</code>",
+            running=f"<code>{running}</code>",
+        ),
+        f"<b>{escape(ui_language.tr('superloop.recordings'))}</b> · <code>{recording_total}</code>",
+        f"<b>{escape(ui_language.tr('superloop.templates'))}</b> · <code>{template_total}</code>",
+        f"<b>{escape(ui_language.tr('common.changes'))}</b> · {escape(ui_language.tr('superloop.changes'))}",
         "",
-        "Superloop coordinates long-running work with persisted tasks, waits, issues, and evidence.",
+        ui_language.tr("superloop.summary"),
         "",
-        "<b>Quick start</b>",
+        f"<b>{escape(ui_language.tr('superloop.quick_start'))}</b>",
         "<code>/superloop quickstart &lt;goal&gt;</code>",
         "<code>/superloop wizard &lt;goal&gt;</code>",
         "",
-        "Choose a section below for detailed commands.",
+        ui_language.tr("superloop.choose"),
     ]
     return "\n".join(lines), _menu_keyboard()
 
@@ -201,12 +207,14 @@ def _guide_view(
     lines = [
         card_title(icon, title),
         "",
-        "<b>Current</b> · <code>READY</code>",
-        "<b>Scope</b> · <code>local project</code>",
+        f"<b>{escape(ui_language.tr('common.current'))}</b> · "
+        f"<code>{escape(ui_language.tr('common.ready'))}</code>",
+        f"<b>{escape(ui_language.tr('common.scope'))}</b> · "
+        f"<code>{escape(ui_language.tr('superloop.scope'))}</code>",
         "",
         purpose,
         "",
-        "<b>Available commands</b>",
+        f"<b>{escape(ui_language.tr('superloop.available_commands'))}</b>",
         *(f"<code>{escape(command)}</code>" for command in commands),
         "",
         note,
@@ -218,7 +226,7 @@ def _recording_guide_view() -> tuple[str, InlineKeyboardMarkup]:
     return _guide_view(
         "🎬",
         "Superloop recording",
-        purpose="Capture a successful workflow before compiling it into a reusable loop.",
+        purpose=ui_language.tr("superloop.recording.purpose"),
         commands=(
             "/superloop record start <goal>",
             "/superloop record status [recording_id]",
@@ -227,7 +235,7 @@ def _recording_guide_view() -> tuple[str, InlineKeyboardMarkup]:
             "/superloop record exit <recording_id> <kind> <details-json>",
             "/superloop record finish [recording_id]",
         ),
-        note="Finish compiles only when the recording has a clear intent, usable steps, and an exit condition.",
+        note=ui_language.tr("superloop.recording.note"),
         refresh_data="superloop:recording",
     )
 
@@ -236,7 +244,7 @@ def _loop_guide_view() -> tuple[str, InlineKeyboardMarkup]:
     return _guide_view(
         "🛠️",
         "Superloop controls",
-        purpose="Inspect, validate, advance, pause, resume, or close a compiled loop.",
+        purpose=ui_language.tr("superloop.controls.purpose"),
         commands=(
             "/superloop status <loop_id>",
             "/superloop validate <loop_id>",
@@ -245,10 +253,7 @@ def _loop_guide_view() -> tuple[str, InlineKeyboardMarkup]:
             "/superloop resume <loop_id>",
             "/superloop closeout <loop_id>",
         ),
-        note=(
-            "⚠️ Closeout remains blocked until worker and reviewer replies are drained, "
-            "classified, and backed by the required evidence."
-        ),
+        note=ui_language.tr("superloop.controls.note"),
         refresh_data="superloop:loops",
     )
 
@@ -257,13 +262,13 @@ def _collaboration_guide_view() -> tuple[str, InlineKeyboardMarkup]:
     return _guide_view(
         "📋",
         "Superloop collaboration",
-        purpose="Add the tasks, issues, and wait conditions that keep a long-running loop explicit.",
+        purpose=ui_language.tr("superloop.collaboration.purpose"),
         commands=(
             "/superloop task add <loop_id> <title>",
             "/superloop issue add <loop_id> <title>",
             "/superloop wait add <loop_id> <kind> [deadline-iso]",
         ),
-        note="ℹ️ Waits default to <code>on_timeout=advance</code> and do not automatically open an issue.",
+        note=ui_language.tr("superloop.collaboration.note"),
         refresh_data="superloop:collaboration",
     )
 
@@ -281,16 +286,17 @@ def _template_list_view(
     lines = [
         card_title("📚", "Superloop templates"),
         "",
-        f"<b>Current</b> · <code>{len(cards)}</code> templates",
-        f"<b>Page</b> · <code>{page + 1}/{page_count}</code>",
-        "<b>Source</b> · <code>superloops/templates/</code>",
+        f"<b>{escape(ui_language.tr('common.current'))}</b> · "
+        f"{ui_language.tr('superloop.template_count', count=f'<code>{len(cards)}</code>')}",
+        f"<b>{escape(ui_language.tr('superloop.page'))}</b> · <code>{page + 1}/{page_count}</code>",
+        f"<b>{escape(ui_language.tr('common.source'))}</b> · <code>superloops/templates/</code>",
     ]
     if not cards:
         lines.extend(
             [
                 "",
-                "No templates are available yet.",
-                "Add a template directory under the source path, then refresh this view.",
+                ui_language.tr("superloop.none_templates"),
+                ui_language.tr("superloop.add_template"),
             ]
         )
     for index, card in enumerate(visible_cards, start=start + 1):
@@ -298,24 +304,24 @@ def _template_list_view(
             [
                 "",
                 f"<b>{index} · {escape(card['title'])}</b>",
-                f"<b>ID</b> · <code>{escape(card['slug'])}</code>",
-                f"<b>Includes</b> · <code>{escape(card['includes'])}</code>",
+                f"<b>{escape(ui_language.tr('common.id'))}</b> · <code>{escape(card['slug'])}</code>",
+                f"<b>{escape(ui_language.tr('superloop.includes'))}</b> · <code>{escape(card['includes'])}</code>",
                 escape(_compact_text(card["purpose"])),
             ]
         )
     lines.extend(
         [
             "",
-            "Open <code>superloops/templates/&lt;slug&gt;/README.md</code> for full details.",
+            ui_language.tr("superloop.open_readme"),
         ]
     )
 
     nav: list[InlineKeyboardButton] = []
     if page > 0:
-        nav.append(InlineKeyboardButton("← Previous", callback_data=f"superloop:list:{page - 1}"))
+        nav.append(InlineKeyboardButton(ui_language.tr("superloop.previous"), callback_data=f"superloop:list:{page - 1}"))
     nav.append(InlineKeyboardButton(refresh_label(), callback_data=f"superloop:list:{page}"))
     if page + 1 < page_count:
-        nav.append(InlineKeyboardButton("Next →", callback_data=f"superloop:list:{page + 1}"))
+        nav.append(InlineKeyboardButton(ui_language.tr("superloop.next"), callback_data=f"superloop:list:{page + 1}"))
     keyboard = InlineKeyboardMarkup(
         [
             nav,
@@ -349,7 +355,7 @@ async def handle_superloop_callback(runtime, update, _context=None) -> None:
     elif action == "collaboration":
         text, markup = _collaboration_guide_view()
     else:
-        await query.answer("Unknown Superloop view.", show_alert=True)
+        await query.answer(ui_language.tr("superloop.error.unknown_view"), show_alert=True)
         return
 
     await query.answer()
@@ -373,7 +379,10 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
     if lowered[:1] == ["quickstart"]:
         goal = raw[len("quickstart") :].strip()
         if not goal:
-            await runtime._reply_text(update, "Usage: /superloop quickstart <goal>")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.quickstart", locale=locale),
+            )
             return
         start_result = recording_service.start_recording(
             goal=goal,
@@ -409,7 +418,14 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             actor_instance=local_instance,
         )
         if not result.get("ok"):
-            await runtime._reply_text(update, f"⚠️ quickstart compile failed: {result}")
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "superloop.quickstart_failed",
+                    locale=locale,
+                    result=result,
+                ),
+            )
             return
         loop_id = str(result["loop_id"])
         store.save_loop_state(loop_id, {**store.load_loop_state(loop_id), "status": "running"})
@@ -476,7 +492,10 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
     if lowered[:2] == ["record", "start"]:
         goal = raw[len("record start") :].strip()
         if not goal:
-            await runtime._reply_text(update, "Usage: /superloop record start <goal>")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.record_start", locale=locale),
+            )
             return
         result = recording_service.start_recording(
             goal=goal,
@@ -498,10 +517,11 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         )
         await runtime._reply_text(
             update,
-            (
-                "✅ Superloop recording started\n"
-                f"recording_id: `{result['recording_id']}`\n"
-                f"status: `{result['status']}`"
+            ui_language.tr(
+                "superloop.record_started",
+                locale=locale,
+                recording_id=result["recording_id"],
+                status=result["status"],
             ),
             parse_mode="Markdown",
         )
@@ -509,7 +529,10 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
 
     if lowered[:2] == ["record", "intent"]:
         if len(parts) < 4:
-            await runtime._reply_text(update, "Usage: /superloop record intent <recording_id> <summary>")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.record_intent", locale=locale),
+            )
             return
         recording_id = parts[2]
         summary = raw.split(None, 3)[3].strip()
@@ -519,14 +542,22 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             actor_agent=runtime.name,
             actor_instance=local_instance,
         )
-        await runtime._reply_text(update, f"✅ intent summary updated for `{recording_id}`", parse_mode="Markdown")
+        await runtime._reply_text(
+            update,
+            ui_language.tr(
+                "superloop.intent_updated",
+                locale=locale,
+                recording_id=recording_id,
+            ),
+            parse_mode="Markdown",
+        )
         return
 
     if lowered[:2] == ["record", "exit"]:
         if len(parts) < 5:
             await runtime._reply_text(
                 update,
-                "Usage: /superloop record exit <recording_id> <kind> <details-json>",
+                ui_language.tr("superloop.usage.record_exit", locale=locale),
             )
             return
         recording_id = parts[2]
@@ -535,9 +566,21 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         try:
             details = json.loads(json_text)
             if not isinstance(details, dict):
-                raise ValueError("details must be a JSON object")
+                raise ValueError(
+                    ui_language.tr(
+                        "superloop.details_object_required",
+                        locale=locale,
+                    )
+                )
         except Exception as exc:
-            await runtime._reply_text(update, f"Invalid details JSON: {exc}")
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "superloop.invalid_details",
+                    locale=locale,
+                    reason=str(exc),
+                ),
+            )
             return
         recording_service.set_exit_condition(
             recording_id,
@@ -545,25 +588,37 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             actor_agent=runtime.name,
             actor_instance=local_instance,
         )
-        await runtime._reply_text(update, f"✅ exit condition updated for `{recording_id}`", parse_mode="Markdown")
+        await runtime._reply_text(
+            update,
+            ui_language.tr(
+                "superloop.exit_updated",
+                locale=locale,
+                recording_id=recording_id,
+            ),
+            parse_mode="Markdown",
+        )
         return
 
     if lowered[:2] == ["record", "status"]:
         recording_id = parts[2] if len(parts) >= 3 else _latest_recording_id(store)
         if not recording_id:
-            await runtime._reply_text(update, "No recording sessions found.")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.no_recordings", locale=locale),
+            )
             return
         payload = recording_service.get_status(recording_id)
         state = payload["state"]
         await runtime._reply_text(
             update,
-            (
-                "🧾 Superloop recording status\n"
-                f"recording_id: `{recording_id}`\n"
-                f"status: `{state.get('status')}`\n"
-                f"goal: {state.get('goal')}\n"
-                f"finish_ready: `{state.get('finish_ready')}`\n"
-                f"candidate_steps: `{len(state.get('candidate_steps') or [])}`"
+            ui_language.tr(
+                "superloop.record_status",
+                locale=locale,
+                recording_id=recording_id,
+                status=state.get("status"),
+                goal=state.get("goal"),
+                finish_ready=state.get("finish_ready"),
+                candidate_steps=len(state.get("candidate_steps") or []),
             ),
             parse_mode="Markdown",
         )
@@ -571,7 +626,10 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
 
     if lowered[:2] == ["record", "try"]:
         if len(parts) < 4:
-            await runtime._reply_text(update, "Usage: /superloop record try <recording_id> <step title>")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.record_try", locale=locale),
+            )
             return
         recording_id = parts[2]
         title = raw.split(None, 3)[3].strip()
@@ -586,10 +644,11 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         )
         await runtime._reply_text(
             update,
-            (
-                "🧪 Recorded trial step\n"
-                f"recording_id: `{recording_id}`\n"
-                f"step_id: `{result['recorded_as_step_id']}`"
+            ui_language.tr(
+                "superloop.trial_recorded",
+                locale=locale,
+                recording_id=recording_id,
+                step_id=result["recorded_as_step_id"],
             ),
             parse_mode="Markdown",
         )
@@ -598,7 +657,10 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
     if lowered[:2] == ["record", "finish"]:
         recording_id = parts[2] if len(parts) >= 3 else _latest_recording_id(store)
         if not recording_id:
-            await runtime._reply_text(update, "No recording sessions found.")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.no_recordings", locale=locale),
+            )
             return
         result = compiler.compile_recording(
             recording_id,
@@ -608,20 +670,22 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         if not result.get("ok"):
             await runtime._reply_text(
                 update,
-                (
-                    "⚠️ compile_blocked\n"
-                    f"recording_id: `{recording_id}`\n"
-                    f"missing: `{', '.join(result.get('missing') or [])}`"
+                ui_language.tr(
+                    "superloop.compile_blocked",
+                    locale=locale,
+                    recording_id=recording_id,
+                    missing=", ".join(result.get("missing") or []),
                 ),
                 parse_mode="Markdown",
             )
             return
         await runtime._reply_text(
             update,
-            (
-                "✅ Superloop compiled\n"
-                f"recording_id: `{recording_id}`\n"
-                f"loop_id: `{result['loop_id']}`"
+            ui_language.tr(
+                "superloop.compiled",
+                locale=locale,
+                recording_id=recording_id,
+                loop_id=result["loop_id"],
             ),
             parse_mode="Markdown",
         )
@@ -629,22 +693,35 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
 
     if lowered[:1] == ["status"]:
         if len(parts) < 2:
-            await runtime._reply_text(update, "Usage: /superloop status <loop_id>")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.status", locale=locale),
+            )
             return
         loop_id = parts[1]
         try:
             state = store.load_loop_state(loop_id)
         except FileNotFoundError:
-            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "superloop.loop_not_found",
+                    locale=locale,
+                    loop_id=loop_id,
+                ),
+            )
             return
         await runtime._reply_text(
             update,
-            (
-                "📌 Superloop status\n"
-                f"loop_id: `{loop_id}`\n"
-                f"status: `{state.get('status')}`\n"
-                f"current_step: `{state.get('current_step')}`\n"
-                f"next_action: `{json.dumps(state.get('next_action'), ensure_ascii=False)}`"
+            ui_language.tr(
+                "superloop.status_result",
+                locale=locale,
+                loop_id=loop_id,
+                status=state.get("status"),
+                current_step=state.get("current_step"),
+                next_action=json.dumps(
+                    state.get("next_action"), ensure_ascii=False
+                ),
             ),
             parse_mode="Markdown",
         )
@@ -652,7 +729,10 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
 
     if lowered[:1] == ["validate"]:
         if len(parts) < 2:
-            await runtime._reply_text(update, "Usage: /superloop validate <loop_id>")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.validate", locale=locale),
+            )
             return
         loop_id = parts[1]
         report = validate_loop(store, loop_id, closeout=False)
@@ -661,7 +741,10 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
 
     if lowered[:1] == ["closeout"]:
         if len(parts) < 2:
-            await runtime._reply_text(update, "Usage: /superloop closeout <loop_id>")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.closeout", locale=locale),
+            )
             return
         loop_id = parts[1]
         report = validate_loop(store, loop_id, closeout=True)
@@ -678,7 +761,14 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         try:
             state = store.load_loop_state(loop_id)
         except FileNotFoundError:
-            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "superloop.loop_not_found",
+                    locale=locale,
+                    loop_id=loop_id,
+                ),
+            )
             return
         state["status"] = "completed"
         state["next_action"] = {"kind": "none", "reason": "validated_closeout"}
@@ -686,14 +776,19 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         store.append_loop_event(loop_id, event_type="loop.completed", data={"reason": "validated_closeout"}, actor=command_actor)
         await runtime._reply_text(
             update,
-            format_validation_report(report) + "\n\n✅ closeout accepted: loop marked `completed`.",
+            format_validation_report(report)
+            + "\n\n"
+            + ui_language.tr("superloop.closeout_accepted", locale=locale),
             parse_mode="Markdown",
         )
         return
 
     if lowered[:1] == ["pause"]:
         if len(parts) < 2:
-            await runtime._reply_text(update, "Usage: /superloop pause <loop_id> [--drain|--immediate]")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.pause", locale=locale),
+            )
             return
         loop_id = parts[1]
         mode = "immediate" if "--immediate" in lowered[2:] else "drain"
@@ -705,19 +800,35 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
                 source="command",
             )
         except FileNotFoundError:
-            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "superloop.loop_not_found",
+                    locale=locale,
+                    loop_id=loop_id,
+                ),
+            )
             return
         drain = "complete" if result["drain_complete"] else "pending"
         await runtime._reply_text(
             update,
-            f"⏸ Paused `{loop_id}`\nmode: `{mode}`\ndrain: `{drain}`",
+            ui_language.tr(
+                "superloop.pause_result",
+                locale=locale,
+                loop_id=loop_id,
+                mode=mode,
+                drain=drain,
+            ),
             parse_mode="Markdown",
         )
         return
 
     if lowered[:1] == ["resume"]:
         if len(parts) < 2:
-            await runtime._reply_text(update, "Usage: /superloop resume <loop_id>")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.resume", locale=locale),
+            )
             return
         loop_id = parts[1]
         try:
@@ -727,41 +838,71 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
                 source="command",
             )
         except FileNotFoundError:
-            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "superloop.loop_not_found",
+                    locale=locale,
+                    loop_id=loop_id,
+                ),
+            )
             return
         if not result.get("ok"):
             await runtime._reply_text(
                 update,
-                (
-                    f"⛔ Resume blocked for `{loop_id}`\n"
-                    f"reason: `{result.get('reason')}`\n"
-                    f"details: `{json.dumps(result.get('details') or {}, ensure_ascii=False)}`"
+                ui_language.tr(
+                    "superloop.resume_blocked",
+                    locale=locale,
+                    loop_id=loop_id,
+                    reason=result.get("reason"),
+                    details=json.dumps(
+                        result.get("details") or {}, ensure_ascii=False
+                    ),
                 ),
                 parse_mode="Markdown",
             )
             return
-        await runtime._reply_text(update, f"▶ Resumed `{loop_id}`", parse_mode="Markdown")
+        await runtime._reply_text(
+            update,
+            ui_language.tr(
+                "superloop.resumed",
+                locale=locale,
+                loop_id=loop_id,
+            ),
+            parse_mode="Markdown",
+        )
         return
 
     if lowered[:1] == ["next"]:
         if len(parts) < 2:
-            await runtime._reply_text(update, "Usage: /superloop next <loop_id>")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.next", locale=locale),
+            )
             return
         loop_id = parts[1]
         runner = SuperloopRunner(store)
         try:
             result = runner.next_action(loop_id)
         except FileNotFoundError:
-            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "superloop.loop_not_found",
+                    locale=locale,
+                    loop_id=loop_id,
+                ),
+            )
             return
         await runtime._reply_text(
             update,
-            (
-                "⏭ Next action evaluated\n"
-                f"loop_id: `{loop_id}`\n"
-                f"advanced: `{result.get('advanced')}`\n"
-                f"reason: `{result.get('reason', '')}`\n"
-                f"task_id: `{result.get('task_id', '')}`"
+            ui_language.tr(
+                "superloop.next_result",
+                locale=locale,
+                loop_id=loop_id,
+                advanced=result.get("advanced"),
+                reason=result.get("reason", ""),
+                task_id=result.get("task_id", ""),
             ),
             parse_mode="Markdown",
         )
@@ -769,7 +910,10 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
 
     if lowered[:2] == ["task", "add"]:
         if len(parts) < 4:
-            await runtime._reply_text(update, "Usage: /superloop task add <loop_id> <title>")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.task_add", locale=locale),
+            )
             return
         loop_id = parts[2]
         title = raw.split(None, 3)[3].strip()
@@ -783,14 +927,32 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
                 actor=command_actor,
             )
         except FileNotFoundError:
-            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "superloop.loop_not_found",
+                    locale=locale,
+                    loop_id=loop_id,
+                ),
+            )
             return
-        await runtime._reply_text(update, f"✅ task added: `{task['task_id']}`", parse_mode="Markdown")
+        await runtime._reply_text(
+            update,
+            ui_language.tr(
+                "superloop.task_added",
+                locale=locale,
+                task_id=task["task_id"],
+            ),
+            parse_mode="Markdown",
+        )
         return
 
     if lowered[:2] == ["issue", "add"]:
         if len(parts) < 4:
-            await runtime._reply_text(update, "Usage: /superloop issue add <loop_id> <title>")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.issue_add", locale=locale),
+            )
             return
         loop_id = parts[2]
         title = raw.split(None, 3)[3].strip()
@@ -805,14 +967,32 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
                 actor=command_actor,
             )
         except FileNotFoundError:
-            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "superloop.loop_not_found",
+                    locale=locale,
+                    loop_id=loop_id,
+                ),
+            )
             return
-        await runtime._reply_text(update, f"✅ issue opened: `{issue['issue_id']}`", parse_mode="Markdown")
+        await runtime._reply_text(
+            update,
+            ui_language.tr(
+                "superloop.issue_opened",
+                locale=locale,
+                issue_id=issue["issue_id"],
+            ),
+            parse_mode="Markdown",
+        )
         return
 
     if lowered[:2] == ["wait", "add"]:
         if len(parts) < 4:
-            await runtime._reply_text(update, "Usage: /superloop wait add <loop_id> <kind> [deadline-iso]")
+            await runtime._reply_text(
+                update,
+                ui_language.tr("superloop.usage.wait_add", locale=locale),
+            )
             return
         loop_id = parts[2]
         kind = parts[3]
@@ -822,9 +1002,24 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         try:
             wait = service.add_wait(loop_id, kind=kind, details=details, deadline=deadline, actor=command_actor)
         except FileNotFoundError:
-            await runtime._reply_text(update, f"Loop not found: {loop_id}")
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "superloop.loop_not_found",
+                    locale=locale,
+                    loop_id=loop_id,
+                ),
+            )
             return
-        await runtime._reply_text(update, f"✅ wait added: `{wait['wait_id']}`", parse_mode="Markdown")
+        await runtime._reply_text(
+            update,
+            ui_language.tr(
+                "superloop.wait_added",
+                locale=locale,
+                wait_id=wait["wait_id"],
+            ),
+            parse_mode="Markdown",
+        )
         return
 
     text, markup = _menu_view(store)
