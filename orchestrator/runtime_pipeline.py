@@ -25,6 +25,7 @@ from orchestrator import (
     telegram_notifications,
     telegram_stream_policy,
 )
+from orchestrator.command_ui import card_title
 from orchestrator.flexible_backend_registry import canonical_backend_engine
 from orchestrator.memory_plus_mode import (
     extract_memory_plus_update_details,
@@ -412,6 +413,7 @@ def surface_context_compaction_warnings(
                     warning,
                     request_id=item.request_id,
                     purpose=_purpose,
+                    parse_mode="HTML",
                 )
                 audit_presentation(
                     f"{_audit_prefix}_warning_delivery",
@@ -457,23 +459,31 @@ def surface_wip_recovery_warning(
 ) -> None:
     """Warn visibly when unfinished HER v2 recovery state precedes a turn."""
 
-    request_line = (
-        "\n<b>First unfinished request</b> · "
-        f"<code>{html.escape(first_request_id)}</code>"
-        if first_request_id
-        else ""
+    lines = [
+        card_title("⚠️", "Unfinished work"),
+        "",
+        "<b>Status</b> · <code>RECOVERY READY</code>",
+        "",
+        f"<b>Records</b> · <code>{max(0, int(record_count)):,}</code>",
+        f"<b>Saved data</b> · <code>{max(0, int(size_bytes)):,} bytes</code>",
+    ]
+    if first_request_id:
+        lines.append(
+            "<b>First request</b> · "
+            f"<code>{html.escape(first_request_id)}</code>"
+        )
+    lines.extend(
+        [
+            "",
+            "HASHI preserved this work from an earlier HER v2 turn. Only a "
+            "bounded summary will be supplied to the Provider; raw Journal "
+            "data stays local.",
+            "",
+            "Run <code>/compact</code> to add the recovery summary to this "
+            "Session and clear the active Journal.",
+        ]
     )
-    warning = (
-        "⚠️ <b>HER v2 unfinished work detected</b>\n\n"
-        "A bounded recovery Journal from an earlier turn is active. HASHI will "
-        "supply only its bounded recovery summary; raw Journal data will not "
-        "be sent to the Provider.\n"
-        f"<b>Recovery records</b> · <code>{max(0, int(record_count)):,}</code>\n"
-        f"<b>Journal bytes</b> · <code>{max(0, int(size_bytes)):,}</code>"
-        f"{request_line}\n\n"
-        "Use <code>/compact</code> to preserve this unfinished-work summary in "
-        "the current Session context and clear the active Journal."
-    )
+    warning = "\n".join(lines)
     surface_context_compaction_warnings(
         runtime,
         item,

@@ -7775,6 +7775,7 @@ class FlexibleAgentRuntime:
         text: str,
         request_id: Optional[str] = None,
         purpose: str = "response",
+        parse_mode: str | None = None,
     ):
         return await runtime_delivery.send_long_message(
             self,
@@ -7782,6 +7783,7 @@ class FlexibleAgentRuntime:
             text=text,
             request_id=request_id,
             purpose=purpose,
+            parse_mode=parse_mode,
         )
 
     async def typing_loop(self, chat_id: int, stop_event: asyncio.Event):

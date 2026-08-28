@@ -1705,10 +1705,11 @@ async def test_context_compaction_warning_delivery_is_mandatory_and_nonblocking(
         (
             123,
             "⚠️ required compaction warning · request continuing",
-            {
-                "request_id": "req-warning",
-                "purpose": "context-compaction-warning",
-            },
+                {
+                    "request_id": "req-warning",
+                    "purpose": "context-compaction-warning",
+                    "parse_mode": "HTML",
+                },
         )
     ]
 
@@ -1742,7 +1743,7 @@ async def test_wip_recovery_warning_is_visible_with_verbose_off_and_dedicated_me
         item,
         record_count=7,
         size_bytes=4_096,
-        first_request_id="req-failed",
+        first_request_id="req-<failed>&",
     )
     tasks = tuple(runtime._background_tasks)
 
@@ -1750,12 +1751,24 @@ async def test_wip_recovery_warning_is_visible_with_verbose_off_and_dedicated_me
     warnings = runtime._request_meta_by_id["req-warning"][
         "wip_recovery_warnings"
     ]
-    assert "unfinished work detected" in warnings[0]
+    warning = warnings[0]
+    assert warning.startswith(
+        "⚠️ <b>UNFINISHED WORK</b>\n━━━━━━━━━━━━━━━━\n\n"
+        "<b>Status</b> · <code>RECOVERY READY</code>"
+    )
+    assert "<b>Records</b> · <code>7</code>" in warning
+    assert "<b>Saved data</b> · <code>4,096 bytes</code>" in warning
+    assert "<code>req-&lt;failed&gt;&amp;</code>" in warning
+    assert warning.index("<b>Status</b>") < warning.index("<b>Records</b>")
+    assert warning.index("raw Journal data stays local") < warning.index(
+        "Run <code>/compact</code>"
+    )
     assert request_context_warning_fields(runtime, "req-warning") == {
         "wip_recovery_warnings": warnings
     }
     await asyncio.gather(*tasks)
     assert sent[0][2]["purpose"] == "wip-recovery-warning"
+    assert sent[0][2]["parse_mode"] == "HTML"
     assert "/compact" in sent[0][1]
 
 

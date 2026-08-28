@@ -90,6 +90,29 @@ async def test_send_long_message_sends_html_by_default(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_send_long_message_preserves_pre_rendered_html(tmp_path):
+    runtime = _runtime(tmp_path)
+
+    _elapsed, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="⚠️ <b>UNFINISHED WORK</b>\n<code>/compact</code>",
+        request_id="req-html-card",
+        parse_mode="HTML",
+    )
+
+    assert chunks == 1
+    assert runtime.app.bot.messages == [
+        {
+            "chat_id": 123,
+            "text": "⚠️ <b>UNFINISHED WORK</b>\n<code>/compact</code>",
+            "parse_mode": constants.ParseMode.HTML,
+            "disable_notification": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_send_long_message_elapsed_uses_monotonic_clock(tmp_path, monkeypatch):
     runtime = _runtime(tmp_path)
     ticks = iter((100.0, 100.25))

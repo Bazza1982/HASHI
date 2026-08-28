@@ -2881,6 +2881,7 @@ def schedule_execution_stage(
                 rendered,
                 request_id=request_ref,
                 purpose="context-compaction-warning",
+                parse_mode="HTML",
             )
             with contextlib.suppress(Exception):
                 coordinator.store.append_audit(

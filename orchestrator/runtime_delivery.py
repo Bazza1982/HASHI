@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import json
 import re
 from time import monotonic
@@ -133,8 +134,9 @@ async def send_long_message(
     request_id: str | None = None,
     purpose: str = "response",
     delivery_mode: str = "final_delivery",
+    parse_mode: str | None = None,
 ):
-    """Send a message to Telegram with safe chunking."""
+    """Send Markdown or pre-rendered Telegram HTML with safe chunking."""
     canonical = getattr(runtime, "canonical_audit", None)
 
     def record_delivery(stage: str, **fields: Any) -> None:
@@ -262,7 +264,18 @@ async def send_long_message(
         record_delivery("completed", disposition="sent", chunks=1)
         return max(0.0, monotonic() - send_started), 1
 
-    html = _md_to_html(text)
+    input_is_html = str(parse_mode or "").strip().casefold() == "html"
+    if input_is_html:
+        rendered_html = text
+        # A failed HTML send must fall back to readable text, never visible tags.
+        fallback_text = html_lib.unescape(re.sub(r"<[^>]*>", "", text))
+        if len(rendered_html) > tg_max_len:
+            # Splitting arbitrary HTML can bisect a tag. Oversized cards degrade
+            # safely to plain text while normal short cards retain formatting.
+            rendered_html = html_lib.escape(fallback_text)
+    else:
+        rendered_html = _md_to_html(text)
+        fallback_text = text
 
     async def _send_chunk(
         chunk_raw: str, chunk_html: str, chunk_index: int, *, final_chunk: bool
@@ -318,9 +331,14 @@ async def send_long_message(
                     remain = remain[split_at:].lstrip("\n")
         return True
 
-    if len(html) <= tg_max_len:
+    if len(rendered_html) <= tg_max_len:
         chunk_count = 1
-        if not await _send_chunk(text, html, chunk_count, final_chunk=True):
+        if not await _send_chunk(
+            fallback_text,
+            rendered_html,
+            chunk_count,
+            final_chunk=True,
+        ):
             return max(0.0, monotonic() - send_started), 0
         runtime.telegram_logger.info(
             f"Sent Telegram message for request_id={request_id or '<none>'} "
@@ -330,7 +348,7 @@ async def send_long_message(
         return max(0.0, monotonic() - send_started), chunk_count
 
     raw_chunks, html_chunks = [], []
-    raw_remain, html_remain = text, html
+    raw_remain, html_remain = fallback_text, rendered_html
     while raw_remain:
         if len(html_remain) <= tg_max_len:
             raw_chunks.append(raw_remain)
