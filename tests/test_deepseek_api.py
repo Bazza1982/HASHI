@@ -9,7 +9,7 @@ import pytest
 from adapters import deepseek_api
 from adapters.deepseek_api import DeepSeekAdapter
 from adapters.openrouter_api import _APIResult, _backend_failure_response
-from adapters.stream_events import KIND_TOOL_END
+from adapters.stream_events import KIND_SHELL_EXEC, KIND_TOOL_END
 from orchestrator.enterprise import IdentityService, PolicyEvaluator
 from orchestrator.multimodal_contract import canonical_request_content
 from tools.registry import ToolResult
@@ -316,6 +316,34 @@ async def test_tool_cleanup_details_are_forwarded_in_the_tool_end_event(tmp_path
         "status": "normal_completion",
         "process_reaped": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_tool_activity_emits_one_typed_start_with_structured_command(tmp_path):
+    adapter = _adapter(tmp_path)
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    await adapter._run_tool_calls(
+        [
+            {
+                "id": "call_check",
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": '{"command":"pytest -q tests/test_example.py"}',
+                },
+            }
+        ],
+        [],
+        capture,
+    )
+
+    assert [event.kind for event in events] == [KIND_SHELL_EXEC, KIND_TOOL_END]
+    assert events[0].metadata["command"] == "pytest -q tests/test_example.py"
+    assert events[1].metadata["is_error"] is False
 
 
 @pytest.mark.asyncio

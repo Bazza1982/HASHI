@@ -14,7 +14,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from adapters.base import BackendResponse, TokenUsage
-from adapters.stream_events import KIND_TEXT_DELTA, StreamCallback, StreamEvent
+from adapters.stream_events import (
+    DELIVERY_INTERNAL,
+    KIND_PROVIDER_ACTIVITY,
+    KIND_TEXT_DELTA,
+    StreamCallback,
+    StreamEvent,
+)
 
 _APP_SERVER_READ_LIMIT = 8 * 1024 * 1024
 _STDERR_LIMIT = 64 * 1024
@@ -38,6 +44,7 @@ _CODEX_DYNAMIC_TOOL_PREFIX = "hashi_ext_"
 _CODEX_DYNAMIC_TOOL_MAX_LENGTH = 64
 _CODEX_DYNAMIC_TOOL_DIGEST_LENGTH = 16
 _CODEX_DYNAMIC_TOOL_STEM_RE = re.compile(r"[^A-Za-z0-9_-]")
+_PROVIDER_ACTIVITY_MIN_INTERVAL_SEC = 1.0
 
 
 class CodexAppServerError(RuntimeError):
@@ -53,6 +60,7 @@ class CodexConversation:
 
 ProcessCallback = Callable[[Any], None]
 KillCallback = Callable[[Any, str], Awaitable[None]]
+ActivityCallback = Callable[[], Awaitable[None]]
 
 
 def _content_parts(content: Any) -> list[dict[str, Any]]:
@@ -473,7 +481,12 @@ class CodexAppServerToolBridge:
         proc.stdin.write((data + "\n").encode("utf-8"))
         await proc.stdin.drain()
 
-    async def _read(self, proc: Any) -> dict[str, Any]:
+    async def _read(
+        self,
+        proc: Any,
+        *,
+        on_activity: ActivityCallback | None = None,
+    ) -> dict[str, Any]:
         if proc.stdout is None:
             raise CodexAppServerError("Codex app-server stdout is unavailable")
         try:
@@ -492,6 +505,8 @@ class CodexAppServerToolBridge:
             raise CodexAppServerError("Codex app-server emitted invalid JSONL") from exc
         if not isinstance(message, dict):
             raise CodexAppServerError("Codex app-server emitted a non-object message")
+        if on_activity is not None:
+            await on_activity()
         return message
 
     async def _request(
@@ -500,13 +515,15 @@ class CodexAppServerToolBridge:
         request_id: str,
         method: str,
         params: dict[str, Any],
+        *,
+        on_activity: ActivityCallback | None = None,
     ) -> dict[str, Any]:
         await self._send(
             proc,
             {"method": method, "id": request_id, "params": params},
         )
         while True:
-            message = await self._read(proc)
+            message = await self._read(proc, on_activity=on_activity)
             if message.get("id") != request_id:
                 if message.get("id") is not None and message.get("method"):
                     await self._send(
@@ -620,6 +637,31 @@ class CodexAppServerToolBridge:
         final_text = ""
         usage: TokenUsage | None = None
         protocol_error: str | None = None
+        last_activity_broadcast = 0.0
+
+        async def broadcast_provider_activity() -> None:
+            """Coalesce real app-server JSONL into a content-free liveness event."""
+
+            nonlocal last_activity_broadcast
+            if not use_streaming or on_stream_event is None:
+                return
+            now = time.monotonic()
+            if (
+                last_activity_broadcast > 0
+                and now - last_activity_broadcast
+                < _PROVIDER_ACTIVITY_MIN_INTERVAL_SEC
+            ):
+                return
+            last_activity_broadcast = now
+            await on_stream_event(
+                StreamEvent(
+                    kind=KIND_PROVIDER_ACTIVITY,
+                    summary="Codex app-server protocol activity",
+                    delivery_class=DELIVERY_INTERNAL,
+                    origin="codex-app-server",
+                    metadata={"activity": "protocol_progress"},
+                )
+            )
 
         try:
             temp_dir = tempfile.TemporaryDirectory(prefix="hashi-codex-api-tools-")
@@ -654,6 +696,7 @@ class CodexAppServerToolBridge:
                         },
                         "capabilities": {"experimentalApi": True},
                     },
+                    on_activity=broadcast_provider_activity,
                 )
                 await self._send(proc, {"method": "initialized", "params": {}})
 
@@ -679,6 +722,7 @@ class CodexAppServerToolBridge:
                             },
                         },
                     },
+                    on_activity=broadcast_provider_activity,
                 )
                 thread = thread_result.get("thread") or {}
                 thread_id = str(thread.get("id") or "")
@@ -694,6 +738,7 @@ class CodexAppServerToolBridge:
                             "threadId": thread_id,
                             "items": conversation.history_items,
                         },
+                        on_activity=broadcast_provider_activity,
                     )
 
                 turn_result = await self._request(
@@ -706,6 +751,7 @@ class CodexAppServerToolBridge:
                         "model": self.model,
                         "effort": self.effort,
                     },
+                    on_activity=broadcast_provider_activity,
                 )
                 turn = turn_result.get("turn") or {}
                 turn_id = str(turn.get("id") or "")
@@ -713,7 +759,10 @@ class CodexAppServerToolBridge:
                     raise CodexAppServerError("Codex turn/start returned no turn id")
 
                 while True:
-                    message = await self._read(proc)
+                    message = await self._read(
+                        proc,
+                        on_activity=broadcast_provider_activity,
+                    )
                     method = str(message.get("method") or "")
                     params = message.get("params") or {}
 

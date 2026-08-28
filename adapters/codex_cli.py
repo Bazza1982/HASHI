@@ -340,18 +340,21 @@ class CodexCLIAdapter(BaseBackend):
             return
         asyncio.create_task(on_stream_event(event))
 
-    def _summarize_command(self, item: dict) -> str:
+    def _command_text(self, item: dict) -> str:
         raw_cmd = item.get("command")
         if isinstance(raw_cmd, list):
             cmd = " ".join(str(part) for part in raw_cmd if part)
         else:
             cmd = str(raw_cmd or "").strip()
-        cmd = " ".join(cmd.split())
+        return " ".join(cmd.split())
+
+    def _summarize_command(self, item: dict) -> str:
+        cmd = self._command_text(item)
         if not cmd:
             return "Running command"
         return f"Running: {cmd[:100]}"
 
-    def _summarize_file_change(self, item: dict) -> tuple[str, str]:
+    def _summarize_file_change(self, item: dict) -> tuple[str, str, tuple[str, ...]]:
         changes = item.get("changes")
         if isinstance(changes, list) and changes:
             paths = []
@@ -363,13 +366,18 @@ class CodexCLIAdapter(BaseBackend):
                     paths.append(path)
             if paths:
                 if len(paths) == 1:
-                    return (f"Edited: {paths[0]}", paths[0])
+                    return (f"Edited: {paths[0]}", paths[0], tuple(paths))
                 preview = ", ".join(paths[:2])
                 if len(paths) > 2:
                     preview += ", ..."
-                return (f"Edited {len(paths)} files: {preview}", paths[0])
+                return (
+                    f"Edited {len(paths)} files: {preview}",
+                    paths[0],
+                    tuple(paths),
+                )
         path = str(item.get("file_path") or "").strip() or "unknown"
-        return (f"Edited: {path}", path)
+        paths = () if path == "unknown" else (path,)
+        return (f"Edited: {path}", path, paths)
 
     def _flush_pending_agent_message(
         self,
@@ -436,13 +444,27 @@ class CodexCLIAdapter(BaseBackend):
                 kind=KIND_SHELL_EXEC,
                 summary=self._summarize_command(item),
                 tool_name="Bash",
+                metadata={"command": self._command_text(item)},
             )
         elif etype == "item.completed" and item_type == "command_execution":
             exit_code = item.get("exit_code", "?")
-            se = StreamEvent(kind=KIND_TOOL_END, summary=f"Command exited ({exit_code})", tool_name="Bash")
+            se = StreamEvent(
+                kind=KIND_TOOL_END,
+                summary=f"Command exited ({exit_code})",
+                tool_name="Bash",
+                metadata={
+                    "command": self._command_text(item),
+                    "exit_code": exit_code,
+                },
+            )
         elif etype == "item.completed" and item_type == "file_change":
-            summary, path = self._summarize_file_change(item)
-            se = StreamEvent(kind=KIND_FILE_EDIT, summary=summary, file_path=path)
+            summary, path, paths = self._summarize_file_change(item)
+            se = StreamEvent(
+                kind=KIND_FILE_EDIT,
+                summary=summary,
+                file_path=path,
+                metadata={"file_paths": paths},
+            )
         elif etype == "item.started" and item_type == "todo_list":
             se = StreamEvent(kind=KIND_PROGRESS, summary="Updated task list")
         elif etype == "item.completed" and item_type == "agent_message":

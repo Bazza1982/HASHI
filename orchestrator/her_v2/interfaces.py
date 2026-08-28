@@ -233,6 +233,16 @@ class DeliveryPort(Protocol):
         delivery_id: str = "",
     ) -> bool | DeliveryReceipt: ...
 
+    async def deliver_activity(
+        self,
+        *,
+        kind: str,
+        text: str,
+        event_id: str,
+        phase: str,
+        metadata: Mapping[str, Any],
+    ) -> bool: ...
+
 
 class HabitAdvisor(Protocol):
     async def retrieve(self, *, goal: str, turn_id: str) -> Sequence[str]: ...
@@ -259,6 +269,7 @@ class DreamMaintainer(Protocol):
 class RecordingDelivery:
     records: list[DeliveryRecord] = field(default_factory=list)
     fail_kinds: set[str] = field(default_factory=set)
+    activity_records: list[dict[str, Any]] = field(default_factory=list)
 
     async def deliver(
         self,
@@ -292,6 +303,28 @@ class RecordingDelivery:
         if any(item.event_id == event_id for item in self.records):
             return True
         self.records.append(DeliveryRecord(kind=kind, text=text, event_id=event_id))
+        return True
+
+    async def deliver_activity(
+        self,
+        *,
+        kind: str,
+        text: str,
+        event_id: str,
+        phase: str,
+        metadata: Mapping[str, Any],
+    ) -> bool:
+        if any(item.get("event_id") == event_id for item in self.activity_records):
+            return True
+        self.activity_records.append(
+            {
+                "kind": kind,
+                "text": text,
+                "event_id": event_id,
+                "phase": phase,
+                "metadata": dict(metadata),
+            }
+        )
         return True
 
     async def resolve_initial(

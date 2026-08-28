@@ -56,8 +56,10 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   adapter-owned HER Habit/Meditation path. Non-HER backends do not read or
   modify its records.
 - `/superloop`: recording-first long-running workflow orchestration.
-- `/verbose [on|off]`: toggle bounded technical planning, tool, test, validation,
-  retry, and runtime telemetry. HER Persona speech and reasoning are excluded.
+- `/verbose [on|off]`: toggle one deterministic rolling digest grouped by
+  lifecycle stage, inspected/changed files, commands, checks, external work,
+  recovery, and runtime status. Raw events remain in logs; HER Persona speech
+  and reasoning are excluded.
 - `/think [on|off]`: toggle the current backend's reasoning presentation. For
   HER this means genuine provider-returned reasoning only; generic progress and
   tools remain under `/verbose`.

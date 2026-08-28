@@ -35,6 +35,9 @@ from adapters.openrouter_api import (
     _usage_thinking_tokens,
 )
 from adapters.stream_events import (
+    DELIVERY_INTERNAL,
+    HASHI_PROVIDER_ACTIVITY_SSE_TYPE,
+    KIND_PROVIDER_ACTIVITY,
     KIND_TEXT_DELTA,
     KIND_THINKING,
     StreamCallback,
@@ -255,6 +258,29 @@ class HashiApiAdapter(OpenRouterAdapter):
                     continue
                 if not isinstance(data, Mapping):
                     continue
+
+                hashi_event = data.get("hashi")
+                if (
+                    isinstance(hashi_event, Mapping)
+                    and str(hashi_event.get("type") or "")
+                    == HASHI_PROVIDER_ACTIVITY_SSE_TYPE
+                ):
+                    provider_activity_observed = True
+                    if on_stream_event is not None:
+                        source = (
+                            str(hashi_event.get("source") or "hashi-api-gateway")
+                            .strip()[:64]
+                            or "hashi-api-gateway"
+                        )
+                        await on_stream_event(
+                            StreamEvent(
+                                kind=KIND_PROVIDER_ACTIVITY,
+                                summary="Provider protocol activity",
+                                delivery_class=DELIVERY_INTERNAL,
+                                origin=source,
+                                metadata={"activity": "protocol_progress"},
+                            )
+                        )
 
                 stream_error = _stream_error_exception(
                     data,

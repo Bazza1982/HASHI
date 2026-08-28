@@ -59,6 +59,20 @@ def test_streaming_status_renders_markdown_and_escapes_identity() -> None:
     assert "**Repair**" not in rendered
 
 
+def test_streaming_status_uses_readable_minute_duration() -> None:
+    rendered = _streaming_status_to_html(
+        "zelda",
+        "codex-cli",
+        125,
+        ["🧪 Ran 2 checks"],
+        phase_icon="🔬",
+        phase_label="Verification",
+    )
+
+    assert "🔬 <b>zelda</b> · <b>Verification</b>" in rendered
+    assert "2m 5s" in rendered
+
+
 @pytest.mark.asyncio
 async def test_think_delivery_renders_markdown_for_flex_runtime() -> None:
     runtime = _runtime()

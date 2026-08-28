@@ -34,6 +34,39 @@ if TYPE_CHECKING:
 
 
 class RuntimeSupportMixin:
+    async def _publish_activity(
+        self,
+        state: _TurnState,
+        *,
+        kind: str,
+        text: str,
+        event_id: str,
+        phase: str,
+        metadata: Mapping[str, Any],
+    ) -> bool:
+        """Best-effort technical progress; never changes workflow authority."""
+
+        publisher = getattr(self.delivery, "deliver_activity", None)
+        if not callable(publisher):
+            return False
+        try:
+            accepted = await publisher(
+                kind=kind,
+                text=text,
+                event_id=event_id,
+                phase=phase,
+                metadata=dict(metadata),
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "HER v2 activity delivery failed safely: turn=%s event=%s error=%s",
+                state.ledger.turn_id,
+                event_id,
+                type(exc).__name__,
+            )
+            return False
+        return accepted is not False
+
     def _record_triage(
         self,
         state: _TurnState,
@@ -92,6 +125,32 @@ class RuntimeSupportMixin:
         state.ledger.transition(requested, terminal_reason=terminal_reason)
         self.ledger_store.save(state.ledger)
         state.progress.record("lifecycle", f"{previous.value}->{requested.value}")
+        if requested in {
+            LifecycleState.COMPLETED,
+            LifecycleState.COMPLETED_WITH_LIMITATIONS,
+            LifecycleState.FAILED,
+            LifecycleState.ERROR,
+            LifecycleState.STOPPED,
+            LifecycleState.PENDING_USER_INPUT,
+        }:
+            if requested in {LifecycleState.FAILED, LifecycleState.ERROR}:
+                kind = "error"
+            else:
+                kind = "progress"
+            await self._publish_activity(
+                state,
+                kind=kind,
+                text=f"Task {requested.value.casefold().replace('_', ' ')}",
+                event_id=f"{state.ledger.turn_id}:activity:terminal:{requested.value}",
+                phase=requested.value,
+                metadata={
+                    "activity_type": "lifecycle",
+                    "status": "completed",
+                    "lifecycle_state": requested.value,
+                    "terminal_reason": terminal_reason or "",
+                    "terminal": True,
+                },
+            )
 
     def _activate_plan(
         self, state: _TurnState, plan: Mapping[str, Any], *, replacement: bool

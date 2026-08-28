@@ -25,9 +25,12 @@ from adapters.registry import get_backend_class
 from adapters.stream_events import (
     DELIVERY_FINAL,
     DELIVERY_INTERNAL,
+    DELIVERY_TECHNICAL,
     DELIVERY_USER_COMMENTARY,
     KIND_COMMENTARY,
     KIND_INITIAL_RESOLUTION,
+    KIND_PROVIDER_ACTIVITY,
+    KIND_REVIEW,
     KIND_THINKING,
     KIND_TOOL_START,
     StreamEvent,
@@ -1060,14 +1063,18 @@ async def test_adapter_marks_direct_answer_delivered_when_immediate_lane_is_acce
 
     assert response.is_success is True
     assert response.stream_metadata["her_v2"]["final_already_delivered"] is True
-    assert [event.delivery_class for event in events] == [
+    user_events = [
+        event for event in events if event.delivery_class != DELIVERY_TECHNICAL
+    ]
+    assert [event.delivery_class for event in user_events] == [
         DELIVERY_USER_COMMENTARY,
         DELIVERY_INTERNAL,
     ]
-    assert events[0].summary == response.text
-    assert events[1].kind == KIND_INITIAL_RESOLUTION
-    assert events[1].resolution == "final"
-    assert events[1].target_event_id == events[0].event_id
+    assert user_events[0].summary == response.text
+    assert user_events[1].kind == KIND_INITIAL_RESOLUTION
+    assert user_events[1].resolution == "final"
+    assert user_events[1].target_event_id == user_events[0].event_id
+    assert events[-1].metadata["lifecycle_state"] == "COMPLETED"
 
 
 @pytest.mark.asyncio
@@ -1089,8 +1096,12 @@ async def test_adapter_does_not_send_early_without_resolution_capability(tmp_pat
 
     assert response.is_success is True
     assert response.stream_metadata["her_v2"]["final_already_delivered"] is False
-    assert [event.delivery_class for event in events] == [DELIVERY_FINAL]
-    assert all(event.kind != KIND_INITIAL_RESOLUTION for event in events)
+    user_events = [
+        event for event in events if event.delivery_class != DELIVERY_TECHNICAL
+    ]
+    assert [event.delivery_class for event in user_events] == [DELIVERY_FINAL]
+    assert all(event.kind != KIND_INITIAL_RESOLUTION for event in user_events)
+    assert events[-1].metadata["lifecycle_state"] == "COMPLETED"
 
 
 @pytest.mark.asyncio
@@ -1155,6 +1166,36 @@ async def test_adapter_draft_is_independent_of_immediate_response_eligibility() 
     assert events[0].kind == KIND_COMMENTARY
     assert events[0].required is True
     assert events[0].summary == "DRAFT RESPONSE\n\nWork completed."
+
+
+@pytest.mark.asyncio
+async def test_adapter_activity_uses_typed_technical_lane() -> None:
+    events = []
+
+    async def capture(event):
+        events.append(event)
+        return True
+
+    delivery = _AdapterDelivery(capture, allow_immediate_response=False)
+    accepted = await delivery.deliver_activity(
+        kind=KIND_REVIEW,
+        text="Review pass",
+        event_id="turn-1:activity:review:1",
+        phase="review",
+        metadata={
+            "activity_type": "review_result",
+            "outcome": "PASS",
+            "finding_count": 0,
+        },
+    )
+
+    assert accepted is True
+    assert len(events) == 1
+    assert events[0].kind == KIND_REVIEW
+    assert events[0].delivery_class == DELIVERY_TECHNICAL
+    assert events[0].phase == "review"
+    assert events[0].origin == "her_v2:runtime"
+    assert events[0].metadata["outcome"] == "PASS"
 
 
 @pytest.mark.asyncio
@@ -1624,6 +1665,35 @@ class _CommentaryManager(_FakeManager):
         return backend
 
 
+class _ProviderActivityBackend(_FakeBackend):
+    async def generate_response(
+        self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
+    ):
+        del request_id, is_retry, silent
+        self.prompt = prompt
+        await on_stream_event(
+            StreamEvent(
+                kind=KIND_PROVIDER_ACTIVITY,
+                summary="Provider protocol activity",
+                delivery_class=DELIVERY_INTERNAL,
+                origin="codex-app-server",
+            )
+        )
+        return BackendResponse(
+            text='{"disposition":"COMPLETED","summary":"done"}',
+            duration_ms=1,
+        )
+
+
+class _ProviderActivityManager(_FakeManager):
+    def create_ephemeral_backend(self, engine, target_model=None):
+        assert engine == "openrouter-api"
+        assert target_model == "configured/model"
+        backend = _ProviderActivityBackend(self.system_md)
+        self.backends.append(backend)
+        return backend
+
+
 class _FlakyPersonaBackend(_FakeBackend):
     def __init__(self, manager):
         super().__init__()
@@ -1976,6 +2046,48 @@ async def test_json_repair_uses_isolated_specialist_prompt_and_no_tools():
     assert "configured agent persona" not in backend.sys_prompt
     assert "Do the requested work" not in backend.prompt
     assert "Do not call tools" in backend.sys_prompt
+
+
+@pytest.mark.asyncio
+async def test_hashi_stage_provider_consumes_activity_without_presenting_it():
+    manager = _ProviderActivityManager()
+    forwarded = []
+    observed = []
+
+    async def capture(event):
+        forwarded.append(event)
+
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        on_stream_event=capture,
+    )
+    profile = ProviderProfile(
+        "premium",
+        "openrouter-api",
+        "configured/model",
+        reasoning="provider-high",
+    )
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "provider_activity_callback": observed.append,
+        }
+    )
+
+    result = await provider.invoke(profile, request)
+
+    assert '"summary":"done"' in result.text
+    assert len(observed) == 1
+    assert observed[0]["kind"] == KIND_PROVIDER_ACTIVITY
+    assert observed[0]["content"] == "Provider protocol activity"
+    assert observed[0]["tool_name"] == ""
+    assert forwarded == []
+    assert manager.backends[-1].shutdown_called is True
 
 
 @pytest.mark.asyncio

@@ -22,10 +22,12 @@ from adapters.stream_events import (
     DELIVERY_FINAL,
     DELIVERY_INTERNAL,
     DELIVERY_REASONING,
+    DELIVERY_TECHNICAL,
     DELIVERY_USER_COMMENTARY,
     KIND_ACKNOWLEDGEMENT,
     KIND_COMMENTARY,
     KIND_INITIAL_RESOLUTION,
+    KIND_PROVIDER_ACTIVITY,
     KIND_TEXT_DELTA,
     KIND_THINKING,
     KIND_TOOL_END,
@@ -1508,6 +1510,33 @@ class _AdapterDelivery(DeliveryPort):
         )
         return accepted is True if commentary.draft_response else accepted is not False
 
+    async def deliver_activity(
+        self,
+        *,
+        kind: str,
+        text: str,
+        event_id: str,
+        phase: str,
+        metadata: Mapping[str, Any],
+    ) -> bool:
+        """Publish deterministic runtime activity through the technical lane."""
+
+        if self.callback is None:
+            return False
+        accepted = await self.callback(
+            StreamEvent(
+                kind=kind,
+                summary=text,
+                event_id=event_id,
+                delivery_class=DELIVERY_TECHNICAL,
+                origin="her_v2:runtime",
+                phase=phase,
+                provenance="runtime_state",
+                metadata=dict(metadata),
+            )
+        )
+        return accepted is not False
+
     async def resolve_initial(
         self,
         *,
@@ -2492,7 +2521,7 @@ class HashiStageProvider(StageProvider):
                     reasoning_chunks.append(trace)
             # Structured JSON answer deltas are internal.  Reasoning and
             # invalid envelope retries are not meaningful execution progress.
-            if event.kind == KIND_TEXT_DELTA:
+            if event.kind in {KIND_TEXT_DELTA, KIND_PROVIDER_ACTIVITY}:
                 return
             if event.kind == KIND_TOOL_END and request.progress_callback is not None:
                 request.progress_callback(event.kind, event.summary, True)

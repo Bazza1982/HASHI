@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -9,6 +10,12 @@ import pytest
 from adapters.hashi_api import HashiApiAdapter
 from adapters.openrouter_api import _APIResult
 from adapters.registry import get_backend_class
+from adapters.stream_events import (
+    DELIVERY_INTERNAL,
+    HASHI_PROVIDER_ACTIVITY_SSE_TYPE,
+    KIND_PROVIDER_ACTIVITY,
+    KIND_TEXT_DELTA,
+)
 from orchestrator.flexible_backend_registry import (
     get_available_efforts,
     get_available_models,
@@ -122,6 +129,124 @@ async def test_hashi_api_initializes_without_a_provider_secret(tmp_path):
         "X-Hashi-After-Tool-End": "false",
     }
 
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_translates_private_gateway_activity_to_internal_event(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    chunks = [
+        {
+            "choices": [
+                {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+            ]
+        },
+        {
+            "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+            "hashi": {
+                "type": HASHI_PROVIDER_ACTIVITY_SSE_TYPE,
+                "source": "codex-app-server",
+                "activity": "protocol_progress",
+                "private": "must not be forwarded",
+            },
+        },
+        {
+            "choices": [
+                {"index": 0, "delta": {"content": "done"}, "finish_reason": None}
+            ]
+        },
+        {
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+        },
+    ]
+
+    async def handler(_request):
+        body = "".join(
+            f"data: {json.dumps(chunk)}\n\n" for chunk in chunks
+        ) + "data: [DONE]\n\n"
+        return httpx.Response(
+            200,
+            text=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    adapter.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    events = []
+
+    async def on_event(event):
+        events.append(event)
+
+    response = await adapter.generate_response(
+        "Keep working",
+        "request-provider-activity",
+        on_stream_event=on_event,
+    )
+
+    assert response.is_success is True
+    assert response.text == "done"
+    assert [event.kind for event in events] == [
+        KIND_PROVIDER_ACTIVITY,
+        KIND_TEXT_DELTA,
+    ]
+    activity_event = events[0]
+    assert activity_event.summary == "Provider protocol activity"
+    assert activity_event.raw_delta == ""
+    assert activity_event.delivery_class == DELIVERY_INTERNAL
+    assert activity_event.origin == "codex-app-server"
+    assert activity_event.metadata == {"activity": "protocol_progress"}
+    assert "must not be forwarded" not in repr(activity_event)
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hashi_private_activity_marks_later_stream_error_as_observed(tmp_path):
+    adapter = _adapter(tmp_path)
+
+    async def handler(_request):
+        activity = {
+            "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+            "hashi": {
+                "type": HASHI_PROVIDER_ACTIVITY_SSE_TYPE,
+                "source": "codex-app-server",
+                "activity": "protocol_progress",
+            },
+        }
+        failure = {
+            "error": {
+                "message": "provider stream failed",
+                "code": "provider_error",
+                "status": 502,
+            }
+        }
+        return httpx.Response(
+            200,
+            text=(
+                f"data: {json.dumps(activity)}\n\n"
+                f"data: {json.dumps(failure)}\n\n"
+                "data: [DONE]\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    adapter.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    events = []
+
+    async def on_event(event):
+        events.append(event)
+
+    response = await adapter.generate_response(
+        "Keep working",
+        "request-provider-activity-error",
+        on_stream_event=on_event,
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_SERVER_ERROR"
+    assert response.stream_metadata["provider_activity_observed"] is True
+    assert [event.kind for event in events] == [KIND_PROVIDER_ACTIVITY]
     await adapter.shutdown()
 
 

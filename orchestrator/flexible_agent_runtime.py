@@ -7909,27 +7909,22 @@ class FlexibleAgentRuntime:
         display_state=None,
     ):
         """
-        Temporary verbose progress card.  It consumes progress and tool events
-        only; provider reasoning and answer text are deliberately excluded.
+        Temporary verbose activity digest.  It consumes typed progress and
+        tool events only; provider reasoning and answer text are deliberately
+        excluded.  Raw events remain available to the canonical audit stream.
         """
         if placeholder is None or not self.telegram_connected:
             return
 
-        from adapters.stream_events import (
-            KIND_REVIEW,
-            KIND_TESTING,
-            KIND_TOOL_START,
-            KIND_VALIDATION,
-        )
+        from orchestrator.activity_digest import ActivityDigest
 
-        buffer: list[str] = []
-        MAX_LINES = 10
         MAX_MSG_LEN = 3800
         display_policy = telegram_stream_policy.get_display_policy(self)
         MIN_EDIT_INTERVAL = display_policy.edit_interval_s
         HEARTBEAT_INTERVAL = display_policy.heartbeat_interval_s
         MAX_EDITS = display_policy.max_edits_per_request
         last_edit_at = 0.0
+        last_rendered_text = ""
         started = time.monotonic()
         last_heartbeat_at = started
         dirty = False
@@ -7937,32 +7932,24 @@ class FlexibleAgentRuntime:
         display_disabled = False
         current_message = placeholder
         engine = getattr(self.config, "active_backend", "unknown")
-
-        ICONS = {
-            "tool_start": "🔧",
-            "tool_end": "  →",
-            "file_read": "📂",
-            "file_edit": "📝",
-            "shell_exec": "🔧",
-            "progress": "📊",
-            "review": "🧐",
-            "validation": "✅",
-            "testing": "🧪",
-            "error": "❌",
-        }
+        extra = getattr(self.config, "extra", {}) or {}
+        display_name = str(extra.get("display_name") or self.name)
+        digest = ActivityDigest(started_at=started)
 
         def _build_display() -> str:
             elapsed = max(0, int(time.monotonic() - started))
             return _streaming_status_to_html(
-                self.name,
+                display_name,
                 engine,
                 elapsed,
-                buffer[-MAX_LINES:],
+                digest.render_lines(),
                 max_message_len=MAX_MSG_LEN,
+                phase_icon=digest.phase_icon,
+                phase_label=digest.phase_label,
             )
 
         async def _rollover_placeholder(text: str) -> bool:
-            nonlocal current_message, last_edit_at, dirty, edit_attempts, display_disabled
+            nonlocal current_message, last_edit_at, last_rendered_text, dirty, edit_attempts, display_disabled
             try:
                 current_message = await self.app.bot.send_message(
                     chat_id=chat_id,
@@ -7976,6 +7963,7 @@ class FlexibleAgentRuntime:
                     display_state.rollover_count += 1
                 edit_attempts = 0
                 last_edit_at = time.monotonic()
+                last_rendered_text = text
                 dirty = False
                 self.telegram_logger.info(
                     f"Rolled over streaming display for {request_id} "
@@ -8000,7 +7988,7 @@ class FlexibleAgentRuntime:
                 return False
 
         async def _edit_placeholder():
-            nonlocal last_edit_at, dirty, edit_attempts, display_disabled
+            nonlocal last_edit_at, last_rendered_text, dirty, edit_attempts, display_disabled
             if display_disabled:
                 dirty = False
                 return
@@ -8013,6 +8001,9 @@ class FlexibleAgentRuntime:
                 )
                 return
             text = _build_display()
+            if text == last_rendered_text:
+                dirty = False
+                return
             if edit_attempts >= MAX_EDITS:
                 await _rollover_placeholder(text)
                 return
@@ -8025,6 +8016,7 @@ class FlexibleAgentRuntime:
                     parse_mode="HTML",
                 )
                 last_edit_at = time.monotonic()
+                last_rendered_text = text
                 dirty = False
             except Exception as exc:
                 if isinstance(exc, RetryAfter):
@@ -8073,46 +8065,43 @@ class FlexibleAgentRuntime:
 
             if stop_task in done and stop_task.result():
                 if event_task in done:
-                    event_task.result()
+                    dirty = (
+                        digest.record(event_task.result(), now=time.monotonic())
+                        or dirty
+                    )
+                while not event_queue.empty():
+                    try:
+                        queued_event = event_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    dirty = (
+                        digest.record(queued_event, now=time.monotonic()) or dirty
+                    )
                 break
 
             if event_task in done:
                 event = event_task.result()
-                icon = ICONS.get(event.kind, "•")
-                if event.kind == KIND_TOOL_START:
-                    # Replace last tool_start line if consecutive (avoids fragmented JSON input spam)
-                    if buffer and buffer[-1].startswith("🔧"):
-                        buffer[-1] = f"{icon} {event.summary[:100]}"
-                    else:
-                        buffer.append(f"{icon} {event.summary[:100]}")
-                elif event.kind in {KIND_REVIEW, KIND_VALIDATION, KIND_TESTING}:
-                    buffer.append(f"{icon} {event.summary[:240]}")
-                else:
-                    buffer.append(f"{icon} {event.summary[:100]}")
-
-                if len(buffer) > MAX_LINES * 2:
-                    buffer[:] = buffer[-MAX_LINES:]
-
-                dirty = True
+                dirty = digest.record(event, now=time.monotonic()) or dirty
+                last_heartbeat_at = time.monotonic()
             else:
                 now = time.monotonic()
                 if (now - last_heartbeat_at) >= HEARTBEAT_INTERVAL:
-                    heartbeat = f"📊 Still working... ({int(now - started)}s)"
-                    if buffer and buffer[-1].startswith("📊 Still working..."):
-                        buffer[-1] = heartbeat
-                    else:
-                        buffer.append(heartbeat)
+                    dirty = digest.mark_waiting(now=now) or dirty
                     last_heartbeat_at = now
-                    dirty = True
 
             now = time.monotonic()
             if dirty and (now - last_edit_at) >= MIN_EDIT_INTERVAL:
                 await _edit_placeholder()
 
-        if buffer:
-            elapsed = max(0, int(time.monotonic() - started))
-            buffer.append(f"✅ Done ({elapsed}s)")
-            await _edit_placeholder()
+        while not event_queue.empty():
+            try:
+                queued_event = event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            dirty = digest.record(queued_event, now=time.monotonic()) or dirty
+        digest.mark_finished()
+        dirty = True
+        await _edit_placeholder()
 
     def _make_stream_callback(self, event_queue: asyncio.Queue | None = None,
                               think_buffer: list | None = None,
@@ -8126,10 +8115,13 @@ class FlexibleAgentRuntime:
             KIND_FILE_EDIT,
             KIND_FILE_READ,
             KIND_PROGRESS,
+            KIND_REVIEW,
             KIND_SHELL_EXEC,
+            KIND_TESTING,
             KIND_THINKING,
             KIND_TOOL_END,
             KIND_TOOL_START,
+            KIND_VALIDATION,
             legacy_delivery_class,
         )
         verbose_kinds = {
@@ -8137,9 +8129,12 @@ class FlexibleAgentRuntime:
             KIND_FILE_EDIT,
             KIND_FILE_READ,
             KIND_PROGRESS,
+            KIND_REVIEW,
             KIND_SHELL_EXEC,
+            KIND_TESTING,
             KIND_TOOL_END,
             KIND_TOOL_START,
+            KIND_VALIDATION,
         }
         _engine = self.config.active_backend
         _chunk_target = 100

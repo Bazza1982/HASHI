@@ -60,6 +60,35 @@ Limits:
 - unique function names matching `[A-Za-z0-9_-]{1,64}`
 - no Gateway `session_id` during a structured tool conversation
 
+## Provider Liveness Propagation
+
+For streaming requests, every valid Codex app-server JSONL message is real
+provider activity. The bridge coalesces those messages to at most one internal
+activity event per second, and the Gateway carries that event in a
+content-free Chat Completions chunk:
+
+```json
+{
+  "choices": [{"index": 0, "delta": {}, "finish_reason": null}],
+  "hashi": {
+    "type": "hashi.provider_activity",
+    "source": "codex-app-server",
+    "activity": "protocol_progress"
+  }
+}
+```
+
+The `hashi-api` adapter converts this private extension into an internal
+`provider_activity` stream event. HER v2 can therefore refresh its provider
+activity tracker, and the upstream HTTP read deadline is refreshed, even when
+Codex has not produced user-visible text or a caller-owned tool call yet.
+
+This is not a timer-generated heartbeat. No event is sent without a real Codex
+JSONL message, so a genuinely silent or stuck backend still reaches the normal
+idle timeout. The extension never contains the Codex method, item payload,
+reasoning text, or any other provider content, and it is not presented to the
+user.
+
 ## Structured History Mapping
 
 Codex `thread/inject_items` receives raw Responses API history items:
