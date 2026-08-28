@@ -29,6 +29,7 @@ from adapters.stream_events import (
     KIND_VALIDATION,
     StreamEvent,
 )
+from orchestrator import ui_language
 
 
 CATEGORY_INSPECT = "inspect"
@@ -356,6 +357,13 @@ class ActivityDigest:
     def phase_label(self) -> str:
         return _PHASES.get(self.phase, _PHASES["execution"])[1]
 
+    def phase_label_for(self, *, locale: str | None = None) -> str:
+        selected = ui_language.normalize_locale(locale or ui_language.DEFAULT_LOCALE)
+        if selected == ui_language.DEFAULT_LOCALE:
+            return self.phase_label
+        phase = self.phase if self.phase in _PHASES else "execution"
+        return ui_language.tr(f"activity.phase.{phase}", locale=selected)
+
     @property
     def version(self) -> int:
         return self._version
@@ -572,17 +580,34 @@ class ActivityDigest:
             self.phase = "completed"
         self._version += 1
 
-    def _result_suffix(self, category: str) -> str:
+    def _result_suffix(self, category: str, *, locale: str | None = None) -> str:
         failures = self.failures[category]
+        selected = ui_language.normalize_locale(locale or ui_language.DEFAULT_LOCALE)
         if failures:
+            if selected != ui_language.DEFAULT_LOCALE:
+                return (
+                    " · "
+                    + ui_language.tr(
+                        "activity.failures",
+                        locale=selected,
+                        count=failures,
+                    )
+                    + " ❌"
+                )
             return f" · {_count_phrase(failures, 'failure')} ❌"
         operations = self.operations[category]
         completions = self.completions[category]
         if operations and completions >= operations:
+            if selected != ui_language.DEFAULT_LOCALE:
+                return (
+                    " · "
+                    + ui_language.tr("activity.completed", locale=selected)
+                    + " ✅"
+                )
             return " · completed ✅"
         return ""
 
-    def render_lines(self) -> list[str]:
+    def _render_lines_english(self) -> list[str]:
         lines: list[str] = []
         inspect_operations = self.operations[CATEGORY_INSPECT]
         if inspect_operations:
@@ -663,4 +688,147 @@ class ActivityDigest:
             lines.append("⏳ Waiting for a long-running operation")
         if not lines and not self.finished:
             lines.append("⏳ Preparing the next step")
+        return lines
+
+    def render_lines(self, *, locale: str | None = None) -> list[str]:
+        selected = ui_language.normalize_locale(locale or ui_language.DEFAULT_LOCALE)
+        if selected == ui_language.DEFAULT_LOCALE:
+            return self._render_lines_english()
+
+        lines: list[str] = []
+        inspect_operations = self.operations[CATEGORY_INSPECT]
+        if inspect_operations:
+            if self.inspect_files:
+                detail = ui_language.tr(
+                    "activity.inspected_files",
+                    locale=selected,
+                    count=len(self.inspect_files),
+                )
+                if inspect_operations > len(self.inspect_files):
+                    detail += " " + ui_language.tr(
+                        "activity.across_operations",
+                        locale=selected,
+                        count=inspect_operations,
+                    )
+            else:
+                detail = ui_language.tr(
+                    "activity.inspections",
+                    locale=selected,
+                    count=inspect_operations,
+                )
+            if self.inspect_searches:
+                detail += " · " + ui_language.tr(
+                    "activity.searches",
+                    locale=selected,
+                    count=self.inspect_searches,
+                )
+            lines.append(f"🔎 {detail}")
+
+        change_operations = self.operations[CATEGORY_CHANGE]
+        if change_operations:
+            if self.changed_files:
+                detail = ui_language.tr(
+                    "activity.changed_files",
+                    locale=selected,
+                    count=len(self.changed_files),
+                )
+            else:
+                detail = ui_language.tr(
+                    "activity.file_changes",
+                    locale=selected,
+                    count=change_operations,
+                )
+            lines.append(f"📝 {detail}")
+
+        for category, icon, key in (
+            (CATEGORY_EXECUTE, "⚙️", "activity.commands"),
+            (CATEGORY_CHECK, "🧪", "activity.checks"),
+            (CATEGORY_EXTERNAL, "🌐", "activity.external"),
+        ):
+            operations = self.operations[category]
+            if operations:
+                lines.append(
+                    f"{icon} "
+                    + ui_language.tr(key, locale=selected, count=operations)
+                    + self._result_suffix(category, locale=selected)
+                )
+
+        if self.recovery_count:
+            lines.append(
+                "🔁 "
+                + ui_language.tr(
+                    "activity.recovery",
+                    locale=selected,
+                    count=self.recovery_count,
+                )
+            )
+
+        if self.review_outcome:
+            if self.review_outcome == "PASS":
+                lines.append(
+                    "✅ " + ui_language.tr("activity.review_passed", locale=selected)
+                )
+            elif self.review_outcome == "CONDITIONAL_PASS":
+                lines.append(
+                    "⚠️ " + ui_language.tr("activity.review_limited", locale=selected)
+                )
+            elif self.review_outcome == "FAIL":
+                if self.review_finding_count:
+                    lines.append(
+                        "❌ "
+                        + ui_language.tr(
+                            "activity.review_issue_count",
+                            locale=selected,
+                            count=self.review_finding_count,
+                        )
+                    )
+                else:
+                    lines.append(
+                        "❌ " + ui_language.tr("activity.review_issues", locale=selected)
+                    )
+            else:
+                lines.append(
+                    "⚠️ "
+                    + ui_language.tr(
+                        "activity.review_other",
+                        locale=selected,
+                        outcome=self.review_outcome,
+                    )
+                )
+
+        if self.completed_with_limitations:
+            lines.append(
+                "⚠️ " + ui_language.tr("activity.completed_limited", locale=selected)
+            )
+        if self.blocked_count:
+            lines.append(
+                "⛔ "
+                + ui_language.tr(
+                    "activity.blocked_count",
+                    locale=selected,
+                    count=self.blocked_count,
+                )
+            )
+        if self.error_count and not sum(self.failures.values()):
+            lines.append(
+                "❌ "
+                + ui_language.tr(
+                    "activity.errors",
+                    locale=selected,
+                    count=self.error_count,
+                )
+            )
+        if self.warning_count:
+            lines.append(
+                "⚠️ "
+                + ui_language.tr(
+                    "activity.warnings",
+                    locale=selected,
+                    count=self.warning_count,
+                )
+            )
+        if self.waiting and not self.finished:
+            lines.append("⏳ " + ui_language.tr("activity.waiting", locale=selected))
+        if not lines and not self.finished:
+            lines.append("⏳ " + ui_language.tr("activity.preparing", locale=selected))
         return lines

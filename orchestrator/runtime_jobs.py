@@ -9,7 +9,7 @@ from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator.command_ui import BACK_LABEL, card_title
+from orchestrator.command_ui import back_label, card_title
 from orchestrator.her_v2.request_policy import job_effort_policy
 from orchestrator.her_v2.models import effort_display_label
 from orchestrator.job_ownership import ownership_mismatch_label
@@ -368,7 +368,7 @@ def build_job_transfer_keyboard(runtime, kind: str, task_id: str) -> InlineKeybo
         logger = getattr(runtime, "logger", logging.getLogger(__name__))
         logger.warning("Failed to build remote agent transfer buttons: %s", exc)
 
-    buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="noop")])
+    buttons.append([InlineKeyboardButton(back_label(), callback_data="noop")])
     return InlineKeyboardMarkup(buttons)
 
 

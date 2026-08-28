@@ -65,6 +65,7 @@ class GlobalConfig:
     base_media_dir: Path | None = None
     instance_id: str = "HASHI"
     display_name: str = "HASHI Instance"
+    ui_language: str = "en"
     api_host: str = "127.0.0.1"
     remote_port: int = DEFAULT_HASHI_REMOTE_PORT
     project_root: Path = None
@@ -611,6 +612,7 @@ class ConfigManager:
             ) or (bridge_home / "media"),
             instance_id=g_raw.get("instance_id", "HASHI"),
             display_name=g_raw.get("display_name", "HASHI Instance"),
+            ui_language=str(g_raw.get("ui_language", "en") or "en"),
             api_host=g_raw.get("api_host", "127.0.0.1"),
             remote_port=int(g_raw.get("remote_port", DEFAULT_HASHI_REMOTE_PORT)),
             project_root=code_root,

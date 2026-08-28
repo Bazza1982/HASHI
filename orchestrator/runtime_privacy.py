@@ -5,7 +5,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator.command_ui import REFRESH_LABEL, card_title, selected_label
+from orchestrator.command_ui import card_title, refresh_label, selected_label
 from orchestrator.flexible_backend_registry import get_supported_privacy_levels
 from orchestrator.privacy_levels import (
     PrivacyLevel,
@@ -130,7 +130,7 @@ def privacy_keyboard(
                 InlineKeyboardButton("🔒 4 · Private", callback_data="privacy:planned:4"),
                 InlineKeyboardButton("🔒 5 · Local", callback_data="privacy:planned:5"),
             ],
-            [InlineKeyboardButton(REFRESH_LABEL, callback_data="privacy:menu")],
+            [InlineKeyboardButton(refresh_label(), callback_data="privacy:menu")],
         ]
     )
 

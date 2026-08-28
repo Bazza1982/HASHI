@@ -12,10 +12,10 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from adapters import her_habits as _her_habits
 from orchestrator.command_ui import (
-    BACK_LABEL,
-    REFRESH_LABEL,
+    back_label,
     card_title,
     confirm_card,
+    refresh_label,
     selected_label,
     setting_card,
     status_label,
@@ -398,7 +398,7 @@ def _home_view(
             )
         )
     nav.append(
-        InlineKeyboardButton(REFRESH_LABEL, callback_data=f"habit:home:{offset}")
+        InlineKeyboardButton(refresh_label(), callback_data=f"habit:home:{offset}")
     )
     if offset + HABIT_PAGE_SIZE < len(habits):
         nav.append(
@@ -477,10 +477,10 @@ def _detail_view(
                 ],
                 [
                     InlineKeyboardButton(
-                        BACK_LABEL, callback_data=f"habit:home:{offset}"
+                        back_label(), callback_data=f"habit:home:{offset}"
                     ),
                     InlineKeyboardButton(
-                        REFRESH_LABEL, callback_data=f"habit:view:{token}:{offset}"
+                        refresh_label(), callback_data=f"habit:view:{token}:{offset}"
                     ),
                 ],
             ]

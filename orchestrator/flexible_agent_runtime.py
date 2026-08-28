@@ -22,16 +22,17 @@ from telegram.ext import ApplicationBuilder
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.bootstrap_logging import refresh_console_output_filters
 from orchestrator.command_ui import (
-    BACK_LABEL,
-    REFRESH_LABEL,
+    back_label,
     card_title,
     confirm_card,
     help_menu_text,
+    refresh_label,
     selected_label,
     setting_card,
     status_label,
 )
 from orchestrator import runtime_audit, runtime_common, runtime_pending, terminal_console
+from orchestrator import ui_language
 from orchestrator import runtime_background_status
 from orchestrator.browser_mode import (
     build_browser_task_prompt,
@@ -569,15 +570,20 @@ class FlexibleAgentRuntime:
                 chat_id=chat_id,
             )
             try:
-                if not self._is_authorized_user(actor_id):
-                    session.deny("unauthorized")
-                    if query is not None:
-                        await query.answer()
-                    return
-                if not await FlexibleAgentRuntime._telegram_channel_allowed(self, update, source_channel="telegram_callback"):
-                    session.block("channel_denied")
-                    return
-                await handler(update, context)
+                with ui_language.language_scope(self, update):
+                    if not self._is_authorized_user(actor_id):
+                        session.deny("unauthorized")
+                        if query is not None:
+                            await query.answer()
+                        return
+                    if not await FlexibleAgentRuntime._telegram_channel_allowed(
+                        self,
+                        update,
+                        source_channel="telegram_callback",
+                    ):
+                        session.block("channel_denied")
+                        return
+                    await handler(update, context)
             except Exception as exc:
                 session.fail(exc)
                 raise
@@ -602,18 +608,26 @@ class FlexibleAgentRuntime:
                 chat_id=chat_id,
             )
             try:
-                if not self._is_authorized_user(actor_id):
-                    session.deny("unauthorized")
-                    return
-                if not await FlexibleAgentRuntime._telegram_channel_allowed(self, update, source_channel="telegram"):
-                    session.block("channel_denied")
-                    return
-                self._record_active_chat(update)
-                if not self._is_command_allowed(cmd):
-                    session.block("command_disabled")
-                    await self._reply_text(update, f"/{cmd} is disabled for this agent.")
-                    return
-                await handler(update, context)
+                with ui_language.language_scope(self, update):
+                    if not self._is_authorized_user(actor_id):
+                        session.deny("unauthorized")
+                        return
+                    if not await FlexibleAgentRuntime._telegram_channel_allowed(
+                        self,
+                        update,
+                        source_channel="telegram",
+                    ):
+                        session.block("channel_denied")
+                        return
+                    self._record_active_chat(update)
+                    if not self._is_command_allowed(cmd):
+                        session.block("command_disabled")
+                        await self._reply_text(
+                            update,
+                            ui_language.tr("command.disabled", command=cmd),
+                        )
+                        return
+                    await handler(update, context)
             except Exception as exc:
                 session.fail(exc)
                 raise
@@ -2176,7 +2190,8 @@ class FlexibleAgentRuntime:
     async def cmd_help(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
-        cmds = self.get_bot_commands()
+        locale = ui_language.preferred_locale(self, update)
+        cmds = self.get_bot_commands(locale=locale)
         enabled = [c for c in cmds if self._is_command_allowed(c.command)]
         disabled = sorted({c.command for c in cmds if not self._is_command_allowed(c.command)})
         await self._reply_text(
@@ -2186,9 +2201,161 @@ class FlexibleAgentRuntime:
                 agent_type=getattr(self.config, "type", "flex"),
                 commands=enabled,
                 disabled=disabled,
+                locale=locale,
             ),
             parse_mode="HTML",
         )
+
+    def _language_menu_text(
+        self,
+        *,
+        locale: str,
+        notice: str | None = None,
+    ) -> str:
+        catalog = ui_language.load_catalog(locale)
+        facts = [
+            f"<b>{html.escape(ui_language.tr('common.scope', locale=locale))}</b> · "
+            f"{html.escape(ui_language.tr('language.scope', locale=locale))}"
+        ]
+        if notice:
+            facts.append(f"✅ {html.escape(notice)}")
+        return setting_card(
+            "🌐",
+            "Interface language",
+            current=f"<b>{html.escape(catalog.native_name)}</b> · <code>{catalog.locale}</code>",
+            facts=facts,
+            consequence=ui_language.tr("language.effect", locale=locale),
+            action=ui_language.tr("language.action", locale=locale),
+            locale=locale,
+        )
+
+    def _language_keyboard(self, *, locale: str) -> InlineKeyboardMarkup:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    selected_label(option.native_name, option.locale == locale),
+                    callback_data=f"language:set:{option.locale}",
+                )
+                for option in ui_language.language_options()
+            ],
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("common.default", locale=locale),
+                    callback_data="language:default",
+                )
+            ],
+        ]
+        return InlineKeyboardMarkup(rows)
+
+    async def _apply_ui_language(
+        self,
+        update: Update,
+        *,
+        requested: str,
+    ) -> tuple[str, str, int]:
+        reset = requested == "default"
+        if reset:
+            ui_language.reset_preferred_locale(self, update)
+            selected = ui_language.preferred_locale(self, update)
+        else:
+            selected = ui_language.normalize_locale(requested, fallback="")
+            if selected not in ui_language.SUPPORTED_LOCALES:
+                raise ValueError(requested)
+            ui_language.set_preferred_locale(self, selected, update)
+
+        chat_id = ui_language.chat_id_from_update(update)
+        failures = 0
+        if chat_id is not None:
+            failures = await runtime_command_binding.sync_user_command_menus(
+                self,
+                chat_id=chat_id,
+                locale=selected,
+            )
+        catalog = ui_language.load_catalog(selected)
+        key = "language.reset" if reset else "language.changed"
+        notice = ui_language.tr(
+            key,
+            locale=selected,
+            language=catalog.native_name,
+        )
+        return selected, notice, failures
+
+    async def cmd_language(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        arg = " ".join(context.args).strip() if context.args else ""
+        current = ui_language.preferred_locale(self, update)
+        notice = None
+        failures = 0
+        if arg and arg.casefold() not in {"status", "menu"}:
+            requested = arg.casefold()
+            if requested in {"default", "reset", "auto"}:
+                requested = "default"
+            try:
+                current, notice, failures = await self._apply_ui_language(
+                    update,
+                    requested=requested,
+                )
+            except ValueError:
+                await self._reply_text(
+                    update,
+                    ui_language.tr("language.invalid", locale=current),
+                )
+                return
+        if failures:
+            warning = ui_language.tr(
+                "language.menu_sync_warning",
+                locale=current,
+                count=failures,
+            )
+            notice = f"{notice}\n⚠️ {warning}" if notice else f"⚠️ {warning}"
+        await self._reply_text(
+            update,
+            self._language_menu_text(locale=current, notice=notice),
+            parse_mode="HTML",
+            reply_markup=self._language_keyboard(locale=current),
+        )
+
+    async def callback_language(self, update: Update, context: Any):
+        del context
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            return
+        data = str(query.data or "")
+        old_locale = ui_language.preferred_locale(self, update)
+        if data == "language:default":
+            requested = "default"
+        elif data.startswith("language:set:"):
+            requested = data.split(":", 2)[-1]
+        else:
+            await query.answer(
+                ui_language.tr("language.invalid", locale=old_locale),
+                show_alert=True,
+            )
+            return
+        try:
+            selected, notice, failures = await self._apply_ui_language(
+                update,
+                requested=requested,
+            )
+        except ValueError:
+            await query.answer(
+                ui_language.tr("language.invalid", locale=old_locale),
+                show_alert=True,
+            )
+            return
+        if failures:
+            notice += "\n⚠️ " + ui_language.tr(
+                "language.menu_sync_warning",
+                locale=selected,
+                count=failures,
+            )
+        await query.edit_message_text(
+            self._language_menu_text(locale=selected, notice=notice),
+            parse_mode="HTML",
+            reply_markup=self._language_keyboard(locale=selected),
+        )
+        await query.answer(notice.splitlines()[0][:200])
 
     def _startable_agent_keyboard(self) -> InlineKeyboardMarkup | None:
         orchestrator = getattr(self, "orchestrator", None)
@@ -2367,7 +2534,7 @@ class FlexibleAgentRuntime:
             btn_row.append(InlineKeyboardButton("Delete", callback_data=f"agents:delete:{name}"))
             rows.append(btn_row)
 
-        rows.append([InlineKeyboardButton(REFRESH_LABEL, callback_data="agents:refresh")])
+        rows.append([InlineKeyboardButton(refresh_label(), callback_data="agents:refresh")])
         return "\n".join(lines), InlineKeyboardMarkup(rows)
 
     async def cmd_agents(self, update: Update, context: Any):
@@ -2683,29 +2850,33 @@ class FlexibleAgentRuntime:
         elif target == "reboot":
             orchestrator = getattr(self, "orchestrator", None)
             if orchestrator is None:
-                await query.answer("Hot restart unavailable.", show_alert=True)
+                await query.answer(ui_language.tr("reboot.unavailable"), show_alert=True)
                 return
             if value == "min":
-                mode, label = "min", f"Restarting only <b>{self.name}</b>..."
+                mode, label = "min", ui_language.tr(
+                    "reboot.restarting_this",
+                    agent=f"<b>{html.escape(self.name)}</b>",
+                )
             elif value == "max":
-                mode, label = "max", "Restarting all active agents..."
+                mode, label = "max", ui_language.tr("reboot.restarting_all_active")
             elif value.isdigit():
                 all_names = orchestrator.configured_agent_names()
                 num = int(value)
                 if num < 1 or num > len(all_names):
-                    await query.answer(
-                        "Invalid agent number.",
-                        show_alert=True,
-                    )
+                    await query.answer(ui_language.tr("reboot.invalid_number_short"), show_alert=True)
                     return
                 mode, label = (
                     "number",
-                    f"Restarting agent #{num} (<b>{all_names[num - 1]}</b>)...",
+                    ui_language.tr(
+                        "reboot.restarting_number",
+                        number=num,
+                        agent=f"<b>{html.escape(all_names[num - 1])}</b>",
+                    ),
                 )
             elif value == "same":
-                mode, label = "same", "Restarting all running agents..."
+                mode, label = "same", ui_language.tr("reboot.restarting_all_running")
             else:
-                await query.answer("Invalid reboot target.", show_alert=True)
+                await query.answer(ui_language.tr("reboot.invalid_target_short"), show_alert=True)
                 return
             await query.edit_message_text(label, parse_mode="HTML")
             await query.answer()
@@ -2749,9 +2920,9 @@ class FlexibleAgentRuntime:
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
-            await self._reply_text(update, "Dynamic lifecycle control is unavailable.")
+            await self._reply_text(update, ui_language.tr("lifecycle.control_unavailable"))
             return
-        await self._reply_text(update, "Shutting down.")
+        await self._reply_text(update, ui_language.tr("lifecycle.shutting_down"))
         asyncio.create_task(orchestrator.stop_agent(self.name))
 
     async def cmd_reboot(self, update: Update, context: Any):
@@ -2759,7 +2930,7 @@ class FlexibleAgentRuntime:
             return
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is None:
-            await self._reply_text(update, "Hot restart is unavailable.")
+            await self._reply_text(update, ui_language.tr("reboot.unavailable"))
             return
         arg = " ".join(context.args).strip().lower() if context.args else ""
         if not arg or arg == "help":
@@ -2768,13 +2939,16 @@ class FlexibleAgentRuntime:
             lines = [
                 card_title("🔄", "Reboot agents"),
                 "",
-                f"<b>Current</b> · <code>{len(running_names)}</code> running",
-                f"<b>Agent</b> · <code>{html.escape(self.name)}</code>",
-                "<b>Effect</b> · reloads code and runtime state for the selected target",
+                f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+                f"<code>{html.escape(ui_language.tr('reboot.current', count=len(running_names)))}</code>",
+                f"<b>{html.escape(ui_language.tr('reboot.agent'))}</b> · "
+                f"<code>{html.escape(self.name)}</code>",
+                f"<b>{html.escape(ui_language.tr('common.effect'))}</b> · "
+                f"{html.escape(ui_language.tr('reboot.effect'))}",
                 "",
-                "Active requests on restarted agents are interrupted. Choose the exact target:",
+                html.escape(ui_language.tr("reboot.warning")),
                 "",
-                "<b>AGENTS</b>",
+                f"<b>{html.escape(ui_language.tr('reboot.agents_heading'))}</b>",
             ]
             for i, name in enumerate(all_names, 1):
                 running = name in running_names
@@ -2782,10 +2956,10 @@ class FlexibleAgentRuntime:
                 lines.append(f"{i}. {marker} <code>{html.escape(name)}</code>")
             rows = [
                 [
-                    InlineKeyboardButton("This bot", callback_data="tgl:reboot:min"),
-                    InlineKeyboardButton("All active", callback_data="tgl:reboot:max"),
+                    InlineKeyboardButton(ui_language.tr("reboot.this_agent"), callback_data="tgl:reboot:min"),
+                    InlineKeyboardButton(ui_language.tr("reboot.all_active"), callback_data="tgl:reboot:max"),
                 ],
-                [InlineKeyboardButton("All running", callback_data="tgl:reboot:same")],
+                [InlineKeyboardButton(ui_language.tr("reboot.all_running"), callback_data="tgl:reboot:same")],
             ]
             for i, name in enumerate(all_names, 1):
                 rows.append([InlineKeyboardButton(f"#{i} {name}", callback_data=f"tgl:reboot:{i}")])
@@ -2793,22 +2967,32 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, "\n".join(lines), parse_mode="HTML", reply_markup=markup)
             return
         if arg == "min":
-            mode, label = "min", f"Restarting only <b>{self.name}</b>..."
+            mode, label = "min", ui_language.tr(
+                "reboot.restarting_this",
+                agent=f"<b>{html.escape(self.name)}</b>",
+            )
         elif arg == "max":
-            mode, label = "max", "Restarting all active agents..."
+            mode, label = "max", ui_language.tr("reboot.restarting_all_active")
         elif arg.isdigit():
             num = int(arg)
             all_names = orchestrator.configured_agent_names()
             if num < 1 or num > len(all_names):
-                await self._reply_text(update, f"Invalid agent number. Use 1–{len(all_names)}. /reboot help to list.")
+                await self._reply_text(
+                    update,
+                    ui_language.tr("reboot.invalid_number", count=len(all_names)),
+                )
                 return
-            mode, label = "number", f"Restarting agent #{num} (<b>{all_names[num - 1]}</b>)..."
+            mode, label = "number", ui_language.tr(
+                "reboot.restarting_number",
+                number=num,
+                agent=f"<b>{html.escape(all_names[num - 1])}</b>",
+            )
         elif arg == "same":
-            mode, label = "same", "Restarting all running agents..."
+            mode, label = "same", ui_language.tr("reboot.restarting_all_running")
         else:
             await self._reply_text(
                 update,
-                "Invalid reboot target. Use /reboot help, min, max, same, or an agent number.",
+                ui_language.tr("reboot.invalid_target"),
             )
             return
         await self._reply_text(update, label, parse_mode="HTML")
@@ -3844,7 +4028,7 @@ class FlexibleAgentRuntime:
         )
         await self._reply_text(
             update,
-            "🔄 收到！正在理解任务并设置循环…",
+            ui_language.tr("loop.setting_up"),
         )
 
     async def cmd_nudge(self, update: Update, context: Any):
@@ -5553,7 +5737,7 @@ class FlexibleAgentRuntime:
                 ]
             )
             back_callback = "backend_menu" if source == "backend" else "model_menu"
-            buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data=back_callback)])
+            buttons.append([InlineKeyboardButton(back_label(), callback_data=back_callback)])
         return InlineKeyboardMarkup(buttons)
 
     def _build_effort_followup_text(self) -> str:
@@ -5650,7 +5834,7 @@ class FlexibleAgentRuntime:
         for model in self._get_available_models_for(target_engine):
             label = selected_label(model, model == active_model)
             buttons.append([InlineKeyboardButton(label, callback_data=f"bmodel:{target_engine}:{mode_flag}:{model}")])
-        buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="backend_menu")])
+        buttons.append([InlineKeyboardButton(back_label(), callback_data="backend_menu")])
         return InlineKeyboardMarkup(buttons)
 
     def _build_backend_menu_text(self) -> str:
@@ -5940,7 +6124,7 @@ class FlexibleAgentRuntime:
             rows.append([InlineKeyboardButton(label, callback_data=f"wcfg:core:codex-cli:{model}")])
         rows.append([
             InlineKeyboardButton("Wrapper model", callback_data="wcfg:menu:wrap"),
-            InlineKeyboardButton(BACK_LABEL, callback_data="wcfg:menu:wrapper"),
+            InlineKeyboardButton(back_label(), callback_data="wcfg:menu:wrapper"),
         ])
         return InlineKeyboardMarkup(rows)
 
@@ -5989,7 +6173,7 @@ class FlexibleAgentRuntime:
         ])
         rows.append([
             InlineKeyboardButton("Core model", callback_data="wcfg:menu:core"),
-            InlineKeyboardButton(BACK_LABEL, callback_data="wcfg:menu:wrapper"),
+            InlineKeyboardButton(back_label(), callback_data="wcfg:menu:wrapper"),
         ])
         return InlineKeyboardMarkup(rows)
 
@@ -6000,7 +6184,7 @@ class FlexibleAgentRuntime:
                     InlineKeyboardButton("Core model", callback_data="wcfg:menu:core"),
                     InlineKeyboardButton("Wrapper model", callback_data="wcfg:menu:wrap"),
                 ],
-                [InlineKeyboardButton(REFRESH_LABEL, callback_data="wcfg:menu:wrapper")],
+                [InlineKeyboardButton(refresh_label(), callback_data="wcfg:menu:wrapper")],
             ]
         )
 
@@ -6446,7 +6630,7 @@ class FlexibleAgentRuntime:
                 ],
                 [
                     InlineKeyboardButton("Prompts", callback_data="bcfg:menu:prompts"),
-                    InlineKeyboardButton(REFRESH_LABEL, callback_data="bcfg:menu:status"),
+                    InlineKeyboardButton(refresh_label(), callback_data="bcfg:menu:status"),
                 ],
             ]
         )
@@ -6470,7 +6654,7 @@ class FlexibleAgentRuntime:
                     label = selected_label(label, True)
                 row.append(InlineKeyboardButton(label, callback_data=f"bcfg:backend:{target}:{engine}"))
             rows.append(row)
-        rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="bcfg:menu:status")])
+        rows.append([InlineKeyboardButton(back_label(), callback_data="bcfg:menu:status")])
         return InlineKeyboardMarkup(rows)
 
     def _dual_brain_model_keyboard(self, cfg, *, target: str, backend: str | None = None) -> InlineKeyboardMarkup:
@@ -6484,7 +6668,7 @@ class FlexibleAgentRuntime:
             label = selected_label(model, active)
             rows.append([InlineKeyboardButton(label, callback_data=f"bcfg:modelidx:{target}:{selected_backend}:{index}")])
         rows.append([InlineKeyboardButton("← Back to backends", callback_data=f"bcfg:menu:{target}")])
-        rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="bcfg:menu:status")])
+        rows.append([InlineKeyboardButton(back_label(), callback_data="bcfg:menu:status")])
         return InlineKeyboardMarkup(rows)
 
     def _dual_brain_status_text(self, cfg) -> str:
@@ -6580,7 +6764,7 @@ class FlexibleAgentRuntime:
                 update,
                 self._dual_brain_prompts_text(cfg),
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(BACK_LABEL, callback_data="bcfg:menu:status")]]),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(back_label(), callback_data="bcfg:menu:status")]]),
             )
             return
 
@@ -6828,7 +7012,7 @@ class FlexibleAgentRuntime:
                 await query.edit_message_text(
                     self._dual_brain_prompts_text(cfg),
                     parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(BACK_LABEL, callback_data="bcfg:menu:status")]]),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(back_label(), callback_data="bcfg:menu:status")]]),
                 )
             elif data.startswith("bcfg:backend:"):
                 parts = data.split(":", 3)
@@ -7252,7 +7436,7 @@ class FlexibleAgentRuntime:
         )
 
     def _notepad_back_keyboard(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([[InlineKeyboardButton(BACK_LABEL, callback_data="npad:refresh")]])
+        return InlineKeyboardMarkup([[InlineKeyboardButton(back_label(), callback_data="npad:refresh")]])
 
     def _notepad_clear_confirm_keyboard(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
@@ -8072,6 +8256,7 @@ class FlexibleAgentRuntime:
         extra = getattr(self.config, "extra", {}) or {}
         display_name = str(extra.get("display_name") or self.name)
         digest = ActivityDigest(started_at=started)
+        locale = ui_language.preferred_locale(self, actor_id=chat_id)
 
         def _build_display() -> str:
             elapsed = max(0, int(time.monotonic() - started))
@@ -8079,10 +8264,10 @@ class FlexibleAgentRuntime:
                 display_name,
                 engine,
                 elapsed,
-                digest.render_lines(),
+                digest.render_lines(locale=locale),
                 max_message_len=MAX_MSG_LEN,
                 phase_icon=digest.phase_icon,
-                phase_label=digest.phase_label,
+                phase_label=digest.phase_label_for(locale=locale),
             )
 
         async def _rollover_placeholder(text: str) -> bool:
@@ -9171,8 +9356,8 @@ class FlexibleAgentRuntime:
     async def process_queue(self):
         await runtime_lifecycle.process_queue(self)
 
-    def get_bot_commands(self):
-        return runtime_command_binding.get_flexible_bot_commands(self)
+    def get_bot_commands(self, *, locale: str | None = None):
+        return runtime_command_binding.get_flexible_bot_commands(self, locale=locale)
 
     async def shutdown(self):
         await runtime_lifecycle.shutdown(self)

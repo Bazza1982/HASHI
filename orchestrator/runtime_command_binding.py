@@ -4,12 +4,13 @@ import logging
 import shlex
 from dataclasses import dataclass
 
-from telegram import BotCommand
+from telegram import BotCommand, BotCommandScopeChat
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands, runtime_command_map
 from orchestrator.command_specs import COMMAND_SPECS
 from orchestrator.private_wol import private_wol_available
+from orchestrator import ui_language
 
 logger = logging.getLogger("BridgeU.RuntimeCommandBinding")
 
@@ -69,6 +70,7 @@ CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
     CallbackBinding(r"^tgl:", "callback_toggle"),
     CallbackBinding(r"^group:", "callback_group"),
     CallbackBinding(r"^move:", "callback_move"),
+    CallbackBinding(r"^language:", "callback_language"),
 )
 
 
@@ -134,12 +136,111 @@ def bind_flexible_runtime_handlers(runtime) -> None:
     runtime.app.add_handler(MessageHandler(filters.Sticker.ALL, runtime.handle_sticker))
 
 
-def get_flexible_bot_commands(runtime) -> list[BotCommand]:
-    commands = [BotCommand(binding.name, binding.description) for binding in BOT_COMMAND_BINDINGS]
+def get_flexible_bot_commands(runtime, *, locale: str | None = None) -> list[BotCommand]:
+    selected = ui_language.normalize_locale(locale or ui_language.DEFAULT_LOCALE)
+    commands = [
+        BotCommand(
+            binding.name,
+            ui_language.command_description(
+                binding.name,
+                binding.description,
+                locale=selected,
+            ),
+        )
+        for binding in BOT_COMMAND_BINDINGS
+    ]
     if private_wol_available(
         runtime.global_config.project_root,
         getattr(runtime.global_config, "instance_id", None),
     ):
         wol_spec = next(spec for spec in COMMAND_SPECS if spec.name == "wol")
-        commands.append(BotCommand(wol_spec.name, wol_spec.description))
-    return commands + runtime_bot_commands()
+        commands.append(
+            BotCommand(
+                wol_spec.name,
+                ui_language.command_description(
+                    wol_spec.name,
+                    wol_spec.description,
+                    locale=selected,
+                ),
+            )
+        )
+    dynamic = [
+        BotCommand(
+            command.command,
+            ui_language.command_description(
+                command.command,
+                command.description,
+                locale=selected,
+            ),
+        )
+        for command in runtime_bot_commands()
+    ]
+    return commands + dynamic
+
+
+async def register_flexible_bot_commands(runtime) -> None:
+    """Register the instance default and any saved per-user command menus."""
+
+    default_locale = ui_language.configured_default_locale(runtime)
+    await runtime.app.bot.set_my_commands(
+        get_flexible_bot_commands(runtime, locale=default_locale)
+    )
+    for actor_id, locale in ui_language.saved_user_locales(runtime).items():
+        try:
+            chat_id = int(actor_id)
+            if chat_id <= 0:
+                continue
+            await runtime.app.bot.set_my_commands(
+                get_flexible_bot_commands(runtime, locale=locale),
+                scope=BotCommandScopeChat(chat_id=chat_id),
+            )
+        except (TypeError, ValueError):
+            continue
+        except Exception as exc:
+            logger.warning(
+                "Could not restore chat command menu for %s on %s: %s",
+                actor_id,
+                getattr(runtime, "name", "unknown"),
+                exc,
+            )
+
+
+async def sync_user_command_menus(
+    runtime,
+    *,
+    chat_id: int | str,
+    locale: str,
+) -> int:
+    """Refresh one user's private-chat command menu on every live agent."""
+
+    try:
+        numeric_chat_id = int(chat_id)
+    except (TypeError, ValueError):
+        return 0
+    if numeric_chat_id <= 0:
+        return 0
+
+    orchestrator = getattr(runtime, "orchestrator", None)
+    candidates = list(getattr(orchestrator, "runtimes", ()) or ())
+    if not candidates:
+        candidates = [runtime]
+    failures = 0
+    for candidate in candidates:
+        bot = getattr(getattr(candidate, "app", None), "bot", None)
+        if bot is None or not getattr(candidate, "telegram_connected", True):
+            continue
+        try:
+            await bot.set_my_commands(
+                get_flexible_bot_commands(candidate, locale=locale),
+                scope=BotCommandScopeChat(chat_id=numeric_chat_id),
+            )
+        except Exception as exc:
+            failures += 1
+            logger.warning(
+                "Could not refresh %s command menu for chat %s on %s: %s",
+                locale,
+                numeric_chat_id,
+                getattr(candidate, "name", "unknown"),
+                exc,
+            )
+    return failures

@@ -10,7 +10,7 @@ from uuid import uuid4
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import NetworkError, TimedOut
 
-from orchestrator import runtime_long
+from orchestrator import runtime_long, ui_language
 from orchestrator.media_utils import is_image_file
 from orchestrator.multimodal_contract import (
     attachment_manifest,
@@ -604,6 +604,7 @@ async def _present_safe_voice_transcript(
     native_audio: bool = False,
 ) -> None:
     chat_id = update.effective_chat.id
+    locale = ui_language.preferred_locale(runtime, update)
     chat_key = str(chat_id)
     runtime._pending_voice[chat_key] = {
         "prompt": prompt,
@@ -617,7 +618,13 @@ async def _present_safe_voice_transcript(
         "attachment_id": attachment_id,
     }
     preview = (
-        transcript[:3500] + f"\n\n…(共 {len(transcript)} 字，已截断)"
+        transcript[:3500]
+        + "\n\n"
+        + ui_language.tr(
+            "media.preview_truncated",
+            locale=locale,
+            count=len(transcript),
+        )
         if len(transcript) > 3500
         else transcript
     )
@@ -625,17 +632,19 @@ async def _present_safe_voice_transcript(
         [
             [
                 InlineKeyboardButton(
-                    "Send transcript", callback_data=f"safevoice:yes:{chat_key}"
+                    ui_language.tr("safevoice.send", locale=locale),
+                    callback_data=f"safevoice:yes:{chat_key}",
                 ),
                 InlineKeyboardButton(
-                    "Discard transcript", callback_data=f"safevoice:no:{chat_key}"
+                    ui_language.tr("safevoice.discard", locale=locale),
+                    callback_data=f"safevoice:no:{chat_key}",
                 ),
             ]
         ]
     )
     await runtime._reply_text(
         update,
-        f"🛡️ *Safe Voice — Confirm transcription:*\n\n_{preview}_",
+        f"*{ui_language.tr('safevoice.confirm', locale=locale)}*\n\n_{preview}_",
         reply_markup=keyboard,
         parse_mode="Markdown",
     )
@@ -884,8 +893,18 @@ async def handle_voice_or_audio(
 
         if transcript.startswith("[Transcription error]"):
             runtime.error_logger.error(f"Voice transcription failed for {filename}: {transcript}")
+            locale = ui_language.preferred_locale(runtime, update)
+            kind_key = f"safevoice.kind.{media_kind.lower()}"
+            localized_kind = ui_language.tr(kind_key, locale=locale)
+            if localized_kind == kind_key:
+                localized_kind = media_kind.lower()
             await runtime._reply_text(
-                update, f"Failed to transcribe {media_kind.lower()} message."
+                update,
+                ui_language.tr(
+                    "safevoice.transcription_failed",
+                    locale=locale,
+                    kind=localized_kind,
+                ),
             )
             return
 
@@ -910,6 +929,7 @@ async def handle_voice_or_audio(
             )
 
         if runtime._safevoice_enabled:
+            locale = ui_language.preferred_locale(runtime, update)
             chat_key = batch_pending_key or str(chat_id)
             runtime._pending_voice[chat_key] = {
                 "prompt": prompt,
@@ -921,19 +941,33 @@ async def handle_voice_or_audio(
             }
             max_preview = 3500
             if len(transcript) > max_preview:
-                preview = transcript[:max_preview] + f"\n\n…(共 {len(transcript)} 字，已截断)"
+                preview = (
+                    transcript[:max_preview]
+                    + "\n\n"
+                    + ui_language.tr(
+                        "media.preview_truncated",
+                        locale=locale,
+                        count=len(transcript),
+                    )
+                )
             else:
                 preview = transcript
             keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("Send transcript", callback_data=f"safevoice:yes:{chat_key}"),
-                    InlineKeyboardButton("Discard transcript", callback_data=f"safevoice:no:{chat_key}"),
+                    InlineKeyboardButton(
+                        ui_language.tr("safevoice.send", locale=locale),
+                        callback_data=f"safevoice:yes:{chat_key}",
+                    ),
+                    InlineKeyboardButton(
+                        ui_language.tr("safevoice.discard", locale=locale),
+                        callback_data=f"safevoice:no:{chat_key}",
+                    ),
                 ]
             ])
             safevoice_title = (
-                "🛡️ *Safe Voice — Confirm transcription for /long batch:*"
+                f"*{ui_language.tr('safevoice.confirm_long', locale=locale)}*"
                 if batch_pending_key
-                else "🛡️ *Safe Voice — Confirm transcription:*"
+                else f"*{ui_language.tr('safevoice.confirm', locale=locale)}*"
             )
             await runtime._reply_text(
                 update,

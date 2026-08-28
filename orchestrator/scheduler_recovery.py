@@ -6,6 +6,8 @@ from collections import deque
 from datetime import datetime
 from typing import Any
 
+from orchestrator import ui_language
+
 
 MAX_OCCURRENCE_SCAN = 10_000
 MAX_STORED_DUE_TIMES = 100
@@ -172,18 +174,33 @@ def replayable_count(item: dict[str, Any]) -> int:
     )
 
 
-def render_notice(batch: dict[str, Any]) -> str:
+def render_notice(
+    batch: dict[str, Any],
+    *,
+    locale: str | None = None,
+) -> str:
+    selected = ui_language.normalize_locale(locale or ui_language.DEFAULT_LOCALE)
     items = list(batch.get("items") or [])
     affected = len(items)
     total_missed = sum(int(item.get("missed_count", 1) or 1) for item in items)
     total_missed_label = f"{total_missed}+" if any(item.get("missed_count_capped") for item in items) else str(total_missed)
     total_replayable = sum(replayable_count(item) for item in items)
     example_id = str(items[0].get("task_id") or "task-id") if items else "task-id"
+    separator = "：" if selected == "zh-CN" else ": "
     lines = [
-        "⏰ HASHI 离线恢复",
+        "⏰ " + ui_language.tr("scheduler.title", locale=selected),
         "",
-        f"离线或暂停期间，{affected} 个任务共错过 {total_missed_label} 次触发。",
-        f"恢复批次：{batch.get('batch_id', '?')}",
+        ui_language.tr(
+            "scheduler.summary",
+            locale=selected,
+            affected=affected,
+            missed=total_missed_label,
+        ),
+        ui_language.tr(
+            "scheduler.batch",
+            locale=selected,
+            batch_id=batch.get("batch_id", "?"),
+        ),
         "",
     ]
     for item in items:
@@ -192,26 +209,53 @@ def render_notice(batch: dict[str, Any]) -> str:
         if kind == "cron":
             schedule_text = f"cron {item.get('schedule', '?')}"
         else:
-            schedule_text = f"每 {int(item.get('interval_seconds', 0) or 0)} 秒"
+            schedule_text = ui_language.tr(
+                "scheduler.every_seconds",
+                locale=selected,
+                seconds=int(item.get("interval_seconds", 0) or 0),
+            )
         replay_count = replayable_count(item)
+        missed_value = ui_language.tr(
+            "scheduler.missed_value",
+            locale=selected,
+            count=_count_label(item),
+            first=format_local_time(item.get("first_due_at")),
+            last=format_local_time(item.get("last_due_at")),
+        )
         lines.extend(
             [
                 f"• {task_id}",
-                f"  内容：{item.get('description') or task_id}",
-                f"  计划：{schedule_text}",
-                f"  错过：{_count_label(item)} 次（{format_local_time(item.get('first_due_at'))} 至 {format_local_time(item.get('last_due_at'))}）",
-                f"  本批最多补跑：{replay_count} 次",
+                f"  {ui_language.tr('scheduler.content', locale=selected)}{separator}"
+                f"{item.get('description') or task_id}",
+                f"  {ui_language.tr('scheduler.schedule', locale=selected)}{separator}{schedule_text}",
+                f"  {ui_language.tr('scheduler.missed', locale=selected)}{separator}{missed_value}",
+                f"  {ui_language.tr('scheduler.replay_limit', locale=selected)}{separator}"
+                + ui_language.tr(
+                    "scheduler.replay_value",
+                    locale=selected,
+                    count=replay_count,
+                ),
                 "",
             ]
         )
     lines.extend(
         [
-            "请选择一次：",
-            f"1. 全部补跑（本批将执行 {total_replayable} 次）",
-            f"2. 部分补跑（回复 任务ID=次数；例如 {example_id}=3，表示最近 3 次并按时间顺序执行）",
-            "3. 全部跳过",
+            ui_language.tr("scheduler.choose", locale=selected),
+            "1. "
+            + ui_language.tr(
+                "scheduler.run_all",
+                locale=selected,
+                count=total_replayable,
+            ),
+            "2. "
+            + ui_language.tr(
+                "scheduler.run_partial",
+                locale=selected,
+                example=example_id,
+            ),
+            "3. " + ui_language.tr("scheduler.skip_all", locale=selected),
             "",
-            "在明确选择前不会补跑；下次仍按原计划正常触发。",
+            ui_language.tr("scheduler.safety", locale=selected),
         ]
     )
     return "\n".join(lines).strip()

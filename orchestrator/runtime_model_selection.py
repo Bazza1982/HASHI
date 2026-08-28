@@ -7,7 +7,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator import runtime_menu_views, runtime_mode
-from orchestrator.command_ui import BACK_LABEL, selected_label, setting_card
+from orchestrator.command_ui import back_label, selected_label, setting_card
 from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
     HER_V2_ENGINE,
@@ -216,7 +216,7 @@ def her_v2_compact_keyboard(runtime) -> InlineKeyboardMarkup:
                     callback_data="her_model_compact_tier:tier_3",
                 ),
             ],
-            [InlineKeyboardButton(BACK_LABEL, callback_data="model_menu")],
+            [InlineKeyboardButton(back_label(), callback_data="model_menu")],
         ]
     )
 
@@ -238,7 +238,7 @@ def her_v2_compact_provider_keyboard(runtime) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="her_model_compact")])
+    buttons.append([InlineKeyboardButton(back_label(), callback_data="her_model_compact")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -260,7 +260,7 @@ def her_v2_compact_model_keyboard(runtime, provider_index: int) -> InlineKeyboar
         for model_index, model in enumerate(option.get("models") or [])
     ]
     buttons.append(
-        [InlineKeyboardButton(BACK_LABEL, callback_data="her_model_compact_providers")]
+        [InlineKeyboardButton(back_label(), callback_data="her_model_compact_providers")]
     )
     return InlineKeyboardMarkup(buttons)
 
@@ -289,7 +289,7 @@ def her_v2_compact_reasoning_keyboard(
     buttons.append(
         [
             InlineKeyboardButton(
-                BACK_LABEL,
+                back_label(),
                 callback_data=(
                     f"her_model_compact_provider:{provider_index}:"
                     f"{_her_v2_callback_token(provider)}"
@@ -362,7 +362,7 @@ def her_v2_slot_model_keyboard(runtime, slot: str) -> InlineKeyboardMarkup:
                 )
             ],
         )
-    buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="model_menu")])
+    buttons.append([InlineKeyboardButton(back_label(), callback_data="model_menu")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -396,7 +396,7 @@ def her_v2_target_provider_keyboard(runtime, slot: str) -> InlineKeyboardMarkup:
             callback = f"her_provider_locked:{index}:{_her_v2_callback_token(provider)}"
         buttons.append([InlineKeyboardButton(label, callback_data=callback)])
     buttons.append(
-        [InlineKeyboardButton(BACK_LABEL, callback_data=f"her_model_slot:{slot}")]
+        [InlineKeyboardButton(back_label(), callback_data=f"her_model_slot:{slot}")]
     )
     return InlineKeyboardMarkup(buttons)
 
@@ -424,7 +424,7 @@ def her_v2_target_model_keyboard(
         for model_index, model in enumerate(option.get("models") or [])
     ]
     buttons.append(
-        [InlineKeyboardButton(BACK_LABEL, callback_data=f"her_target_providers:{slot}")]
+        [InlineKeyboardButton(back_label(), callback_data=f"her_target_providers:{slot}")]
     )
     return InlineKeyboardMarkup(buttons)
 
@@ -484,7 +484,7 @@ def her_v2_routes_keyboard(runtime) -> InlineKeyboardMarkup:
         ]
         for route in HER_V2_ROUTE_ORDER
     ]
-    buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="model_menu")])
+    buttons.append([InlineKeyboardButton(back_label(), callback_data="model_menu")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -545,7 +545,7 @@ def her_v2_route_keyboard(runtime, route: Route | str) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data="her_routes")])
+    buttons.append([InlineKeyboardButton(back_label(), callback_data="her_routes")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -579,7 +579,7 @@ def her_v2_route_provider_keyboard(runtime, route: Route | str) -> InlineKeyboar
             callback = f"her_provider_locked:{index}:{_her_v2_callback_token(provider)}"
         buttons.append([InlineKeyboardButton(label, callback_data=callback)])
     buttons.append(
-        [InlineKeyboardButton(BACK_LABEL, callback_data=f"her_route_menu:{parsed.value}")]
+        [InlineKeyboardButton(back_label(), callback_data=f"her_route_menu:{parsed.value}")]
     )
     return InlineKeyboardMarkup(buttons)
 
@@ -610,7 +610,7 @@ def her_v2_route_model_keyboard(
     buttons.append(
         [
             InlineKeyboardButton(
-                BACK_LABEL,
+                back_label(),
                 callback_data=f"her_route_custom:{parsed.value}",
             )
         ]

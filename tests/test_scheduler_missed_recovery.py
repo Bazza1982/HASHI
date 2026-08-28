@@ -116,11 +116,11 @@ async def test_startup_groups_one_hundred_missed_crons_and_heartbeats_into_one_d
     assert runtime.enqueued == []
     assert len(runtime.notices) == 1
     notice = runtime.notices[0]["text"]
-    assert "100 个任务共错过" in notice
+    assert "100 task(s) missed" in notice
     assert notice.count("\n• ") == 100
-    assert "1. 全部补跑" in notice
-    assert "2. 部分补跑" in notice
-    assert "3. 全部跳过" in notice
+    assert "1. Run all" in notice
+    assert "2. Run some" in notice
+    assert "3. Skip all" in notice
     assert len(scheduler.state["missed_crons"]) == 50
     assert len(scheduler.state["missed_heartbeats"]) == 50
     assert len(scheduler.state["recovery_batches"]) == 1
@@ -354,7 +354,7 @@ async def test_recovery_reply_replays_latest_occurrences_with_direct_policy_cont
         runtime_map={"zelda": runtime},
     )
 
-    assert "补跑 3 次" in result
+    assert "replayed 3" in result
     assert len(runtime.enqueued) == 3
     assert [
         payload["prompt"].split("originally due at ", 1)[1].split(".", 1)[0]

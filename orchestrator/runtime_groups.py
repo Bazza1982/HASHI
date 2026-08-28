@@ -5,7 +5,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator.command_ui import BACK_LABEL, card_title, confirm_card
+from orchestrator.command_ui import back_label, card_title, confirm_card
 
 
 def group_detail_view(directory: Any, group_name: str) -> tuple[str, InlineKeyboardMarkup]:
@@ -41,7 +41,7 @@ def group_detail_view(directory: Any, group_name: str) -> tuple[str, InlineKeybo
         f"{member_display}\n"
     )
     if is_dynamic:
-        buttons = [[InlineKeyboardButton(BACK_LABEL, callback_data="group:back")]]
+        buttons = [[InlineKeyboardButton(back_label(), callback_data="group:back")]]
     else:
         buttons = [
             [
@@ -51,7 +51,7 @@ def group_detail_view(directory: Any, group_name: str) -> tuple[str, InlineKeybo
             ],
             [
                 InlineKeyboardButton("🗑 Delete", callback_data=f"group:delete:{group_name}"),
-                InlineKeyboardButton(BACK_LABEL, callback_data="group:back"),
+                InlineKeyboardButton(back_label(), callback_data="group:back"),
             ],
             [
                 InlineKeyboardButton("Start all", callback_data=f"group:start:{group_name}"),
@@ -249,7 +249,7 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
                     )
                 ]
             )
-        buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data=f"group:view:{group_name}")])
+        buttons.append([InlineKeyboardButton(back_label(), callback_data=f"group:view:{group_name}")])
         await query.edit_message_text(
             f"➕ Add to <b>{group_name}</b>\nSelect agents to add:",
             parse_mode="HTML",
@@ -285,7 +285,7 @@ async def callback_group(runtime: Any, update: Any, context: Any) -> None:
                     )
                 ]
             )
-        buttons.append([InlineKeyboardButton(BACK_LABEL, callback_data=f"group:view:{group_name}")])
+        buttons.append([InlineKeyboardButton(back_label(), callback_data=f"group:view:{group_name}")])
         await query.edit_message_text(
             f"➖ Remove from <b>{group_name}</b>\nSelect agents to remove:",
             parse_mode="HTML",

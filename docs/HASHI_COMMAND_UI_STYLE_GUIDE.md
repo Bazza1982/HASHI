@@ -117,6 +117,26 @@ inventing new dividers, selected markers, Back labels, or Refresh labels.
 Tests should verify information order, HTML escaping, active-choice markers,
 navigation labels, and that `/help` is derived from registered command metadata.
 
+### Interface language contract
+
+- Runtime interface catalogs live under `locales/runtime/`; English is the
+  complete fallback catalog and every supported catalog must keep the same keys
+  and formatting placeholders.
+- `/language` controls menus, buttons, common cards, and HASHI-authored system
+  notices for one user across all agents. Do not infer interface language from
+  the language of a prompt.
+- Agent/model replies, provider reasoning, user content, exact provider errors,
+  identifiers, model names, commands, paths, terminal output, transcripts, and
+  file logs are never translated.
+- Chinese wording follows formal product terminology. In particular, user-facing
+  `agent` is `代理`; use `已启用的代理`, `正在运行的代理`, and `已配置的代理`
+  when those states differ. Do not leave `Agent` in a Chinese menu.
+- Keep callback data, command names, enum values, IDs, and persisted wire values
+  language-neutral. Only presentation strings belong in a catalog.
+- Shared helpers resolve the active locale from command context. Proactive
+  notices must resolve the saved user preference explicitly because they do not
+  have an inbound Telegram update.
+
 ## 8. Migration coverage
 
 The shared contract applies to every command surface that opens a status card,

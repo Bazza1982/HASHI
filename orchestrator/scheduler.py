@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from orchestrator import runtime_pending, scheduler_recovery
+from orchestrator import runtime_pending, scheduler_recovery, ui_language
 from orchestrator.her_v2.request_policy import build_scheduler_request_context
 from orchestrator.job_ownership import ownership_mismatch_label
 from orchestrator.runtime_common import _safe_excerpt
@@ -897,10 +897,14 @@ class TaskScheduler:
             )
             return False
         try:
+            locale = ui_language.preferred_locale(
+                runtime,
+                actor_id=self.authorized_id,
+            )
             result = await asyncio.wait_for(
                 sender(
                     chat_id=self.authorized_id,
-                    text=str(batch.get("notice_text") or scheduler_recovery.render_notice(batch)),
+                    text=scheduler_recovery.render_notice(batch, locale=locale),
                     request_id=f"scheduler-{batch.get('batch_id')}",
                     purpose="scheduler-recovery",
                 ),
@@ -1092,13 +1096,16 @@ class TaskScheduler:
         parsed = scheduler_recovery.parse_reply(text, pending)
         if parsed is None:
             return None
+        runtime = runtime_map.get(agent_name)
+        locale = (
+            ui_language.preferred_locale(runtime, actor_id=self.authorized_id)
+            if runtime is not None
+            else ui_language.DEFAULT_LOCALE
+        )
         if parsed.get("action") == "help":
-            return (
-                "请回复“任务ID=次数”，例如 task-id=3。次数表示选择最近 N 次，"
-                "执行时仍按原计划时间从早到晚排列。"
-            )
+            return ui_language.tr("scheduler.reply_help", locale=locale)
         if parsed.get("action") == "ambiguous":
-            return "同一任务存在多个待处理恢复批次，请先回复“全部补跑”或“全部跳过”；我不会猜测执行范围。"
+            return ui_language.tr("scheduler.reply_ambiguous", locale=locale)
 
         async with self._recovery_lock:
             executed_total = 0
@@ -1115,11 +1122,28 @@ class TaskScheduler:
                 failed_total += int(resolution.get("failed_total", 0))
                 skipped_total += int(resolution.get("skipped_total", 0))
         if parsed.get("action") == "skip":
-            return f"✅ 已跳过 {len(pending)} 个恢复批次，共 {skipped_total} 次错过触发；原计划不受影响。"
-        suffix = f"，失败 {failed_total} 次" if failed_total else ""
-        return (
-            f"✅ 已处理 {len(pending)} 个恢复批次：补跑 {executed_total} 次，"
-            f"跳过 {skipped_total} 次{suffix}；原计划不受影响。"
+            return ui_language.tr(
+                "scheduler.reply_skipped",
+                locale=locale,
+                batches=len(pending),
+                skipped=skipped_total,
+            )
+        failed_clause = (
+            ui_language.tr(
+                "scheduler.reply_failed_clause",
+                locale=locale,
+                failed=failed_total,
+            )
+            if failed_total
+            else ""
+        )
+        return ui_language.tr(
+            "scheduler.reply_resolved",
+            locale=locale,
+            batches=len(pending),
+            executed=executed_total,
+            skipped=skipped_total,
+            failed_clause=failed_clause,
         )
 
     async def _fire_heartbeat_job(

@@ -6,7 +6,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator import telegram_notifications
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
-from orchestrator.command_ui import REFRESH_LABEL, selected_label, setting_card
+from orchestrator.command_ui import refresh_label, selected_label, setting_card
 
 
 def _is_authorized(runtime: Any, update: Any) -> bool:
@@ -52,7 +52,7 @@ def _keyboard(runtime: Any) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(selected_label("Quiet", mode == "quiet"), callback_data="notify:quiet"),
                 InlineKeyboardButton(selected_label("Off", mode == "off"), callback_data="notify:off"),
             ],
-            [InlineKeyboardButton(REFRESH_LABEL, callback_data="notify:refresh")],
+            [InlineKeyboardButton(refresh_label(), callback_data="notify:refresh")],
         ]
     )
 

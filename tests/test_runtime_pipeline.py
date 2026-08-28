@@ -2447,7 +2447,7 @@ async def test_prepare_successful_response_blocks_dangling_tool_markup_globally(
     )
 
     assert "DSML" not in result.visible_text
-    assert "不视为已执行或已完成" in result.visible_text
+    assert "No related action is considered executed or complete" in result.visible_text
     assert response.stop_reason == "no_final_text"
     assert response.stream_metadata["completion_status"] == "incomplete"
     assert response.stream_metadata["dangling_tool_markup_blocked"] is True

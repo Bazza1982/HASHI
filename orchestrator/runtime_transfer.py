@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from orchestrator.runtime_common import QueuedRequest
 from orchestrator.runtime_delivery import format_backend_error_for_user
+from orchestrator import ui_language
 
 
 def persist_transfer_state(runtime: Any) -> None:
@@ -85,7 +86,7 @@ async def flush_suppressed_transfer_results(runtime: Any) -> None:
             if entry.get("success")
             else (
                 f"Flex Backend Error ({runtime.config.active_backend}): "
-                f"{format_backend_error_for_user(runtime.config.active_backend, entry.get('error') or '')}"
+                f"{format_backend_error_for_user(runtime.config.active_backend, entry.get('error') or '', locale=ui_language.preferred_locale(runtime, actor_id=entry.get('chat_id')))}"
             )
         )
         if not text:

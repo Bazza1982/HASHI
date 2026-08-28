@@ -14,6 +14,8 @@ from typing import Any, Awaitable, Callable, Iterable
 from telegram import BotCommand
 from telegram.ext import CallbackQueryHandler, CommandHandler
 
+from orchestrator import ui_language
+
 logger = logging.getLogger("BridgeU.CommandRegistry")
 DEFAULT_PRIVATE_COMMAND_DIR = Path.home() / ".hashi" / "private_commands"
 NON_OVERRIDABLE_CORE_COMMANDS = frozenset({"queue", "wiki"})
@@ -173,7 +175,8 @@ def bind_runtime_commands(runtime, *, wrap: bool = False) -> None:
         runtime.app.add_handler(CommandHandler(command.name, handler))
     for callback in load_runtime_callbacks():
         async def handler(update, context, _callback=callback):
-            await _callback.callback(runtime, update, context)
+            with ui_language.language_scope(runtime, update):
+                await _callback.callback(runtime, update, context)
 
         runtime.app.add_handler(CallbackQueryHandler(handler, pattern=callback.pattern))
 

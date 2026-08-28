@@ -7,7 +7,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator.command_ui import BACK_LABEL, REFRESH_LABEL, card_title, selected_label
+from orchestrator.command_ui import back_label, card_title, refresh_label, selected_label
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
 from orchestrator.human_restart import build_human_restart_proof, human_restart_secret_path, load_human_restart_secret
 from tools import remote_rescue
@@ -71,7 +71,7 @@ def _gateway_status_keyboard(runtime: Any) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("Choose model", callback_data="apigw:menu:model"),
-                InlineKeyboardButton(REFRESH_LABEL, callback_data="apigw:refresh"),
+                InlineKeyboardButton(refresh_label(), callback_data="apigw:refresh"),
             ],
         ]
     )
@@ -99,7 +99,7 @@ def _gateway_model_keyboard(runtime: Any) -> InlineKeyboardMarkup:
                 row = []
         if row:
             rows.append(row)
-    rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="apigw:menu:status")])
+    rows.append([InlineKeyboardButton(back_label(), callback_data="apigw:menu:status")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -242,12 +242,12 @@ def _restart_status_keyboard(confirm: bool = False, *, available: bool = True) -
             ]
         )
     if not available:
-        return InlineKeyboardMarkup([[InlineKeyboardButton(REFRESH_LABEL, callback_data="hardrestart:refresh")]])
+        return InlineKeyboardMarkup([[InlineKeyboardButton(refresh_label(), callback_data="hardrestart:refresh")]])
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton("Hard Restart", callback_data="hardrestart:arm"),
-                InlineKeyboardButton(REFRESH_LABEL, callback_data="hardrestart:refresh"),
+                InlineKeyboardButton(refresh_label(), callback_data="hardrestart:refresh"),
             ]
         ]
     )

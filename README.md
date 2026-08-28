@@ -786,6 +786,7 @@ configuration summary.
 
 | Command | Description |
 |---------|-------------|
+| `/language [en\|zh\|default]` | Choose the Telegram/HASHI interface language for this user across all agents. Localizes command menus, buttons, common cards, and system notices; agent replies, terminal output, transcripts, and logs are unchanged |
 | `/terminal [quiet\|activity\|debug\|raw]` | Control instance-wide terminal stdout only. Defaults to `quiet`; Workbench, TUI chat, Telegram, transcripts, and file logs are unchanged |
 | `/verbose [on\|off]` | Show one deterministic rolling activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status; raw technical events remain in logs |
 | `/think [on\|off]` | Show backend-owned reasoning output; for HER this is genuine provider-returned reasoning only |
@@ -1410,6 +1411,7 @@ duplicate alias `/paswd` has been removed.
 {
   "global": {
     "authorized_id": 123456789,
+    "ui_language": "en",
     "default_tools": {
       "allowed": ["bash", "file_read", "file_write", "file_list"]
     },

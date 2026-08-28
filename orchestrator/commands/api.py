@@ -5,7 +5,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator.command_ui import BACK_LABEL, REFRESH_LABEL, card_title, selected_label
+from orchestrator.command_ui import back_label, card_title, refresh_label, selected_label
 from orchestrator.api_gateway_config import (
     available_api_models,
     load_api_gateway_config,
@@ -70,7 +70,7 @@ def _keyboard(runtime: Any) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(selected_label("Off", not running), callback_data="api:off"),
             ],
             [InlineKeyboardButton("Choose default model", callback_data="api:model")],
-            [InlineKeyboardButton(REFRESH_LABEL, callback_data="api:status")],
+            [InlineKeyboardButton(refresh_label(), callback_data="api:status")],
         ]
     )
 
@@ -81,7 +81,7 @@ def _model_keyboard(runtime: Any) -> InlineKeyboardMarkup:
     for model in available_api_models():
         label = selected_label(model, model == current)
         rows.append([InlineKeyboardButton(label, callback_data=f"api:model:{model}")])
-    rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="api:status")])
+    rows.append([InlineKeyboardButton(back_label(), callback_data="api:status")])
     return InlineKeyboardMarkup(rows)
 
 

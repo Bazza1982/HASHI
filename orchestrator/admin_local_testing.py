@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from orchestrator.command_registry import runtime_command_map
 from orchestrator.runtime_command_binding import COMMAND_BINDINGS
+from orchestrator import ui_language
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
     default_audit_path,
@@ -281,10 +282,11 @@ async def execute_local_command(
             if original_send_text is not None:
                 runtime._send_text = store.capture_send
             try:
-                if registry_command is not None:
-                    await registry_command.callback(runtime, update, context)
-                else:
-                    await method(update, context)
+                with ui_language.language_scope(runtime, update):
+                    if registry_command is not None:
+                        await registry_command.callback(runtime, update, context)
+                    else:
+                        await method(update, context)
             except Exception as e:
                 session.fail(e)
                 return {

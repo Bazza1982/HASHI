@@ -168,7 +168,11 @@ class AgentLifecycleManager:
                 )
                 rt.telegram_connected = True
                 try:
-                    await rt.app.bot.set_my_commands(rt.get_bot_commands())
+                    from orchestrator.runtime_command_binding import (
+                        register_flexible_bot_commands,
+                    )
+
+                    await register_flexible_bot_commands(rt)
                 except Exception as e:
                     if hasattr(rt, "logger"):
                         rt.logger.warning("Could not register command menu: %s", e)

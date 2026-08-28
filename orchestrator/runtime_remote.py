@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from orchestrator.command_ui import BACK_LABEL, card_title
+from orchestrator.command_ui import back_label, card_title
 from orchestrator import remote_lifecycle, runtime_pending
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -238,7 +238,7 @@ async def handle_move_callback(runtime: Any, update: Any, context: Any) -> None:
         for name, inst in instances.items():
             label = inst.get("display_name", name)
             rows.append([InlineKeyboardButton(f"📦 {label}", callback_data=f"move:target:{agent_id}:{name}")])
-        rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="move:cancel")])
+        rows.append([InlineKeyboardButton(back_label(), callback_data="move:cancel")])
         markup = InlineKeyboardMarkup(rows)
         await query.edit_message_text(
             f"{card_title('📦', 'Move agent')}\n\n"

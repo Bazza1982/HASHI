@@ -56,6 +56,10 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   adapter-owned HER Habit/Meditation path. Non-HER backends do not read or
   modify its records.
 - `/superloop`: recording-first long-running workflow orchestration.
+- `/language [en|zh|default]`: choose the HASHI interface language for this
+  user across all agents. It localizes Telegram command menus, buttons, common
+  cards, and system notices; agent replies, terminal output, transcripts, and
+  logs remain unchanged.
 - `/terminal [quiet|activity|debug|raw]`: control instance-wide terminal stdout.
   Quiet is the default; Activity adds content-free phases, timing, tool counts,
   and token counts; Debug adds sanitised technical clues; Raw restores the

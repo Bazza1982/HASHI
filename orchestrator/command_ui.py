@@ -5,15 +5,25 @@ from html import escape
 from typing import Any
 
 from orchestrator.command_specs import COMMAND_GROUPS, COMMAND_SPECS
+from orchestrator import ui_language
 
 DIVIDER = "━━━━━━━━━━━━━━━━"
 BACK_LABEL = "← Back"
 REFRESH_LABEL = "↻ Refresh"
 
 
-def card_title(icon: str, title: str) -> str:
+def back_label(*, locale: str | None = None) -> str:
+    return ui_language.tr("common.back", locale=locale)
+
+
+def refresh_label(*, locale: str | None = None) -> str:
+    return ui_language.tr("common.refresh", locale=locale)
+
+
+def card_title(icon: str, title: str, *, locale: str | None = None) -> str:
     """Return the standard Telegram/local command-card heading."""
-    return f"{icon} <b>{escape(title.upper())}</b>\n{DIVIDER}"
+    translated = ui_language.title(title, locale=locale)
+    return f"{icon} <b>{escape(translated.upper())}</b>\n{DIVIDER}"
 
 
 def selected_label(label: str, selected: bool) -> str:
@@ -21,8 +31,9 @@ def selected_label(label: str, selected: bool) -> str:
     return f"✓ {label}" if selected else label
 
 
-def status_label(enabled: bool) -> str:
-    return "ON" if enabled else "OFF"
+def status_label(enabled: bool, *, locale: str | None = None) -> str:
+    key = "common.on" if enabled else "common.off"
+    return ui_language.tr(key, locale=locale)
 
 
 def setting_card(
@@ -33,9 +44,15 @@ def setting_card(
     facts: Iterable[str] = (),
     consequence: str | None = None,
     action: str | None = None,
+    locale: str | None = None,
 ) -> str:
     """Render the common information order for an interactive setting card."""
-    lines = [card_title(icon, title), "", f"<b>Current</b> · {current}"]
+    current_label = ui_language.tr("common.current", locale=locale)
+    lines = [
+        card_title(icon, title, locale=locale),
+        "",
+        f"<b>{escape(current_label)}</b> · {current}",
+    ]
     fact_lines = [str(fact) for fact in facts if str(fact).strip()]
     if fact_lines:
         lines.extend(["", *fact_lines])
@@ -46,23 +63,32 @@ def setting_card(
     return "\n".join(lines)
 
 
-def confirm_card(icon: str, title: str, *, target: str, consequence: str) -> str:
+def confirm_card(
+    icon: str,
+    title: str,
+    *,
+    target: str,
+    consequence: str,
+    locale: str | None = None,
+) -> str:
     """Render a dangerous-operation confirmation with an exact target."""
+    target_label = ui_language.tr("common.target", locale=locale)
     return "\n".join(
         [
-            card_title(icon, title),
+            card_title(icon, title, locale=locale),
             "",
-            f"<b>Target</b> · {target}",
+            f"<b>{escape(target_label)}</b> · {target}",
             "",
             consequence,
             "",
-            "Confirm below, or keep the current state.",
+            ui_language.tr("common.confirm_or_keep", locale=locale),
         ]
     )
 
 
-HELP_GROUPS: tuple[tuple[str, str, frozenset[str]], ...] = tuple(
+HELP_GROUPS: tuple[tuple[str, str, str, frozenset[str]], ...] = tuple(
     (
+        group,
         icon,
         heading,
         frozenset(spec.name for spec in COMMAND_SPECS if spec.group == group),
@@ -78,21 +104,32 @@ def help_menu_text(
     commands: Sequence[Any],
     disabled: Iterable[str] = (),
     show_descriptions: bool = False,
+    locale: str | None = None,
 ) -> str:
     """Render registered commands as a compact, grouped HTML help card."""
     command_map = {str(command.command): str(command.description) for command in commands}
     lines = [
-        card_title("⚔️", "Hashi command centre"),
+        card_title("⚔️", "Hashi command centre", locale=locale),
         "",
         f"<b>{escape(agent_name)}</b> · <code>{escape(agent_type)}</code>",
-        f"{len(command_map)} commands available",
+        ui_language.tr(
+            "help.commands_available",
+            locale=locale,
+            count=len(command_map),
+        ),
     ]
     rendered: set[str] = set()
-    for icon, heading, names in HELP_GROUPS:
+    for group, icon, heading, names in HELP_GROUPS:
         entries = [(name, command_map[name]) for name in command_map if name in names]
         if not entries:
             continue
-        lines.extend(["", f"{icon} <b>{escape(heading.upper())}</b>"])
+        translated_heading = ui_language.tr(
+            f"help.group.{group}",
+            locale=locale,
+        )
+        if translated_heading == f"help.group.{group}":
+            translated_heading = heading
+        lines.extend(["", f"{icon} <b>{escape(translated_heading.upper())}</b>"])
         if show_descriptions:
             lines.extend(
                 f"<code>/{escape(name)}</code>  {escape(description)}"
@@ -105,7 +142,8 @@ def help_menu_text(
 
     remaining = [(name, description) for name, description in command_map.items() if name not in rendered]
     if remaining:
-        lines.extend(["", "◇ <b>MORE</b>"])
+        more_label = ui_language.tr("common.more", locale=locale)
+        lines.extend(["", f"◇ <b>{escape(more_label.upper())}</b>"])
         if show_descriptions:
             lines.extend(
                 f"<code>/{escape(name)}</code>  {escape(description)}"
@@ -119,9 +157,9 @@ def help_menu_text(
         lines.extend(
             [
                 "",
-                "🔒 <b>DISABLED FOR THIS AGENT</b>",
+                f"🔒 <b>{escape(ui_language.tr('help.disabled', locale=locale).upper())}</b>",
                 " ".join(f"<code>/{escape(name)}</code>" for name in disabled_names),
             ]
         )
-    lines.extend(["", "Open Telegram’s command button for a short description of each command."])
+    lines.extend(["", ui_language.tr("help.hint", locale=locale)])
     return "\n".join(lines)

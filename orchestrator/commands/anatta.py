@@ -8,7 +8,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
-from orchestrator.command_ui import REFRESH_LABEL, card_title, selected_label
+from orchestrator.command_ui import card_title, refresh_label, selected_label
 from tools.anatta_diagnostics import build_report
 
 
@@ -96,7 +96,7 @@ def _keyboard(workspace: Path) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("Full report", callback_data="anatta:full"),
-                InlineKeyboardButton(REFRESH_LABEL, callback_data="anatta:status"),
+                InlineKeyboardButton(refresh_label(), callback_data="anatta:status"),
             ],
         ]
     )

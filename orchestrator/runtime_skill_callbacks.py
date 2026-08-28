@@ -5,7 +5,7 @@ from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator import runtime_menu_views
-from orchestrator.command_ui import BACK_LABEL, REFRESH_LABEL
+from orchestrator.command_ui import back_label, refresh_label
 
 
 def _workspace_dir(runtime) -> Path:
@@ -31,14 +31,14 @@ def _resolve_skill(manager, reference: str):
 
 def _back_to_catalog_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(BACK_LABEL, callback_data="skill:b:all")]]
+        [[InlineKeyboardButton(back_label(), callback_data="skill:b:all")]]
     )
 
 
 def _back_to_skill_keyboard(manager, skill) -> InlineKeyboardMarkup:
     key = _skill_key(manager, skill)
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(BACK_LABEL, callback_data=f"skill:s:{key}")]]
+        [[InlineKeyboardButton(back_label(), callback_data=f"skill:s:{key}")]]
     )
 
 
@@ -62,7 +62,7 @@ def build_skill_catalog_keyboard(manager, workspace_dir: Path) -> InlineKeyboard
                 InlineKeyboardButton("🔎 Find", callback_data="skill:f:all"),
             ],
             [
-                InlineKeyboardButton(REFRESH_LABEL, callback_data="skill:r:all"),
+                InlineKeyboardButton(refresh_label(), callback_data="skill:r:all"),
                 InlineKeyboardButton(
                     f"⚠️ Invalid {len(manager.skill_validation_errors())}",
                     callback_data="skill:z:all",
@@ -98,7 +98,7 @@ def build_skill_action_keyboard(
         }
         label = labels.get(skill.source_type, "🗑️ Delete")
         rows.append([InlineKeyboardButton(label, callback_data=f"skill:x:{key}")])
-    rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="skill:b:all")])
+    rows.append([InlineKeyboardButton(back_label(), callback_data="skill:b:all")])
     return InlineKeyboardMarkup(rows)
 
 

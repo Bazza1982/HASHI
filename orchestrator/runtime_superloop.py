@@ -7,7 +7,8 @@ from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator.command_ui import BACK_LABEL, REFRESH_LABEL, card_title
+from orchestrator import ui_language
+from orchestrator.command_ui import back_label, card_title, refresh_label
 from orchestrator.superloop_compiler import SuperloopCompiler
 from orchestrator.superloop_control import SuperloopControlService
 from orchestrator.superloop_issues import SuperloopIssuesService
@@ -146,7 +147,7 @@ def _menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Loop controls", callback_data="superloop:loops"),
             ],
             [InlineKeyboardButton("Tasks, issues & waits", callback_data="superloop:collaboration")],
-            [InlineKeyboardButton(REFRESH_LABEL, callback_data="superloop:menu")],
+            [InlineKeyboardButton(refresh_label(), callback_data="superloop:menu")],
         ]
     )
 
@@ -155,8 +156,8 @@ def _page_keyboard(refresh_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(BACK_LABEL, callback_data="superloop:menu"),
-                InlineKeyboardButton(REFRESH_LABEL, callback_data=refresh_data),
+                InlineKeyboardButton(back_label(), callback_data="superloop:menu"),
+                InlineKeyboardButton(refresh_label(), callback_data=refresh_data),
             ]
         ]
     )
@@ -312,13 +313,13 @@ def _template_list_view(
     nav: list[InlineKeyboardButton] = []
     if page > 0:
         nav.append(InlineKeyboardButton("← Previous", callback_data=f"superloop:list:{page - 1}"))
-    nav.append(InlineKeyboardButton(REFRESH_LABEL, callback_data=f"superloop:list:{page}"))
+    nav.append(InlineKeyboardButton(refresh_label(), callback_data=f"superloop:list:{page}"))
     if page + 1 < page_count:
         nav.append(InlineKeyboardButton("Next →", callback_data=f"superloop:list:{page + 1}"))
     keyboard = InlineKeyboardMarkup(
         [
             nav,
-            [InlineKeyboardButton(BACK_LABEL, callback_data="superloop:menu")],
+            [InlineKeyboardButton(back_label(), callback_data="superloop:menu")],
         ]
     )
     return "\n".join(lines), keyboard
@@ -357,6 +358,7 @@ async def handle_superloop_callback(runtime, update, _context=None) -> None:
 
 async def handle_superloop_command(runtime, update, args_text: str) -> None:
     raw = (args_text or "").strip()
+    locale = ui_language.preferred_locale(runtime, update)
     if not raw:
         text, markup = _menu_view(_build_store(runtime))
         await runtime._reply_text(update, text, parse_mode="HTML", reply_markup=markup)
@@ -422,17 +424,16 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         await runtime._reply_text(
             update,
             (
-                "🚀 Superloop Quickstart 完成\n"
-                f"goal: {goal}\n"
+                f"{ui_language.tr('superloop.quickstart_title', locale=locale)}\n"
+                f"{ui_language.tr('superloop.goal_label', locale=locale)}: {goal}\n"
                 f"recording_id: `{recording_id}`\n"
                 f"loop_id: `{loop_id}`\n"
                 f"seed_task: `{task['task_id']}`\n\n"
-                "下一步建议：\n"
+                f"{ui_language.tr('superloop.next_steps', locale=locale)}\n"
                 f"1) `/superloop status {loop_id}`\n"
                 f"2) `/superloop next {loop_id}`\n"
-                f"3) `/superloop wait add {loop_id} sleep_until <ISO时间>`\n\n"
-                "Closeout guard: final 前请先 drain/classify 同 loop 的 worker/reviewer replies，"
-                "避免旧 hchat reply 在 close 后逐条回放。"
+                f"3) `/superloop wait add {loop_id} sleep_until <ISO-time>`\n\n"
+                f"{ui_language.tr('superloop.closeout_guard', locale=locale)}"
             ),
             parse_mode="Markdown",
         )
@@ -444,9 +445,9 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             await runtime._reply_text(
                 update,
                 (
-                    "Usage: /superloop wizard <goal>\n\n"
-                    "示例：\n"
-                    "/superloop wizard 每天追踪远端实例健康并异常通知"
+                    f"{ui_language.tr('superloop.wizard_usage', locale=locale)}\n\n"
+                    f"{ui_language.tr('superloop.example_heading', locale=locale)}\n"
+                    f"{ui_language.tr('superloop.wizard_example', locale=locale)}"
                 ),
             )
             return
@@ -455,12 +456,13 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
         await runtime._reply_text(
             update,
             (
-                "🪄 Superloop Wizard 引导\n"
-                "已为您自动完成基础建模（quickstart）。\n\n"
-                "建议完善（可选）：\n"
-                f"1) `/superloop record intent {latest_rec} <更精确意图>`\n"
+                f"{ui_language.tr('superloop.wizard_title', locale=locale)}\n"
+                f"{ui_language.tr('superloop.wizard_completed', locale=locale)}\n\n"
+                f"{ui_language.tr('superloop.optional_improvements', locale=locale)}\n"
+                f"1) `/superloop record intent {latest_rec} "
+                f"{ui_language.tr('superloop.intent_placeholder', locale=locale)}`\n"
                 f"2) `/superloop record exit {latest_rec} all_tasks_completed {{\"task_ids\":[]}}`\n"
-                "3) 给 loop 增加 task / wait / issue 以形成长期闭环"
+                f"3) {ui_language.tr('superloop.add_items', locale=locale)}"
             ),
             parse_mode="Markdown",
         )

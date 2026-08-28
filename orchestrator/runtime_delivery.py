@@ -14,6 +14,7 @@ from orchestrator import (
     runtime_delivery_order,
     telegram_delivery_failover,
     telegram_notifications,
+    ui_language,
 )
 from orchestrator.runtime_common import _md_to_html
 
@@ -101,28 +102,49 @@ def _backend_runtime_name(engine: str) -> str:
     return names.get(str(engine or "").strip().lower(), str(engine or "").strip() or "backend")
 
 
-def format_backend_error_for_user(engine: str, error_text: str) -> str:
-    raw = str(error_text or "").strip() or "Unknown error"
+def format_backend_error_for_user(
+    engine: str,
+    error_text: str,
+    *,
+    locale: str | None = None,
+) -> str:
+    selected = ui_language.normalize_locale(locale or ui_language.DEFAULT_LOCALE)
+    raw = str(error_text or "").strip() or ui_language.tr(
+        "error.unknown",
+        locale=selected,
+    )
     exact = _extract_backend_error_message(raw)
-    lines: list[str] = [f"Exact backend failure: {exact}"]
+    lines: list[str] = [
+        ui_language.tr(
+            "error.exact_failure",
+            locale=selected,
+            error=exact,
+        )
+    ]
 
     if "requires a newer version of" in exact:
         match = re.search(r"requires a newer version of ([^.]+)", exact, re.IGNORECASE)
         runtime_name = match.group(1).strip() if match else _backend_runtime_name(engine)
         lines.append(
-            f"Action: this model is not supported by the installed {runtime_name}. "
-            f"Upgrade {runtime_name} or switch this backend to a model your current {runtime_name} supports."
+            ui_language.tr(
+                "error.action_newer_runtime",
+                locale=selected,
+                runtime=runtime_name,
+            )
         )
     elif re.search(r"\bmodel\b.*\bnot supported\b", exact, re.IGNORECASE):
         runtime_name = _backend_runtime_name(engine)
         lines.append(
-            f"Action: this model is not supported by the current {runtime_name}. "
-            f"Upgrade {runtime_name} or switch to a supported model."
+            ui_language.tr(
+                "error.action_unsupported_model",
+                locale=selected,
+                runtime=runtime_name,
+            )
         )
 
     if exact != raw:
         lines.append("")
-        lines.append(f"Raw error: {raw}")
+        lines.append(ui_language.tr("error.raw", locale=selected, error=raw))
     return "\n".join(lines).strip()
 
 
@@ -225,28 +247,39 @@ async def send_long_message(
             raise
 
     if purpose == "error":
+        locale = ui_language.preferred_locale(runtime, actor_id=chat_id)
         errors_path = str(getattr(runtime, "session_dir", runtime.workspace_dir) / "errors.log")
-        header = f"❌ Backend error ({runtime.config.active_backend})"
+        header = "❌ " + ui_language.tr(
+            "error.backend_header",
+            locale=locale,
+            backend=runtime.config.active_backend,
+        )
         if request_id:
             header += f" | {request_id}"
 
         max_excerpt = 2400
-        s = format_backend_error_for_user(runtime.config.active_backend, text)
+        s = format_backend_error_for_user(
+            runtime.config.active_backend,
+            text,
+            locale=locale,
+        )
         if len(s) > max_excerpt:
             head = s[:1200]
             tail = s[-800:]
-            excerpt = head + "\n... (truncated) ...\n" + tail
+            truncated = ui_language.tr("error.truncated", locale=locale)
+            excerpt = head + f"\n... ({truncated}) ...\n" + tail
         else:
             excerpt = s
 
         msg = (
             f"{header}\n\n"
             f"{excerpt}\n\n"
-            f"Full log (local): {errors_path}\n"
-            f"Tip: use /verbose off to reduce progress message noise."
+            f"{ui_language.tr('error.full_log', locale=locale, path=errors_path)}\n"
+            f"{ui_language.tr('error.verbose_tip', locale=locale)}"
         )
         if len(msg) > tg_max_len:
-            msg = msg[: tg_max_len - 20] + "\n... (truncated)"
+            truncated = ui_language.tr("error.truncated", locale=locale)
+            msg = msg[: tg_max_len - len(truncated) - 9] + f"\n... ({truncated})"
 
         sent = await _send_or_skip(
             chat_id=chat_id,

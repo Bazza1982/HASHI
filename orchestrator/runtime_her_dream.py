@@ -15,7 +15,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from adapters import her_dream, her_habits, her_persona
 from orchestrator import runtime_her_habits
-from orchestrator.command_ui import REFRESH_LABEL, card_title, status_label
+from orchestrator.command_ui import card_title, refresh_label, status_label
 from orchestrator.scheduler import next_cron_occurrence, validate_cron_schedule
 
 DREAM_JOB_ACTION = "her:dream"
@@ -186,7 +186,7 @@ def _status_view(
                 callback_data="dream:off" if enabled else "dream:on",
             ),
         ],
-        [InlineKeyboardButton(REFRESH_LABEL, callback_data="dream:status")],
+        [InlineKeyboardButton(refresh_label(), callback_data="dream:status")],
     ]
     if undo_run_id != "none":
         rows.append(

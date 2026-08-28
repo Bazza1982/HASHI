@@ -25,6 +25,7 @@ from orchestrator import (
     telegram_delivery_failover,
     telegram_notifications,
     telegram_stream_policy,
+    ui_language,
 )
 from orchestrator.command_ui import card_title
 from orchestrator.flexible_backend_registry import canonical_backend_engine
@@ -151,18 +152,12 @@ def _contains_dangling_tool_markup(text: Any) -> bool:
     return any(marker in visible for marker in _DANGLING_TOOL_MARKERS)
 
 
-def _safe_blocked_tool_markup_final(item) -> str:
-    prompt = str(getattr(item, "prompt", "") or "")
-    if any("\u4e00" <= char <= "\u9fff" for char in prompt):
-        return (
-            "本轮回复包含未完成的工具控制标记，HASHI 已阻止其发送。"
-            "相关操作不视为已执行或已完成；任务状态为未完成，请从已保存的任务检查点继续。"
-        )
-    return (
-        "HASHI blocked an unfinished tool-control envelope from the final response. "
-        "No related action is considered executed or complete; the task remains incomplete "
-        "and should resume from its preserved checkpoint."
+def _safe_blocked_tool_markup_final(runtime, item) -> str:
+    locale = ui_language.preferred_locale(
+        runtime,
+        actor_id=getattr(item, "owner_id", None) or getattr(item, "chat_id", None),
     )
+    return ui_language.tr("safety.dangling_tool", locale=locale)
 
 
 def queued_elapsed_s(item) -> float:
@@ -477,28 +472,35 @@ def surface_wip_recovery_warning(
 ) -> None:
     """Warn visibly when unfinished HER v2 recovery state precedes a turn."""
 
+    locale = ui_language.preferred_locale(
+        runtime,
+        actor_id=getattr(item, "owner_id", None) or getattr(item, "chat_id", None),
+    )
     lines = [
-        card_title("⚠️", "Unfinished work"),
+        card_title("⚠️", "Unfinished work", locale=locale),
         "",
-        "<b>Status</b> · <code>RECOVERY READY</code>",
+        f"<b>{html.escape(ui_language.tr('wip.status_label', locale=locale))}</b> · "
+        f"<code>{html.escape(ui_language.tr('wip.status_ready', locale=locale))}</code>",
         "",
-        f"<b>Records</b> · <code>{max(0, int(record_count)):,}</code>",
-        f"<b>Saved data</b> · <code>{max(0, int(size_bytes)):,} bytes</code>",
+        f"<b>{html.escape(ui_language.tr('wip.records', locale=locale))}</b> · "
+        f"<code>{max(0, int(record_count)):,}</code>",
+        f"<b>{html.escape(ui_language.tr('wip.saved_data', locale=locale))}</b> · "
+        f"<code>{html.escape(ui_language.tr('wip.bytes_value', locale=locale, count=f'{max(0, int(size_bytes)):,}'))}</code>",
     ]
     if first_request_id:
         lines.append(
-            "<b>First request</b> · "
+            f"<b>{html.escape(ui_language.tr('wip.first_request', locale=locale))}</b> · "
             f"<code>{html.escape(first_request_id)}</code>"
         )
     lines.extend(
         [
             "",
-            "HASHI preserved this work from an earlier HER v2 turn. Only a "
-            "bounded summary will be supplied to the Provider; raw Journal "
-            "data stays local.",
+            html.escape(ui_language.tr("wip.explanation", locale=locale)),
             "",
-            "Run <code>/compact</code> to add the recovery summary to this "
-            "Session and clear the active Journal.",
+            ui_language.tr("wip.action", locale=locale).replace(
+                "/compact",
+                "<code>/compact</code>",
+            ),
         ]
     )
     warning = "\n".join(lines)
@@ -511,10 +513,7 @@ def surface_wip_recovery_warning(
         _audit_prefix="wip_recovery",
         _purpose="wip-recovery-warning",
         _origin="hashi_wip_recovery",
-        _stream_summary=(
-            "⚠️ Unfinished HER v2 work was recovered in bounded form; "
-            "/compact can preserve it in Session context."
-        ),
+        _stream_summary="⚠️ " + ui_language.tr("wip.stream_summary", locale=locale),
     )
 
 
@@ -2309,7 +2308,7 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
     if _contains_dangling_tool_markup(response.text) or _contains_dangling_tool_markup(
         visible_text
     ):
-        fallback = _safe_blocked_tool_markup_final(item)
+        fallback = _safe_blocked_tool_markup_final(runtime, item)
         runtime.logger.error(
             f"Blocked dangling tool markup at the final delivery boundary: request={item.request_id}"
         )

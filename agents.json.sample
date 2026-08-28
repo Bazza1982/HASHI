@@ -1,6 +1,7 @@
 {
   "global": {
     "authorized_id": 0,
+    "ui_language": "en",
     "workbench_port": 18802,
     "default_tools": {
       "allowed": ["*", "vision_inspect"],

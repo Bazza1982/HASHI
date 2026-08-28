@@ -19,7 +19,7 @@ from orchestrator.audit_mode import (
 )
 from orchestrator.runtime_common import QueuedRequest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from orchestrator.command_ui import BACK_LABEL, REFRESH_LABEL, card_title, selected_label, setting_card
+from orchestrator.command_ui import back_label, card_title, refresh_label, selected_label, setting_card
 
 
 def audit_enabled(runtime: Any) -> bool:
@@ -100,7 +100,7 @@ def audit_model_keyboard(runtime: Any, cfg: Any, *, target: str) -> InlineKeyboa
             InlineKeyboardButton("Audit model", callback_data="acfg:menu:auditmodel"),
         ]
     )
-    rows.append([InlineKeyboardButton(BACK_LABEL, callback_data="acfg:menu:audit")])
+    rows.append([InlineKeyboardButton(back_label(), callback_data="acfg:menu:audit")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -168,7 +168,7 @@ def audit_config_keyboard(cfg: Any) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Core model", callback_data="acfg:menu:core"),
                 InlineKeyboardButton("Audit model", callback_data="acfg:menu:auditmodel"),
             ],
-            [InlineKeyboardButton(REFRESH_LABEL, callback_data="acfg:menu:audit")],
+            [InlineKeyboardButton(refresh_label(), callback_data="acfg:menu:audit")],
         ]
     )
 
