@@ -11,6 +11,21 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+# ``importlib.reload`` reuses the module dictionary.  Preserve the class and
+# exception identities already held by live runtimes; the handoff at the end
+# of this module installs the newly defined implementation onto those objects.
+_PRE_RELOAD_SESSION_STORE_CLASS = globals().get("SessionStore")
+_PRE_RELOAD_SESSION_ERROR_CLASSES = {
+    name: globals().get(name)
+    for name in (
+        "SessionStoreError",
+        "SessionNotFound",
+        "SessionConflict",
+        "IdempotencyConflict",
+        "StaleFencingToken",
+    )
+}
+
 TERMINAL_RUN_STATES = frozenset(
     {"completed", "failed", "stopped", "superseded", "interrupted"}
 )
@@ -2157,6 +2172,47 @@ class SessionStore:
         path = self.workspaces_root / safe_session / f"generation_{generation}"
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+
+def _handoff_reloaded_session_store_class(
+    previous_class: type | None,
+    current_class: type,
+) -> type:
+    """Install reloaded behavior without invalidating live store instances."""
+
+    if not isinstance(previous_class, type) or previous_class is current_class:
+        return current_class
+
+    protected = {"__dict__", "__module__", "__qualname__", "__weakref__"}
+    previous_names = set(vars(previous_class))
+    current_namespace = vars(current_class)
+    for name in previous_names - set(current_namespace):
+        if name in protected:
+            continue
+        try:
+            delattr(previous_class, name)
+        except (AttributeError, TypeError):
+            pass
+    for name, value in current_namespace.items():
+        if name in protected:
+            continue
+        setattr(previous_class, name, value)
+    return previous_class
+
+
+# Exception identity matters to consumers that catch these classes directly.
+# Restore the live identities first, then hand the complete new SessionStore
+# implementation onto the live class.  A cold import has no previous classes
+# and simply keeps the definitions above.
+for _error_name, _previous_error_class in _PRE_RELOAD_SESSION_ERROR_CLASSES.items():
+    globals()[_error_name] = _handoff_reloaded_session_store_class(
+        _previous_error_class,
+        globals()[_error_name],
+    )
+SessionStore = _handoff_reloaded_session_store_class(
+    _PRE_RELOAD_SESSION_STORE_CLASS,
+    SessionStore,
+)
 
 
 __all__ = [

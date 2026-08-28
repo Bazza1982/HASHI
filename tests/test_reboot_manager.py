@@ -187,6 +187,36 @@ def test_reload_project_modules_loads_runtime_common_before_consumers(monkeypatc
     assert common_idx < reloaded.index("orchestrator.runtime_pipeline")
 
 
+def test_reload_project_modules_loads_session_store_before_session_consumers(
+    monkeypatch,
+):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    module_names = [
+        "orchestrator.flexible_agent_runtime",
+        "orchestrator.runtime_pipeline",
+        "orchestrator.runtime_session",
+        "orchestrator.session_store",
+    ]
+    reloaded = []
+
+    for name in module_names:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+
+    def fake_reload(module):
+        reloaded.append(module.__name__)
+        return module
+
+    monkeypatch.setattr("orchestrator.reboot_manager.importlib.reload", fake_reload)
+
+    manager.reload_project_modules()
+
+    store_idx = reloaded.index("orchestrator.session_store")
+    session_idx = reloaded.index("orchestrator.runtime_session")
+    assert store_idx < session_idx
+    assert session_idx < reloaded.index("orchestrator.runtime_pipeline")
+    assert session_idx < reloaded.index("orchestrator.flexible_agent_runtime")
+
+
 def test_reload_project_modules_loads_tool_registry_before_gateway_context(monkeypatch):
     manager = RebootManager(kernel=object(), console_handler=None)
     module_names = [
@@ -220,6 +250,17 @@ def test_validate_agent_runtime_contract_accepts_current_modules():
     manager = RebootManager(kernel=object(), console_handler=None)
 
     manager.validate_agent_runtime_contract()
+
+
+def test_validate_agent_runtime_contract_rejects_stale_session_store(monkeypatch):
+    manager = RebootManager(kernel=object(), console_handler=None)
+    monkeypatch.setattr(
+        "orchestrator.runtime_session.SessionStore",
+        type("StaleSessionStore", (), {}),
+    )
+
+    with pytest.raises(HotReloadError, match="stale SessionStore class"):
+        manager.validate_agent_runtime_contract()
 
 
 def test_validate_agent_runtime_contract_rejects_legacy_notification_signature(

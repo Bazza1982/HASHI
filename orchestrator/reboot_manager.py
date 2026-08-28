@@ -193,6 +193,8 @@ class RebootManager:
         her_v2 = importlib.import_module("adapters.her_v2")
         runtime_pipeline = importlib.import_module("orchestrator.runtime_pipeline")
         runtime_common = importlib.import_module("orchestrator.runtime_common")
+        session_store = importlib.import_module("orchestrator.session_store")
+        runtime_session = importlib.import_module("orchestrator.runtime_session")
         flexible_runtime = importlib.import_module(
             "orchestrator.flexible_agent_runtime"
         )
@@ -274,6 +276,18 @@ class RebootManager:
             raise HotReloadError(
                 "Hot reload contract failed: flexible runtime retained a stale "
                 "QueuedRequest class"
+            )
+        session_store_class = getattr(session_store, "SessionStore", None)
+        if (
+            session_store_class is None
+            or getattr(runtime_session, "SessionStore", None) is not session_store_class
+            or not callable(
+                getattr(session_store_class, "recent_agent_exchanges", None)
+            )
+        ):
+            raise HotReloadError(
+                "Hot reload contract failed: runtime session handling retained a "
+                "stale SessionStore class"
             )
         if getattr(gateway_context, "ToolRegistry", None) is not getattr(
             tool_registry, "ToolRegistry", None

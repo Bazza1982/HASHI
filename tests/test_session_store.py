@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
+import runpy
 
 import pytest
 
 from orchestrator import runtime_session
+from orchestrator import session_store as session_store_module
 from orchestrator.session_store import (
     IdempotencyConflict,
     SessionConflict,
@@ -16,6 +18,48 @@ from orchestrator.session_store import (
 
 def _store(tmp_path) -> SessionStore:
     return SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
+
+
+def test_reload_hands_new_store_api_to_live_class_identity(tmp_path):
+    class LegacySessionStoreError(RuntimeError):
+        pass
+
+    class LegacySessionNotFound(LegacySessionStoreError):
+        pass
+
+    class LegacySessionConflict(LegacySessionStoreError):
+        pass
+
+    class LegacyIdempotencyConflict(LegacySessionConflict):
+        pass
+
+    class LegacyStaleFencingToken(LegacySessionConflict):
+        pass
+
+    class LegacySessionStore:
+        pass
+
+    reloaded = runpy.run_path(
+        session_store_module.__file__,
+        init_globals={
+            "SessionStoreError": LegacySessionStoreError,
+            "SessionNotFound": LegacySessionNotFound,
+            "SessionConflict": LegacySessionConflict,
+            "IdempotencyConflict": LegacyIdempotencyConflict,
+            "StaleFencingToken": LegacyStaleFencingToken,
+            "SessionStore": LegacySessionStore,
+        },
+    )
+
+    assert reloaded["SessionStore"] is LegacySessionStore
+    assert reloaded["SessionNotFound"] is LegacySessionNotFound
+    assert callable(getattr(LegacySessionStore, "recent_agent_exchanges", None))
+    live_store = LegacySessionStore(
+        tmp_path / "reloaded" / "sessions.sqlite3", instance_id="HASHI1"
+    )
+    assert live_store.recent_agent_exchanges(
+        owner_id="user:7", agent_id="lily"
+    ) == []
 
 
 def test_runtime_without_bridge_root_keeps_session_db_in_its_workspace(tmp_path):

@@ -51,6 +51,11 @@ FOUNDATION_PHASES = {
     "orchestrator.runtime_common": 0,
     "orchestrator.runtime_defaults": 0,
     "orchestrator.workspace_state": 0,
+    # SessionStore defines classes imported directly by runtime_session.  The
+    # provider must reload first; otherwise runtime_session can retain the old
+    # class while a later SessionStore reload installs the new implementation.
+    "orchestrator.session_store": 0,
+    "orchestrator.runtime_session": 1,
     # Context compaction owns new value types and must refresh before runtime
     # pipeline/command consumers bind its coordinator and exception classes.
     "orchestrator.context_compaction": 3,
