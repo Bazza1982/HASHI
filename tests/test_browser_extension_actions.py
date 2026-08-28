@@ -321,6 +321,48 @@ def test_media_tools_are_model_visible_with_strict_high_level_contract() -> None
 
 
 @pytest.mark.asyncio
+async def test_registry_projects_runtime_audit_before_browser_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from orchestrator.config import GlobalConfig
+    from tools.registry import ToolRegistry
+
+    captured: dict = {}
+
+    async def fake_get_text(args: dict) -> str:
+        captured.update(args)
+        return "Example Domain"
+
+    monkeypatch.setattr(browser, "execute_browser_get_text", fake_get_text)
+    registry = ToolRegistry(
+        allowed_tools=["browser_get_text"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "agent_name": "momo",
+            "workspace_dir": tmp_path,
+            "safety_mode": "read_only",
+            "global_config": GlobalConfig(authorized_id=123),
+            "_runtime": object(),
+        },
+    )
+
+    result = await registry.execute(
+        "browser_get_text", {"url": "https://example.com"}, "call-7"
+    )
+
+    assert result.is_error is False
+    assert result.output == "Example Domain"
+    assert captured["_audit"] == {
+        "agent_name": "momo",
+        "workspace_dir": str(tmp_path),
+        "safety_mode": "read_only",
+    }
+
+
+@pytest.mark.asyncio
 async def test_extension_contract_rejects_advanced_action_not_advertised(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

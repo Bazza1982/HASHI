@@ -147,6 +147,7 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
             BrowserBridgeError,
             bridge_available,
             ensure_bridge_session,
+            project_browser_audit_metadata,
             send_bridge_command,
         )
     except ImportError:
@@ -162,7 +163,8 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
         return None
 
     bridge_args = dict(args)
-    audit = dict(bridge_args.get("_audit") or {})
+    audit = project_browser_audit_metadata(bridge_args.get("_audit"))
+    bridge_args["_audit"] = audit
     owner = str(
         bridge_args.get("agent_name")
         or audit.get("agent_name")

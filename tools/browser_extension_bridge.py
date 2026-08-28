@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 import logging
+import math
 import os
 import socket
 import uuid
@@ -36,6 +38,53 @@ class BrowserBridgeError(RuntimeError):
     pass
 
 
+# Audit context is process-local authority state. Only the small metadata
+# subset needed by the native host and its audit log may cross the JSON bridge.
+_BRIDGE_AUDIT_FIELDS = frozenset(
+    {
+        "agent_name",
+        "authority_mode",
+        "call_id",
+        "org_id",
+        "project_id",
+        "request_id",
+        "safety_mode",
+        "session_id",
+        "source",
+        "source_channel",
+        "task_id",
+        "workspace_dir",
+    }
+)
+_JSON_SCALARS = (str, int, float, bool, type(None))
+
+
+def project_browser_audit_metadata(value: Any) -> dict[str, Any]:
+    """Return the JSON-safe audit metadata allowed across Browser Bridge."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    projected: dict[str, Any] = {}
+    for key in _BRIDGE_AUDIT_FIELDS:
+        if key not in value:
+            continue
+        item = value[key]
+        if isinstance(item, Path):
+            projected[key] = str(item)
+        elif isinstance(item, float) and not math.isfinite(item):
+            continue
+        elif isinstance(item, _JSON_SCALARS):
+            projected[key] = item
+    return projected
+
+
+def _prepare_bridge_args(args: Optional[dict[str, Any]]) -> dict[str, Any]:
+    payload = dict(args or {})
+    if "_audit" in payload:
+        payload["_audit"] = project_browser_audit_metadata(payload.get("_audit"))
+    return payload
+
+
 def get_socket_path() -> str | Path:
     return DEFAULT_ENDPOINT
 
@@ -65,8 +114,14 @@ def send_bridge_command(
     request = {
         "request_id": str(uuid.uuid4()),
         "action": action,
-        "args": args or {},
+        "args": _prepare_bridge_args(args),
     }
+    try:
+        encoded_request = (json.dumps(request, allow_nan=False) + "\n").encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise BrowserBridgeError(
+            f"bridge request is not JSON serializable: {exc}"
+        ) from exc
 
     if is_windows_pipe(endpoint):
         try:
@@ -98,7 +153,7 @@ def send_bridge_command(
             client.settimeout(timeout_s)
             try:
                 client.connect(str(path))
-                client.sendall((json.dumps(request) + "\n").encode("utf-8"))
+                client.sendall(encoded_request)
                 chunks: list[bytes] = []
                 while True:
                     data = client.recv(65536)
