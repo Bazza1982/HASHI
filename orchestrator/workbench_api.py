@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import mimetypes
+import os
 import socket
 import time
 from datetime import datetime
@@ -222,6 +223,7 @@ class WorkbenchApiServer:
         self.orchestrator = orchestrator
         self.secrets = dict(secrets or {})
         self.admin_token = (self.secrets.get("workbench_admin_token") or "").strip()
+        self._agent_config_lock = asyncio.Lock()
         self._static_connectors = list(connectors or [])
         self.session_store = SessionStore.from_global_config(self.global_config)
         self.reconciled_session_runs = self.session_store.reconcile_incomplete_runs()
@@ -540,6 +542,12 @@ class WorkbenchApiServer:
         self.app.router.add_get(
             "/api/agents/{name}/overview", self.handle_agent_overview
         )
+        self.app.router.add_patch(
+            "/api/agents/{name}/metadata", self.handle_agent_metadata
+        )
+        self.app.router.add_post(
+            "/api/agents/{name}/active", self.handle_agent_active
+        )
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get(
             "/api/transcript/{name}/poll", self.handle_transcript_poll
@@ -651,11 +659,42 @@ class WorkbenchApiServer:
             return list(getattr(self.orchestrator, "runtimes", []))
         return list(self.runtimes)
 
-    def _load_agent_rows(self) -> list[dict]:
+    def _load_agent_rows(self, *, include_inactive: bool = False) -> list[dict]:
         raw = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
         return [
-            agent for agent in raw.get("agents", []) if agent.get("is_active", True)
+            agent
+            for agent in raw.get("agents", [])
+            if include_inactive or agent.get("is_active", True)
         ]
+
+    def _load_raw_agent_config(self) -> dict:
+        return json.loads(self.config_path.read_text(encoding="utf-8-sig"))
+
+    def _write_raw_agent_config(self, raw: dict) -> None:
+        original = self.config_path.read_bytes()
+        uses_bom = original.startswith(b"\xef\xbb\xbf")
+        newline = "\r\n" if b"\r\n" in original else "\n"
+        rendered = json.dumps(raw, indent=2, ensure_ascii=False) + "\n"
+        if newline == "\r\n":
+            rendered = rendered.replace("\n", "\r\n")
+        encoded = rendered.encode("utf-8")
+        if uses_bom:
+            encoded = b"\xef\xbb\xbf" + encoded
+        temporary = self.config_path.with_name(
+            f".{self.config_path.name}.tmp-{os.getpid()}-{time.time_ns()}"
+        )
+        try:
+            temporary.write_bytes(encoded)
+            try:
+                temporary.chmod(self.config_path.stat().st_mode)
+            except OSError:
+                pass
+            temporary.replace(self.config_path)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _load_agent_capability_rows(self):
         capabilities_path = self.config_path.parent / "agent_capabilities.json"
@@ -1047,7 +1086,7 @@ class WorkbenchApiServer:
 
     def _metadata_for_agent(self, agent_row: dict, runtime) -> dict:
         if runtime is not None:
-            metadata = runtime.get_runtime_metadata()
+            metadata = dict(runtime.get_runtime_metadata())
         else:
             transcript_path = self._resolve_transcript_path(agent_row, runtime)
             workspace_dir = resolve_path_value(
@@ -1087,6 +1126,11 @@ class WorkbenchApiServer:
                     "whatsapp": self._is_whatsapp_available(),
                 },
             }
+        metadata["is_active"] = bool(agent_row.get("is_active", True))
+        metadata["isActive"] = metadata["is_active"]
+        if not metadata["is_active"]:
+            metadata["online"] = False
+            metadata["status"] = "inactive"
         return metadata
 
     def _is_whatsapp_available(self) -> bool:
@@ -3460,7 +3504,14 @@ class WorkbenchApiServer:
 
     async def handle_agents(self, request):
         runtime_map = self._runtime_map()
-        agent_rows = self._load_agent_rows()
+        include_inactive = str(
+            request.query.get("include_inactive") or ""
+        ).strip().lower() in {"1", "true", "yes"}
+        if include_inactive and not self._check_admin_auth(request):
+            return web.json_response(
+                {"ok": False, "error": "admin auth failed"}, status=403
+            )
+        agent_rows = self._load_agent_rows(include_inactive=include_inactive)
         if self._is_governed_profile():
             user = self._enterprise_user_from_request(request)
             if user is None:
@@ -3473,6 +3524,152 @@ class WorkbenchApiServer:
             for agent_row in agent_rows
         ]
         return web.json_response({"ok": True, "agents": agents})
+
+    async def handle_agent_metadata(self, request):
+        if not self._check_admin_auth(request):
+            return web.json_response(
+                {"ok": False, "error": "admin auth failed"}, status=403
+            )
+        name = str(request.match_info.get("name") or "").strip()
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON"}, status=400
+            )
+        if not isinstance(payload, dict):
+            return web.json_response(
+                {"ok": False, "error": "JSON object is required"}, status=400
+            )
+        has_display_name = "display_name" in payload
+        has_emoji = "emoji" in payload
+        if not has_display_name and not has_emoji:
+            return web.json_response(
+                {"ok": False, "error": "display_name or emoji is required"},
+                status=400,
+            )
+
+        async with self._agent_config_lock:
+            raw = self._load_raw_agent_config()
+            agent_row = next(
+                (row for row in raw.get("agents", []) if row.get("name") == name),
+                None,
+            )
+            if agent_row is None:
+                return web.json_response(
+                    {"ok": False, "error": "agent not found"}, status=404
+                )
+            if has_display_name:
+                display_name = str(payload.get("display_name") or "").strip()
+                if not display_name or len(display_name) > 160:
+                    return web.json_response(
+                        {"ok": False, "error": "display_name is invalid"},
+                        status=400,
+                    )
+                agent_row["display_name"] = display_name
+            if has_emoji:
+                emoji = str(payload.get("emoji") or "").strip()
+                if not emoji or len(emoji) > 32:
+                    return web.json_response(
+                        {"ok": False, "error": "emoji is invalid"}, status=400
+                    )
+                agent_row["emoji"] = emoji
+            self._write_raw_agent_config(raw)
+
+            runtime = self._runtime_map().get(name)
+            if runtime is not None and getattr(runtime, "config", None) is not None:
+                extra = dict(getattr(runtime.config, "extra", None) or {})
+                if has_display_name:
+                    extra["display_name"] = agent_row["display_name"]
+                if has_emoji:
+                    extra["emoji"] = agent_row["emoji"]
+                runtime.config.extra = extra
+
+        return web.json_response(
+            {
+                "ok": True,
+                "agent": self._metadata_for_agent(agent_row, runtime),
+            }
+        )
+
+    async def handle_agent_active(self, request):
+        if not self._check_admin_auth(request):
+            return web.json_response(
+                {"ok": False, "error": "admin auth failed"}, status=403
+            )
+        if self.orchestrator is None:
+            return web.json_response(
+                {"ok": False, "error": "orchestrator unavailable"}, status=503
+            )
+        name = str(request.match_info.get("name") or "").strip()
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON"}, status=400
+            )
+        desired = payload.get("is_active") if isinstance(payload, dict) else None
+        if not isinstance(desired, bool):
+            return web.json_response(
+                {"ok": False, "error": "boolean is_active is required"},
+                status=400,
+            )
+
+        async with self._agent_config_lock:
+            raw = self._load_raw_agent_config()
+            agent_row = next(
+                (row for row in raw.get("agents", []) if row.get("name") == name),
+                None,
+            )
+            if agent_row is None:
+                return web.json_response(
+                    {"ok": False, "error": "agent not found"}, status=404
+                )
+            previous = bool(agent_row.get("is_active", True))
+            runtime_before = self._runtime_map().get(name)
+            lifecycle = {"ok": True, "message": "No lifecycle change was needed."}
+
+            if desired:
+                if not previous:
+                    agent_row["is_active"] = True
+                    self._write_raw_agent_config(raw)
+                if runtime_before is None:
+                    ok, message = await self.orchestrator.start_agent(name)
+                    lifecycle = {"ok": ok, "message": message}
+                    if not ok and "already" not in str(message).lower():
+                        if not previous:
+                            agent_row["is_active"] = False
+                            self._write_raw_agent_config(raw)
+                        return web.json_response(
+                            {"ok": False, "error": message, "lifecycle": lifecycle},
+                            status=400,
+                        )
+            else:
+                if runtime_before is not None:
+                    ok, message = await self.orchestrator.stop_agent(name)
+                    lifecycle = {"ok": ok, "message": message}
+                    if not ok and "not running" not in str(message).lower():
+                        return web.json_response(
+                            {"ok": False, "error": message, "lifecycle": lifecycle},
+                            status=400,
+                        )
+                if previous:
+                    agent_row["is_active"] = False
+                    self._write_raw_agent_config(raw)
+
+            updated_raw = self._load_raw_agent_config()
+            updated_row = next(
+                row for row in updated_raw.get("agents", []) if row.get("name") == name
+            )
+            runtime_after = self._runtime_map().get(name)
+
+        return web.json_response(
+            {
+                "ok": True,
+                "agent": self._metadata_for_agent(updated_row, runtime_after),
+                "lifecycle": lifecycle,
+            }
+        )
 
     async def handle_agent_overview(self, request):
         name = str(request.match_info.get("name") or "").strip()

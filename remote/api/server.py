@@ -5,6 +5,8 @@ FastAPI application exposing endpoints for inter-HASHI communication:
 
   GET  /health          — instance info + peer list
   GET  /peers           — discovered LAN peers
+  GET  /workbench/v1/status — authenticated Workbench gateway status
+  *    /workbench/v1/proxy/api/* — authenticated local Workbench API relay
   POST /hchat           — receive hchat from remote, relay to local workbench
   POST /terminal/exec   — execute shell command (auth-gated)
   POST /files/push      — receive a file and atomically write it to a path
@@ -37,7 +39,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from orchestrator.pathing import instance_runtime_dir
@@ -88,7 +90,30 @@ API_PROTOCOL_CAPABILITIES = [
     "protocol_outbound_correlation_v1",
     "protocol_ack_v1",
     "protocol_reply_v1",
+    "workbench_gateway_v1",
 ]
+
+_WORKBENCH_GATEWAY_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
+_WORKBENCH_GATEWAY_REQUEST_HEADERS = frozenset(
+    {
+        "accept",
+        "authorization",
+        "content-type",
+        "if-match",
+        "if-none-match",
+        "x-workbench-session",
+    }
+)
+_WORKBENCH_GATEWAY_RESPONSE_HEADERS = frozenset(
+    {
+        "cache-control",
+        "content-disposition",
+        "content-language",
+        "content-type",
+        "etag",
+        "last-modified",
+    }
+)
 
 
 def _protocol_capabilities_with_api_endpoints(capabilities: list[str]) -> list[str]:
@@ -583,6 +608,92 @@ def _workbench_health_url() -> str:
     return local_http_url(_workbench_port, "/api/health")
 
 
+def _workbench_gateway_timeout() -> float:
+    raw = str(os.getenv("HASHI_WORKBENCH_GATEWAY_TIMEOUT_SECONDS") or "30").strip()
+    try:
+        return max(1.0, min(float(raw), 120.0))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _workbench_admin_token() -> str:
+    """Return the local-only Workbench admin token without exposing it remotely."""
+    if not _control_hashi_root:
+        return ""
+    secrets_path = Path(_control_hashi_root) / "secrets.json"
+    try:
+        data = json.loads(secrets_path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return ""
+    return str((data or {}).get("workbench_admin_token") or "").strip()
+
+
+def _validate_workbench_gateway_path(api_path: str) -> str:
+    value = str(api_path or "").strip().lstrip("/")
+    segments = value.split("/") if value else []
+    if not value or any(segment in {"", ".", ".."} for segment in segments):
+        raise ValueError("invalid Workbench API path")
+    return f"/api/{value}"
+
+
+def _forward_workbench_gateway_request(
+    *,
+    method: str,
+    api_path: str,
+    query: str,
+    body_bytes: bytes,
+    request_headers: dict[str, str],
+) -> tuple[int, bytes, dict[str, str]]:
+    """Relay one authenticated request to this instance's loopback Workbench API."""
+    normalized_method = str(method or "").upper()
+    if normalized_method not in _WORKBENCH_GATEWAY_METHODS:
+        raise ValueError("unsupported Workbench gateway method")
+    upstream_path = _validate_workbench_gateway_path(api_path)
+    if query:
+        upstream_path = f"{upstream_path}?{query}"
+
+    headers = {
+        name: value
+        for name, value in request_headers.items()
+        if name.lower() in _WORKBENCH_GATEWAY_REQUEST_HEADERS
+    }
+    admin_token = _workbench_admin_token()
+    if admin_token:
+        # The shared-token gateway terminates remote authentication. The
+        # existing local admin token is injected only on the loopback hop.
+        headers["X-Workbench-Token"] = admin_token
+
+    last_error: Exception | None = None
+    for host in local_http_hosts():
+        url = local_http_url(_workbench_port, upstream_path, host=host)
+        request_data = body_bytes if normalized_method not in {"GET"} else None
+        upstream = urllib_request.Request(
+            url,
+            data=request_data,
+            headers=headers,
+            method=normalized_method,
+        )
+        try:
+            with urllib_request.urlopen(upstream, timeout=_workbench_gateway_timeout()) as response:
+                response_headers = {
+                    name.lower(): value
+                    for name, value in response.headers.items()
+                    if name.lower() in _WORKBENCH_GATEWAY_RESPONSE_HEADERS
+                }
+                return response.status, response.read(), response_headers
+        except HTTPError as exc:
+            response_headers = {
+                name.lower(): value
+                for name, value in exc.headers.items()
+                if name.lower() in _WORKBENCH_GATEWAY_RESPONSE_HEADERS
+            }
+            return exc.code, exc.read(), response_headers
+        except (URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            continue
+    raise ConnectionError(str(last_error or "local Workbench API is unavailable"))
+
+
 def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
     for host in local_http_hosts():
         req = urllib_request.Request(local_http_url(_workbench_port, "/api/health", host=host), method="GET")
@@ -709,6 +820,73 @@ def create_app(
             "lan_mode": is_lan_mode(),
             "trusted_view": True,
         }
+
+    # ── HASHI Workbench Gateway ─────────────────────────────
+
+    @app.get("/workbench/v1/status")
+    async def workbench_gateway_status(request: Request):
+        ok, reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=b"",
+        )
+        if not ok:
+            detail = "Shared token required" if reason == "auth_required" else "Invalid or expired shared token"
+            raise HTTPException(status_code=401, detail=detail)
+        health = await asyncio.to_thread(_fetch_workbench_health, 1.0)
+        return {
+            "ok": True,
+            "gateway": "workbench_v1",
+            "authenticated_instance": authenticated_instance,
+            "instance": {
+                "instance_id": _instance_info.get("instance_id"),
+                "display_name": _instance_info.get("display_name"),
+                "hashi_version": _instance_info.get("hashi_version"),
+                "platform": _instance_info.get("platform"),
+                "remote_port": _instance_info.get("remote_port"),
+                "workbench_port": _instance_info.get("workbench_port", _workbench_port),
+            },
+            "workbench_online": health is not None,
+            "workbench_health": health,
+        }
+
+    @app.api_route(
+        "/workbench/v1/proxy/api/{api_path:path}",
+        methods=sorted(_WORKBENCH_GATEWAY_METHODS),
+    )
+    async def workbench_gateway_proxy(request: Request, api_path: str):
+        body_bytes = await request.body()
+        ok, reason, _authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+        )
+        if not ok:
+            detail = "Shared token required" if reason == "auth_required" else "Invalid or expired shared token"
+            raise HTTPException(status_code=401, detail=detail)
+        try:
+            status, content, headers = await asyncio.to_thread(
+                _forward_workbench_gateway_request,
+                method=request.method,
+                api_path=api_path,
+                query=request.url.query,
+                body_bytes=body_bytes,
+                request_headers={name.lower(): value for name, value in request.headers.items()},
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": str(exc)},
+            )
+        except ConnectionError as exc:
+            logger.warning("Workbench gateway upstream unavailable: %s", exc)
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "ok": False,
+                    "error": "Local Workbench API unavailable",
+                    "detail": str(exc),
+                },
+            )
+        return Response(content=content, status_code=status, headers=headers)
 
     # ── Peers ────────────────────────────────────────────────
 
