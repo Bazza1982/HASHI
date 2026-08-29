@@ -6,17 +6,17 @@ Usage:
     python tools/hchat_send.py --to lily --from rain --text "Hi lily, I wanted to update you that..."
 
 Hchat protocol rules:
-  1. Workbench /api/chat is the primary delivery surface.
+  1. The local Backend API /api/chat endpoint is the primary delivery surface.
   2. instances.json + agents.json + live health are authoritative.
   3. contacts.json is only a short-lived learned cache.
   4. Hashi Remote /hchat is a restricted-network fallback, not the normal path.
   5. Mailbox is retired and must not be used for delivery.
 
 Cross-instance routing (priority order):
-  1. Local agent -> local Workbench API
+  1. Local agent -> local Backend API
   2. Contacts cache -> refreshed against instances.json before use
-  3. Instance discovery -> direct Workbench using instances.json + live health
-  4. Remote /hchat -> only when direct Workbench is unavailable or a forced target needs relay
+  3. Instance discovery -> direct Backend API using instances.json + live health
+  4. Remote /hchat -> only when the direct Backend API is unavailable or a forced target needs relay
 """
 
 import argparse
@@ -1147,7 +1147,7 @@ def check_hchat_route(
             route_type="local_group_workbench",
             host=host,
             port=local_port,
-            error=None if host else "local workbench unreachable",
+            error=None if host else "local backend API unreachable",
         )
         return result
 
@@ -1162,7 +1162,7 @@ def check_hchat_route(
             route_type="local_workbench",
             host=host,
             port=local_port,
-            error=None if host else "local workbench unreachable",
+            error=None if host else "local backend API unreachable",
         )
         return result
 
@@ -1263,7 +1263,7 @@ def check_hchat_route(
         host=remote.get("host"),
         port=wb_port,
         remote_port=remote_port,
-        error=f"route found for {to_agent}@{target_instance}, but workbench/remote probes failed",
+        error=f"route found for {to_agent}@{target_instance}, but backend API/Remote probes failed",
     )
     return result
 

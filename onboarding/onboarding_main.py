@@ -348,10 +348,10 @@ def run_onboarding():
         # shutdown. Onboarding must never scan or kill machine-wide processes.
         if os.name == "nt":
             main_bat = project_root / "bin" / "bridge-u.bat"
-            args = ["cmd", "/d", "/c", "call", str(main_bat), "--workbench", "--resume-last", "--force"]
+            args = ["cmd", "/d", "/c", "call", str(main_bat), "--resume-last", "--force"]
             _log(f"Launching bridge-u.bat via subprocess: {args}")
         else:
-            args = ["bash", str(main_sh), "--workbench", "--resume-last", "--force"]
+            args = ["bash", str(main_sh), "--resume-last", "--force"]
             _log(f"Launching bridge-u.sh via subprocess: {args}")
 
         # Pass HASHI_BRIDGE_PORT through so the correct instance port is used

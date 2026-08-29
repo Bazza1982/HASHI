@@ -78,7 +78,7 @@ class AgentLifecycleManager:
     async def start_runtime(self, rt) -> tuple[bool, str]:
         """
         Start an agent runtime. Backend initialization failure is fatal.
-        Telegram connection failure results in LOCAL MODE (Workbench + WhatsApp only).
+        Telegram connection failure results in LOCAL MODE (Backend API + WhatsApp only).
         """
         bridge_logger.info("%s: starting backend initialization", rt.name)
         for attempt in range(1, 4):
@@ -132,7 +132,7 @@ class AgentLifecycleManager:
 
         bridge_logger.warning("%s: LOCAL MODE (backend ok, Telegram failed)", rt.name)
         main_logger.info("Bot '%s' started in LOCAL MODE (Telegram unavailable).", rt.name)
-        return True, f"Started '{rt.name}' in LOCAL MODE (Workbench + WhatsApp only)."
+        return True, f"Started '{rt.name}' in LOCAL MODE (Backend API + WhatsApp only)."
 
     async def try_telegram_connect(self, rt) -> bool:
         """
@@ -149,7 +149,7 @@ class AgentLifecycleManager:
                     continue
                 msg = (
                     f"⚠️ Telegram unavailable for '{rt.name}'. "
-                    f"Agent will run in LOCAL MODE (Workbench + WhatsApp only)."
+                    f"Agent will run in LOCAL MODE (Backend API + WhatsApp only)."
                 )
                 main_logger.warning(msg)
                 bridge_logger.warning("%s: all 3 preflight attempts failed → LOCAL MODE", rt.name)

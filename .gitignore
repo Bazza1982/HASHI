@@ -72,11 +72,6 @@ workspaces/*/*_Continuity_Journal.md
 workspaces/*/bridge-u-root/
 workspaces/*/skill_state.json
 
-# Workbench build artifacts
-workbench/node_modules/
-workbench/dist/
-workbench/api/node_modules/
-workbench/.env
 state/
 
 # Temp and stress test artifacts

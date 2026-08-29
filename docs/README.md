@@ -74,7 +74,7 @@ deployment validation continues.
 - [HASHI_PRIVACY_LEVEL_2_PLAN.md](HASHI_PRIVACY_LEVEL_2_PLAN.md) — Level 2 basic-redaction security contract, API-only backend boundary, local model probe, and implementation sequence
 - [initial.md](initial.md) — Onboarding prompt template (onboarding-only)
 - [tools.md](tools.md) — Tools & operations reference
-- [WORKBENCH_NOTES.md](WORKBENCH_NOTES.md) — Workbench/runtime semantics
+- [WORKBENCH_NOTES.md](WORKBENCH_NOTES.md) — External Workbench gateway and shared-runtime contract
 - [HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md](HASHI_ENTERPRISE_AAI_VALUE_PROPOSITION.md) — Agent as Interface value proposition and enterprise positioning
 - [HASHI_ENTERPRISE_AAI_PRD.md](HASHI_ENTERPRISE_AAI_PRD.md) — Enterprise AAI product requirements and development plan
 - [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md) — accepted decision for one codebase, `personal`/`team`/`enterprise` profiles, and enterprise identity roles

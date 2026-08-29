@@ -9450,7 +9450,7 @@ class FlexibleAgentRuntime:
         text = "\n".join(lines)
         # Console
         _print_thinking(self.name, text)
-        # Transcript (for workbench polling) — always write, even if Telegram disconnected
+        # Transcript (for external-client polling) — always write, even if Telegram disconnected
         self.handoff_builder.append_transcript("thinking", f"💭 {text}", "think")
         # Telegram — skip if not connected
         if not self.telegram_connected:

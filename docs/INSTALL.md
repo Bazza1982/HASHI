@@ -22,18 +22,16 @@
 ### Prerequisites
 - Windows 10/11
 - Python (project-supported version)
-- Node.js + npm
 
 ### Install
 1) Clone repo
 2) Create venv and install Python deps (if required by your workflow)
-3) Install workbench deps
 
 ### Run
 - Preferred: use the unified launcher `bin/bridge-u.bat`.
-- Workbench:
-  - API server (Node): `http://127.0.0.1:3001`
-  - UI (Vite dev): `http://127.0.0.1:5173`
+- HASHI exposes its Python Backend API on the configured `workbench_port` and
+  the authenticated Workbench Gateway through Hashi Remote. HASHI Workbench is
+  an independent client and is installed and launched separately.
 
 ---
 
@@ -47,7 +45,7 @@
 
 ### Install
 1) Install Homebrew
-2) Install Python + Node
+2) Install Python
 3) Clone repo
 4) Install dependencies
 
@@ -58,10 +56,9 @@
 ### Prerequisites
 - Ubuntu 22.04+ recommended
 - Python3 + venv
-- Node.js + npm
 
 ### Run
-- Preferred: `./bin/bridge-u.sh --resume-last --workbench`
+- Preferred: `./bin/bridge-u.sh --resume-last`
 
 ---
 

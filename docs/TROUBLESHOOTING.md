@@ -13,10 +13,8 @@
 - [ ] `secrets.json` exists in `bridge_home` (tokens/keys present)
 
 ### Ports
-- [ ] Bridge Workbench API port is listening (default: `workbench_port`, e.g. 18819)
+- [ ] HASHI Backend API port is listening (configured by the compatibility field `workbench_port`, e.g. 18819)
 - [ ] Hashi Remote peer port is listening (`remote_port`, e.g. 8766/8767/8768)
-- [ ] Workbench Node API is listening (`:3001`)
-- [ ] Workbench UI is reachable (`:5173`)
 - [ ] API Gateway (optional) is listening on `api_gateway_port`; default is `workbench_port + 1`
 - [ ] Multi-instance ports do not collide: HASHI1 `18800/18801`, HASHI2 `18802/18803`, HASHI9 `18819/18820`
 - [ ] Same-host HASHI instances do not share the same `remote_port`
@@ -30,10 +28,6 @@
 - [ ] From Telegram, `/api` shows the live gateway address, `/v1/chat/completions`, `/v1/models`, enabled-on-restart state, and default API model
 - [ ] `/api on` and `/api off` change only the OpenAI-compatible API Gateway, not the agent's active `/backend` or `/model`
 - [ ] `/api model <model>` sets the gateway default for external API requests that omit `model`; callers may still override per request
-
-### Workbench UI "no reaction" symptom
-- [ ] `http://127.0.0.1:3001/api/config` returns JSON
-- [ ] `bridgeUApi` in that JSON points to the correct `workbench_port`
 
 ### /new and /fresh semantics
 - [ ] CLI backends use `/new` for a fresh CLI session reset
@@ -52,7 +46,7 @@
 - [ ] `/reboot min` and `/reboot N` are never widened to all Agents; malformed
   target input is rejected without stopping anyone
 - [ ] `/reboot max` restarts all running agents and rebuilds hot managers
-- [ ] Workbench API stays healthy after reboot
+- [ ] Backend API stays healthy after reboot
 - [ ] Scheduler is recreated and started after reboot
 - [ ] No post-reboot `ERROR`, `CRITICAL`, `Traceback`, `failed`, or unexpected `LOCAL MODE` entries appear in `logs/bridge.log`
 
@@ -104,14 +98,6 @@
   - Branch: `v1.1-debugging`
   - Commit: (fill)
   - Date: 2026-03-17
-- [x] Workbench control script resolves repo root correctly (Windows).
-  - Branch: `v1.1-debugging`
-  - Commit: (fill)
-  - Date: 2026-03-17
-- [x] Vite dev server binds to `127.0.0.1` so `127.0.0.1:5173` works.
-  - Branch: `v1.1-debugging`
-  - Commit: (fill)
-  - Date: 2026-03-17
 - [x] `/new` is **bare** for CLI session reset; non-CLI clean context uses `/fresh`.
   - Branch: `v1.1-debugging`
   - Commit: (fill)
@@ -130,7 +116,6 @@
 - Remote rescue start log: `logs/remote_rescue_hashi_start.log`
 - Remote rescue audit log: `logs/remote_rescue_audit.jsonl`
 - Browser/native host log: `logs/browser_native_host.log`
-- Workbench control logs (Windows): `state/workbench/logs/`
 
 ---
 

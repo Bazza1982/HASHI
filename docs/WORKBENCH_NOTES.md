@@ -1,32 +1,46 @@
-# Workbench Notes
+# External Workbench Gateway Notes
+
+HASHI Workbench is an independent application. This repository contains no
+Workbench frontend, Node server, build assets, launcher, or private Workbench
+state. HASHI provides only the runtime interfaces that an authenticated
+Workbench client needs.
+
+## Connection Boundary
+
+- The local Python Backend API is implemented in
+  `orchestrator/workbench_api.py` and listens on `global.workbench_port`. The
+  configuration and module names are retained for compatibility.
+- Hashi Remote exposes `GET /workbench/v1/status` and
+  `/workbench/v1/proxy/api/*` as the authenticated Workbench Gateway.
+- Remote requests use the existing Hashi Remote shared-token HMAC protocol.
+- The gateway terminates remote authentication and forwards the request over a
+  loopback-only hop. If a local Backend API admin token is configured, Remote
+  injects it as `X-Workbench-Token`; it is never returned to the client.
+- A Workbench client may discover several HASHI instances and connect to any
+  instance that has a compatible gateway and the same shared token.
 
 ## Shared Runtime Semantics
 
-The Telegram bots and the local workbench are two frontends for the same in-process agent runtimes.
+Telegram, TUI, scheduler jobs, HChat, and authenticated external clients feed
+the same in-process agent runtimes. Consequently:
 
-That means:
+- requests use the same per-agent queue and backend session state
+- transcript order follows queue order regardless of the originating surface
+- `/new`, `/fresh`, `/model`, backend switches, `/retry`, and `/resend` affect
+  the same shared runtime
+- durable user/assistant deliveries remain in each agent's
+  `transcript.jsonl`; external clients do not own a second authoritative
+  transcript
 
-- both interfaces enqueue into the same per-agent runtime queue
-- both interfaces share the same backend session state
-- transcript order reflects queue order, regardless of whether a request came from Telegram, the workbench API, or the scheduler
-- control commands affect the same shared backend session
+The client-neutral Session API persists canonical Session, Message, Run, and
+Event state only after its fail-closed qualification gate is enabled.
 
-Examples:
+## Operational Boundary
 
-- `/new` resets the shared backend session for that agent
-- `/model` changes the active model used by both Telegram and workbench traffic
-- backend switches affect the same shared Flex Agent runtime
-- `/resend` replays the last model or Bridge output without changing runtime state
-- `/retry` intentionally replaces stale shared context with a clean `/new` or
-  `/fresh` context, restores bounded handoff continuity, then reruns the last
-  prompt; see [RETRY_RESEND_COMMANDS.md](RETRY_RESEND_COMMANDS.md)
-
-## Operational Notes
-
-- supported Flex Agents write the durable user/assistant delivery record to
-  `transcript.jsonl` across their execution modes
-- `core_transcript.jsonl`, backend logs, and HER v2 audit records are auxiliary
-  evidence; they do not replace the visible delivery transcript
-- the client-neutral persistent Session API keeps canonical Session, Message,
-  Run, and Event state only after its fail-closed qualification gate is enabled
-- the Python workbench API is optional infrastructure; if it fails to bind, the Telegram bridge should still start normally
+- HASHI must continue to run if the external Workbench is absent or stopped.
+- Workbench design-only features must continue to run without HASHI.
+- HASHI launchers do not start, stop, update, or package Workbench.
+- Workbench releases, UI tests, Node dependencies, local design data, and
+  commercial/private code belong only to the independent Workbench repository.
+- Gateway and Backend API contract tests remain in HASHI because they protect
+  the public integration boundary.

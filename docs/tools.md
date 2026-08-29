@@ -67,7 +67,7 @@ Five runtime execution modes are available to a Flex Agent:
 - `/model` — switch model (inline keyboard), then optionally choose or keep effort when the model supports it
 - `/mode [fixed|flex|wrapper|audit|dual-brain]` — switch execution mode; `/mode memory+` only enables Memory+ and keeps the current mode
 - `/language [en|zh|default]` — choose the HASHI interface language for this user across all agents. The setting applies to Telegram command menus, buttons, common cards, and system notices, without translating agent replies, terminal output, transcripts, or logs.
-- `/terminal [quiet|activity|debug|raw]` — control instance-wide terminal stdout. `quiet` is the default and shows lifecycle/failures/operator attention; `activity` adds content-free phases, timing, tool counts, and token counts; `debug` adds sanitised technical events and failure clues without chat or reasoning text; `raw` restores the historical plaintext console. This never filters Workbench, TUI chat, Telegram, transcripts, or file logs.
+- `/terminal [quiet|activity|debug|raw]` — control instance-wide terminal stdout. `quiet` is the default and shows lifecycle/failures/operator attention; `activity` adds content-free phases, timing, tool counts, and token counts; `debug` adds sanitised technical events and failure clues without chat or reasoning text; `raw` restores the historical plaintext console. This never filters external clients, TUI chat, Telegram, transcripts, or file logs.
 - `/think [on|off]` — show the current backend's reasoning presentation; for HER this is only genuine provider-returned reasoning chunks or explicit provider-redaction notices, independent of `/verbose` and `/typing`
 - `/commentary [on|off]` — HER only: show explicitly model-authored Persona acknowledgements and interim reports once each; independent of `/think`, `/verbose`, and raw reasoning
 - `/verbose [on|off]` — show one temporary deterministic activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status. The same Telegram card is edited as work advances; raw technical events remain in logs, while Persona speech, reasoning, and answer drafts stay excluded.
@@ -441,15 +441,21 @@ own capability and permission checks before advertising or executing them.
 ## Dynamic Agent Lifecycle
 Agents can be started and stopped without restarting the bridge process.
 - **BAT:** `start-agent.bat <agent>`, `stop-agent.bat <agent>`
-- **Workbench API:** `POST /api/admin/start-agent {"agent": "coder"}`, `POST /api/admin/stop-agent {"agent": "coder"}`
+- **Backend API:** `POST /api/admin/start-agent {"agent": "coder"}`, `POST /api/admin/stop-agent {"agent": "coder"}`
 - **Telegram:** `/start` (inline keyboard), `/terminate` in agent chat
 - Implementation in `main.py`: `start_agent()` / `stop_agent()` methods.
 
-## Workbench
-- Browser frontend + local Node API + bridge integration API (`orchestrator/workbench_api.py`).
-- Runs at `127.0.0.1:18800`.
-- Telegram and workbench share the same agent queue — commands affect the same underlying state.
-- Start: `workbench.bat`. Control: `workbench_ctl.ps1`.
+## External HASHI Workbench
+
+- HASHI contains the local Python Backend API (`orchestrator/workbench_api.py`),
+  not a browser frontend or Node server.
+- The Backend API listens on the configured `global.workbench_port`; this field
+  name is retained for compatibility.
+- Hashi Remote provides the shared-token authenticated `/workbench/v1/*`
+  gateway for an independently installed HASHI Workbench.
+- Telegram, TUI, and authenticated Workbench traffic share the same agent queue
+  and runtime state.
+- Workbench is launched, updated, tested, and packaged from its own repository.
 
 ## WhatsApp Transport
 - Optional; uses the complete WhatsApp profile

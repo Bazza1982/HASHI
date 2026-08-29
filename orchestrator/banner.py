@@ -16,7 +16,7 @@ Sequence
                           each line decrypts left→right into block art
   Phase 2.5 — poem:       logo possession → kanji evaporate → poem crystallises
                           to the right of the logo
-  Phase 3 — status table: agents · workbench · api gateway · whatsapp
+  Phase 3 — status table: agents · backend api · api gateway · whatsapp
   Phase 4 — agent results: waits for any stragglers, then prints ✓/✗ per agent
 """
 
@@ -143,7 +143,7 @@ def _show_ascii_startup_banner(
         return
 
     print(f"  agents      {len(agent_names)} active")
-    print(f"  workbench   :{workbench_port}" if workbench_port else "  workbench   disabled")
+    print(f"  backend api :{workbench_port}" if workbench_port else "  backend api disabled")
     print(f"  api gateway {'enabled' if api_gateway_enabled else 'disabled'}")
     print(f"  whatsapp    {'enabled' if wa_enabled else 'disabled'}")
 
@@ -275,7 +275,7 @@ def show_startup_banner(
                              {name: "pending"|"connecting"|"online"|"failed"}
                              When supplied, a live status bar tracks each agent.
                              When None, simple spinners are used instead.
-        workbench_port:      port if workbench is active, else None
+        workbench_port:      Backend API port (compatibility parameter name), else None
         wa_enabled:          whether WhatsApp transport is enabled
         api_gateway_enabled: whether the API gateway is enabled
         skipped_agents:      [(name, reason)] for agents that couldn't start
@@ -520,7 +520,7 @@ def show_startup_banner(
 
         row("agents",
             f"{len(agent_names)} active", _c(108))
-        row("workbench",
+        row("backend api",
             f":{workbench_port}" if workbench_port else "disabled",
             _c(108) if workbench_port else _c(238))
         row("api gateway",
@@ -574,8 +574,8 @@ def show_startup_banner(
             _simple_resolve(f"loading agents{symbols['ellipsis']}",
                             f"{len(agent_names)} agents queued", _c(108), secs=0.7)
             if workbench_port:
-                _simple_resolve(f"workbench{symbols['ellipsis']}",
-                                f"workbench :{workbench_port}", _c(108), secs=0.4)
+                _simple_resolve(f"backend api{symbols['ellipsis']}",
+                                f"backend api :{workbench_port}", _c(108), secs=0.4)
             if wa_enabled:
                 _simple_resolve(f"whatsapp transport{symbols['ellipsis']}",
                                 "whatsapp active", _c(108), secs=0.4)

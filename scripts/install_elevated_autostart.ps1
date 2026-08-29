@@ -9,7 +9,7 @@ $wslDistro = "Ubuntu-22.04"
 $wslProjectDir = "/home/lily/projects/hashi2"
 $bashScript = "./bin/bridge-u.sh"
 
-# Note: Using --api-gateway instead of --workbench as requested. --force avoids the prompt on reboot.
+# The external Workbench is started independently. --force avoids the HASHI prompt on reboot.
 $arguments = "-d $wslDistro --cd $wslProjectDir -e bash $bashScript --resume-last --api-gateway --force"
 
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest

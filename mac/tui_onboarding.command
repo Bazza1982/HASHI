@@ -59,7 +59,6 @@ if [ "$BRIDGE_RUNNING" -eq 0 ]; then
     echo "Bridge not running — starting in background..." >> "$LOG_FILE"
     PYTHONPATH="$ROOT" "$PYTHON_EXE" "$ROOT/main.py" \
         --bridge-home "$ROOT" \
-        --workbench \
         >> "$LOG_DIR/bridge_$(date '+%Y-%m-%d_%H%M%S').log" 2>&1 &
     echo "Waiting 15 seconds for bridge to initialise..."
     sleep 15

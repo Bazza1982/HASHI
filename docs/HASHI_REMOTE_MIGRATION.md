@@ -165,11 +165,11 @@ HASHI2 `8767`.
 - `auth_required`: one side is upgraded and requires HMAC, while the other side
   is missing token support or the token differs.
 - same-host port conflict: give each same-host instance a unique `remote_port`.
-- stale directory: Remote is alive but HASHI core or Workbench health is down.
+- stale directory: Remote is alive but HASHI core or Backend API health is down.
 - hchat works but `/remote list` still shows offline: restart/refresh the local
   Remote sidecar so its peer registry reloads the latest bootstrap self-healing
   code, then check `/peers` and `/remote list` again.
-- peer still offline after upgrade: test both the Remote port and Workbench port
+- peer still offline after upgrade: test both the Remote port and Backend API port
   from another machine. If both timeout, this is a host/firewall/service outage,
   not a stale registry bug.
 - rescue start forbidden: `max_terminal_level` is not `L3_RESTART`.

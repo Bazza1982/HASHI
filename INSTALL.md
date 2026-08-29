@@ -37,7 +37,7 @@ The onboarding program will:
 - Detect your installed CLI backends (Gemini, Claude, Codex)
 - Guide you through creating your first agent
 - Set up Telegram/WhatsApp connections (optional)
-- Launch the Workbench UI
+- Prepare HASHI for local transports and authenticated external clients
 
 ### Step 4: Launch HASHI
 
@@ -118,7 +118,6 @@ hashi --help         # Show help
 - **Or** an [OpenRouter](https://openrouter.ai/) API key
 
 ### Optional
-- **Node.js 18+** (for Workbench UI)
 - **Telegram Bot Token** (for Telegram transport)
 - **WhatsApp** (for WhatsApp transport via whatsapp-web.js)
 

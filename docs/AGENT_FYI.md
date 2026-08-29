@@ -28,7 +28,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/fresh`: clean API context for non-CLI backends. On HER v2 it creates a persistent boundary across normal turns, completed exchanges, cross-session receipts, Compact capsules, and auxiliary continuity sources. Logs and memories remain stored but are not automatically injected.
 - `/handoff`: restore the latest 10 completed Bridge exchanges across retained HASHI Sessions into a fresh backend session.
 - `/fyi [prompt]`: explicit bridge environment awareness refresh.
-- `/bg <task>`: queue a background-capable task. Treat `/bg <task>` as `/bg run <task>`; preserve the user's task text exactly and use HASHI BackgroundJobManager for long OS/process work instead of blocking the chat. If model-facing `background_job_*` tools are unavailable, use the live local Workbench `/api/background-jobs` endpoints instead of starting a temporary standalone manager. Start managed jobs with success/failure notification and completion/failure agent-event routing enabled when possible.
+- `/bg <task>`: queue a background-capable task. Treat `/bg <task>` as `/bg run <task>`; preserve the user's task text exactly and use HASHI BackgroundJobManager for long OS/process work instead of blocking the chat. If model-facing `background_job_*` tools are unavailable, use the live local Backend API `/api/background-jobs` endpoints instead of starting a temporary standalone manager. Start managed jobs with success/failure notification and completion/failure agent-event routing enabled when possible.
 - `/bg status [job_id]`, `/bg tail <job_id>`, `/bg cancel <job_id>`, `/bg list`: inspect or manage recorded background jobs.
 - `background-job-event`: internal one-shot event delivered when a managed background job reaches a terminal state. Use the included `job_id`, `event`, `returncode`, paths, and `last_output` to summarize, continue the workflow, ask for confirmation, or report failure. Only run extra inspection when the event evidence is missing or inconsistent, and do not restart the same job unless the user explicitly asked for that behavior.
 - `/active [on|off] [minutes]`: toggle proactive follow-up heartbeat; default is 10 minutes.
@@ -63,7 +63,7 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
 - `/terminal [quiet|activity|debug|raw]`: control instance-wide terminal stdout.
   Quiet is the default; Activity adds content-free phases, timing, tool counts,
   and token counts; Debug adds sanitised technical clues; Raw restores the
-  historical plaintext chat and visible provider-reasoning output. Workbench,
+  historical plaintext chat and visible provider-reasoning output. External clients,
   TUI chat, Telegram, transcripts, and file logs are never filtered by it.
 - `/verbose [on|off]`: toggle one deterministic rolling digest grouped by
   lifecycle stage, inspected/changed files, commands, checks, external work,
@@ -574,7 +574,7 @@ Session is saved in `wa_session/` — subsequent starts do not need a QR scan.
 
 **方法：**
 - **同实例（HASHI1）：** 直接发消息给 lily
-- **跨实例（HASHI2/HASHI9等）：** 优先使用 Hchat / Workbench live chat 联系 HASHI1 的 lily，或使用 `/ask lily 你的问题`
+- **跨实例（HASHI2/HASHI9等）：** 优先使用 Hchat 联系 HASHI1 的 lily，或使用 `/ask lily 你的问题`
 
 **查询权限：**
 - system 域（系统知识）：所有 agent 可查询
@@ -629,7 +629,7 @@ Cross-Instance Mailbox is retired.
 
 - Do not use mailbox for cross-instance delivery.
 - Do not document mailbox as a fallback path.
-- Hchat / Workbench live chat is the official inter-instance protocol.
+- Hchat over Hashi Remote is the official inter-instance protocol.
 
 ## Hchat — Real-Time Direct Agent Messaging
 
@@ -638,7 +638,7 @@ Cross-Instance Mailbox is retired.
 The formal protocol is:
 
 - Identity and routing metadata are separate.
-- Workbench `/api/chat` is the final delivery surface.
+- Backend API `/api/chat` is the final local delivery surface.
 - `instances.json + agents.json + live health` are authoritative.
 - `contacts.json` is only a short-lived cache.
 - cross-instance `tools/hchat_send.py` now prefers shared-token Remote protocol
@@ -668,7 +668,7 @@ After editing, restart WSL: shut down via `wsl --shutdown` in PowerShell, then r
 
 | Port | Purpose | Example |
 |------|---------|---------|
-| `18819` | Workbench API — chat with agents | `POST http://127.0.0.1:18819/api/chat` |
+| `18819` | Backend API — chat with agents | `POST http://127.0.0.1:18819/api/chat` |
 | `18801` | API Gateway — OpenAI-compatible interface | `POST http://127.0.0.1:18801/v1/chat/completions` |
 
 ### Sending a Real-Time Message to HASHI9
@@ -683,7 +683,7 @@ curl -s -X POST http://127.0.0.1:18819/api/chat \
 
 | Method | Priority | Use Case |
 |--------|----------|---------|
-| **Workbench `/api/chat`** | Primary | Same-instance delivery |
+| **Backend API `/api/chat`** | Primary | Same-instance delivery |
 | **`HASHI1` exchange** | Primary for cross-instance | Any `agent@INSTANCE` delivery between `HASHI1/HASHI2/HASHI9/MSI` |
 | **`contacts.json` cache** | Secondary | Recently learned routes, refreshed against registry before use |
 | **Remote `/hchat`** | Transport | Carry exchange traffic or restricted-network relay |
@@ -751,7 +751,7 @@ Permanent fix note:
 - `hchat_send.py` cross-instance delivery now prefers protocol transport over
   legacy `/hchat`, fixing the case where legacy `/hchat` was bearer-gated while
   trusted protocol traffic already worked via shared-token HMAC.
-- Remote also widens local Workbench host fallback beyond `127.0.0.1`.
+- Remote also widens local Backend API host fallback beyond `127.0.0.1`.
   This fixes the Windows/LAN case where a peer can receive protocol traffic but
-  cannot inject it into its own Workbench because the Workbench is bound to a
+  cannot inject it into its own Backend API because the API is bound to a
   LAN IP instead of loopback.

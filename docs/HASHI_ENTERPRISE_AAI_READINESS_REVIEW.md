@@ -16,6 +16,10 @@ Related documents:
 - [HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md](HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md)
 - [HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md](HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md)
 
+**Workbench boundary:** UI/console statements in this review refer to the
+independent HASHI Workbench repository. HASHI itself owns the Backend API,
+governance services, and authenticated Workbench Gateway only.
+
 ---
 
 ## 1. Readiness Decision
@@ -36,7 +40,7 @@ HASHI Enterprise AAI has reached an **MVP review-ready** state for the governed 
 - central policy decisions for commands, channels, backends, tools, execution, and connectors;
 - unified audit ledger and adapters for existing HASHI audit streams;
 - task, artifact, evidence bundle, verification, and escalation primitives;
-- Workbench admin surfaces for users, channels, policies, audit, approvals, health, and connectors;
+- Backend admin API surfaces for users, channels, policies, audit, approvals, health, and connectors;
 - Docker/Kubernetes ops skeleton with backup, restore, migration, and health checks;
 - P10 connector MVP with GitHub, Slack, Google Chat, Teams, and Feishu, scoped credentials, secret refs, policy gates, health, dry-run, audit, and admin UI.
 
@@ -46,7 +50,7 @@ reviewable and alpha-testable implementation slice.
 Alpha acceptance requires:
 
 - personal profile smoke stays smooth for local individual use;
-- enterprise APIs and Workbench surfaces import/build and pass targeted smoke;
+- enterprise APIs and the external Workbench integration contract pass targeted smoke;
 - enterprise connector dry-run, health, policy, and audit paths remain runnable;
 - deployment artifacts are present for Compose, Kubernetes, Helm, systemd,
   audit export, secret refs, HA rehearsal, and production validation planning;
@@ -62,9 +66,9 @@ Alpha acceptance requires:
 - Deployment profiles preserve current `personal` mode while enabling governed `team` and `enterprise` paths.
 - Enterprise bootstrap requires explicit organization initialization.
 - Identity and role primitives distinguish `individual_user` from personal owner/admin mode.
-- Admin APIs and Workbench surfaces use governed session/admin checks.
+- Backend admin APIs use governed session/admin checks for external clients.
 - Scoped API tokens can be created, listed as metadata without secret material, and revoked through admin-gated APIs with audit events.
-- Workbench can discover configured local/OIDC/SAML login providers without exposing client secrets or SAML metadata XML.
+- Authenticated external clients can discover configured local/OIDC/SAML login providers without exposing client secrets or SAML metadata XML.
 - OIDC start returns an authorization URL while keeping the PKCE `code_verifier` server-side; callback validation consumes state and prepares a token exchange request without writing authorization codes, PKCE verifiers, or client secrets into browser responses or audit.
 - OIDC ID token verification enforces compact JWT shape, `alg=RS256`, matching `kid`, RSA JWKS signing keys, signature validity, and issuer/audience/expiry/not-before/issued-at/subject/nonce claims.
 - OIDC verified identities can create or reuse active enterprise users, issue sessions, and assign only `individual_user` default project membership unless an administrator changes policy.
@@ -72,7 +76,7 @@ Alpha acceptance requires:
 - OIDC callback supports an explicitly enabled full login path from authorization code to session, while preserving default prepared mode for deployments that have not enabled live SSO completion.
 - SAML IdP metadata can be parsed safely, and preverified SAML assertion claims can be checked for issuer, audience, time window, subject, email, and display name.
 - SAML HTTP login baseline can create AuthnRequest start payloads, track RelayState, validate callback state/provider, require a verifier hook or explicitly enabled preverified assertion handoff, upsert enterprise users, assign default project membership, and issue sessions.
-- SAML XML Signature verification is wired to IdP metadata signing certificates through `xmlsec1`; Workbench SAML callback defaults to this verifier path and fails closed when assertions are unsigned, verification fails, or no verifier is available.
+- SAML XML Signature verification is wired to IdP metadata signing certificates through `xmlsec1`; the Backend API SAML callback defaults to this verifier path and fails closed when assertions are unsigned, verification fails, or no verifier is available.
 - SCIM-style provisioning primitives, admin-gated HTTP handlers, and IdP-facing SCIM 2.0 Users routes can create, update, list, fetch, deactivate, and reactivate users, assign default project membership, revoke sessions/API tokens on deactivation, and require scoped SCIM API tokens for `/scim/v2/Users`.
 - Read-only SCIM 2.0 Groups routes can expose HASHI projects as groups with active project members through admin-gated and IdP-facing `/scim/v2/Groups` surfaces protected by scoped `scim:read` service tokens.
 - SCIM 2.0 discovery routes expose ServiceProviderConfig, ResourceTypes, and Schemas metadata for Users and Groups through admin-gated and IdP-facing surfaces.
@@ -94,7 +98,7 @@ Alpha acceptance requires:
 - Audit anchors can export a chain-range manifest with start/end hash, count, and anchor hash for later storage in WORM-capable systems.
 - Filesystem audit anchor sink can write hash-named read-only anchor objects with receipts and verification, providing a local WORM-style adapter for early deployments.
 - Object-store audit anchor sink can write hash-named anchor objects through an SDK-neutral client protocol with no-overwrite semantics, idempotent conflict handling, receipt verification, and object-lock metadata forwarding.
-- Audit export and Workbench timeline views exist for review and handoff.
+- Audit export APIs support review and handoff; timeline rendering belongs to the independent Workbench.
 - Audit export supports default ledger NDJSON plus SIEM/ECS-style and OpenTelemetry log-style NDJSON mappings.
 - Live audit export service primitive can push ledger/SIEM NDJSON or OTLP JSON log payloads from a hash-chain checkpoint through an injectable enterprise transport, persist file-backed checkpoints, and retry transient failures without advancing the checkpoint before delivery succeeds.
 - Live audit exporters create a checkpoint-adjacent singleton lock by default and fail closed when another exporter already holds it.
@@ -154,15 +158,15 @@ Alpha acceptance requires:
 - Slack incoming webhook connector supports governed `message.send` with dry-run behavior.
 - Google Chat, Teams, and Feishu incoming webhook connectors support governed `message.send` with dry-run behavior.
 - Default connector policy allows GitHub reads, requires approval for GitHub writes, and requires approval for Slack, Google Chat, Teams, and Feishu outbound messages.
-- Workbench connector credential creation rejects unsupported connector types, unsupported secret-ref schemes, and connector credentials missing their minimum internal scope.
-- Workbench exposes an admin-gated connector action schema catalog for supported GitHub and webhook connector actions.
+- Backend API connector credential creation rejects unsupported connector types, unsupported secret-ref schemes, and connector credentials missing their minimum internal scope.
+- Backend API exposes an admin-gated connector action schema catalog for supported GitHub and webhook connector actions.
 - Workbench Connector Test Run consumes the schema catalog to show parameter names, types, required flags, enum/default hints, and resource format.
 - Workbench Connector Test Run renders schema-driven controls for scalar, enum, and array parameters while keeping the raw JSON editor as an escape hatch.
 - Workbench Connector Test Run includes starter parameter presets for Slack blocks, Google Chat cards, Teams sections, and GitHub issue labels.
 - Workbench Connector Test Run validates required parameters, parameter types, and enum values before submitting connector execution requests.
-- Workbench connector execution API also validates schema-required parameters, parameter types, and enum values before invoking policy-gated connector execution.
-- Workbench connector execution API rejects webhook `message.send` actions without non-empty `text` before execution.
-- Workbench Enterprise console supports connector credentials, health, policy defaults, and dry-run/test-run execution.
+- Backend API connector execution also validates schema-required parameters, parameter types, and enum values before invoking policy-gated connector execution.
+- Backend API connector execution rejects webhook `message.send` actions without non-empty `text` before execution.
+- The independent Workbench Enterprise console consumes these contracts for connector credentials, health, policy defaults, and dry-run/test-run execution.
 
 ### Deployment And Operations
 
@@ -190,11 +194,15 @@ pytest -q tests/test_workbench_enterprise_connectors.py \
 50 passed
 ```
 
-Recent Workbench build checks passed:
+Recent Workbench integration contract checks passed:
 
 ```text
-cd workbench && npm run build
+pytest -q tests/test_remote_workbench_gateway.py \
+  tests/test_workbench_enterprise_connectors.py
 ```
+
+The independent Workbench repository owns its UI build and private product
+tests; HASHI validates only the Backend API and authenticated gateway contract.
 
 Phase 2 Enterprise Control Plane Alpha Lock checks passed:
 

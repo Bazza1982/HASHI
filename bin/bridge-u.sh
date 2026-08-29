@@ -57,7 +57,6 @@ if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]; then
 fi
 
 # Options
-WORKBENCH_LAUNCH=0
 API_GATEWAY_LAUNCH=0
 SELECTED_AGENTS=""
 AUTO_RESUME_LAST=0
@@ -84,8 +83,6 @@ WHATSAPP_DEFAULT_AGENT=""
 BRIDGE_PORT=${HASHI_BRIDGE_PORT:-18800}
 WORKBENCH_PORT=$BRIDGE_PORT
 API_GATEWAY_PORT=$((WORKBENCH_PORT + 1))
-CLIENT_PORT=$((5173 + BRIDGE_PORT - 18800))
-SERVER_PORT=$((3001 + BRIDGE_PORT - 18800))
 CLI_GEMINI="missing"
 CLI_CLAUDE="missing"
 CLI_CODEX="missing"
@@ -97,7 +94,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --resume-last) AUTO_RESUME_LAST=1; shift ;;
         --force) FORCE_LAUNCH=1; shift ;;
-        --workbench|-w) WORKBENCH_LAUNCH=1; shift ;;
         --api-gateway|-a) API_GATEWAY_LAUNCH=1; shift ;;
         --agents) SELECTED_AGENTS="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -105,8 +101,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [options]"
             echo "Options:"
             echo "  --resume-last       Automatically resume last selected agents"
-            echo "  --workbench, -w     Start workbench UI"
-            echo "  --api-gateway, -a   Enable API gateway (default: workbench port + 1)"
+            echo "  --api-gateway, -a   Enable API gateway (default: backend API port + 1)"
             echo "  --agents NAME       Start specific agent(s)"
             echo "  --dry-run           Show what would be done"
             echo "  --help, -h          Show this help"
@@ -163,8 +158,6 @@ load_agents() {
     eval "$output"
     BRIDGE_PORT=$WORKBENCH_PORT
     API_GATEWAY_PORT=${API_GATEWAY_PORT:-$((WORKBENCH_PORT + 1))}
-    CLIENT_PORT=$((5173 + BRIDGE_PORT - 18800))
-    SERVER_PORT=$((3001 + BRIDGE_PORT - 18800))
     
     if [[ ${#ACTIVE_AGENTS[@]} -eq 0 ]]; then
         echo -e "${C_WARN}No active agents found in agents.json.${C_RESET}"
@@ -204,8 +197,6 @@ is_in_last() {
 render_menu() {
     clear || true
     
-    local wb_label="OFF"
-    [[ "$WORKBENCH_LAUNCH" == "1" ]] && wb_label="ON"
     local api_label="OFF"
     [[ "$API_GATEWAY_LAUNCH" == "1" ]] && api_label="ON"
     
@@ -245,11 +236,7 @@ render_menu() {
     # ── Services ──
     echo -e "${C_RAIL}│${C_RESET} ${C_ACCENT}Services${C_RESET}"
     
-    if [[ "$wb_label" == "ON" ]]; then
-        echo -e "${C_RAIL}│${C_RESET}   Workbench       ${C_OK}ON${C_RESET} (:${WORKBENCH_PORT})"
-    else
-        echo -e "${C_RAIL}│${C_RESET}   Workbench       ${C_MUTED}OFF${C_RESET} (:${WORKBENCH_PORT})"
-    fi
+    echo -e "${C_RAIL}│${C_RESET}   Backend API     ${C_OK}enabled${C_RESET} (:${WORKBENCH_PORT})"
     
     if [[ "$api_label" == "ON" ]]; then
         echo -e "${C_RAIL}│${C_RESET}   API Gateway     ${C_OK}ON${C_RESET} (:${API_GATEWAY_PORT})"
@@ -334,7 +321,6 @@ render_menu() {
     echo -e "  ${C_ACCENT}[1]${C_RESET} Start all active agents"
     echo -e "  ${C_ACCENT}[2]${C_RESET} Start same as last time"
     echo -e "  ${C_ACCENT}[3]${C_RESET} Choose agents now"
-    echo -e "  ${C_ACCENT}[W]${C_RESET} Toggle workbench"
     echo -e "  ${C_ACCENT}[A]${C_RESET} Toggle API gateway"
     echo -e "  ${C_ACCENT}[Q]${C_RESET} Quit"
     echo ""
@@ -546,17 +532,7 @@ launch() {
     
     echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Agents           ${C_RESET} ${C_TEXT}${start_label}${C_RESET}"
     
-    if [[ "$WORKBENCH_LAUNCH" == "1" ]]; then
-        echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Workbench        ${C_RESET} ${C_OK}starting${C_RESET} (:${WORKBENCH_PORT})"
-        if [[ -x "$SCRIPT_DIR/bin/workbench-ctl.sh" ]]; then
-            export HASHI_CLIENT_PORT=$CLIENT_PORT HASHI_SERVER_PORT=$SERVER_PORT HASHI_BRIDGE_API_PORT=$WORKBENCH_PORT
-            "$SCRIPT_DIR/bin/workbench-ctl.sh" start --open &
-        else
-            echo -e "${C_WARN}workbench-ctl.sh not found, skipping workbench${C_RESET}"
-        fi
-    else
-        echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Workbench        ${C_RESET} ${C_MUTED}disabled${C_RESET}"
-    fi
+    echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}Backend API      ${C_RESET} ${C_OK}enabled${C_RESET} (:${WORKBENCH_PORT})"
     
     if [[ "$API_GATEWAY_LAUNCH" == "1" ]]; then
         echo -e "${C_RAIL}│${C_RESET} ${C_LABEL}API Gateway      ${C_RESET} ${C_OK}enabled${C_RESET} (:${API_GATEWAY_PORT})"
@@ -755,14 +731,6 @@ while true; do
                 echo "selected|$SELECTED_AGENTS" > "$STATE_FILE"
                 launch "$SELECTED_AGENTS" "--agents $SELECTED_AGENTS"
                 exit 0
-            fi
-            ;;
-        w)
-            # Toggle workbench
-            if [[ "$WORKBENCH_LAUNCH" == "1" ]]; then
-                WORKBENCH_LAUNCH=0
-            else
-                WORKBENCH_LAUNCH=1
             fi
             ;;
         a)

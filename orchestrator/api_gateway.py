@@ -7,7 +7,7 @@ Exposes:
 
 Routes requests to local CLI backends (gemini-cli, claude-cli, codex-cli) and
 xAI HTTP backend (xai-api).
-Runs on its own port (default 18801), independent from Telegram and workbench.
+Runs on its own port (default 18801), independent from Telegram and the Backend API.
 
 Adapter instances are separate from Telegram runtimes — no shared queue.
 Supports stateless mode (client manages history) and optional server-side

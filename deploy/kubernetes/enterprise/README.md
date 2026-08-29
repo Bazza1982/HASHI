@@ -3,7 +3,8 @@
 This directory contains a minimal Kubernetes baseline for running HASHI in
 `enterprise` profile. It mirrors the Docker Compose deployment shape:
 
-- Workbench listens on port `18800`.
+- HASHI Backend API listens on port `18800` (the deployment field and resource
+  port name remain `workbench` for compatibility).
 - `/api/health` is used for liveness and readiness probes.
 - `HASHI_DEPLOYMENT_PROFILE=enterprise`.
 - `HASHI_BRIDGE_HOME=/data`.

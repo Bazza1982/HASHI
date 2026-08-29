@@ -491,7 +491,7 @@ class ConfigManager:
 
         # authorized_id: secrets.json takes priority (written by Hashiko during
         # AI-driven onboarding); falls back to agents.json for manual setups.
-        # Value of 0 means Telegram not yet configured (workbench-only mode).
+        # Value of 0 means Telegram not yet configured (local/API-only mode).
         _auth_id = int(secrets.get("authorized_telegram_id", 0)) or int(g_raw.get("authorized_id", 0))
 
         workbench_port = int(g_raw.get("workbench_port", DEFAULT_WORKBENCH_PORT))

@@ -18,7 +18,7 @@ enterprise-grade Agent as Interface control plane for governed human-AI work.
 
 The original HASHI experience is still first-class: a privacy-first local
 platform for one owner to run multiple AI agents, backends, skills, memory,
-scheduling, voice, Workbench, and automation from their own machine. The
+scheduling, voice, authenticated external clients, and automation from their own machine. The
 Enterprise AAI line adds the governance layer organizations need: profiles,
 identity, SSO/SCIM readiness, policy, approvals, audit, evidence, connectors,
 and deployment artifacts.
@@ -37,7 +37,7 @@ In short:
 
 Key principles:
 - **No Token Storage** — CLI backends use local authentication; no OAuth tokens stored
-- **Multi-Agent, Single Interface** — Chat with multiple specialized agents through one Telegram, WhatsApp, or Workbench session
+- **Multi-Agent, Shared Sessions** — Chat with multiple specialized agents through Telegram, WhatsApp, TUI, or an authenticated external client
 - **Self-Improving HER Agents** — optional, adapter-owned Habit planning and post-run Meditation in HER
 - **Open Source And Self-Hostable** — The control plane is designed to be
   inspectable and extensible rather than a closed hosted black box
@@ -86,14 +86,14 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 **Core Components:**
 - **Onboarding** — Multi-language guided setup to create your first agent
-- **Workbench** — Local web UI (React + Vite) for multi-agent conversations
+- **Workbench Gateway** — Authenticated Hashi Remote interface for independent HASHI Workbench clients
 - **Orchestrator** — Central runtime managing agents, memory, skills, and scheduling
 - **Nagare Flow System** — Multi-agent workflow orchestration engine
-- **Transports** — Connect via Telegram, WhatsApp, or Workbench
+- **Transports** — Connect via Telegram, WhatsApp, TUI, or the Backend API and Workbench Gateway
 - **Skills** — Modular capabilities (prompts, toggles, actions) that extend agents
 - **Jobs** — Automated scheduling (heartbeats + cron) for periodic agent tasks
 - **Background Jobs** — Managed `/bg` long-running OS/process work with durable
-  job ids, bounded logs, Workbench status/tail/cancel APIs, completion/failure
+  job ids, bounded logs, Backend API status/tail/cancel endpoints, completion/failure
   notifications, and terminal events that can wake the responsible agent to
   summarize or continue the workflow
 - **HER Habit–Meditation** — Optional agent-local learning, independent from orchestration skills and Dream
@@ -137,7 +137,7 @@ and binary packages are no longer part of the active program.
 
 - **Enterprise AAI v0.1.0-alpha.1** *(current enterprise alpha line)* — governed
   AAI control plane, identity/SSO/SCIM primitives, policy/approval/audit,
-  connector MVPs, Workbench enterprise surfaces, and deployment artifacts for
+  connector MVPs, authenticated client surfaces, and deployment artifacts for
   alpha operator review. Production enterprise-server validation remains
   pending.
 - **v4.0.0-alpha.2** *(current v4 release candidate)* — HER v2 orchestration,
@@ -236,7 +236,7 @@ HASHI 2.x proved that local agents could execute tools, browse, switch backends,
 - **From generic skills to learned expertise:** `/exp` adds context-specific guidebooks with playbooks, validators, failure memory, templates, evidence, and training runs for repeatable high-skill work.
 - **From browser automation to browser routing:** `/browser` exposes a route dashboard that chooses between headless browser tools, CLI-native browsing, Brave Search, and the real logged-in Chrome extension bridge.
 - **From a monolith to a hot-reloadable core:** v3.2's slim core moves frequently changed behavior into managers and runtime modules so `/reboot min` can adopt most code changes without a full process restart.
-- **From scripts to a local work platform:** Workbench, API Gateway, Workzone helpers, Nagare, Minato, and the EXP corpus now give HASHI a stronger operating surface for research, writing, office automation, and cross-device work.
+- **From scripts to a local work platform:** the external HASHI Workbench, API Gateway, Workzone helpers, Nagare, Minato, and the EXP corpus provide a stronger operating surface for research, writing, office automation, and cross-device work.
 
 ---
 
@@ -330,7 +330,7 @@ workspaces. Global rules are injected before Agent-local rules and take
 precedence over them when they conflict. Global mutations are recorded without
 prompt text in `bridge_home/state/global_sys_prompt_audit.jsonl`.
 
-This scope covers normal Bridge requests, including Telegram, Workbench,
+This scope covers normal Bridge requests, including Telegram, external Workbench clients,
 HChat, Scheduler, and Automation paths that use the Bridge context assembler.
 An already-running request is not rewritten. HER/Ultra internal sub-agents use
 their own native system-prompt assembly and do not directly load this Bridge
@@ -435,7 +435,6 @@ python main.py            # Any platform
   - [OpenRouter](https://openrouter.ai/) API key
   - [DeepSeek](https://platform.deepseek.com/) API key
   - [Ollama](https://ollama.com/) (local LLM, no API key needed)
-- Optional: Node.js 18+ (for Workbench UI)
 
 For a smaller headless environment, install the core with
 `python -m pip install -e .`. Named extras such as `media`, `remote`, `tui`,
@@ -481,7 +480,7 @@ HASHI uses a **Universal Orchestrator** pattern where a single Python process ma
 │                          ▲                                        │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │                Transport Layer                              │  │
-│  │    [Telegram] [WhatsApp] [Workbench API] [HChat]           │  │
+│  │    [Telegram] [WhatsApp] [Backend API] [HChat]             │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  ┌────────────┐  ┌────────────┐  ┌────────────────────┐        │
@@ -506,7 +505,7 @@ HASHI uses a **Universal Orchestrator** pattern where a single Python process ma
 
 **Key Design Principles:**
 - **Backend Agnostic** — Agents work with any supported backend; you can switch mid-conversation
-- **Shared Sessions** — Telegram and Workbench share the same agent queues and memory
+- **Shared Sessions** — Telegram, TUI, and authenticated external clients share the same agent queues and memory
 - **Explicit over Automatic** — Skills, jobs, and features are user-activated, never magic
 - **Single Instance** — File-based locking prevents multiple HASHI processes from conflicting
 - **Remote Provider Policy** — Remote provider calls are permission-gated for automated flows to prevent runaway costs
@@ -526,7 +525,7 @@ hashi/
 │   ├── config_admin.py        # Config administration manager
 │   ├── backend_preflight.py   # Backend availability/preflight manager
 │   ├── agent_lifecycle.py     # Agent start/stop/teardown manager
-│   ├── service_manager.py     # Workbench, API gateway, scheduler services
+│   ├── service_manager.py     # Backend API, API gateway, scheduler services
 │   ├── reboot_manager.py      # /reboot reload and manager rebuild flow
 │   ├── startup_manager.py     # Cold-start orchestration
 │   ├── shutdown_manager.py    # Final shutdown orchestration
@@ -538,7 +537,7 @@ hashi/
 │   ├── skill_manager.py       # Skills system
 │   ├── bridge_memory.py       # Context assembly + memory retrieval
 │   ├── voice_manager.py       # TTS and voice reply management
-│   ├── workbench_api.py       # Workbench REST API server
+│   ├── workbench_api.py       # Backend REST API (compatibility module name)
 │   └── api_gateway.py         # External API gateway (optional)
 ├── adapters/                  # Backend adapters
 │   ├── base.py                # Abstract base adapter
@@ -563,8 +562,7 @@ hashi/
 ├── nagare/                    # Nagare workflow engine (standalone package)
 ├── nagare-viz/                # Visual workflow editor (React + TypeScript)
 ├── flow/                      # Legacy flow system + HASHI adapter
-├── remote/                    # Hashi Remote (cross-network agent communication)
-├── workbench/                 # Local web UI (React + Vite + Node.js)
+├── remote/                    # Hashi Remote, including the authenticated Workbench Gateway
 ├── tui.py                     # Terminal UI (Textual)
 ├── tui_onboarding.py          # First-run TUI setup
 ├── scripts/                   # Utility scripts
@@ -619,12 +617,14 @@ HASHI supports multiple communication channels:
 - Multi-Agent Support — route messages to different agents using `/agent <name>` prefix
 
 #### Workbench
-- Local web UI (React + Vite)
-- No authentication required (localhost only)
-- Shared sessions with Telegram/WhatsApp
+- HASHI Workbench is an independent application, not bundled in this repository.
+- It can design workflows offline and connects to one or more HASHI instances when execution or agent chat is needed.
+- Remote connections use the shared-token authenticated `/workbench/v1/*` gateway exposed by Hashi Remote.
+- Connected sessions share the same queues and memory as Telegram, WhatsApp, and TUI.
 
 #### HASHI API & API Gateway
-- HASHI API is the internal Workbench API and listens on each instance's `global.workbench_port`.
+- HASHI Backend API listens on each instance's `global.workbench_port`. The configuration field name is retained for compatibility.
+- Hashi Remote exposes the authenticated Workbench Gateway and relays approved `/workbench/v1/proxy/api/*` requests to this local Backend API.
 - API Gateway is the optional OpenAI-compatible gateway enabled with `--api-gateway`.
 - `/api` controls the API Gateway from Telegram with inline buttons:
   status, on, off, and default-model selection.
@@ -634,7 +634,7 @@ HASHI supports multiple communication channels:
   rollback artifact.
 - If `global.api_gateway_port` is omitted, HASHI derives it as `workbench_port + 1`.
 - Common local layout: HASHI1 `18800/18801`, HASHI2 `18802/18803`, HASHI9 `18819/18820`.
-- `GET /api/health` reports instance, Workbench port, API Gateway port, gateway enabled state, and online agents after restart.
+- `GET /api/health` reports instance, Backend API port, API Gateway port, gateway enabled state, and online agents after restart.
 - The Gateway's own `GET /health` reports its live listener state separately
   from the persisted enabled-on-restart choice.
 - The gateway exposes OpenAI-compatible `/v1/chat/completions`, `/v1/models`,
@@ -657,10 +657,10 @@ HASHI supports multiple communication channels:
 - HASHI WatchTower is an always-on side service used for LAN rescue and cold
   restart of HASHI instances.
 - WatchTower can stay alive when the HASHI process, Telegram runtime, or
-  Workbench API is down.
+  Backend API is down.
 - `/restart` asks `WATCHTOWER` to perform a supervised hard restart: stop the
   HASHI process, start it again through the configured launcher, and verify
-  Workbench health.
+  Backend API health.
 - Rescue and restart actions use fixed control endpoints, shared-token/HMAC
   authentication, audit logs, and restart state files. They are not generic
   shell execution.
@@ -669,7 +669,7 @@ HASHI supports multiple communication channels:
 - `name` means local-instance delivery only
 - `name@INSTANCE` means cross-instance delivery via Hashi Remote
 - Each HASHI instance has its own direct P2P identity (e.g., `@hashi2`); no central relay required
-- Routing: local Workbench exchange API → Hashi Remote registry lookup → direct delivery to target `/hchat` or `/protocol/message`
+- Routing: local Backend exchange API → Hashi Remote registry lookup → direct delivery to target `/hchat` or `/protocol/message`
 - Fallback path: if the exchange endpoint is unavailable, direct Remote delivery is attempted automatically
 - JSON protocol preserves sender agent identity, sender instance, and TTL for loop prevention
 - Reply path: remote instance delivers reply directly back to the originating instance via Hashi Remote
@@ -787,7 +787,7 @@ configuration summary.
 | Command | Description |
 |---------|-------------|
 | `/language [en\|zh\|default]` | Choose the Telegram/HASHI interface language for this user across all agents. Localizes command menus, buttons, common cards, and system notices; agent replies, terminal output, transcripts, and logs are unchanged |
-| `/terminal [quiet\|activity\|debug\|raw]` | Control instance-wide terminal stdout only. Defaults to `quiet`; Workbench, TUI chat, Telegram, transcripts, and file logs are unchanged |
+| `/terminal [quiet\|activity\|debug\|raw]` | Control instance-wide terminal stdout only. Defaults to `quiet`; external clients, TUI chat, Telegram, transcripts, and file logs are unchanged |
 | `/verbose [on\|off]` | Show one deterministic rolling activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status; raw technical events remain in logs |
 | `/think [on\|off]` | Show backend-owned reasoning output; for HER this is genuine provider-returned reasoning only |
 | `/commentary [on\|off]` | HER only: show each explicitly model-authored Persona acknowledgement or interim report once, independently from `/think` and `/verbose` |
@@ -1362,8 +1362,8 @@ cross-instance `agent@INSTANCE` delivery and only falls back to legacy
 transport mismatch where `/protocol/message` worked but `/hchat` could still
 fail with bearer-only authorization behavior.
 
-Windows/LAN peers may bind the local Workbench API to a LAN IP rather than
-`127.0.0.1`. Hashi Remote now widens local Workbench host fallback to include
+Windows/LAN peers may bind the local Backend API to a LAN IP rather than
+`127.0.0.1`. Hashi Remote widens local Backend API host fallback to include
 real interface IPv4 addresses, which fixes the case where protocol transport
 reaches the peer but local enqueue fails on an otherwise healthy LAN PC.
 

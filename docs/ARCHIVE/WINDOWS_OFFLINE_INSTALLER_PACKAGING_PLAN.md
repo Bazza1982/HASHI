@@ -1,4 +1,9 @@
-# HASHI — Windows Offline Installer & Desktop Packaging Plan (v2)
+# HASHI — Windows Offline Installer & Desktop Packaging Plan (v2, Superseded)
+
+> Archived on 2026-08-29. This plan assumed that HASHI bundled the legacy
+> Node/Vite Workbench. HASHI Workbench is now an independent product and
+> repository; future packaging must treat HASHI and Workbench as separate,
+> shared-token-authenticated components.
 
 > Purpose: deliver a **user-friendly, offline-capable Windows installer** for HASHI.
 > 

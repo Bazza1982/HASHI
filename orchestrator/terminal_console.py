@@ -1,7 +1,7 @@
 """Instance-wide terminal presentation policy.
 
 This module controls stdout presentation only.  It must never gate Telegram,
-Workbench/TUI, transcripts, audit records, or file logging.  The default is
+external clients/TUI, transcripts, audit records, or file logging.  The default is
 deliberately quiet; operators can opt back into the historical plaintext
 console with ``/terminal raw``.
 """

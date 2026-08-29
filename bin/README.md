@@ -43,31 +43,6 @@ bin\stop-agent.bat [agent_name]      # Windows
 
 ---
 
-## Workbench
-
-### Start Workbench
-```bash
-./bin/workbench-ctl.sh start         # Linux
-bin\workbench.bat                    # Windows
-.\bin\workbench_ctl.ps1 start        # PowerShell
-```
-
-### Stop Workbench
-```bash
-./bin/workbench-ctl.sh stop          # Linux
-bin\stop_workbench.bat               # Windows
-.\bin\workbench_ctl.ps1 stop         # PowerShell
-```
-
-### Restart Workbench
-```bash
-./bin/workbench-ctl.sh restart       # Linux
-bin\restart_workbench.bat            # Windows
-.\bin\workbench_ctl.ps1 restart      # PowerShell
-```
-
----
-
 ## System Management
 
 ### Restart HASHI

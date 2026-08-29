@@ -108,24 +108,24 @@ class ServiceManager:
             await self.kernel.workbench_api.start()
             bind_host = getattr(self.kernel.workbench_api, "bind_host", "127.0.0.1")
             main_logger.info(
-                "Workbench API listening on http://%s:%s",
+                "Backend API listening on http://%s:%s",
                 bind_host,
                 global_cfg.workbench_port,
             )
             bridge_logger.info(
-                "Workbench API listening on http://%s:%s",
+                "Backend API listening on http://%s:%s",
                 bind_host,
                 global_cfg.workbench_port,
             )
         except Exception as e:
             self.kernel.workbench_api = None
             main_logger.warning(
-                "Workbench API failed to start; continuing without workbench integration: %s",
+                "Backend API failed to start; continuing without external-client integration: %s",
                 e,
             )
             main_logger.debug(traceback.format_exc())
             bridge_logger.warning(
-                "Workbench API failed to start; continuing without workbench integration: %s: %s",
+                "Backend API failed to start; continuing without external-client integration: %s: %s",
                 type(e).__name__,
                 e,
             )
@@ -437,12 +437,12 @@ class ServiceManager:
 
     async def restart_workbench_api(self):
         if self.kernel.global_cfg is None:
-            bridge_logger.warning("Hot restart: Workbench API restart skipped because global config is unavailable")
+            bridge_logger.warning("Hot restart: Backend API restart skipped because global config is unavailable")
             return
         await self.stop_workbench_api(timeout=2.0)
         await self.start_workbench_api(self.kernel.global_cfg, self.kernel.secrets)
         if self.kernel.workbench_api is not None:
-            bridge_logger.info("Hot restart: Workbench API recreated with reloaded code")
+            bridge_logger.info("Hot restart: Backend API recreated with reloaded code")
 
     async def restart_api_gateway(self):
         """Recreate an enabled Gateway so one /reboot adopts reloaded code."""
@@ -474,7 +474,7 @@ class ServiceManager:
     async def repair_workbench_api_if_needed(self):
         global_cfg = self.kernel.global_cfg
         if global_cfg is None:
-            bridge_logger.warning("Workbench API repair skipped: global config is unavailable")
+            bridge_logger.warning("Backend API repair skipped: global config is unavailable")
             return
         workbench_api = self.kernel.workbench_api
         if workbench_api is not None:
@@ -482,13 +482,13 @@ class ServiceManager:
             if await self._workbench_api_healthy(bind_host, global_cfg.workbench_port):
                 return
             bridge_logger.warning(
-                "Workbench API exists but health check failed on %s:%s; rebuilding service",
+                "Backend API exists but health check failed on %s:%s; rebuilding service",
                 bind_host,
                 global_cfg.workbench_port,
             )
             await self.stop_workbench_api(timeout=2.0)
         bridge_logger.warning(
-            "Workbench API missing during hot restart; attempting repair on port %s",
+            "Backend API missing during hot restart; attempting repair on port %s",
             global_cfg.workbench_port,
         )
         await self.start_workbench_api(global_cfg, self.kernel.secrets)
@@ -511,12 +511,12 @@ class ServiceManager:
     async def stop_workbench_api(self, timeout: float = 5.0):
         if self.kernel.workbench_api is None:
             return
-        bridge_logger.info("Stopping Workbench API")
+        bridge_logger.info("Stopping Backend API")
         try:
             await asyncio.wait_for(self.kernel.workbench_api.shutdown(), timeout=timeout)
         except (asyncio.TimeoutError, Exception) as e:
-            main_logger.warning("Workbench API shutdown warning: %s", e)
-            bridge_logger.warning("Workbench API shutdown warning: %s: %s", type(e).__name__, e)
+            main_logger.warning("Backend API shutdown warning: %s", e)
+            bridge_logger.warning("Backend API shutdown warning: %s: %s", type(e).__name__, e)
         finally:
             self.kernel.workbench_api = None
 

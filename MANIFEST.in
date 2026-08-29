@@ -43,9 +43,6 @@ global-exclude *.pid
 global-exclude .DS_Store
 global-exclude *:Zone.Identifier
 
-# Exclude workbench (Node.js project, separate package)
-prune workbench
-
 # Exclude runtime directories
 prune logs
 prune state

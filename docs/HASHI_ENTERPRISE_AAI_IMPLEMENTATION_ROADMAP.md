@@ -11,6 +11,11 @@
 - [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md)
 - [HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md](HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md)
 
+**Workbench boundary:** references to a Workbench UI or console in this
+roadmap mean the independent HASHI Workbench product. This repository owns the
+Backend API, governance services, and authenticated Remote gateway that the UI
+consumes; it does not bundle the frontend or its tests.
+
 ---
 
 ## 1. Implementation Decision
@@ -37,7 +42,7 @@ The enterprise upgrade should not be delivered as one large rewrite. It should b
 2. add identity and channel control;
 3. add policy decisions and audit records early;
 4. promote logs, commands, tools, tasks, and artifacts into enterprise primitives;
-5. expose controls through admin APIs and Workbench;
+5. expose controls through admin APIs for independent clients such as Workbench;
 6. harden deployment and operations;
 7. add enterprise connectors only after governance is stable.
 
@@ -68,7 +73,8 @@ Alpha is ready when:
   channels, policy, approvals, audit, connectors, evidence, and deployment
   review;
 - connector registry, credential setup, action schemas, policy gates, dry-run
-  execution, health checks, audit redaction, and Workbench controls are present
+  execution, health checks, audit redaction, Backend API controls, and an
+  independently tested Workbench client are present
   for the current GitHub and webhook connector set;
 - audit ledger, hash-chain verification, anchor adapters, live export runner,
   daemon mode, SIEM starter assets, and deployment examples are present and
@@ -104,7 +110,7 @@ Required:
 
 Not required:
 
-- full Workbench admin console;
+- full independent Workbench admin console;
 - SSO;
 - full ABAC;
 - tamper-evident audit;
@@ -121,7 +127,7 @@ Required:
 - P3 policy MVP for channels, commands, backend switch, file read/write, and shell;
 - P4 unified audit ledger query/export;
 - P5 task, artifact, and evidence model;
-- P8-min Workbench admin console;
+- P8-min independent Workbench admin console;
 - P9-min deployment, backup, restore, and migrations;
 - end-to-end journeys from PRD Section 5.
 
@@ -214,7 +220,7 @@ Deferred:
 - SCIM 2.0 discovery surface for ServiceProviderConfig, ResourceTypes, and Schemas;
 - SCIM 2.0 Bulk operations safety MVP for bounded Users create/get/patch batches;
 - SSO/SCIM deployment runbook for current SAML `xmlsec1` verification and SCIM 2.0 operations;
-- Workbench login endpoint;
+- Backend API login endpoint for external clients;
 - audit events for login/logout/admin bootstrap;
 - personal profile maps current owner behavior to implicit top admin.
 
@@ -238,7 +244,7 @@ Deferred:
 - `ENT-011` Add bootstrap admin flow.
 - `ENT-012` Add user table and role enum.
 - `ENT-013` Add password hashing and session tokens.
-- `ENT-014` Add Workbench login/logout endpoints.
+- `ENT-014` Add Backend API login/logout endpoints for external clients.
 - `ENT-015` Emit audit events for auth and bootstrap.
 - `ENT-016` Add OIDC provider metadata skeleton. Done for config parsing, provider readiness checks, public metadata, and secret redaction; full authorization-code flow remains future work.
 - `ENT-017` Add OIDC authorization start with PKCE. Done for authorization URL generation, state/nonce, server-side code verifier storage, and start audit.
@@ -264,7 +270,7 @@ Deferred:
 **Acceptance:**
 
 - `org_admin` can log in.
-- Workbench can discover configured login providers without exposing provider secrets.
+- Authenticated external clients can discover configured login providers without exposing provider secrets.
 - OIDC start does not expose `code_verifier`; the browser receives the authorization URL while HASHI keeps verifier and nonce state for callback validation.
 - OIDC callback validates state before token exchange and does not write authorization codes into audit logs.
 - OIDC callback can prepare a token exchange request without exposing authorization codes, PKCE verifiers, or client secrets in browser responses or audit logs.
@@ -352,7 +358,7 @@ Implemented checkpoints:
 
 - enterprise channel schema and `ChannelRegistry`;
 - default channel bootstrap:
-  - `workbench` registered as the control-plane channel;
+  - `workbench` registered as the compatibility identifier for the external-client control-plane channel;
   - `hchat`, `telegram`, `whatsapp`, `email`, `slack`, `teams`, `google_chat`, and `feishu` registered disabled by default;
 - channel admin API:
   - `GET /api/enterprise/channels`;
@@ -371,7 +377,7 @@ Residual P2 limitations:
 
 - channel bindings currently use pragmatic identifiers such as Telegram user id, WhatsApp phone number, and agent id;
 - project/task-aware channel authorization is deferred to P3/P5/P7;
-- Workbench UI for channel administration is deferred to P8-min;
+- independent Workbench UI for channel administration is deferred to P8-min;
 - direct Remote protocol paths outside Workbench exchange still need deeper trust and policy integration.
 
 **Scope:**
@@ -417,7 +423,7 @@ Residual P2 limitations:
 
 - admin APIs for users, roles, projects, channels, policies, audit query, and export;
 - role-gated API middleware;
-- stable JSON contracts for Workbench to consume later.
+- stable JSON contracts for independent clients such as Workbench to consume.
 
 **Primary code areas:**
 
@@ -940,7 +946,7 @@ Residual P7 limitations:
 
 ---
 
-### P8 - Workbench Admin Console
+### P8 - Independent Workbench Admin Console Integration
 
 **Goal:** provide a human admin surface for enterprise controls.
 
@@ -975,7 +981,7 @@ Residual P8 limitations:
 
 **Primary code areas:**
 
-- Workbench frontend;
+- independent Workbench frontend (external repository);
 - `orchestrator/workbench_api.py`;
 - `orchestrator/enterprise/admin_api.py`.
 

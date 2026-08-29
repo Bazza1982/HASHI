@@ -348,7 +348,7 @@ async def test_terminal_command_changes_global_setting_and_renders_scope(tmp_pat
     text, kwargs = replies[-1]
     assert "<b>ACTIVITY</b>" in text
     assert "<code>HASHI1</code> instance" in text
-    assert "Workbench, TUI chat, Telegram" in text
+    assert "External clients, TUI chat, Telegram" in text
     assert kwargs["parse_mode"] == "HTML"
     labels = [button.text for row in kwargs["reply_markup"].inline_keyboard for button in row]
     assert "✓ Activity" in labels

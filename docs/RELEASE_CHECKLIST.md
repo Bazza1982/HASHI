@@ -158,8 +158,9 @@ testing. It does not certify a production enterprise-server rollout.
 - CLI smoke:
   - `python3 hashi.py --help`
   - `python3 hashi.py enterprise --help`
-- Workbench build:
-  - `cd workbench && npm run build`
+- External Workbench interface:
+  - `pytest -q tests/test_remote_workbench_gateway.py tests/test_workbench_agent_management.py`
+  - UI builds and private Workbench tests run in the independent Workbench repository.
 - Final hygiene:
   - `git diff --check`
 

@@ -119,7 +119,7 @@ class WhatsAppManager:
             emoji = getattr(runtime, "get_agent_emoji", lambda: "🤖")()
             message = (
                 f"{emoji} {display_name} started in LOCAL MODE\n"
-                f"⚠️ Telegram unavailable — using Workbench + WhatsApp\n"
+                f"⚠️ Telegram unavailable — using Backend API + WhatsApp\n"
                 f"Use /agent to check status"
             )
 

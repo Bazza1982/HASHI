@@ -8,7 +8,7 @@ Usage:
     python -m remote --port 8766        # custom port
     python -m remote --verbose          # debug logging
 
-Hashi Remote runs alongside the HASHI Workbench and enables:
+Hashi Remote runs alongside HASHI and enables:
   - LAN peer discovery (mDNS)
   - Cross-machine hchat delivery
   - Remote terminal execution (auth-gated)
@@ -310,7 +310,7 @@ class HashiRemoteApplication:
         logger.info("  Hashi Remote v1.0.0  🌸")
         logger.info("  Instance : %s", instance_id)
         logger.info("  Platform : %s", instance_info["platform"])
-        logger.info("  Peer port: %d  |  Workbench: %d", self._port, workbench_port)
+        logger.info("  Peer port: %d  |  Backend API: %d", self._port, workbench_port)
         logger.info("  LAN mode : %s", "on" if self._lan_mode else "off")
         logger.info("  Discovery: %s", self._discovery_backend)
         shared_token = load_shared_token(self._hashi_root)
@@ -544,7 +544,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--display-name", default=None,
                         help="Advertised Remote display name")
     parser.add_argument("--workbench-port", type=int, default=None,
-                        help="Workbench port monitored by rescue status")
+                        help="Backend API port monitored by rescue status (compatibility option name)")
     parser.add_argument("--supervised", action="store_true",
                         help="Mark this Remote as OS-supervised side-program")
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")

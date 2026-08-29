@@ -29,9 +29,7 @@ if "!BRIDGE_HOME:~-1!"=="\" set "BRIDGE_HOME=!BRIDGE_HOME:~0,-1!"
 set "STATE_FILE=%BRIDGE_HOME%\.bridge_u_last_agents.txt"
 set "AGENTS_FILE=%TEMP%\bridge_u_active_agents.txt"
 set "INACTIVE_FILE=%TEMP%\bridge_u_inactive_agents.txt"
-set "WORKBENCH_LAUNCH=0"
 set "API_GATEWAY_LAUNCH=0"
-set "AUTO_STOP_WORKBENCH=0"
 set "AUTO_RESUME_LAST=0"
 set "NO_PAUSE=0"
 set "DRY_RUN=0"
@@ -49,23 +47,14 @@ if "!AUTO_RESUME_LAST!"=="1" goto run_last
 
 :menu
 call :render_menu
-choice /C 123WAQ /N /M "Select option: "
+choice /C 123AQ /N /M "Select option: "
 set "MENU_CHOICE=%ERRORLEVEL%"
 
 if "%MENU_CHOICE%"=="1" goto run_all
 if "%MENU_CHOICE%"=="2" goto run_last
 if "%MENU_CHOICE%"=="3" goto choose_agents
-if "%MENU_CHOICE%"=="4" goto toggle_workbench
-if "%MENU_CHOICE%"=="5" goto toggle_api_gateway
-if "%MENU_CHOICE%"=="6" goto quit
-goto menu
-
-:toggle_workbench
-if "!WORKBENCH_LAUNCH!"=="1" (
-    set "WORKBENCH_LAUNCH=0"
-) else (
-    set "WORKBENCH_LAUNCH=1"
-)
+if "%MENU_CHOICE%"=="4" goto toggle_api_gateway
+if "%MENU_CHOICE%"=="5" goto quit
 goto menu
 
 :toggle_api_gateway
@@ -130,13 +119,7 @@ goto launch
 cls
 call :print_banner "BRIDGE-U-F BOOT" "Multi-backend orchestrator launch"
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Agents           !C_RESET! !C_TEXT!!START_LABEL!!C_RESET!
-if "!WORKBENCH_LAUNCH!"=="1" (
-    echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!starting in background!C_RESET!
-    start /MIN "" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0workbench_ctl.ps1" -Action start -OpenBrowser
-    set "AUTO_STOP_WORKBENCH=1"
-) else (
-    echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_MUTED!disabled!C_RESET!
-)
+echo !C_RAIL!^|!C_RESET! !C_LABEL!Backend API      !C_RESET! !C_OK!enabled!C_RESET!
 if "!API_GATEWAY_LAUNCH!"=="1" (
     echo !C_RAIL!^|!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!enabled ^(port 18801^)!C_RESET!
 ) else (
@@ -166,11 +149,6 @@ call :resolve_wakeup_file
 if defined WAKEUP_FILE call :start_wakeup_injector
 "!PYTHON_EXE!" -c "import colorama, runpy, sys; colorama.just_fix_windows_console(); sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')" main.py --bridge-home "%BRIDGE_HOME%" %PY_ARGS% !GW_ARG!
 set "PY_RC=!errorlevel!"
-if "!AUTO_STOP_WORKBENCH!"=="1" (
-    echo.
-    echo !C_MUTED!Stopping workbench services started by this launcher...!C_RESET!
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0workbench_ctl.ps1" -Action stop >nul 2>&1
-)
 if not "!PY_RC!"=="0" (
     echo.
     echo !C_WARN!Bridge process exited with code !PY_RC!.!C_RESET!
@@ -219,18 +197,12 @@ exit /b 0
 
 :render_menu
 cls
-set "WORKBENCH_LABEL=OFF"
-if "!WORKBENCH_LAUNCH!"=="1" set "WORKBENCH_LABEL=ON"
 set "API_GATEWAY_LABEL=OFF"
 if "!API_GATEWAY_LAUNCH!"=="1" set "API_GATEWAY_LABEL=ON"
-call :print_banner "BRIDGE-U-F LAUNCHER" "Universal bridge + optional workbench"
+call :print_banner "BRIDGE-U-F LAUNCHER" "Universal multi-agent bridge"
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Active agents    !C_RESET! !C_TEXT!!AGENT_COUNT!!C_RESET!
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Inactive agents  !C_RESET! !C_TEXT!!INACTIVE_COUNT!!C_RESET!
-if "!WORKBENCH_LABEL!"=="ON" (
-    echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!ON!C_RESET!
-) else (
-    echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_MUTED!OFF!C_RESET!
-)
+echo !C_RAIL!^|!C_RESET! !C_LABEL!Backend API      !C_RESET! !C_OK!enabled!C_RESET!
 if "!API_GATEWAY_LABEL!"=="ON" (
     echo !C_RAIL!^|!C_RESET! !C_LABEL!API Gateway     !C_RESET! !C_OK!ON!C_RESET!
 ) else (
@@ -258,7 +230,6 @@ echo !C_ACCENT!Actions!C_RESET!
 echo   !C_ACCENT![1]!C_RESET! Start all active agents
 echo   !C_ACCENT![2]!C_RESET! Start same as last time
 echo   !C_ACCENT![3]!C_RESET! Choose agents now
-echo   !C_ACCENT![W]!C_RESET! Toggle workbench launch
 echo   !C_ACCENT![A]!C_RESET! Toggle API gateway (port 18801)
 echo   !C_ACCENT![Q]!C_RESET! Quit
 echo.
@@ -470,7 +441,6 @@ exit /b 0
 :parse_args
 if "%~1"=="" exit /b 0
 if /i "%~1"=="--resume-last" set "AUTO_RESUME_LAST=1"
-if /i "%~1"=="--workbench" set "WORKBENCH_LAUNCH=1"
 if /i "%~1"=="--api-gateway" set "API_GATEWAY_LAUNCH=1"
 if /i "%~1"=="--no-pause" set "NO_PAUSE=1"
 if /i "%~1"=="--dry-run" set "DRY_RUN=1"

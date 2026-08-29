@@ -90,7 +90,7 @@ class ConsoleOutputFilter(logging.Filter):
         "Process bootstrap:",
         "Configured ",
         "Universal Orchestrator is online.",
-        "Workbench API listening on",
+        "Backend API listening on",
         "API Gateway listening on",
         "API Gateway disabled",
         "API Gateway failed to start",

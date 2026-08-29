@@ -30,7 +30,7 @@ default by supplying a request-level `model`.
 
 Common local ports:
 
-| Instance | HASHI API / Workbench | API Gateway |
+| Instance | HASHI Backend API | API Gateway |
 |---|---:|---:|
 | HASHI1 | `18800` | `18801` |
 | HASHI2 | `18802` | `18803` |
@@ -44,11 +44,11 @@ Common local ports:
 | **Port** | `global.api_gateway_port`, defaulting to `global.workbench_port + 1` |
 | **API Key** | Any non-empty string (no auth enforced, e.g. `"EMPTY"`) |
 
-By default, HASHI binds the Workbench API and API Gateway to the configured
+By default, HASHI binds the Backend API and API Gateway to the configured
 `global.api_host`. If that value is `127.0.0.1` or `localhost` and the WSL host
 alias `10.255.255.254` is available, HASHI uses `10.255.255.254` instead. This
 avoids WSL loopback environments where `127.0.0.1` accepts a socket but does not
-serve aiohttp traffic reliably. Confirm the live address with Workbench
+serve aiohttp traffic reliably. Confirm the live address with Backend API
 `GET /api/health` or the startup log line.
 
 ---
@@ -77,8 +77,8 @@ serve aiohttp traffic reliably. Confirm the live address with Workbench
   Codex image requests; there is no lower decoded-total cap that would reject a
   valid current image merely because earlier screenshots are also present.
 
-The HASHI API itself is separate from the API Gateway and listens on
-`global.workbench_port`. Use `GET /api/health` on the HASHI API port to confirm
+The HASHI Backend API is separate from the API Gateway and listens on
+`global.workbench_port` (a compatibility field name). Use `GET /api/health` on the Backend API port to confirm
 instance ownership, online agents, and the configured API Gateway port.
 
 The Telegram `/api` status view shows the live gateway address every time,
