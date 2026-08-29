@@ -138,6 +138,58 @@ def test_send_bridge_command_rejects_non_audit_runtime_objects(tmp_path: Path) -
         )
 
 
+def test_windows_pipe_branch_projects_runtime_audit_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from orchestrator.config import GlobalConfig
+
+    captured: dict = {}
+
+    def fake_send_windows_pipe_request(
+        endpoint: str,
+        request: dict,
+        **_: object,
+    ) -> dict:
+        captured.update(request)
+        return {"ok": True, "received_args": request["args"]}
+
+    monkeypatch.setattr(
+        "tools.browser_extension_bridge.is_windows_pipe",
+        lambda _endpoint: True,
+    )
+    monkeypatch.setattr(
+        "tools.browser_extension_bridge.send_windows_pipe_request",
+        fake_send_windows_pipe_request,
+    )
+
+    response = send_bridge_command(
+        "get_text",
+        {
+            "url": "https://example.com",
+            "_audit": {
+                "agent_name": "momo",
+                "workspace_dir": tmp_path,
+                "safety_mode": "read_only",
+                "global_config": GlobalConfig(authorized_id=123),
+                "_runtime": object(),
+                "_kernel": object(),
+            },
+        },
+        socket_path=r"\\.\pipe\hashi-browser-test",
+        auth_file=tmp_path / "bridge-auth.key",
+    )
+
+    expected_audit = {
+        "agent_name": "momo",
+        "workspace_dir": str(tmp_path),
+        "safety_mode": "read_only",
+    }
+    assert captured["args"]["_audit"] == expected_audit
+    assert response["received_args"]["_audit"] == expected_audit
+    json.dumps(captured, allow_nan=False)
+
+
 @requires_unix_stream_server
 def test_healthcheck_uses_ping(bridge_socket: Path) -> None:
     response = healthcheck(socket_path=bridge_socket)
@@ -230,6 +282,73 @@ def test_windows_named_pipe_roundtrip_and_healthcheck(tmp_path: Path) -> None:
     assert response["extension_connected"] is True
     assert response["extension_meta"]["browser"] == "Chrome"
     assert status["connected"] is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows named-pipe transport requires Windows")
+def test_windows_named_pipe_transports_projected_runtime_audit_context(
+    tmp_path: Path,
+) -> None:
+    from multiprocessing.connection import Listener
+
+    from orchestrator.config import GlobalConfig
+
+    endpoint = rf"\\.\pipe\hashi-browser-audit-test-{uuid.uuid4().hex}"
+    auth_file = tmp_path / "bridge-auth.key"
+    auth_key = load_auth_key(auth_file, create=True)
+    listener = Listener(endpoint, family="AF_PIPE", authkey=auth_key)
+    received: dict = {}
+    server_errors: list[BaseException] = []
+
+    def serve_once() -> None:
+        try:
+            connection = listener.accept()
+            try:
+                request = json.loads(connection.recv_bytes().decode("utf-8"))
+                received.update(request)
+                connection.send_bytes(
+                    json.dumps(
+                        {"ok": True, "received_args": request["args"]}
+                    ).encode("utf-8")
+                )
+            finally:
+                connection.close()
+        except BaseException as exc:
+            server_errors.append(exc)
+
+    thread = threading.Thread(target=serve_once, daemon=True)
+    thread.start()
+    try:
+        response = send_bridge_command(
+            "get_text",
+            {
+                "url": "https://example.com",
+                "_audit": {
+                    "agent_name": "momo",
+                    "workspace_dir": tmp_path,
+                    "safety_mode": "read_only",
+                    "global_config": GlobalConfig(authorized_id=123),
+                    "_runtime": object(),
+                    "_kernel": object(),
+                },
+            },
+            socket_path=endpoint,
+            auth_file=auth_file,
+            timeout_s=2.0,
+            connect_wait_s=2.0,
+        )
+        thread.join(timeout=5.0)
+    finally:
+        listener.close()
+
+    assert not thread.is_alive()
+    assert not server_errors
+    expected_audit = {
+        "agent_name": "momo",
+        "workspace_dir": str(tmp_path),
+        "safety_mode": "read_only",
+    }
+    assert received["args"]["_audit"] == expected_audit
+    assert response["received_args"]["_audit"] == expected_audit
 
 
 def test_existing_session_returns_current_extension_capabilities() -> None:
@@ -398,3 +517,37 @@ def test_browser_audit_redacts_screenshot_image_payloads() -> None:
 
     assert payload not in json.dumps(sanitized)
     assert all("[image-redacted]" in value for value in sanitized.values())
+
+
+def test_browser_audit_sanitizes_unknown_runtime_objects(tmp_path: Path) -> None:
+    from orchestrator.config import GlobalConfig
+
+    sanitized = sanitize_value(
+        {
+            "global_config": GlobalConfig(authorized_id=123),
+            "runtime": object(),
+            "path": tmp_path,
+            "tuple": ("safe", object()),
+            "nan": float("nan"),
+            "infinity": float("inf"),
+        }
+    )
+
+    assert sanitized == {
+        "global_config": "[unsupported:GlobalConfig]",
+        "runtime": "[unsupported:object]",
+        "path": str(tmp_path),
+        "tuple": ["safe", "[unsupported:object]"],
+        "nan": "[non-finite-float]",
+        "infinity": "[non-finite-float]",
+    }
+    json.dumps(sanitized, allow_nan=False)
+
+    audit_path = tmp_path / "runtime-audit.jsonl"
+    append_audit_record(
+        {"global_config": GlobalConfig(authorized_id=123), "runtime": object()},
+        path=audit_path,
+    )
+    record = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert record["global_config"] == "[unsupported:GlobalConfig]"
+    assert record["runtime"] == "[unsupported:object]"

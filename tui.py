@@ -31,6 +31,9 @@ from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 
 def _get_workbench_url() -> str:
     """Read workbench_port from agents.json so TUI always connects to THIS instance."""
+    override = os.environ.get("HASHI_WORKBENCH_URL", "").strip()
+    if override:
+        return override.rstrip("/")
     try:
         config_path = os.path.join(_project_root, "agents.json")
         with open(config_path) as f:
