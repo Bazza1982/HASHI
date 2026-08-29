@@ -18,7 +18,7 @@
     process files from regressing
   - no new model, command, manager, workspace-state, instance-lock, or
     platform fact source duplicates an existing owner
-- Workbench health: `curl http://127.0.0.1:<workbench_port>/api/health`
+- Backend API health: `curl http://127.0.0.1:<workbench_port>/api/health`
 - API Gateway health when enabled: `curl http://127.0.0.1:<api_gateway_port>/health`
 - Live reboot smoke:
   - `/reboot min`
@@ -30,7 +30,7 @@
     never fall back to all running Agents
   - no function change or failed reload directs the operator to a cold process restart
   - verify agents return to `ONLINE`
-  - verify Workbench API, enabled API Gateway, scheduler, delivery watcher, and
+  - verify Backend API, enabled API Gateway, scheduler, delivery watcher, and
     background jobs are recreated and healthy
   - introduce a syntax error in a disposable fixture and verify preflight
     rejects `/reboot` without stopping live agents
@@ -158,9 +158,9 @@ testing. It does not certify a production enterprise-server rollout.
 - CLI smoke:
   - `python3 hashi.py --help`
   - `python3 hashi.py enterprise --help`
-- External Workbench interface:
+- Retired Workbench compatibility boundary:
   - `pytest -q tests/test_remote_workbench_gateway.py tests/test_workbench_agent_management.py`
-  - UI builds and private Workbench tests run in the independent Workbench repository.
+  - no Workbench UI, Node build, launcher, or UI test remains in this repository
 - Final hygiene:
   - `git diff --check`
 

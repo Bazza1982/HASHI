@@ -678,7 +678,7 @@ Implementation decision for HASHI1:
 
 - `transcript.jsonl` remains the visible transcript.
   - It records what the user actually received.
-  - Workbench, handoff, project chat, and Anatta-facing surfaces should continue reading this path by default.
+  - Backend API, handoff, project chat, and Anatta-facing surfaces should continue reading this path by default.
 - `core_transcript.jsonl` stores core raw assistant output for wrapper-mode audit/debug.
   - Each core entry includes `text` as `core_raw`, `visible_text`, `request_id`, `source`, `completion_path`, backend, and wrapper metadata.
   - It is not a default handoff or memory source.

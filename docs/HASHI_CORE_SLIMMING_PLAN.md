@@ -272,7 +272,7 @@ orchestrator/service_manager.py
 
 Move:
 
-- Workbench API start/stop.
+- Backend API start/stop.
 - API Gateway start/stop.
 - Scheduler create/recreate/stop.
 - Agent directory creation.
@@ -286,15 +286,15 @@ self.services = ServiceManager(self)
 
 Ownership rule:
 
-- The kernel keeps the live Workbench API, API Gateway, and scheduler handles.
+- The kernel keeps the live Backend API, API Gateway, and scheduler handles.
 - `ServiceManager` operates on those handles and can adopt them after manager rebuild.
-- `/reboot min` should not unnecessarily restart Workbench/API Gateway.
+- `/reboot min` should not unnecessarily restart Backend API/API Gateway.
 - Scheduler may be recreated on reboot because it is already designed as a managed background task.
 
 Goals:
 
 - Scheduler changes can be picked up by `/reboot`.
-- Workbench and API Gateway lifecycle is isolated.
+- Backend API and API Gateway lifecycle is isolated.
 - `main.py` no longer knows service startup details.
 
 Validation:
@@ -519,7 +519,7 @@ curl http://127.0.0.1:18801/health
   changes while interrupting only its target.
 - `/reboot max` picks up the same changes when the operator explicitly chooses
   a whole-instance rollout.
-- Workbench API remains healthy after reboot.
+- Backend API remains healthy after reboot.
 - API Gateway remains healthy after reboot when enabled.
 - HASHI can still cold-start normally.
 - Startup, shutdown, and reboot logs remain clear enough to debug failures.
@@ -566,7 +566,7 @@ Current shape:
 - Feature behavior moved into hot-reloadable managers for config administration, backend preflight, agent lifecycle, runtime services, reboot, startup, shutdown, WhatsApp, and skill management.
 - Long-lived service and transport handles remain on the kernel.
 - Manager rebuild is transaction-style: build replacements first, commit only after construction succeeds.
-- `stop_agent()` now preserves `self.kernel.runtimes` list identity, so Workbench API and AgentDirectory do not hold stale list references after `/reboot min`.
+- `stop_agent()` now preserves `self.kernel.runtimes` list identity, so Backend API and AgentDirectory do not hold stale list references after `/reboot min`.
 - `SkillManager` is now rebuilt during hot manager rebuild.
 - `StartupManager` is rebuilt with the rest of the manager set for consistency, although initial agent startup only runs during cold start.
 
@@ -584,7 +584,7 @@ Live validation completed on 2026-05-02:
 /reboot min: passed
 /reboot max: passed
 cold restart: passed
-Workbench API health: ok
+Backend API health: ok
 API Gateway health: ok when enabled
 12 agents online after /reboot max
 ```
@@ -595,7 +595,7 @@ The accepted `/reboot max` run showed:
 - 12 agents stopped with `reason=hot-restart:max`.
 - 12 agents restarted and reached `ONLINE (backend + Telegram)`.
 - Scheduler was recreated with reloaded code and restarted.
-- Workbench API returned `ok: true` with 12 agents.
+- Backend API returned `ok: true` with 12 agents.
 - API Gateway returned `status: ok` on the active gateway port.
 - Post-reboot log scan found no `ERROR`, `CRITICAL`, `Traceback`, `failed`, or `LOCAL MODE` entries.
 

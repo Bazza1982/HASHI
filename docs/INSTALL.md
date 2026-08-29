@@ -29,9 +29,8 @@
 
 ### Run
 - Preferred: use the unified launcher `bin/bridge-u.bat`.
-- HASHI exposes its Python Backend API on the configured `workbench_port` and
-  the authenticated Workbench Gateway through Hashi Remote. HASHI Workbench is
-  an independent client and is installed and launched separately.
+- HASHI exposes its Python Backend API on the configured `workbench_port`.
+  Workbench has retired and is no longer installed or launched by HASHI.
 
 ---
 

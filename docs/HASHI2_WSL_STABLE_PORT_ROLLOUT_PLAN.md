@@ -14,7 +14,7 @@ Verified outcome:
 - HASHI2 kept `hashi_remote` on the configured legacy migration port `8767`.
 - `runtime_port_assignments.json` persisted `hashi_remote -> 8767` with
   `source=configured`.
-- HASHI2 Remote `/health`, Workbench `18802`, API Gateway `18803`, and local
+- HASHI2 Remote `/health`, Backend API `18802`, API Gateway `18803`, and local
   hchat smoke passed during rollout.
 - HASHI1 and HASHI2 both ended on commit `8bf8c5d`.
 - `croniter` was installed through the full launcher requirements path, so the
@@ -49,7 +49,7 @@ Success means:
 
 - HASHI2 keeps its configured Remote port when free;
 - the new allocator state is persisted and ignored by git;
-- Workbench, API Gateway, Hashi Remote, HChat, peer discovery, file transfer,
+- Backend API, API Gateway, Hashi Remote, HChat, peer discovery, file transfer,
   reboot, and WSL path/platform behavior still work;
 - HASHI1 remains healthy while HASHI2 is tested;
 - rollback is documented and quick.
@@ -256,7 +256,7 @@ Run every row and record pass/fail/evidence.
 | Area | Command / Probe | Expected |
 |---|---|---|
 | Instance identity | `curl http://127.0.0.1:<WORKBENCH_PORT>/api/health` | reports HASHI2 instance id and expected ports |
-| Workbench API | `curl http://127.0.0.1:<WORKBENCH_PORT>/api/health` | healthy, online agents visible |
+| Backend API | `curl http://127.0.0.1:<WORKBENCH_PORT>/api/health` | healthy, online agents visible |
 | API Gateway | `curl http://127.0.0.1:<API_GATEWAY_PORT>/v1/models` or `/api` status if enabled | gateway state matches HASHI2 config |
 | Remote health | `curl http://127.0.0.1:<REMOTE_PORT>/health` | HTTP 200 / healthy JSON |
 | Remote peers | `curl http://127.0.0.1:<REMOTE_PORT>/peers` | peers listed, no duplicate HASHI2 identity |
@@ -270,7 +270,7 @@ Run every row and record pass/fail/evidence.
 | File transfer push | push small temp file to HASHI1 incoming smoke path | file appears, no path escape |
 | Remote rescue status | `python tools/remote_rescue.py status HASHI1` and HASHI2 target where configured | status works; no destructive start |
 | Remote on/off | `/remote status`, `/remote off`, `/remote on` or lifecycle script equivalent | Remote stops/starts and keeps same persisted port |
-| Reboot min | `/reboot min` from HASHI2 agent | agent returns; Workbench/Remote still healthy |
+| Reboot min | `/reboot min` from HASHI2 agent | agent returns; Backend API/Remote still healthy |
 | Reboot max | optional only if safe | all agents return; Remote still healthy |
 | Scheduler | inspect scheduler heartbeat/log or known scheduled task list | no post-reboot scheduler errors |
 | WSL pathing | commands run from WSL path, no Windows path leakage in config | paths are WSL-native |
@@ -327,7 +327,7 @@ Close only if:
 | Remote start fails on persisted occupied port | expected_if_port_occupied | release port or reset only with approval |
 | Remote silently changes persisted port | release_blocker | rollback and fix allocator |
 | HASHI1 cannot see HASHI2 after restart | routing_blocker | inspect `/peers`, `/protocol/status`, live endpoints |
-| HChat fails but Remote peers healthy | hchat_transport_blocker | inspect `tools/hchat_send.py --check` output and Workbench health |
+| HChat fails but Remote peers healthy | hchat_transport_blocker | inspect `tools/hchat_send.py --check` output and Backend API health |
 | File transfer auth fails | config_or_token_blocker | verify shared token/capabilities |
 | `runtime_port_assignments.json` appears in git | git_hygiene_blocker | fix `.gitignore` before close |
 
@@ -344,7 +344,7 @@ Before commit:
 After commit:
 Configured Remote port:
 Persisted Remote port:
-Workbench port:
+Backend API port (legacy configuration name):
 API Gateway port:
 
 Phase 0 HASHI1 baseline:
@@ -366,7 +366,7 @@ Final verdict:
 Go to HASHI1/HASHI9 broader rollout only if:
 
 - HASHI2 preserves its configured Remote port;
-- HASHI2 passes Workbench/API/Remote/HChat/file-transfer/reboot checks;
+- HASHI2 passes Backend API/API Gateway/Remote/HChat/file-transfer/reboot checks;
 - HASHI1 and HASHI2 agree on peer liveness;
 - no git-tracked local allocator state appears;
 - occupied persisted port behavior is either tested or explicitly deferred with

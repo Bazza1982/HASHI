@@ -86,7 +86,7 @@ retired by the HER v2 and repository-slimming architecture.
 - API Gateway shutdown drains admission and protects HASHI's own process group;
   foreground shell process groups and remote supervisor identities now have
   explicit lifecycle cleanup.
-- Workbench exposes a canonical read-only Agent Overview, and signed
+- The Backend API exposes a canonical read-only Agent Overview, and signed
   shared-token requests may use the remote terminal endpoint alongside pairing
   bearer authentication.
 - Python dependencies are split into core, standard, feature, development, and
@@ -108,7 +108,7 @@ The compulsory-Replanning corrective working tree completed these local gates:
 | Git diff/whitespace check | passed |
 | Internal Markdown targets | `207` checked; `0` missing |
 | Runtime code adoption | authorised Arale `/reboot min` passed; target set was exactly `('arale',)` and the current HER runtime contract was verified |
-| Runtime health after adoption | Arale online on HER v2; all 20 configured Agents online; Workbench and API Gateway recreated with reloaded code |
+| Runtime health after adoption | Arale online on HER v2; all 20 configured Agents online; Backend API and API Gateway recreated with reloaded code |
 | Capability-level canary | not performed; real threshold Replan, Auto Compact, and provider multi-image canaries remain separate |
 
 The already-published integrated implementation baseline had completed these
@@ -123,7 +123,7 @@ historical gates before its documentation pass:
 | Git diff/whitespace check | passed |
 | `/reboot min` adoption | passed; implementation baseline loaded |
 | `/reboot max` adoption | passed; implementation baseline retained |
-| Runtime health after adoption | configured Agents online; Workbench, API Gateway, Telegram, and scheduler healthy |
+| Runtime health after adoption | configured Agents online; Backend API, API Gateway, Telegram, and scheduler healthy |
 | Historical HER v2 canary | passed on `main` at `cc010d1`; it predates the compulsory-Replanning correction and does not certify its live cadence |
 
 The documentation and publication-hygiene pass completed these additional

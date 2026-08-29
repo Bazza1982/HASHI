@@ -59,7 +59,7 @@ The current operational model has two modes:
 Mode 2 is convenient but not rescue-safe. If HASHI core crashes, is killed as a
 process tree, or loses its launcher session, the child Remote process may also
 die. Even if Remote stays alive, legacy `/hchat` delivery still depends on the
-local Workbench API, so agent delivery fails while HASHI core is down.
+local Backend API, so agent delivery fails while HASHI core is down.
 
 The result is a remote management paradox: the service that should rescue HASHI
 is often owned by the HASHI process that needs rescuing.
@@ -82,7 +82,7 @@ Hashi Remote Side Program
 HASHI Core Process
         |
         +-- agents
-        +-- Workbench API
+        +-- Backend API
         +-- API Gateway
         +-- Telegram / WhatsApp / local runtime services
 ```
@@ -533,16 +533,16 @@ python tools/remote_rescue.py start HASHI1 --reason "HASHI core unreachable"
 python tools/remote_rescue.py status HASHI1
 ```
 
-Then resume normal workflows after Workbench health is back.
+Then resume normal workflows after Backend API health is back.
 
 ## Failure Modes To Handle
 
 - Remote is down: cannot rescue; use OS/physical access.
 - Remote is alive but L3 disabled: can diagnose, cannot start core.
-- Workbench health is down but PID alive: report `state=starting_or_stuck`.
+- Backend API health is down but PID alive: report `state=starting_or_stuck`.
 - PID file exists but process is not alive: report `state=stale_pid`, ignore the
   stale PID, and allow start.
-- PID file missing and Workbench health is down: report `state=offline`.
+- PID file missing and Backend API health is down: report `state=offline`.
 - Launcher missing: return clear 500 with supported launcher paths.
 - Port collision: start log should show launcher failure.
 - Older peer returns 404: mark rescue unsupported, not failed.

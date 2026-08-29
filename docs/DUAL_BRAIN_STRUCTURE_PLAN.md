@@ -881,7 +881,7 @@ Steps:
    - this avoids HASHI core edits while proving dual-brain cognition.
 5. Keep these non-goals for the first product path:
    - do not inject through Telegram/HChat delivery;
-   - do not require Workbench API `extra_context`;
+   - do not require Backend API `extra_context`;
    - do not modify runtime message routing.
 6. Record handoff metadata:
    - request id;

@@ -1,46 +1,29 @@
-# External Workbench Gateway Notes
+# Workbench Retirement Notice
 
-HASHI Workbench is an independent application. This repository contains no
-Workbench frontend, Node server, build assets, launcher, or private Workbench
-state. HASHI provides only the runtime interfaces that an authenticated
-Workbench client needs.
+Workbench has retired and is no longer shipped or supported by HASHI.
 
-## Connection Boundary
+The retired component's frontend, Node server, build assets, launchers, local
+data, dependencies, and UI-specific tests have been removed from this
+repository. HASHI startup, onboarding, packaging, and release checks no longer
+start or build Workbench.
 
-- The local Python Backend API is implemented in
-  `orchestrator/workbench_api.py` and listens on `global.workbench_port`. The
-  configuration and module names are retained for compatibility.
-- Hashi Remote exposes `GET /workbench/v1/status` and
-  `/workbench/v1/proxy/api/*` as the authenticated Workbench Gateway.
-- Remote requests use the existing Hashi Remote shared-token HMAC protocol.
-- The gateway terminates remote authentication and forwards the request over a
-  loopback-only hop. If a local Backend API admin token is configured, Remote
-  injects it as `X-Workbench-Token`; it is never returned to the client.
-- A Workbench client may discover several HASHI instances and connect to any
-  instance that has a compatible gateway and the same shared token.
+## Compatibility Names
 
-## Shared Runtime Semantics
+Some established internal names remain to avoid breaking HASHI deployments and
+API consumers:
 
-Telegram, TUI, scheduler jobs, HChat, and authenticated external clients feed
-the same in-process agent runtimes. Consequently:
+- `global.workbench_port` is the HASHI Backend API port.
+- `orchestrator/workbench_api.py` implements the Backend API.
+- `workbench_admin_token` and `X-Workbench-Token` remain compatibility names
+  for existing Backend API authentication.
+- `/workbench/v1/*` remains a compatibility route family in Hashi Remote.
 
-- requests use the same per-agent queue and backend session state
-- transcript order follows queue order regardless of the originating surface
-- `/new`, `/fresh`, `/model`, backend switches, `/retry`, and `/resend` affect
-  the same shared runtime
-- durable user/assistant deliveries remain in each agent's
-  `transcript.jsonl`; external clients do not own a second authoritative
-  transcript
+These identifiers do not mean that Workbench is still included. New HASHI
+documentation and user-facing status text call the service **Backend API**.
 
-The client-neutral Session API persists canonical Session, Message, Run, and
-Event state only after its fail-closed qualification gate is enabled.
+## Runtime Semantics
 
-## Operational Boundary
-
-- HASHI must continue to run if the external Workbench is absent or stopped.
-- Workbench design-only features must continue to run without HASHI.
-- HASHI launchers do not start, stop, update, or package Workbench.
-- Workbench releases, UI tests, Node dependencies, local design data, and
-  commercial/private code belong only to the independent Workbench repository.
-- Gateway and Backend API contract tests remain in HASHI because they protect
-  the public integration boundary.
+Telegram, TUI, scheduler jobs, HChat, and authenticated Backend API clients use
+the same in-process agent runtimes, queues, sessions, memory, and transcripts.
+Gateway and Backend API contract tests remain in HASHI because they protect
+those public runtime interfaces, not the retired Workbench UI.

@@ -26,8 +26,7 @@ HASHI owns the execution-side pieces:
 - agent queues, transcripts, scheduling, and HChat delivery
 - parsing the `MINATO CONTEXT` envelope in agent traffic
 - per-agent project chat logging through `ProjectChatLogger`
-- Backend API and authenticated Workbench Gateway endpoints used by external
-  clients
+- Backend API and authenticated Hashi Remote endpoints used by external clients
 
 The context envelope is:
 
@@ -43,17 +42,13 @@ scope: brief description of task scope
 The receiving runtime extracts the metadata before normal agent processing.
 HChat preserves the envelope when work crosses HASHI instances.
 
-## Independent Workbench Responsibilities
+## Retired Workbench Boundary
 
-HASHI Workbench is a separate application and repository. It owns visual
-workflow design, project UI, local design data, Minato MCP presentation and
-storage surfaces, and other packaging/observation features. It may operate in
-design-only mode without HASHI.
-
-When agent chat or execution is requested, Workbench connects to a compatible
-HASHI instance through Hashi Remote's shared-token authenticated
-`/workbench/v1/*` gateway. No Workbench frontend, Node server, Workbench MCP
-server, UI data directory, or Workbench test suite is bundled in this repo.
+Workbench has retired. Its project UI, Node server, local UI data, Minato MCP
+presentation layer, launchers, and UI tests are no longer part of HASHI.
+Minato's HASHI-side context parsing, project chat logging, Nagare execution,
+Backend API, and HChat behavior remain supported independently of that retired
+interface.
 
 ## Nagare
 
@@ -75,11 +70,11 @@ contracts belong to those systems.
 ```text
 orchestrator/project_chat_logger.py  per-agent project chat log
 orchestrator/workbench_api.py        local Backend API (compatibility name)
-remote/api/server.py                 authenticated Workbench Gateway
+remote/api/server.py                 authenticated Hashi Remote API
 nagare/                              standalone workflow engine
 flow/                                legacy flow compatibility and HASHI adapter
 docs/NAGARE_FLOW_SYSTEM.md           Nagare reference
 ```
 
-The independent Workbench repository is intentionally not represented as a
-subdirectory of HASHI.
+The retired Workbench is intentionally not represented as a subdirectory of
+HASHI.

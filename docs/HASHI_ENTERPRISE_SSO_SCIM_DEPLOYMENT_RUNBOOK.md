@@ -35,7 +35,7 @@ This runbook does not yet cover:
 | SAML verifier | `xmlsec1` must be installed in the runtime image or configured through `xmlsec1_path`. |
 | IdP metadata | SAML provider config must include metadata XML with at least one signing certificate. |
 | TLS | Public SAML ACS and SCIM URLs must be served over HTTPS in production. |
-| Tokens | SCIM IdP integration must use scoped HASHI API tokens, not Workbench sessions. |
+| Tokens | SCIM IdP integration must use scoped HASHI API tokens, not interactive Backend API sessions. |
 | Audit | Enterprise audit ledger should be enabled before live IdP sync. |
 
 ---
@@ -91,7 +91,7 @@ Recommended scopes:
 
 Rules:
 
-- Do not use Workbench session tokens for SCIM.
+- Do not use interactive Backend API session tokens for SCIM.
 - Store the raw token only in the IdP secret field or an enterprise secret manager.
 - HASHI audit events record token id metadata, not the raw token.
 - Revoking the API token must immediately disable IdP SCIM calls.
@@ -191,7 +191,7 @@ If SCIM sync misbehaves:
 1. Revoke the SCIM API token.
 2. Disable the IdP SCIM integration.
 3. Review audit events for `scim_v2_user_create`, `scim_v2_user_patch`, and `scim_v2_bulk`.
-4. Reconcile HASHI users manually through Workbench admin APIs.
+4. Reconcile HASHI users manually through authenticated Backend admin APIs.
 5. Reissue a scoped token only after the IdP mapping is corrected.
 
 ---

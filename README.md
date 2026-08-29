@@ -86,10 +86,10 @@ HASHI is a **universal multi-agent orchestration platform** that runs entirely l
 
 **Core Components:**
 - **Onboarding** — Multi-language guided setup to create your first agent
-- **Workbench Gateway** — Authenticated Hashi Remote interface for independent HASHI Workbench clients
+- **Backend API** — Local runtime API for authenticated clients and HASHI integrations
 - **Orchestrator** — Central runtime managing agents, memory, skills, and scheduling
 - **Nagare Flow System** — Multi-agent workflow orchestration engine
-- **Transports** — Connect via Telegram, WhatsApp, TUI, or the Backend API and Workbench Gateway
+- **Transports** — Connect via Telegram, WhatsApp, TUI, or the Backend API
 - **Skills** — Modular capabilities (prompts, toggles, actions) that extend agents
 - **Jobs** — Automated scheduling (heartbeats + cron) for periodic agent tasks
 - **Background Jobs** — Managed `/bg` long-running OS/process work with durable
@@ -147,7 +147,7 @@ and binary packages are no longer part of the active program.
   maintenance, stronger session and delivery continuity, and a Flex-only
   runtime architecture. This is the broader platform line, not the enterprise
   package version line.
-- **v3.2.1** — Workbench API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
+- **v3.2.1** — Backend API self-repair on `/reboot`, HChat tool hot reload, and cross-instance route fallback hardening for multi-instance deployments
 - **v3.2.0** — Slim core architecture, Wrapper Agent Mode, Audit Agent Mode, Anatta controls, EXP guidebooks, `/browser` route dashboard, Hashi Remote file transfer, per-instance API Gateway ports, OLL HASHI Chrome extension integration, Workzone support, runtime/backend hardening
 - **v3.1** — Claude Opus 4.7, GPT-5.5, Codex CLI 0.125.0, `xhigh`/`max` effort levels, HASHI Remote remediation
 - **v3.0-beta** — **Self-improving agents**, 6 LLM backends, SafeVoice, cross-instance messaging, token audit, agent behavior audit, remote backend policy, Minato MCP, Obsidian wiki integration
@@ -236,7 +236,7 @@ HASHI 2.x proved that local agents could execute tools, browse, switch backends,
 - **From generic skills to learned expertise:** `/exp` adds context-specific guidebooks with playbooks, validators, failure memory, templates, evidence, and training runs for repeatable high-skill work.
 - **From browser automation to browser routing:** `/browser` exposes a route dashboard that chooses between headless browser tools, CLI-native browsing, Brave Search, and the real logged-in Chrome extension bridge.
 - **From a monolith to a hot-reloadable core:** v3.2's slim core moves frequently changed behavior into managers and runtime modules so `/reboot min` can adopt most code changes without a full process restart.
-- **From scripts to a local work platform:** the external HASHI Workbench, API Gateway, Workzone helpers, Nagare, Minato, and the EXP corpus provide a stronger operating surface for research, writing, office automation, and cross-device work.
+- **From scripts to a local work platform:** the Backend API, API Gateway, Workzone helpers, Nagare, Minato, and the EXP corpus provide a stronger operating surface for research, writing, office automation, and cross-device work.
 
 ---
 
@@ -330,7 +330,7 @@ workspaces. Global rules are injected before Agent-local rules and take
 precedence over them when they conflict. Global mutations are recorded without
 prompt text in `bridge_home/state/global_sys_prompt_audit.jsonl`.
 
-This scope covers normal Bridge requests, including Telegram, external Workbench clients,
+This scope covers normal Bridge requests, including Telegram, authenticated API clients,
 HChat, Scheduler, and Automation paths that use the Bridge context assembler.
 An already-running request is not rewritten. HER/Ultra internal sub-agents use
 their own native system-prompt assembly and do not directly load this Bridge
@@ -562,7 +562,7 @@ hashi/
 ├── nagare/                    # Nagare workflow engine (standalone package)
 ├── nagare-viz/                # Visual workflow editor (React + TypeScript)
 ├── flow/                      # Legacy flow system + HASHI adapter
-├── remote/                    # Hashi Remote, including the authenticated Workbench Gateway
+├── remote/                    # Authenticated Hashi Remote communication and control
 ├── tui.py                     # Terminal UI (Textual)
 ├── tui_onboarding.py          # First-run TUI setup
 ├── scripts/                   # Utility scripts
@@ -616,15 +616,15 @@ HASHI supports multiple communication channels:
 - Requires QR code scan on first launch (agent can relay QR via Telegram)
 - Multi-Agent Support — route messages to different agents using `/agent <name>` prefix
 
-#### Workbench
-- HASHI Workbench is an independent application, not bundled in this repository.
-- It can design workflows offline and connects to one or more HASHI instances when execution or agent chat is needed.
-- Remote connections use the shared-token authenticated `/workbench/v1/*` gateway exposed by Hashi Remote.
-- Connected sessions share the same queues and memory as Telegram, WhatsApp, and TUI.
+#### Workbench (Retired)
+- Workbench has retired and is no longer shipped or supported by HASHI.
+- The frontend, Node server, launchers, build assets, data, and UI tests have
+  been removed from this repository.
+- Legacy identifiers such as `workbench_port`, `workbench_api.py`, and
+  `/workbench/v1/*` remain only for Backend API compatibility.
 
 #### HASHI API & API Gateway
 - HASHI Backend API listens on each instance's `global.workbench_port`. The configuration field name is retained for compatibility.
-- Hashi Remote exposes the authenticated Workbench Gateway and relays approved `/workbench/v1/proxy/api/*` requests to this local Backend API.
 - API Gateway is the optional OpenAI-compatible gateway enabled with `--api-gateway`.
 - `/api` controls the API Gateway from Telegram with inline buttons:
   status, on, off, and default-model selection.
@@ -1642,7 +1642,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
   caller-owned Gateway tools, and Flex Fixed mode
 - **Lean runtime** — HER v1, its Rust source/binaries, `/rebuild` machinery,
   `claw-cli`, and the OpenClaw importer are retired; `her` resolves to HER v2
-- **Operator visibility and remote access** — canonical Workbench Agent
+- **Operator visibility and remote access** — canonical Backend API Agent
   Overview plus authenticated shared-token terminal execution
 - Full scope and alpha limits are recorded in
   [the release notes](docs/RELEASE_NOTES_v4.0.0-alpha.2.md).
@@ -1670,12 +1670,12 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **Release gates expanded** — Claw and Superloop checks are now part of `docs/RELEASE_CHECKLIST.md`
 - **Alpha limits** — packaged `hashi-claw` binaries, Claw Tool Gateway/MCP parity, Claw shell/test execution, and stable unattended Superloop automation remain release-blocking work for later v4 milestones
 
-### v3.2.1 — Workbench/HChat/Remote Recovery (May 2026)
+### v3.2.1 — Backend API/HChat/Remote Recovery (May 2026)
 
-- **Workbench API self-repair** — `/reboot` health-checks the live Workbench API and rebuilds it when the listener exists but `/api/health` is unresponsive
+- **Backend API self-repair** — `/reboot` health-checks the live Backend API and rebuilds it when the listener exists but `/api/health` is unresponsive
 - **HChat reloadability** — hot reboot reloads `tools.*`, and HChat draft delivery refreshes `tools.hchat_send` before sending so delivery fixes do not require a full HASHI process restart
 - **Cross-instance Hchat protocol transport** — `tools/hchat_send.py` now prefers shared-token `/protocol/message` delivery for `agent@INSTANCE` and only keeps legacy `/hchat` as fallback, removing the old bearer-only transport mismatch
-- **Cross-instance route fallback** — `agent@INSTANCE` delivery tries multiple Workbench host candidates instead of relying on one stale loopback or discovery value
+- **Cross-instance route fallback** — `agent@INSTANCE` delivery tries multiple Backend API host candidates instead of relying on one stale loopback or discovery value
 - **Remote registry self-healing** — Hashi Remote repairs stale persisted LAN
   peer routes when a non-WSL peer moves back to its verified default Remote
   port, while preserving unique WSL ports for same-host multi-instance safety
@@ -1699,7 +1699,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 - **Grok/xAI API Gateway support** — `/v1/chat/completions`,
   `/v1/images/generations`, `/v1/videos/generations`, and `/v1/models` can
   serve xAI models through Hermes-managed OAuth or an xAI API key
-- **Live reboot validation passed** — cold restart, `/reboot min`, `/reboot max`, Workbench health, API Gateway health, and `pytest` all passed on 2026-05-02
+- **Live reboot validation passed** — cold restart, `/reboot min`, `/reboot max`, Backend API health, API Gateway health, and `pytest` all passed on 2026-05-02
 - **Browser routing dashboard** — `/browser` and `/browser status` show route availability for headless browser tools, CLI-native browsing, Brave Search, and the logged-in Chrome extension bridge
 - **Hashi Remote file transfer** — direct cross-PC file push support for moving artifacts and EXP packages between HASHI instances
 - **Browser gateway work** — local gateway package and tests for browser-facing bridge capabilities
@@ -1761,7 +1761,7 @@ Report bugs on the [GitHub Issues](https://github.com/Bazza1982/HASHI/issues) pa
 
 - Multi-backend support (Gemini, Claude, Codex, OpenRouter)
 - Multi-agent orchestration
-- Telegram + WhatsApp + Workbench transports
+- Telegram + WhatsApp + legacy Workbench transport (retired)
 - Skills system, job scheduler, memory system
 - Handoff context recovery
 - Multi-language onboarding (9 languages)

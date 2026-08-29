@@ -828,7 +828,7 @@ Deliverables:
 
 Deliverables:
 
-- Workbench or Telegram menu for:
+- Backend API or Telegram menu for:
   - plan
   - export
   - import

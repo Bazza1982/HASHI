@@ -6,10 +6,13 @@ Status:
 - proposed
 - ready for staged implementation
 
+Workbench has retired. This plan targets the authenticated HASHI Backend API;
+it does not depend on or propose a Workbench UI.
+
 Owners:
 - browser UX: OLL extension
 - public edge: HASHI Browser Gateway
-- agent execution: existing HASHI Workbench and runtimes
+- agent execution: existing HASHI Backend API and runtimes
 
 ## Executive Summary
 
@@ -22,7 +25,7 @@ Goal:
 Recommendation:
 - reuse the old OLL sidepanel UX and browser interaction ideas
 - do not reuse the old OpenClaw relay protocol
-- build a new HASHI Browser Gateway in front of the existing local Workbench API
+- build a new HASHI Browser Gateway in front of the existing local Backend API
 - keep the core minimal and move optional features into plug-in modules
 
 Core principle:
@@ -75,8 +78,8 @@ Primary user stories:
 - optionally let HASHI act on the active tab after explicit permission
 
 Non-goals for phase 1:
-- replacing the existing Workbench UI
-- exposing direct public access to the Workbench API
+- adding or replacing a bundled browser administration UI
+- exposing direct public access to the Backend API
 - full zero-trust protection against local endpoint monitoring on the office computer
 
 ## Architecture
@@ -86,7 +89,7 @@ Chrome Extension (OLL)
   -> HTTPS + app-layer encryption
 HASHI Browser Gateway (public edge on HASHI1)
   -> localhost only
-HASHI Workbench API
+HASHI Backend API
   -> runtimes / transcripts / browser tools / hchat
 HASHI Agents
 ```
@@ -107,10 +110,10 @@ HASHI Agents
 - browser message correlation
 - encrypted file ingest
 - audit logging
-- bridge to local Workbench API
+- bridge to local Backend API
 - runs as a separate service/process from the HASHI core so it can be started, stopped, upgraded, or rolled back independently
 
-3. Existing HASHI Workbench API
+3. Existing HASHI Backend API
 - agent discovery
 - message enqueue
 - transcript polling / reply capture
@@ -143,7 +146,7 @@ HASHI Agents
 - files, screenshots, and actions use separate handlers and scopes
 
 5. Compatibility
-- gateway should internally reuse existing Workbench behavior
+- gateway should internally reuse existing Backend API behavior
 - preserve future compatibility with local browser bridge and cross-instance routing
 
 6. Expandability by design
@@ -230,14 +233,14 @@ Suggested model:
 - gateway stores public key and device metadata
 - each thread negotiates a content key or derives one from a session secret
 - ciphertext envelopes are passed through the public edge
-- decrypt only inside the Browser Gateway process memory before Workbench injection
+- decrypt only inside the Browser Gateway process memory before Backend API injection
 
 Optional future hardening:
 - split decryption service from the public HTTP process
 - memory-only plaintext mode with no plaintext disk persistence
 
 Current limitation to state explicitly:
-- even with transport and app-layer encryption, plaintext chat content will still enter existing HASHI transcript persistence after Workbench injection unless Workbench storage behavior is changed later
+- even with transport and app-layer encryption, plaintext chat content will still enter existing HASHI transcript persistence after Backend API injection unless transcript storage behavior is changed later
 
 ### Logging and Audit
 
@@ -315,7 +318,7 @@ Reason:
 - enough for chat and progress updates in phase 1
 
 Clarification:
-- phase 1 does not assume token-level model streaming from Workbench
+- phase 1 does not assume token-level model streaming from the Backend API
 - phase 1 SSE is a structured event channel for:
   - keepalive events
   - reply-ready events
@@ -339,7 +342,7 @@ HASHI OLL should use an explicit session model:
 - `agent_id`: selected HASHI agent
 - `thread_id`: durable conversation thread
 - `message_id`: unique outbound message
-- `source_tag`: internal correlation key injected into Workbench
+- `source_tag`: internal correlation key injected into the Backend API
 
 ### Proposed Flow
 
@@ -350,8 +353,8 @@ HASHI OLL should use an explicit session model:
 5. Browser Gateway:
    - decrypts payload
    - writes audit event
-   - injects message into Workbench with a unique source tag
-6. Gateway waits for the matching assistant completion via a Workbench completion primitive.
+   - injects message into the Backend API with a unique source tag
+6. Gateway waits for the matching assistant completion via a Backend API completion primitive.
 7. Gateway emits reply-ready SSE or returns final reply to the extension.
 8. Thread state is updated for continuation.
 
@@ -365,12 +368,12 @@ This lets the gateway:
 - wait only for the correct assistant reply
 - avoid cross-talk when the same agent is active on multiple channels
 
-### Required Workbench Primitive for Phase 1
+### Required Backend API Primitive for Phase 1
 
 Phase 1 depends on an integration point that does not exist today.
 
 Requirement:
-- Workbench must expose a source-safe completion primitive for browser-originated requests
+- the Backend API must expose a source-safe completion primitive for browser-originated requests
 
 Minimum acceptable shape:
 - `await_completion(request_id)` or equivalent internal helper
@@ -381,15 +384,15 @@ Behavior:
 - return completion status, final assistant text, optional metadata, and timeout or cancellation result
 
 Non-goal:
-- phase 1 does not require token-by-token streaming from Workbench
+- phase 1 does not require token-by-token streaming from the Backend API
 
 Why this must exist:
 - transcript timing alone is not safe when the same agent is active on Telegram, browser, TUI, or hchat at the same time
-- source tags identify request origin, but they do not identify the matching assistant completion unless Workbench preserves that linkage
+- source tags identify request origin, but they do not identify the matching assistant completion unless the Backend API preserves that linkage
 
 ## Public API Proposal
 
-All endpoints below are for the new Browser Gateway, not the Workbench API.
+All endpoints below are for the new Browser Gateway, not the Backend API.
 
 ### Session and Auth
 
@@ -501,7 +504,7 @@ Permissions:
 
 Reuse as-is where possible:
 - agent discovery from existing config/runtime metadata
-- message injection through local Workbench API
+- message injection through local Backend API
 - transcript observation logic
 - browser native host and extension bridge concepts for future page/action convergence
 - remote pairing concepts for device onboarding
@@ -523,7 +526,7 @@ Reuse as-is where possible:
 - nonces
 - audit metadata
 
-4. optional adapter layer in Workbench API
+4. optional adapter layer in Backend API
 - source-safe completion helper for browser conversations
 
 5. optional service controller
@@ -751,7 +754,7 @@ Scope:
 - list agents
 - create/resume threads
 - send message
-- source-safe completion wait path from Workbench
+- source-safe completion wait path from the Backend API
 - SSE keepalive and reply-ready event delivery
 - `/oll on`, `/oll off`, `/oll status`
 - separate process/service deployment and logs
@@ -760,7 +763,7 @@ Do not include:
 - screenshots
 - uploads
 - page actions
-- token-level streaming from Workbench
+- token-level streaming from the Backend API
 
 Exit criteria:
 - extension can talk to any local HASHI1 agent over the internet using one stable hostname
@@ -820,7 +823,7 @@ Tasks:
 - add auth, token, device registry
 - add thread registry
 - add source-tagged chat send path
-- add matching completion path backed by Workbench request identity
+- add matching completion path backed by Backend API request identity
 - add SSE keepalive and structured event channel
 - add structured logging
 - add rate limiting per device
@@ -835,7 +838,7 @@ Tasks:
 - implement connectivity and retry UX
 - implement upload and page modules later
 
-### Workstream C: Workbench Integration
+### Workstream C: Backend API Integration
 
 Tasks:
 - expose or reuse agent list
@@ -867,7 +870,7 @@ Tasks:
 
 2. Transcript correlation race conditions
 - risk: wrong reply attached to wrong browser thread
-- mitigation: explicit source tags plus a Workbench completion primitive bound to request identity
+- mitigation: explicit source tags plus a Backend API completion primitive bound to request identity
 
 3. Browser action safety
 - risk: unintended clicks or form submissions
@@ -896,18 +899,18 @@ Tasks:
 ## Recommended Immediate Next Steps
 
 1. Approve the product boundary:
-- OLL is a HASHI browser client, not a public Workbench clone
+- OLL is a HASHI browser client, not a general-purpose administration console
 
 2. Approve the network shape:
 - fixed hostname on user-owned domain
-- Browser Gateway in front of local Workbench
+- Browser Gateway in front of the local Backend API
 
 3. Approve the security baseline:
 - TLS mandatory
 - app-layer encryption for messages, files, screenshots
 
 4. Start implementation in this order:
-- Workbench completion primitive first
+- Backend API completion primitive first
 - Browser Gateway phase 1
 - extension chat shell
 - thread persistence
@@ -947,7 +950,7 @@ tools/chrome_extension/
 Decisions made in this proposal:
 - rebuild OLL transport for HASHI rather than porting the OpenClaw gateway
 - use a dedicated Browser Gateway as the public edge
-- keep Workbench private and local-only
+- keep the Backend API private and local-only
 - use stable hostname instead of rotating relay URLs
 - support app-layer encryption on top of TLS
 - separate chat core from page and action modules

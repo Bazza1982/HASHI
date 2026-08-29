@@ -273,7 +273,7 @@ offers two choices: cancel the switch, or explicitly confirm Level 1.
 - downgrade confirmation, including Level 1 to Level 0;
 - reserved Level 2–5 menu details without false activation;
 - request-level privacy snapshot;
-- Workbench slider;
+- an authenticated client control;
 - compatible-backend filtering in menus and switch handlers.
 
 ### L2.4 — Acceptance

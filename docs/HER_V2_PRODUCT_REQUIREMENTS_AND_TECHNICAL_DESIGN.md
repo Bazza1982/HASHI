@@ -462,7 +462,7 @@ stage from dropping or reframing original instruction details.
 The scheduler attaches an explicit request-local context containing the job
 kind, task id, and trigger (`scheduled`, `manual`, or `recovery`). The Direct
 policy is compulsory and the same whether the occurrence is automatic,
-manually run from Telegram or Workbench, or replayed from recovery. Per-job HER
+manually run from Telegram or the Backend API, or replayed from recovery. Per-job HER
 effort overrides are not accepted by the policy. Legacy `her_v2_effort` fields
 are ignored and opportunistically removed at job mutation boundaries.
 
@@ -1424,7 +1424,7 @@ HASHI remains responsible for:
 - typed context assembly, provider/model capacity metadata, Auto Compact
   configuration, raw-context retention, and atomic continuity-capsule commits;
 - audit logging and redaction;
-- Workbench and operational status;
+- Backend API and operational status;
 - hot restart and process lifecycle.
 
 ### 21.2 HER-owned responsibilities

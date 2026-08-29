@@ -8,6 +8,10 @@
 
 **Implementation roadmap:** [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md)
 
+**Workbench status:** Workbench has retired. Requirements below use the
+authenticated Backend API and configured channels; no bundled Workbench UI is
+part of this product plan.
+
 ---
 
 ## 1. Product Goal
@@ -43,7 +47,7 @@ HASHI already has strong foundations:
 - multi-agent runtime;
 - multi-backend support;
 - CLI and API backends;
-- Telegram, WhatsApp, Workbench, API Gateway;
+- Telegram, WhatsApp, TUI, Backend API, API Gateway;
 - HChat and Remote;
 - Nagare workflows;
 - Superloop operational contracts;
@@ -102,7 +106,7 @@ Enterprise development should not restart from zero. Existing HASHI capabilities
 | Current capability | Enterprise primitive | Required evolution |
 |---|---|---|
 | `agents.json` and per-agent workspace config | agent registry and assignment model | move from local config file semantics to admin-managed project/role assignments |
-| Telegram, WhatsApp, Workbench | channel gateway layer | add admin enablement, policy checks, ingress/egress audit, and channel-specific risk controls |
+| Telegram, WhatsApp, TUI, authenticated API clients | channel gateway layer | add admin enablement, policy checks, ingress/egress audit, and channel-specific risk controls |
 | HChat and Remote | cross-agent / cross-instance routing | add organization/project trust, route policy, and audit correlation IDs |
 | token audit and slash command audit | unified audit ledger | normalize event schema, correlate by request/task, add export and retention |
 | Nagare and Superloop | governed workflow orchestration | add task ownership, approval gates, evidence bundles, and admin visibility |
@@ -240,7 +244,7 @@ Minimum v1:
 - stable schema;
 - per-project query;
 - export to JSONL;
-- audit dashboard in Workbench;
+- audit query and export APIs;
 - retention setting.
 
 Future:
@@ -419,7 +423,7 @@ Deployment should run in parallel with identity, policy, and audit work. Enterpr
 
 Supported-channel direction:
 
-- Workbench should be the default enterprise control and inspection surface.
+- The authenticated Backend API should be the default enterprise control and inspection surface.
 - Microsoft Teams, Slack, Google Chat, and Feishu/Lark are high-priority enterprise channels.
 - Telegram, WhatsApp, and voice remain useful but should be optional, policy-gated, and not presented as the default enterprise path.
 
@@ -437,7 +441,7 @@ Channel control requirements:
 Minimum v1:
 
 - channel registry;
-- Workbench as first admin-controlled channel;
+- authenticated API access as the first admin-controlled external surface;
 - at least one enterprise chat connector design target;
 - channel policy decisions in audit ledger;
 - admin UI to enable/disable channels per project/agent.
@@ -598,7 +602,7 @@ Deliverables:
 - audit event schema;
 - append-only store;
 - event writers for channels, commands, tasks, tools, files, approvals, and admin changes;
-- Workbench audit viewer.
+- audit query and export endpoints.
 
 Acceptance:
 
@@ -684,8 +688,8 @@ Enterprise v1 beta is credible when the following are in scope:
 | Identity | local admin, users, roles, API tokens | SAML/SCIM full enterprise provisioning |
 | Projects | project registry, workspace assignment | advanced portfolio management |
 | Policy | RBAC, tool/command/backend/channel policy | full ABAC policy language |
-| Audit | unified ledger, export, Workbench viewer | tamper-evident WORM/SIEM production adapter |
-| Channels | Workbench plus one enterprise chat connector target | every chat platform |
+| Audit | unified ledger and export API | tamper-evident WORM/SIEM production adapter |
+| Channels | authenticated API plus one enterprise chat connector target | every chat platform |
 | Execution | workspace-scoped tools and verification checklist | full container sandbox for every task |
 | Deployment | Docker Compose, backup/restore, health checks | HA Kubernetes and multi-region |
 | Integrations | GitHub plus one work-management/document connector target | broad marketplace |
@@ -735,14 +739,14 @@ Security metrics:
 The implementation sequence is maintained in [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md). The first ready-to-implement tickets are `ENT-001` through `ENT-007`, which create the enterprise package skeleton, profile loader, governed-mode validation, audit/policy contracts, and personal regression checks.
 
 1. Create enterprise data model for organizations, users, projects, roles, and API tokens.
-2. Add local admin login and session management for Workbench.
+2. Add local admin login and session management for authenticated admin clients.
 3. Build centralized policy evaluator.
 4. Create unified audit event schema and store.
 5. Migrate slash command audit into the unified audit writer.
 6. Add channel registry and disabled-by-default channel policy.
 7. Add task and artifact registry.
 8. Add execution verification requirement for file-producing agent tasks.
-9. Add Workbench admin console skeleton.
+9. Add the admin API skeleton.
 10. Add Docker Compose deployment profile.
 11. Add backup/restore and migration commands.
 
@@ -752,7 +756,7 @@ The implementation sequence is maintained in [HASHI_ENTERPRISE_AAI_IMPLEMENTATIO
 
 1. Should enterprise mode be a separate runtime mode or a configuration profile? **Decision:** configuration profile in the same codebase; see [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md).
 2. Should the first persistent store be SQLite, Postgres, or a pluggable interface with SQLite default?
-3. Should Workbench become the primary admin console or should admin UI be separated?
+3. Workbench has retired; any future admin UI must consume the generic admin APIs and is outside this repository.
 4. What is the minimum identity model for open-source self-hosted deployment?
 5. How should HASHI handle organizations that want local-only operation with no SSO?
 6. Which integration should be first: GitHub, Slack/Teams, Jira, or Drive/SharePoint?

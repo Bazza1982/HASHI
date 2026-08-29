@@ -24,7 +24,7 @@ HASHI currently has one large active runtime and one quarantined legacy runtime:
 The live fleet now uses flexible agents. The long-term goal is to retire the
 legacy fixed runtime and split the flexible runtime into smaller, modular,
 testable components while preserving reboot behavior, audit mode, Anatta,
-wrapper mode, Workbench, API Gateway, Hchat, transfer, media handling, and
+wrapper mode, Backend API, API Gateway, Hchat, transfer, media handling, and
 existing Telegram command behavior.
 
 ## Current Findings
@@ -82,7 +82,7 @@ default would cause older configs to keep selecting legacy behavior implicitly.
 - Telegram handler binding
 - dozens of command handlers
 - media handling
-- Workbench/API/Hchat routing
+- Backend API/API Gateway/Hchat routing
 - transfer and handoff flows
 - skill, workzone, memory, and status UI
 - wrapper mode
@@ -425,7 +425,7 @@ Retirement requirements:
 1. No active agents use fixed runtime for a sustained trial period.
 2. `rg "BridgeAgentRuntime"` has no production references except a legacy shim
    or archival docs.
-3. Workbench and API Gateway no longer assume fixed transcript names.
+3. Backend API and API Gateway no longer assume fixed transcript names.
 4. Config validation blocks accidental fixed runtime selection.
 5. CI covers flexible lifecycle, reboot, queue processing, wrapper, audit, and
    Anatta.
@@ -449,7 +449,7 @@ Implementation note:
   compatibility shim.
 - Config loading rejects omitted `type` values and blocks explicit
   `type: "fixed"` unless `HASHI_ENABLE_LEGACY_FIXED_RUNTIME=1` is set.
-- Offline Workbench and agent-directory metadata must not infer fixed runtime
+- Offline Backend API and agent-directory metadata must not infer fixed runtime
   from a missing `type`; missing type is invalid configuration.
 
 ## Phase 8: Acceptance Metrics
@@ -468,7 +468,7 @@ Target outcomes:
   - audit mode
   - Anatta
   - Anatta + audit mode
-  - Workbench local mode
+  - Backend API local mode
   - API Gateway
   - Hchat and transfer
 
@@ -495,7 +495,7 @@ High risk:
 Medium risk:
 
 - transcript filename assumptions between fixed and flex runtimes;
-- Workbench/API Gateway references to old runtime symbols;
+- Backend API/API Gateway references to old runtime symbols;
 - tests that instantiate runtime classes via `__new__`;
 - callback handlers split away from their command state.
 

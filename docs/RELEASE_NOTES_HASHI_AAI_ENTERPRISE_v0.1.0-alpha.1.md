@@ -2,6 +2,9 @@
 
 Release focus: **enterprise-grade AAI deployment alpha**.
 
+Workbench has retired. This release line now exposes enterprise controls only
+through the authenticated Backend API and configured channels.
+
 This release resets the enterprise-grade update line to `0.1.0-alpha.1`. It is
 an alpha testing cut for deployments that need the full enterprise control-plane
 shape available in theory, while accepting that real customer environment
@@ -14,7 +17,7 @@ validation remains pending.
   governance gates.
 - Identity, sessions, projects, roles, service tokens, SSO/SCIM primitives,
   channel governance, policy decisions, approval records, audit ledger, audit
-  export, evidence primitives, connectors, and Workbench admin surfaces are
+  export, evidence primitives, connectors, and Backend admin APIs are
   available for alpha review.
 - Deployment artifacts exist for Docker Compose, raw Kubernetes, Helm, systemd
   audit export daemon mode, production hardening command plans, HA rehearsal
@@ -26,7 +29,7 @@ validation remains pending.
 - Enterprise bootstrap/control-plane primitives.
 - OIDC and SAML/SCIM readiness surfaces with fail-closed verifier behavior.
 - GitHub, Slack, Google Chat, Teams, and Feishu connector MVPs with health,
-  dry-run, credential validation, action schemas, Workbench controls, policy
+  dry-run, credential validation, action schemas, Backend API controls, policy
   gates, and audit redaction.
 - Unified audit ledger, tamper-evident chain verification, local/object-store
   anchor adapters, live export runner, daemon mode, checkpoint safety, and SIEM
@@ -77,7 +80,6 @@ pytest -q tests/test_enterprise_siem_assets.py tests/test_hashi_enterprise_cli.p
 
 python3 hashi.py --help
 python3 hashi.py enterprise --help
-cd workbench && npm run build
 git diff --check
 ```
 
@@ -100,10 +102,4 @@ python3 -m pytest -q tests/test_enterprise_connectors.py \
   tests/test_workbench_enterprise_connectors.py \
   tests/test_enterprise_policy.py
 git diff --check
-```
-
-Workbench build should also pass when Node dependencies are installed:
-
-```text
-cd workbench && npm run build
 ```

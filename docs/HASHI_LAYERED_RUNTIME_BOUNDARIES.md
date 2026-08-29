@@ -218,7 +218,7 @@ updates.
 Examples:
 
 - `instance_id`
-- assigned Workbench/API/Remote ports
+- assigned Backend API/API Gateway/Remote ports
 - local machine identity
 - local bind hosts
 - active agent set
@@ -269,7 +269,7 @@ the process bootstrap contract itself did not change:
    error; never continue into a mixed manager rebuild silently.
 5. Build the complete manager bundle before installing any replacement.
 6. Restart only the previously selected agents.
-7. Recreate warm services—Workbench API, enabled API Gateway, scheduler,
+7. Recreate warm services—Backend API, enabled API Gateway, scheduler,
    delivery watcher, and background jobs—only after a successful reload.
 8. Keep the process lock, kernel identity, and live WhatsApp transport outside
    the warm-service refresh.

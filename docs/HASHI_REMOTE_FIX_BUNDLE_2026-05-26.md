@@ -128,7 +128,7 @@ What changed:
 
 - host candidate ordering now prefers non-loopback canonical, LAN, and overlay
   addresses before loopback
-- exchange routing and workbench routing follow the same preference order
+- exchange routing and Backend API routing follow the same preference order
 
 Why:
 

@@ -339,7 +339,7 @@ Selection hard rules:
 - do not select an already blocked candidate;
 - do not rotate candidates repeatedly inside one active incident;
 - if the chosen failover agent later fails, try at most one alternate candidate;
-- if both fail, stop and rely on Workbench/state/log visibility.
+- if both fail, stop and rely on Backend API/state/log visibility.
 
 ### 4. Failover Message
 
@@ -355,7 +355,7 @@ Retry after: 30029s
 Blocked until: 2026-06-15T20:39:07+10:00
 Saved response: workspaces/kasumi/undelivered/req-0001.md
 
-Please use lin_yueru or Workbench until kasumi's Telegram delivery recovers.
+Please use lin_yueru or the Backend API until kasumi's Telegram delivery recovers.
 ```
 
 Wording requirements:
@@ -488,7 +488,7 @@ Recommended detail text:
 👁 Preview: OFF (persisted override)
 ```
 
-Workbench or job surfaces should also be able to indicate:
+Backend API or job surfaces should also be able to indicate:
 
 - backend success but delivery blocked
 - undelivered response saved
@@ -529,13 +529,13 @@ Workbench or job surfaces should also be able to indicate:
    `RetryAfter`.
 5. User sends multiple messages during a long block; only reminders should be
    emitted, not one warning per request.
-6. Failover agent is online but Workbench-only with no real Telegram token.
+6. Failover agent is online but API-only with no real Telegram token.
 7. Block expires while the source agent process restarts; watcher must resume
    from persisted state.
 8. Preview is toggled off while a request is already running; only future
    preview activity should be guaranteed, not retroactive edit cancellation.
 9. `/preview status` must still work when Telegram delivery is blocked, if sent
-   through an unblocked local command path or Workbench; if not possible via the
+   through an unblocked local command path or Backend API; if not possible via the
    blocked source token, it should at least be visible in `/status`.
 
 ## Acceptance Criteria

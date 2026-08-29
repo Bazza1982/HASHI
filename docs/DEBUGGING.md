@@ -44,7 +44,7 @@ internal rendering. They are not selectable top-level `/backend` choices.
 There are also two operator surfaces:
 
 - Telegram
-- authenticated external clients through the Backend API or Workbench Gateway
+- authenticated clients through the Backend API or Hashi Remote
 
 Important shared rule:
 
@@ -446,7 +446,7 @@ Special note:
 
 ## External Client and Shared-Session Guidance
 
-An authenticated Workbench client and Telegram are not separate agent sessions.
+An authenticated Backend API client and Telegram are not separate agent sessions.
 
 If behavior looks inconsistent:
 
@@ -460,8 +460,9 @@ Integration bugs are often:
 - shared-token authentication or signature issues
 - transcript ordering or client polling issues
 
-UI rendering and client packaging issues belong to the independent Workbench
-repository; HASHI debugging should stop at the authenticated interface boundary.
+Workbench has retired, so HASHI debugging stops at the authenticated Backend
+API and Remote interface boundary; no Workbench UI or client package is part of
+this repository.
 
 ## Known Good Practices
 

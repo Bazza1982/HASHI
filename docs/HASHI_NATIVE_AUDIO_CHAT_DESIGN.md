@@ -9,7 +9,7 @@
 | Qualification date | 2026-08-28 |
 | Scope | Turn-based voice messages with native audio input and output |
 | Initial provider route | Configured OpenRouter GPT Audio Mini route |
-| Initial delivery surfaces | Telegram, Workbench, and the generic Persistent Session API |
+| Initial delivery surfaces | Telegram and the generic Persistent Session API |
 | Architecture rule | Provider-, model-, and terminal-neutral |
 | Realtime calls | Explicitly out of scope for this stage |
 | Audio-model tools | Represented by the contract but disabled in the proof of concept |
@@ -71,7 +71,7 @@ models must use the same internal contracts.
 The following decisions are fixed for the first implementation:
 
 1. The feature covers turn-based voice messages, not real-time calls.
-2. Telegram and Workbench are first-party clients, but no client name appears
+2. Telegram and authenticated Backend API clients are first-party clients, but no client name appears
    in the core routing rules.
 3. Any conforming AI frontend can submit an audio Turn through the generic
    Persistent Session API and consume ordered HASHI Events.
@@ -107,7 +107,7 @@ The following decisions are fixed for the first implementation:
 
 ### 3.1 Functional goals
 
-- Accept voice messages from Telegram, Workbench, and any compatible frontend.
+- Accept voice messages from Telegram and any compatible Backend API client.
 - Preserve one canonical input shape from terminal admission through HER.
 - Send original audio to an exact audio-capable provider/model when allowed.
 - Produce native model audio and its associated transcript as one typed output.
@@ -180,7 +180,7 @@ The following decisions are fixed for the first implementation:
   records.
 
 **Terminal**
-: A delivery surface such as Telegram, Workbench, desktop, web, mobile, IDE,
+: A delivery surface such as Telegram, an authenticated API client, desktop, web, mobile, IDE,
   operations console, or another compatible AI frontend.
 
 **Immediate output**
@@ -213,7 +213,7 @@ The implementation must address these current constraints:
 
 - Telegram voice and audio are locally transcribed before the backend receives
   the Turn.
-- Workbench media admission does not consistently construct canonical audio
+- Backend API media admission does not consistently construct canonical audio
   request content.
 - Persistent Session Run admission requires a non-empty text part and cannot
   accept an audio-only Message.
@@ -227,7 +227,7 @@ The implementation must address these current constraints:
 - the current voice menu controls post-response TTS only.
 - Direct currently inherits the Quick/Fast model slot and cannot select a
   voice-origin-only exact route target.
-- Workbench and generic API projections do not expose assistant audio assets.
+- Backend and generic API projections do not expose assistant audio assets.
 
 ## 7. Core invariants
 
@@ -288,7 +288,7 @@ Provider-neutral ModelOutput
   +--> PCM transcript projection
   +--> terminal-specific delivery
          Telegram: companion text + complete voice asset
-         Workbench/generic UI: text + player/asset reference
+         Generic API UI: text + player/asset reference
          stream-capable UI: optional volatile audio deltas
 ~~~
 
@@ -362,7 +362,7 @@ Direct multipart upload is the required first transport. A future authorized
 upload URL may be advertised as an alternative. Arbitrary remote URLs and
 caller-supplied host paths are not accepted as trusted media references.
 
-Telegram and Workbench adapters call the same internal attachment admission
+Telegram and Backend API adapters call the same internal attachment admission
 service rather than bypassing it.
 
 ### 9.4 Run submission
@@ -485,7 +485,7 @@ playback. Raw audio deltas are not durable Session Events.
 The first proof of concept does not require progressive playback:
 
 - Telegram requires a complete uploadable audio asset;
-- Workbench and generic clients receive **assistant.output.available** as soon
+- Backend API clients receive **assistant.output.available** as soon
   as the complete validated asset is ready; and
 - no terminal waits for Triage before receiving that asset.
 
@@ -1029,9 +1029,9 @@ Telegram delivery must:
 Provider output may be transcoded to OGG/Opus, MP3, or another Telegram-accepted
 format at the terminal boundary. The canonical model output remains unchanged.
 
-### 16.3 Workbench and generic frontends
+### 16.3 Generic Backend API frontends
 
-Workbench and compatible clients receive the same ordered Events and authorized
+Compatible clients receive the same ordered Events and authorized
 asset references.
 
 They should:
@@ -1343,7 +1343,7 @@ Phase 5 canary.
 
 ### Phase 1 — Canonical audio admission and asset lifecycle
 
-- Unify Telegram, Workbench, and Session API audio admission.
+- Unify Telegram and Session API audio admission.
 - Permit audio-only Session Messages.
 - Implement real attachment byte upload, verification, commit, and authorized
   retrieval.
@@ -1373,7 +1373,7 @@ Phase 5 canary.
 ### Phase 4 — Delivery and controls
 
 - Deliver native audio plus transcript to Telegram.
-- Add Workbench audio player and generic media retrieval.
+- Add generic media retrieval for authenticated clients.
 - Emit Session audio Events in first-ready order.
 - Upgrade the voice menu and retain current TTS controls.
 - Deliver final work text plus existing TTS for voice-origin work Turns.
@@ -1382,7 +1382,7 @@ Phase 5 canary.
 
 - Run offline contract and regression tests.
 - Run one controlled OpenRouter audio-in/audio-out canary.
-- Run Telegram and Workbench end-to-end voice Turns.
+- Run Telegram and one generic Backend API client end-to-end voice Turns.
 - Qualify one generic frontend against capability, attachment, Run, Event,
   replay, ACK, and retention contracts.
 - Keep native voice behind an explicit feature/configuration gate until all
@@ -1396,8 +1396,10 @@ The proof-of-concept implementation completed qualification on HASHI1:
   0 failed**;
 - focused native-audio, Session, HER, media, and pipeline coverage completed
   with **315 passed, 1 skipped, and 0 failed**;
-- all **18** Workbench server tests passed under their required serial fixture
-  isolation, and the Workbench production build completed successfully;
+- all **18** then-current Workbench server tests passed under their required
+  serial fixture isolation, and its production build completed successfully;
+  Workbench has since retired and these checks are retained only as historical
+  qualification evidence;
 - a live generic Session canary sent original WAV speech to Arale's configured
   OpenRouter **openai/gpt-audio-mini** Audio Direct route and received provider
   audio plus its associated transcript in about four seconds;
@@ -1411,7 +1413,7 @@ The proof-of-concept implementation completed qualification on HASHI1:
 - only Arale was enabled for the canary. HASHI1 remained online and retained
   its original main process throughout Agent-local reloads.
 
-Telegram and Workbench terminal projections are covered by deterministic
+Telegram and Backend API terminal projections are covered by deterministic
 integration tests. Qualification did not fabricate a production Telegram
 inbound update; a normal user-originated voice message remains the appropriate
 live terminal exercise.
@@ -1444,7 +1446,7 @@ The likely code ownership boundaries are:
 | **orchestrator.voice_manager** | Separate native voice policy from TTS rendering |
 | **orchestrator.workbench_api** | Extend Session capabilities, upload, audio-only Run input, asset retrieval, and Events |
 | **orchestrator.session_store** | Store derived transcripts, asset/event metadata, and idempotent correlations |
-| **terminal delivery adapters** | Project common output into Telegram, Workbench, or future clients |
+| **terminal delivery adapters** | Project common output into Telegram or future authenticated clients |
 | **audio asset service** | Own bytes, normalization derivatives, leases, retention, archive, retrieval, and cleanup |
 
 Module boundaries may be refined during implementation, but responsibilities
@@ -1466,7 +1468,7 @@ must not move into client-specific branches.
 | NAC-010 | Triage resolution changes internal status and companion text presentation but never the audio asset/message |
 | NAC-011 | DIRECT_RESPONSE produces no duplicate final audio |
 | NAC-012 | A work classification preserves Immediate as acknowledgement and later delivers final text plus TTS |
-| NAC-013 | Voice-origin default delivery includes both audio and text on Telegram, Workbench, and generic Event projection |
+| NAC-013 | Voice-origin default delivery includes both audio and text on Telegram and generic Event projection |
 | NAC-014 | A text-only Turn does not trigger audio reply |
 | NAC-015 | Native audio failure emits a warning and falls back through STT, text model, and TTS |
 | NAC-016 | STT failure does not retry STT or call the audio model again; successful native audio and output text still deliver |

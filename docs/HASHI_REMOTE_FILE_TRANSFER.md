@@ -64,9 +64,9 @@ Capability rules:
 
 Windows/LAN stability note:
 
-- Some LAN PCs bind the local Workbench API to the machine's LAN IP instead of
+- Some LAN PCs bind the local Backend API to the machine's LAN IP instead of
   `127.0.0.1`.
-- Hashi Remote now widens its local Workbench host fallback to include real
+- Hashi Remote now widens its local Backend API host fallback to include real
   interface IPv4 addresses, preventing `local_enqueue_failed` on otherwise
   healthy Windows peers.
 - If a peer can handshake but cannot receive plain protocol replies, verify the

@@ -42,7 +42,7 @@ This plan fixes that gap and also defines a safe path for message attachments.
 1. Replace all remote auth with one mechanism in a single step.
 2. Allow arbitrarily large binary payloads to travel inside normal message bodies.
 3. Solve internet-scale resumable transfer, chunk retry, or CDN-style distribution.
-4. Redesign local Workbench rendering in this phase beyond basic attachment display.
+4. Build a bundled Workbench renderer; Workbench has retired.
 5. Change the auth contract of legacy `/hchat` in Phase 1.
 6. Break plain chat compatibility with current HASHI Remote peers that only support
    existing `/protocol/message` or legacy `/hchat` behavior.
@@ -403,7 +403,7 @@ Return mode-specific auth failures where possible.
 The local runtime should receive normalized attachment metadata as part of the
 message body. It should not need to understand raw upload mechanics.
 
-### Workbench / chat display
+### Backend API / chat display
 
 Minimum viable behavior:
 
@@ -506,7 +506,7 @@ spool.
 
 ### Step 6
 
-Expose attachment metadata in runtime/workbench surfaces.
+Expose attachment metadata in runtime and Backend API surfaces.
 
 ## Open questions
 

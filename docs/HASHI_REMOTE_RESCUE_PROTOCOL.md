@@ -18,10 +18,10 @@ WatchTower enables two operational capabilities:
 
 - **LAN rescue**: another trusted HASHI instance or operator tool can inspect
   and start a down HASHI instance without relying on that instance's Telegram
-  bot or Workbench API.
+  bot or Backend API.
 - **Cold restart**: a running HASHI instance can ask WatchTower to stop the
   current process, restart it with the configured launcher, and verify that
-  Workbench health returns.
+  Backend API health returns.
 
 The Telegram `/restart` command uses this mechanism. HASHI itself only asks
 WatchTower to restart; WatchTower owns the stop/start/verify supervision.
@@ -33,7 +33,7 @@ That is useful for normal operation, but it is not enough for rescue:
 
 - if HASHI core crashes or the launcher terminal closes, the child Remote
   process can also disappear depending on the platform/session;
-- `/hchat` delivery depends on the local Workbench API, so it cannot deliver to
+- `/hchat` delivery depends on the local Backend API, so it cannot deliver to
   agents while HASHI core is down;
 - generic `/terminal/exec` is too broad for a clean remote-start protocol.
 
@@ -57,7 +57,7 @@ v1 implements **Topology A only**:
 - launcher: `bin/bridge_ctl.ps1 -Action start -Resume`
 - fallback: `bin/bridge-u.bat --resume-last --no-pause`
 - PID checks: Windows PID semantics
-- Workbench health: HASHI Windows Workbench port
+- Backend API health: HASHI Windows Backend API port
 
 **Topology C** (Windows Remote -> WSL2 HASHI core) stays out of scope for v1.
 Treat it as a future advanced mode after separate launcher, PID, and log
@@ -76,16 +76,16 @@ GET  /control/hashi/restarts/{restart_id}
 ```
 
 `/control/hashi/status` reports whether local HASHI core is reachable through
-the Workbench health endpoint and whether this instance's
+the Backend API health endpoint and whether this instance's
 `state/instance/process.pid` process appears
 alive.
 
 The status response should distinguish:
 
-- `state=running`: Workbench health is reachable.
-- `state=starting_or_stuck`: PID is alive but Workbench health is not reachable.
+- `state=running`: Backend API health is reachable.
+- `state=starting_or_stuck`: PID is alive but Backend API health is not reachable.
 - `state=stale_pid`: PID file exists but the process is gone.
-- `state=offline`: no live PID and no Workbench health.
+- `state=offline`: no live PID and no Backend API health.
 
 `/control/hashi/start` starts HASHI through a fixed launcher command:
 
@@ -125,7 +125,7 @@ outcome, status state, and error text when available.
 2. stop the controlled HASHI process with the fixed launcher/control script
 3. wait for the old process to stop
 4. start HASHI again with the fixed launcher
-5. verify Workbench health
+5. verify Backend API health
 6. update the restart record to `completed` or a failed phase
 7. append a structured audit event to `logs/remote_rescue_audit.jsonl`
 
@@ -170,7 +170,7 @@ After the controlled HASHI process comes back, WatchTower can call:
 POST /api/admin/notify
 ```
 
-on the controlled Workbench API with an admin-authenticated payload such as:
+on the controlled Backend API with an admin-authenticated payload such as:
 
 ```json
 {"agent":"hashiko","text":"WatchTower restart completed."}
@@ -231,7 +231,7 @@ curl -X POST http://<host>:<remote-port>/control/hashi/restart \
 ```
 
 Then poll `/control/hashi/status` until `hashi_running` is true. After HASHI is
-back, normal `/hchat`, Workbench API, Telegram, and `/reboot` workflows can
+back, normal `/hchat`, Backend API, Telegram, and `/reboot` workflows can
 resume.
 
 When invoked from Telegram, `/restart` first shows WatchTower status and the

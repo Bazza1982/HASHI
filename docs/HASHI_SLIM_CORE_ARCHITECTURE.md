@@ -90,7 +90,7 @@ The accepted flow is:
 6. Commit the full replacement manager set only if every constructor succeeds.
 7. Reload config and secrets as needed.
 8. Restart selected agents.
-9. Refresh warm services through `ServiceManager`: Workbench API, enabled API
+9. Refresh warm services through `ServiceManager`: Backend API, enabled API
    Gateway, scheduler, delivery watcher, and background jobs.
 10. Keep the long-lived process, instance lock, kernel identity, and WhatsApp
     transport alive.
@@ -124,7 +124,7 @@ operator-selected rollout action, not a compatibility prerequisite.
 
 `/reboot max` restarts all running agents and reloads project code.
 
-Both modes rebuild hot managers. Workbench API and an enabled API Gateway are
+Both modes rebuild hot managers. Backend API and an enabled API Gateway are
 warm-recreated so their request handlers adopt reloaded code; the scheduler,
 delivery watcher, and background jobs are also recreated. Their fields remain
 kernel-owned even though the service objects stored in those fields are
@@ -132,12 +132,12 @@ replaced.
 
 ## Live Handle Boundaries
 
-Workbench API, API Gateway, scheduler task state, WhatsApp transport, and the
+Backend API, API Gateway, scheduler task state, WhatsApp transport, and the
 agent directory are kernel-level fields. Managers can start, stop, recreate, or
 send through them. Manager construction alone must not destroy a live service;
 the explicit post-reload warm-service refresh owns that lifecycle.
 
-The `runtimes` list is also identity-sensitive. External holders, including the Workbench API and agent directory, may hold a reference to that list. Agent stop logic must mutate the list in place rather than replacing it:
+The `runtimes` list is also identity-sensitive. External holders, including the Backend API and agent directory, may hold a reference to that list. Agent stop logic must mutate the list in place rather than replacing it:
 
 ```python
 self.kernel.runtimes[:] = [
@@ -205,7 +205,7 @@ Live checks completed on 2026-05-02:
 /reboot min: passed
 /reboot max: passed
 cold restart: passed
-Workbench API health: ok
+Backend API health: ok
 API Gateway health: ok when enabled
 12 agents online after /reboot max
 ```
@@ -215,7 +215,7 @@ The `/reboot max` acceptance run confirmed:
 - 12 agents stopped successfully.
 - 12 agents restarted and reached `ONLINE`.
 - Scheduler was recreated with reloaded code and restarted.
-- Workbench API returned `ok: true`.
+- Backend API returned `ok: true`.
 - API Gateway returned `{"status":"ok","engines":["codex-cli"]}` when checked on the active gateway port.
 - No post-reboot `ERROR`, `CRITICAL`, `Traceback`, `failed`, or `LOCAL MODE` entries were found.
 

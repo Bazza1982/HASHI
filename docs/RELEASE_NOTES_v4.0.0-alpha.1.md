@@ -8,7 +8,7 @@ Claw Tool Gateway parity.
 
 ## Why This Is v4 Alpha
 
-v3.2.1 was a hotfix release for Workbench, HChat, and Remote route recovery.
+v3.2.1 was a hotfix release for Backend API, HChat, and Remote route recovery.
 v4.0.0-alpha.1 introduces new execution and orchestration foundations:
 
 - HASHI can treat Claw/OpenClaw as a scoped backend through `her`.

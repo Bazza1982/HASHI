@@ -1020,7 +1020,7 @@ Required side effects:
 
 ### 10.2 API/workbench alignment
 
-When exposed through workbench or API later, command results should preserve the
+When exposed through the Backend API, command results should preserve the
 same machine-readable core fields:
 
 - `ok`

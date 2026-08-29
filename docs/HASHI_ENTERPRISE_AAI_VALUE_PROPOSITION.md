@@ -6,6 +6,10 @@
 
 **Audience:** product, engineering, enterprise buyers, and contributors evaluating HASHI as an open-source enterprise platform.
 
+**Workbench status:** Workbench has retired. HASHI's supported control surfaces
+are its authenticated Backend API, Hashi Remote, TUI, and configured messaging
+channels.
+
 ---
 
 ## 1. Core Thesis
@@ -76,7 +80,7 @@ In enterprise language, an **Individual User** is not the same thing as the Pers
 
 Human-facing channels:
 
-- Workbench as the enterprise control and inspection surface
+- authenticated clients of the Backend API for enterprise control and inspection
 - enterprise chat surfaces such as Microsoft Teams, Slack, Google Chat, Feishu/Lark, and similar systems
 - controlled optional channels such as Telegram, WhatsApp, and voice for local, personal, or field use cases
 - human-readable artifacts such as PDF, docs, spreadsheets, commits, and dashboards
@@ -152,9 +156,9 @@ HASHI should connect to the channels enterprises already use, but channel breadt
 
 Enterprise AAI should treat channels as managed gateways:
 
-- Microsoft Teams, Slack, Google Chat, Feishu/Lark, Workbench, Telegram, WhatsApp, email, and future channels use the same policy and audit layer.
+- Microsoft Teams, Slack, Google Chat, Feishu/Lark, Telegram, WhatsApp, email, authenticated API clients, and future channels use the same policy and audit layer.
 - Admins decide which channels are available for which users, projects, and agents.
-- Sensitive agents can be restricted to Workbench or approved enterprise chat only.
+- Sensitive agents can be restricted to authenticated API clients or approved enterprise chat only.
 - Consumer-style channels can remain useful for local or field work, but they should never imply uncontrolled enterprise access.
 
 ---

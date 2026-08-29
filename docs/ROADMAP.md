@@ -10,7 +10,7 @@ HASHI is moving through three connected stages:
 
 1. **Personal local agent project** — HASHI started as a vibe-coded,
    human-directed AI agent system for one owner running local agents, backends,
-   voice, memory, scheduling, tools, and Workbench.
+   voice, memory, scheduling, tools, and the now-retired Workbench.
 2. **Open-source orchestration platform** — HASHI now provides a broader
    multi-agent runtime with backend adapters, Nagare workflows, HER mode,
    Superloop operations, HChat, Remote, EXP guidebooks, and local-first
@@ -43,7 +43,7 @@ broader HASHI 4 line advances independently through the advanced HER
 `v4.0.0-alpha.2` release candidate.
 
 This enterprise alpha includes governed profiles, identity/SSO/SCIM primitives,
-policy/approval/audit, connector MVPs, Workbench enterprise surfaces, and
+policy/approval/audit, connector MVPs, authenticated Backend API surfaces, and
 Compose/Kubernetes/Helm/systemd/SIEM deployment artifacts for alpha operator
 review. It is not production-certified; customer-like enterprise server, IdP,
 SIEM, and Kubernetes/cloud validation remain post-alpha.
@@ -71,7 +71,7 @@ consolidated as the `v4.0.0-alpha.2` release candidate:
 - caller-owned OpenAI function tools through the Codex app-server bridge;
 - retirement of HER v1, native Rust source/packages, `/rebuild` machinery,
   `claw-cli`, the legacy fixed runtime, and the OpenClaw importer;
-- canonical Workbench Agent Overview and shared-token-authenticated remote
+- canonical Backend API Agent Overview and shared-token-authenticated remote
   terminal execution;
 - crash-safe HER v2 WIP context with explicit preserve/inject/clear audit
   events, provider-only OpenRouter/DeepSeek selection, and exact DeepSeek native
@@ -256,7 +256,7 @@ Planned implementation shape:
 - SQLite-backed local job store for Phase 1.
 - Per-agent partitions with cross-agent admin visibility.
 - Explicit `/reboot` and full-restart recovery semantics.
-- Workbench read-only job APIs early, alongside a thin `/bg` Telegram adapter.
+- Backend read-only job APIs early, alongside a thin `/bg` Telegram adapter.
 - Remote support later through `background_jobs_v1`, using the target
   instance's policy and durable notification retry.
 - Enterprise hardening later for project scoping, approval, audit, retention,

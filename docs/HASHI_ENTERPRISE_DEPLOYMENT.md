@@ -1,5 +1,8 @@
 # HASHI AAI Enterprise 0.1 Alpha Deployment Skeleton
 
+Workbench has retired. This deployment runs the HASHI Backend API and does not
+build, install, or launch a Workbench UI.
+
 This is the first deployable alpha skeleton for the Enterprise AAI profile. It
 is intentionally conservative: governance state is mounted into named volumes,
 channels are not enabled by default, and production secrets should come from the
@@ -12,7 +15,7 @@ already passed full production validation.
 ## Files
 
 - `Dockerfile.enterprise` builds the Python runtime image.
-- `deploy/docker-compose.enterprise.yml` runs the enterprise Workbench/API service.
+- `deploy/docker-compose.enterprise.yml` runs the enterprise Backend API service.
 - `deploy/enterprise.env.example` documents the minimum environment variables.
 - `deploy/audit-export-presets.env.example` gives safe starting presets for generic NDJSON, Splunk, Elastic/Logstash, and OTLP collectors.
 - `deploy/kubernetes/enterprise/audit-export-cronjob.yaml` schedules the live audit exporter in raw Kubernetes deployments.
@@ -27,7 +30,7 @@ already passed full production validation.
 Enterprise alpha startup has a hard bootstrap gate. The example deployment is
 for an environment whose organization/admin bootstrap state already exists. If
 `HASHI_ENTERPRISE_BOOTSTRAP_COMPLETE` is not set to `true`, startup fails closed
-before serving Workbench.
+before serving the Backend API.
 
 For this alpha skeleton:
 

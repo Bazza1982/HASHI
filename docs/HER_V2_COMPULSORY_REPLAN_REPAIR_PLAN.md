@@ -382,7 +382,7 @@ Completed on 2026-08-24 in the HASHI1 working tree:
   retained Auto Compact commits `3950cc0` and `81f5d76`;
 - completed the separately authorised targeted `/reboot min` with
   `requester=arale` and `targets=('arale',)`, verified the current HER runtime
-  contract, returned Arale online, and recreated the Workbench API and API
+  contract, returned Arale online, and recreated the Backend API and API
   Gateway with reloaded code; and
 - did not push, tag, create a Release, or claim a real threshold-triggered
   compulsory-Replan canary.

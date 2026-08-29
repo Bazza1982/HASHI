@@ -11,10 +11,10 @@
 - [HASHI_ENTERPRISE_PROFILE_ADR.md](HASHI_ENTERPRISE_PROFILE_ADR.md)
 - [HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md](HASHI_ENTERPRISE_AAI_READINESS_REVIEW.md)
 
-**Workbench boundary:** references to a Workbench UI or console in this
-roadmap mean the independent HASHI Workbench product. This repository owns the
-Backend API, governance services, and authenticated Remote gateway that the UI
-consumes; it does not bundle the frontend or its tests.
+**Workbench boundary:** Workbench has retired. References to its UI or console
+below are historical or superseded. HASHI continues to own the Backend API,
+governance services, and authenticated Remote APIs; it does not bundle an
+administration frontend.
 
 ---
 
@@ -42,7 +42,7 @@ The enterprise upgrade should not be delivered as one large rewrite. It should b
 2. add identity and channel control;
 3. add policy decisions and audit records early;
 4. promote logs, commands, tools, tasks, and artifacts into enterprise primitives;
-5. expose controls through admin APIs for independent clients such as Workbench;
+5. expose controls through authenticated admin APIs;
 6. harden deployment and operations;
 7. add enterprise connectors only after governance is stable.
 
@@ -73,8 +73,7 @@ Alpha is ready when:
   channels, policy, approvals, audit, connectors, evidence, and deployment
   review;
 - connector registry, credential setup, action schemas, policy gates, dry-run
-  execution, health checks, audit redaction, Backend API controls, and an
-  independently tested Workbench client are present
+  execution, health checks, audit redaction, and Backend API controls are present
   for the current GitHub and webhook connector set;
 - audit ledger, hash-chain verification, anchor adapters, live export runner,
   daemon mode, SIEM starter assets, and deployment examples are present and
@@ -110,7 +109,7 @@ Required:
 
 Not required:
 
-- full independent Workbench admin console;
+- a bundled browser administration console;
 - SSO;
 - full ABAC;
 - tamper-evident audit;
@@ -127,7 +126,7 @@ Required:
 - P3 policy MVP for channels, commands, backend switch, file read/write, and shell;
 - P4 unified audit ledger query/export;
 - P5 task, artifact, and evidence model;
-- P8-min independent Workbench admin console;
+- P8-min admin API surface;
 - P9-min deployment, backup, restore, and migrations;
 - end-to-end journeys from PRD Section 5.
 
@@ -257,7 +256,7 @@ Deferred:
 - `ENT-024` Wire OIDC callback full login completion. Done behind `enterprise_oidc_complete_login`, preserving default prepared-mode compatibility while enabling token exchange, JWKS fetch/cache, ID token verification, claim mapping, user/session completion, and no-token audit/response redaction.
 - `ENT-024a` Add SAML metadata and assertion validation skeleton. Done for IdP metadata parsing, SSO binding selection, signing certificate discovery, preverified assertion issuer/audience/time validation, email/display-name extraction, and DTD/entity rejection.
 - `ENT-024b` Add SAML HTTP login baseline. Done for SAML auth provider config/redaction, AuthnRequest start with RelayState, pending state tracking, callback state/provider validation, base64 `SAMLResponse` decoding, verifier-hook or explicitly enabled preverified assertion validation, enterprise user upsert, session issuance, default project membership, and no assertion/token material in audit logs.
-- `ENT-024c` Add production SAML XML Signature verification wiring. Done for IdP metadata signing certificate extraction, required XML Signature presence, `xmlsec1 --verify` command wiring, fail-closed missing verifier/signature handling, and Workbench callback default verification path; IdP compatibility runbooks and packaged deployment checks remain future work.
+- `ENT-024c` Add production SAML XML Signature verification wiring. Done for IdP metadata signing certificate extraction, required XML Signature presence, `xmlsec1 --verify` command wiring, fail-closed missing verifier/signature handling, and Backend API callback default verification path; IdP compatibility runbooks and packaged deployment checks remain future work.
 - `ENT-025` Add SCIM provisioning primitive. Done for user create/update/deactivate/reactivate, standard `userName`/`emails` extraction, default project membership, session/API token revocation on deactivation, and deterministic result payloads; full group mutation, advanced filters, and IdP schema negotiation remain future work.
 - `ENT-026` Add admin-gated SCIM provisioning API. Done for `/api/enterprise/scim/users` upsert and `/api/enterprise/scim/users/deactivate`, admin auth, audit events, default project assignment, and session/API token revocation on deactivation.
 - `ENT-027` Add SCIM 2.0 Users compatibility surface. Done for admin-gated `/api/enterprise/scim/v2/Users` list/create/get/PATCH, SCIM User/ListResponse payloads, `userName`, `emails.value`, and `active` filters, pagination, PATCH `active`/`displayName`, audit for write paths, and token/session revocation on deactivation.
@@ -358,7 +357,7 @@ Implemented checkpoints:
 
 - enterprise channel schema and `ChannelRegistry`;
 - default channel bootstrap:
-  - `workbench` registered as the compatibility identifier for the external-client control-plane channel;
+  - `workbench` registered as the legacy compatibility identifier for the external-client control-plane channel;
   - `hchat`, `telegram`, `whatsapp`, `email`, `slack`, `teams`, `google_chat`, and `feishu` registered disabled by default;
 - channel admin API:
   - `GET /api/enterprise/channels`;
@@ -367,7 +366,7 @@ Implemented checkpoints:
 - unified `EnterpriseChannelGate`;
 - governed-profile gates for:
   - WhatsApp ingress and egress;
-  - HChat Workbench exchange ingress and egress;
+  - HChat compatibility exchange ingress and egress;
   - HChat CLI send-side egress;
   - Telegram command, message, and inline callback ingress;
 - deny events written to the enterprise audit JSONL writer;
@@ -377,8 +376,8 @@ Residual P2 limitations:
 
 - channel bindings currently use pragmatic identifiers such as Telegram user id, WhatsApp phone number, and agent id;
 - project/task-aware channel authorization is deferred to P3/P5/P7;
-- independent Workbench UI for channel administration is deferred to P8-min;
-- direct Remote protocol paths outside Workbench exchange still need deeper trust and policy integration.
+- channel administration remains API-only;
+- direct Remote protocol paths outside the compatibility exchange still need deeper trust and policy integration.
 
 **Scope:**
 
@@ -386,7 +385,7 @@ Residual P2 limitations:
 - channel enable/disable;
 - channel bindings to users, teams, projects, and agents;
 - ingress and egress checks;
-- Workbench and HChat as initial governed channels;
+- the legacy `workbench` compatibility channel and HChat as initial governed channels;
 - Telegram/WhatsApp remain supported but must pass channel gates in team/enterprise.
 
 **Primary code areas:**
@@ -423,7 +422,7 @@ Residual P2 limitations:
 
 - admin APIs for users, roles, projects, channels, policies, audit query, and export;
 - role-gated API middleware;
-- stable JSON contracts for independent clients such as Workbench to consume.
+- stable JSON contracts for authenticated admin clients to consume.
 
 **Primary code areas:**
 
@@ -542,7 +541,7 @@ Implemented checkpoints:
   - `verify_chain()` to detect modified, deleted, or reordered chained events;
 - stable ledger event schema version field;
 - policy and channel deny/approval audit paths now dual-write into the unified ledger;
-- Workbench enterprise audit APIs:
+- Backend enterprise audit APIs:
   - `GET /api/enterprise/audit` for admin-gated ledger query;
   - `GET /api/enterprise/audit/export` for admin-gated NDJSON export;
   - `GET /api/enterprise/audit/export?format=siem` for SIEM/ECS-style NDJSON mapping;
@@ -634,7 +633,7 @@ Residual P4 limitations:
 **Tickets:**
 
 - `ENT-060` Implement append-only ledger store. Done for P4A foundation.
-- `ENT-061` Add query API and pagination. Query filters and Workbench API done; pagination cursor pending.
+- `ENT-061` Add query API and pagination. Query filters and Backend API are done; pagination cursor pending.
 - `ENT-062` Add JSONL export. Done for P4A foundation.
 - `ENT-063` Add slash audit adapter. Done for legacy JSONL ingest with idempotent event IDs; live dual-write pending.
 - `ENT-064` Add token/model invocation adapter. Done for legacy JSONL ingest with idempotent event IDs; live dual-write pending.
@@ -767,7 +766,7 @@ Residual P5 limitations:
 
 - artifact auto-registration currently covers HASHI-controlled `file_write`; CLI backend internal writes still need event mapping or completion verification;
 - runtime closeout does not yet automatically build and attach evidence bundles;
-- task APIs and Workbench UI are deferred to P7/P8;
+- task APIs are deferred to P7/P8; no bundled UI is planned;
 - missing promised artifact verification remains P6 work.
 
 **Scope:**
@@ -889,7 +888,7 @@ Implemented checkpoints:
 - `PolicyEvaluator.decide_approval_request()` supports pending approval decisions;
 - approval requests can transition to `approved` or `denied` exactly once;
 - approval decisions write canonical `policy` ledger events with project/task/request correlation.
-- Workbench exposes approval queue API routes:
+- The Backend API exposes approval queue routes:
   - `GET /api/enterprise/approvals`;
   - `POST /api/enterprise/approvals/{request_id}/approve`;
   - `POST /api/enterprise/approvals/{request_id}/deny`.
@@ -907,11 +906,11 @@ Implemented checkpoints:
 
 Residual P7 limitations:
 
-- Workbench approval UI is not yet implemented;
+- approval remains API-driven because Workbench has retired;
 - approved requests are not yet consumed to resume blocked work automatically;
 - project-aware routing is implemented only for explicit bridge `project_id`; broader channel/project resolution remains pending.
 - failed-task escalation writes audit events only; notification delivery and retry routing remain pending.
-- agent capability registry is service-layer only; Workbench API/UI exposure remains pending.
+- agent capability registry is service-layer only; Backend API exposure remains pending.
 
 **Scope:**
 
@@ -933,8 +932,8 @@ Residual P7 limitations:
 **Tickets:**
 
 - `ENT-090` Add project-aware inbound routing. Done for bridge messages that carry explicit `project_id`, with fail-closed sender/target checks.
-- `ENT-091` Add approval queue APIs. Done for Workbench admin list endpoint.
-- `ENT-092` Add admin approve/deny action. Done for service and Workbench admin API routes with ledger events.
+- `ENT-091` Add approval queue APIs. Done for the Backend admin list endpoint.
+- `ENT-092` Add admin approve/deny action. Done for service and Backend admin API routes with ledger events.
 - `ENT-093` Add failed-task escalation events. Done with ledger-backed `task.escalate_failed` helpers.
 - `ENT-094` Add agent capability registry. Done as a service primitive with project-filtered summaries.
 
@@ -946,17 +945,17 @@ Residual P7 limitations:
 
 ---
 
-### P8 - Independent Workbench Admin Console Integration
+### P8 - Admin API Surface (Workbench Retired)
 
-**Goal:** provide a human admin surface for enterprise controls.
+**Goal:** provide stable API surfaces for enterprise controls.
 
 **Implementation status:** P8-min API groundwork started.
 
 Implemented checkpoints:
 
-- Workbench admin API exposes project-filterable agent capability summaries at `GET /api/enterprise/agent-capabilities`.
+- The Backend admin API exposes project-filterable agent capability summaries at `GET /api/enterprise/agent-capabilities`.
 - The endpoint is guarded by enterprise admin auth and returns normalized backend/tool/project/bridge capability data.
-- Workbench admin API exposes policy rules at `GET /api/enterprise/policies` and `POST /api/enterprise/policies`.
+- The Backend admin API exposes policy rules at `GET /api/enterprise/policies` and `POST /api/enterprise/policies`.
 - Policy rule creation supports action, resource, effect, scope, conditions, priority, and optional explicit rule id.
 - `/api/health` includes an enterprise block in governed profiles with identity, channel registry, audit ledger, and policy evaluator readiness.
 - Personal profile health keeps the legacy response shape without enterprise fields.
@@ -964,10 +963,10 @@ Implemented checkpoints:
 
 Residual P8 limitations:
 
-- Frontend admin screens are not yet implemented.
-- Capability summaries are read-only; approval UI remains pending.
+- Workbench has retired, so no bundled frontend admin screens are planned here.
+- Capability summaries are read-only; approval remains API-driven.
 - Policy API supports list/create only; delete, simulation, and richer versioning remain pending.
-- Enterprise health is a readiness summary, not yet a full monitoring dashboard.
+- Enterprise health is a readiness summary, not a monitoring dashboard.
 
 **Minimum scope:**
 
@@ -975,25 +974,24 @@ Residual P8 limitations:
 - projects;
 - channels;
 - policies;
-- audit ledger viewer;
+- audit ledger query API;
 - audit export;
 - system health.
 
 **Primary code areas:**
 
-- independent Workbench frontend (external repository);
 - `orchestrator/workbench_api.py`;
 - `orchestrator/enterprise/admin_api.py`.
 
 **Tickets:**
 
-- `ENT-100` Add role-gated admin navigation.
-- `ENT-101` Add users and roles screens.
-- `ENT-102` Add projects screen.
-- `ENT-103` Add channel registry screen.
-- `ENT-104` Add policy viewer/editor. API list/create done; frontend and advanced edit operations remain pending.
-- `ENT-105` Add audit timeline and export screen.
-- `ENT-106` Add enterprise health screen.
+- `ENT-100` Add role-gated admin discovery endpoints.
+- `ENT-101` Add users and roles endpoints.
+- `ENT-102` Add projects endpoints.
+- `ENT-103` Add channel registry endpoints.
+- `ENT-104` Add policy list/editor endpoints. API list/create done; advanced edit operations remain pending.
+- `ENT-105` Add audit timeline data and export endpoints.
+- `ENT-106` Add enterprise health endpoint.
 - `ENT-106A` Add enterprise service readiness to `/api/health`. Done for API-level identity/channel/audit/policy checks.
 - `ENT-107` Add admin API for agent capability inventory. Done for read-only project-filtered summaries.
 
@@ -1001,7 +999,7 @@ Residual P8 limitations:
 
 - `org_admin` can enable a channel and assign it to a project.
 - `auditor` can export audit but cannot mutate settings. API-level audit query/export is implemented.
-- `individual_user` cannot see admin navigation.
+- `individual_user` cannot access admin-only endpoints.
 
 ---
 
@@ -1061,7 +1059,7 @@ Residual P9 limitations:
 - `ENT-111` Add enterprise volume layout. Done for state, workspaces, logs, and backups named volumes.
 - `ENT-112` Add migration runner command. Done for idempotent schema initialization and schema version reporting.
 - `ENT-113` Add backup/restore command. Done for backup, restore, and manifest inspection CLI.
-- `ENT-114` Add enterprise health checks. Done for Workbench `/api/health`, Docker healthcheck, and Kubernetes liveness/readiness probe manifests.
+- `ENT-114` Add enterprise health checks. Done for Backend API `/api/health`, Docker healthcheck, and Kubernetes liveness/readiness probe manifests.
 - `ENT-115` Add upgrade and rollback documentation.
 - `ENT-116` Add Kubernetes baseline manifests. Done for namespace, config map, example secret, PVC, single-replica deployment, service, data/secret mounts, and manifest contract tests; HA/Helm remains future work.
 - `ENT-117` Add enterprise Helm baseline chart. Done for chart metadata, values, service account, config map, example secret, PVC, deployment, service, optional ingress, optional NetworkPolicy, optional HPA, README, and chart contract tests; true multi-replica HA remains future work.
@@ -1102,7 +1100,7 @@ Implemented checkpoints:
   - duplicate or unnamed connector types fail fast;
   - health probes normalize connector exceptions to `unhealthy` summaries;
   - health probes can write canonical connector ledger events;
-  - Workbench exposes admin-gated `GET /api/enterprise/connectors/health`.
+  - the Backend API exposes admin-gated `GET /api/enterprise/connectors/health`.
 - First GitHub connector foundation added:
   - `health_check()` probes GitHub rate-limit metadata;
   - `repo.get` and `repo.read` fetch repository metadata;
@@ -1129,13 +1127,13 @@ Implemented checkpoints:
   - policy deny and approval-required decisions return blocked `ConnectorResult` values without calling connector code;
   - missing connector registrations fail closed;
   - successful, blocked, failed, and approval-required attempts can write canonical connector ledger events.
-- Workbench connector execution API added:
+- Backend connector execution API added:
   - `POST /api/enterprise/connectors/execute` is admin-gated;
   - requests require `connector_type`, `action`, and `credential_id`;
   - the API constructs a `ConnectorAction` with actor, project, task, request, correlation, dry-run, and parameters;
   - execution always goes through `ConnectorExecutionService`;
   - responses include both connector `result` and explicit `gate` decision metadata.
-- Workbench connector credential admin API added:
+- Backend connector credential admin API added:
   - `GET /api/enterprise/connectors/credentials` lists active connector credential references;
   - `POST /api/enterprise/connectors/credentials` creates scoped connector credential references;
   - `POST /api/enterprise/connectors/credentials/{credential_id}/revoke` revokes credentials;
@@ -1151,11 +1149,11 @@ Implemented checkpoints:
   - creates GitHub connector instances with resolved tokens;
   - skips revoked credentials when building registries;
   - unsupported connector types fail closed.
-- Workbench connector registry refresh added:
-  - Workbench builds its in-process connector registry from active credential references at startup;
+- Backend connector registry refresh added:
+  - the Backend API service builds its in-process connector registry from active credential references at startup;
   - credential create/revoke refreshes the registry;
   - static test/injected connectors take precedence over credential-built connectors of the same type;
-  - unresolved connector secrets are captured as registry errors instead of breaking Workbench startup.
+  - unresolved connector secrets are captured as registry errors instead of breaking Backend API startup.
 - Default connector policy template added:
   - explicitly allows GitHub read-only repository metadata actions;
   - requires approval for GitHub `issue.create`, `pr.create`, and `pr.merge`;
@@ -1179,14 +1177,9 @@ Implemented checkpoints:
   - real execution posts text and optional card payloads through an injectable transport;
   - factory can build Google Chat connectors from scoped credential secret references.
 - Connector server-side validation added:
-  - Workbench connector execution API rejects webhook `message.send` actions without non-empty `text` before policy/connector execution.
-- Workbench connector admin UI MVP added:
-  - Enterprise layout exposes connector credentials, health, and default connector policy controls;
-  - admins can create connector credential references, include revoked credentials in the list, and revoke active credentials;
-  - admins can refresh connector health and see registry secret-resolution errors;
-  - admins can install the default connector policy template from the Workbench;
-  - admins can run gated connector test actions, with dry-run enabled by default, and inspect the execution result and policy gate metadata;
-  - Slack, Google Chat, Teams, Feishu, and GitHub setup/test forms include safe presets and JSON parameter validation.
+  - the Backend connector execution API rejects webhook `message.send` actions without non-empty `text` before policy/connector execution.
+- Workbench has retired; connector administration remains available through the
+  authenticated Backend API, with no bundled connector UI.
 
 Residual P10 limitations:
 
@@ -1195,17 +1188,13 @@ Residual P10 limitations:
 - Google Chat, Teams, and Feishu exist as incoming webhook MVPs only; OAuth/Graph API, space/team/channel discovery, and user mapping are not implemented yet.
 - Credential store records secret references only; environment and HASHI secrets can now be resolved through a dedicated resolver, while Vault/Kubernetes secret resolution remains pending.
 - Connector factory currently supports GitHub, Slack, Google Chat, Teams, and Feishu.
-- Workbench registry refresh is in-process; multi-node registry synchronization remains future work.
+- Backend registry refresh is in-process; multi-node registry synchronization remains future work.
 - Default connector policy covers GitHub reads, GitHub writes, Slack outbound message approval, Google Chat outbound message approval, Teams outbound message approval, and Feishu outbound message approval; silent auto-install remains intentionally avoided to prevent overwriting administrator policy edits.
-- Workbench/admin connector execution API now uses the gated execution service.
-- Workbench/admin connector action schema API exposes supported parameter metadata for GitHub and webhook connector test runs.
-- Workbench Connector Test Run consumes connector action schemas and renders parameter metadata beside the JSON parameter editor.
-- Workbench Connector Test Run renders schema-driven controls for string, integer, boolean, enum, and array parameters while retaining raw JSON editing as an escape hatch.
-- Workbench Connector Test Run includes starter parameter presets for Slack blocks, Google Chat cards, Teams sections, and GitHub issue labels.
-- Workbench Connector Test Run validates schema-required parameters, JSON value types, and enum values before submitting connector execution requests.
-- Workbench/admin connector execution API applies the same schema-required parameter, type, and enum validation before policy-gated execution.
+- The Backend connector execution API now uses the gated execution service.
+- The Backend connector action schema API exposes supported parameter metadata for GitHub and webhook connector test runs.
+- The Backend connector execution API applies schema-required parameter, type, and enum validation before policy-gated execution.
 - Connector health API exists for registered in-process connectors; built-in GitHub, Slack, Google Chat, Teams, and Feishu connectors can now be constructed from credential references.
-- Connector admin UI exists as a Workbench MVP; credential creation now has built-in connector type, secret-ref scheme, and minimum-scope validation, while richer guided setup and OAuth flows remain pending.
+- Connector administration is API-only; credential creation has built-in connector type, secret-ref scheme, and minimum-scope validation, while richer OAuth flows remain pending.
 
 **Scope:**
 
@@ -1219,7 +1208,7 @@ Residual P10 limitations:
 - channel registry;
 - audit ledger;
 - policy evaluator;
-- Workbench admin console.
+- Backend admin API.
 
 **Tickets:**
 
@@ -1227,22 +1216,22 @@ Residual P10 limitations:
 - `ENT-121` Add scoped credential store abstraction. Done for secret references, scopes, active listing, and revoke.
 - `ENT-122` Add connector execution gate. Done for credential existence, org isolation, revoke fail-closed, type match, policy deny, and approval-required decisions.
 - `ENT-126` Add first enterprise channel connector. Done for Slack incoming webhook health, dry-run, `message.send`, injectable transport, and factory construction from secret refs.
-- `ENT-136` Add second enterprise channel connector. Done for Google Chat incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, default approval-required policy, Workbench presets, and server-side `message.send` text validation.
-- `ENT-136a` Add Microsoft Teams webhook connector. Done for Teams incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, server-side text validation, data-governance checks, audit redaction, default approval-required policy, Workbench safe presets, and Workbench dry-run execution.
-- `ENT-136b` Add Feishu/Lark webhook connector. Done for Feishu incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, server-side text validation, data-governance checks, audit redaction, default approval-required policy, Workbench safe presets, and Workbench dry-run execution.
+- `ENT-136` Add second enterprise channel connector. Done for Google Chat incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, default approval-required policy, and server-side `message.send` text validation.
+- `ENT-136a` Add Microsoft Teams webhook connector. Done for Teams incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, server-side text validation, data-governance checks, audit redaction, and default approval-required policy.
+- `ENT-136b` Add Feishu/Lark webhook connector. Done for Feishu incoming webhook health, dry-run, `message.send`, injectable transport, factory construction from secret refs, server-side text validation, data-governance checks, audit redaction, and default approval-required policy.
 - `ENT-123` Add GitHub connector with audit. Done for health, repository metadata, issue creation, PR creation, and PR merge actions.
-- `ENT-124` Add connector health checks. Done for in-process registry, normalized health summaries, ledger health events, and Workbench admin health API.
+- `ENT-124` Add connector health checks. Done for in-process registry, normalized health summaries, ledger health events, and Backend admin health API.
 - `ENT-125` Add credential revoke tests. Done for gate-level fail-closed behavior.
 - `ENT-127` Add gated connector execution service. Done for credential gate, policy gate, connector invocation, fail-closed missing connector handling, and ledger events.
-- `ENT-128` Add Workbench connector execution API. Done for admin-gated execution through `ConnectorExecutionService` with result and gate metadata.
-- `ENT-128a` Add connector action schema catalog. Done for admin-gated Workbench schema metadata covering GitHub repo/issue/PR actions and Slack, Google Chat, Teams, and Feishu `message.send`, plus schema-driven parameter hints, scalar/enum/array controls, starter parameter presets, pre-submit UI validation, and Workbench execution API validation.
-- `ENT-129` Add Workbench connector credential API. Done for admin-gated list, create, revoke, active-only listing, include-revoked listing, connector type/secret-ref/scope validation, and audit events.
+- `ENT-128` Add Backend connector execution API. Done for admin-gated execution through `ConnectorExecutionService` with result and gate metadata.
+- `ENT-128a` Add connector action schema catalog. Done for admin-gated Backend schema metadata covering GitHub repo/issue/PR actions and Slack, Google Chat, Teams, and Feishu `message.send`, plus server-side schema validation.
+- `ENT-129` Add Backend connector credential API. Done for admin-gated list, create, revoke, active-only listing, include-revoked listing, connector type/secret-ref/scope validation, and audit events.
 - `ENT-130` Add connector secret reference resolver. Done for env/HASHI secret refs, redacted metadata, unsupported scheme failures, and unconfigured vault fail-closed behavior.
 - `ENT-131` Add connector factory. Done for GitHub connector construction from credential refs, secret resolution, revoked credential skipping, and unsupported type fail-closed behavior.
-- `ENT-132` Add Workbench connector registry refresh. Done for startup refresh, create/revoke refresh, static connector precedence, and fail-soft registry errors.
+- `ENT-132` Add Backend connector registry refresh. Done for startup refresh, create/revoke refresh, static connector precedence, and fail-soft registry errors.
 - `ENT-133` Add default connector policy template. Done for GitHub read allow, GitHub write approval-required, Slack outbound message approval-required, and idempotent install.
 - `ENT-134` Add default connector policy install API. Done for admin-gated install, idempotent responses, and audit event emission.
-- `ENT-135` Add connector admin UI. Done for Workbench MVP covering credential create/list/revoke, health refresh, registry errors, default policy installation, gated connector dry-run/test-run execution, Slack, Google Chat, Teams, Feishu, and GitHub presets, and JSON parameter validation.
+- `ENT-135` Retire the bundled connector admin UI. Done; credential, health, policy, and dry-run operations remain available through authenticated APIs.
 
 **Acceptance:**
 
@@ -1250,10 +1239,10 @@ Residual P10 limitations:
 - Revoked credentials fail closed.
 - Connector access is scoped by project and role.
 - Slack credential creation refreshes the in-process registry from secret references.
-- Workbench Slack dry-run execution succeeds only when connector policy allows it.
+- Backend API Slack dry-run execution succeeds only when connector policy allows it.
 - Default connector policy requires approval for Slack outbound messages before connector code can run.
 - Google Chat credential creation refreshes the in-process registry from secret references.
-- Workbench Google Chat dry-run execution succeeds only when connector policy allows it.
+- Backend API Google Chat dry-run execution succeeds only when connector policy allows it.
 - Default connector policy requires approval for Google Chat outbound messages before connector code can run.
 
 ---
@@ -1300,7 +1289,7 @@ P10 starts after beta control plane is stable
 | Token audit | token tracker/audit files | model/backend invocation events |
 | Audit mode | `audit_mode.py` | high-risk approval and evidence workflow |
 | Source policy | `source_policy.py` | channel and remote API policy input |
-| Workbench admin token | `workbench_api.py` | sessions, roles, and admin APIs |
+| Legacy Backend API admin token | `workbench_api.py` | sessions, roles, and admin APIs |
 | Agent directory | `agent_directory.py` | project-scoped agent lookup |
 | HChat/Remote | `remote/` | channel gate, org/project trust, audit correlation |
 | Superloop evidence | Superloop store/taskboard | evidence bundles |
@@ -1320,7 +1309,7 @@ P10 starts after beta control plane is stable
 | Channel bypass | High | all transport ingress/egress must use channel gate |
 | Policy inconsistency | High | central `PolicyEvaluator`; no new local allow/deny systems |
 | SQLite scale concerns | Medium | store interface is pluggable; SQLite is MVP default |
-| Workbench UI delaying governance | Medium | ship Admin API before UI |
+| UI coupling delaying governance | Medium | keep governance API-first; Workbench has retired |
 | Connector risk | Medium | P10 deferred until governance plane is stable |
 
 ---

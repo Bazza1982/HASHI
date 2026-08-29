@@ -28,7 +28,7 @@ The current codebase already provides a usable standalone `Hashi Remote` foundat
   - This confirms `Hashi Remote` is already treated as a service, not core runtime.
 - `remote/api/server.py`
   - Exposes `/health`, `/peers`, `/hchat`, `/terminal/exec`, and pairing endpoints.
-  - Currently relays inbound remote hchat into the local Workbench API.
+  - Currently relays inbound remote hchat into the local Backend API.
 - `remote/peer/lan.py`
   - Advertises and discovers peers over mDNS using `_hashi._tcp.local.`
 - `remote/peer/registry.py`
@@ -109,7 +109,7 @@ The service boundary is already correct, but the communication state model is no
 Unchanged responsibilities:
 
 - local agent runtime
-- local Workbench `/api/chat`
+- local Backend API `/api/chat`
 - local transcript logging
 - local commands and workflows
 
@@ -515,7 +515,7 @@ This should be a distinct service object under `remote/`, not spread across `api
 
 `tools/hchat_send.py` should evolve toward:
 
-- local agent without suffix -> local Workbench path
+- local agent without suffix -> local Backend API path
 - explicit `agent@instance` -> resolve via remote peer directory
 - direct remote delivery first
 - central relay optional, not primary
@@ -628,7 +628,7 @@ This simplification is intentionally scoped to remote delivery only. Local
 Hchat must keep its current behaviour:
 
 - `/hchat agent ...` stays local and continues to enqueue through the local
-  Workbench/runtime path
+  Backend API/runtime path
 - `/hchat agent@INSTANCE ...` uses remote protocol transport
 - user-facing `/hchat` syntax stays unchanged
 
@@ -680,7 +680,7 @@ Preferred remote delivery result classes:
 - `target_instance_offline` — target instance cannot be reached, has no
   healthy Remote, or is not currently trusted/reachable as a peer
 - `target_agent_unavailable` — target instance is online, but the local HASHI
-  runtime/workbench cannot accept delivery for the target agent
+  runtime/backend-api cannot accept delivery for the target agent
 - `auth_failed` — shared-token HMAC authentication failed or trust is missing
 - `delivery_rejected` — target explicitly rejected the message, for example
   invalid payload, TTL violation, or policy refusal
@@ -703,7 +703,7 @@ Preferred mapping from protocol-facing errors to operator-facing Hchat results:
 Operator and user-facing surfaces should present:
 
 - one primary delivery status from the list above
-- one short explanatory note, for example `Remote online but local workbench
+- one short explanatory note, for example `Remote online but local Backend API
   unavailable`
 - optional low-level debug detail only as a secondary field
 

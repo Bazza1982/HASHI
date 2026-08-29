@@ -238,7 +238,7 @@ configuration, commands, or persistence. Range shorthand such as
 "medium-or-above" must be read and asserted as the named set of execution
 modes, never as task risk or provider reasoning.
 
-Command, Telegram, Workbench, job, and status tests must also prove that HER
+Command, Telegram, Backend API, job, and status tests must also prove that HER
 shows Direct, Fast path, Planned, Adaptive, Reviewed, and Assured while preserving the
 canonical `zero`, `low`, `medium`, `high`, `xhigh`, and `max` wire values. Direct
 must prove exactly one Quick-model call at default provider reasoning `high`, no
@@ -312,7 +312,7 @@ Cron and heartbeat regressions must prove that:
   boundaries;
 - nudge, delayed, and ordinary requests do not acquire scheduled-job effort
   from a source string or summary heuristic;
-- Workbench and Telegram manual Run preserve the explicit cron/heartbeat kind;
+- Backend API and Telegram manual Run preserve the explicit cron/heartbeat kind;
 - request and response audit metadata records configured effort, effective
   effort, resolution reason, job identity, and trigger.
 

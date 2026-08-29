@@ -16,9 +16,9 @@ Related documents:
 - [HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md](HASHI_ENTERPRISE_POSTGRES_LEASE_REHEARSAL.md)
 - [HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md](HASHI_ENTERPRISE_K8S_HA_REHEARSAL.md)
 
-**Workbench boundary:** UI/console statements in this review refer to the
-independent HASHI Workbench repository. HASHI itself owns the Backend API,
-governance services, and authenticated Workbench Gateway only.
+**Workbench boundary:** Workbench has retired. UI or console statements below
+are historical or superseded. Current validation covers the Backend API,
+governance services, and authenticated Remote API.
 
 ---
 
@@ -42,7 +42,7 @@ HASHI Enterprise AAI has reached an **MVP review-ready** state for the governed 
 - task, artifact, evidence bundle, verification, and escalation primitives;
 - Backend admin API surfaces for users, channels, policies, audit, approvals, health, and connectors;
 - Docker/Kubernetes ops skeleton with backup, restore, migration, and health checks;
-- P10 connector MVP with GitHub, Slack, Google Chat, Teams, and Feishu, scoped credentials, secret refs, policy gates, health, dry-run, audit, and admin UI.
+- P10 connector MVP with GitHub, Slack, Google Chat, Teams, and Feishu, scoped credentials, secret refs, policy gates, health, dry-run, audit, and admin APIs.
 
 This is **not** the end state of the enterprise product. It is the first
 reviewable and alpha-testable implementation slice.
@@ -50,7 +50,7 @@ reviewable and alpha-testable implementation slice.
 Alpha acceptance requires:
 
 - personal profile smoke stays smooth for local individual use;
-- enterprise APIs and the external Workbench integration contract pass targeted smoke;
+- enterprise APIs and authenticated Remote compatibility contracts pass targeted smoke;
 - enterprise connector dry-run, health, policy, and audit paths remain runnable;
 - deployment artifacts are present for Compose, Kubernetes, Helm, systemd,
   audit export, secret refs, HA rehearsal, and production validation planning;
@@ -98,7 +98,7 @@ Alpha acceptance requires:
 - Audit anchors can export a chain-range manifest with start/end hash, count, and anchor hash for later storage in WORM-capable systems.
 - Filesystem audit anchor sink can write hash-named read-only anchor objects with receipts and verification, providing a local WORM-style adapter for early deployments.
 - Object-store audit anchor sink can write hash-named anchor objects through an SDK-neutral client protocol with no-overwrite semantics, idempotent conflict handling, receipt verification, and object-lock metadata forwarding.
-- Audit export APIs support review and handoff; timeline rendering belongs to the independent Workbench.
+- Audit export APIs support review and handoff; no bundled timeline UI remains after Workbench retirement.
 - Audit export supports default ledger NDJSON plus SIEM/ECS-style and OpenTelemetry log-style NDJSON mappings.
 - Live audit export service primitive can push ledger/SIEM NDJSON or OTLP JSON log payloads from a hash-chain checkpoint through an injectable enterprise transport, persist file-backed checkpoints, and retry transient failures without advancing the checkpoint before delivery succeeds.
 - Live audit exporters create a checkpoint-adjacent singleton lock by default and fail closed when another exporter already holds it.
@@ -160,13 +160,9 @@ Alpha acceptance requires:
 - Default connector policy allows GitHub reads, requires approval for GitHub writes, and requires approval for Slack, Google Chat, Teams, and Feishu outbound messages.
 - Backend API connector credential creation rejects unsupported connector types, unsupported secret-ref schemes, and connector credentials missing their minimum internal scope.
 - Backend API exposes an admin-gated connector action schema catalog for supported GitHub and webhook connector actions.
-- Workbench Connector Test Run consumes the schema catalog to show parameter names, types, required flags, enum/default hints, and resource format.
-- Workbench Connector Test Run renders schema-driven controls for scalar, enum, and array parameters while keeping the raw JSON editor as an escape hatch.
-- Workbench Connector Test Run includes starter parameter presets for Slack blocks, Google Chat cards, Teams sections, and GitHub issue labels.
-- Workbench Connector Test Run validates required parameters, parameter types, and enum values before submitting connector execution requests.
 - Backend API connector execution also validates schema-required parameters, parameter types, and enum values before invoking policy-gated connector execution.
 - Backend API connector execution rejects webhook `message.send` actions without non-empty `text` before execution.
-- The independent Workbench Enterprise console consumes these contracts for connector credentials, health, policy defaults, and dry-run/test-run execution.
+- Connector administration is API-only after Workbench retirement.
 
 ### Deployment And Operations
 
@@ -194,15 +190,16 @@ pytest -q tests/test_workbench_enterprise_connectors.py \
 50 passed
 ```
 
-Recent Workbench integration contract checks passed:
+Recent Backend API and Remote compatibility contract checks passed:
 
 ```text
 pytest -q tests/test_remote_workbench_gateway.py \
   tests/test_workbench_enterprise_connectors.py
 ```
 
-The independent Workbench repository owns its UI build and private product
-tests; HASHI validates only the Backend API and authenticated gateway contract.
+Workbench has retired. HASHI validates only the Backend API and authenticated
+Remote compatibility contract; no Workbench UI build or product test suite
+remains in this repository.
 
 Phase 2 Enterprise Control Plane Alpha Lock checks passed:
 
@@ -281,9 +278,9 @@ operator review:
 
 The connector readiness tests cover:
 
-- Slack credential creation through Workbench API;
+- Slack credential creation through the Backend API;
 - registry refresh from a Slack secret reference;
-- Slack dry-run execution through the Workbench connector execution API;
+- Slack dry-run execution through the Backend connector execution API;
 - policy allow path for Slack dry-run;
 - default approval-required gate for Slack outbound messages;
 - Google Chat, Teams, and Feishu credential creation, registry refresh, dry-run execution, and default approval-required gate;
@@ -306,7 +303,6 @@ These are not blockers for Enterprise MVP review, but they are not complete:
 - Google Chat OAuth, space discovery, and user mapping;
 - GitHub PR create/merge actions;
 - full DLP/data residency enforcement across every runtime, non-webhook connector, channel, artifact export, and backend path;
-- browser-level UI screenshot regression tests for the Workbench Enterprise console.
 
 ---
 
@@ -319,8 +315,8 @@ Recommended review order:
 1. Run personal profile regression smoke to confirm no single-user regression.
 2. Run enterprise identity/channel/policy/audit tests.
 3. Run task/artifact/evidence/verification tests.
-4. Run connector tests and Workbench build.
-5. Manually inspect Workbench Enterprise console.
+4. Run connector and Backend API contract tests.
+5. Inspect the authenticated enterprise admin API responses.
 6. Decide whether to tag this as Enterprise AAI alpha or continue to the next hardening sprint.
 
 ---

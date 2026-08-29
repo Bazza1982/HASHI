@@ -69,7 +69,7 @@ Keep HASHI maintainable:
 - Minimal runtime core: put reusable HChat delivery helpers in a small module.
 - Hot-reboot friendly: avoid moving this into `main.py`; keep changes under
   orchestrator/runtime modules and tools.
-- Modular transport: local Workbench/API delivery and remote delivery should be
+- Modular transport: local Backend API delivery and remote delivery should be
   swappable under one helper.
 - Backward compatibility: preserve existing `/hchat` user behavior while the new
   pipeline is phased in.
@@ -197,7 +197,7 @@ Tasks:
   - call existing `tools.hchat_send.send_hchat()`,
   - return structured delivery status.
 - Do not duplicate target resolution or local/remote routing logic in the helper.
-  `send_hchat()` remains the single address-resolution path for local Workbench,
+  `send_hchat()` remains the single address-resolution path for local Backend API,
   contact cache, remote instance discovery, and relay behavior.
 - Keep `tools/hchat_send.py` as the transport primitive.
 - Add logging around target, route, delivery method, success/failure, and latency.

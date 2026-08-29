@@ -126,7 +126,7 @@ An individual user may be powerful in their own project, but they are not automa
 
 Channels should be controlled by the profile and by administrator policy.
 
-HASHI should support enterprise channels such as Microsoft Teams, Slack, Google Chat, Feishu/Lark, Workbench, and future connectors. It may also support Telegram, WhatsApp, email, voice, and local channels.
+HASHI should support enterprise channels such as Microsoft Teams, Slack, Google Chat, Feishu/Lark, authenticated API clients, and future connectors. It may also support Telegram, WhatsApp, email, voice, and local channels. Workbench has retired.
 
 The enterprise value is not opening every channel by default. Every channel is also a possible data-leak, impersonation, prompt-injection, and operational-risk surface.
 

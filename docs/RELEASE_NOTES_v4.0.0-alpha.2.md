@@ -165,7 +165,7 @@ restart.
 - **Provider and model routing** — Quick and Pro slots support Single or Hybrid
   stage routing, including another HASHI OpenAI-compatible Gateway through the
   HASHI API provider.
-- **Workbench Agent Overview** — one canonical, read-only, no-store API view of
+- **Backend API Agent Overview** — one canonical, read-only, no-store API view of
   Agent status, workzone, usage, system-prompt slots, and safe parked-topic
   summaries.
 - **Remote terminal authentication** — signed shared-token requests can use the

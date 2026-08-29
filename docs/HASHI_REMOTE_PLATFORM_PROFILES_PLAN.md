@@ -126,7 +126,7 @@ reliably.
 
 ## Port Allocation Policy
 
-The previous fixed-port model is a root cause of recurring Remote, Workbench,
+The previous fixed-port model is a root cause of recurring Remote, Backend API,
 and API conflicts. New installs should not assume that `8766`, `8767`, `18800`,
 or any other fixed port is globally available.
 
@@ -436,7 +436,7 @@ validation.
 
 ### Phase 1B: Stable Port Allocator
 
-- Add a local port allocator for Workbench API, API Gateway, and Hashi Remote.
+- Add a local port allocator for Backend API, API Gateway, and Hashi Remote.
 - Allocate uncommon random ports once and persist them in instance config.
 - Treat fixed ports as legacy migration hints, not permanent defaults.
 - Add OS-aware filtering for Linux/WSL ephemeral ranges and Windows excluded

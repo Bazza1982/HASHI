@@ -26,7 +26,7 @@ line and its follow-on HASHI work, including:
 - secure media, Tool Gateway/MCP, Habit/Meditation, and Dream integration;
 - source-integrated `/rebuild`, candidate adoption, cache correction, live
   verification documentation, and rollback safeguards;
-- the canonical Workbench Agent Overview and shared-token-authenticated remote
+- the canonical Backend API Agent Overview and shared-token-authenticated remote
   terminal work that existed on separate clean feature branches.
 
 The original feature branches and pre-consolidation refs remain available for

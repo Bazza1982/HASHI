@@ -11,7 +11,9 @@ This is `HASHI（develop code name bridge-u-f)`, a local multi-agent bridge.
   2. Create a dedicated directory in `workspaces/<agent_id>/`.
   3. Convert the seed into strict `[persona]`, `[sys]`, and optional `[memory]` blocks, then write it to the exact lower-case `workspaces/<agent_id>/agent.md` path. Do not leave substantive text outside these blocks.
   4. Update `agents.json` by adding a new entry to the `agents` list. Refer to `agents.json.samples` for the standard Flex Agent schema. Do not add the retired `system_md` field.
-  5. Configure credentials in `secrets.json`. Use `WORKBENCH_ONLY_NO_TOKEN` if a Telegram token is not yet available.
+  5. Configure credentials in `secrets.json`. If a Telegram token is not yet
+     available, use the legacy compatibility sentinel
+     `WORKBENCH_ONLY_NO_TOKEN`; its name does not indicate a live Workbench.
   6. Ask the user to authorise the appropriate `/reboot` scope so the validated configuration can be loaded.
 
 ## Agent Type and Runtime Modes

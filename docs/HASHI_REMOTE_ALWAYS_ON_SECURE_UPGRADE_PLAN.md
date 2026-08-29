@@ -65,7 +65,7 @@ The main gaps are operational and security related:
 2. Make Remote safe to expose on trusted LAN/Tailscale by requiring a shared
    security token for protocol trust.
 3. Keep Remote independently supervised so it survives HASHI core crashes,
-   terminal closure, agent reboot, and Workbench stalls.
+   terminal closure, agent reboot, and Backend API stalls.
 4. Keep Remote explicitly disableable through config, CLI, and `/remote off`.
 5. Make behavior consistent across Windows, WSL, Linux, and same-host mixed
    deployments.
@@ -107,7 +107,7 @@ Hashi Remote Side Program
 HASHI Core Process
         |
         +-- agents
-        +-- Workbench API
+        +-- Backend API
         +-- Telegram / WhatsApp / local runtime services
 ```
 
@@ -366,7 +366,7 @@ Remote should continuously publish:
 - host identity,
 - environment kind,
 - remote port,
-- workbench port,
+- Backend API port (configured through the legacy `workbench_port` field),
 - protocol version,
 - capabilities,
 - address candidates,
@@ -381,7 +381,7 @@ Remote should refresh and advertise local agent metadata when:
 - Remote starts;
 - `agents.json` changes;
 - HASHI core starts or stops;
-- Workbench health changes;
+- Backend API health changes;
 - an agent becomes active/inactive;
 - a peer handshakes;
 - periodic refresh interval elapses.
@@ -462,11 +462,11 @@ Same-host multi-instance deployments must not reuse the same Remote port.
 Common layout:
 
 ```text
-HASHI1 Remote 8766, Workbench 18800
-HASHI2 Remote 8767, Workbench 18802
-HASHI9 Remote 8768, Workbench 18819
-INTEL  Remote 8766, Workbench 18802
-MSI    Remote 8767, Workbench 8779
+HASHI1 Remote 8766, Backend API 18800
+HASHI2 Remote 8767, Backend API 18802
+HASHI9 Remote 8768, Backend API 18819
+INTEL  Remote 8766, Backend API 18802
+MSI    Remote 8767, Backend API 8779
 ```
 
 The repeated INTEL/MSI ports are safe only because they are on different hosts.
@@ -744,7 +744,7 @@ Purpose: make Remote useful when HASHI core is down.
 
 Work:
 
-- Ensure supervised Remote can start without Workbench.
+- Ensure supervised Remote can start without the Backend API.
 - Keep rescue status/start independent of core.
 - Add authenticated remote assist commands for status, logs, and fixed HASHI
   start.
@@ -808,7 +808,7 @@ Validation:
   enabled during rolling deployment;
 - `/remote off` prevents supervisor restart;
 - HASHI core down while Remote stays alive;
-- rescue status works without Workbench.
+- rescue status works without the Backend API.
 
 ### Manual Acceptance Matrix
 
@@ -941,5 +941,5 @@ The upgrade is complete when:
 - Active agent lists refresh without restarting Remote.
 - HASHI1/HASHI2/HASHI9/INTEL style deployments show correct peer status.
 - WSL/Windows same-host routes are deterministic and logged.
-- Remote rescue status works when Workbench is down.
+- Remote rescue status works when the Backend API is down.
 - Tests cover auth, lifecycle, discovery, routing, and rescue behavior.

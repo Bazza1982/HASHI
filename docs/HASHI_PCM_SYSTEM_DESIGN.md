@@ -34,7 +34,7 @@ You are a helpful assistant named Lily.
 
 A persona should normally describe the agent’s name, role, tone, preferred form of address, default language and optional emoji use.
 
-A PCM-compatible backend may extract this block when it only needs persona information for message rendering or delivery. The persona block supports persona-aware rendering before delivery. Telegram and Workbench delivery transports do not interpret the persona themselves.
+A PCM-compatible backend may extract this block when it only needs persona information for message rendering or delivery. The persona block supports persona-aware rendering before delivery. Telegram and Backend API delivery transports do not interpret the persona themselves.
 
 ## 4. Context
 

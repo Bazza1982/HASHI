@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Workbench retired** — removed the bundled frontend, Node server, launchers,
+  assets, local UI data, dependencies, and UI-specific tests. HASHI retains
+  only the authenticated Backend API and legacy compatibility identifiers such
+  as `workbench_port`, `workbench_api.py`, and `/workbench/v1/*`.
+
 ### Added
 
 - **Telegram Quiet notification mode** — expanded `/notify` to

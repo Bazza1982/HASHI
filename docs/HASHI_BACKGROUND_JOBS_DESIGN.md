@@ -1,8 +1,11 @@
 # HASHI Background Jobs Design
 
-Status: historical design plus Phase 1/Workbench implementation notes
+Status: historical design plus Phase 1/Backend API implementation notes
 Date: 2026-07-06
-Scope: HASHI runtime, HASHI Remote, Workbench, governed tool execution
+Scope: HASHI runtime, HASHI Remote, Backend API, governed tool execution
+
+Workbench has retired. Names such as `workbench_api.py` remain only as
+compatibility identifiers for the Backend API.
 
 > Runtime file references below describe the July 2026 implementation
 > baseline. The legacy fixed runtime has since been removed; current Background
@@ -24,7 +27,7 @@ The target capability is:
   launch source, stdout/stderr logs, and notification preferences;
 - HASHI monitors process state and records terminal outcome;
 - completion, failure, timeout, or cancellation can be reported back to the
-  originating chat, Workbench session, or remote peer;
+  originating chat, Backend API session, or remote peer;
 - operators can list, inspect, tail, cancel, and audit jobs after the original
   turn has ended;
 - the design remains compatible with personal/local HASHI and enterprise AAI
@@ -58,7 +61,7 @@ HASHI operation:
 - Job state includes command metadata, cwd, owner agent, origin metadata,
   process pid/pgid, stdout/stderr paths, terminal return code, bounded last
   output, notification flags, and terminal event metadata.
-- Workbench exposes structured job APIs for start, list/detail, tail, and
+- The Backend API exposes structured job endpoints for start, list/detail, tail, and
   cancellation:
 
 ```text
@@ -69,8 +72,8 @@ GET  /api/background-jobs/{job_id}/tail
 POST /api/background-jobs/{job_id}/cancel
 ```
 
-- Workbench job starts accept both shell strings and argv arrays.
-- `/reboot` hot reload recreates the Workbench API service so changed route
+- Backend API job starts accept both shell strings and argv arrays.
+- `/reboot` hot reload recreates the Backend API service so changed route
   handlers are loaded without requiring a full process restart.
 - Terminal success/failure notifications can be delivered back to the user.
 - Terminal success/failure can also enqueue a one-shot
@@ -81,9 +84,9 @@ POST /api/background-jobs/{job_id}/cancel
 
 Validated smoke coverage includes:
 
-- short argv job start through Workbench API;
+- short argv job start through Backend API;
 - subprocess completion and notification delivery;
-- command-array handling through Workbench API;
+- command-array handling through Backend API;
 - one-shot completion event enqueue;
 - user-visible agent report delivery from a completion event;
 - a live 3-minute sleep job that completed, woke Zelda through
@@ -284,7 +287,7 @@ it would blur synchronous command semantics, create client compatibility risk,
 and bypass the stronger job policy surface. Background jobs require a dedicated
 capability and endpoint family.
 
-### Workbench And Notification Surfaces
+### Backend API And Notification Surfaces
 
 Relevant files:
 
@@ -294,22 +297,22 @@ Relevant files:
 
 Current strengths:
 
-- Workbench already exposes `/api/admin/notify`, authenticated with the
-  Workbench admin token.
+- The Backend API already exposes `/api/admin/notify`, authenticated with the
+  legacy `workbench_admin_token` compatibility setting.
 - `handle_admin_notify()` resolves a runtime by agent name and sends text to
   the runtime's primary chat when `chat_id` is absent.
-- Workbench transfer paths already send operational chat notifications.
+- Backend API transfer paths already send operational chat notifications.
 
 Current gaps:
 
-- Workbench has no job API: no job list, job detail, log tail, cancel, or
+- The Backend API originally had no job endpoints: no job list, job detail, log tail, cancel, or
   notification preference endpoints.
 - Notification is text-only. It does not carry structured job metadata for UI
   rendering.
 
 Design implication:
 
-Workbench should expose structured Background Jobs endpoints rather than only
+The Backend API should expose structured Background Jobs endpoints rather than only
 consume completion notifications. Text notification is a delivery channel, not
 the source of truth.
 
@@ -393,7 +396,7 @@ Background Jobs should support:
   supervision;
 - hchat-originated jobs whose completion can be routed back to the originating
   agent conversation;
-- Workbench dashboards and future enterprise audit views.
+- authenticated dashboards and future enterprise audit clients.
 
 ### Non-Goals
 
@@ -457,7 +460,7 @@ classes:
 - `BackgroundProcessRunner`
 - `BackgroundJobMonitor`
 
-Policy can start as a focused helper owned by the manager. Workbench and Remote
+Policy can start as a focused helper owned by the manager. Backend API and Remote
 route handlers should call the manager directly; they should not introduce a
 pass-through `ApiAdapter` layer until there is real cross-transport complexity
 that justifies it.
@@ -466,7 +469,7 @@ that justifies it.
 
 `BackgroundJobManager`
 
-- public service API used by runtime commands, Workbench, Remote, scheduler, and
+- public service API used by runtime commands, Backend API, Remote, scheduler, and
   tools;
 - coordinates validation, persistence, process start, status transitions,
   monitor registration, and notifications.
@@ -510,7 +513,7 @@ that justifies it.
 
 - emits structured completion events;
 - sends Telegram/chat text through runtime delivery helpers;
-- emits Workbench events;
+- emits Backend API events;
 - can enqueue one-shot `background-job-event` requests to the responsible
   agent for terminal success/failure follow-up;
 - optionally sends hchat/protocol replies when a job was remote-originated.
@@ -534,7 +537,7 @@ service_manager.stop_background_jobs()
 service_manager.restart_background_jobs()
 ```
 
-The kernel handle exists so Workbench, runtimes, scheduler, Remote hooks, and
+The kernel handle exists so Backend API, runtimes, scheduler, Remote hooks, and
 commands can address one manager consistently. The implementation remains in
 Layer 2 and must avoid protected core business logic.
 
@@ -544,7 +547,7 @@ This is important for:
 - admin/operator cancellation;
 - per-agent and per-instance concurrency quotas;
 - `/reboot` behavior;
-- Workbench read-only dashboards;
+- authenticated read-only dashboards;
 - future enterprise audit and project scoping.
 
 ### Layer Placement
@@ -683,7 +686,7 @@ Personal/local default:
 
 The Phase 1 store should be SQLite, not JSON. SQLite is still local,
 dependency-light, and compatible with personal HASHI, but it gives better
-concurrency safety, idempotency, Workbench query support, and future migration
+concurrency safety, idempotency, Backend API query support, and future migration
 paths than an `index.json` file.
 
 JSON may be added later as an export/backup format. If a future local profile
@@ -816,7 +819,7 @@ and register through the existing `RuntimeCommand` mechanism.
 Telegram output must be concise. Full logs should not be dumped into chat.
 `tail` should default to a small bounded excerpt.
 
-### Workbench API
+### Backend API
 
 Implemented endpoints:
 
@@ -834,10 +837,10 @@ Planned endpoint:
 POST /api/background-jobs/{job_id}/notify
 ```
 
-Workbench should treat the job store as the source of truth and should render
-structured job metadata, not parse chat notifications.
+Backend API clients should treat the job store as the source of truth and use
+structured job metadata rather than parse chat notifications.
 
-Read-only Workbench endpoints are now available:
+Read-only Backend API endpoints are now available:
 
 ```text
 GET /api/background-jobs
@@ -892,7 +895,7 @@ instance may request intent; it does not lend its local permissions to the
 target.
 
 Remote notification retry must be durable. A Remote sidecar that completes a
-job while the local HASHI core or Workbench is offline should persist a pending
+job while the local HASHI core or Backend API is offline should persist a pending
 notification record and retry later with idempotency keys.
 
 ### Tool Surface
@@ -1013,7 +1016,7 @@ A job has:
 - owning agent;
 - owning instance;
 - origin source;
-- chat id or Workbench session when applicable;
+- chat id or Backend API session when applicable;
 - optional remote correlation.
 
 Cancellation should require the same actor class or an operator/admin channel.
@@ -1032,7 +1035,7 @@ Notifications are events derived from job state, not the job state itself.
 Supported notification targets:
 
 - Telegram chat through `FlexibleAgentRuntime._send_text`;
-- Workbench event stream or API notification;
+- Backend API event stream or notification;
 - HChat/protocol reply for remote-originated jobs;
 - future enterprise webhook/audit sinks.
 
@@ -1102,7 +1105,7 @@ Risk:
 Policy:
 
 - Remote stores terminal state locally;
-- retry notification when Workbench becomes reachable;
+- retry notification when the Backend API becomes reachable;
 - persist retry intent in `pending_notifications.db` or an equivalent durable
   queue, not only in memory;
 - expose status via Remote API.
@@ -1204,7 +1207,7 @@ This is not the shortest path. It is the serious, durable path.
   recovery marking, and notification idempotency.
 - Add local runtime service initialization in the function/service layer without
   moving supervision logic into protected core.
-- Keep Remote, Workbench write APIs, and model-facing tools out of scope.
+- Keep Remote, Backend write APIs, and model-facing tools out of scope.
 - Keep `/bg` command routing out of scope unless it is needed only as a thin
   manual smoke adapter; the manager API and tests are the source of truth.
 
@@ -1237,9 +1240,9 @@ Acceptance:
 - `flow_trigger.py` has an explicit migration contract;
 - no model-facing tools are required for these guardrails.
 
-### Phase 1b: Workbench API, Telegram Adapter, And Agent Terminal Events
+### Phase 1b: Backend API, Telegram Adapter, And Agent Terminal Events
 
-- Add structured Workbench endpoints:
+- Add structured Backend API endpoints:
   - `POST /api/background-jobs`
   - `GET /api/background-jobs`
   - `GET /api/background-jobs/{job_id}`
@@ -1254,14 +1257,14 @@ Acceptance:
 
 Acceptance:
 
-- Workbench can render a jobs dashboard without scraping transcripts.
+- Authenticated clients can render a jobs dashboard without scraping transcripts.
 - Telegram can start/list/status/tail/cancel without owning job semantics.
 - terminal success/failure can wake the responsible agent once and produce a
   user-visible report without exposing the internal event payload.
 
 ### Phase 2: Write APIs, Cancellation, Retention, And Quotas
 
-- Add Workbench notification preference endpoints.
+- Add Backend API notification preference endpoints.
 - Add retention cleanup.
 - Add per-agent and per-instance quotas in Layer 4 config.
 - Add cross-agent/admin cancellation policy tests.
@@ -1333,8 +1336,8 @@ Integration tests:
 - start failing command and detect failure;
 - cancel long command;
 - verify logs are written;
-- verify Telegram/Workbench notification hooks are called through fakes;
-- verify Workbench read-only API can query jobs without transcript scraping;
+- verify Telegram/Backend API notification hooks are called through fakes;
+- verify the Backend read-only API can query jobs without transcript scraping;
 - verify Remote API refuses background jobs without capability/auth.
 
 Regression tests:
@@ -1345,7 +1348,7 @@ Regression tests:
 - scheduler tests still treat cron/heartbeat as trigger definitions;
 - scheduler integration creates a job id instead of waiting for long OS process
   completion;
-- Workbench `/api/admin/notify` remains compatible.
+- Backend API `/api/admin/notify` remains compatible.
 
 Manual smoke:
 
@@ -1369,7 +1372,7 @@ GET /background/jobs/{job_id}/tail
 1. Store format for Phase 1:
    - Decision: use SQLite for Phase 1 local/personal.
    - Rationale: concurrent-safe enough for this service, simple to query from
-     Workbench, better for idempotent notification/cancel tracking, and still
+     Backend API, better for idempotent notification/cancel tracking, and still
      local-first.
    - JSON remains an export/backup format, not the authoritative live store.
 

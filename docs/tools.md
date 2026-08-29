@@ -1,7 +1,7 @@
 # Tools
 
 ## Universal Multi-Agent Telegram Orchestrator (`bridge-u-f`)
-The `bridge-u-f` project located at `<project_root>` is a local multi-agent bridge that connects Telegram bots (and optionally WhatsApp) to multiple AI backends, with an optional browser workbench.
+The `bridge-u-f` project located at `<project_root>` is a local multi-agent bridge that connects Telegram bots (and optionally WhatsApp) to multiple AI backends, with TUI and authenticated Backend API surfaces.
 
 Five runtime execution modes are available to a Flex Agent:
 - **Fixed mode:** keep one selected session-capable backend and its native session.
@@ -80,7 +80,7 @@ Five runtime execution modes are available to a Flex Agent:
 - `/voice [status|on|off|provider|providers|voices|use <alias>]` — control native bridge-owned voice replies
 - `/reboot [min|max|number|help]` — preflight and hot-reload Python code,
   rebuild managers, restart the exact selected lifecycle scope, and
-  warm-recreate Workbench/API gateway/scheduler/watchers; `min` and numbered
+  warm-recreate the Backend API/gateway/scheduler/watchers; `min` and numbered
   targets are never widened or rejected because a valid class interface
   changed, while the process lock and live WhatsApp transport remain intact
 - `/rebuild` — one-version compatibility notice for the retired native HER build workflow; performs no build, reload, or restart
@@ -445,17 +445,19 @@ Agents can be started and stopped without restarting the bridge process.
 - **Telegram:** `/start` (inline keyboard), `/terminate` in agent chat
 - Implementation in `main.py`: `start_agent()` / `stop_agent()` methods.
 
-## External HASHI Workbench
+## Workbench (Retired)
 
-- HASHI contains the local Python Backend API (`orchestrator/workbench_api.py`),
-  not a browser frontend or Node server.
+- Workbench has retired. HASHI no longer includes its browser frontend, Node
+  server, startup scripts, assets, data, dependencies, or UI tests.
+- HASHI retains the local Python Backend API in
+  `orchestrator/workbench_api.py` for authenticated API clients.
 - The Backend API listens on the configured `global.workbench_port`; this field
-  name is retained for compatibility.
-- Hashi Remote provides the shared-token authenticated `/workbench/v1/*`
-  gateway for an independently installed HASHI Workbench.
-- Telegram, TUI, and authenticated Workbench traffic share the same agent queue
-  and runtime state.
-- Workbench is launched, updated, tested, and packaged from its own repository.
+  name is retained only for compatibility.
+- Hashi Remote retains the shared-token-authenticated `/workbench/v1/*` route
+  family as a compatibility interface. Its name does not indicate that
+  Workbench is still part of HASHI.
+- Telegram, TUI, and authenticated API traffic share the same agent queues and
+  runtime state.
 
 ## WhatsApp Transport
 - Optional; uses the complete WhatsApp profile
