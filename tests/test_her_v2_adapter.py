@@ -209,6 +209,25 @@ def _global_config(tmp_path):
     )
 
 
+def _strategy_payload(classification: str, goal: str) -> dict[str, object]:
+    work = classification in {"SIMPLE_TASK", "COMPLEX_TASK", "HIGH_VOLUME_TASK"}
+    return {
+        "classification": classification,
+        "real_goal": goal,
+        "selected_strategy_cards": ["SIMPLE_QA"] if work else [],
+        "relevant_habits": [],
+        "execution_brief": {
+            "strategy": "Execute and verify." if work else "",
+            "stages": ["Execute", "Verify"] if work else [],
+            "dependencies": [],
+            "verification": ["Verify the requested outcome"] if work else [],
+            "success_criteria": ["The requested outcome is complete"] if work else [],
+            "replan_conditions": ["Evidence invalidates the approach"] if work else [],
+        },
+        "clarification": None,
+    }
+
+
 class _DirectProvider:
     def __init__(self):
         self.requests = []
@@ -218,12 +237,7 @@ class _DirectProvider:
         if request.stage is Stage.IMMEDIATE_RESPONSE:
             data = {"message": "Hello from HER v2."}
         elif request.stage is Stage.TRIAGE:
-            data = {
-                "classification": "DIRECT_RESPONSE",
-                "real_goal": request.goal,
-                "relevant_habits": [],
-                "clarification": None,
-            }
+            data = _strategy_payload("DIRECT_RESPONSE", request.goal)
         else:
             raise AssertionError(f"unexpected stage: {request.stage}")
         return StageResponse(
@@ -427,12 +441,7 @@ class _WorkAndMeditationProvider(_DirectProvider):
         self.requests.append((profile, request))
         payload = {
             Stage.IMMEDIATE_RESPONSE: {"message": "I have it."},
-            Stage.TRIAGE: {
-                "classification": "SIMPLE_TASK",
-                "real_goal": request.goal,
-                "relevant_habits": [],
-                "clarification": None,
-            },
+            Stage.TRIAGE: _strategy_payload("SIMPLE_TASK", request.goal),
             Stage.EXECUTION: {
                 "disposition": "COMPLETED",
                 "summary": "Verified and completed the requested work.",
@@ -483,12 +492,7 @@ class _SideEffectFailureProvider(_DirectProvider):
         if request.stage is Stage.IMMEDIATE_RESPONSE:
             payload = {"message": "I have it."}
         elif request.stage is Stage.TRIAGE:
-            payload = {
-                "classification": "SIMPLE_TASK",
-                "real_goal": request.goal,
-                "relevant_habits": [],
-                "clarification": None,
-            }
+            payload = _strategy_payload("SIMPLE_TASK", request.goal)
         elif request.stage is Stage.EXECUTION:
             request.provider_activity_callback(
                 {
@@ -567,12 +571,7 @@ class _EffortPolicyProvider:
             )
         payload = {
             Stage.IMMEDIATE_RESPONSE: {"message": "I have it."},
-            Stage.TRIAGE: {
-                "classification": "SIMPLE_TASK",
-                "real_goal": request.goal,
-                "relevant_habits": [],
-                "clarification": None,
-            },
+            Stage.TRIAGE: _strategy_payload("SIMPLE_TASK", request.goal),
             Stage.PLANNING: {
                 "plan": ["Execute the scheduled specification"],
                 "success_criteria": ["The scheduled specification is completed"],
@@ -959,12 +958,7 @@ async def test_adapter_accepts_primary_execution_natural_language_without_finali
             if request.stage is Stage.IMMEDIATE_RESPONSE:
                 payload = {"message": "I have it."}
             elif request.stage is Stage.TRIAGE:
-                payload = {
-                    "classification": "SIMPLE_TASK",
-                    "real_goal": request.goal,
-                    "relevant_habits": [],
-                    "clarification": None,
-                }
+                payload = _strategy_payload("SIMPLE_TASK", request.goal)
             elif request.stage is Stage.EXECUTION:
                 return StageResponse(
                     text="execution reply without valid JSON",
@@ -1994,7 +1988,7 @@ async def test_persona_packaging_retries_once_with_a_fresh_backend(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_triage_receives_complete_policy_and_minimal_turn_prompt():
+async def test_strategy_receives_complete_policy_and_minimal_turn_prompt():
     manager = _FakeManager()
     provider = HashiStageProvider(backend_manager=manager)
     profile = ProviderProfile(
@@ -2018,7 +2012,7 @@ async def test_triage_receives_complete_policy_and_minimal_turn_prompt():
     await provider.invoke(profile, request)
 
     backend = manager.backends[-1]
-    assert "triage classifier and context preparation agent" in backend.sys_prompt
+    assert "task strategist and context preparation agent" in backend.sys_prompt
     assert "configured agent persona" not in backend.sys_prompt
     assert "Original user request and context" in backend.sys_prompt
     assert "Earlier context already contains the result. Please check it." in (
@@ -2043,6 +2037,8 @@ async def test_triage_receives_complete_policy_and_minimal_turn_prompt():
         assert decision_boundary in backend.sys_prompt
     assert "Return exactly one valid JSON object" in backend.sys_prompt
     assert '"real_goal"' in backend.sys_prompt
+    assert '"selected_strategy_cards"' in backend.sys_prompt
+    assert '"execution_brief"' in backend.sys_prompt
     assert '"relevant_habits"' in backend.sys_prompt
     assert "checkpoint_policy" not in backend.sys_prompt
     assert "checkpoint_reason" not in backend.sys_prompt

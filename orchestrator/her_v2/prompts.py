@@ -19,9 +19,20 @@ _SCHEMAS = {
             "concise resolved operational goal; null only when "
             "CONFIRMATION_REQUIRED because the goal cannot be resolved reliably"
         ),
+        "selected_strategy_cards": [
+            "exact Strategy Card ID selected from the supplied Playbook"
+        ],
         "relevant_habits": [
             "exact unchanged entry selected from the supplied habit_catalogue"
         ],
+        "execution_brief": {
+            "strategy": "overall strategic approach; empty for non-work paths",
+            "stages": ["major strategic stage"],
+            "dependencies": ["important sequence, prerequisite, or parallelism"],
+            "verification": ["verification approach or evidence standard"],
+            "success_criteria": ["observable completion condition"],
+            "replan_conditions": ["condition that should trigger replanning"],
+        },
         "clarification": (
             "a concrete question required only for CONFIRMATION_REQUIRED; otherwise "
             "null"
@@ -234,12 +245,27 @@ def render_stage_prompt(request: StageRequest) -> str:
             else []
         )
         return render_prompt_asset(
-            "system_triage",
+            "system_strategy",
             goal=request.goal,
+            strategy_cards=json.dumps(
+                request.context.get("strategy_cards") or {},
+                ensure_ascii=False,
+                indent=2,
+            ),
             habit_catalogue=json.dumps(
                 habit_catalogue, ensure_ascii=False, indent=2
             ),
-            schema_v2=json.dumps(
+            execution_capabilities=json.dumps(
+                request.context.get("execution_capabilities") or {},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            request_resources=json.dumps(
+                request.context.get("request_resources") or {},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            schema_v3=json.dumps(
                 _SCHEMAS[Stage.TRIAGE], ensure_ascii=False, indent=2
             ),
         )
@@ -560,6 +586,7 @@ def render_execution_system_prompt(
     relevant_habits: Sequence[str],
     active_plan: Mapping[str, Any] | None,
     delegated_execution: Mapping[str, Any] | None,
+    strategy_handoff: Mapping[str, Any] | None,
     tool_catalogue: Sequence[Mapping[str, Any]],
     guidance: str,
     display_name: str,
@@ -583,6 +610,11 @@ def render_execution_system_prompt(
             json.dumps(dict(delegated_execution), ensure_ascii=False, indent=2)
             if delegated_execution is not None
             else "No delegated execution batch was attached."
+        ),
+        strategy_handoff=(
+            json.dumps(dict(strategy_handoff), ensure_ascii=False, indent=2)
+            if strategy_handoff is not None
+            else "No Strategy handoff was supplied for this execution path."
         ),
         tool_catalogue=(
             json.dumps(list(tool_catalogue), ensure_ascii=False, indent=2)

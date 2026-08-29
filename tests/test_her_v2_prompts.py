@@ -48,6 +48,7 @@ def test_external_prompt_inventory_is_complete_and_cwd_independent(
     monkeypatch.chdir(tmp_path)
     prompt_catalog.validate_prompt_assets()
     assert "triage classifier" in prompt_catalog.load_prompt_asset("system_triage")
+    assert "task strategist" in prompt_catalog.load_prompt_asset("system_strategy")
 
 
 def test_json_repair_prompt_is_generic_tool_free_and_data_driven() -> None:
@@ -207,6 +208,24 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
             "plan_id": "turn-1:plan:v1",
             "results": [{"assignment_id": "worker", "summary": "Inspected."}],
         },
+        strategy_handoff={
+            "selected_strategy_cards": [
+                {
+                    "id": "CODE_MODIFY",
+                    "version": "1.0.0",
+                    "title": "功能修改与扩展",
+                    "content": "Inspect architecture, modify, and verify.",
+                }
+            ],
+            "execution_brief": {
+                "strategy": "Inspect, modify, and verify.",
+                "stages": ["Inspect", "Modify", "Verify"],
+                "dependencies": ["Modify follows inspection"],
+                "verification": ["Run focused tests"],
+                "success_criteria": ["Requested behaviour works"],
+                "replan_conditions": ["Architecture differs from assumptions"],
+            },
+        },
         tool_catalogue=[{"function": {"name": "file_read"}}],
         **common,
     )
@@ -215,6 +234,8 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
     assert '"name": "file_read"' in execution
     assert '"plan_id": "turn-1:plan:v1"' in execution
     assert '"assignment_id": "worker"' in execution
+    assert '"id": "CODE_MODIFY"' in execution
+    assert "Inspect, modify, and verify." in execution
     assert "Inspect current state before reporting." in execution
     assert "Speak plainly." in execution
     assert "Return exactly one JSON object" not in execution
@@ -501,21 +522,40 @@ def test_review_uses_one_complete_prompt_with_draft_plan_and_actual_tools() -> N
     assert "$active_plan" not in review_system
 
 
-def test_triage_uses_schema_v2_with_goal_resolution_and_habit_catalogue() -> None:
+def test_strategy_uses_schema_v3_with_playbook_capabilities_and_resources() -> None:
     request = _request(
         Stage.TRIAGE,
         habit_catalogue=["[inspect-first] Inspect current state before reporting."],
+        strategy_cards={
+            "playbook_version": "1",
+            "cards": [
+                {
+                    "id": "CODE_MODIFY",
+                    "version": "1.0.0",
+                    "title": "Modify code",
+                    "content": "Inspect, modify, and verify.",
+                }
+            ],
+        },
+        execution_capabilities={"tools": [{"function": {"name": "file_read"}}]},
+        request_resources={"attachments": [{"attachment_id": "attachment-1"}]},
     )
     system_prompt = render_internal_stage_system_prompt(request)
     stage_prompt = render_stage_prompt(request)
 
     assert system_prompt == stage_prompt
-    assert "triage classifier and context preparation agent" in stage_prompt
+    assert "task strategist and context preparation agent" in stage_prompt
     assert "Original user request and context" in stage_prompt
     assert '"real_goal"' in stage_prompt
+    assert '"selected_strategy_cards"' in stage_prompt
+    assert '"execution_brief"' in stage_prompt
     assert '"relevant_habits"' in stage_prompt
+    assert '"id": "CODE_MODIFY"' in stage_prompt
+    assert '"name": "file_read"' in stage_prompt
+    assert '"attachment_id": "attachment-1"' in stage_prompt
     assert "[inspect-first] Inspect current state before reporting." in stage_prompt
-    assert "$schema_v2" not in stage_prompt
+    assert "$schema_v3" not in stage_prompt
+    assert "$strategy_cards" not in stage_prompt
     assert "$habit_catalogue" not in stage_prompt
     assert "checkpoint_policy" not in stage_prompt
     assert "checkpoint_reason" not in stage_prompt

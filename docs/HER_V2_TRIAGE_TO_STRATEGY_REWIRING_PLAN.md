@@ -2,12 +2,29 @@
 
 | Field | Value |
 |---|---|
-| Status | Design agreed; implementation and activation pending |
+| Status | Fast/Low Strategy-to-Execution slice implemented and verified; broader paths pending |
 | Date | 2026-08-30 |
 | Experiment environment | HASHI3 only |
-| Current production effect | None; this document does not rewire HER v2 |
+| Current production effect | None until an authorised HASHI3 hot reload |
 | Core change | Replace prompt-only Triage with a tool-capable Strategy stage that classifies the request, selects Strategy Cards, and prepares a concise execution brief |
-| Activation | Requires separate implementation, verification, user approval, and an authorised HASHI3 hot reload |
+| Activation | Fast/Low implementation is ready; activation still requires an authorised HASHI3 hot reload |
+
+## Implementation checkpoint — 2026-08-30
+
+The first experimental slice is implemented in HASHI3:
+
+- the legacy `Stage.TRIAGE` wire stage now renders the Strategy prompt and
+  validates schema v3;
+- the Strategist receives the complete 38-card external Playbook, complete PCM,
+  current request resources, downstream capabilities, and the normal HASHI
+  tools/skills with current-request side-effect authority;
+- the HASHI3 local Triage route is assigned to the Pro model slot;
+- Low effort skips Planning as before and passes one `strategy_handoff` to
+  Execution containing only the selected Card snapshots and six-field
+  `execution_brief`;
+- Medium and higher paths retain their existing Planning and downstream
+  behaviour for this slice; and
+- the HER v2 regression suite passes before activation.
 
 ## 1. Purpose
 

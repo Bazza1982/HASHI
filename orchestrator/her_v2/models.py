@@ -267,6 +267,18 @@ class TriageDecision:
 
 
 @dataclass(frozen=True)
+class StrategyDecision:
+    """Validated Strategy schema-v3 handoff at the legacy Triage wire stage."""
+
+    classification: TriageClassification
+    real_goal: str
+    selected_strategy_cards: tuple[str, ...] = ()
+    relevant_habits: tuple[str, ...] = ()
+    execution_brief: Mapping[str, Any] = field(default_factory=dict)
+    clarification: str = ""
+
+
+@dataclass(frozen=True)
 class ReplanningOutcome:
     """Validated answers to the compulsory HER v2 Replanning calibration."""
 

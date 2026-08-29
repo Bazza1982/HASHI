@@ -17,6 +17,7 @@ from .models import (
     ReviewFinding,
     ReviewOutcome,
     StageResponse,
+    StrategyDecision,
     TriageClassification,
     TriageDecision,
 )
@@ -70,7 +71,16 @@ def _mapping_key(value: Mapping[str, Any]) -> str:
 
 
 def _semantic_key(value: Any) -> str:
-    if isinstance(value, TriageDecision):
+    if isinstance(value, StrategyDecision):
+        value = {
+            "classification": value.classification.value,
+            "real_goal": value.real_goal,
+            "selected_strategy_cards": value.selected_strategy_cards,
+            "relevant_habits": value.relevant_habits,
+            "execution_brief": dict(value.execution_brief),
+            "clarification": value.clarification,
+        }
+    elif isinstance(value, TriageDecision):
         value = {
             "classification": value.classification.value,
             "real_goal": value.real_goal,
@@ -497,6 +507,125 @@ def parse_triage(data: Mapping[str, Any]) -> TriageDecision:
             "Triage schema v2 requires a non-empty real_goal for resolved requests"
         )
     return TriageDecision(classification, real_goal, relevant_habits, clarification)
+
+
+@_stage_parser()
+def parse_strategy(data: Mapping[str, Any]) -> StrategyDecision:
+    """Validate the minimal Strategy schema-v3 envelope."""
+
+    required = {
+        "classification",
+        "real_goal",
+        "selected_strategy_cards",
+        "relevant_habits",
+        "execution_brief",
+    }
+    missing = sorted(required - set(data))
+    if missing:
+        raise StructuredOutputError(
+            "Strategy schema v3 is missing required fields: " + ", ".join(missing)
+        )
+
+    classification = _enum_value(
+        TriageClassification,
+        data.get("classification"),
+    )
+    real_goal = _text_value(data.get("real_goal"))
+
+    def string_list(field: str) -> tuple[str, ...]:
+        raw = data.get(field)
+        if not isinstance(raw, list) or any(
+            not isinstance(item, str) or not item.strip() for item in raw
+        ):
+            raise StructuredOutputError(
+                f"Strategy {field} must be a list of non-empty strings"
+            )
+        values = tuple(item.strip() for item in raw)
+        if len(set(values)) != len(values):
+            raise StructuredOutputError(
+                f"Strategy {field} must not contain duplicates"
+            )
+        return values
+
+    selected_cards = string_list("selected_strategy_cards")
+    relevant_habits = string_list("relevant_habits")
+
+    raw_brief = data.get("execution_brief")
+    if not isinstance(raw_brief, Mapping):
+        raise StructuredOutputError("Strategy execution_brief must be an object")
+    brief_fields = {
+        "strategy",
+        "stages",
+        "dependencies",
+        "verification",
+        "success_criteria",
+        "replan_conditions",
+    }
+    if set(raw_brief) != brief_fields:
+        missing_brief = sorted(brief_fields - set(raw_brief))
+        extra_brief = sorted(set(raw_brief) - brief_fields)
+        details = []
+        if missing_brief:
+            details.append("missing " + ", ".join(missing_brief))
+        if extra_brief:
+            details.append("unexpected " + ", ".join(extra_brief))
+        raise StructuredOutputError(
+            "Strategy execution_brief has invalid fields: " + "; ".join(details)
+        )
+    strategy = _text_value(raw_brief.get("strategy"))
+    execution_brief: dict[str, Any] = {"strategy": strategy}
+    for field in (
+        "stages",
+        "dependencies",
+        "verification",
+        "success_criteria",
+        "replan_conditions",
+    ):
+        raw_values = raw_brief.get(field)
+        if not isinstance(raw_values, list) or any(
+            not isinstance(item, str) or not item.strip() for item in raw_values
+        ):
+            raise StructuredOutputError(
+                f"Strategy execution_brief.{field} must be a list of non-empty strings"
+            )
+        execution_brief[field] = [item.strip() for item in raw_values]
+
+    clarification = _text_value(data.get("clarification"))
+    if classification is TriageClassification.CONFIRMATION_REQUIRED:
+        if not clarification:
+            raise StructuredOutputError(
+                "CONFIRMATION_REQUIRED requires a clarification question"
+            )
+        if selected_cards or relevant_habits:
+            raise StructuredOutputError(
+                "CONFIRMATION_REQUIRED must not speculate about Cards or Habits"
+            )
+        if strategy or any(execution_brief[field] for field in brief_fields - {"strategy"}):
+            raise StructuredOutputError(
+                "CONFIRMATION_REQUIRED requires an empty execution_brief"
+            )
+    else:
+        if not real_goal:
+            raise StructuredOutputError(
+                "Strategy schema v3 requires a non-empty real_goal for resolved requests"
+            )
+        if classification in {
+            TriageClassification.SIMPLE_TASK,
+            TriageClassification.COMPLEX_TASK,
+            TriageClassification.HIGH_VOLUME_TASK,
+        } and not strategy:
+            raise StructuredOutputError(
+                "work classifications require execution_brief.strategy"
+            )
+
+    return StrategyDecision(
+        classification=classification,
+        real_goal=real_goal,
+        selected_strategy_cards=selected_cards,
+        relevant_habits=relevant_habits,
+        execution_brief=execution_brief,
+        clarification=clarification,
+    )
 
 
 def _validated_delegation_plan_fields(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 from typing import TYPE_CHECKING, Any, Mapping
@@ -19,10 +20,12 @@ from .models import (
     ExecutionOutcome,
     LifecycleState,
     Stage,
+    StrategyDecision,
     TerminalState,
     TriageDecision,
     TurnResult,
 )
+from .strategy_playbook import StrategyPlaybookSnapshot
 from .presentation import (
     RenderedRequiredMessage,
     RequiredMessageValidationError,
@@ -87,6 +90,52 @@ class RuntimeSupportMixin:
                 "classification": decision.classification.value,
                 "real_goal": state.goal,
                 "relevant_habits": list(state.relevant_habits),
+            },
+        )
+        state.ledger.add_log_ref(ref)
+        state.ledger.record_triage(decision.classification, goal_ref=goal_ref)
+        self.ledger_store.save(state.ledger)
+
+    def _record_strategy(
+        self,
+        state: _TurnState,
+        decision: StrategyDecision,
+        playbook: StrategyPlaybookSnapshot,
+    ) -> None:
+        """Record schema-v3 Strategy while preserving the Triage wire ledger."""
+
+        selected_cards = playbook.resolve_cards(decision.selected_strategy_cards)
+        state.goal = decision.real_goal
+        state.relevant_habits = tuple(decision.relevant_habits)
+        state.strategy_handoff = {
+            "selected_strategy_cards": [
+                copy.deepcopy(dict(card)) for card in selected_cards
+            ],
+            "execution_brief": copy.deepcopy(dict(decision.execution_brief)),
+        }
+        state.strategy_playbook_ref = {
+            "playbook_version": playbook.playbook_version,
+            "sha256": playbook.sha256,
+            "card_count": len(playbook.cards),
+        }
+        goal_ref = "sha256:" + hashlib.sha256(
+            state.goal.encode("utf-8")
+        ).hexdigest()
+        ref = self._audit(
+            state,
+            stage=Stage.TRIAGE.value,
+            role="strategist",
+            event="strategy_recorded",
+            event_id=f"{state.ledger.turn_id}:strategy",
+            payload={
+                "classification": decision.classification.value,
+                "real_goal": state.goal,
+                "selected_strategy_cards": list(
+                    decision.selected_strategy_cards
+                ),
+                "relevant_habits": list(state.relevant_habits),
+                "execution_brief": copy.deepcopy(dict(decision.execution_brief)),
+                "playbook": dict(state.strategy_playbook_ref),
             },
         )
         state.ledger.add_log_ref(ref)

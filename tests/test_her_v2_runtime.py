@@ -382,11 +382,28 @@ def _triage(
     real_goal: str | None,
     clarification: str | None = None,
     relevant_habits: tuple[str, ...] = (),
+    selected_strategy_cards: tuple[str, ...] | None = None,
+    execution_strategy: str | None = None,
 ):
+    work = classification in {"SIMPLE_TASK", "COMPLEX_TASK", "HIGH_VOLUME_TASK"}
+    selected = (
+        selected_strategy_cards
+        if selected_strategy_cards is not None
+        else (("SIMPLE_QA",) if work else ())
+    )
     return {
         "classification": classification,
         "real_goal": real_goal,
+        "selected_strategy_cards": list(selected),
         "relevant_habits": list(relevant_habits),
+        "execution_brief": {
+            "strategy": execution_strategy or ("Execute and verify." if work else ""),
+            "stages": ["Execute", "Verify"] if work else [],
+            "dependencies": [],
+            "verification": ["Verify the requested outcome"] if work else [],
+            "success_criteria": ["The requested outcome is complete"] if work else [],
+            "replan_conditions": ["Current evidence invalidates the approach"] if work else [],
+        },
         "clarification": clarification,
     }
 
@@ -1823,7 +1840,7 @@ async def test_deferred_clarification_resolution_is_deduplicated_by_delivery_sta
 
 
 @pytest.mark.asyncio
-async def test_medium_turn_uses_triage_real_goal_and_routes_tools_only_to_execution(
+async def test_medium_turn_uses_strategy_goal_and_routes_tools_to_strategy_and_execution(
     tmp_path,
 ):
     real_goal = "Implement and test the requested feature."
@@ -1872,10 +1889,71 @@ async def test_medium_turn_uses_triage_real_goal_and_routes_tools_only_to_execut
     assert len(execution_calls) == 1
     assert execution_calls[0].allow_tools is True
     assert execution_calls[0].allow_side_effects is True
+    assert "strategy_handoff" not in execution_calls[0].context
     assert all(
         not call.allow_tools
         for _profile, call in provider.requests
-        if call.stage is not Stage.EXECUTION
+        if call.stage not in {Stage.TRIAGE, Stage.EXECUTION}
+    )
+    strategy_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
+    )
+    assert strategy_call.allow_tools is True
+    assert strategy_call.allow_side_effects is True
+    assert strategy_call.role == "strategist"
+
+
+@pytest.mark.asyncio
+async def test_low_strategy_handoff_contains_only_selected_cards_and_skips_planning(
+    tmp_path,
+):
+    scripts = _initial("SIMPLE_TASK", real_goal="Modify and verify the target.")
+    scripts[Stage.TRIAGE] = [
+        _triage(
+            "SIMPLE_TASK",
+            real_goal="Modify and verify the target.",
+            selected_strategy_cards=("CODE_MODIFY", "TEST_QA"),
+            execution_strategy="Inspect the implementation, change it, and verify it.",
+        )
+    ]
+    scripts[Stage.EXECUTION] = [
+        {"disposition": "COMPLETED", "summary": "Modified and verified."}
+    ]
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        skills_catalogue=({"name": "debug", "description": "Debug work"},),
+    ).run_turn("Modify it", "request-low-strategy-handoff", effort=Effort.LOW)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert not any(call.stage is Stage.PLANNING for _profile, call in provider.requests)
+    strategy_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
+    )
+    assert strategy_call.role == "strategist"
+    assert strategy_call.allow_tools is True
+    assert strategy_call.allow_side_effects is True
+    assert len(strategy_call.context["strategy_cards"]["cards"]) == 38
+    assert strategy_call.context["execution_capabilities"]["skills"] == [
+        {"name": "debug", "description": "Debug work"}
+    ]
+
+    execution_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.EXECUTION
+    )
+    assert execution_call.context["active_plan"] is None
+    handoff = execution_call.context["strategy_handoff"]
+    assert [card["id"] for card in handoff["selected_strategy_cards"]] == [
+        "CODE_MODIFY",
+        "TEST_QA",
+    ]
+    assert "SIMPLE_QA" not in {
+        card["id"] for card in handoff["selected_strategy_cards"]
+    }
+    assert handoff["execution_brief"]["strategy"] == (
+        "Inspect the implementation, change it, and verify it."
     )
 
 
@@ -2112,8 +2190,10 @@ async def test_normal_mode_enables_external_side_effect_authority(tmp_path):
         "active_plan",
         "real_goal",
         "relevant_habits",
+        "strategy_handoff",
         "sub_agent_results",
     }
+    assert execution.context["strategy_handoff"]["execution_brief"]["strategy"]
     assert execution.context["real_goal"] == "resolved goal"
     assert execution.context["relevant_habits"] == []
     assert execution.allow_tools is True
@@ -4452,10 +4532,13 @@ async def test_triage_recovers_unambiguous_control_json_from_reasoning(tmp_path)
         Stage.TRIAGE: [
             StageResponse(
                 text="",
-                reasoning_trace=(
-                    '{"classification":"COMPLEX_TASK",'
-                    '"real_goal":"Diagnose the fault",'
-                    '"relevant_habits":[],"clarification":null}'
+                reasoning_trace=json.dumps(
+                    _triage(
+                        "COMPLEX_TASK",
+                        real_goal="Diagnose the fault",
+                        selected_strategy_cards=("BUG_DIAGNOSIS",),
+                        execution_strategy="Inspect evidence and diagnose the fault.",
+                    )
                 ),
                 provider="fake-api",
                 model="model-triage",
@@ -4832,11 +4915,8 @@ async def test_specialist_json_repair_has_no_attempt_cap_and_preserves_classific
         StageResponse(text="still not json"),
         StageResponse(text="not json on the third attempt"),
         StageResponse(text="not json on the fourth attempt"),
-        StageResponse(
-            text=(
-                '{"classification":"SIMPLE_TASK","real_goal":"Do it",'
-                '"relevant_habits":[],"clarification":null}'
-            ),
+            StageResponse(
+                text=json.dumps(_triage("SIMPLE_TASK", real_goal="Do it")),
             reasoning_trace=None,
             provider="fake-api",
             model="model-triage",

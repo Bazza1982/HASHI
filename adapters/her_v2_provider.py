@@ -650,6 +650,7 @@ def _execution_system_prompt(
     relevant_habits: Sequence[str],
     active_plan: Mapping[str, Any] | None,
     delegated_execution: Mapping[str, Any] | None,
+    strategy_handoff: Mapping[str, Any] | None,
     tool_catalogue: list[Mapping[str, Any]],
 ) -> str:
     return render_execution_system_prompt(
@@ -657,6 +658,7 @@ def _execution_system_prompt(
         relevant_habits=relevant_habits,
         active_plan=active_plan,
         delegated_execution=delegated_execution,
+        strategy_handoff=strategy_handoff,
         tool_catalogue=tool_catalogue,
         guidance=source.guidance,
         display_name=source.display_name,
@@ -2275,7 +2277,16 @@ class HashiStageProvider(StageProvider):
                                 "Keep the native no-tool voice chat response; "
                                 "the transcript-dependent path is unavailable."
                             ),
+                            "selected_strategy_cards": [],
                             "relevant_habits": [],
+                            "execution_brief": {
+                                "strategy": "",
+                                "stages": [],
+                                "dependencies": [],
+                                "verification": [],
+                                "success_criteria": [],
+                                "replan_conditions": [],
+                            },
                             "clarification": "",
                         },
                         provider="hashi-runtime",
@@ -2738,6 +2749,13 @@ class HashiStageProvider(StageProvider):
                                     "results": delegated_results,
                                 }
                                 if delegated_results
+                                else None
+                            ),
+                            strategy_handoff=(
+                                request.context.get("strategy_handoff")
+                                if isinstance(
+                                    request.context.get("strategy_handoff"), Mapping
+                                )
                                 else None
                             ),
                             tool_catalogue=tool_catalogue,

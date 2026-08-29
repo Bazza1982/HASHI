@@ -40,6 +40,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "persona_block_end",
             "persona_guidance",
             "relevant_habits",
+            "strategy_handoff",
             "tool_catalogue",
         }
     ),
@@ -106,6 +107,16 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
         }
     ),
     "system_triage": frozenset({"goal", "habit_catalogue", "schema_v2"}),
+    "system_strategy": frozenset(
+        {
+            "execution_capabilities",
+            "goal",
+            "habit_catalogue",
+            "request_resources",
+            "schema_v3",
+            "strategy_cards",
+        }
+    ),
 }
 
 

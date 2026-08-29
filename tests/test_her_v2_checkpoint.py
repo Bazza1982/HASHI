@@ -633,7 +633,16 @@ class ReplanJourneyProvider:
                 data={
                     "classification": "COMPLEX_TASK",
                     "real_goal": request.goal,
+                    "selected_strategy_cards": ["SIMPLE_QA"],
                     "relevant_habits": [],
+                    "execution_brief": {
+                        "strategy": "Execute and verify the authorised task.",
+                        "stages": ["Execute", "Verify"],
+                        "dependencies": [],
+                        "verification": ["Verify the final state"],
+                        "success_criteria": ["The authorised goal is complete"],
+                        "replan_conditions": ["Evidence invalidates the approach"],
+                    },
                     "clarification": None,
                 }
             )
