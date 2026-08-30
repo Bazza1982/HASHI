@@ -145,6 +145,7 @@ testpaths = [
     "tests/test_request_activity.py",
     "tests/test_runtime_command_binding.py",
     "tests/test_runtime_lifecycle.py",
+    "tests/test_smart_tool_registry.py",
 ]
 python_files = ["test_*.py"]
 norecursedirs = [

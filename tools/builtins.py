@@ -301,6 +301,7 @@ async def execute_bash(
                     f"Error: command timed out after {_seconds_label(timeout)}s",
                     {
                         **timeout_details,
+                        "exit_code": proc.returncode,
                         "foreground_cleanup": cleanup,
                     },
                 )
@@ -338,6 +339,7 @@ async def execute_bash(
             result or "(no output)",
             {
                 **timeout_details,
+                "exit_code": proc.returncode,
                 "foreground_cleanup": completion_cleanup,
             },
         )
@@ -350,6 +352,7 @@ async def execute_bash(
             )
         details = {
             **timeout_details,
+            "exit_code": proc.returncode if proc is not None else None,
             "foreground_cleanup": cleanup or {
                 "status": "not_started",
                 "process_reaped": True,
@@ -368,6 +371,7 @@ async def execute_bash(
             f"Error executing command: {exc}",
             {
                 **timeout_details,
+                "exit_code": proc.returncode if proc is not None else None,
                 "foreground_cleanup": cleanup or {
                     "status": "not_started",
                     "process_reaped": True,

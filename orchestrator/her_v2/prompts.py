@@ -127,6 +127,30 @@ _SCHEMAS = {
 }
 
 
+def _compact_tool_catalogue(
+    items: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep model guidance once; function parameters remain in the API schema."""
+
+    compact: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        function = item.get("function")
+        source = function if isinstance(function, Mapping) else item
+        name = str(source.get("name") or "").strip()
+        if not name:
+            continue
+        entry: dict[str, Any] = {
+            "name": name,
+            "description": str(source.get("description") or "").strip(),
+        }
+        if "hashi_read_only" in item:
+            entry["hashi_read_only"] = bool(item.get("hashi_read_only"))
+        compact.append(entry)
+    return compact
+
+
 _JSON_REPAIR_STAGES = frozenset(
     {
         Stage.TRIAGE,
@@ -284,7 +308,9 @@ def render_stage_prompt(request: StageRequest) -> str:
             ),
             relevant_habits=json.dumps(habits, ensure_ascii=False, indent=2),
             available_execution_tools=json.dumps(
-                request.context.get("available_execution_tools") or [],
+                _compact_tool_catalogue(
+                    request.context.get("available_execution_tools") or []
+                ),
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -322,7 +348,9 @@ def render_stage_prompt(request: StageRequest) -> str:
                 indent=2,
             ),
             available_execution_tools=json.dumps(
-                request.context.get("available_execution_tools") or [],
+                _compact_tool_catalogue(
+                    request.context.get("available_execution_tools") or []
+                ),
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -548,7 +576,11 @@ def render_direct_system_prompt(
             else "[]"
         ),
         tool_catalogue=(
-            json.dumps(list(tool_catalogue), ensure_ascii=False, indent=2)
+            json.dumps(
+                _compact_tool_catalogue(tool_catalogue),
+                ensure_ascii=False,
+                indent=2,
+            )
             if tool_catalogue
             else "No tools are available for this invocation."
         ),
@@ -617,7 +649,11 @@ def render_execution_system_prompt(
             else "No Strategy handoff was supplied for this execution path."
         ),
         tool_catalogue=(
-            json.dumps(list(tool_catalogue), ensure_ascii=False, indent=2)
+            json.dumps(
+                _compact_tool_catalogue(tool_catalogue),
+                ensure_ascii=False,
+                indent=2,
+            )
             if tool_catalogue
             else "No tools are available for this invocation."
         ),
@@ -648,7 +684,11 @@ def render_review_system_prompt(
     return render_prompt_asset(
         "system_review",
         available_review_tools=(
-            json.dumps(list(available_review_tools), ensure_ascii=False, indent=2)
+            json.dumps(
+                _compact_tool_catalogue(available_review_tools),
+                ensure_ascii=False,
+                indent=2,
+            )
             if available_review_tools
             else "No review tools are available for this invocation."
         ),

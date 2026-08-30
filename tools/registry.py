@@ -17,6 +17,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from tools.schemas import TOOL_SCHEMA_MAP, ALL_TOOL_NAMES
+from tools.smart_tools import SmartToolRuntime
 
 # Tool tiers — send only what's needed per turn to save context window.
 # Models can still *call* any allowed tool; tiers only control which
@@ -180,6 +181,11 @@ class ToolRegistry:
             default=None,
         )
         self.media_roots = [Path(root) for root in (media_roots or [])]
+        smart_options = self.tool_options.get("smart_registry", {})
+        self.smart_tools = SmartToolRuntime(
+            self.workspace_dir,
+            smart_options if isinstance(smart_options, dict) else {},
+        )
 
         explicitly_allowed = set(allowed_tools) - {"*"}
         if "*" in allowed_tools:
@@ -265,14 +271,29 @@ class ToolRegistry:
         result: ToolResult,
         *,
         audit_context: dict | None = None,
-    ) -> None:
+    ) -> ToolResult:
         """Audit a denial made by a narrower delegated registry."""
 
         scoped_context = dict(self._effective_audit_context())
         scoped_context.update(dict(audit_context or {}))
         token = self._audit_context_override.set(scoped_context)
         try:
-            self._record_tool_audit(tool_name, arguments, result, time.monotonic())
+            started = time.monotonic()
+            effective_call_id = str(result.tool_call_id or "")
+            if self.smart_tools.enabled and not effective_call_id:
+                effective_call_id = self.smart_tools.new_call_id()
+                result = ToolResult(
+                    tool_call_id=effective_call_id,
+                    output=result.output,
+                    is_error=result.is_error,
+                    content=result.content,
+                    details=result.details,
+                )
+            result = self._finalize_tool_result(
+                tool_name, arguments, result, started
+            )
+            self._record_tool_audit(tool_name, arguments, result, started)
+            return result
         finally:
             self._audit_context_override.reset(token)
 
@@ -350,10 +371,16 @@ class ToolRegistry:
         audited after local cleanup and then deliberately propagated.
         """
         started = time.monotonic()
+        effective_call_id = str(tool_call_id or "")
+        if self.smart_tools.enabled and not effective_call_id:
+            effective_call_id = self.smart_tools.new_call_id()
         admission_denial = self.evaluate_admission(
-            tool_name, arguments, tool_call_id
+            tool_name, arguments, effective_call_id
         )
         if admission_denial is not None:
+            admission_denial = self._finalize_tool_result(
+                tool_name, arguments, admission_denial, started
+            )
             self._record_tool_audit(tool_name, arguments, admission_denial, started)
             return admission_denial
 
@@ -372,17 +399,27 @@ class ToolRegistry:
                 )
             )
             result = ToolResult(
-                tool_call_id=tool_call_id,
+                tool_call_id=effective_call_id,
                 output=output,
                 is_error=True,
                 details=details,
+            )
+            result = self._finalize_tool_result(
+                tool_name, arguments, result, started
             )
             self._record_tool_audit(tool_name, arguments, result, started)
             raise
         except Exception as e:
             self.logger.error(f"Tool '{tool_name}' raised unexpected error: {e}", exc_info=True)
             output = f"Error: unexpected failure in '{tool_name}': {e}"
-            result = ToolResult(tool_call_id=tool_call_id, output=output, is_error=True)
+            result = ToolResult(
+                tool_call_id=effective_call_id,
+                output=output,
+                is_error=True,
+            )
+            result = self._finalize_tool_result(
+                tool_name, arguments, result, started
+            )
             self._record_tool_audit(tool_name, arguments, result, started)
             return result
 
@@ -401,14 +438,52 @@ class ToolRegistry:
             content = None
         is_error = output.startswith("Error:")
         result = ToolResult(
-            tool_call_id=tool_call_id,
+            tool_call_id=effective_call_id,
             output=output,
             is_error=is_error,
             content=content,
             details=details,
         )
+        result = self._finalize_tool_result(tool_name, arguments, result, started)
         self._record_tool_audit(tool_name, arguments, result, started)
         return result
+
+    def _finalize_tool_result(
+        self,
+        tool_name: str,
+        arguments: dict,
+        result: ToolResult,
+        started: float,
+    ) -> ToolResult:
+        """Apply the optional five-field contract and append one ledger row."""
+
+        if not self.smart_tools.enabled:
+            return result
+        outcome, _spec, _record = self.smart_tools.complete(
+            tool_name=tool_name,
+            arguments=arguments,
+            output=result.output,
+            raw_is_error=result.is_error,
+            details=result.details,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            call_id=result.tool_call_id,
+            audit_context=self._effective_audit_context(),
+        )
+        details = dict(result.details or {})
+        details.update(
+            {
+                "smart_result": True,
+                "smart_status": outcome.status,
+                "smart_effect": outcome.effect,
+            }
+        )
+        return ToolResult(
+            tool_call_id=result.tool_call_id,
+            output=outcome.model_output(),
+            is_error=outcome.status in {"failed", "unavailable"},
+            content=result.content,
+            details=details,
+        )
 
     def _check_enterprise_path_gate(
         self,
@@ -559,10 +634,15 @@ class ToolRegistry:
         result: ToolResult,
         started: float,
     ) -> None:
+        artifact_id = self._register_file_write_artifact(
+            tool_name, arguments, result
+        )
         canonical = self.canonical_audit
         if canonical is not None:
             try:
                 context = dict(self._effective_audit_context())
+                if artifact_id:
+                    context["artifact_id"] = artifact_id
                 canonical.record(
                     "tool_call",
                     {
@@ -586,11 +666,12 @@ class ToolRegistry:
                 self.logger.error(
                     "Failed to persist canonical Tool audit evidence: %s", exc
                 )
+        if self.smart_tools.enabled:
+            return
         try:
             from tools.tool_audit import record_tool_action
 
             audit_context = dict(self._effective_audit_context())
-            artifact_id = self._register_file_write_artifact(tool_name, arguments, result)
             if artifact_id:
                 audit_context["artifact_id"] = artifact_id
             record_tool_action(

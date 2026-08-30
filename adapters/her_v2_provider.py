@@ -813,6 +813,20 @@ class _DelegatedToolRegistry:
         return None
 
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
+        return await self.execute_with_audit_context(
+            tool_name, arguments, tool_call_id
+        )
+
+    async def execute_with_audit_context(
+        self,
+        tool_name: str,
+        arguments: dict,
+        tool_call_id: str = "",
+        *,
+        audit_context: Mapping[str, Any] | None = None,
+    ):
+        scoped_context = dict(self.audit_context)
+        scoped_context.update(dict(audit_context or {}))
         if self.is_allowed(tool_name):
             effective_arguments = dict(arguments or {})
             if tool_name == "verification_run" and self._verification_policy:
@@ -828,7 +842,7 @@ class _DelegatedToolRegistry:
                     tool_name,
                     effective_arguments,
                     tool_call_id,
-                    audit_context=self.audit_context,
+                    audit_context=scoped_context,
                 )
             return await self._base.execute(
                 tool_name, effective_arguments, tool_call_id
@@ -845,12 +859,14 @@ class _DelegatedToolRegistry:
         )
         denial_recorder = getattr(self.base, "record_delegated_denial", None)
         if callable(denial_recorder):
-            denial_recorder(
+            recorded = denial_recorder(
                 tool_name,
                 arguments,
                 result,
-                audit_context=self.audit_context,
+                audit_context=scoped_context,
             )
+            if recorded is not None:
+                result = recorded
         return result
 
 
@@ -862,9 +878,14 @@ def _evidence_ref_segment(value: Any, *, fallback: str) -> str:
 class _EvidenceRecordingToolRegistry:
     """Attach exact, current-invocation receipts to completed tool calls."""
 
-    def __init__(self, base: Any, request: StageRequest):
+    def __init__(self, base: Any, request: StageRequest, *, model: str = ""):
         self._base = base
         self._request = request
+        self._audit_context = {
+            "task_id": str(request.turn_id or ""),
+            "stage": request.stage.value,
+            "model": str(model or ""),
+        }
         self._receipts: list[ToolEvidenceReceipt] = []
         self._serial = 0
         self.max_loops = None
@@ -946,7 +967,20 @@ class _EvidenceRecordingToolRegistry:
             dict(arguments or {}), self._request.attachment_manifest
         )
         try:
-            result = await self._base.execute(tool_name, arguments, tool_call_id)
+            scoped_execute = getattr(
+                self._base, "execute_with_audit_context", None
+            )
+            if callable(scoped_execute):
+                result = await scoped_execute(
+                    tool_name,
+                    arguments,
+                    tool_call_id,
+                    audit_context=self._audit_context,
+                )
+            else:
+                result = await self._base.execute(
+                    tool_name, arguments, tool_call_id
+                )
         except asyncio.CancelledError:
             self._receipts.append(
                 self._receipt(
@@ -1043,15 +1077,23 @@ class _EvidenceRecordingToolRegistry:
     ):
         denial_recorder = getattr(self.base, "record_delegated_denial", None)
         if callable(denial_recorder):
-            denial_recorder(
+            scoped_context = dict(
+                getattr(self._base, "audit_context", {}) or {}
+            )
+            scoped_context.update(self._audit_context)
+            recorded = denial_recorder(
                 tool_name,
                 arguments,
                 result,
-                audit_context=dict(getattr(self._base, "audit_context", {}) or {}),
+                audit_context=scoped_context,
             )
+            if recorded is not None:
+                result = recorded
         receipt = self._receipt(
             tool_name=tool_name,
-            tool_call_id=tool_call_id,
+            tool_call_id=str(
+                getattr(result, "tool_call_id", "") or tool_call_id
+            ),
             result=result,
             completed=True,
             status=ToolReceiptStatus.FAILED,
@@ -1065,9 +1107,10 @@ class _EvidenceRecordingToolRegistry:
     ):
         from tools.registry import ToolResult
 
-        output = str(getattr(result, "output", "") or "")
-        output += f"\n\nHASHI_EVIDENCE_RECEIPT: {receipt.evidence_ref}"
         details = dict(getattr(result, "details", None) or {})
+        output = str(getattr(result, "output", "") or "")
+        if not details.get("smart_result"):
+            output += f"\n\nHASHI_EVIDENCE_RECEIPT: {receipt.evidence_ref}"
         details.update(
             {
                 "evidence_ref": receipt.evidence_ref,
@@ -2186,7 +2229,7 @@ class HashiStageProvider(StageProvider):
             # length.  HER tool-enabled stages continue until the model
             # finishes, fails, or the request is cancelled.
             evidence_registry = _EvidenceRecordingToolRegistry(
-                selected_registry, request
+                selected_registry, request, model=profile.model
             )
             selected_registry = evidence_registry
             if request.checkpoint_coordinator is not None:

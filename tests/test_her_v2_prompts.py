@@ -470,6 +470,41 @@ def test_direct_prompt_is_one_natural_language_agent_with_full_catalogues() -> N
     assert "$tool_catalogue" not in system_prompt
 
 
+def test_prompt_tool_catalogue_keeps_guidance_without_duplicate_parameters() -> None:
+    system_prompt = render_direct_system_prompt(
+        goal="Read one file.",
+        habit_catalogue=[],
+        skills_catalogue=[],
+        tool_catalogue=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_read",
+                    "description": "Read one file; this does not verify correctness.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "SECRET_SCHEMA_MARKER"}
+                        },
+                    },
+                },
+                "hashi_read_only": True,
+            }
+        ],
+        guidance="",
+        display_name="Agent",
+        usable=False,
+        persona_block_begin="[persona]",
+        persona_block_end="[persona_end]",
+    )
+
+    assert '"name": "file_read"' in system_prompt
+    assert "Read one file; this does not verify correctness." in system_prompt
+    assert '"hashi_read_only": true' in system_prompt
+    assert "SECRET_SCHEMA_MARKER" not in system_prompt
+    assert '"parameters"' not in system_prompt
+
+
 def test_review_uses_one_complete_prompt_with_draft_plan_and_actual_tools() -> None:
     request = _request(Stage.REVIEW)
     review_system = render_review_system_prompt(
