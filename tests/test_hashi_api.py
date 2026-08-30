@@ -327,6 +327,8 @@ async def test_hashi_api_tool_loop_sends_full_prompt_once_then_only_tool_delta(
         }
     ]
     assert first_payload["session_id"] == second_payload["session_id"]
+    assert first_payload["hashi_tool_workspace"] == str(tmp_path.resolve())
+    assert second_payload["hashi_tool_workspace"] == str(tmp_path.resolve())
     second_headers = adapter._call_api_once.call_args_list[1].args[1]
     assert second_headers["X-Hashi-After-Tool-End"] == "true"
     assert second_headers["X-Hashi-External-Tool-Session"] == "v1"

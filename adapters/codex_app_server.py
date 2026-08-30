@@ -11,6 +11,7 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from adapters.base import BackendResponse, TokenUsage
@@ -35,7 +36,9 @@ function tools. Their internal names are aliases; each description identifies th
 caller-visible function name that user messages may reference. Never execute those
 functions yourself and never substitute local shell, filesystem, web, app, MCP,
 skill, or multi-agent tools for them. If a dynamic function is needed, invoke it
-with valid JSON arguments and wait for its result."""
+with valid JSON arguments and wait for its result. The current working directory is
+the caller's stable, authorized tool workspace. Resolve relative tool paths against
+that directory and keep the same workspace path throughout continuation calls."""
 _CONTINUE_AFTER_TOOL_RESULTS = (
     "Continue the conversation using the supplied function-call results."
 )
@@ -606,6 +609,7 @@ class CodexAppServerToolBridge:
         parallel_tool_calls: bool | None = None,
         use_streaming: bool = False,
         on_stream_event: StreamCallback = None,
+        workspace_dir: str | Path | None = None,
     ) -> BackendResponse:
         started = time.perf_counter()
         selected_tools = _selected_tools(tools, tool_choice)
@@ -664,10 +668,31 @@ class CodexAppServerToolBridge:
             )
 
         try:
-            temp_dir = tempfile.TemporaryDirectory(prefix="hashi-codex-api-tools-")
+            if workspace_dir is None:
+                temp_dir = tempfile.TemporaryDirectory(
+                    prefix="hashi-codex-api-tools-"
+                )
+                cwd_value = temp_dir.name
+            else:
+                requested_cwd = Path(workspace_dir)
+                if not requested_cwd.is_absolute():
+                    raise CodexAppServerError(
+                        "caller tool workspace must be an absolute path"
+                    )
+                try:
+                    resolved_cwd = requested_cwd.resolve(strict=True)
+                except OSError as exc:
+                    raise CodexAppServerError(
+                        "caller tool workspace is unavailable"
+                    ) from exc
+                if not resolved_cwd.is_dir():
+                    raise CodexAppServerError(
+                        "caller tool workspace must be a directory"
+                    )
+                cwd_value = str(resolved_cwd)
             # Keep the existing scoped block, but defer directory deletion until
             # after app-server exits. Windows cannot remove a live process cwd.
-            with contextlib.nullcontext(temp_dir.name) as cwd:
+            with contextlib.nullcontext(cwd_value) as cwd:
                 extra_kwargs: dict[str, Any] = {"limit": _APP_SERVER_READ_LIMIT}
                 if os.name != "nt":
                     extra_kwargs["start_new_session"] = True

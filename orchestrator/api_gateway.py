@@ -79,6 +79,8 @@ _EXTERNAL_TOOL_ENGINES = frozenset({"codex-cli", "xai-api"})
 _EXTERNAL_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _GATEWAY_SERVER_APP_KEY = web.AppKey("hashi-api-gateway-server", object)
 _CORRELATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
+_INTERNAL_TOOL_WORKSPACE_FIELD = "hashi_tool_workspace"
+_TRUSTED_TOOL_WORKSPACE_FIELD = "_hashi_internal_tool_workspace"
 
 _ENGINE_FOR_MODEL = {
     model: engine
@@ -824,6 +826,7 @@ class APIGatewayServer:
         self.enabled: bool = bool(gateway_config.get("enabled", False))
         selected_default = str(default_model or gateway_config.get("default_model") or "").strip()
         self.default_model = selected_default if selected_default in _ENGINE_FOR_MODEL else DEFAULT_API_MODEL
+        self._workspace_root = Path(workspace_root).resolve()
         self._pool = _AdapterPool(global_config, secrets, workspace_root)
         self.gateway_instance_id = f"gateway-{uuid.uuid4().hex[:12]}"
         logs_root = Path(
@@ -879,6 +882,51 @@ class APIGatewayServer:
         headers = getattr(request, "headers", {})
         candidate = str(headers.get("X-Hashi-Correlation-ID") or "").strip()
         return candidate if _CORRELATION_ID_RE.fullmatch(candidate) else None
+
+    def _resolve_internal_tool_workspace(
+        self,
+        raw_workspace: Any,
+    ) -> tuple[str | None, web.Response | None]:
+        """Validate one internal caller cwd without broadening filesystem scope."""
+
+        if not isinstance(raw_workspace, str) or not raw_workspace.strip():
+            return None, _external_tool_error(
+                "hashi_tool_workspace must be a non-empty absolute path",
+                code="external_tool_workspace_invalid",
+                param=_INTERNAL_TOOL_WORKSPACE_FIELD,
+            )
+        requested = Path(raw_workspace.strip())
+        if not requested.is_absolute():
+            return None, _external_tool_error(
+                "hashi_tool_workspace must be an absolute path",
+                code="external_tool_workspace_invalid",
+                param=_INTERNAL_TOOL_WORKSPACE_FIELD,
+            )
+        try:
+            resolved = requested.resolve(strict=True)
+        except OSError:
+            return None, _external_tool_error(
+                "hashi_tool_workspace does not exist",
+                code="external_tool_workspace_invalid",
+                param=_INTERNAL_TOOL_WORKSPACE_FIELD,
+            )
+        if not resolved.is_dir():
+            return None, _external_tool_error(
+                "hashi_tool_workspace must be a directory",
+                code="external_tool_workspace_invalid",
+                param=_INTERNAL_TOOL_WORKSPACE_FIELD,
+            )
+        if (
+            resolved != self._workspace_root
+            and self._workspace_root not in resolved.parents
+        ):
+            return None, _external_tool_error(
+                "hashi_tool_workspace is outside this HASHI instance",
+                code="external_tool_workspace_forbidden",
+                param=_INTERNAL_TOOL_WORKSPACE_FIELD,
+                status=403,
+            )
+        return str(resolved), None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -1139,6 +1187,13 @@ class APIGatewayServer:
         if not isinstance(body, dict):
             return web.json_response({"error": "request body must be an object"}, status=400)
 
+        # Never accept the post-validation private field from a caller.
+        body.pop(_TRUSTED_TOOL_WORKSPACE_FIELD, None)
+        requested_tool_workspace = body.pop(
+            _INTERNAL_TOOL_WORKSPACE_FIELD,
+            None,
+        )
+
         model = str(body.get("model") or "").strip() or self.default_model
 
         engine = _ENGINE_FOR_MODEL.get(model)
@@ -1207,6 +1262,7 @@ class APIGatewayServer:
             or body.get("session_id")
         )
 
+        internal_continuation = False
         if external_tool_mode and session_id:
             internal_continuation = (
                 str(
@@ -1223,6 +1279,23 @@ class APIGatewayServer:
                     code="external_tools_session_unsupported",
                     param="session_id",
                 )
+
+        if requested_tool_workspace is not None:
+            if not (external_tool_mode and session_id and internal_continuation):
+                return _external_tool_error(
+                    "hashi_tool_workspace requires the HASHI internal "
+                    "external-tool continuation contract",
+                    code="external_tool_workspace_unsupported",
+                    param=_INTERNAL_TOOL_WORKSPACE_FIELD,
+                )
+            trusted_workspace, workspace_error = (
+                self._resolve_internal_tool_workspace(
+                    requested_tool_workspace
+                )
+            )
+            if workspace_error is not None:
+                return workspace_error
+            body[_TRUSTED_TOOL_WORKSPACE_FIELD] = trusted_workspace
 
         if session_id and _contains_inline_media(messages):
             return _external_tool_error(

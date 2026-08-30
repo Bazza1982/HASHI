@@ -846,6 +846,44 @@ async def test_codex_app_server_returns_final_text_and_usage_in_stream_mode(monk
 
 
 @pytest.mark.asyncio
+async def test_codex_app_server_uses_caller_authorized_workspace(
+    tmp_path, monkeypatch
+):
+    fake = _FakeAppServerProcess(final_text="Workspace retained")
+    process_kwargs = {}
+
+    async def create_subprocess(*_args, **kwargs):
+        process_kwargs.update(kwargs)
+        return fake
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    workspace = tmp_path / "agent1"
+    workspace.mkdir()
+    bridge = CodexAppServerToolBridge(
+        command="codex",
+        model="gpt-5.6-luna",
+        effort="low",
+        idle_timeout_sec=5,
+    )
+
+    response = await bridge.run(
+        [{"role": "user", "content": "Use the stable workspace"}],
+        [WEATHER_TOOL],
+        "req-stable-workspace",
+        tool_choice="none",
+        workspace_dir=workspace,
+    )
+
+    expected = str(workspace.resolve())
+    assert response.is_success is True
+    assert process_kwargs["cwd"] == expected
+    assert fake.thread_params["cwd"] == expected
+    assert "stable, authorized tool workspace" in fake.thread_params[
+        "baseInstructions"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_named_tool_choice_exposes_only_the_selected_function(monkeypatch):
     fake = _FakeAppServerProcess(
         tool_calls=[

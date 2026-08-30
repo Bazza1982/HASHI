@@ -1075,12 +1075,15 @@ async def test_external_tools_reject_gateway_session_cache(tmp_path):
 async def test_internal_external_tool_session_reconstructs_incremental_suffix(tmp_path):
     adapter = _ExternalAdapter()
     server = _server(tmp_path, adapter)
+    workspace = tmp_path / "agent1"
+    workspace.mkdir()
     first_request = _Request(
         {
             "model": "gpt-5.6-luna",
             "messages": [{"role": "user", "content": "Read notes"}],
             "tools": [TOOL_SCHEMA],
             "session_id": "internal-tool-session",
+            "hashi_tool_workspace": str(workspace),
         }
     )
     first_request.headers = {"X-Hashi-External-Tool-Session": "v1"}
@@ -1092,6 +1095,10 @@ async def test_internal_external_tool_session_reconstructs_incremental_suffix(tm
     assert cached is not None
     assert [message["role"] for message in cached] == ["user", "assistant"]
     assert cached[-1]["tool_calls"] == [TOOL_CALL]
+    assert adapter.calls[-1]["request_options"][
+        "_hashi_internal_tool_workspace"
+    ] == str(workspace.resolve())
+    assert "hashi_tool_workspace" not in adapter.calls[-1]["request_options"]
 
     second_request = _Request(
         {
@@ -1105,6 +1112,7 @@ async def test_internal_external_tool_session_reconstructs_incremental_suffix(tm
             ],
             "tools": [TOOL_SCHEMA],
             "session_id": "internal-tool-session",
+            "hashi_tool_workspace": str(workspace),
         }
     )
     second_request.headers = {"X-Hashi-External-Tool-Session": "v1"}
@@ -1119,6 +1127,38 @@ async def test_internal_external_tool_session_reconstructs_incremental_suffix(tm
         "tool",
     ]
     assert reconstructed[-1]["content"] == "notes contents"
+    assert adapter.calls[-1]["request_options"][
+        "_hashi_internal_tool_workspace"
+    ] == str(workspace.resolve())
+
+
+@pytest.mark.asyncio
+async def test_internal_external_tool_workspace_cannot_escape_instance_root(
+    tmp_path,
+):
+    instance_root = tmp_path / "workspaces"
+    instance_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    adapter = _ExternalAdapter()
+    server = _server(instance_root, adapter)
+    request = _Request(
+        {
+            "model": "gpt-5.6-luna",
+            "messages": [{"role": "user", "content": "Read notes"}],
+            "tools": [TOOL_SCHEMA],
+            "session_id": "internal-tool-session",
+            "hashi_tool_workspace": str(outside),
+        }
+    )
+    request.headers = {"X-Hashi-External-Tool-Session": "v1"}
+
+    response = await server.handle_chat_completions(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 403
+    assert payload["error"]["code"] == "external_tool_workspace_forbidden"
+    assert adapter.calls == []
 
 
 @pytest.mark.asyncio

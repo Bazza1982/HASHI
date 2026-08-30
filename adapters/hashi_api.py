@@ -447,6 +447,19 @@ class HashiApiAdapter(OpenRouterAdapter):
                     )
                     if gateway_session_id is not None:
                         payload["session_id"] = gateway_session_id
+                        # This field is consumed only by HASHI's trusted
+                        # Gateway continuation boundary. It is validated
+                        # against the instance workspaces root before a
+                        # physical provider bridge can use it as cwd.
+                        workspace_dir = getattr(
+                            self.config,
+                            "workspace_dir",
+                            None,
+                        )
+                        if workspace_dir is not None:
+                            payload["hashi_tool_workspace"] = str(
+                                Path(workspace_dir).resolve()
+                            )
                     gateway_transport_calls.append(
                         {
                             "provider_attempt": provider_attempt_count,
