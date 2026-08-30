@@ -1326,6 +1326,20 @@ class BridgeContextAssembler:
         "history": 300,
         "runtime_context": 200,
     }
+    _TRANSPORT_ORDER_STRIDE: ClassVar[int] = 100_000_000
+    _TRANSPORT_ORDER_SLOTS: ClassVar[dict[str, int]] = {
+        "permanent_system": 1,
+        "instance_global_sys": 1,
+        "agent_local_sys": 1,
+        "current_user_request": 1,
+        "permanent_memory": 1,
+        "relevant_long_term_memory": 2,
+        "time": 1,
+        "active_runtime_instructions": 2,
+        "skills_catalogue": 4,
+        "tools_catalogue": 5,
+        "persona": 1,
+    }
 
     def __init__(
         self,
@@ -1365,6 +1379,37 @@ class BridgeContextAssembler:
     def _load_system_prompt(self) -> str:
         document = self._load_pcm()
         return document.system if document else ""
+
+    @classmethod
+    def _stable_transport_order(cls, section: dict[str, Any]) -> int:
+        """Return a section-identity order that survives optional omissions.
+
+        Fixed backends compare every typed field when calculating a PCM delta.
+        A list index is therefore not a safe presentation order: omitting an
+        initial-only history or memory section would otherwise make every
+        following unchanged section look updated.  Known sections occupy
+        semantic slots, exchanges retain chronological sequence, and extension
+        sections receive a deterministic identity-derived position between
+        active runtime instructions and the catalogues.
+        """
+
+        key = str(section.get("key") or "")
+        stride = cls._TRANSPORT_ORDER_STRIDE
+        if key.startswith("recent_exchange:"):
+            sequence = int((section.get("metadata") or {}).get("sequence") or 0)
+            return stride + max(0, min(sequence, stride - 1))
+        if key.startswith("extra:"):
+            identity = int.from_bytes(
+                hashlib.sha256(key.encode("utf-8")).digest()[:8], "big"
+            )
+            return (3 * stride) + (identity % stride)
+        slot = cls._TRANSPORT_ORDER_SLOTS.get(key)
+        if slot is not None:
+            return slot * stride
+        identity = int.from_bytes(
+            hashlib.sha256(key.encode("utf-8")).digest()[:8], "big"
+        )
+        return (3 * stride) + (identity % stride)
 
     @staticmethod
     def _catalogue_lines(provider) -> list[str]:
@@ -1807,9 +1852,9 @@ class BridgeContextAssembler:
                 "rank": section["rank"],
                 "protected": section["protected"],
                 "metadata": section["metadata"],
-                "order": index,
+                "order": self._stable_transport_order(section),
             }
-            for index, section in enumerate(sections)
+            for section in sections
         ]
         context_text = "\n\n".join(
             section["text"]

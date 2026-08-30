@@ -352,6 +352,36 @@ def test_fixed_incremental_sends_delta_pcm_without_repeating_history(tmp_path):
     assert payload["audit"]["incremental"] is True
 
 
+def test_fixed_transport_order_survives_initial_only_section_omissions(tmp_path):
+    store, assembler = _assembler(
+        tmp_path,
+        skill_catalog_provider=lambda: [{"name": "one", "description": "Skill"}],
+        tool_catalog_provider=lambda: [{"name": "web_search", "description": "Search"}],
+    )
+    store.record_completed_exchange("OLD USER", "OLD ASSISTANT", "text")
+
+    initial = assembler.build_prompt_payload("first", "her-v2", incremental=False)
+    incremental = assembler.build_prompt_payload("second", "her-v2", incremental=True)
+    initial_orders = {
+        item["key"]: item["order"] for item in initial["transport_snapshot"]["sections"]
+    }
+    incremental_orders = {
+        item["key"]: item["order"]
+        for item in incremental["transport_snapshot"]["sections"]
+    }
+
+    assert any(key.startswith("recent_exchange:") for key in initial_orders)
+    assert not any(key.startswith("recent_exchange:") for key in incremental_orders)
+    common_keys = set(initial_orders) & set(incremental_orders)
+    assert {key: initial_orders[key] for key in common_keys} == {
+        key: incremental_orders[key] for key in common_keys
+    }
+    assert incremental_orders["time"] < incremental_orders["skills_catalogue"]
+    assert (
+        incremental_orders["skills_catalogue"] < incremental_orders["tools_catalogue"]
+    )
+
+
 def test_non_her_budget_removes_oldest_whole_exchanges_first(tmp_path, monkeypatch):
     store, assembler = _assembler(tmp_path)
     for index in range(5):
