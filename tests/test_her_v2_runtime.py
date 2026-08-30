@@ -725,6 +725,8 @@ async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_
     assert request.checkpoint_coordinator is None
     assert request.context["automatic_effort_upgrade_allowed"] is False
     assert request.context["sub_agent_delegation_allowed"] is False
+    assert request.context["direct_strategy_self_selection"] is False
+    assert request.context["strategy_playbook"] is None
     assert request.context["habit_catalogue"] == ["advisory habit"]
     assert request.context["skills_catalogue"][0]["id"] == "reports"
     assert profile.model == "quick-model"
@@ -741,6 +743,65 @@ async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_
         Stage.REVIEW,
         Stage.FINALISATION,
     }.isdisjoint(request.stage for _profile, request in provider.requests)
+
+
+@pytest.mark.asyncio
+async def test_zero_can_self_select_from_playbook_without_adding_a_stage(tmp_path):
+    provider = ScriptedProvider(
+        {
+            Stage.DIRECT: [
+                StageResponse(
+                    data={
+                        "message": (
+                            "Work complete.\nStrategy Cards used: "
+                            "OPTIMIZATION_SCHEDULING, TEST_QA"
+                        )
+                    },
+                    provider="fake-api",
+                    model="quick-model",
+                )
+            ]
+        }
+    )
+    runtime = _runtime(
+        tmp_path,
+        provider,
+        config=_config(direct_strategy_self_selection=True),
+    )
+
+    result = await runtime.run_turn(
+        "Schedule the meetings directly.",
+        "request-zero-direct-playbook",
+        effort=Effort.ZERO,
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert len(provider.requests) == 1
+    _profile, request = provider.requests[0]
+    assert request.stage is Stage.DIRECT
+    assert request.context["direct_strategy_self_selection"] is True
+    playbook = request.context["strategy_playbook"]
+    assert playbook["playbook_version"] == "2026-08-29.1"
+    assert playbook["sha256"].startswith("sha256:")
+    assert len(playbook["cards"]) == 38
+    assert {
+        Stage.IMMEDIATE_RESPONSE,
+        Stage.TRIAGE,
+        Stage.PLANNING,
+        Stage.EXECUTION,
+        Stage.REPLANNING,
+        Stage.REVIEW,
+        Stage.FINALISATION,
+    }.isdisjoint(item.stage for _profile, item in provider.requests)
+    audit_rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    attached = next(
+        row for row in audit_rows if row["event"] == "direct_strategy_playbook_attached"
+    )
+    assert attached["payload"]["card_count"] == 38
+    assert attached["payload"]["selection_mode"] == "direct_self_selection"
 
 
 @pytest.mark.asyncio

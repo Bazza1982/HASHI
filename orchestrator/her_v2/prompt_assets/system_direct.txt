@@ -63,7 +63,7 @@ Use relevant Habits as advisory execution guidance. Do not rewrite, improve, com
 
 If no Habit is relevant, proceed normally without one.
 
-## 3. Perform the task
+${direct_strategy_block}## 3. Perform the task
 
 Faithfully execute the user's resolved `real_goal`.
 

@@ -22,6 +22,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
         {
             "goal",
             "habit_catalogue",
+            "direct_strategy_block",
             "persona_block_begin",
             "persona_block_end",
             "persona_guidance",

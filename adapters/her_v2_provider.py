@@ -693,12 +693,14 @@ def _direct_system_prompt(
     habit_catalogue: Sequence[str],
     skills_catalogue: Sequence[Mapping[str, Any]],
     tool_catalogue: Sequence[Mapping[str, Any]],
+    strategy_playbook: Mapping[str, Any] | None,
 ) -> str:
     return render_direct_system_prompt(
         goal=goal,
         habit_catalogue=habit_catalogue,
         skills_catalogue=skills_catalogue,
         tool_catalogue=tool_catalogue,
+        strategy_playbook=strategy_playbook,
         guidance=source.guidance,
         display_name=source.display_name,
         usable=source.usable,
@@ -2815,6 +2817,13 @@ class HashiStageProvider(StageProvider):
                             habit_catalogue=habits,
                             skills_catalogue=skills,
                             tool_catalogue=tool_catalogue,
+                            strategy_playbook=(
+                                request.context.get("strategy_playbook")
+                                if isinstance(
+                                    request.context.get("strategy_playbook"), Mapping
+                                )
+                                else None
+                            ),
                         )
                     else:
                         raw_sub_agent_results = request.context.get(

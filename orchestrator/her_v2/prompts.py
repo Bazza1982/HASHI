@@ -554,6 +554,7 @@ def render_direct_system_prompt(
     habit_catalogue: Sequence[str],
     skills_catalogue: Sequence[Mapping[str, Any]],
     tool_catalogue: Sequence[Mapping[str, Any]],
+    strategy_playbook: Mapping[str, Any] | None = None,
     guidance: str,
     display_name: str,
     usable: bool,
@@ -562,9 +563,45 @@ def render_direct_system_prompt(
 ) -> str:
     """Render the complete zero-orchestration Direct contract."""
 
+    direct_strategy_block = ""
+    if strategy_playbook:
+        direct_strategy_block = (
+            """## Direct Strategy Playbook self-selection
+
+This invocation is the Direct + Playbook experimental condition. You remain the
+sole Direct agent in one invocation; this is not a separate Strategist, Triage,
+Planning, Review, or other orchestration stage.
+
+Before making the first task tool call:
+
+1. inspect the complete Strategy Card Playbook below;
+2. select a small, focused set of the most suitable cards, normally one to
+   three, using their exact Card IDs;
+3. compose a concise working approach from their strategy, validation, and
+   failure-mode guidance; and
+4. perform the task according to that approach, adapting tactical details only
+   when task evidence requires it.
+
+Do not merely name relevant cards. Apply their useful guidance throughout the
+work and verification. After the work, include one concise final-response line
+in the form `Strategy Cards used: CARD_ID, ...` so the experiment can audit the
+self-selection without creating a structured handoff or another provider call.
+
+Complete Strategy Card Playbook:
+
+```json
+"""
+            + json.dumps(dict(strategy_playbook), ensure_ascii=False, indent=2)
+            + """
+```
+
+"""
+        )
+
     return render_prompt_asset(
         "system_direct",
         goal=goal,
+        direct_strategy_block=direct_strategy_block,
         habit_catalogue=(
             json.dumps(list(habit_catalogue), ensure_ascii=False, indent=2)
             if habit_catalogue

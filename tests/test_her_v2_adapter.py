@@ -2622,6 +2622,11 @@ async def test_hashi_stage_provider_installs_full_direct_contract_and_tools():
             "plan_id": None,
             "context": {
                 "habit_catalogue": ["Verify before reporting success."],
+                "strategy_playbook": {
+                    "playbook_version": "test-v1",
+                    "sha256": "sha256:test",
+                    "cards": [{"id": "TEST_QA"}],
+                },
                 "skills_catalogue": [
                     {
                         "id": "reports",
@@ -2651,6 +2656,8 @@ async def test_hashi_stage_provider_installs_full_direct_contract_and_tools():
     assert '"name": "file_write"' in backend.sys_prompt
     assert '"id": "reports"' in backend.sys_prompt
     assert "Verify before reporting success." in backend.sys_prompt
+    assert "Direct Strategy Playbook self-selection" in backend.sys_prompt
+    assert '"id": "TEST_QA"' in backend.sys_prompt
     assert backend.tool_registry.is_allowed("file_write") is True
     assert backend.tool_registry.max_loops is None
     assert backend.config.extra["reasoning_effort"] == "high"

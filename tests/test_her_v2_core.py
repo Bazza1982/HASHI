@@ -283,6 +283,26 @@ def test_direct_route_uses_quick_model_and_high_reasoning_by_default():
 
     assert direct.model == "quick-model"
     assert direct.reasoning == "high"
+    assert config.direct_strategy_self_selection is False
+
+
+def test_direct_strategy_self_selection_is_an_explicit_boolean_experiment():
+    config = HERv2Config.from_mapping(
+        {
+            "profiles": _profiles(),
+            "direct_strategy_self_selection": True,
+        }
+    )
+
+    assert config.direct_strategy_self_selection is True
+
+    with pytest.raises(HERv2ConfigurationError):
+        HERv2Config.from_mapping(
+            {
+                "profiles": _profiles(),
+                "direct_strategy_self_selection": "true",
+            }
+        )
 
 
 def test_direct_route_reasoning_can_be_explicitly_overridden_but_model_stays_quick():
@@ -479,6 +499,7 @@ def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
         ("shadow_mode", "false"),
         ("shadow_mode", True),
         ("meditation_enabled", 1),
+        ("direct_strategy_self_selection", 1),
         ("audit_failure_terminal", "COMPLETED"),
     ]
     for field, value in cases:

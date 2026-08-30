@@ -1268,6 +1268,27 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     turn_id=state.ledger.turn_id,
                 )
 
+        strategy_playbook: Mapping[str, Any] | None = None
+        if self.config.direct_strategy_self_selection:
+            playbook = load_strategy_playbook()
+            strategy_playbook = playbook.prompt_payload()
+            state.strategy_playbook_ref = {
+                "playbook_version": playbook.playbook_version,
+                "sha256": playbook.sha256,
+                "card_count": len(playbook.cards),
+                "selection_mode": "direct_self_selection",
+            }
+            ref = self._audit(
+                state,
+                stage=Stage.DIRECT.value,
+                role=self.config.stage_roles[Stage.DIRECT],
+                event="direct_strategy_playbook_attached",
+                event_id=f"{state.ledger.turn_id}:direct-strategy-playbook",
+                payload=dict(state.strategy_playbook_ref),
+            )
+            state.ledger.add_log_ref(ref)
+            self.ledger_store.save(state.ledger)
+
         response, direct_text = await self._invoke_stage(
             state,
             Stage.DIRECT,
@@ -1278,6 +1299,8 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 "habit_catalogue": list(habits),
                 "habits_are_advisory": True,
                 "skills_catalogue": [dict(item) for item in self.skills_catalogue],
+                "direct_strategy_self_selection": bool(strategy_playbook),
+                "strategy_playbook": strategy_playbook,
                 "zero_orchestration": True,
                 "automatic_effort_upgrade_allowed": False,
                 "sub_agent_delegation_allowed": False,

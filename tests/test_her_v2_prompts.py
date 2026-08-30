@@ -450,6 +450,7 @@ def test_direct_prompt_is_one_natural_language_agent_with_full_catalogues() -> N
                 "hashi_read_only": False,
             }
         ],
+        strategy_playbook=None,
         guidance="Address the user as Captain.",
         display_name="Agent",
         usable=True,
@@ -468,6 +469,7 @@ def test_direct_prompt_is_one_natural_language_agent_with_full_catalogues() -> N
     assert "Address the user as Captain." in system_prompt
     assert "Return only the natural-language response" in system_prompt
     assert "$tool_catalogue" not in system_prompt
+    assert "Direct Strategy Playbook self-selection" not in system_prompt
 
 
 def test_prompt_tool_catalogue_keeps_guidance_without_duplicate_parameters() -> None:
@@ -491,6 +493,7 @@ def test_prompt_tool_catalogue_keeps_guidance_without_duplicate_parameters() -> 
                 "hashi_read_only": True,
             }
         ],
+        strategy_playbook=None,
         guidance="",
         display_name="Agent",
         usable=False,
@@ -503,6 +506,38 @@ def test_prompt_tool_catalogue_keeps_guidance_without_duplicate_parameters() -> 
     assert '"hashi_read_only": true' in system_prompt
     assert "SECRET_SCHEMA_MARKER" not in system_prompt
     assert '"parameters"' not in system_prompt
+
+
+def test_direct_prompt_can_self_select_from_the_complete_strategy_playbook() -> None:
+    system_prompt = render_direct_system_prompt(
+        goal="Schedule the meetings.",
+        habit_catalogue=[],
+        skills_catalogue=[],
+        tool_catalogue=[],
+        strategy_playbook={
+            "playbook_version": "test-v1",
+            "sha256": "sha256:test",
+            "cards": [
+                {
+                    "id": "OPTIMIZATION_SCHEDULING",
+                    "strategy": ["Model all hard constraints."],
+                    "validation": ["Reparse the generated schedule."],
+                }
+            ],
+        },
+        guidance="",
+        display_name="Agent",
+        usable=False,
+        persona_block_begin="[persona]",
+        persona_block_end="[persona_end]",
+    )
+
+    assert "Direct Strategy Playbook self-selection" in system_prompt
+    assert "Before making the first task tool call" in system_prompt
+    assert "normally one to\n   three" in system_prompt
+    assert "Strategy Cards used: CARD_ID" in system_prompt
+    assert '"playbook_version": "test-v1"' in system_prompt
+    assert '"id": "OPTIMIZATION_SCHEDULING"' in system_prompt
 
 
 def test_review_uses_one_complete_prompt_with_draft_plan_and_actual_tools() -> None:

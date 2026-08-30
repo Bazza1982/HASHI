@@ -193,6 +193,7 @@ class HERv2Config:
     user_idle_timeout_s: float = 1800.0
     audit_failure_terminal: TerminalState = TerminalState.ERROR
     meditation_enabled: bool = False
+    direct_strategy_self_selection: bool = False
     shadow_mode: bool = False
 
     def __post_init__(self) -> None:
@@ -602,6 +603,10 @@ class HERv2Config:
             ),
             meditation_enabled=_strict_bool(
                 raw.get("meditation_enabled", False), "meditation_enabled"
+            ),
+            direct_strategy_self_selection=_strict_bool(
+                raw.get("direct_strategy_self_selection", False),
+                "direct_strategy_self_selection",
             ),
             shadow_mode=_strict_bool(raw.get("shadow_mode", False), "shadow_mode"),
         )
