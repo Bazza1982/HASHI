@@ -478,7 +478,7 @@ def test_direct_provider_state_migrates_to_her_v2(
 
 
 @pytest.mark.parametrize("persisted_backend", ["her", "her-v2"])
-def test_stale_her_v2_fixed_mode_is_repaired_to_flex(
+def test_her_v2_fixed_mode_is_preserved(
     tmp_path,
     persisted_backend,
 ):
@@ -494,9 +494,9 @@ def test_stale_her_v2_fixed_mode_is_repaired_to_flex(
     state = json.loads(manager.state_file.read_text(encoding="utf-8"))
 
     assert manager.config.active_backend == "her-v2"
-    assert manager.agent_mode == "flex"
+    assert manager.agent_mode == "fixed"
     assert state["active_backend"] == "her-v2"
-    assert state["agent_mode"] == "flex"
+    assert state["agent_mode"] == "fixed"
     assert state["unrelated"] == {"keep": True}
 
 

@@ -1072,6 +1072,56 @@ async def test_external_tools_reject_gateway_session_cache(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_internal_external_tool_session_reconstructs_incremental_suffix(tmp_path):
+    adapter = _ExternalAdapter()
+    server = _server(tmp_path, adapter)
+    first_request = _Request(
+        {
+            "model": "gpt-5.6-luna",
+            "messages": [{"role": "user", "content": "Read notes"}],
+            "tools": [TOOL_SCHEMA],
+            "session_id": "internal-tool-session",
+        }
+    )
+    first_request.headers = {"X-Hashi-External-Tool-Session": "v1"}
+
+    first_response = await server.handle_chat_completions(first_request)
+
+    assert first_response.status == 200
+    cached = server._sessions.get("internal-tool-session")
+    assert cached is not None
+    assert [message["role"] for message in cached] == ["user", "assistant"]
+    assert cached[-1]["tool_calls"] == [TOOL_CALL]
+
+    second_request = _Request(
+        {
+            "model": "gpt-5.6-luna",
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-local-1",
+                    "content": "notes contents",
+                }
+            ],
+            "tools": [TOOL_SCHEMA],
+            "session_id": "internal-tool-session",
+        }
+    )
+    second_request.headers = {"X-Hashi-External-Tool-Session": "v1"}
+
+    second_response = await server.handle_chat_completions(second_request)
+
+    assert second_response.status == 200
+    reconstructed = adapter.calls[-1]["messages"]
+    assert [message["role"] for message in reconstructed] == [
+        "user",
+        "assistant",
+        "tool",
+    ]
+    assert reconstructed[-1]["content"] == "notes contents"
+
+
+@pytest.mark.asyncio
 async def test_responses_api_model_is_rejected_by_adapter_capability(tmp_path):
     adapter = _ExternalAdapter(supports=False)
     server = _server(tmp_path, adapter)

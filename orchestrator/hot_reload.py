@@ -72,6 +72,11 @@ FOUNDATION_PHASES = {
     "orchestrator.her_v2.models": 0,
     "orchestrator.her_v2.audit": 0,
     "orchestrator.her_v2.progress": 0,
+    # Fixed-backend state types must refresh before the protocol coordinator
+    # imports them. This keeps repeated /reboot cycles from binding the newly
+    # reloaded coordinator to the previous SessionStore class object.
+    "orchestrator.her_v2.session_store": 0,
+    "orchestrator.her_v2.backend_session": 1,
     "orchestrator.her_v2.config": 1,
     "orchestrator.her_v2.retry": 1,
     "orchestrator.her_v2.runtime_configuration": 2,

@@ -1669,6 +1669,20 @@ class HashiStageProvider(StageProvider):
         connection and is cached for the lifetime of this Turn.
         """
 
+        if str(profile.engine or "").strip().casefold() in {
+            "codex",
+            "codex-cli",
+            "codex-app-server",
+        }:
+            raise StageInvocationError(
+                "Codex is a separate HASHI backend, not an internal HER provider",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description=(
+                    "HER v2 must use hashi-api for configured GPT models rather "
+                    "than selecting the Codex backend internally."
+                ),
+            )
         options_fingerprint = hashlib.sha256(
             json.dumps(
                 dict(profile.options),
@@ -2068,6 +2082,20 @@ class HashiStageProvider(StageProvider):
     async def invoke(
         self, profile: ProviderProfile, request: StageRequest
     ) -> StageResponse:
+        if str(profile.engine or "").strip().casefold() in {
+            "codex",
+            "codex-cli",
+            "codex-app-server",
+        }:
+            raise StageInvocationError(
+                "Codex is a separate HASHI backend, not an internal HER provider",
+                retryable=False,
+                code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                human_description=(
+                    "HER v2 must use hashi-api for configured GPT models rather "
+                    "than selecting the Codex backend internally."
+                ),
+            )
         native_audio_stage = bool(
             request.stage in {Stage.DIRECT, Stage.IMMEDIATE_RESPONSE}
             and request_content_is_voice_origin(request.request_content)

@@ -131,6 +131,30 @@ def test_explicit_fixed_session_agent_keeps_fixed_working_mode(tmp_path, caplog)
     assert "default_mode=fixed" in caplog.text
 
 
+def test_her_v2_is_accepted_as_a_fixed_session_backend(tmp_path):
+    config_path, secrets_path = _write_base_files(
+        tmp_path,
+        {
+            "name": "strategic",
+            "type": "flex",
+            "workspace_dir": "workspaces/strategic",
+            "system_md": "workspaces/strategic/agent.md",
+            "allowed_backends": [
+                {"engine": "her-v2", "model": "role-configured"}
+            ],
+            "active_backend": "her-v2",
+            "default_mode": "fixed",
+        },
+    )
+
+    _, agents, _ = ConfigManager(
+        config_path, secrets_path, bridge_home=tmp_path
+    ).load()
+
+    assert agents[0].active_backend == "her-v2"
+    assert agents[0].default_mode == "fixed"
+
+
 def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):
     config_path, secrets_path = _write_base_files(
         tmp_path,

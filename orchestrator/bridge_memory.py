@@ -1793,6 +1793,24 @@ class BridgeContextAssembler:
             }
             for section in sections
         ]
+        # Exact section bodies are returned only to the in-process backend
+        # transport.  HER v2 fixed sessions use this snapshot to compute a
+        # revisioned delta against their last durable acknowledgement.  It is
+        # deliberately separate from the audit envelope, which remains
+        # content-free.
+        transport_sections = [
+            {
+                "key": section["key"],
+                "title": section["title"],
+                "text": section["text"],
+                "authority": section["authority"],
+                "rank": section["rank"],
+                "protected": section["protected"],
+                "metadata": section["metadata"],
+                "order": index,
+            }
+            for index, section in enumerate(sections)
+        ]
         context_text = "\n\n".join(
             section["text"]
             for section in sections
@@ -1804,6 +1822,10 @@ class BridgeContextAssembler:
                 "version": 1,
                 "current_request_key": "current_user_request",
                 "sections": envelope_sections,
+            },
+            "transport_snapshot": {
+                "version": 1,
+                "sections": transport_sections,
             },
             "audit": {
                 "incremental": incremental,

@@ -714,6 +714,24 @@ class _SessionCache:
         messages.append({"role": role, "content": content})
         return self.set(session_id, messages)
 
+    def delete(self, session_id: str) -> bool:
+        return self._store.pop(str(session_id), None) is not None
+
+    @staticmethod
+    def merge_messages(
+        cached: list[dict] | None,
+        incoming: list[dict],
+    ) -> list[dict]:
+        """Append an incremental suffix without duplicating a retried suffix."""
+
+        combined = list(cached or [])
+        if not incoming:
+            return combined
+        if len(combined) >= len(incoming) and combined[-len(incoming) :] == incoming:
+            return combined
+        combined.extend(dict(message) for message in incoming)
+        return combined
+
     def purge_expired(self):
         now = time.time()
         expired = [k for k, v in self._store.items() if now - v["ts"] > self._ttl]
@@ -1172,10 +1190,6 @@ class APIGatewayServer:
                     code="external_tool_passthrough_unsupported",
                     param="model",
                 )
-            validated_tools, validation_error = _validate_external_tool_request(body, messages)
-            if validation_error is not None:
-                return validation_error
-            external_tools = validated_tools or []
 
         engine_ok, engine_reason = self._engine_available(engine)
         if not engine_ok:
@@ -1194,12 +1208,21 @@ class APIGatewayServer:
         )
 
         if external_tool_mode and session_id:
-            return _external_tool_error(
-                "session_id is not supported for external tool passthrough; "
-                "the caller must send the complete tool conversation",
-                code="external_tools_session_unsupported",
-                param="session_id",
+            internal_continuation = (
+                str(
+                    getattr(request, "headers", {}).get(
+                        "X-Hashi-External-Tool-Session", ""
+                    )
+                ).strip().casefold()
+                == "v1"
             )
+            if not internal_continuation:
+                return _external_tool_error(
+                    "session_id for external tool passthrough requires the "
+                    "HASHI internal continuation contract",
+                    code="external_tools_session_unsupported",
+                    param="session_id",
+                )
 
         if session_id and _contains_inline_media(messages):
             return _external_tool_error(
@@ -1213,16 +1236,7 @@ class APIGatewayServer:
         if session_id:
             cached = self._sessions.get(session_id)
             if cached:
-                # Prepend cached history, then append new messages
-                # Avoid duplicating the last user turn
-                combined = list(cached)
-                for msg in messages:
-                    if not any(
-                        m.get("role") == msg.get("role") and m.get("content") == msg.get("content")
-                        for m in combined[-4:]
-                    ):
-                        combined.append(msg)
-                messages = combined
+                messages = self._sessions.merge_messages(cached, messages)
             structured_conversation_mode = _uses_structured_conversation(messages)
             if structured_conversation_mode:
                 structured_error = _validate_structured_conversation(
@@ -1232,6 +1246,17 @@ class APIGatewayServer:
                 )
                 if structured_error is not None:
                     return structured_error
+
+        if external_tool_mode:
+            # Session continuations may contain only the newly completed tool
+            # messages. Validate after reconstructing the cached assistant
+            # tool request so call/result pairing remains strict.
+            validated_tools, validation_error = _validate_external_tool_request(
+                body, messages
+            )
+            if validation_error is not None:
+                return validation_error
+            external_tools = validated_tools or []
 
         prompt = ""
         if not external_tool_mode and not structured_conversation_mode:
@@ -1297,6 +1322,7 @@ class APIGatewayServer:
                     body,
                     request_id,
                     model,
+                    session_id,
                     t_start,
                     request,
                 )
@@ -1307,6 +1333,7 @@ class APIGatewayServer:
                 body,
                 request_id,
                 model,
+                session_id,
                 t_start,
             )
 
@@ -1534,6 +1561,7 @@ class APIGatewayServer:
         body: dict[str, Any],
         request_id: str,
         model: str,
+        session_id: str | None,
         t_start: float,
     ) -> web.Response:
         try:
@@ -1549,6 +1577,8 @@ class APIGatewayServer:
             )
         except Exception as exc:
             logger.error("External tool backend error for %s: %s", request_id, exc)
+            if session_id:
+                self._sessions.delete(session_id)
             return _external_tool_error(
                 str(exc),
                 code="external_tool_backend_error",
@@ -1558,6 +1588,8 @@ class APIGatewayServer:
         if not response.is_success:
             error = response.error or "backend error"
             logger.error("External tool backend failure %s: %s", request_id, error)
+            if session_id:
+                self._sessions.delete(session_id)
             return _external_tool_error(
                 error,
                 code=response.error_code or "external_tool_backend_error",
@@ -1572,6 +1604,11 @@ class APIGatewayServer:
         }
         if tool_calls:
             message["tool_calls"] = tool_calls
+        if session_id:
+            if tool_calls:
+                self._sessions.set(session_id, list(messages) + [message])
+            else:
+                self._sessions.delete(session_id)
 
         elapsed = time.time() - t_start
         _print_api_out(model, elapsed, len(text), stream=False)
@@ -1600,6 +1637,7 @@ class APIGatewayServer:
         body: dict[str, Any],
         request_id: str,
         model: str,
+        session_id: str | None,
         t_start: float,
         request: web.Request,
     ) -> web.StreamResponse:
@@ -1677,6 +1715,8 @@ class APIGatewayServer:
             error_status = _backend_http_error_status(response)
 
         if error:
+            if session_id:
+                self._sessions.delete(session_id)
             try:
                 payload = _backend_stream_error_payload(
                     error,
@@ -1719,6 +1759,22 @@ class APIGatewayServer:
 
         elapsed = time.time() - t_start
         final_text = full_text or "".join(collected_text)
+        if session_id:
+            assistant_message: dict[str, Any] = {
+                "role": "assistant",
+                "content": final_text if final_text else (
+                    None if response.tool_calls else ""
+                ),
+            }
+            if response.tool_calls:
+                assistant_message["tool_calls"] = list(response.tool_calls)
+            if response.tool_calls:
+                self._sessions.set(
+                    session_id,
+                    list(messages) + [assistant_message],
+                )
+            else:
+                self._sessions.delete(session_id)
         _print_api_out(model, elapsed, len(final_text), stream=True)
         await write_chunk(
             {},

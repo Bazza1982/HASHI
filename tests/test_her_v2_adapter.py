@@ -266,6 +266,112 @@ class _ZeroProvider:
 
 
 @pytest.mark.asyncio
+async def test_adapter_fixed_backend_keeps_one_session_and_accepts_incremental_turns(
+    tmp_path,
+):
+    config = _agent_config(tmp_path)
+    provider = _DirectProvider()
+    setattr(config, "_her_v2_stage_provider", provider)
+    runtime = SimpleNamespace(
+        backend_manager=SimpleNamespace(agent_mode="fixed"),
+        _request_meta_by_id={},
+        current_request_meta={},
+    )
+    setattr(config, "_hashi_runtime", runtime)
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert adapter.capabilities.supports_sessions is True
+    assert await adapter.initialize() is True
+
+    sections = [
+        {
+            "key": "permanent_system",
+            "title": "PERMANENT SYSTEM INSTRUCTIONS",
+            "text": "Follow the permanent policy.",
+            "authority": "permanent_system",
+            "rank": 0,
+            "protected": True,
+            "metadata": {},
+            "order": 0,
+        },
+        {
+            "key": "current_user_request",
+            "title": "CURRENT USER REQUEST",
+            "text": "placeholder",
+            "authority": "current_user",
+            "rank": 3,
+            "protected": True,
+            "metadata": {},
+            "order": 1,
+        },
+    ]
+    prompt_payload = {
+        "transport_snapshot": {"version": 1, "sections": sections}
+    }
+
+    def metadata(request_id):
+        return {
+            "request_id": request_id,
+            "hashi_session_id": "hashi-session-a",
+            "hashi_message_id": f"message-{request_id}",
+            "context_generation": 1,
+            "session_workspace": str(tmp_path / "session-a"),
+        }
+
+    first_meta = metadata("request-1")
+    runtime._request_meta_by_id["request-1"] = first_meta
+    runtime.current_request_meta = first_meta
+    first_transport, first_audit = adapter.prepare_fixed_turn_input(
+        prompt_payload=prompt_payload,
+        user_message="Remember that the colour is blue.",
+        request_id="request-1",
+        request_meta=first_meta,
+    )
+    first_response = await adapter.generate_response(
+        first_transport, "request-1"
+    )
+    session_id = adapter._session_id
+
+    assert first_response.is_success is True
+    assert first_audit["operation"] == "open_session"
+    assert session_id
+    assert first_response.stream_metadata["her_v2"]["fixed_backend"][
+        "session_id"
+    ] == session_id
+
+    second_meta = metadata("request-2")
+    runtime._request_meta_by_id["request-2"] = second_meta
+    runtime.current_request_meta = second_meta
+    second_transport, second_audit = adapter.prepare_fixed_turn_input(
+        prompt_payload=prompt_payload,
+        user_message="What colour did I give you?",
+        request_id="request-2",
+        request_meta=second_meta,
+    )
+
+    assert second_audit["operation"] == "append_turn"
+    assert "Follow the permanent policy." not in second_transport
+    assert "Remember that the colour is blue." not in second_transport
+
+    before = len(provider.requests)
+    second_response = await adapter.generate_response(
+        second_transport, "request-2"
+    )
+    second_goals = [request.goal for _profile, request in provider.requests[before:]]
+
+    assert second_response.is_success is True
+    assert adapter._session_id == session_id
+    assert any("Remember that the colour is blue." in goal for goal in second_goals)
+    assert any(first_response.text in goal for goal in second_goals)
+    assert second_response.stream_metadata["her_v2"]["fixed_backend"][
+        "transport"
+    ]["incremental"] is True
+
+    assert await adapter.handle_new_session() is True
+    assert adapter._session_id is None
+    assert adapter._session_coordinator.store.session(session_id)["status"] == "closed"
+
+
+@pytest.mark.asyncio
 async def test_adapter_injects_prior_wip_and_clears_after_completed_ledger(tmp_path):
     config = _agent_config(tmp_path)
     provider = _DirectProvider()
@@ -3360,7 +3466,7 @@ async def test_hashi_stage_provider_rejects_tool_backend_without_isolation_capab
 
     manager = CapabilityManager()
     provider = HashiStageProvider(backend_manager=manager)
-    profile = ProviderProfile("premium", "codex-cli", "gpt-configured")
+    profile = ProviderProfile("premium", "openrouter-api", "model-configured")
 
     with pytest.raises(StageInvocationError, match="cannot prove HASHI tool isolation"):
         await provider.invoke(
@@ -3368,6 +3474,24 @@ async def test_hashi_stage_provider_rejects_tool_backend_without_isolation_capab
             _stage_request(Stage.EXECUTION, allow_tools=True),
         )
     assert manager.backends[0].shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_hashi_stage_provider_never_selects_codex_as_internal_provider():
+    class Manager:
+        def create_ephemeral_backend(self, *_args, **_kwargs):
+            raise AssertionError("Codex backend construction must not be reached")
+
+    provider = HashiStageProvider(backend_manager=Manager())
+    profile = ProviderProfile("premium", "codex-cli", "gpt-configured")
+
+    with pytest.raises(StageInvocationError, match="separate HASHI backend") as caught:
+        await provider.invoke(
+            profile,
+            _stage_request(Stage.EXECUTION, allow_tools=True),
+        )
+
+    assert caught.value.code is ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR
 
 
 @pytest.mark.asyncio

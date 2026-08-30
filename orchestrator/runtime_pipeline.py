@@ -820,6 +820,9 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         and runtime.backend_manager.agent_mode == "fixed"
         and session_scope == SESSION_SCOPE_PERSISTENT
     )
+    if incremental and runtime.config.active_backend == "her-v2":
+        can_resume = getattr(backend, "can_resume_fixed_session", None)
+        incremental = bool(callable(can_resume) and can_resume())
     continuity_enabled = is_memory_plus_enabled(runtime.workspace_dir)
     session_scoped = bool(str(getattr(item, "session_id", "") or ""))
     session_workspace = runtime_session.item_session_workspace(runtime, item)
@@ -973,6 +976,37 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             runtime._context_compaction_prompt_tokens = request_tokens
         request_tokens[item.request_id] = prompt_tokens
         runtime._last_full_prompt_tokens = prompt_tokens
+    materialized_hashi_prompt = prompt_payload["final_prompt"]
+    if (
+        runtime.config.active_backend == "her-v2"
+        and runtime.backend_manager.agent_mode == "fixed"
+    ):
+        prepare_fixed = getattr(backend, "prepare_fixed_turn_input", None)
+        if not callable(prepare_fixed):
+            raise RuntimeError(
+                "HER v2 fixed mode requires the fixed-backend transport contract"
+            )
+        fixed_prompt, fixed_audit = prepare_fixed(
+            prompt_payload=prompt_payload,
+            user_message=effective_prompt,
+            request_id=item.request_id,
+            request_meta=request_meta,
+        )
+        prompt_payload["final_prompt"] = fixed_prompt
+        prompt_payload.setdefault("audit", {})["her_fixed_backend"] = dict(
+            fixed_audit
+        )
+        incremental = bool(fixed_audit.get("incremental"))
+        request_meta["her_fixed_backend"] = dict(fixed_audit)
+        # Persist the HASHI conversation -> HER session binding before any
+        # model or tool work. A process replacement during the first turn can
+        # therefore recover the same durable HER session instead of opening a
+        # competing logical thread.
+        runtime_session.capture_backend_binding(
+            runtime,
+            request_id=item.request_id,
+        )
+
     _canonical_record(
         runtime,
         "provider_request",
@@ -1025,11 +1059,11 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             "context_profile": context_profile,
             "inject_memory": history_compaction_enabled,
             "is_bridge_request": bool(is_bridge_request),
-            "final_prompt": final_prompt,
+            "final_prompt": materialized_hashi_prompt,
             "prompt_tokens": int(
                 request_token_map.get(
                     item.request_id,
-                    max(1, len(final_prompt) // 4),
+                    max(1, len(materialized_hashi_prompt) // 4),
                 )
             ),
             "capacity_recovery_attempted": False,

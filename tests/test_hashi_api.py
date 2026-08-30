@@ -278,6 +278,68 @@ async def test_hashi_api_reports_usage_and_never_adds_openrouter_headers(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_hashi_api_tool_loop_sends_full_prompt_once_then_only_tool_delta(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = SimpleNamespace(
+        get_tool_definitions=lambda tiers=None: []
+    )
+    tool_call = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "file_read", "arguments": '{"path":"a.txt"}'},
+    }
+    adapter._call_api_once = AsyncMock(
+        side_effect=[
+            _APIResult("", [tool_call], "tool_calls", 100, 10),
+            _APIResult("finished", None, "stop", 20, 5),
+        ]
+    )
+
+    async def run_tool_calls(_calls, messages, _callback, **_kwargs):
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "file contents",
+            }
+        )
+
+    adapter._run_tool_calls = run_tool_calls
+
+    response = await adapter.generate_response("Inspect the file", "request-tool")
+
+    assert response.is_success is True
+    assert response.text == "finished"
+    assert adapter._call_api_once.call_count == 2
+    first_payload = adapter._call_api_once.call_args_list[0].args[0]
+    second_payload = adapter._call_api_once.call_args_list[1].args[0]
+    assert [message["role"] for message in first_payload["messages"]] == [
+        "system",
+        "user",
+    ]
+    assert second_payload["messages"] == [
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": "file contents",
+        }
+    ]
+    assert first_payload["session_id"] == second_payload["session_id"]
+    second_headers = adapter._call_api_once.call_args_list[1].args[1]
+    assert second_headers["X-Hashi-After-Tool-End"] == "true"
+    assert second_headers["X-Hashi-External-Tool-Session"] == "v1"
+    continuation = response.stream_metadata["gateway_continuation"]
+    assert continuation["enabled"] is True
+    assert continuation["full_prompt_send_count"] == 1
+    assert [call["message_count"] for call in continuation["transport_calls"]] == [
+        2,
+        1,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_hashi_api_preserves_multipart_messages_and_reasoning_effort(tmp_path):
     image = tmp_path / "photo.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\nhashi-api")

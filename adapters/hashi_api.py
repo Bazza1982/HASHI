@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from collections.abc import Mapping
 from itertools import count
 from pathlib import Path
@@ -73,7 +74,12 @@ def _provider_base_url(global_config: Any) -> str:
 
 
 class HashiApiAdapter(OpenRouterAdapter):
-    """Stateless OpenAI-compatible adapter for HASHI's own API gateway."""
+    """Provider adapter for HASHI's OpenAI-compatible model gateway.
+
+    The adapter remains stateless between HER stages.  Within one tool-enabled
+    stage it uses an opaque Gateway continuation so follow-up tool results are
+    sent as an incremental suffix instead of replaying the complete prompt.
+    """
 
     def _trace(self, message: str, *args: Any) -> None:
         """Emit best-effort observability without entering the request boundary."""
@@ -97,6 +103,13 @@ class HashiApiAdapter(OpenRouterAdapter):
             supports_progress_stream=True,
             supports_tool_stream=True,
             supports_answer_stream=True,
+            # The Gateway owns a request-local visible transcript and may
+            # reconstruct it for the exact configured model route. This is
+            # continuation-safe but is not a claim of provider-native state.
+            continuation_mode="reconstructed",
+            tool_request_mode="native",
+            recovery_mode="reconstruct_safe",
+            reasoning_transport="visible_optional",
         )
 
     def __init__(self, agent_config, global_config, api_key: str | None = None):
@@ -159,6 +172,7 @@ class HashiApiAdapter(OpenRouterAdapter):
         request_id: str | None = None,
         provider_call: int | None = None,
         after_tool_end: bool = False,
+        external_tool_session: bool = False,
     ) -> dict:
         headers = {"Content-Type": "application/json"}
         if request_id:
@@ -166,6 +180,8 @@ class HashiApiAdapter(OpenRouterAdapter):
         if provider_call is not None:
             headers["X-Hashi-Provider-Call"] = str(provider_call)
         headers["X-Hashi-After-Tool-End"] = "true" if after_tool_end else "false"
+        if external_tool_session:
+            headers["X-Hashi-External-Tool-Session"] = "v1"
         return headers
 
     async def initialize(self) -> bool:
@@ -384,10 +400,13 @@ class HashiApiAdapter(OpenRouterAdapter):
         media_routing: tuple[dict[str, Any], ...] = ()
         media_fallback_attempted = False
         provider_attempt_count = 0
+        gateway_session_id: str | None = None
+        gateway_transport_calls: list[dict[str, Any]] = []
 
         try:
             self._touch_activity()
             messages, media_routing = self._initial_messages(prompt, request_content)
+            outbound_messages = messages
             self._last_media_routing = media_routing
             normalized_request_content = normalize_request_content(request_content)
             manifest = attachment_manifest(normalized_request_content)
@@ -403,6 +422,10 @@ class HashiApiAdapter(OpenRouterAdapter):
             all_media_native = bool(media_routing) and all(
                 str(item.get("route") or "") == "native" for item in media_routing
             )
+            # Gateway sessions intentionally exclude inline media. Text-only
+            # tool stages qualify for the request-local continuation protocol.
+            if self.tool_registry is not None and not media_routing:
+                gateway_session_id = f"hashi-tool-{uuid.uuid4().hex}"
 
             for loop_idx in count():
                 while True:
@@ -411,15 +434,32 @@ class HashiApiAdapter(OpenRouterAdapter):
                         request_id=request_id,
                         provider_call=provider_attempt_count,
                         after_tool_end=tool_loop_count > 0,
+                        external_tool_session=gateway_session_id is not None,
                     )
                     payload = self._build_payload(
-                        messages,
+                        list(outbound_messages),
                         use_streaming=use_streaming,
                         excluded_tool_names=(
                             _MEDIA_FALLBACK_TOOL_NAMES
                             if all_media_native
                             else frozenset()
                         ),
+                    )
+                    if gateway_session_id is not None:
+                        payload["session_id"] = gateway_session_id
+                    gateway_transport_calls.append(
+                        {
+                            "provider_attempt": provider_attempt_count,
+                            "incremental": bool(tool_loop_count > 0),
+                            "message_count": len(outbound_messages),
+                            "message_chars": len(
+                                json.dumps(
+                                    outbound_messages,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                            ),
+                        }
                     )
 
                     try:
@@ -462,6 +502,8 @@ class HashiApiAdapter(OpenRouterAdapter):
                             prompt,
                             request_content,
                         )
+                        outbound_messages = messages
+                        gateway_session_id = None
                         media_routing = self._typed_media_fallback_routing(
                             media_routing
                         )
@@ -516,6 +558,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                     assistant_msg["content"] = result.text
                 assistant_msg["tool_calls"] = result.tool_calls
                 messages.append(assistant_msg)
+                tool_result_start = len(messages)
 
                 await self._run_tool_calls(
                     result.tool_calls,
@@ -525,6 +568,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                     native_local_refs=native_local_refs,
                     all_media_native=all_media_native,
                 )
+                outbound_messages = messages[tool_result_start:]
                 self._trace(
                     "HASHI_API_TRACE tool_round_completed "
                     "request_id=%s tool_round=%s tool_calls=%s",
@@ -555,6 +599,14 @@ class HashiApiAdapter(OpenRouterAdapter):
                     "meter": {"provider_calls": provider_calls},
                     "multimodal_routing": list(media_routing),
                     "multimodal_fallback_attempted": media_fallback_attempted,
+                    "gateway_continuation": {
+                        "enabled": gateway_session_id is not None,
+                        "session_id": gateway_session_id,
+                        "transport_calls": gateway_transport_calls,
+                        "full_prompt_send_count": (
+                            1 if gateway_session_id is not None else provider_call_count
+                        ),
+                    },
                 },
                 tool_call_count=total_tool_calls,
                 tool_loop_count=tool_loop_count,

@@ -64,6 +64,12 @@ class BackendCapabilities:
     # Provider-neutral policy for models that technically accept text but
     # require an audio-bearing request shape for a particular route.
     input_policy: str = "auto"
+    # Physical provider continuation is separate from HASHI/HER logical
+    # sessions. Safe defaults require reconstruction and expose no reasoning.
+    continuation_mode: str = "reconstructed"
+    tool_request_mode: str = "none"
+    recovery_mode: str = "reconstruct_safe"
+    reasoning_transport: str = "absent"
 
 
 @dataclass

@@ -487,6 +487,10 @@ class OpenRouterAdapter(BaseBackend):
             supports_progress_stream=True,
             supports_tool_stream=True,
             supports_answer_stream=True,
+            continuation_mode="reconstructed",
+            tool_request_mode="native",
+            recovery_mode="reconstruct_safe",
+            reasoning_transport="visible_optional",
         )
 
     def __init__(self, agent_config, global_config, api_key: str = None):
