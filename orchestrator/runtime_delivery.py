@@ -21,7 +21,7 @@ from orchestrator.runtime_common import _md_to_html
 
 def _retry_after_seconds(exc: Exception) -> int | None:
     if isinstance(exc, RetryAfter):
-        return int(getattr(exc, "retry_after", 0) or 0)
+        return telegram_delivery_failover.retry_after_seconds(exc)
     return None
 
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timedelta
+from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,49 @@ def _parse_iso(value: str | None) -> datetime | None:
         return datetime.fromisoformat(str(value))
     except Exception:
         return None
+
+
+def _record_has_active_block(
+    record: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether Telegram's authoritative RetryAfter window is active.
+
+    ``recovery_due`` tracks a pending recovery notice.  It must never suppress
+    ordinary Telegram business after the server-provided wait has elapsed.
+    """
+    if str(record.get("status") or "") != "blocked":
+        return False
+    blocked_until = _parse_iso(record.get("blocked_until"))
+    if blocked_until is None:
+        # A malformed active incident has no safe release deadline.  Keep the
+        # conservative legacy behaviour until another RetryAfter or operator
+        # repair supplies one.
+        return True
+    current = now or _now()
+    if blocked_until.tzinfo is None:
+        blocked_until = blocked_until.replace(tzinfo=current.tzinfo)
+    return current < blocked_until.astimezone(current.tzinfo)
+
+
+def retry_after_seconds(exc: Any) -> int:
+    """Normalize python-telegram-bot RetryAfter values without under-waiting."""
+    value = getattr(exc, "retry_after", 0) or 0
+    if isinstance(value, timedelta):
+        return max(0, ceil(value.total_seconds()))
+    try:
+        return max(0, ceil(float(value)))
+    except (OverflowError, TypeError, ValueError):
+        return 0
+
+
+def _pending_recovery_chat_keys(record: dict[str, Any]) -> list[str]:
+    return [
+        str(chat_key)
+        for chat_key, chat_state in (record.get("per_chat") or {}).items()
+        if not chat_state.get("recovery_notice_sent_at")
+    ]
 
 
 def preview_preferences_path(runtime: Any) -> Path:
@@ -128,7 +172,7 @@ def get_blocked_record(runtime: Any) -> dict[str, Any] | None:
     _agent_name, record = _find_record_by_token(state, runtime_token_key(runtime))
     if not record:
         return None
-    if str(record.get("status")) in {"blocked", "recovery_due"}:
+    if _record_has_active_block(record):
         return record
     return None
 
@@ -142,7 +186,7 @@ def delivery_status_summary(runtime: Any) -> dict[str, Any] | None:
     _agent_name, record = _find_record_by_token(state, runtime_token_key(runtime))
     if not record:
         return None
-    if str(record.get("status")) not in {"blocked", "recovery_due"}:
+    if not _record_has_active_block(record):
         return None
     return {
         "blocked_until": record.get("blocked_until"),
@@ -259,7 +303,7 @@ def _select_failover_runtime_from_state(
     blocked_tokens = {
         str(record.get("token_key") or "")
         for record in (state.get("agents") or {}).values()
-        if str(record.get("status") or "") in {"blocked", "recovery_due"}
+        if _record_has_active_block(record)
     }
     candidates = _runtime_candidates(source_runtime)
     if preferred_name:
@@ -341,7 +385,7 @@ async def _prepare_warning(
         path = delivery_state_path(source_runtime)
         state = _load_health_state_sync(path)
         _agent_name, record = _find_record_by_token(state, runtime_token_key(source_runtime))
-        if not record or str(record.get("status") or "") not in {"blocked", "recovery_due"}:
+        if not record or not _record_has_active_block(record):
             return None
         chat_key = str(chat_id)
         per_chat = record.setdefault("per_chat", {})
@@ -500,7 +544,29 @@ async def handle_blocked_send(
         path = delivery_state_path(runtime)
         state = _load_health_state_sync(path)
         _agent_name, record = _find_record_by_token(state, runtime_token_key(runtime))
-        if not record or str(record.get("status") or "") not in {"blocked", "recovery_due"}:
+        if not record:
+            return False
+        if not _record_has_active_block(record):
+            if str(record.get("status") or "") == "blocked":
+                record["status"] = (
+                    "recovery_due"
+                    if _pending_recovery_chat_keys(record)
+                    else "healthy"
+                )
+                record["delivery_restored_at"] = _iso(_now())
+                record["active_failover_agent"] = None
+                record["failover_failed"] = False
+                if record["status"] == "healthy":
+                    record.pop("recovery_failed", None)
+                    record.pop("last_recovery_error", None)
+                _save_health_state_sync(path, state)
+                logger.info(
+                    "Telegram delivery wait elapsed; normal delivery restored "
+                    "agent=%s incident_id=%s blocked_until=%s",
+                    getattr(runtime, "name", "unknown"),
+                    record.get("incident_id"),
+                    record.get("blocked_until"),
+                )
             return False
         if text:
             response_path = persist_undelivered_response(
@@ -536,25 +602,42 @@ async def handle_retry_after(
     purpose: str,
     text: str | None = None,
 ) -> dict[str, Any]:
-    retry_after_s = int(getattr(exc, "retry_after", 0) or 0)
-    blocked_until_dt = _now() + timedelta(seconds=max(retry_after_s, 1))
+    retry_after_s = retry_after_seconds(exc)
+    now = _now()
+    blocked_until_dt = now + timedelta(seconds=max(retry_after_s, 1))
     runtime_name = getattr(runtime, "name", "unknown")
-    incident_id = f"tg-{runtime_name}-{_now().strftime('%Y%m%dT%H%M%S')}"
+    incident_id = f"tg-{runtime_name}-{now.strftime('%Y%m%dT%H%M%S%f')}"
     response_path = None
     saved_record: dict[str, Any]
     async with _HEALTH_STATE_LOCK:
         path = delivery_state_path(runtime)
         state = _load_health_state_sync(path)
         record = _agent_record(state, runtime)
-        if record.get("incident_id"):
+        continuing_incident = _record_has_active_block(record, now=now)
+        if continuing_incident and record.get("incident_id"):
             incident_id = str(record.get("incident_id"))
+        else:
+            for entry in (record.get("per_chat") or {}).values():
+                for key in (
+                    "first_warned_at",
+                    "last_warned_at",
+                    "last_warning_request_id",
+                    "recovery_notice_sent_at",
+                ):
+                    entry.pop(key, None)
+            record["active_failover_agent"] = None
+            record["failover_failed"] = False
+            record.pop("last_failover_error", None)
         record["status"] = "blocked"
         record["token_key"] = runtime_token_key(runtime)
         record["blocked_until"] = _iso(blocked_until_dt)
         record["retry_after_s"] = retry_after_s
         record["incident_id"] = incident_id
-        record["last_incident_at"] = _iso(_now())
+        record["last_incident_at"] = _iso(now)
         record["last_request_id"] = request_id
+        record.pop("delivery_restored_at", None)
+        record.pop("recovery_failed", None)
+        record.pop("last_recovery_error", None)
         if text:
             response_path = persist_undelivered_response(
                 runtime,
@@ -580,18 +663,17 @@ async def handle_retry_after(
 
 async def delivery_health_watcher(kernel: Any) -> None:
     while True:
-        await asyncio.sleep(max(5, watcher_poll_seconds(kernel)))
         try:
             await _tick_recovery(kernel)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Telegram delivery recovery watcher tick failed")
-            continue
+        await asyncio.sleep(max(5, watcher_poll_seconds(kernel)))
 
 
 async def _tick_recovery(kernel: Any) -> None:
-    notices: list[tuple[str, Any, int]] = []
+    notices: list[tuple[str, Any, int, str | None]] = []
     async with _HEALTH_STATE_LOCK:
         path = delivery_state_path(kernel)
         state = _load_health_state_sync(path)
@@ -602,8 +684,7 @@ async def _tick_recovery(kernel: Any) -> None:
             if status not in {"blocked", "recovery_due"}:
                 continue
             if status == "blocked":
-                blocked_until = _parse_iso(record.get("blocked_until"))
-                if blocked_until is None or _now() < blocked_until:
+                if _record_has_active_block(record):
                     continue
             runtime = runtimes.get(agent_name)
             if runtime is None or not getattr(runtime, "telegram_connected", False):
@@ -619,36 +700,57 @@ async def _tick_recovery(kernel: Any) -> None:
                     "Retrying pending Telegram delivery recovery agent=%s",
                     agent_name,
                 )
-            for chat_key, chat_state in (record.get("per_chat") or {}).items():
-                if chat_state.get("recovery_notice_sent_at"):
-                    continue
-                notices.append((agent_name, runtime, int(chat_key)))
-            if not record.get("per_chat"):
+            pending_chat_keys = _pending_recovery_chat_keys(record)
+            for chat_key in pending_chat_keys:
+                notices.append(
+                    (agent_name, runtime, int(chat_key), record.get("incident_id"))
+                )
+            if not pending_chat_keys:
                 record["status"] = "healthy"
                 record["active_failover_agent"] = None
                 record["failover_failed"] = False
+                record.pop("recovery_failed", None)
+                record.pop("last_recovery_error", None)
+                logger.info("Telegram delivery recovered agent=%s", agent_name)
             changed = True
         if changed:
             _save_health_state_sync(path, state)
     if not notices:
         return
-    results: list[tuple[str, int, str, int | None, Exception | None]] = []
-    for agent_name, runtime, chat_id in notices:
+    results: list[tuple[str, int, str | None, str, int | None, Exception | None]] = []
+    for agent_name, runtime, chat_id, incident_id in notices:
         try:
             await _send_direct(runtime, chat_id=chat_id, text=_recovery_text(agent_name))
-            results.append((agent_name, chat_id, "sent", None, None))
+            results.append((agent_name, chat_id, incident_id, "sent", None, None))
         except RetryAfter as exc:
-            retry_after_s = int(getattr(exc, "retry_after", 0) or 0)
-            results.append((agent_name, chat_id, "retry_after", retry_after_s, exc))
+            retry_after_s = retry_after_seconds(exc)
+            results.append(
+                (agent_name, chat_id, incident_id, "retry_after", retry_after_s, exc)
+            )
         except Exception as exc:
-            results.append((agent_name, chat_id, "error", None, exc))
+            results.append((agent_name, chat_id, incident_id, "error", None, exc))
     async with _HEALTH_STATE_LOCK:
         path = delivery_state_path(kernel)
         state = _load_health_state_sync(path)
         changed = False
-        for agent_name, chat_id, status, retry_after_s, error in results:
+        for agent_name, chat_id, incident_id, status, retry_after_s, error in results:
             record = (state.get("agents") or {}).get(agent_name)
             if not record:
+                continue
+            if record.get("incident_id") != incident_id:
+                logger.info(
+                    "Ignoring stale Telegram recovery result agent=%s incident_id=%s",
+                    agent_name,
+                    incident_id,
+                )
+                continue
+            if str(record.get("status") or "") == "blocked" and _record_has_active_block(record):
+                logger.info(
+                    "Ignoring Telegram recovery result after a new active block "
+                    "agent=%s incident_id=%s",
+                    agent_name,
+                    incident_id,
+                )
                 continue
             chat_state = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
             if status == "sent":

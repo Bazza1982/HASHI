@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -346,6 +347,45 @@ async def test_send_long_message_skips_retry_after_without_raising(tmp_path):
     assert chunks == 0
     assert runtime.app.bot.messages == []
     assert any("Telegram flood control" in message for _level, message in runtime.telegram_logger.messages)
+
+
+@pytest.mark.asyncio
+async def test_send_long_message_resumes_immediately_after_retry_wait(tmp_path):
+    runtime = _runtime(tmp_path)
+    state_path = tmp_path / "state" / "telegram_delivery_health.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {
+                    "test-agent": {
+                        "token_key": "telegram:test-agent",
+                        "status": "blocked",
+                        "blocked_until": "2000-01-01T00:00:00+00:00",
+                        "retry_after_s": 5,
+                        "incident_id": "tg-test-agent-expired",
+                        "per_chat": {},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _elapsed, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=123,
+        text="normal business is back",
+        request_id="req-after-wait",
+        purpose="response",
+    )
+
+    assert chunks == 1
+    assert runtime.app.bot.messages[0]["text"] == "normal business is back"
+    record = json.loads(state_path.read_text(encoding="utf-8"))["agents"]["test-agent"]
+    assert record["status"] == "healthy"
+    assert not (tmp_path / "undelivered" / "req-after-wait.md").exists()
 
 
 @pytest.mark.asyncio

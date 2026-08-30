@@ -38,8 +38,8 @@ Implement one instance-local Telegram delivery health system that:
 4. saves any undelivered successful response;
 5. sends one operational warning through a same-instance failover agent;
 6. rate-limits repeated warnings while the block is active;
-7. automatically recovers after `blocked_until`;
-8. sends one recovery notice and returns future delivery to the original agent;
+7. automatically permits normal delivery as soon as `blocked_until` passes;
+8. sends one best-effort recovery notice without making that notice a delivery gate;
 9. adds a Telegram `/preview` command so operators can disable answer stream
    preview per agent without editing config files.
 
@@ -227,16 +227,22 @@ Per source agent or token, use the following states:
 Behavior:
 
 1. First `RetryAfter` opens `blocked`.
-2. Watcher moves `blocked -> recovery_due` when `now >= blocked_until`.
-3. Recovery notice success moves `recovery_due -> recovered`, then immediately
+2. The watcher or first normal send moves `blocked -> recovery_due` when
+   `now >= blocked_until`; if no recovery notices remain, it goes directly to
+   `healthy`.
+3. `recovery_due` is notification bookkeeping only. Normal Telegram delivery
+   is already permitted, and recovery-notice failure cannot suppress business
+   messages.
+4. Recovery notice success moves `recovery_due -> recovered`, then immediately
    clears active failover routing and returns to `healthy`.
-4. Recovery notice `RetryAfter` moves back to `blocked` with a new
+5. Recovery notice `RetryAfter` moves back to `blocked` with a new
    `blocked_until`.
 
 The important rule is:
 
-**routing returns to the original agent only after the recovery transition is
-completed, not merely because wall-clock time has passed.**
+**only an unexpired Telegram `RetryAfter` window may suppress delivery.  Once
+that exact wait has elapsed, the next ordinary send proceeds immediately; a
+watcher tick, agent reboot, or successful recovery notice is not required.**
 
 ## Preview Preference Behavior
 
