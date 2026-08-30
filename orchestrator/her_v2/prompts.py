@@ -306,6 +306,11 @@ def render_stage_prompt(request: StageRequest) -> str:
             classification=(
                 request.classification.value if request.classification else ""
             ),
+            strategy_handoff=json.dumps(
+                request.context.get("strategy_handoff") or {},
+                ensure_ascii=False,
+                indent=2,
+            ),
             relevant_habits=json.dumps(habits, ensure_ascii=False, indent=2),
             available_execution_tools=json.dumps(
                 _compact_tool_catalogue(

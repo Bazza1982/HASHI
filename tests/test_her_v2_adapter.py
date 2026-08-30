@@ -2118,7 +2118,7 @@ async def test_strategy_receives_complete_policy_and_minimal_turn_prompt():
     await provider.invoke(profile, request)
 
     backend = manager.backends[-1]
-    assert "task strategist and context preparation agent" in backend.sys_prompt
+    assert "You are the task strategist" in backend.sys_prompt
     assert "configured agent persona" not in backend.sys_prompt
     assert "Original user request and context" in backend.sys_prompt
     assert "Earlier context already contains the result. Please check it." in (

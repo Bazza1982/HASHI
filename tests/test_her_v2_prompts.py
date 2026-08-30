@@ -329,6 +329,39 @@ def test_planning_binds_high_volume_assignments_to_runtime_plan_snapshot() -> No
     assert "unrelated historical batches" in prompt
 
 
+def test_planning_is_tool_free_and_renders_the_strategy_handoff() -> None:
+    request = _request(
+        Stage.PLANNING,
+        strategy_handoff={
+            "selected_strategy_cards": [
+                {"id": "DEBUG_DIAGNOSE", "content": "Reproduce, isolate, verify."}
+            ],
+            "execution_brief": {
+                "strategy": "Use cheap static diagnosis before expensive inference.",
+                "verification": ["Run the authoritative inference cases once."],
+            },
+        },
+    )
+
+    rendered = render_stage_prompt(request)
+
+    assert '"id": "DEBUG_DIAGNOSE"' in rendered
+    assert "cheap static diagnosis before expensive inference" in rendered
+    assert "Planning itself has no tools" in rendered
+    assert "Do not retrieve or reread the complete Playbook" in rendered
+    assert "$strategy_handoff" not in rendered
+
+
+def test_strategy_prompt_keeps_tool_authority_but_focuses_on_strategy() -> None:
+    prompt = prompt_catalog.load_prompt_asset("system_strategy")
+
+    assert "including with authorised side effects" in prompt
+    assert "responsibility is strategic" in prompt
+    assert "Do not turn Strategy into detailed Planning" in prompt
+    assert "context preparation agent" not in prompt
+    assert "prepare a stronger execution strategy" not in prompt
+
+
 def test_planning_renders_exact_available_subagent_profile_names() -> None:
     request = _request(
         Stage.PLANNING,
@@ -614,7 +647,7 @@ def test_strategy_uses_schema_v3_with_playbook_capabilities_and_resources() -> N
     stage_prompt = render_stage_prompt(request)
 
     assert system_prompt == stage_prompt
-    assert "task strategist and context preparation agent" in stage_prompt
+    assert "You are the task strategist" in stage_prompt
     assert "Original user request and context" in stage_prompt
     assert '"real_goal"' in stage_prompt
     assert '"selected_strategy_cards"' in stage_prompt

@@ -73,6 +73,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "goal",
             "relevant_habits",
             "schema",
+            "strategy_handoff",
         }
     ),
     "system_replanning": frozenset(

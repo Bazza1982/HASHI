@@ -1950,7 +1950,16 @@ async def test_medium_turn_uses_strategy_goal_and_routes_tools_to_strategy_and_e
     assert len(execution_calls) == 1
     assert execution_calls[0].allow_tools is True
     assert execution_calls[0].allow_side_effects is True
-    assert "strategy_handoff" not in execution_calls[0].context
+    planning_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.PLANNING
+    )
+    assert planning_call.allow_tools is False
+    assert planning_call.allow_side_effects is False
+    assert planning_call.context["strategy_handoff"]["execution_brief"]["strategy"]
+    assert (
+        execution_calls[0].context["strategy_handoff"]
+        == planning_call.context["strategy_handoff"]
+    )
     assert all(
         not call.allow_tools
         for _profile, call in provider.requests
@@ -2224,6 +2233,10 @@ async def test_execution_receives_the_same_complete_request_context_as_planning(
         "change",
         "verify",
     ]
+    assert (
+        execution_request.context["strategy_handoff"]
+        == planning_request.context["strategy_handoff"]
+    )
     assert result.terminal_state is TerminalState.COMPLETED
 
 
@@ -4774,10 +4787,11 @@ async def test_simple_classification_can_escalate_execution_capability_without_m
         "active_plan",
         "continuation_rules",
         "real_goal",
-        "relevant_habits",
-        "replan_continuation",
-        "sub_agent_results",
-    }
+            "relevant_habits",
+            "replan_continuation",
+            "strategy_handoff",
+            "sub_agent_results",
+        }
     assert (
         second_execution.context["continuation_rules"][
             "never_repeat_completed_side_effects_because_of_replanning"

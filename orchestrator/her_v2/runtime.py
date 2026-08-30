@@ -1555,6 +1555,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
 
             planning_context: dict[str, Any] = {
                 "classification": classification.value,
+                "strategy_handoff": copy.deepcopy(
+                    dict(state.strategy_handoff)
+                    if isinstance(state.strategy_handoff, Mapping)
+                    else {}
+                ),
                 "relevant_habits": list(state.relevant_habits),
                 "available_execution_tools": [
                     dict(item) for item in execution_tool_catalogue
@@ -1570,6 +1575,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 Stage.PLANNING,
                 validate_plan,
                 allow_tools=False,
+                allow_side_effects=False,
                 context=planning_context,
             )
             await self._transition(state, LifecycleState.PLANNED)
@@ -2179,9 +2185,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     _subagent_result_payload(result) for result in sub_agent_results
                 ],
             }
-            if state.effort is Effort.LOW and isinstance(
-                state.strategy_handoff, Mapping
-            ):
+            if isinstance(state.strategy_handoff, Mapping):
                 execution_context["strategy_handoff"] = copy.deepcopy(
                     dict(state.strategy_handoff)
                 )
