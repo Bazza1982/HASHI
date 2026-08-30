@@ -87,6 +87,7 @@ DEFAULT_CAPABILITIES = [
     "protocol_message_v1",
     "agent_reply_v1",
     "rescue_control",
+    "tui_proxy_v1",
 ]
 TERMINAL_INFLIGHT_STATES = {
     "reply_sent",

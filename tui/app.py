@@ -2,27 +2,33 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import json
+import logging
+import os
 import random
 import sys
 from pathlib import Path
 
 from rich.text import Text
+from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.widgets import RichLog, Input, Static
-from textual.message import Message
-from textual import work
+from textual.widgets import Input, RichLog, Static
 
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 from tui.api_client import TuiApiClient
-from tui.onboarding import (
-    load_languages, lang_code_from_file, audit_environment,
-    verify_openrouter, write_config,
-)
+from tui.instances import InstanceResolver, InstanceTarget, load_launch_instance
 from tui.light_onboarding import LightOnboardingPhase, is_onboarding_complete
+from tui.onboarding import (
+    audit_environment,
+    lang_code_from_file,
+    load_languages,
+    verify_openrouter,
+    write_config,
+)
+
+logger = logging.getLogger(__name__)
 
 
 STARTUP_LOGO = [
@@ -154,13 +160,23 @@ class FooterInfoBox(Static):
         self._offset = (self._offset + 1) % len(self._ticker)
         self._refresh_footer()
 
-    def update_state(self, agent: str = "", backend: str = "", gateway_ok: bool = False, mode: str = "", agents: list[dict] | None = None, current_agent: str | None = None):
+    def update_state(
+        self,
+        agent: str = "",
+        backend: str = "",
+        gateway_ok: bool = False,
+        mode: str = "",
+        agents: list[dict] | None = None,
+        current_agent: str | None = None,
+        instance_id: str = "",
+    ):
         icon = "\u2705" if gateway_ok else "\u274c"
+        instance_part = f"Instance: {instance_id} | " if instance_id else ""
         agent_part = f"Agent: {agent}" if agent else "No agent selected"
         backend_part = f" | Backend: {backend}" if backend else ""
         mode_part = f" | Mode: {mode}" if mode else ""
         api_part = f" | API: {'connected' if gateway_ok else 'offline'}"
-        self._status_line = f" {icon} {agent_part}{backend_part}{mode_part}{api_part}"
+        self._status_line = f" {icon} {instance_part}{agent_part}{backend_part}{mode_part}{api_part}"
 
         connected = []
         for agent_data in agents or []:
@@ -331,16 +347,33 @@ class HASHITuiApp(App):
         self,
         workbench_url: str = DEFAULT_WORKBENCH_LOCALHOST_URL,
         onboarding_mode: bool = False,
+        *,
+        workbench_urls: list[str] | tuple[str, ...] | None = None,
+        bridge_home: Path | None = None,
+        launch_instance_id: str | None = None,
     ):
         super().__init__()
-        self.bridge_home = self._find_bridge_home()
+        self.bridge_home = Path(bridge_home).resolve() if bridge_home else self._find_bridge_home()
+        configured_instance_id, _workbench_port = load_launch_instance(self.bridge_home)
+        self.launch_instance_id = str(launch_instance_id or configured_instance_id).strip().upper()
+        local_urls = list(workbench_urls or [workbench_url])
+        if workbench_url not in local_urls:
+            local_urls.insert(0, workbench_url)
+        self.current_instance_id = self.launch_instance_id
         self.bridge_proc: asyncio.subprocess.Process | None = None
         self.current_agent: str | None = None
         self._chat_targets: list[str] = []
         self.current_agent_display: str = ""
         self.current_backend: str = ""
         self._agent_mode: str = ""
-        self.api = TuiApiClient(base_url=workbench_url)
+        self.api = TuiApiClient(
+            base_url=local_urls[0],
+            fallback_base_urls=local_urls[1:],
+            expected_instance_id=self.launch_instance_id,
+        )
+        self._instance_resolver = InstanceResolver(self.bridge_home, local_urls)
+        self._instance_switch_lock = asyncio.Lock()
+        self._connection_generation = 0
         self.gateway_ok = False
         self._log_paused = False
         self._onboarding: OnboardingPhase | None = None
@@ -369,10 +402,11 @@ class HASHITuiApp(App):
             yield LogPanel(id="log-panel")
             with Vertical(id="chat-container"):
                 yield ChatHistory(id="chat-history")
-                yield ChatInput(placeholder="Type message or /to <agent> ...", id="chat-input")
+                yield ChatInput(placeholder="Type message, /to <agent>, or /instance ...", id="chat-input")
             yield FooterInfoBox(id="footer-info-box")
 
     def on_mount(self):
+        self.query_one("#log-panel", LogPanel).border_title = f"Local log — {self.launch_instance_id}"
         # Start the intro only after the first screen refresh so frames are visible.
         self.call_after_refresh(self._schedule_startup_sequence)
 
@@ -389,11 +423,11 @@ class HASHITuiApp(App):
         needs_onboarding = True
         if agents_path.exists():
             try:
-                cfg = json.loads(agents_path.read_text(encoding="utf-8"))
+                cfg = json.loads(agents_path.read_text(encoding="utf-8-sig"))
                 if cfg.get("agents"):
                     needs_onboarding = False
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("TUI startup config unreadable: path=%s error=%s", agents_path, exc)
 
         if self._onboarding_mode and not is_onboarding_complete(self.bridge_home):
             self._start_light_onboarding()
@@ -523,7 +557,7 @@ class HASHITuiApp(App):
             ob.finalize()
             chat.write("\u2705 Configuration created! Starting HASHI...\n")
             self._onboarding = None
-            self.query_one("#chat-input", ChatInput).placeholder = "Type message or /to <agent> ..."
+            self.query_one("#chat-input", ChatInput).placeholder = "Type message, /to <agent>, or /instance ..."
             self.query_one("#chat-history", ChatHistory).border_title = "Chat"
             self._start_bridge()
 
@@ -543,7 +577,7 @@ class HASHITuiApp(App):
             self._onboarding.finalize()
             chat.write("\u2705 Configuration created! Starting HASHI...\n")
             self._onboarding = None
-            self.query_one("#chat-input", ChatInput).placeholder = "Type message or /to <agent> ..."
+            self.query_one("#chat-input", ChatInput).placeholder = "Type message, /to <agent>, or /instance ..."
             self.query_one("#chat-history", ChatHistory).border_title = "Chat"
             self._start_bridge()
 
@@ -591,7 +625,7 @@ class HASHITuiApp(App):
         self._inject_wakeup = lo.get_wakeup_prompt()
         self._light_onboarding = None
         chat.write("✅ Setup complete! Starting HASHI...\n")
-        self.query_one("#chat-input", ChatInput).placeholder = "Type message or /to <agent> ..."
+        self.query_one("#chat-input", ChatInput).placeholder = "Type message, /to <agent>, or /instance ..."
         self.query_one("#chat-history", ChatHistory).border_title = "Chat"
         self._start_bridge()
 
@@ -607,10 +641,12 @@ class HASHITuiApp(App):
 
         # If API is already up (HASHI already running), just attach — don't start a new process
         if await self.api.health():
-            self._write_log_line("[TUI] HASHI is already running — attaching to existing instance.")
+            self._write_log_line(
+                f"[TUI] {self.launch_instance_id} is already running — attaching to launch instance."
+            )
             self._start_attached_log_follow()
             self.gateway_ok = True
-            await self._load_agents()
+            await self._load_agents(client=self.api, generation=self._connection_generation)
             self._start_polling()
             self._update_status_bar()
             return
@@ -640,7 +676,8 @@ class HASHITuiApp(App):
                 decoded = line.decode("utf-8", errors="replace").rstrip()
                 if decoded and not self._log_paused:
                     self._write_log_line(decoded)
-            except Exception:
+            except Exception as exc:
+                logger.warning("TUI bridge log stream failed: error=%s", exc)
                 break
         self._write_log_line("[TUI] Bridge process exited.")
 
@@ -687,8 +724,8 @@ class HASHITuiApp(App):
                             self._write_log_line(line)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("TUI attached log follow failed: path=%s error=%s", path, exc)
             await asyncio.sleep(1.0)
 
     def _read_log_chunk(self, path: Path, position: int) -> tuple[list[str], int]:
@@ -706,7 +743,7 @@ class HASHITuiApp(App):
             if await self.api.health():
                 self.gateway_ok = True
                 self._write_log_line("[TUI] API Gateway connected.")
-                await self._load_agents()
+                await self._load_agents(client=self.api, generation=self._connection_generation)
                 self._start_polling()
                 self._update_status_bar()
                 return
@@ -714,43 +751,74 @@ class HASHITuiApp(App):
         self._write_log_line("[TUI] Warning: API Gateway not reachable after 60s. Chat disabled.")
         self._update_status_bar()
 
-    async def _load_agents(self):
-        agents = await self.api.list_agents()
+    async def _load_agents(
+        self,
+        *,
+        client: TuiApiClient | None = None,
+        generation: int | None = None,
+        agents: list[dict] | None = None,
+    ):
+        client = client or self.api
+        generation = self._connection_generation if generation is None else generation
+        agents = await client.list_agents() if agents is None else agents
+        if generation != self._connection_generation or client is not self.api:
+            logger.debug("Discarded stale TUI agent load: generation=%s", generation)
+            return
         self._agents_cache = agents
         self._update_status_bar()
         if agents and not self.current_agent:
             # Auto-select first active agent
             for a in agents:
                 if a.get("is_active") or a.get("online"):
-                    self._select_agent(a)
+                    self._select_agent(a, client=client, generation=generation)
                     break
             if not self.current_agent and agents:
-                self._select_agent(agents[0])
+                self._select_agent(agents[0], client=client, generation=generation)
 
-    def _select_agent(self, agent_data: dict):
+    def _select_agent(
+        self,
+        agent_data: dict,
+        *,
+        client: TuiApiClient | None = None,
+        generation: int | None = None,
+    ):
+        client = client or self.api
+        generation = self._connection_generation if generation is None else generation
         self.current_agent = agent_data.get("name", "")
         self._chat_targets = [self.current_agent] if self.current_agent else []
         self.current_agent_display = agent_data.get("display_name", self.current_agent)
         self.current_backend = agent_data.get("active_backend", agent_data.get("engine", ""))
         self._agent_mode = agent_data.get("mode", "flex")
-        self.api.reset_offset(self.current_agent)
+        client.reset_offset(self.current_agent)
         chat = self.query_one("#chat-history", ChatHistory)
         emoji = agent_data.get("emoji", "")
-        chat.border_title = f"Chat \u2014 {emoji} {self.current_agent_display} ({self.current_agent})"
+        chat.border_title = (
+            f"Chat — {self.current_instance_id} — {emoji} "
+            f"{self.current_agent_display} ({self.current_agent})"
+        )
         self._update_status_bar()
         # Load recent transcript
-        self._load_initial_transcript()
+        self._load_initial_transcript(client, self.current_agent, generation)
 
         # First-run wakeup: send once after initial agent selection
         if self._inject_wakeup and self.current_agent:
             wakeup = self._inject_wakeup
             self._inject_wakeup = None
-            self._send_wakeup(wakeup, self.current_agent)
+            self._send_wakeup(wakeup, self.current_agent, client, generation)
 
     @work()
-    async def _send_wakeup(self, prompt: str, agent: str):
+    async def _send_wakeup(
+        self,
+        prompt: str,
+        agent: str,
+        client: TuiApiClient,
+        generation: int,
+    ):
         await asyncio.sleep(2.0)  # let bridge settle
-        await self.api.send_chat(agent, prompt)
+        if generation != self._connection_generation or client is not self.api:
+            logger.info("Skipped stale onboarding wakeup: agent=%s generation=%s", agent, generation)
+            return
+        await client.send_chat(agent, prompt)
 
     def _render_transcript_message(self, msg: dict):
         role = msg.get("role", "?")
@@ -771,10 +839,22 @@ class HASHITuiApp(App):
             chat.write(markup(f"[bold #63ffd9]{prefix}:[/] {text}"))
 
     @work()
-    async def _load_initial_transcript(self):
-        if not self.current_agent:
+    async def _load_initial_transcript(
+        self,
+        client: TuiApiClient,
+        agent: str,
+        generation: int,
+    ):
+        if not agent:
             return
-        messages = await self.api.get_recent_transcript(self.current_agent, limit=20)
+        messages = await client.get_recent_transcript(agent, limit=20)
+        if (
+            generation != self._connection_generation
+            or client is not self.api
+            or agent != self.current_agent
+        ):
+            logger.debug("Discarded stale TUI transcript load: agent=%s generation=%s", agent, generation)
+            return
         chat = self.query_one("#chat-history", ChatHistory)
         chat.clear()
         for msg in messages:
@@ -790,21 +870,34 @@ class HASHITuiApp(App):
     async def _poll_loop(self):
         while True:
             if self.gateway_ok:
+                generation = self._connection_generation
+                client = self.api
                 try:
                     self._agent_refresh_tick = (self._agent_refresh_tick + 1) % 5
                     if self._agent_refresh_tick == 0:
-                        self._agents_cache = await self.api.list_agents()
-                        self._update_status_bar()
+                        agents = await client.list_agents()
+                        if generation == self._connection_generation and client is self.api:
+                            self._agents_cache = agents
+                            self._update_status_bar()
                     poll_targets = self._chat_targets[:]
                     if self.current_agent and self.current_agent not in poll_targets:
                         poll_targets.append(self.current_agent)
                     for agent in poll_targets:
-                        messages = await self.api.poll_transcript(agent)
+                        messages = await client.poll_transcript(agent)
+                        if generation != self._connection_generation or client is not self.api:
+                            logger.debug("Discarded stale TUI poll result: agent=%s generation=%s", agent, generation)
+                            break
                         for msg in messages:
                             if msg.get("role") == "assistant":
                                 self._render_transcript_message(msg)
-                except Exception:
-                    pass
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "TUI transcript polling failed: instance=%s error=%s",
+                        self.current_instance_id,
+                        exc,
+                    )
             await asyncio.sleep(1.0)
 
     # ── Input handling ──────────────────────────────────────────────────
@@ -836,6 +929,9 @@ class HASHITuiApp(App):
         if normalized == "/agents":
             await self._handle_agents_cmd()
             return
+        if normalized == "/instance" or normalized.startswith("/instance "):
+            await self._handle_instance_cmd(normalized)
+            return
         if normalized == "/quit":
             await self._shutdown()
             return
@@ -854,28 +950,44 @@ class HASHITuiApp(App):
 
         if self.current_agent_display == "ALL":
             # Broadcast to all active agents
-            self._send_broadcast(normalized)
+            self._send_broadcast(normalized, self.api, self._connection_generation)
             return
 
         if not self.current_agent:
             chat.write(markup("[yellow]No agent selected. Use /to <name> first.[/]"))
             return
         else:
-            self._send_message(normalized, self.current_agent)
+            self._send_message(normalized, self.current_agent, self.api, self._connection_generation)
 
     @work()
-    async def _send_message(self, text: str, agent: str):
-        result = await self.api.send_chat(agent, text)
+    async def _send_message(
+        self,
+        text: str,
+        agent: str,
+        client: TuiApiClient,
+        generation: int,
+    ):
+        result = await client.send_chat(agent, text)
+        if generation != self._connection_generation or client is not self.api:
+            logger.info("TUI message completed on previous instance generation=%s agent=%s", generation, agent)
+            return
         if not result.get("ok", True) and "error" in result:
             chat = self.query_one("#chat-history", ChatHistory)
             chat.write(markup(f"[red]Error ({agent}): {result['error']}[/]"))
 
     @work()
-    async def _send_broadcast(self, text: str):
-        agents = await self.api.list_agents()
+    async def _send_broadcast(
+        self,
+        text: str,
+        client: TuiApiClient,
+        generation: int,
+    ):
+        agents = await client.list_agents()
         for a in agents:
             if a.get("is_active") or a.get("online"):
-                await self.api.send_chat(a["name"], text)
+                await client.send_chat(a["name"], text)
+        if generation != self._connection_generation:
+            logger.info("TUI broadcast completed on previous instance generation=%s", generation)
 
     # ── /to command ─────────────────────────────────────────────────────
 
@@ -933,19 +1045,158 @@ class HASHITuiApp(App):
             marker = " \u25c0" if name == self.current_agent else ""
             chat.write(markup(f"  {online} {emoji} [#dff6ff]{name}[/] ([#9be7ff]{display}[/]) [#71b7ff]\u2014[/] [#7fb6c7]{engine}[/]{marker}"))
 
+    # ── /instance command ──────────────────────────────────────────────
+
+    def _client_for_instance(self, target: InstanceTarget) -> TuiApiClient:
+        if target.transport == "direct":
+            urls = list(target.workbench_urls)
+            return TuiApiClient(
+                base_url=urls[0],
+                fallback_base_urls=urls[1:],
+                expected_instance_id=target.instance_id,
+            )
+        return TuiApiClient(
+            remote_url=target.remote_url,
+            target_instance=target.instance_id,
+            expected_instance_id=target.instance_id,
+        )
+
+    async def _show_instances(self, *, refresh: bool = True) -> list[InstanceTarget]:
+        chat = self.query_one("#chat-history", ChatHistory)
+        targets = await self._instance_resolver.discover(refresh=refresh)
+        chat.write(markup("[bold #9be7ff]HASHI instances:[/]"))
+        for target in targets:
+            selected = target.instance_id == self.current_instance_id
+            if selected:
+                icon = "[#63ffd9]●[/]"
+                state = "current · connected"
+            elif target.available:
+                icon = "[#9be7ff]○[/]"
+                state = f"available · {target.route_kind}"
+            else:
+                icon = "[#ff7a7a]×[/]"
+                state = target.reason or "unavailable"
+            chat.write(markup(f"  {icon} [#dff6ff]{target.instance_id}[/]  [#7fb6c7]{state}[/]"))
+        if len(targets) == 1:
+            chat.write(
+                markup(
+                    "[#c7ff8a]No trusted peers available. Hashi Remote must be "
+                    "on and handshaken on both instances.[/]"
+                )
+            )
+        chat.write(markup("[#c7ff8a]Use: /instance <id> · /instance current · /instance refresh[/]"))
+        return targets
+
+    async def _handle_instance_cmd(self, text: str):
+        chat = self.query_one("#chat-history", ChatHistory)
+        parts = text.split(maxsplit=1)
+        argument = parts[1].strip() if len(parts) > 1 else ""
+        if not argument or argument.lower() == "refresh":
+            await self._show_instances(refresh=True)
+            return
+
+        requested = self.launch_instance_id if argument.lower() == "current" else argument.upper()
+        if requested == self.current_instance_id:
+            chat.write(markup(f"[#c7ff8a]Already connected to {self.current_instance_id}.[/]"))
+            return
+
+        async with self._instance_switch_lock:
+            targets = await self._instance_resolver.discover(refresh=True)
+            target = next((item for item in targets if item.instance_id == requested), None)
+            if target is None:
+                chat.write(markup(f"[#ff7a7a]Instance '{requested}' was not found through local Hashi Remote.[/]"))
+                return
+            if not target.available:
+                chat.write(markup(f"[#ff7a7a]Cannot switch to {requested}: {target.reason or 'unavailable'}.[/]"))
+                return
+
+            candidate = self._client_for_instance(target)
+            self._write_log_line(
+                f"[TUI] Verifying instance switch {self.current_instance_id} -> {target.instance_id}..."
+            )
+            health = await candidate.health_info()
+            if not health.get("ok"):
+                reason = str(health.get("error") or "health check failed")
+                logger.warning(
+                    "TUI instance switch rolled back: from=%s target=%s reason=%s",
+                    self.current_instance_id,
+                    target.instance_id,
+                    reason,
+                )
+                self._write_log_line(f"[TUI] Instance switch rejected; keeping {self.current_instance_id}: {reason}")
+                chat.write(markup(f"[#ff7a7a]Switch failed: {reason}. Current connection was kept.[/]"))
+                return
+            agent_result = await candidate.agents_info()
+            if not agent_result.get("ok") or not isinstance(agent_result.get("agents"), list):
+                reason = str(agent_result.get("error") or "agent directory unavailable")
+                logger.warning(
+                    "TUI instance switch rolled back: from=%s target=%s reason=%s",
+                    self.current_instance_id,
+                    target.instance_id,
+                    reason,
+                )
+                self._write_log_line(f"[TUI] Instance switch rejected; keeping {self.current_instance_id}: {reason}")
+                chat.write(markup(f"[#ff7a7a]Switch failed: {reason}. Current connection was kept.[/]"))
+                return
+            agents = agent_result["agents"]
+
+            previous_instance = self.current_instance_id
+            self._connection_generation += 1
+            generation = self._connection_generation
+            self.api = candidate
+            self.current_instance_id = target.instance_id
+            self.gateway_ok = True
+            self.current_agent = None
+            self._chat_targets = []
+            self.current_agent_display = ""
+            self.current_backend = ""
+            self._agent_mode = ""
+            self._agents_cache = []
+            self._agent_refresh_tick = 0
+            chat.clear()
+            chat.border_title = f"Chat — {self.current_instance_id}"
+            await self._load_agents(
+                client=candidate,
+                generation=generation,
+                agents=agents,
+            )
+            self._update_status_bar()
+            logger.info(
+                "TUI instance switch committed: from=%s target=%s transport=%s",
+                previous_instance,
+                self.current_instance_id,
+                target.transport,
+            )
+            self._write_log_line(
+                f"[TUI] Connected to {self.current_instance_id} via "
+                f"{'local Workbench' if target.transport == 'direct' else 'authenticated Hashi Remote'}."
+            )
+            chat.write(markup(f"[#63ffd9]✅ Connected to {self.current_instance_id}.[/]"))
+
     # ── Status bar ──────────────────────────────────────────────────────
 
     def _update_status_bar(self):
         bar = self.query_one("#footer-info-box", FooterInfoBox)
         agent = self.current_agent_display or (self.current_agent or "")
-        bar.update_state(agent, self.current_backend, self.gateway_ok, self._agent_mode, self._agents_cache, self.current_agent)
+        bar.update_state(
+            agent,
+            self.current_backend,
+            self.gateway_ok,
+            self._agent_mode,
+            self._agents_cache,
+            self.current_agent,
+            self.current_instance_id,
+        )
 
     # ── Actions ─────────────────────────────────────────────────────────
 
     def action_toggle_log_pause(self):
         self._log_paused = not self._log_paused
         log = self.query_one("#log-panel", LogPanel)
-        log.border_title = "HASHI Log" + (" [PAUSED]" if self._log_paused else "")
+        log.border_title = (
+            f"Local log — {self.launch_instance_id}"
+            + (" [PAUSED]" if self._log_paused else "")
+        )
 
     async def action_quit_app(self):
         await self._shutdown()
