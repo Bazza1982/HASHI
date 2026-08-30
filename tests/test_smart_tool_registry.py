@@ -110,6 +110,19 @@ def test_bash_command_not_found_does_not_claim_no_change() -> None:
     assert outcome.error.code == "command_not_found"
 
 
+def test_bash_nonzero_exit_marker_may_follow_command_output() -> None:
+    _spec, outcome = adapt_legacy_result(
+        "bash",
+        output="partial command output\n[exit code 2]",
+        raw_is_error=False,
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.effect == "unknown"
+    assert outcome.error.code == "nonzero_exit"
+    assert outcome.error.retryable is True
+
+
 @pytest.mark.asyncio
 async def test_scheduler_without_gateway_is_unavailable_and_not_retryable(
     tmp_path, monkeypatch

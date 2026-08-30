@@ -367,7 +367,7 @@ def _bash_outcome(
     if isinstance(raw_exit_code, int) and not isinstance(raw_exit_code, bool):
         exit_code = raw_exit_code
     if exit_code is None:
-        matched = re.match(r"\[exit code (-?\d+)\]", text.strip())
+        matched = re.search(r"(?m)^\[exit code (-?\d+)\]$", text.strip())
         if matched:
             exit_code = int(matched.group(1))
 
