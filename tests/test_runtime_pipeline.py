@@ -2564,7 +2564,28 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
                 "thinking_event_count": 2,
                 "thinking_redacted_count": 1,
                 "thinking_sources": ["reasoning", "reasoning_details.encrypted"],
-            }
+            },
+            "meter": {
+                "line_items": [
+                    {
+                        "request_id": "req-1:provider-call:1",
+                        "parent_request_id": "req-1",
+                        "phase": "execution",
+                        "engine": "deepseek-api",
+                        "model": "deepseek-v4-flash",
+                        "input": 100,
+                        "output": 10,
+                        "thinking": 2,
+                        "token_source": "provider",
+                        "thinking_in_output": True,
+                        "cost_usd": 0.0001,
+                        "cost_source": "provider",
+                        "prompt_cache_hit_tokens": 80,
+                        "prompt_cache_miss_tokens": 20,
+                        "provider_call_latency_ms": 123.456,
+                    }
+                ]
+            },
         },
     )
 
@@ -2590,6 +2611,18 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
     assert event["thinking_event_count"] == 2
     assert event["thinking_redacted_count"] == 1
     assert event["thinking_sources"] == ["reasoning", "reasoning_details.encrypted"]
+    assert event["provider_call_metrics"] == [
+        {
+            "request_id": "req-1:provider-call:1",
+            "parent_request_id": "req-1",
+            "phase": "execution",
+            "engine": "deepseek-api",
+            "model": "deepseek-v4-flash",
+            "prompt_cache_hit_tokens": 80,
+            "prompt_cache_miss_tokens": 20,
+            "provider_call_latency_ms": 123.456,
+        }
+    ]
     assert event["section_chars"] == {"Workzone": 8}
     assert event["wrapper_applied"] is True
 

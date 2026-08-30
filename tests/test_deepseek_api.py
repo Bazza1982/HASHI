@@ -150,6 +150,55 @@ def test_deepseek_reasoning_helper_supports_old_api_result_shape():
     assert result.reasoning_content == "legacy-safe reasoning"
 
 
+def test_deepseek_cache_helper_supports_old_api_result_shape():
+    class OldAPIResult:
+        pass
+
+    result = deepseek_api._with_deepseek_cache_usage(
+        OldAPIResult(),
+        {
+            "prompt_cache_hit_tokens": 123,
+            "prompt_cache_miss_tokens": "45",
+        },
+    )
+
+    assert result.prompt_cache_hit_tokens == 123
+    assert result.prompt_cache_miss_tokens == 45
+
+
+@pytest.mark.asyncio
+async def test_deepseek_non_stream_captures_prompt_cache_usage(tmp_path):
+    adapter = _adapter(tmp_path)
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 7,
+                    "prompt_cache_hit_tokens": 80,
+                    "prompt_cache_miss_tokens": 20,
+                },
+            }
+
+    adapter.client = SimpleNamespace(post=AsyncMock(return_value=_Response()))
+
+    result = await adapter._call_api_once({}, {}, None)
+
+    assert result.prompt_tokens == 100
+    assert result.prompt_cache_hit_tokens == 80
+    assert result.prompt_cache_miss_tokens == 20
+
+
 @pytest.mark.parametrize(
     ("status", "code", "retryable"),
     [
@@ -415,6 +464,8 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
                 prompt_tokens=10,
                 completion_tokens=4,
                 thinking_tokens=3,
+                prompt_cache_hit_tokens=6,
+                prompt_cache_miss_tokens=4,
             )
         assistant_msg = payload["messages"][2]
         assert assistant_msg["reasoning_content"] == "Need to inspect the directory."
@@ -425,6 +476,8 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
             prompt_tokens=20,
             completion_tokens=5,
             thinking_tokens=2,
+            prompt_cache_hit_tokens=15,
+            prompt_cache_miss_tokens=5,
         )
 
     monkeypatch.setattr(adapter, "_call_api_once", fake_call)
@@ -435,7 +488,15 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
     assert response.text == "done"
     assert response.tool_call_count == 1
     assert response.tool_loop_count == 1
-    assert response.stream_metadata["meter"]["provider_calls"] == [
+    provider_calls = response.stream_metadata["meter"]["provider_calls"]
+    assert [
+        {
+            key: value
+            for key, value in call.items()
+            if key != "provider_call_latency_ms"
+        }
+        for call in provider_calls
+    ] == [
         {
             "input": 10,
             "output": 4,
@@ -443,6 +504,8 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
             "token_source": "provider",
             "thinking_in_output": True,
             "cost_usd": None,
+            "prompt_cache_hit_tokens": 6,
+            "prompt_cache_miss_tokens": 4,
         },
         {
             "input": 20,
@@ -451,8 +514,15 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
             "token_source": "provider",
             "thinking_in_output": True,
             "cost_usd": None,
+            "prompt_cache_hit_tokens": 15,
+            "prompt_cache_miss_tokens": 5,
         },
     ]
+    assert all(
+        isinstance(call["provider_call_latency_ms"], float)
+        and call["provider_call_latency_ms"] >= 0
+        for call in provider_calls
+    )
 
 
 @pytest.mark.asyncio
@@ -608,7 +678,8 @@ async def test_deepseek_stream_waits_for_reasoning_capture_before_returning(tmp_
             yield (
                 'data: {"choices":[{"delta":{"content":"result text"},'
                 '"finish_reason":"stop"}],"usage":{"prompt_tokens":2,'
-                '"completion_tokens":3}}'
+                '"completion_tokens":3,"prompt_cache_hit_tokens":1,'
+                '"prompt_cache_miss_tokens":1}}'
             )
             yield "data: [DONE]"
 
@@ -630,6 +701,8 @@ async def test_deepseek_stream_waits_for_reasoning_capture_before_returning(tmp_
 
     assert result.text == "result text"
     assert result.reasoning_content == "reason first"
+    assert result.prompt_cache_hit_tokens == 1
+    assert result.prompt_cache_miss_tokens == 1
     assert events == [
         ("thinking", "reason first"),
         ("text_delta", "result text"),

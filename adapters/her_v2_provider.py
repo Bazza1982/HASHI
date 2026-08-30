@@ -98,6 +98,24 @@ _HASHI_VERIFICATION_POLICY_ARGUMENT = "_hashi_verification_policy"
 _PERSONA_COMMENTARY_AGENT_FAILED_FIELD = "persona_commentary_agent_failed"
 
 
+def _optional_nonnegative_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_nonnegative_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(max(0.0, float(value)), 3)
+    except (TypeError, ValueError):
+        return None
+
+
 def _persona_commentary_agent_failure(text: str) -> tuple[bool, str]:
     """Recognise only the Persona commentary agent's explicit JSON failure."""
 
@@ -1983,6 +2001,15 @@ class HashiStageProvider(StageProvider):
                 if call.get("thinking_in_output") is not None
                 else token_source == "provider"
             )
+            prompt_cache_hit_tokens = _optional_nonnegative_int(
+                call.get("prompt_cache_hit_tokens")
+            )
+            prompt_cache_miss_tokens = _optional_nonnegative_int(
+                call.get("prompt_cache_miss_tokens")
+            )
+            provider_call_latency_ms = _optional_nonnegative_float(
+                call.get("provider_call_latency_ms")
+            )
             resolved_cost, cost_source = resolve_cost_source(
                 cost_usd=call.get("cost_usd"),
                 model=model,
@@ -1994,29 +2021,34 @@ class HashiStageProvider(StageProvider):
                     output_tokens,
                     model,
                     thinking_tokens,
+                    cached_tokens=prompt_cache_hit_tokens or 0,
                     thinking_in_output=thinking_in_output,
                 )
             per_call = len(calls) > 1 or bool(raw_calls)
-            self.usage_line_items.append(
-                PerCallUsageLineItem(
-                    request_id=(
-                        f"{parent_request_id}:provider-call:{index}"
-                        if per_call
-                        else parent_request_id
-                    ),
-                    parent_request_id=parent_request_id if per_call else "",
-                    phase=str(phase or ""),
-                    engine=str(engine or ""),
-                    model=str(model or ""),
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    thinking_tokens=thinking_tokens,
-                    token_source=token_source,
-                    thinking_in_output=thinking_in_output,
-                    cost_usd=resolved_cost,
-                    cost_source=cost_source,
-                )
+            line_item = PerCallUsageLineItem(
+                request_id=(
+                    f"{parent_request_id}:provider-call:{index}"
+                    if per_call
+                    else parent_request_id
+                ),
+                parent_request_id=parent_request_id if per_call else "",
+                phase=str(phase or ""),
+                engine=str(engine or ""),
+                model=str(model or ""),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                thinking_tokens=thinking_tokens,
+                token_source=token_source,
+                thinking_in_output=thinking_in_output,
+                cost_usd=resolved_cost,
+                cost_source=cost_source,
             )
+            # /reboot min may retain the already-imported meter dataclass.
+            # Dynamic attachment keeps mixed old/new module shapes safe.
+            line_item.prompt_cache_hit_tokens = prompt_cache_hit_tokens
+            line_item.prompt_cache_miss_tokens = prompt_cache_miss_tokens
+            line_item.provider_call_latency_ms = provider_call_latency_ms
+            self.usage_line_items.append(line_item)
 
     def usage_receipt(self, request_id: str = ""):
         """Return a structured :class:`UsageReceipt` for this provider turn."""

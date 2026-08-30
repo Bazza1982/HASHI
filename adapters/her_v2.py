@@ -1719,9 +1719,22 @@ class HERv2Adapter(BaseBackend):
         # is already a plain dict carried on ``stream_metadata``.
         line_items = getattr(provider, "usage_line_items", None) or []
         if line_items:
-            metadata.setdefault("meter", {})["line_items"] = [
-                item.to_dict() for item in line_items
-            ]
+            serialized_line_items = []
+            for item in line_items:
+                payload = item.to_dict()
+                # Preserve new observability fields even when /reboot min
+                # retained an older tools.meter_cost module in memory.
+                payload["prompt_cache_hit_tokens"] = getattr(
+                    item, "prompt_cache_hit_tokens", None
+                )
+                payload["prompt_cache_miss_tokens"] = getattr(
+                    item, "prompt_cache_miss_tokens", None
+                )
+                payload["provider_call_latency_ms"] = getattr(
+                    item, "provider_call_latency_ms", None
+                )
+                serialized_line_items.append(payload)
+            metadata.setdefault("meter", {})["line_items"] = serialized_line_items
         return BackendResponse(
             text=result.text,
             duration_ms=duration_ms,

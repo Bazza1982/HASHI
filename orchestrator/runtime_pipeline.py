@@ -2417,11 +2417,22 @@ def _meter_line_items_from_response(response):
     try:
         from tools.meter_cost import line_item_from_dict
 
-        return [
-            line_item_from_dict(item)
-            for item in raw_items
-            if isinstance(item, dict)
-        ]
+        line_items = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                continue
+            line_item = line_item_from_dict(raw_item)
+            # A minimal reboot can retain an older meter dataclass/parser.
+            # Preserve additive observability fields on that mixed shape.
+            for field_name in (
+                "prompt_cache_hit_tokens",
+                "prompt_cache_miss_tokens",
+                "provider_call_latency_ms",
+            ):
+                if not hasattr(line_item, field_name):
+                    setattr(line_item, field_name, raw_item.get(field_name))
+            line_items.append(line_item)
+        return line_items
     except Exception:
         return None
 
@@ -2505,6 +2516,27 @@ def record_foreground_usage_audit(
         section_counts = {s["key"]: s.get("item_count", 0) for s in prompt_audit.get("sections", [])}
         stream_metadata = getattr(response, "stream_metadata", None) or {}
         thinking_metadata = stream_metadata.get("thinking") or {}
+        provider_call_metrics = []
+        for line_item in meter_line_items or []:
+            cache_hit = getattr(line_item, "prompt_cache_hit_tokens", None)
+            cache_miss = getattr(line_item, "prompt_cache_miss_tokens", None)
+            latency_ms = getattr(line_item, "provider_call_latency_ms", None)
+            if cache_hit is None and cache_miss is None and latency_ms is None:
+                continue
+            provider_call_metrics.append(
+                {
+                    "request_id": str(getattr(line_item, "request_id", "") or ""),
+                    "parent_request_id": str(
+                        getattr(line_item, "parent_request_id", "") or ""
+                    ),
+                    "phase": str(getattr(line_item, "phase", "") or ""),
+                    "engine": str(getattr(line_item, "engine", "") or ""),
+                    "model": str(getattr(line_item, "model", "") or ""),
+                    "prompt_cache_hit_tokens": cache_hit,
+                    "prompt_cache_miss_tokens": cache_miss,
+                    "provider_call_latency_ms": latency_ms,
+                }
+            )
         record_audit_event(
             runtime.workspace_dir,
             {
@@ -2536,6 +2568,7 @@ def record_foreground_usage_audit(
                 "thinking_sources": list(thinking_metadata.get("thinking_sources") or []),
                 "tool_call_count": int(getattr(response, "tool_call_count", 0) or 0),
                 "tool_loop_count": int(getattr(response, "tool_loop_count", 0) or 0),
+                "provider_call_metrics": provider_call_metrics,
                 "tool_catalog_count": 0,
                 "tool_schema_chars": 0,
                 "tool_schema_tokens_est": 0,

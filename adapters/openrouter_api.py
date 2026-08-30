@@ -219,6 +219,10 @@ class _APIResult:
     structured_data: dict[str, Any] | None = None
     audio_bytes: bytes = b""
     audio_transcript: str = ""
+    # Provider-reported prompt-cache accounting.  ``None`` means the
+    # provider did not report the field; zero remains a real observation.
+    prompt_cache_hit_tokens: int | None = None
+    prompt_cache_miss_tokens: int | None = None
 
 
 def _usage_thinking_tokens(usage: Mapping[str, Any]) -> int:
@@ -236,6 +240,17 @@ def _usage_cost_usd(usage: Mapping[str, Any]) -> float | None:
         return None
     try:
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_usage_token_count(value: Any) -> int | None:
+    """Normalize an optional provider token counter without inventing zero."""
+
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
     except (TypeError, ValueError):
         return None
 
@@ -1651,6 +1666,7 @@ class OpenRouterAdapter(BaseBackend):
                         ),
                     )
 
+                    provider_call_started = time.perf_counter()
                     try:
                         if use_streaming:
                             result = await self._stream_api_once(
@@ -1689,6 +1705,10 @@ class OpenRouterAdapter(BaseBackend):
                         native_local_refs = set()
                         all_media_native = False
                         continue
+                    provider_call_latency_ms = round(
+                        (time.perf_counter() - provider_call_started) * 1000,
+                        3,
+                    )
                     break
 
                 # Accumulate usage from each API call
@@ -1706,6 +1726,16 @@ class OpenRouterAdapter(BaseBackend):
                         # completion_tokens, not an additional token bucket.
                         "thinking_in_output": True,
                         "cost_usd": result.cost_usd,
+                        "prompt_cache_hit_tokens": _optional_usage_token_count(
+                            getattr(result, "prompt_cache_hit_tokens", None)
+                        ),
+                        "prompt_cache_miss_tokens": _optional_usage_token_count(
+                            getattr(result, "prompt_cache_miss_tokens", None)
+                        ),
+                        # Wall-clock time HER waited for this provider
+                        # invocation.  Streaming includes delivery of the
+                        # complete stream, and tool execution starts later.
+                        "provider_call_latency_ms": provider_call_latency_ms,
                     }
                 )
                 if result.cost_usd is None:
