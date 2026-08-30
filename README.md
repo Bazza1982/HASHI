@@ -1274,6 +1274,9 @@ When a peer is discovered, Hashi Remote performs a mutual handshake before any m
 - Revalidates every 30 seconds to confirm continued liveness; state transitions: `handshake_pending → handshake_in_progress → handshake_accepted`
 - Authenticates `/protocol/handshake` and `/protocol/message` with `hashi-shared-hmac-v1` when a shared token is configured
 - Missing shared token starts Remote in `discovery-only` mode: peers can be seen, but trusted protocol messaging, full peer details, file transfer, and rescue controls are unavailable
+- Peers that advertise `tui_proxy_v1` may carry the TUI's restricted
+  Workbench operations after both registries report `handshake_accepted`.
+  Remote online status by itself is not sufficient.
 
 #### Peer Liveness
 
@@ -1312,6 +1315,10 @@ Direct agent-to-agent messaging over Hashi Remote (`/protocol/message`):
 - TLS encryption on all remote connections
 - Shared-token HMAC for trusted protocol traffic; configure `HASHI_REMOTE_SHARED_TOKEN` or `secrets.json` key `hashi_remote_shared_token`
 - Public `/health`, `/peers`, and `/protocol/status` responses are redacted unless the caller is loopback or authenticated
+- Cross-instance TUI access never exposes or directly connects to a peer's
+  Workbench port. The local-only `/tui/proxy` endpoint forwards an allowlisted
+  operation through HMAC-authenticated `/protocol/tui`; arbitrary Workbench
+  paths are not accepted.
 - Pairing-based client authentication remains available for non-protocol endpoints; LAN mode is off by default for protocol trust
 - Auth-gated terminal execution delegation (`/terminal/exec`)
 - Full audit logging for all inbound hchat and remote operations
@@ -1333,6 +1340,9 @@ For rollout and rollback notes, see
 - `GET /peers` — live peer list with liveness status, route kind, and agent directory
 - `GET /protocol/status` — full protocol state: handshake states, in-flight count, local network profile, agent snapshot
 - `GET /health` — instance info and peer summary
+- `POST /tui/proxy` — loopback-only entry point for trusted TUI peer access
+- `POST /protocol/tui` — HMAC-authenticated peer endpoint for the restricted
+  health, agents, chat, and transcript operation set
 - `/remote list` should agree with `/peers`: a peer that is reachable by hchat
   but still shown offline in `/remote list` means the Remote registry is stale
   and should be refreshed or restarted after pulling the latest code.
@@ -1578,6 +1588,28 @@ python tui.py
 - **Chat input bar** (lower) — send messages to any active agent
 - **Status bar** — current agent, backend, bridge uptime
 - **Agent selector** — hotkey to switch which agent receives input
+
+**Local TUI commands:**
+
+```text
+/to <agent>          switch agent on the connected instance
+/agents              list that instance's agents
+/instance            list the launch instance and trusted Remote peers
+/instance <id>       switch to a peer after authenticated handshake
+/instance current    return to the instance that launched this TUI
+/instance refresh    refresh Remote peer state
+/log                 pause or resume the launch instance's local log
+/quit                close the TUI
+```
+
+The launch repository is always the default instance, regardless of the shell's
+current directory. Windows/WSL co-located instances and LAN instances use the
+same Hashi Remote trust rule: both Remotes must be running, share valid protocol
+credentials, complete the handshake, and advertise `tui_proxy_v1`. A failed
+switch leaves the existing API client, agent selection, and transcript offsets
+unchanged. The upper panel remains explicitly labeled as the launch instance's
+local log after switching. See
+[`docs/TUI_INSTANCE_SWITCHING.md`](docs/TUI_INSTANCE_SWITCHING.md).
 
 ---
 

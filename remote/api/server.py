@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,6 +57,7 @@ from ..security.auth import (
     authenticate_request_detailed,
     has_shared_token,
     is_lan_mode,
+    is_loopback_request,
     protocol_auth_mode,
     set_lan_mode,
     set_pairing_manager,
@@ -88,7 +89,18 @@ API_PROTOCOL_CAPABILITIES = [
     "protocol_outbound_correlation_v1",
     "protocol_ack_v1",
     "protocol_reply_v1",
+    "tui_proxy_v1",
 ]
+
+TUI_PROXY_OPERATIONS = {
+    "health",
+    "agents",
+    "chat",
+    "transcript_recent",
+    "transcript_poll",
+}
+TUI_PROXY_MAX_TEXT_BYTES = 1_000_000
+TUI_PROXY_MAX_RESPONSE_BYTES = 5_000_000
 
 
 def _protocol_capabilities_with_api_endpoints(capabilities: list[str]) -> list[str]:
@@ -217,6 +229,28 @@ class ProtocolAckPayload(BaseModel):
     to_instance: str
     state: str = "ack"
     details: Optional[dict] = None
+
+
+class TuiProxyRequest(BaseModel):
+    """Loopback TUI request routed through an authenticated Remote peer."""
+
+    target_instance: str
+    operation: str
+    agent: Optional[str] = None
+    text: Optional[str] = None
+    offset: int = 0
+    limit: int = 20
+
+
+class ProtocolTuiRequest(BaseModel):
+    """Authenticated peer-to-peer form of a restricted TUI request."""
+
+    from_instance: str
+    operation: str
+    agent: Optional[str] = None
+    text: Optional[str] = None
+    offset: int = 0
+    limit: int = 20
 
 
 class AttachmentUploadPayload(BaseModel):
@@ -367,6 +401,94 @@ def _post_json_with_optional_hmac(url: str, payload: dict[str, Any], *, timeout:
         if isinstance(result, dict):
             result["__http_status"] = exc.code
         return result
+
+
+def _peer_is_tui_trusted(instance_id: str) -> tuple[bool, str, Any]:
+    """Require a live, mutually handshaken peer with TUI proxy support."""
+    peer = _peer_registry.get_peer(str(instance_id or "").upper()) if _peer_registry else None
+    if peer is None:
+        return False, "peer_not_found", None
+    properties = dict(getattr(peer, "properties", None) or {})
+    handshake_state = str(properties.get("handshake_state") or "").strip().lower()
+    if handshake_state != "handshake_accepted":
+        return False, "handshake_required", peer
+    live_status = str(properties.get("live_status") or "unknown").strip().lower()
+    if live_status in {"offline", "unknown"}:
+        return False, f"peer_{live_status}", peer
+    capabilities = {str(item).strip() for item in (getattr(peer, "capabilities", None) or [])}
+    if "tui_proxy_v1" not in capabilities:
+        return False, "tui_proxy_unsupported", peer
+    return True, "ok", peer
+
+
+def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]:
+    operation = str(payload.operation or "").strip().lower()
+    if operation not in TUI_PROXY_OPERATIONS:
+        return False, "operation_not_allowed"
+    if operation in {"chat", "transcript_recent", "transcript_poll"}:
+        agent = str(payload.agent or "").strip()
+        if not agent or len(agent) > 128 or any(ord(ch) < 32 for ch in agent):
+            return False, "invalid_agent"
+    if operation == "chat":
+        text = str(payload.text or "")
+        if not text or len(text.encode("utf-8")) > TUI_PROXY_MAX_TEXT_BYTES:
+            return False, "invalid_text"
+    if payload.offset < 0:
+        return False, "invalid_offset"
+    if payload.limit < 1 or payload.limit > 200:
+        return False, "invalid_limit"
+    return True, "ok"
+
+
+def _local_workbench_tui_request(payload: ProtocolTuiRequest, *, timeout: int = 15) -> tuple[int, dict[str, Any]]:
+    """Execute one allowlisted TUI operation against this instance's Workbench."""
+    operation = str(payload.operation or "").strip().lower()
+    agent = str(payload.agent or "").strip()
+    method = "GET"
+    body_bytes: bytes | None = None
+    path = "/api/health"
+    if operation == "agents":
+        path = "/api/agents"
+    elif operation == "chat":
+        path = "/api/chat"
+        method = "POST"
+        body_bytes = json.dumps({"agent": agent, "text": str(payload.text or "")}).encode("utf-8")
+    elif operation == "transcript_recent":
+        path = f"/api/transcript/{quote(agent, safe='')}?limit={int(payload.limit)}"
+    elif operation == "transcript_poll":
+        path = f"/api/transcript/{quote(agent, safe='')}/poll?offset={int(payload.offset)}"
+
+    last_error: Exception | None = None
+    for host in local_http_hosts():
+        url = local_http_url(_workbench_port, path, host=host)
+        headers = {"Content-Type": "application/json"} if body_bytes is not None else {}
+        request = urllib_request.Request(url, data=body_bytes, headers=headers, method=method)
+        try:
+            with urllib_request.urlopen(request, timeout=timeout) as response:
+                raw = response.read(TUI_PROXY_MAX_RESPONSE_BYTES + 1)
+                if len(raw) > TUI_PROXY_MAX_RESPONSE_BYTES:
+                    return 502, {"ok": False, "error": "workbench_response_too_large"}
+                result = json.loads(raw.decode("utf-8"))
+                if not isinstance(result, dict):
+                    return 502, {"ok": False, "error": "invalid_workbench_response"}
+                return int(getattr(response, "status", 200)), result
+        except HTTPError as exc:
+            raw = exc.read(TUI_PROXY_MAX_RESPONSE_BYTES + 1)
+            try:
+                result = json.loads(raw.decode("utf-8")) if raw else {}
+            except (UnicodeDecodeError, ValueError):
+                result = {"ok": False, "error": f"Workbench HTTP {exc.code}"}
+            return int(exc.code), result if isinstance(result, dict) else {"ok": False, "error": str(result)}
+        except (URLError, OSError, ValueError) as exc:
+            last_error = exc
+            logger.debug(
+                "TUI proxy local Workbench candidate failed: operation=%s url=%s error=%s",
+                operation,
+                url,
+                exc,
+            )
+    logger.warning("TUI proxy local Workbench unavailable: operation=%s error=%s", operation, last_error)
+    return 503, {"ok": False, "error": "local_workbench_unreachable", "detail": str(last_error or "no route")}
 
 
 def _process_exists(pid: int) -> bool:
@@ -754,6 +876,142 @@ def create_app(
             "rescue_start_requirement": "L3_RESTART",
             "trusted_view": True,
         }
+
+    @app.post("/tui/proxy")
+    async def tui_proxy(request: Request, payload: TuiProxyRequest):
+        """Route a local TUI operation to a mutually authenticated peer."""
+        if not is_loopback_request(request):
+            logger.warning("TUI proxy rejected non-local caller: client=%s", request.client)
+            return JSONResponse(status_code=403, content={"ok": False, "error": "loopback_required"})
+        if _protocol_manager is None or not has_shared_token():
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "trusted_remote_unavailable"},
+            )
+
+        target_instance = str(payload.target_instance or "").strip().upper()
+        local_instance = str(_instance_info.get("instance_id") or "").strip().upper()
+        if not target_instance or target_instance == local_instance:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_remote_target"})
+        trusted, reason, _peer = _peer_is_tui_trusted(target_instance)
+        if not trusted:
+            logger.warning("TUI proxy target rejected: target=%s reason=%s", target_instance, reason)
+            return JSONResponse(status_code=409, content={"ok": False, "error": reason})
+
+        protocol_payload = ProtocolTuiRequest(
+            from_instance=local_instance,
+            operation=payload.operation,
+            agent=payload.agent,
+            text=payload.text,
+            offset=payload.offset,
+            limit=payload.limit,
+        )
+        valid, validation_error = _validate_tui_proxy_payload(protocol_payload)
+        if not valid:
+            return JSONResponse(status_code=400, content={"ok": False, "error": validation_error})
+
+        candidate_urls = _protocol_manager.resolve_forward_urls(target_instance, "/protocol/tui")
+        if not candidate_urls:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "peer_route_unavailable"})
+        last_error: Exception | None = None
+        for url in candidate_urls:
+            try:
+                result = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda u=url: _post_json_with_optional_hmac(
+                        u,
+                        protocol_payload.model_dump(),
+                        timeout=20,
+                    ),
+                )
+                status = int(result.pop("__http_status", 200)) if isinstance(result, dict) else 502
+                if not isinstance(result, dict):
+                    raise ValueError("invalid peer response")
+                actual_instance = str(result.get("target_instance") or "").strip().upper()
+                if status < 400 and actual_instance != target_instance:
+                    logger.error(
+                        "TUI proxy identity mismatch: expected=%s actual=%s url=%s",
+                        target_instance,
+                        actual_instance or "missing",
+                        url,
+                    )
+                    return JSONResponse(status_code=502, content={"ok": False, "error": "target_identity_mismatch"})
+                if status < 400:
+                    logger.info(
+                        "TUI proxy operation completed: target=%s operation=%s",
+                        target_instance,
+                        payload.operation,
+                    )
+                else:
+                    logger.warning(
+                        "TUI proxy peer rejected operation: target=%s operation=%s status=%s error=%s",
+                        target_instance,
+                        payload.operation,
+                        status,
+                        result.get("error"),
+                    )
+                return JSONResponse(status_code=status, content=result)
+            except Exception as exc:
+                last_error = exc
+                logger.warning("TUI proxy route failed: target=%s url=%s error=%s", target_instance, url, exc)
+        return JSONResponse(
+            status_code=502,
+            content={"ok": False, "error": "peer_proxy_failed", "detail": str(last_error or "no route")},
+        )
+
+    @app.post("/protocol/tui")
+    async def protocol_tui(request: Request, payload: ProtocolTuiRequest):
+        """Serve one restricted Workbench operation to an authenticated peer."""
+        body_bytes = await request.body()
+        ok, auth_reason, authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            logger.warning("Protocol TUI request rejected: from=%s reason=%s", payload.from_instance, auth_reason)
+            return JSONResponse(status_code=401, content={"ok": False, "error": auth_reason})
+
+        source_instance = str(authenticated_instance or payload.from_instance or "").strip().upper()
+        trusted, trust_reason, _peer = _peer_is_tui_trusted(source_instance)
+        if not trusted:
+            logger.warning("Protocol TUI peer rejected: from=%s reason=%s", source_instance, trust_reason)
+            return JSONResponse(status_code=409, content={"ok": False, "error": trust_reason})
+        valid, validation_error = _validate_tui_proxy_payload(payload)
+        if not valid:
+            return JSONResponse(status_code=400, content={"ok": False, "error": validation_error})
+
+        status, result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: _local_workbench_tui_request(payload),
+        )
+        local_instance = str(_instance_info.get("instance_id") or "").strip().upper()
+        if payload.operation == "health" and status < 400:
+            workbench_instance = str(result.get("instance_id") or "").strip().upper()
+            if workbench_instance != local_instance:
+                logger.error(
+                    "Protocol TUI local identity mismatch: remote=%s workbench=%s",
+                    local_instance,
+                    workbench_instance or "missing",
+                )
+                return JSONResponse(
+                    status_code=502,
+                    content={"ok": False, "error": "local_identity_mismatch", "target_instance": local_instance},
+                )
+        response = {
+            "ok": status < 400,
+            "target_instance": local_instance,
+            "result": result,
+        }
+        if status >= 400:
+            response["error"] = str(result.get("error") or f"workbench_http_{status}")
+        logger.info(
+            "Protocol TUI operation served: from=%s operation=%s status=%s",
+            source_instance,
+            payload.operation,
+            status,
+        )
+        return JSONResponse(status_code=status, content=response)
 
     async def _handle_protocol_handshake_like(request: Request, payload: ProtocolHandshakePayload, *, endpoint_name: str):
         if _protocol_manager is None:
