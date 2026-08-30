@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ DEFAULT_WARNING_REMINDER_SECONDS = 600
 DEFAULT_WATCHER_POLL_SECONDS = 60
 
 _HEALTH_STATE_LOCK = asyncio.Lock()
+logger = logging.getLogger("BridgeU.TelegramDeliveryFailover")
 
 
 def _now() -> datetime:
@@ -282,18 +284,25 @@ def _warn_text(
     blocked_until: str | None,
     response_path: Path | None,
     failover_agent: str | None,
+    status: str = "blocked",
 ) -> str:
+    recovery_due = status == "recovery_due"
     lines = [
         f"Delivery warning from {instance_id}:",
         "",
-        f"{source_agent} generated a response, but Telegram delivery is flood-limited.",
+        (
+            f"{source_agent} generated a response, but Telegram delivery recovery is still pending "
+            "after the earlier flood limit expired."
+            if recovery_due
+            else f"{source_agent} generated a response, but Telegram delivery is flood-limited."
+        ),
     ]
     if request_id:
         lines.append("")
         lines.append(f"Request: {request_id}")
-    if retry_after_s is not None:
+    if retry_after_s is not None and not recovery_due:
         lines.append(f"Retry after: {retry_after_s}s")
-    if blocked_until:
+    if blocked_until and not recovery_due:
         lines.append(f"Blocked until: {blocked_until}")
     if response_path is not None:
         lines.append(f"Saved response: {response_path}")
@@ -365,6 +374,7 @@ async def _prepare_warning(
             blocked_until=record.get("blocked_until"),
             response_path=response_path,
             failover_agent=chosen.name,
+            status=str(record.get("status") or "blocked"),
         )
         return chosen, warning_text
 
@@ -576,6 +586,7 @@ async def delivery_health_watcher(kernel: Any) -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
+            logger.exception("Telegram delivery recovery watcher tick failed")
             continue
 
 
@@ -588,15 +599,26 @@ async def _tick_recovery(kernel: Any) -> None:
         runtimes = {getattr(rt, "name", None): rt for rt in getattr(kernel, "runtimes", [])}
         for agent_name, record in (state.get("agents") or {}).items():
             status = str(record.get("status") or "")
-            if status != "blocked":
+            if status not in {"blocked", "recovery_due"}:
                 continue
-            blocked_until = _parse_iso(record.get("blocked_until"))
-            if blocked_until is None or _now() < blocked_until:
-                continue
+            if status == "blocked":
+                blocked_until = _parse_iso(record.get("blocked_until"))
+                if blocked_until is None or _now() < blocked_until:
+                    continue
             runtime = runtimes.get(agent_name)
             if runtime is None or not getattr(runtime, "telegram_connected", False):
                 continue
             record["status"] = "recovery_due"
+            if status == "blocked":
+                logger.info(
+                    "Telegram delivery block expired; recovery due agent=%s",
+                    agent_name,
+                )
+            else:
+                logger.info(
+                    "Retrying pending Telegram delivery recovery agent=%s",
+                    agent_name,
+                )
             for chat_key, chat_state in (record.get("per_chat") or {}).items():
                 if chat_state.get("recovery_notice_sent_at"):
                     continue
@@ -631,16 +653,34 @@ async def _tick_recovery(kernel: Any) -> None:
             chat_state = record.setdefault("per_chat", {}).setdefault(str(chat_id), {})
             if status == "sent":
                 chat_state["recovery_notice_sent_at"] = _iso(_now())
+                logger.info(
+                    "Telegram delivery recovery notice sent agent=%s chat_id=%s",
+                    agent_name,
+                    chat_id,
+                )
             elif status == "retry_after":
                 record["status"] = "blocked"
                 record["retry_after_s"] = retry_after_s
                 record["blocked_until"] = _iso(_now() + timedelta(seconds=max(int(retry_after_s or 0), 1)))
+                logger.warning(
+                    "Telegram delivery recovery flood-limited agent=%s chat_id=%s retry_after_s=%s",
+                    agent_name,
+                    chat_id,
+                    retry_after_s,
+                )
                 changed = True
                 continue
             else:
                 record["status"] = "recovery_due"
                 record["recovery_failed"] = True
                 record["last_recovery_error"] = f"{type(error).__name__}: {error}"
+                logger.warning(
+                    "Telegram delivery recovery notice failed; will retry agent=%s chat_id=%s error=%s: %s",
+                    agent_name,
+                    chat_id,
+                    type(error).__name__,
+                    error,
+                )
                 changed = True
                 continue
             pending = [
@@ -654,6 +694,7 @@ async def _tick_recovery(kernel: Any) -> None:
                 record["failover_failed"] = False
                 record.pop("recovery_failed", None)
                 record.pop("last_recovery_error", None)
+                logger.info("Telegram delivery recovered agent=%s", agent_name)
             changed = True
         if changed:
             _save_health_state_sync(path, state)

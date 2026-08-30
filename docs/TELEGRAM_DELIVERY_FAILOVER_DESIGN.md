@@ -407,6 +407,11 @@ Watcher behavior:
 3. send one recovery notice;
 4. on success, clear blocked state and stop failover routing;
 5. on `RetryAfter`, extend the existing incident and return to `blocked`.
+6. on other transient delivery errors, keep `recovery_due` and retry the
+   unsent recovery notice on the next watcher tick. While recovery is pending,
+   failover warnings must not present the expired `blocked_until` value as an
+   active Telegram flood limit, and `/status` must report recovery as pending
+   without displaying that expired deadline as a current block.
 
 Recovery notice:
 

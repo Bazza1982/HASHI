@@ -199,6 +199,116 @@ async def test_tick_recovery_retry_after_reextends_block(tmp_path):
     assert not source.app.bot.messages
 
 
+@pytest.mark.asyncio
+async def test_tick_recovery_retries_recovery_due_after_transient_error(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+    source.app.bot = _Bot(send_error=RuntimeError("temporary gateway failure"))
+    orchestrator = SimpleNamespace(
+        runtimes=[source],
+        raw_config={},
+        global_cfg=SimpleNamespace(project_root=tmp_path),
+    )
+    source.orchestrator = orchestrator
+    path = tmp_path / "state" / "telegram_delivery_health.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {
+                    "zelda": {
+                        "token_key": "telegram:zelda",
+                        "status": "blocked",
+                        "blocked_until": "2000-01-01T00:00:00+00:00",
+                        "retry_after_s": 5,
+                        "incident_id": "tg-zelda-test",
+                        "per_chat": {
+                            "321": {
+                                "first_warned_at": "2000-01-01T00:00:00+00:00"
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    await failover._tick_recovery(orchestrator)
+
+    failed = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
+    assert failed["status"] == "recovery_due"
+    assert "temporary gateway failure" in failed["last_recovery_error"]
+
+    source.app.bot.send_error = None
+    await failover._tick_recovery(orchestrator)
+
+    recovered = json.loads(path.read_text(encoding="utf-8"))["agents"]["zelda"]
+    assert recovered["status"] == "healthy"
+    assert "last_recovery_error" not in recovered
+    assert len(source.app.bot.messages) == 1
+    assert "Delivery recovered" in source.app.bot.messages[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_due_warning_does_not_report_expired_flood_block(tmp_path):
+    source = _runtime(tmp_path, "zelda")
+    fail = _runtime(tmp_path, "lily")
+    orchestrator = SimpleNamespace(runtimes=[source, fail], raw_config={})
+    source.orchestrator = orchestrator
+    fail.orchestrator = orchestrator
+    path = tmp_path / "state" / "telegram_delivery_health.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {
+                    "zelda": {
+                        "token_key": "telegram:zelda",
+                        "status": "recovery_due",
+                        "blocked_until": "2000-01-01T00:00:05+00:00",
+                        "retry_after_s": 5,
+                        "incident_id": "tg-zelda-test",
+                        "active_failover_agent": "lily",
+                        "per_chat": {},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    blocked = await failover.handle_blocked_send(
+        source,
+        chat_id=321,
+        request_id="req-after-expiry",
+        purpose="response",
+        text="answer generated after the original block expired",
+    )
+
+    assert blocked is True
+    warning = fail.app.bot.messages[0]["text"]
+    assert "recovery is still pending" in warning
+    assert "Telegram delivery is flood-limited" not in warning
+    assert "Retry after:" not in warning
+    assert "Blocked until:" not in warning
+
+
+def test_recovery_due_status_does_not_show_expired_block_deadline():
+    text = runtime_status._delivery_line(
+        {
+            "status": "recovery_due",
+            "blocked_until": "2000-01-01T00:00:05+00:00",
+            "active_failover_agent": "lily",
+        }
+    )
+
+    assert "RECOVERY_DUE" in text
+    assert "2000-01-01T00:00:05+00:00" not in text
+    assert "lily" in text
+
+
 def test_persisted_typing_only_defaults_override_legacy_preview_config(tmp_path):
     runtime = _runtime(tmp_path, "kasumi", preview_default=True)
     telegram_stream_policy.set_policy_value(runtime, "placeholder", True)

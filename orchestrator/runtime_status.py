@@ -74,7 +74,7 @@ def _delivery_line(delivery: Mapping[str, Any] | None) -> str:
     elif status == "recovery_due":
         remaining_text = ui_language.tr("status.delivery.due")
 
-    if blocked_until_raw:
+    if blocked_until_raw and status == "blocked":
         return (
             f"<b>{html.escape(ui_language.tr('common.delivery'))}</b> · "
             f"<code>{html.escape(status.upper())}</code> · "
