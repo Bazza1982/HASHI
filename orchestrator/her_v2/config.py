@@ -194,6 +194,8 @@ class HERv2Config:
     audit_failure_terminal: TerminalState = TerminalState.ERROR
     meditation_enabled: bool = False
     direct_strategy_self_selection: bool = False
+    strategy_tools_enabled: bool = True
+    planning_tools_enabled: bool = False
     shadow_mode: bool = False
 
     def __post_init__(self) -> None:
@@ -607,6 +609,14 @@ class HERv2Config:
             direct_strategy_self_selection=_strict_bool(
                 raw.get("direct_strategy_self_selection", False),
                 "direct_strategy_self_selection",
+            ),
+            strategy_tools_enabled=_strict_bool(
+                raw.get("strategy_tools_enabled", True),
+                "strategy_tools_enabled",
+            ),
+            planning_tools_enabled=_strict_bool(
+                raw.get("planning_tools_enabled", False),
+                "planning_tools_enabled",
             ),
             shadow_mode=_strict_bool(raw.get("shadow_mode", False), "shadow_mode"),
         )

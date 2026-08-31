@@ -847,12 +847,15 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         setattr(validate_strategy, "_mapping_parser", validate_strategy_mapping)
 
         async def invoke_triage():
+            strategy_tools_enabled = self.config.strategy_tools_enabled
             return await self._invoke_stage(
                 state,
                 Stage.TRIAGE,
                 validate_strategy,
-                allow_tools=True,
-                allow_side_effects=not self.config.shadow_mode,
+                allow_tools=strategy_tools_enabled,
+                allow_side_effects=(
+                    strategy_tools_enabled and not self.config.shadow_mode
+                ),
                 role_override="strategist",
                 context={
                     "habit_catalogue": list(state.habit_catalogue),
@@ -1574,8 +1577,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 state,
                 Stage.PLANNING,
                 validate_plan,
-                allow_tools=False,
-                allow_side_effects=False,
+                allow_tools=self.config.planning_tools_enabled,
+                allow_side_effects=(
+                    self.config.planning_tools_enabled
+                    and not self.config.shadow_mode
+                ),
                 context=planning_context,
             )
             await self._transition(state, LifecycleState.PLANNED)

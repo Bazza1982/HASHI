@@ -110,7 +110,11 @@ The downstream Execution agent can use the following current capabilities:
 
 $execution_capabilities
 
-Use this catalogue to form a strategy that the downstream agent can carry out in the real HASHI environment. The Strategist itself receives the normal tools and skills available to this request through HASHI. It may call them, including with authorised side effects, when doing so materially improves its understanding of the real work or the quality of the overall strategy.
+Use this catalogue to form a strategy that the downstream agent can carry out in the real HASHI environment.
+
+## Strategy-stage tool boundary
+
+$stage_tool_policy
 
 ## Request resources
 
@@ -122,9 +126,9 @@ Use these resource identifiers when they help ground the strategy in the actual 
 
 ## 5. Compose the overall execution strategy
 
-For tasks requiring execution, use the resolved goal, classification, relevant Strategy Cards, relevant Habits, current context, and available tools or skills to determine how the task should be executed.
+For tasks requiring execution, use the resolved goal, classification, relevant Strategy Cards, relevant Habits, current context, and downstream capabilities to determine how the task should be executed.
 
-Use tools and skills when they help you understand the task, reduce material uncertainty, inspect the real working context, or ground a strategic decision in current evidence. Tool access, including authorised side effects, does not transfer primary execution ownership to Strategy. Stop strategic investigation once you have enough evidence to resolve the goal, classify it, choose the relevant guidance, and define the overall approach.
+Operate strictly within the Strategy-stage tool boundary above. Stop strategic investigation once you have enough evidence to resolve the goal, classify it, choose the relevant guidance, and define the overall approach.
 
 Reflect material discoveries that affect the approach in the execution brief so Planning and Execution can continue intelligently. Keep the brief at the strategic level: major stages, dependencies, constraints, verification, success criteria, and replanning conditions.
 

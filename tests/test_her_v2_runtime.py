@@ -1973,6 +1973,56 @@ async def test_medium_turn_uses_strategy_goal_and_routes_tools_to_strategy_and_e
     assert strategy_call.role == "strategist"
 
 
+@pytest.mark.parametrize("planning_tools_enabled", [False, True])
+@pytest.mark.asyncio
+async def test_medium_stage_tool_access_is_controlled_independently(
+    tmp_path,
+    planning_tools_enabled,
+):
+    scripts = _initial(
+        "COMPLEX_TASK",
+        real_goal="Diagnose, repair, and verify the supplied implementation.",
+    )
+    scripts.update(
+        {
+            Stage.PLANNING: [{"plan": ["inspect", "repair", "verify"]}],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Repaired and verified.",
+                }
+            ],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_config(
+            strategy_tools_enabled=False,
+            planning_tools_enabled=planning_tools_enabled,
+        ),
+    ).run_turn("Repair it", "request-stage-tool-access", effort=Effort.MEDIUM)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    strategy_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
+    )
+    planning_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.PLANNING
+    )
+    execution_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.EXECUTION
+    )
+    assert strategy_call.allow_tools is False
+    assert strategy_call.allow_side_effects is False
+    assert planning_call.allow_tools is planning_tools_enabled
+    assert planning_call.allow_side_effects is planning_tools_enabled
+    assert execution_call.allow_tools is True
+    assert execution_call.allow_side_effects is True
+
+
 @pytest.mark.asyncio
 async def test_low_strategy_handoff_contains_only_selected_cards_and_skips_planning(
     tmp_path,

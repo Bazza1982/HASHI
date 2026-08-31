@@ -284,6 +284,8 @@ def test_direct_route_uses_quick_model_and_high_reasoning_by_default():
     assert direct.model == "quick-model"
     assert direct.reasoning == "high"
     assert config.direct_strategy_self_selection is False
+    assert config.strategy_tools_enabled is True
+    assert config.planning_tools_enabled is False
 
 
 def test_direct_strategy_self_selection_is_an_explicit_boolean_experiment():
@@ -303,6 +305,23 @@ def test_direct_strategy_self_selection_is_an_explicit_boolean_experiment():
                 "direct_strategy_self_selection": "true",
             }
         )
+
+
+def test_strategy_and_planning_tool_access_are_explicit_boolean_controls():
+    config = HERv2Config.from_mapping(
+        {
+            "profiles": _profiles(),
+            "strategy_tools_enabled": False,
+            "planning_tools_enabled": True,
+        }
+    )
+
+    assert config.strategy_tools_enabled is False
+    assert config.planning_tools_enabled is True
+
+    for field in ("strategy_tools_enabled", "planning_tools_enabled"):
+        with pytest.raises(HERv2ConfigurationError):
+            HERv2Config.from_mapping({"profiles": _profiles(), field: "true"})
 
 
 def test_direct_route_reasoning_can_be_explicitly_overridden_but_model_stays_quick():
@@ -500,6 +519,8 @@ def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
         ("shadow_mode", True),
         ("meditation_enabled", 1),
         ("direct_strategy_self_selection", 1),
+        ("strategy_tools_enabled", 1),
+        ("planning_tools_enabled", 1),
         ("audit_failure_terminal", "COMPLETED"),
     ]
     for field, value in cases:

@@ -237,6 +237,59 @@ def _immediate_response_goal(goal: str) -> str:
     return "\n".join(rendered).strip()
 
 
+def _strategy_stage_tool_policy(request: StageRequest) -> str:
+    if not request.allow_tools:
+        return (
+            "The Strategist has no tool access. Perform only goal resolution, "
+            "classification, Strategy Card and Habit selection, and strategic "
+            "direction from the supplied request, context, catalogues, and resource "
+            "manifest. Do not call, simulate, or claim to have called a tool, inspect "
+            "the workspace, apply a fix, or create the requested deliverable. Pass "
+            "all execution work to downstream Planning and Execution."
+        )
+    if not request.allow_side_effects:
+        return (
+            "The Strategist may use only the read-only tools exposed by HASHI when "
+            "they materially improve a strategic decision. Do not modify artifacts "
+            "or perform the downstream execution task. Tool access does not transfer "
+            "primary execution ownership to Strategy."
+        )
+    return (
+        "The Strategist receives the normal tools and skills available to this "
+        "request through HASHI. It may call them, including with authorised side "
+        "effects, when doing so materially improves its understanding of the real "
+        "work or the quality of the overall strategy. Tool access does not transfer "
+        "primary execution ownership to Strategy."
+    )
+
+
+def _planning_stage_tool_policy(request: StageRequest) -> str:
+    if not request.allow_tools:
+        return (
+            "Planning itself has no tools and must reason only from the supplied "
+            "Strategy handoff and context. Do not call, simulate, or claim to have "
+            "called a tool. Produce the plan and pass all investigation and execution "
+            "work to Execution."
+        )
+    if not request.allow_side_effects:
+        return (
+            "Planning may freely choose and call the read-only tools actually exposed "
+            "by HASHI when current evidence materially improves the plan. Use tools "
+            "only to inspect or validate planning assumptions. Do not modify artifacts, "
+            "apply fixes, generate requested deliverables, or otherwise perform "
+            "Execution's work. Return a plan, not a completed implementation."
+        )
+    return (
+        "Planning may freely choose and call any registered tool actually exposed by "
+        "HASHI when current evidence materially improves the plan, including tools "
+        "whose interface can produce side effects. This access does not transfer the "
+        "downstream execution task to Planning: use tools only to investigate or "
+        "validate planning assumptions. Do not edit artifacts, apply fixes, generate "
+        "requested deliverables, change services, or otherwise perform Execution's "
+        "work. Return a plan, not a completed implementation."
+    )
+
+
 def render_stage_prompt(request: StageRequest) -> str:
     json_repair_input = request.context.get("json_repair_input")
     if request.stage is Stage.JSON_REPAIR:
@@ -292,6 +345,7 @@ def render_stage_prompt(request: StageRequest) -> str:
             schema_v3=json.dumps(
                 _SCHEMAS[Stage.TRIAGE], ensure_ascii=False, indent=2
             ),
+            stage_tool_policy=_strategy_stage_tool_policy(request),
         )
     if request.stage is Stage.PLANNING:
         raw_habits = request.context.get("relevant_habits")
@@ -324,6 +378,7 @@ def render_stage_prompt(request: StageRequest) -> str:
                 ensure_ascii=False,
             ),
             schema=json.dumps(_SCHEMAS[Stage.PLANNING], ensure_ascii=False, indent=2),
+            stage_tool_policy=_planning_stage_tool_policy(request),
         )
     if request.stage is Stage.REPLANNING:
         return render_prompt_asset(

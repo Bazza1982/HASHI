@@ -352,14 +352,43 @@ def test_planning_is_tool_free_and_renders_the_strategy_handoff() -> None:
     assert "$strategy_handoff" not in rendered
 
 
-def test_strategy_prompt_keeps_tool_authority_but_focuses_on_strategy() -> None:
-    prompt = prompt_catalog.load_prompt_asset("system_strategy")
+def test_strategy_prompt_tracks_the_actual_tool_boundary() -> None:
+    tool_request = _request(Stage.TRIAGE)
+    tool_request = StageRequest(
+        **{
+            **tool_request.__dict__,
+            "allow_tools": True,
+            "allow_side_effects": True,
+        }
+    )
+    tool_prompt = render_stage_prompt(tool_request)
+    no_tool_prompt = render_stage_prompt(_request(Stage.TRIAGE))
 
-    assert "including with authorised side effects" in prompt
-    assert "responsibility is strategic" in prompt
-    assert "Do not turn Strategy into detailed Planning" in prompt
-    assert "context preparation agent" not in prompt
-    assert "prepare a stronger execution strategy" not in prompt
+    assert "including with authorised side effects" in tool_prompt
+    assert "The Strategist has no tool access" in no_tool_prompt
+    assert "Do not call, simulate, or claim to have called a tool" in no_tool_prompt
+    assert "responsibility is strategic" in tool_prompt
+    assert "Do not turn Strategy into detailed Planning" in tool_prompt
+    assert "context preparation agent" not in tool_prompt
+    assert "prepare a stronger execution strategy" not in tool_prompt
+
+
+def test_planning_prompt_with_full_tools_keeps_execution_work_downstream() -> None:
+    request = _request(Stage.PLANNING)
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "allow_tools": True,
+            "allow_side_effects": True,
+        }
+    )
+
+    rendered = render_stage_prompt(request)
+
+    assert "freely choose and call any registered tool" in rendered
+    assert "Do not edit artifacts, apply fixes" in rendered
+    assert "Return a plan, not a completed implementation" in rendered
+    assert "Planning itself has no tools" not in rendered
 
 
 def test_planning_renders_exact_available_subagent_profile_names() -> None:

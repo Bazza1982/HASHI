@@ -73,6 +73,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "goal",
             "relevant_habits",
             "schema",
+            "stage_tool_policy",
             "strategy_handoff",
         }
     ),
@@ -116,6 +117,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "habit_catalogue",
             "request_resources",
             "schema_v3",
+            "stage_tool_policy",
             "strategy_cards",
         }
     ),
