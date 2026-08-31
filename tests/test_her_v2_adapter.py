@@ -543,11 +543,18 @@ class _RetryingMaintenanceProvider:
 
 
 class _WorkAndMeditationProvider(_DirectProvider):
+    def __init__(self, *, strategy_commentary: str = ""):
+        super().__init__()
+        self.strategy_commentary = strategy_commentary
+
     async def invoke(self, profile, request):
         self.requests.append((profile, request))
+        strategy_payload = _strategy_payload("SIMPLE_TASK", request.goal)
+        if self.strategy_commentary:
+            strategy_payload["commentary"] = self.strategy_commentary
         payload = {
             Stage.IMMEDIATE_RESPONSE: {"message": "I have it."},
-            Stage.TRIAGE: _strategy_payload("SIMPLE_TASK", request.goal),
+            Stage.TRIAGE: strategy_payload,
             Stage.EXECUTION: {
                 "disposition": "COMPLETED",
                 "summary": "Verified and completed the requested work.",
@@ -1158,10 +1165,15 @@ async def test_adapter_exposes_primary_failure_recovery_decision_and_cleanup(tmp
 
 
 @pytest.mark.asyncio
-async def test_adapter_packages_only_structured_stage_commentary_before_delivery(
+async def test_adapter_delivers_stage_authored_strategy_commentary_without_repackaging(
     tmp_path,
 ):
-    provider = _WorkAndMeditationProvider()
+    strategy_commentary = (
+        "Captain, the verified strategy is ready; execution comes next."
+    )
+    provider = _WorkAndMeditationProvider(
+        strategy_commentary=strategy_commentary
+    )
     packager = _StaticPersonaPackager()
     config = _agent_config(tmp_path, effort="low")
     setattr(config, "_her_v2_stage_provider", provider)
@@ -1180,12 +1192,11 @@ async def test_adapter_packages_only_structured_stage_commentary_before_delivery
     assert response.is_success is True
     commentary = [event for event in events if event.kind == KIND_COMMENTARY]
     assert [(event.phase, event.provenance) for event in commentary] == [
-        ("execution", "persona_packager"),
+        ("triage", "stage_authored_persona"),
     ]
     assert commentary[0].detail == "persona_packaging_fallback=false"
-    assert [(item.stage, item.text) for item in packager.commentaries] == [
-        (Stage.EXECUTION, "The requested work is verified and complete."),
-    ]
+    assert commentary[0].summary == strategy_commentary
+    assert packager.commentaries == []
 
 
 @pytest.mark.asyncio

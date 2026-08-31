@@ -37,6 +37,12 @@ _SCHEMAS = {
             "a concrete question required only for CONFIRMATION_REQUIRED; otherwise "
             "null"
         ),
+        "commentary": (
+            "one concise user-facing Strategy milestone for work classifications, "
+            "written directly in the active PCM presentation Persona and grounded "
+            "only in this Strategy result; null for DIRECT_RESPONSE or "
+            "CONFIRMATION_REQUIRED"
+        ),
     },
     Stage.PLANNING: {
         "plan": ["ordered, concrete action"],
@@ -55,8 +61,9 @@ _SCHEMAS = {
             }
         ],
         "commentary": (
-            "optional concise neutral user-facing update based only on this "
-            "completed stage result; omit when no useful update exists"
+            "one concise user-facing Planning milestone written directly in the "
+            "active PCM presentation Persona and grounded only in this completed "
+            "Planning result; omit only when no useful downstream work remains"
         ),
     },
     Stage.REPLANNING: {

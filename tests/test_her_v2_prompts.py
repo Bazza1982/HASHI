@@ -349,6 +349,9 @@ def test_planning_is_tool_free_and_renders_the_strategy_handoff() -> None:
     assert "cheap static diagnosis before expensive inference" in rendered
     assert "Planning itself has no tools" in rendered
     assert "Do not retrieve or reread the complete Playbook" in rendered
+    assert "typed presentation Persona section" in rendered
+    assert "Persona authority is presentation-only" in rendered
+    assert "commentary belongs only in the JSON `commentary` field" in rendered
     assert "$strategy_handoff" not in rendered
 
 
@@ -700,6 +703,10 @@ def test_strategy_uses_schema_v3_with_playbook_capabilities_and_resources() -> N
     assert '"selected_strategy_cards"' in stage_prompt
     assert '"execution_brief"' in stage_prompt
     assert '"relevant_habits"' in stage_prompt
+    assert '"commentary"' in stage_prompt
+    assert "typed presentation Persona section" in stage_prompt
+    assert "Persona authority is presentation-only" in stage_prompt
+    assert "dedicated user-facing response or clarification lane" in stage_prompt
     assert '"id": "CODE_MODIFY"' in stage_prompt
     assert '"name": "file_read"' in stage_prompt
     assert '"attachment_id": "attachment-1"' in stage_prompt

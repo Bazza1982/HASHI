@@ -22,6 +22,27 @@ HER v2 exposes exactly three production execution modes:
 These modes are orchestration policies. They do not change provider reasoning,
 tool-call ceilings, filesystem authority, or user-granted scope.
 
+## In-turn semantic progress
+
+The three public modes use stage-authored, event-driven Commentary only:
+
+| Mode | Semantic Commentary contract |
+|---|---|
+| Direct | None; observable work uses `/verbose` and completion uses the final response |
+| Strategic | One Strategy milestone after validated Strategy and before Execution |
+| Planned | One Strategy milestone, then one Planning milestone before Execution |
+
+Strategy and Planning write these milestones directly in the current typed PCM
+Persona. Persona authority is presentation-only and cannot change the resolved
+goal, strategy, plan, facts, permissions, or workflow authority. The validated
+stage message enters the existing typed Commentary router without a second
+Persona model invocation. The isolated Persona renderer remains available for
+required clarification and control messages.
+
+Runtime timer heartbeats are intentionally excluded. Tool calls and other
+observable Execution activity remain owned by `/verbose`; the completed
+Execution outcome remains owned by the final response.
+
 ## Compatibility
 
 - Canonical persisted and wire values remain `zero`, `low`, and `medium`.

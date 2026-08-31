@@ -1499,6 +1499,9 @@ class HERv2Adapter(BaseBackend):
             commentary = PersonaCommentaryPipeline(
                 packager=commentary_packager,
                 delivery=delivery,
+                stage_authored_persona_stages=frozenset(
+                    {Stage.TRIAGE, Stage.PLANNING}
+                ),
             )
 
         required_persona = getattr(

@@ -87,6 +87,40 @@ async def test_commentary_pipeline_packages_before_delivery_and_deduplicates_rep
 
 
 @pytest.mark.asyncio
+async def test_stage_authored_persona_commentary_bypasses_second_model_call():
+    timeline = []
+    packager = _RecordingPackager(timeline)
+    delivery = _RecordingDelivery(timeline)
+    pipeline = PersonaCommentaryPipeline(
+        packager=packager,
+        delivery=delivery,
+        stage_authored_persona_stages=frozenset(
+            {Stage.TRIAGE, Stage.PLANNING}
+        ),
+    )
+    commentary = NeutralCommentary(
+        event_id="turn:commentary:triage:1:1",
+        turn_id="turn",
+        stage=Stage.TRIAGE,
+        attempt=1,
+        text="Captain, the strategy is selected; planning comes next.",
+    )
+
+    accepted = await asyncio.gather(
+        pipeline.publish(commentary),
+        pipeline.publish(commentary),
+    )
+
+    assert accepted == [True, True]
+    assert packager.calls == []
+    assert len(delivery.calls) == 1
+    packaged = delivery.calls[0]
+    assert packaged.text == commentary.text
+    assert packaged.provenance == "stage_authored_persona"
+    assert timeline == [("deliver", commentary.event_id)]
+
+
+@pytest.mark.asyncio
 async def test_draft_response_uses_typed_commentary_delivery_without_rewriting():
     timeline = []
     packager = _RecordingPackager(timeline)
@@ -145,6 +179,31 @@ def test_optional_commentary_extraction_is_bounded_and_stage_scoped():
     assert commentary is not None
     assert commentary.text == "A neutral update."
     assert commentary.event_id == "turn:commentary:execution:2:1"
+    strategy_commentary = commentary_from_stage_response(
+        response,
+        turn_id="turn",
+        stage=Stage.TRIAGE,
+        invocation=1,
+        attempt=1,
+    )
+    assert strategy_commentary is not None
+    assert strategy_commentary.stage is Stage.TRIAGE
+    assert (
+        commentary_from_stage_response(
+            StageResponse(
+                text="",
+                data={
+                    "classification": "DIRECT_RESPONSE",
+                    "commentary": "This must not duplicate the direct response.",
+                },
+            ),
+            turn_id="turn",
+            stage=Stage.TRIAGE,
+            invocation=1,
+            attempt=1,
+        )
+        is None
+    )
     assert (
         commentary_from_stage_response(
             response,

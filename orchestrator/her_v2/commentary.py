@@ -1,10 +1,12 @@
 """HER v2 commentary lane.
 
 Ordinary stage commentary is optional; compulsory Replanning builds its
-required neutral event from a successful validated stage result. This module
-deliberately knows nothing about lifecycle events, plans, execution state,
-provider prompts, Persona files, or Telegram. Persona packaging and transport
-are composed outside :class:`HERv2Runtime`.
+required event from a successful validated stage result. Strategy and Planning
+may author already-Persona-styled progress while later compatibility stages can
+still use the isolated Persona packager. This module deliberately knows nothing
+about lifecycle events, plans, execution state, provider prompts, Persona files,
+or Telegram. Presentation handling and transport are composed outside
+:class:`HERv2Runtime`.
 """
 
 from __future__ import annotations
@@ -22,9 +24,12 @@ MAX_PACKAGED_COMMENTARY_CHARS = 8_000
 MAX_DRAFT_RESPONSE_COMMENTARY_CHARS = 128_000
 
 # Immediate Response and Finalisation already own dedicated user-facing lanes.
-# Triage is classification authority, while sub-agents are not user-facing.
+# The legacy Triage wire stage is the HER v2 Strategist. Sub-agents are not
+# user-facing, while Execution remains admitted for legacy reviewed-mode
+# commentary and exact provisional draft delivery.
 COMMENTARY_STAGES = frozenset(
     {
+        Stage.TRIAGE,
         Stage.PLANNING,
         Stage.EXECUTION,
         Stage.REPLANNING,
@@ -39,7 +44,12 @@ class CommentaryValidationError(ValueError):
 
 @dataclass(frozen=True)
 class NeutralCommentary:
-    """A bounded, Persona-free message supplied by one successful stage."""
+    """A bounded message supplied by one successful stage.
+
+    The historical type name remains part of the compatibility boundary. The
+    pipeline decides whether a stage already applied the presentation Persona
+    or still requires isolated packaging.
+    """
 
     event_id: str
     turn_id: str
@@ -218,11 +228,17 @@ class RecordingCommentaryPort:
 
 
 class PersonaCommentaryPipeline:
-    """Package, then deliver, each logical commentary event at most once.
+    """Prepare, then deliver, each logical commentary event at most once.
 
     Event IDs are reserved before packaging.  A transport ambiguity therefore
     cannot cause replay to duplicate a user-facing message.  Pipeline failure
     remains an optional presentation failure and is returned as ``False``.
+
+    Stages listed in ``stage_authored_persona_stages`` have already applied the
+    current PCM Persona under their presentation-only prompt contract. Their
+    validated text is delivered directly, avoiding a second model invocation.
+    Other stages retain the isolated Persona packager for compatibility and for
+    required control-message rendering elsewhere in the runtime.
     """
 
     def __init__(
@@ -230,9 +246,19 @@ class PersonaCommentaryPipeline:
         *,
         packager: PersonaPackager,
         delivery: PackagedCommentaryDelivery,
+        stage_authored_persona_stages: frozenset[Stage] | None = None,
     ) -> None:
         self.packager = packager
         self.delivery = delivery
+        authored = frozenset(stage_authored_persona_stages or ())
+        unsupported = authored - COMMENTARY_STAGES
+        if unsupported:
+            labels = ", ".join(sorted(stage.value for stage in unsupported))
+            raise ValueError(
+                "stage-authored Persona commentary has unsupported stages: "
+                + labels
+            )
+        self.stage_authored_persona_stages = authored
         self._lock = asyncio.Lock()
         self._attempts: dict[str, asyncio.Task[bool]] = {}
 
@@ -240,7 +266,7 @@ class PersonaCommentaryPipeline:
         async with self._lock:
             task = self._attempts.get(commentary.event_id)
             if task is None:
-                task = asyncio.create_task(self._package_then_deliver(commentary))
+                task = asyncio.create_task(self._prepare_then_deliver(commentary))
                 self._attempts[commentary.event_id] = task
         return await asyncio.shield(task)
 
@@ -252,9 +278,17 @@ class PersonaCommentaryPipeline:
                 self._attempts[commentary.event_id] = task
         return await asyncio.shield(task)
 
-    async def _package_then_deliver(self, commentary: NeutralCommentary) -> bool:
+    async def _prepare_then_deliver(self, commentary: NeutralCommentary) -> bool:
         try:
-            packaged = await self.packager.package(commentary)
+            if commentary.stage in self.stage_authored_persona_stages:
+                packaged = PackagedCommentary(
+                    source_event_id=commentary.event_id,
+                    stage=commentary.stage,
+                    text=commentary.text,
+                    provenance="stage_authored_persona",
+                )
+            else:
+                packaged = await self.packager.package(commentary)
             if packaged.source_event_id != commentary.event_id:
                 raise CommentaryValidationError(
                     "packager changed the source commentary identity"
@@ -289,11 +323,17 @@ def commentary_from_stage_response(
     invocation: int,
     attempt: int,
 ) -> NeutralCommentary | None:
-    """Extract one optional neutral field without affecting stage validity."""
+    """Extract one optional stage-authored field without affecting validity."""
 
     if stage not in COMMENTARY_STAGES:
         return None
-    raw = response_data(response).get("commentary")
+    data = response_data(response)
+    if stage is Stage.TRIAGE and str(data.get("classification") or "") in {
+        "DIRECT_RESPONSE",
+        "CONFIRMATION_REQUIRED",
+    }:
+        return None
+    raw = data.get("commentary")
     if raw is None:
         return None
     if not isinstance(raw, str):

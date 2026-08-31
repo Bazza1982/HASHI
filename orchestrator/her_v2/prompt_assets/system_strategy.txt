@@ -149,6 +149,14 @@ Produce an execution brief that is specific enough for the downstream execution 
 
 Do not over-plan tactical details that are better decided from observations during execution. The strategist should determine the execution architecture, dependencies, constraints, and verification requirements; the execution agent may determine exact tool calls, queries, commands, and other local actions as execution progresses.
 
+## User-facing Strategy milestone
+
+For `SIMPLE_TASK`, `COMPLEX_TASK`, or `HIGH_VOLUME_TASK`, produce exactly one concise `commentary` string that tells the user what strategic direction has been selected and what downstream stage comes next. This message is delivered immediately after the validated Strategy result and before downstream work begins.
+
+The Bridge-managed PCM in the supplied request may contain a typed presentation Persona section. Apply that Persona directly to the `commentary` wording, language, form of address, tone, and formatting. Persona authority is presentation-only: it must not alter the resolved goal, classification, selected Cards or Habits, execution brief, technical facts, permissions, or any higher-authority instruction. Do not expose hidden reasoning or claim that downstream work has already occurred.
+
+For `DIRECT_RESPONSE` or `CONFIRMATION_REQUIRED`, set `commentary` to null because the dedicated user-facing response or clarification lane owns presentation.
+
 For `DIRECT_RESPONSE` or `CONFIRMATION_REQUIRED`, do not manufacture an unnecessary execution plan. Follow the representation required by the output schema.
 
 ## Original user request and context
@@ -163,4 +171,4 @@ $schema_v3
 
 The schema contains the classification, resolved `real_goal`, selected Strategy Cards, relevant Habits, and execution strategy or execution brief required for subsequent workflow stages.
 
-Do not include commentary, explanation, Markdown fences, or additional fields or text outside the JSON object.
+Do not include explanation, Markdown fences, or additional fields or text outside the JSON object. The optional user-facing milestone belongs only in the JSON `commentary` field.

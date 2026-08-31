@@ -3804,6 +3804,55 @@ async def test_missing_optional_commentary_does_not_fail_work(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_public_planned_mode_publishes_strategy_and_planning_persona_progress_only(
+    tmp_path,
+):
+    scripts = _initial("COMPLEX_TASK")
+    scripts[Stage.TRIAGE][0]["commentary"] = (
+        "Captain, the safe implementation strategy is selected; planning comes next."
+    )
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["inspect", "change", "verify"],
+                    "commentary": (
+                        "Captain, the execution plan is ready; implementation comes next."
+                    ),
+                }
+            ],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Done.",
+                    "commentary": "This duplicate Execution update must stay internal.",
+                }
+            ],
+            Stage.FINALISATION: [{"report": "Done."}],
+        }
+    )
+    commentary = RecordingCommentaryPort()
+
+    result = await _runtime(
+        tmp_path,
+        ScriptedProvider(scripts),
+        commentary=commentary,
+    ).run_turn("Do it", "request-persona-progress", effort="medium")
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert [(item.stage, item.text) for item in commentary.records] == [
+        (
+            Stage.TRIAGE,
+            "Captain, the safe implementation strategy is selected; planning comes next.",
+        ),
+        (
+            Stage.PLANNING,
+            "Captain, the execution plan is ready; implementation comes next.",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_only_successful_stage_results_publish_neutral_commentary(
     tmp_path,
 ):
