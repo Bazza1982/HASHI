@@ -9,7 +9,13 @@ import pytest
 from adapters import deepseek_api
 from adapters.deepseek_api import DeepSeekAdapter
 from adapters.openrouter_api import _APIResult, _backend_failure_response
-from adapters.stream_events import KIND_SHELL_EXEC, KIND_TOOL_END
+from adapters.stream_events import (
+    KIND_SHELL_EXEC,
+    KIND_TEXT_DELTA,
+    KIND_THINKING,
+    KIND_TOOL_END,
+    StreamEvent,
+)
 from orchestrator.enterprise import IdentityService, PolicyEvaluator
 from orchestrator.multimodal_contract import canonical_request_content
 from tools.registry import ToolResult
@@ -663,6 +669,86 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_stream(monkeypatch
     assert response.text == "done"
     assert response.tool_call_count == 1
     assert response.tool_loop_count == 1
+
+
+@pytest.mark.asyncio
+async def test_deepseek_retries_only_the_unfinished_call_after_completed_tool_loop(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    seen_messages = []
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "file_list", "arguments": '{"path": "/tmp"}'},
+        }
+    ]
+
+    async def fake_stream(payload, headers, on_stream_event):
+        seen_messages.append(repr(payload["messages"]))
+        if len(seen_messages) == 1:
+            return _APIResult("", tool_calls, "tool_calls")
+        if len(seen_messages) == 2:
+            await on_stream_event(
+                StreamEvent(kind=KIND_THINKING, summary="finishing safely")
+            )
+            raise httpx.RemoteProtocolError("peer closed the final stream")
+        return _APIResult("done", None, "stop")
+
+    events = []
+
+    async def capture(event):
+        events.append(event.kind)
+
+    monkeypatch.setattr(adapter, "_stream_api_once", fake_stream)
+
+    response = await adapter.generate_response(
+        "check files",
+        "req-transport-retry",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is True
+    assert response.text == "done"
+    assert len(seen_messages) == 3
+    assert seen_messages[1] == seen_messages[2]
+    assert adapter.tool_registry.calls == [
+        ("file_list", {"path": "/tmp"}, "call_1")
+    ]
+    assert events.count(KIND_THINKING) == 1
+    assert response.stream_metadata["provider_transport_retry_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_deepseek_does_not_retry_after_partial_answer_text(monkeypatch, tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    calls = 0
+
+    async def fake_stream(payload, headers, on_stream_event):
+        nonlocal calls
+        calls += 1
+        await on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="partial"))
+        raise httpx.RemoteProtocolError("peer closed after answer text")
+
+    async def capture(_event):
+        return None
+
+    monkeypatch.setattr(adapter, "_stream_api_once", fake_stream)
+
+    response = await adapter.generate_response(
+        "answer",
+        "req-partial-text",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_INCOMPLETE_STREAM"
+    assert response.stream_metadata["provider_transport_retry_count"] == 0
+    assert calls == 1
 
 
 @pytest.mark.asyncio

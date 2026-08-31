@@ -82,6 +82,11 @@ def _with_deepseek_cache_usage(
 
 
 class DeepSeekAdapter(OpenRouterAdapter):
+    # DeepSeek's long-running tool conversations can occasionally lose the
+    # current SSE call after earlier tool results have already been committed.
+    # Retry only that unfinished HTTP call; the base adapter never replays the
+    # completed tool loops.
+    TRANSIENT_PROVIDER_CALL_RETRIES = 1
 
     def _request_headers(self) -> dict[str, str]:
         return self._deepseek_headers()
