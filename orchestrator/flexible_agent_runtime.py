@@ -9658,7 +9658,15 @@ class FlexibleAgentRuntime:
         try:
             from tools.meter_cost import format_cost_tail
 
-            text = format_cost_tail(receipt)
+            locale = str(
+                request_meta.get("ui_locale_at_start")
+                or ui_language.preferred_locale(
+                    self,
+                    actor_id=getattr(item, "owner_id", None)
+                    or getattr(item, "chat_id", None),
+                )
+            )
+            text = format_cost_tail(receipt, locale=locale)
         except Exception:
             self.logger.exception("meter cost tail formatting failed")
             return
@@ -9730,7 +9738,17 @@ class FlexibleAgentRuntime:
                     + float(foreground.cost_usd),
                     6,
                 )
-            text = format_meditation_cost_tail(receipt, task_total_usd=task_total)
+            locale = str(
+                notification.get("ui_locale_at_start")
+                or ui_language.preferred_locale(
+                    self, actor_id=notification.get("chat_id")
+                )
+            )
+            text = format_meditation_cost_tail(
+                receipt,
+                locale=locale,
+                task_total_usd=task_total,
+            )
         except Exception:
             self.logger.exception("meditation cost tail formatting failed")
             return False

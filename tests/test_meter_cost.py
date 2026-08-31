@@ -29,7 +29,12 @@ from tools.meter_cost import (
 )
 from adapters.base import BackendResponse, TokenUsage
 from adapters.her_v2_provider import HashiStageProvider
-from tools.token_tracker import record_usage, resolve_cost_source, model_has_pricing
+from tools.token_tracker import (
+    get_summary_extended,
+    model_has_pricing,
+    record_usage,
+    resolve_cost_source,
+)
 
 
 # ── Data contract: record_usage returns a structured receipt ─────────────────
@@ -121,6 +126,56 @@ def test_jsonl_uses_structured_receipt_cost_for_multi_model_turn(tmp_path: Path)
     )
     assert receipt.cost_usd == pytest.approx(0.456750)
     assert persisted["cost_usd"] == pytest.approx(0.456750)
+
+
+def test_jsonl_persists_cache_savings_and_provider_request_statistics(tmp_path: Path):
+    line_items = [
+        PerCallUsageLineItem(
+            phase="execution",
+            engine="deepseek-api",
+            model="deepseek-v4-flash",
+            input_tokens=100_000,
+            output_tokens=10_000,
+            thinking_tokens=4_000,
+            token_source="provider",
+            thinking_in_output=True,
+            cost_usd=0.005824,
+            cost_source="pricing_table",
+            prompt_cache_hit_tokens=80_000,
+            prompt_cache_miss_tokens=20_000,
+            pricing_revision="2026-08-23.v1",
+        )
+    ]
+
+    record_usage(
+        tmp_path,
+        model="deepseek-v4-flash",
+        backend="her-v2",
+        input_tokens=100_000,
+        output_tokens=10_000,
+        thinking_tokens=4_000,
+        session_id="session-rich",
+        request_id="request-rich",
+        line_items=line_items,
+    )
+
+    persisted = json.loads(
+        (tmp_path / "token_usage.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert persisted["request_id"] == "request-rich"
+    assert persisted["provider_requests"] == 1
+    assert persisted["prompt_cache_hit_tokens"] == 80_000
+    assert persisted["cache_metrics_complete"] is True
+    assert persisted["no_cache_cost_usd"] == pytest.approx(0.0168)
+    assert persisted["cache_savings_usd"] == pytest.approx(0.010976)
+    assert persisted["thinking_in_output_tokens"] == 4_000
+    assert persisted["total_tokens"] == 110_000
+
+    summary = get_summary_extended(tmp_path, session_id="session-rich")["session"]
+    assert summary["provider_requests"] == 1
+    assert summary["cache_observed_input_tokens"] == 100_000
+    assert summary["cache_savings_usd"] == pytest.approx(0.010976)
+    assert summary["pricing_revisions"] == ["2026-08-23.v1"]
 
 
 def test_provider_reasoning_is_output_detail_not_extra_tokens(tmp_path: Path):
@@ -278,10 +333,11 @@ def test_formatter_pricing_table_has_approx():
                              output_tokens=500, cost_usd=0.0105,
                              cost_source="pricing_table"),
     ])
-    tail = format_cost_tail(receipt)
+    tail = format_cost_tail(receipt, locale="zh-CN")
     assert tail.startswith("💰 前台回合：≈ US$")
-    assert "价目表估算" in tail
-    assert "1.5K tokens" in tail
+    assert "价目表 2026-08-23.v1" in tail
+    assert "📥 输入 1.0K" in tail
+    assert len(tail.splitlines()) == 4
 
 
 def test_formatter_provider_no_approx():
@@ -290,8 +346,8 @@ def test_formatter_provider_no_approx():
                              output_tokens=500, cost_usd=0.012345,
                              cost_source="provider"),
     ])
-    tail = format_cost_tail(receipt)
-    assert "≈" not in tail
+    tail = format_cost_tail(receipt, locale="zh-CN")
+    assert "≈" not in tail.splitlines()[0]
     assert "Provider 实报" in tail
 
 
@@ -299,22 +355,78 @@ def test_formatter_small_cost():
     receipt = UsageReceipt(line_items=[
         PerCallUsageLineItem(cost_usd=0.00005, cost_source="provider"),
     ])
-    assert "< US$0.0001" in format_cost_tail(receipt)
+    assert "< US$0.0001" in format_cost_tail(receipt, locale="zh-CN")
 
 
 def test_formatter_unknown_cost():
     receipt = UsageReceipt(line_items=[
         PerCallUsageLineItem(cost_usd=None, cost_source="unknown"),
     ])
-    assert "成本未知" in format_cost_tail(receipt)
+    assert "成本未知" in format_cost_tail(receipt, locale="zh-CN")
 
 
 def test_formatter_task_total():
     receipt = UsageReceipt(line_items=[
         PerCallUsageLineItem(cost_usd=0.012347, cost_source="provider"),
     ])
-    tail = format_cost_tail(receipt, task_total_usd=0.013587)
+    tail = format_cost_tail(
+        receipt, locale="zh-CN", task_total_usd=0.013587
+    )
     assert "任务累计 ≈" in tail
+
+
+def test_formatter_renders_rich_cache_and_reasoning_statistics_in_both_languages():
+    line_items = [
+        PerCallUsageLineItem(
+            model="deepseek-v4-pro",
+            input_tokens=2_283_850,
+            output_tokens=0,
+            token_source="provider",
+            thinking_in_output=True,
+            cost_usd=0.080921,
+            cost_source="pricing_table",
+            prompt_cache_hit_tokens=2_115_454,
+            prompt_cache_miss_tokens=168_396,
+            pricing_revision="2026-08-23.v1",
+        ),
+        PerCallUsageLineItem(
+            model="deepseek-v4-flash",
+            input_tokens=631_748,
+            output_tokens=52_184,
+            thinking_tokens=38_112,
+            token_source="provider",
+            thinking_in_output=True,
+            cost_usd=0.025170,
+            cost_source="pricing_table",
+            prompt_cache_hit_tokens=567_682,
+            prompt_cache_miss_tokens=64_066,
+            pricing_revision="2026-08-23.v1",
+        ),
+    ]
+    line_items.extend(
+        PerCallUsageLineItem(
+            model="deepseek-v4-flash",
+            token_source="provider",
+            thinking_in_output=True,
+            cost_usd=0.0,
+            cost_source="pricing_table",
+            pricing_revision="2026-08-23.v1",
+        )
+        for _ in range(38)
+    )
+    receipt = UsageReceipt(line_items=line_items)
+
+    chinese = format_cost_tail(receipt, locale="zh-CN")
+    assert chinese.splitlines() == [
+        "💰 前台回合：≈ US$0.1061 · 价目表 2026-08-23.v1",
+        "📥 输入 2.916M · 缓存命中 2.683M（92.0%）",
+        "📤 输出 52.2K（其中推理 38.1K）",
+        "🔁 Provider 请求 40 · 无缓存约 US$1.0965 · 缓存节省约 US$0.9904（90.3%）",
+    ]
+    english = format_cost_tail(receipt, locale="en")
+    assert english.splitlines()[0].startswith("💰 Foreground turn: ≈ US$0.1061")
+    assert "cache hit 2.683M (92.0%)" in english
+    assert "including 38.1K reasoning" in english
 
 
 # ── Command registration ─────────────────────────────────────────────────────
@@ -365,16 +477,18 @@ def test_meditation_formatter_label_and_approx():
                              output_tokens=50, cost_usd=0.001240,
                              cost_source="pricing_table"),
     ])
-    tail = format_meditation_cost_tail(receipt)
+    tail = format_meditation_cost_tail(receipt, locale="zh-CN")
     assert tail.startswith("🧘 冥想：≈ US$")
-    assert "价目表估算" in tail
+    assert "价目表 2026-08-23.v1" in tail
 
 
 def test_meditation_formatter_task_total():
     receipt = UsageReceipt(line_items=[
         PerCallUsageLineItem(cost_usd=0.001240, cost_source="provider"),
     ])
-    tail = format_meditation_cost_tail(receipt, task_total_usd=0.013587)
+    tail = format_meditation_cost_tail(
+        receipt, locale="zh-CN", task_total_usd=0.013587
+    )
     assert "任务累计 ≈" in tail
     assert "🧘 冥想" in tail
 
@@ -383,4 +497,4 @@ def test_meditation_formatter_unknown_cost():
     receipt = UsageReceipt(line_items=[
         PerCallUsageLineItem(cost_usd=None, cost_source="unknown"),
     ])
-    assert "成本未知" in format_meditation_cost_tail(receipt)
+    assert "成本未知" in format_meditation_cost_tail(receipt, locale="zh-CN")

@@ -712,6 +712,7 @@ class HERv2Adapter(BaseBackend):
             "chat_id": meta.get("chat_id"),
             "verbose_at_start": bool(meta.get("verbose_at_start")),
             "meter_at_start": bool(meta.get("meter_at_start")),
+            "ui_locale_at_start": meta.get("ui_locale_at_start"),
             "silent": bool(meta.get("silent", silent)),
             "deliver_to_telegram": bool(meta.get("deliver_to_telegram")),
             "request_source": meta.get("source"),

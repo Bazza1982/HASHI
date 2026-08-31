@@ -33,7 +33,10 @@ class FakeMeterRuntime:
             {"req-1": receipt} if receipt is not None else {}
         )
         self._request_meta_by_id: dict[str, dict[str, Any]] = {
-            "req-1": {"meter_at_start": meter_at_start}
+            "req-1": {
+                "meter_at_start": meter_at_start,
+                "ui_locale_at_start": "zh-CN",
+            }
         }
         self._buffer_during_transfer = buffer_during_transfer
         self.logger = logging.getLogger("test.meter")
@@ -101,6 +104,7 @@ def _meditation_job(*, meter_at_start: bool = True) -> dict[str, Any]:
         "notification": {
             "chat_id": 99,
             "meter_at_start": meter_at_start,
+            "ui_locale_at_start": "zh-CN",
             "verbose_at_start": True,
         },
         "meter": {

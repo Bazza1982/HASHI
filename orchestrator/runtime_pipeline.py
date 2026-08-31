@@ -729,6 +729,10 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         # notification policy for this already-started task.
         "verbose_at_start": bool(getattr(runtime, "_verbose", False)),
         "meter_at_start": bool(getattr(runtime, "_meter", False)),
+        "ui_locale_at_start": ui_language.preferred_locale(
+            runtime,
+            actor_id=getattr(item, "owner_id", None) or getattr(item, "chat_id", None),
+        ),
         "silent": bool(item.silent),
         "deliver_to_telegram": bool(item.deliver_to_telegram),
         "hashi_session_id": getattr(item, "session_id", None),
