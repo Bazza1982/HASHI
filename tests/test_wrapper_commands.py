@@ -82,7 +82,7 @@ def _make_her_v2_manager(workspace: Path) -> FlexibleBackendManager:
             {
                 "engine": "her-v2",
                 "model": "role-configured",
-                "effort": "high",
+                "effort": "medium",
                 "her_v2": {
                     "profiles": {
                         "lightweight": {
@@ -149,7 +149,7 @@ def _make_her_v2_manager(workspace: Path) -> FlexibleBackendManager:
             model="role-configured",
             extra={"her_v2": cfg.allowed_backends[-1]["her_v2"]},
         ),
-        effort="high",
+        effort="medium",
         _v2_config=None,
     )
     return manager
@@ -615,13 +615,13 @@ def test_status_text_shows_wrapper_model_configuration():
 def test_status_text_names_her_execution_mode_without_renaming_other_backends():
     runtime = _make_status_runtime("flex", {})
     runtime.config.active_backend = "her-v2"
-    runtime._get_current_effort = lambda: "max"
+    runtime._get_current_effort = lambda: "medium"
     runtime.get_current_model = lambda: "role-configured"
     runtime.get_current_provider = lambda: "openrouter"
 
     text = runtime._build_status_text(detailed=False)
 
-    assert "<b>HER execution mode</b> · <code>Assured (max)</code>" in text
+    assert "<b>HER execution mode</b> · <code>Planned (medium)</code>" in text
     assert "<b>Effort</b>" not in text
 
 
@@ -1875,21 +1875,23 @@ async def test_her_v2_effort_change_does_not_mutate_provider_reasoning(tmp_path)
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
     before = manager.get_her_v2_configuration().to_dict()
-    update, context = _update(["max"])
+    update, context = _update(["strategic"])
 
     await FlexibleAgentRuntime.cmd_effort(runtime, update, context)
 
     after = manager.get_her_v2_configuration().to_dict()
     assert after == before
-    assert manager.current_backend.effort == "max"
+    assert manager.current_backend.effort == "low"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("alias", "canonical", "label"),
     [
-        ("reviewed", "xhigh", "Reviewed (xhigh)"),
-        ("assured", "max", "Assured (max)"),
+        ("direct", "zero", "Direct (zero)"),
+        ("strategic", "low", "Strategic (low)"),
+        ("fast", "low", "Strategic (low)"),
+        ("planned", "medium", "Planned (medium)"),
     ],
 )
 async def test_her_v2_effort_aliases_persist_canonical_execution_modes(
@@ -1918,13 +1920,16 @@ async def test_her_v2_effort_menu_uses_execution_mode_names(tmp_path):
     markup = str(runtime._reply_payloads[-1]["reply_markup"])
     for label in (
         "Direct (zero)",
-        "Fast path (low)",
+        "Strategic (low)",
         "Planned (medium)",
+    ):
+        assert label in markup
+    for retired_label in (
         "Adaptive (high)",
         "Reviewed (xhigh)",
         "Assured (max)",
     ):
-        assert label in markup
+        assert retired_label not in markup
 
 
 @pytest.mark.asyncio

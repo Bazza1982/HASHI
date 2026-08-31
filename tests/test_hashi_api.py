@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from adapters.hashi_api import HashiApiAdapter
-from adapters.openrouter_api import _APIResult
+from adapters.openrouter_api import ProviderCallObserverError, _APIResult
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
     DELIVERY_INTERNAL,
@@ -130,6 +130,52 @@ async def test_hashi_api_initializes_without_a_provider_secret(tmp_path):
     }
 
     await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_observes_each_physical_provider_call(tmp_path):
+    adapter = _adapter(tmp_path)
+    observed = []
+    adapter.set_provider_call_observer(observed.append)
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult(
+            "done",
+            None,
+            "stop",
+            prompt_tokens=11,
+            completion_tokens=3,
+            thinking_tokens=2,
+            prompt_cache_hit_tokens=7,
+            prompt_cache_miss_tokens=4,
+        )
+    )
+
+    response = await adapter.generate_response("hello", "request-meter")
+
+    calls = response.stream_metadata["meter"]["provider_calls"]
+    assert calls == observed
+    assert len(calls) == 1
+    assert calls[0]["status"] == "completed"
+    assert calls[0]["prompt_cache_hit_tokens"] == 7
+    assert calls[0]["prompt_cache_miss_tokens"] == 4
+    assert calls[0]["provider_request_id"].startswith("hashi-provider:")
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_does_not_swallow_or_retry_accounting_failure(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult("done", None, "stop", 4, 1)
+    )
+
+    def fail_accounting(_call):
+        raise RuntimeError("ledger unavailable")
+
+    adapter.set_provider_call_observer(fail_accounting)
+
+    with pytest.raises(ProviderCallObserverError):
+        await adapter.generate_response("hello", "request-accounting-failure")
+    assert adapter._call_api_once.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -275,6 +321,70 @@ async def test_hashi_api_reports_usage_and_never_adds_openrouter_headers(tmp_pat
     assert response.usage.output_tokens == 30
     assert response.usage.thinking_tokens == 10
     assert response.cost_usd == pytest.approx(0.0025)
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_tool_loop_sends_full_prompt_once_then_only_tool_delta(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = SimpleNamespace(
+        get_tool_definitions=lambda tiers=None: []
+    )
+    tool_call = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "file_read", "arguments": '{"path":"a.txt"}'},
+    }
+    adapter._call_api_once = AsyncMock(
+        side_effect=[
+            _APIResult("", [tool_call], "tool_calls", 100, 10),
+            _APIResult("finished", None, "stop", 20, 5),
+        ]
+    )
+
+    async def run_tool_calls(_calls, messages, _callback, **_kwargs):
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "file contents",
+            }
+        )
+
+    adapter._run_tool_calls = run_tool_calls
+
+    response = await adapter.generate_response("Inspect the file", "request-tool")
+
+    assert response.is_success is True
+    assert response.text == "finished"
+    assert adapter._call_api_once.call_count == 2
+    first_payload = adapter._call_api_once.call_args_list[0].args[0]
+    second_payload = adapter._call_api_once.call_args_list[1].args[0]
+    assert [message["role"] for message in first_payload["messages"]] == [
+        "system",
+        "user",
+    ]
+    assert second_payload["messages"] == [
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": "file contents",
+        }
+    ]
+    assert first_payload["session_id"] == second_payload["session_id"]
+    assert first_payload["hashi_tool_workspace"] == str(tmp_path.resolve())
+    assert second_payload["hashi_tool_workspace"] == str(tmp_path.resolve())
+    second_headers = adapter._call_api_once.call_args_list[1].args[1]
+    assert second_headers["X-Hashi-After-Tool-End"] == "true"
+    assert second_headers["X-Hashi-External-Tool-Session"] == "v1"
+    continuation = response.stream_metadata["gateway_continuation"]
+    assert continuation["enabled"] is True
+    assert continuation["full_prompt_send_count"] == 1
+    assert [call["message_count"] for call in continuation["transport_calls"]] == [
+        2,
+        1,
+    ]
 
 
 @pytest.mark.asyncio

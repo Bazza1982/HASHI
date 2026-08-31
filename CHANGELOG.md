@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HER v2 Fast/Low Strategy experiment (HASHI3)** — upgraded the compatible
+  Triage wire stage to a tool-capable Strategist backed by a versioned external
+  38-card Playbook and schema v3. Low effort now passes only the selected Card
+  snapshots and strategic execution brief to primary Execution while retaining
+  `active_plan=None`; Medium and higher Planning paths remain unchanged in this
+  first slice.
 - **Telegram Quiet notification mode** — expanded `/notify` to
   `on|quiet|off`. Quiet delivers every message, silences acknowledgements,
   commentary, reasoning, technical activity, placeholders, and previews, then

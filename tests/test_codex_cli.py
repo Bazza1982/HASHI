@@ -919,6 +919,7 @@ async def test_codex_external_tools_refresh_mcp_inventory_each_request(
     discovered = []
     bridge_inventories = []
     bridge_efforts = []
+    bridge_workspaces = []
 
     async def discover():
         value = inventories[len(discovered)]
@@ -931,6 +932,7 @@ async def test_codex_external_tools_refresh_mcp_inventory_each_request(
             bridge_efforts.append(kwargs["effort"])
 
         async def run(self, *_args, **_kwargs):
+            bridge_workspaces.append(_kwargs.get("workspace_dir"))
             return BackendResponse(text="done", duration_ms=1)
 
     monkeypatch.setattr(adapter, "_discover_mcp_servers", discover)
@@ -942,11 +944,15 @@ async def test_codex_external_tools_refresh_mcp_inventory_each_request(
             [],
             request_id,
             model="gpt-5.6-luna",
-            request_options={"reasoning_effort": effort},
+            request_options={
+                "reasoning_effort": effort,
+                "_hashi_internal_tool_workspace": str(tmp_path),
+            },
         )
         assert response.is_success is True
 
     assert discovered == inventories
     assert bridge_inventories == inventories
     assert bridge_efforts == ["high", "max"]
+    assert bridge_workspaces == [tmp_path, tmp_path]
     assert adapter.effort == "medium"

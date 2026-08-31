@@ -32,7 +32,9 @@ from orchestrator.flexible_backend_registry import (
 #   "project"   - the project root / repo root (sensible default)
 #   "drive"     - full drive root e.g. C:\ (least restrictive)
 VALID_ACCESS_SCOPES = {"workspace", "project", "drive"}
-SESSION_MODE_BACKENDS = frozenset({"claude-cli", "codex-cli", "grok-cli"})
+SESSION_MODE_BACKENDS = frozenset(
+    {"claude-cli", "codex-cli", "grok-cli", "her-v2"}
+)
 LEGACY_FIXED_CONFIG_BACKUP_SUFFIX = ".pre-flex-migration.bak"
 LEGACY_PCM_CONFIG_BACKUP_SUFFIX = ".pre-pcm-migration.bak"
 config_logger = logging.getLogger("BridgeU.Config")

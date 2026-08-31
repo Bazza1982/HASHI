@@ -19,12 +19,29 @@ _SCHEMAS = {
             "concise resolved operational goal; null only when "
             "CONFIRMATION_REQUIRED because the goal cannot be resolved reliably"
         ),
+        "selected_strategy_cards": [
+            "exact Strategy Card ID selected from the supplied Playbook"
+        ],
         "relevant_habits": [
             "exact unchanged entry selected from the supplied habit_catalogue"
         ],
+        "execution_brief": {
+            "strategy": "overall strategic approach; empty for non-work paths",
+            "stages": ["major strategic stage"],
+            "dependencies": ["important sequence, prerequisite, or parallelism"],
+            "verification": ["verification approach or evidence standard"],
+            "success_criteria": ["observable completion condition"],
+            "replan_conditions": ["condition that should trigger replanning"],
+        },
         "clarification": (
             "a concrete question required only for CONFIRMATION_REQUIRED; otherwise "
             "null"
+        ),
+        "commentary": (
+            "one concise user-facing Strategy milestone for work classifications, "
+            "written directly in the active PCM presentation Persona and grounded "
+            "only in this Strategy result; null for DIRECT_RESPONSE or "
+            "CONFIRMATION_REQUIRED"
         ),
     },
     Stage.PLANNING: {
@@ -44,8 +61,9 @@ _SCHEMAS = {
             }
         ],
         "commentary": (
-            "optional concise neutral user-facing update based only on this "
-            "completed stage result; omit when no useful update exists"
+            "one concise user-facing Planning milestone written directly in the "
+            "active PCM presentation Persona and grounded only in this completed "
+            "Planning result; omit only when no useful downstream work remains"
         ),
     },
     Stage.REPLANNING: {
@@ -114,6 +132,30 @@ _SCHEMAS = {
     Stage.MEDITATION: {"actions": []},
     Stage.DREAM: {"groups": []},
 }
+
+
+def _compact_tool_catalogue(
+    items: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep model guidance once; function parameters remain in the API schema."""
+
+    compact: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        function = item.get("function")
+        source = function if isinstance(function, Mapping) else item
+        name = str(source.get("name") or "").strip()
+        if not name:
+            continue
+        entry: dict[str, Any] = {
+            "name": name,
+            "description": str(source.get("description") or "").strip(),
+        }
+        if "hashi_read_only" in item:
+            entry["hashi_read_only"] = bool(item.get("hashi_read_only"))
+        compact.append(entry)
+    return compact
 
 
 _JSON_REPAIR_STAGES = frozenset(
@@ -202,6 +244,59 @@ def _immediate_response_goal(goal: str) -> str:
     return "\n".join(rendered).strip()
 
 
+def _strategy_stage_tool_policy(request: StageRequest) -> str:
+    if not request.allow_tools:
+        return (
+            "The Strategist has no tool access. Perform only goal resolution, "
+            "classification, Strategy Card and Habit selection, and strategic "
+            "direction from the supplied request, context, catalogues, and resource "
+            "manifest. Do not call, simulate, or claim to have called a tool, inspect "
+            "the workspace, apply a fix, or create the requested deliverable. Pass "
+            "all execution work to downstream Planning and Execution."
+        )
+    if not request.allow_side_effects:
+        return (
+            "The Strategist may use only the read-only tools exposed by HASHI when "
+            "they materially improve a strategic decision. Do not modify artifacts "
+            "or perform the downstream execution task. Tool access does not transfer "
+            "primary execution ownership to Strategy."
+        )
+    return (
+        "The Strategist receives the normal tools and skills available to this "
+        "request through HASHI. It may call them, including with authorised side "
+        "effects, when doing so materially improves its understanding of the real "
+        "work or the quality of the overall strategy. Tool access does not transfer "
+        "primary execution ownership to Strategy."
+    )
+
+
+def _planning_stage_tool_policy(request: StageRequest) -> str:
+    if not request.allow_tools:
+        return (
+            "Planning itself has no tools and must reason only from the supplied "
+            "Strategy handoff and context. Do not call, simulate, or claim to have "
+            "called a tool. Produce the plan and pass all investigation and execution "
+            "work to Execution."
+        )
+    if not request.allow_side_effects:
+        return (
+            "Planning may freely choose and call the read-only tools actually exposed "
+            "by HASHI when current evidence materially improves the plan. Use tools "
+            "only to inspect or validate planning assumptions. Do not modify artifacts, "
+            "apply fixes, generate requested deliverables, or otherwise perform "
+            "Execution's work. Return a plan, not a completed implementation."
+        )
+    return (
+        "Planning may freely choose and call any registered tool actually exposed by "
+        "HASHI when current evidence materially improves the plan, including tools "
+        "whose interface can produce side effects. This access does not transfer the "
+        "downstream execution task to Planning: use tools only to investigate or "
+        "validate planning assumptions. Do not edit artifacts, apply fixes, generate "
+        "requested deliverables, change services, or otherwise perform Execution's "
+        "work. Return a plan, not a completed implementation."
+    )
+
+
 def render_stage_prompt(request: StageRequest) -> str:
     json_repair_input = request.context.get("json_repair_input")
     if request.stage is Stage.JSON_REPAIR:
@@ -234,14 +329,30 @@ def render_stage_prompt(request: StageRequest) -> str:
             else []
         )
         return render_prompt_asset(
-            "system_triage",
+            "system_strategy",
             goal=request.goal,
+            strategy_cards=json.dumps(
+                request.context.get("strategy_cards") or {},
+                ensure_ascii=False,
+                indent=2,
+            ),
             habit_catalogue=json.dumps(
                 habit_catalogue, ensure_ascii=False, indent=2
             ),
-            schema_v2=json.dumps(
+            execution_capabilities=json.dumps(
+                request.context.get("execution_capabilities") or {},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            request_resources=json.dumps(
+                request.context.get("request_resources") or {},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            schema_v3=json.dumps(
                 _SCHEMAS[Stage.TRIAGE], ensure_ascii=False, indent=2
             ),
+            stage_tool_policy=_strategy_stage_tool_policy(request),
         )
     if request.stage is Stage.PLANNING:
         raw_habits = request.context.get("relevant_habits")
@@ -256,9 +367,16 @@ def render_stage_prompt(request: StageRequest) -> str:
             classification=(
                 request.classification.value if request.classification else ""
             ),
+            strategy_handoff=json.dumps(
+                request.context.get("strategy_handoff") or {},
+                ensure_ascii=False,
+                indent=2,
+            ),
             relevant_habits=json.dumps(habits, ensure_ascii=False, indent=2),
             available_execution_tools=json.dumps(
-                request.context.get("available_execution_tools") or [],
+                _compact_tool_catalogue(
+                    request.context.get("available_execution_tools") or []
+                ),
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -267,6 +385,7 @@ def render_stage_prompt(request: StageRequest) -> str:
                 ensure_ascii=False,
             ),
             schema=json.dumps(_SCHEMAS[Stage.PLANNING], ensure_ascii=False, indent=2),
+            stage_tool_policy=_planning_stage_tool_policy(request),
         )
     if request.stage is Stage.REPLANNING:
         return render_prompt_asset(
@@ -296,7 +415,9 @@ def render_stage_prompt(request: StageRequest) -> str:
                 indent=2,
             ),
             available_execution_tools=json.dumps(
-                request.context.get("available_execution_tools") or [],
+                _compact_tool_catalogue(
+                    request.context.get("available_execution_tools") or []
+                ),
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -500,6 +621,7 @@ def render_direct_system_prompt(
     habit_catalogue: Sequence[str],
     skills_catalogue: Sequence[Mapping[str, Any]],
     tool_catalogue: Sequence[Mapping[str, Any]],
+    strategy_playbook: Mapping[str, Any] | None = None,
     guidance: str,
     display_name: str,
     usable: bool,
@@ -508,9 +630,45 @@ def render_direct_system_prompt(
 ) -> str:
     """Render the complete zero-orchestration Direct contract."""
 
+    direct_strategy_block = ""
+    if strategy_playbook:
+        direct_strategy_block = (
+            """## Direct Strategy Playbook self-selection
+
+This invocation is the Direct + Playbook experimental condition. You remain the
+sole Direct agent in one invocation; this is not a separate Strategist, Triage,
+Planning, Review, or other orchestration stage.
+
+Before making the first task tool call:
+
+1. inspect the complete Strategy Card Playbook below;
+2. select a small, focused set of the most suitable cards, normally one to
+   three, using their exact Card IDs;
+3. compose a concise working approach from their strategy, validation, and
+   failure-mode guidance; and
+4. perform the task according to that approach, adapting tactical details only
+   when task evidence requires it.
+
+Do not merely name relevant cards. Apply their useful guidance throughout the
+work and verification. After the work, include one concise final-response line
+in the form `Strategy Cards used: CARD_ID, ...` so the experiment can audit the
+self-selection without creating a structured handoff or another provider call.
+
+Complete Strategy Card Playbook:
+
+```json
+"""
+            + json.dumps(dict(strategy_playbook), ensure_ascii=False, indent=2)
+            + """
+```
+
+"""
+        )
+
     return render_prompt_asset(
         "system_direct",
         goal=goal,
+        direct_strategy_block=direct_strategy_block,
         habit_catalogue=(
             json.dumps(list(habit_catalogue), ensure_ascii=False, indent=2)
             if habit_catalogue
@@ -522,7 +680,11 @@ def render_direct_system_prompt(
             else "[]"
         ),
         tool_catalogue=(
-            json.dumps(list(tool_catalogue), ensure_ascii=False, indent=2)
+            json.dumps(
+                _compact_tool_catalogue(tool_catalogue),
+                ensure_ascii=False,
+                indent=2,
+            )
             if tool_catalogue
             else "No tools are available for this invocation."
         ),
@@ -560,6 +722,7 @@ def render_execution_system_prompt(
     relevant_habits: Sequence[str],
     active_plan: Mapping[str, Any] | None,
     delegated_execution: Mapping[str, Any] | None,
+    strategy_handoff: Mapping[str, Any] | None,
     tool_catalogue: Sequence[Mapping[str, Any]],
     guidance: str,
     display_name: str,
@@ -584,8 +747,17 @@ def render_execution_system_prompt(
             if delegated_execution is not None
             else "No delegated execution batch was attached."
         ),
+        strategy_handoff=(
+            json.dumps(dict(strategy_handoff), ensure_ascii=False, indent=2)
+            if strategy_handoff is not None
+            else "No Strategy handoff was supplied for this execution path."
+        ),
         tool_catalogue=(
-            json.dumps(list(tool_catalogue), ensure_ascii=False, indent=2)
+            json.dumps(
+                _compact_tool_catalogue(tool_catalogue),
+                ensure_ascii=False,
+                indent=2,
+            )
             if tool_catalogue
             else "No tools are available for this invocation."
         ),
@@ -616,7 +788,11 @@ def render_review_system_prompt(
     return render_prompt_asset(
         "system_review",
         available_review_tools=(
-            json.dumps(list(available_review_tools), ensure_ascii=False, indent=2)
+            json.dumps(
+                _compact_tool_catalogue(available_review_tools),
+                ensure_ascii=False,
+                indent=2,
+            )
             if available_review_tools
             else "No review tools are available for this invocation."
         ),

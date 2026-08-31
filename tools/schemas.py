@@ -9,8 +9,10 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "bash",
             "description": (
-                "Execute a shell command on the local machine and return stdout/stderr. "
-                "Use for file operations, running scripts, checking system state, etc."
+                "Execute one foreground shell command and return stdout/stderr. "
+                "This does not manage long-running jobs or prove code correctness. "
+                "Exit code 0 is success; non-zero is failure. Use background_job_start "
+                "for managed jobs and verification_run for correctness checks."
             ),
             "parameters": {
                 "type": "object",
@@ -171,8 +173,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "file_write",
             "description": (
-                "Write content to a file, creating it or overwriting if it exists. "
-                "Parent directories are created automatically."
+                "Create or fully overwrite one file and return the write result. "
+                "This is not an incremental editor. Parent directories are created; "
+                "use apply_patch when only part of an existing file should change."
             ),
             "parameters": {
                 "type": "object",
@@ -309,9 +312,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "apply_patch",
             "description": (
-                "Apply a unified diff patch to a file. "
-                "The patch must be in standard unified diff format (--- / +++ / @@ headers). "
-                "Safer than file_write for incremental code edits."
+                "Apply one standard unified diff (--- / +++ / @@) after a dry-run check. "
+                "A rejected dry run changes nothing. Use file_write only when the whole "
+                "file should be created or replaced."
             ),
             "parameters": {
                 "type": "object",
@@ -1709,7 +1712,9 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
         "function": {
             "name": "hashi_scheduler_list",
             "description": (
-                "List jobs from the authoritative HASHI Scheduler for this agent."
+                "List this agent's jobs from the authoritative HASHI Scheduler. "
+                "This only observes scheduler state. If gateway context is unavailable, "
+                "repeating the call in the same environment will not help."
             ),
             "parameters": {
                 "type": "object",
@@ -1734,7 +1739,8 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
             "name": "hashi_scheduler_status",
             "description": (
                 "Read one job's definition, last-run state, and pending recovery state "
-                "from the authoritative HASHI Scheduler."
+                "from the authoritative HASHI Scheduler. It does not run the job. If "
+                "gateway context is unavailable, retrying in the same environment will not help."
             ),
             "parameters": {
                 "type": "object",
@@ -1756,7 +1762,8 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
             "name": "hashi_scheduler_run_history",
             "description": (
                 "Read recent isolated execution receipts for this agent's authoritative "
-                "HASHI Scheduler jobs."
+                "HASHI Scheduler jobs. It does not rerun them. If gateway context is "
+                "unavailable, retrying in the same environment will not help."
             ),
             "parameters": {
                 "type": "object",
@@ -1785,7 +1792,8 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
             "description": (
                 "Queue exactly one named HASHI Scheduler job for this agent. Call only "
                 "after the user explicitly authorizes that exact rerun; bare continue, "
-                "yes, okay, or similar conversation does not authorize recovery or rerun."
+                "yes, okay, or similar conversation does not authorize recovery or rerun. "
+                "If gateway context is unavailable, retrying in the same environment will not help."
             ),
             "parameters": {
                 "type": "object",
@@ -1902,9 +1910,10 @@ TOOL_SCHEMAS.extend(
             "function": {
                 "name": "workspace_inspect",
                 "description": (
-                    "Read-only HER review tool for workspace snapshots, git status/diff, "
-                    "bounded search, and file or artifact hashes. It cannot write files. "
-                    "Evidence-backed Review and Verification must call snapshot first and last."
+                    "Read workspace snapshots, git status/diff, bounded search, and file "
+                    "or artifact hashes without writing files. A stable snapshot only shows "
+                    "that state did not change; it does not prove correctness. Use "
+                    "verification_run to test correctness."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1947,12 +1956,10 @@ TOOL_SCHEMAS.extend(
             "function": {
                 "name": "verification_run",
                 "description": (
-                    "List configured recipes or run a recipe/direct argv validation command "
-                    "in the authoritative current workspace. The process inherits HASHI's "
-                    "filesystem, identity, environment, HOME, and network authority; the "
-                    "workspace is not copied or sandboxed. argv is executed without an "
-                    "implicit shell. The effective timeout automatically grows with the "
-                    "turn's cumulative Execution duration, and timeout_s can only raise it."
+                    "List validation recipes or run one recipe/direct argv check in the "
+                    "current workspace. This verifies only the command actually run, not all "
+                    "project behaviour. argv has no implicit shell. The process inherits "
+                    "HASHI's authority; timeout_s can raise but not reduce the runtime timeout."
                 ),
                 "parameters": {
                     "type": "object",

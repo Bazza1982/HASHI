@@ -109,6 +109,7 @@ class DurableAuditLog:
         fallback_writer: AuditWriter | None = None,
         redactor: Callable[[Any], Any] | None = None,
         observer: Callable[[Mapping[str, Any]], None] | None = None,
+        canonical_observer: Callable[[Mapping[str, Any]], None] | None = None,
     ):
         if primary_writer is None and primary_path is None:
             raise ValueError("a primary audit path or writer is required")
@@ -120,6 +121,7 @@ class DurableAuditLog:
         self.fallback_writer = fallback_writer or JsonlAuditWriter(self.fallback_path)  # type: ignore[arg-type]
         self.redactor = redactor or _redact
         self.observer = observer
+        self.canonical_observer = canonical_observer
         self._seen = self._read_ids(self.primary_path) | self._read_ids(
             self.fallback_path
         )
@@ -161,8 +163,6 @@ class DurableAuditLog:
             )
             identifier = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
         with self._lock:
-            if identifier in self._seen:
-                return f"hashi-log:deduplicated:{identifier}"
             record = {
                 "format": "her-v2-audit-v1",
                 "event_id": identifier,
@@ -178,6 +178,13 @@ class DurableAuditLog:
                 "plan_id": str(plan_id) if plan_id else None,
                 "payload": self.redactor(dict(payload or {})),
             }
+            # The SQLite recovery/control log is authoritative. Write it
+            # before the JSONL audit/shadow so a tool intent can never execute
+            # merely because an optional projection failed.
+            if self.canonical_observer is not None:
+                self.canonical_observer(record)
+            if identifier in self._seen:
+                return f"hashi-log:deduplicated:{identifier}"
             try:
                 ref = self.primary_writer.append(record)
             except Exception as primary_error:

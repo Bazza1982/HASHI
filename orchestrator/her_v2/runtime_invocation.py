@@ -31,7 +31,14 @@ from .interfaces import (
     StructuredOutputError,
     TurnStopped,
 )
-from .models import DeliveryRecord, Stage, StageRequest, StageResponse, ToolEvidenceReceipt
+from .models import (
+    DeliveryRecord,
+    Effort,
+    Stage,
+    StageRequest,
+    StageResponse,
+    ToolEvidenceReceipt,
+)
 from .progress import ProviderActivityTracker
 from .prompts import json_repair_schema_for_stage
 from .runtime_support import _payload_hash
@@ -1000,7 +1007,22 @@ class RuntimeInvocationMixin:
         invocation: int,
         attempt: int,
     ) -> None:
-        """Forward optional model-authored neutral prose without workflow authority."""
+        """Forward optional model-authored prose without workflow authority.
+
+        Direct has no Strategy/Planning stages. In the three public HER v2
+        modes, observable Execution activity belongs to ``/verbose`` and the
+        completed outcome belongs to the final response, so a second semantic
+        message at Execution completion would only duplicate those lanes.
+        Legacy hidden assurance modes retain their existing compatibility
+        behaviour until their postponed redesign.
+        """
+
+        if stage is Stage.EXECUTION and state.effort in {
+            Effort.ZERO,
+            Effort.LOW,
+            Effort.MEDIUM,
+        }:
+            return
 
         try:
             commentary = commentary_from_stage_response(

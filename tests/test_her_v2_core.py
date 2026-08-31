@@ -212,12 +212,12 @@ def test_legacy_terminal_ledgers_load_into_current_plan_b_states(legacy, current
 
 def test_effort_is_orchestration_policy_not_provider_reasoning():
     cases = [
-        (Effort.ZERO, True, False, False, False, 0),
-        (Effort.LOW, False, False, False, False, 0),
-        (Effort.MEDIUM, False, True, False, False, 0),
-        (Effort.HIGH, False, True, True, False, 0),
-        (Effort.XHIGH, False, True, True, True, 1),
-        (Effort.MAX, False, True, True, True, 1),
+        (Effort.ZERO, True, False, False, False, False, False, 0),
+        (Effort.LOW, False, False, False, False, True, False, 0),
+        (Effort.MEDIUM, False, True, False, False, False, True, 0),
+        (Effort.HIGH, False, True, True, False, True, False, 0),
+        (Effort.XHIGH, False, True, True, True, True, False, 1),
+        (Effort.MAX, False, True, True, True, True, False, 1),
     ]
     for (
         effort,
@@ -225,6 +225,8 @@ def test_effort_is_orchestration_policy_not_provider_reasoning():
         planning,
         replanning,
         review,
+        strategy_tools,
+        planning_tools,
         reviews,
     ) in cases:
         policy = resolve_policy(effort, review_limit=reviews)
@@ -239,6 +241,8 @@ def test_effort_is_orchestration_policy_not_provider_reasoning():
             replanning,
             review,
         ), effort
+        assert policy.strategy_tools is strategy_tools, effort
+        assert policy.planning_tools is planning_tools, effort
         assert not hasattr(policy, "max_replans"), effort
         assert not hasattr(policy, "assurance"), effort
         assert not hasattr(policy, "max_verifications"), effort
@@ -248,7 +252,7 @@ def test_effort_is_orchestration_policy_not_provider_reasoning():
 def test_her_execution_mode_labels_and_aliases_keep_canonical_wire_values():
     assert [effort_display_label(item) for item in Effort] == [
         "Direct (zero)",
-        "Fast path (low)",
+        "Strategic (low)",
         "Planned (medium)",
         "Adaptive (high)",
         "Reviewed (xhigh)",
@@ -258,6 +262,7 @@ def test_her_execution_mode_labels_and_aliases_keep_canonical_wire_values():
     assert parse_effort("zero orchestration") is Effort.ZERO
     assert parse_effort("reviewed") is Effort.XHIGH
     assert parse_effort("assured") is Effort.MAX
+    assert parse_effort("strategic") is Effort.LOW
     assert parse_effort("Fast path") is Effort.LOW
 
 
@@ -283,6 +288,45 @@ def test_direct_route_uses_quick_model_and_high_reasoning_by_default():
 
     assert direct.model == "quick-model"
     assert direct.reasoning == "high"
+    assert config.direct_strategy_self_selection is False
+    assert config.strategy_tools_enabled is True
+    assert config.planning_tools_enabled is True
+
+
+def test_direct_strategy_self_selection_is_an_explicit_boolean_experiment():
+    config = HERv2Config.from_mapping(
+        {
+            "profiles": _profiles(),
+            "direct_strategy_self_selection": True,
+        }
+    )
+
+    assert config.direct_strategy_self_selection is True
+
+    with pytest.raises(HERv2ConfigurationError):
+        HERv2Config.from_mapping(
+            {
+                "profiles": _profiles(),
+                "direct_strategy_self_selection": "true",
+            }
+        )
+
+
+def test_strategy_and_planning_tool_access_are_explicit_boolean_controls():
+    config = HERv2Config.from_mapping(
+        {
+            "profiles": _profiles(),
+            "strategy_tools_enabled": False,
+            "planning_tools_enabled": True,
+        }
+    )
+
+    assert config.strategy_tools_enabled is False
+    assert config.planning_tools_enabled is True
+
+    for field in ("strategy_tools_enabled", "planning_tools_enabled"):
+        with pytest.raises(HERv2ConfigurationError):
+            HERv2Config.from_mapping({"profiles": _profiles(), field: "true"})
 
 
 def test_direct_route_reasoning_can_be_explicitly_overridden_but_model_stays_quick():
@@ -479,6 +523,9 @@ def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
         ("shadow_mode", "false"),
         ("shadow_mode", True),
         ("meditation_enabled", 1),
+        ("direct_strategy_self_selection", 1),
+        ("strategy_tools_enabled", 1),
+        ("planning_tools_enabled", 1),
         ("audit_failure_terminal", "COMPLETED"),
     ]
     for field, value in cases:

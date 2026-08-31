@@ -80,6 +80,8 @@ _EXTERNAL_TOOL_ENGINES = frozenset({"codex-cli", "xai-api"})
 _EXTERNAL_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _GATEWAY_SERVER_APP_KEY = web.AppKey("hashi-api-gateway-server", object)
 _CORRELATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
+_INTERNAL_TOOL_WORKSPACE_FIELD = "hashi_tool_workspace"
+_TRUSTED_TOOL_WORKSPACE_FIELD = "_hashi_internal_tool_workspace"
 
 _ENGINE_FOR_MODEL = {
     model: engine
@@ -784,6 +786,24 @@ class _SessionCache:
         messages.append({"role": role, "content": content})
         return self.set(session_id, messages)
 
+    def delete(self, session_id: str) -> bool:
+        return self._store.pop(str(session_id), None) is not None
+
+    @staticmethod
+    def merge_messages(
+        cached: list[dict] | None,
+        incoming: list[dict],
+    ) -> list[dict]:
+        """Append an incremental suffix without duplicating a retried suffix."""
+
+        combined = list(cached or [])
+        if not incoming:
+            return combined
+        if len(combined) >= len(incoming) and combined[-len(incoming) :] == incoming:
+            return combined
+        combined.extend(dict(message) for message in incoming)
+        return combined
+
     def purge_expired(self):
         now = time.time()
         expired = [k for k, v in self._store.items() if now - v["ts"] > self._ttl]
@@ -908,6 +928,7 @@ class APIGatewayServer:
         self.enabled: bool = bool(gateway_config.get("enabled", False))
         selected_default = str(default_model or gateway_config.get("default_model") or "").strip()
         self.default_model = selected_default if selected_default in _ENGINE_FOR_MODEL else DEFAULT_API_MODEL
+        self._workspace_root = Path(workspace_root).resolve()
         self._pool = _AdapterPool(global_config, secrets, workspace_root)
         self.gateway_instance_id = f"gateway-{uuid.uuid4().hex[:12]}"
         logs_root = Path(
@@ -963,6 +984,51 @@ class APIGatewayServer:
         headers = getattr(request, "headers", {})
         candidate = str(headers.get("X-Hashi-Correlation-ID") or "").strip()
         return candidate if _CORRELATION_ID_RE.fullmatch(candidate) else None
+
+    def _resolve_internal_tool_workspace(
+        self,
+        raw_workspace: Any,
+    ) -> tuple[str | None, web.Response | None]:
+        """Validate one internal caller cwd without broadening filesystem scope."""
+
+        if not isinstance(raw_workspace, str) or not raw_workspace.strip():
+            return None, _external_tool_error(
+                "hashi_tool_workspace must be a non-empty absolute path",
+                code="external_tool_workspace_invalid",
+                param=_INTERNAL_TOOL_WORKSPACE_FIELD,
+            )
+        requested = Path(raw_workspace.strip())
+        if not requested.is_absolute():
+            return None, _external_tool_error(
+                "hashi_tool_workspace must be an absolute path",
+                code="external_tool_workspace_invalid",
+                param=_INTERNAL_TOOL_WORKSPACE_FIELD,
+            )
+        try:
+            resolved = requested.resolve(strict=True)
+        except OSError:
+            return None, _external_tool_error(
+                "hashi_tool_workspace does not exist",
+                code="external_tool_workspace_invalid",
+                param=_INTERNAL_TOOL_WORKSPACE_FIELD,
+            )
+        if not resolved.is_dir():
+            return None, _external_tool_error(
+                "hashi_tool_workspace must be a directory",
+                code="external_tool_workspace_invalid",
+                param=_INTERNAL_TOOL_WORKSPACE_FIELD,
+            )
+        if (
+            resolved != self._workspace_root
+            and self._workspace_root not in resolved.parents
+        ):
+            return None, _external_tool_error(
+                "hashi_tool_workspace is outside this HASHI instance",
+                code="external_tool_workspace_forbidden",
+                param=_INTERNAL_TOOL_WORKSPACE_FIELD,
+                status=403,
+            )
+        return str(resolved), None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -1238,6 +1304,13 @@ class APIGatewayServer:
         if not isinstance(body, dict):
             return web.json_response({"error": "request body must be an object"}, status=400)
 
+        # Never accept the post-validation private field from a caller.
+        body.pop(_TRUSTED_TOOL_WORKSPACE_FIELD, None)
+        requested_tool_workspace = body.pop(
+            _INTERNAL_TOOL_WORKSPACE_FIELD,
+            None,
+        )
+
         model = str(body.get("model") or "").strip() or self.default_model
 
         engine = _ENGINE_FOR_MODEL.get(model)
@@ -1289,10 +1362,6 @@ class APIGatewayServer:
                     code="external_tool_passthrough_unsupported",
                     param="model",
                 )
-            validated_tools, validation_error = _validate_external_tool_request(body, messages)
-            if validation_error is not None:
-                return validation_error
-            external_tools = validated_tools or []
 
         engine_ok, engine_reason = self._engine_available(engine)
         if not engine_ok:
@@ -1323,13 +1392,40 @@ class APIGatewayServer:
             raw_session_id.strip() if isinstance(raw_session_id, str) else None
         )
 
+        internal_continuation = False
         if external_tool_mode and session_id:
-            return _external_tool_error(
-                "session_id is not supported for external tool passthrough; "
-                "the caller must send the complete tool conversation",
-                code="external_tools_session_unsupported",
-                param="session_id",
+            internal_continuation = (
+                str(
+                    getattr(request, "headers", {}).get(
+                        "X-Hashi-External-Tool-Session", ""
+                    )
+                ).strip().casefold()
+                == "v1"
             )
+            if not internal_continuation:
+                return _external_tool_error(
+                    "session_id for external tool passthrough requires the "
+                    "HASHI internal continuation contract",
+                    code="external_tools_session_unsupported",
+                    param="session_id",
+                )
+
+        if requested_tool_workspace is not None:
+            if not (external_tool_mode and session_id and internal_continuation):
+                return _external_tool_error(
+                    "hashi_tool_workspace requires the HASHI internal "
+                    "external-tool continuation contract",
+                    code="external_tool_workspace_unsupported",
+                    param=_INTERNAL_TOOL_WORKSPACE_FIELD,
+                )
+            trusted_workspace, workspace_error = (
+                self._resolve_internal_tool_workspace(
+                    requested_tool_workspace
+                )
+            )
+            if workspace_error is not None:
+                return workspace_error
+            body[_TRUSTED_TOOL_WORKSPACE_FIELD] = trusted_workspace
 
         if session_id and _contains_inline_media(messages):
             return _external_tool_error(
@@ -1395,15 +1491,7 @@ class APIGatewayServer:
         if session_id:
             cached = self._sessions.get(session_id)
             if cached:
-                combined = list(cached)
-                for message in messages:
-                    if not any(
-                        existing.get("role") == message.get("role")
-                        and existing.get("content") == message.get("content")
-                        for existing in combined[-4:]
-                    ):
-                        combined.append(message)
-                messages = combined
+                messages = self._sessions.merge_messages(cached, messages)
             structured_conversation_mode = _uses_structured_conversation(messages)
             if structured_conversation_mode:
                 structured_error = _validate_structured_conversation(
@@ -1413,6 +1501,17 @@ class APIGatewayServer:
                 )
                 if structured_error is not None:
                     return structured_error
+
+        if external_tool_mode:
+            # Session continuations may contain only the newly completed tool
+            # messages. Validate after reconstructing the cached assistant
+            # tool request so call/result pairing remains strict.
+            validated_tools, validation_error = _validate_external_tool_request(
+                body, messages
+            )
+            if validation_error is not None:
+                return validation_error
+            external_tools = validated_tools or []
 
         prompt = ""
         if not external_tool_mode and not structured_conversation_mode:
@@ -1535,6 +1634,7 @@ class APIGatewayServer:
                     body,
                     request_id,
                     model,
+                    session_id,
                     t_start,
                     request,
                 )
@@ -1545,6 +1645,7 @@ class APIGatewayServer:
                 body,
                 request_id,
                 model,
+                session_id,
                 t_start,
             )
 
@@ -1771,6 +1872,7 @@ class APIGatewayServer:
         body: dict[str, Any],
         request_id: str,
         model: str,
+        session_id: str | None,
         t_start: float,
     ) -> web.Response:
         try:
@@ -1786,6 +1888,8 @@ class APIGatewayServer:
             )
         except Exception as exc:
             logger.error("External tool backend error for %s: %s", request_id, exc)
+            if session_id:
+                self._sessions.delete(session_id)
             return _external_tool_error(
                 str(exc),
                 code="external_tool_backend_error",
@@ -1795,6 +1899,8 @@ class APIGatewayServer:
         if not response.is_success:
             error = response.error or "backend error"
             logger.error("External tool backend failure %s: %s", request_id, error)
+            if session_id:
+                self._sessions.delete(session_id)
             return _backend_json_error_response(
                 response,
                 fallback_message=error,
@@ -1809,6 +1915,11 @@ class APIGatewayServer:
         }
         if tool_calls:
             message["tool_calls"] = tool_calls
+        if session_id:
+            if tool_calls:
+                self._sessions.set(session_id, list(messages) + [message])
+            else:
+                self._sessions.delete(session_id)
 
         elapsed = time.time() - t_start
         _print_api_out(model, elapsed, len(text), stream=False)
@@ -1837,6 +1948,7 @@ class APIGatewayServer:
         body: dict[str, Any],
         request_id: str,
         model: str,
+        session_id: str | None,
         t_start: float,
         request: web.Request,
     ) -> web.StreamResponse:
@@ -1914,6 +2026,8 @@ class APIGatewayServer:
             error_status = _backend_http_error_status(response)
 
         if error:
+            if session_id:
+                self._sessions.delete(session_id)
             try:
                 payload = _backend_stream_error_payload(
                     error,
@@ -1956,6 +2070,22 @@ class APIGatewayServer:
 
         elapsed = time.time() - t_start
         final_text = full_text or "".join(collected_text)
+        if session_id:
+            assistant_message: dict[str, Any] = {
+                "role": "assistant",
+                "content": final_text if final_text else (
+                    None if response.tool_calls else ""
+                ),
+            }
+            if response.tool_calls:
+                assistant_message["tool_calls"] = list(response.tool_calls)
+            if response.tool_calls:
+                self._sessions.set(
+                    session_id,
+                    list(messages) + [assistant_message],
+                )
+            else:
+                self._sessions.delete(session_id)
         _print_api_out(model, elapsed, len(final_text), stream=True)
         await write_chunk(
             {},

@@ -22,6 +22,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
         {
             "goal",
             "habit_catalogue",
+            "direct_strategy_block",
             "persona_block_begin",
             "persona_block_end",
             "persona_guidance",
@@ -40,6 +41,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "persona_block_end",
             "persona_guidance",
             "relevant_habits",
+            "strategy_handoff",
             "tool_catalogue",
         }
     ),
@@ -71,6 +73,8 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "goal",
             "relevant_habits",
             "schema",
+            "stage_tool_policy",
+            "strategy_handoff",
         }
     ),
     "system_replanning": frozenset(
@@ -106,6 +110,17 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
         }
     ),
     "system_triage": frozenset({"goal", "habit_catalogue", "schema_v2"}),
+    "system_strategy": frozenset(
+        {
+            "execution_capabilities",
+            "goal",
+            "habit_catalogue",
+            "request_resources",
+            "schema_v3",
+            "stage_tool_policy",
+            "strategy_cards",
+        }
+    ),
 }
 
 

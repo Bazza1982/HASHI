@@ -9,7 +9,13 @@ import pytest
 from adapters import deepseek_api
 from adapters.deepseek_api import DeepSeekAdapter
 from adapters.openrouter_api import _APIResult, _backend_failure_response
-from adapters.stream_events import KIND_SHELL_EXEC, KIND_TOOL_END
+from adapters.stream_events import (
+    KIND_SHELL_EXEC,
+    KIND_TEXT_DELTA,
+    KIND_THINKING,
+    KIND_TOOL_END,
+    StreamEvent,
+)
 from orchestrator.enterprise import IdentityService, PolicyEvaluator
 from orchestrator.multimodal_contract import canonical_request_content
 from tools.registry import ToolResult
@@ -148,6 +154,55 @@ def test_deepseek_reasoning_helper_supports_old_api_result_shape():
     )
 
     assert result.reasoning_content == "legacy-safe reasoning"
+
+
+def test_deepseek_cache_helper_supports_old_api_result_shape():
+    class OldAPIResult:
+        pass
+
+    result = deepseek_api._with_deepseek_cache_usage(
+        OldAPIResult(),
+        {
+            "prompt_cache_hit_tokens": 123,
+            "prompt_cache_miss_tokens": "45",
+        },
+    )
+
+    assert result.prompt_cache_hit_tokens == 123
+    assert result.prompt_cache_miss_tokens == 45
+
+
+@pytest.mark.asyncio
+async def test_deepseek_non_stream_captures_prompt_cache_usage(tmp_path):
+    adapter = _adapter(tmp_path)
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 7,
+                    "prompt_cache_hit_tokens": 80,
+                    "prompt_cache_miss_tokens": 20,
+                },
+            }
+
+    adapter.client = SimpleNamespace(post=AsyncMock(return_value=_Response()))
+
+    result = await adapter._call_api_once({}, {}, None)
+
+    assert result.prompt_tokens == 100
+    assert result.prompt_cache_hit_tokens == 80
+    assert result.prompt_cache_miss_tokens == 20
 
 
 @pytest.mark.parametrize(
@@ -415,6 +470,8 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
                 prompt_tokens=10,
                 completion_tokens=4,
                 thinking_tokens=3,
+                prompt_cache_hit_tokens=6,
+                prompt_cache_miss_tokens=4,
             )
         assistant_msg = payload["messages"][2]
         assert assistant_msg["reasoning_content"] == "Need to inspect the directory."
@@ -425,6 +482,8 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
             prompt_tokens=20,
             completion_tokens=5,
             thinking_tokens=2,
+            prompt_cache_hit_tokens=15,
+            prompt_cache_miss_tokens=5,
         )
 
     monkeypatch.setattr(adapter, "_call_api_once", fake_call)
@@ -435,7 +494,23 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
     assert response.text == "done"
     assert response.tool_call_count == 1
     assert response.tool_loop_count == 1
-    assert response.stream_metadata["meter"]["provider_calls"] == [
+    provider_calls = response.stream_metadata["meter"]["provider_calls"]
+    accounting_fields = {
+        "attempt",
+        "retry_count",
+        "recovery_kind",
+        "status",
+        "provider_request_id",
+        "provider_call_latency_ms",
+    }
+    assert [
+        {
+            key: value
+            for key, value in call.items()
+            if key not in accounting_fields
+        }
+        for call in provider_calls
+    ] == [
         {
             "input": 10,
             "output": 4,
@@ -443,6 +518,8 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
             "token_source": "provider",
             "thinking_in_output": True,
             "cost_usd": None,
+            "prompt_cache_hit_tokens": 6,
+            "prompt_cache_miss_tokens": 4,
         },
         {
             "input": 20,
@@ -451,8 +528,20 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
             "token_source": "provider",
             "thinking_in_output": True,
             "cost_usd": None,
+            "prompt_cache_hit_tokens": 15,
+            "prompt_cache_miss_tokens": 5,
         },
     ]
+    assert all(
+        isinstance(call["provider_call_latency_ms"], float)
+        and call["provider_call_latency_ms"] >= 0
+        for call in provider_calls
+    )
+    assert [call["status"] for call in provider_calls] == [
+        "completed",
+        "completed",
+    ]
+    assert len({call["provider_request_id"] for call in provider_calls}) == 2
 
 
 @pytest.mark.asyncio
@@ -596,6 +685,98 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_stream(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_deepseek_retries_only_the_unfinished_call_after_completed_tool_loop(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    seen_messages = []
+    observed_provider_calls = []
+    adapter.set_provider_call_observer(observed_provider_calls.append)
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "file_list", "arguments": '{"path": "/tmp"}'},
+        }
+    ]
+
+    async def fake_stream(payload, headers, on_stream_event):
+        seen_messages.append(repr(payload["messages"]))
+        if len(seen_messages) == 1:
+            return _APIResult("", tool_calls, "tool_calls")
+        if len(seen_messages) == 2:
+            await on_stream_event(
+                StreamEvent(kind=KIND_THINKING, summary="finishing safely")
+            )
+            raise httpx.RemoteProtocolError("peer closed the final stream")
+        return _APIResult("done", None, "stop")
+
+    events = []
+
+    async def capture(event):
+        events.append(event.kind)
+
+    monkeypatch.setattr(adapter, "_stream_api_once", fake_stream)
+
+    response = await adapter.generate_response(
+        "check files",
+        "req-transport-retry",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is True
+    assert response.text == "done"
+    assert len(seen_messages) == 3
+    assert seen_messages[1] == seen_messages[2]
+    assert adapter.tool_registry.calls == [
+        ("file_list", {"path": "/tmp"}, "call_1")
+    ]
+    assert events.count(KIND_THINKING) == 1
+    assert response.stream_metadata["provider_transport_retry_count"] == 1
+    provider_calls = response.stream_metadata["meter"]["provider_calls"]
+    assert provider_calls == observed_provider_calls
+    assert [call["status"] for call in provider_calls] == [
+        "completed",
+        "failed_without_receipt",
+        "completed",
+    ]
+    assert [call["retry_count"] for call in provider_calls] == [0, 0, 1]
+    assert provider_calls[-1]["recovery_kind"] == "provider_transport_retry"
+    assert len({call["provider_request_id"] for call in provider_calls}) == 3
+
+
+@pytest.mark.asyncio
+async def test_deepseek_does_not_retry_after_partial_answer_text(monkeypatch, tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    calls = 0
+
+    async def fake_stream(payload, headers, on_stream_event):
+        nonlocal calls
+        calls += 1
+        await on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="partial"))
+        raise httpx.RemoteProtocolError("peer closed after answer text")
+
+    async def capture(_event):
+        return None
+
+    monkeypatch.setattr(adapter, "_stream_api_once", fake_stream)
+
+    response = await adapter.generate_response(
+        "answer",
+        "req-partial-text",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_INCOMPLETE_STREAM"
+    assert response.stream_metadata["provider_transport_retry_count"] == 0
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_deepseek_stream_waits_for_reasoning_capture_before_returning(tmp_path):
     adapter = _adapter(tmp_path)
 
@@ -608,7 +789,8 @@ async def test_deepseek_stream_waits_for_reasoning_capture_before_returning(tmp_
             yield (
                 'data: {"choices":[{"delta":{"content":"result text"},'
                 '"finish_reason":"stop"}],"usage":{"prompt_tokens":2,'
-                '"completion_tokens":3}}'
+                '"completion_tokens":3,"prompt_cache_hit_tokens":1,'
+                '"prompt_cache_miss_tokens":1}}'
             )
             yield "data: [DONE]"
 
@@ -630,6 +812,8 @@ async def test_deepseek_stream_waits_for_reasoning_capture_before_returning(tmp_
 
     assert result.text == "result text"
     assert result.reasoning_content == "reason first"
+    assert result.prompt_cache_hit_tokens == 1
+    assert result.prompt_cache_miss_tokens == 1
     assert events == [
         ("thinking", "reason first"),
         ("text_delta", "result text"),

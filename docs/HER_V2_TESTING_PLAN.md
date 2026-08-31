@@ -12,6 +12,12 @@
 | Governing design | [HER v2 Product Requirements and Technical Design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) |
 | Implementation baseline | HASHI `her-v2` at `cc010d11d69b4eb24c62c134dc57ac62ea42c277` |
 
+> **Current product-surface override (2026-08-31):** production acceptance is
+> governed by [HER_V2_THREE_MODE_DECISION.md](HER_V2_THREE_MODE_DECISION.md).
+> Adaptive, Reviewed, and Assured cases below remain internal regression tests
+> for retained code; they are not selectable execution modes or release-surface
+> promises.
+
 ## 1. Purpose
 
 This plan defines the minimum correct test coverage for HER v2.

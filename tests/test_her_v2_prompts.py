@@ -48,6 +48,7 @@ def test_external_prompt_inventory_is_complete_and_cwd_independent(
     monkeypatch.chdir(tmp_path)
     prompt_catalog.validate_prompt_assets()
     assert "triage classifier" in prompt_catalog.load_prompt_asset("system_triage")
+    assert "task strategist" in prompt_catalog.load_prompt_asset("system_strategy")
 
 
 def test_json_repair_prompt_is_generic_tool_free_and_data_driven() -> None:
@@ -207,6 +208,24 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
             "plan_id": "turn-1:plan:v1",
             "results": [{"assignment_id": "worker", "summary": "Inspected."}],
         },
+        strategy_handoff={
+            "selected_strategy_cards": [
+                {
+                    "id": "CODE_MODIFY",
+                    "version": "1.0.0",
+                    "title": "功能修改与扩展",
+                    "content": "Inspect architecture, modify, and verify.",
+                }
+            ],
+            "execution_brief": {
+                "strategy": "Inspect, modify, and verify.",
+                "stages": ["Inspect", "Modify", "Verify"],
+                "dependencies": ["Modify follows inspection"],
+                "verification": ["Run focused tests"],
+                "success_criteria": ["Requested behaviour works"],
+                "replan_conditions": ["Architecture differs from assumptions"],
+            },
+        },
         tool_catalogue=[{"function": {"name": "file_read"}}],
         **common,
     )
@@ -215,6 +234,8 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
     assert '"name": "file_read"' in execution
     assert '"plan_id": "turn-1:plan:v1"' in execution
     assert '"assignment_id": "worker"' in execution
+    assert '"id": "CODE_MODIFY"' in execution
+    assert "Inspect, modify, and verify." in execution
     assert "Inspect current state before reporting." in execution
     assert "Speak plainly." in execution
     assert "Return exactly one JSON object" not in execution
@@ -306,6 +327,89 @@ def test_planning_binds_high_volume_assignments_to_runtime_plan_snapshot() -> No
         in prompt
     )
     assert "unrelated historical batches" in prompt
+
+
+def test_planning_is_tool_free_and_renders_the_strategy_handoff() -> None:
+    request = _request(
+        Stage.PLANNING,
+        strategy_handoff={
+            "selected_strategy_cards": [
+                {"id": "DEBUG_DIAGNOSE", "content": "Reproduce, isolate, verify."}
+            ],
+            "execution_brief": {
+                "strategy": "Use cheap static diagnosis before expensive inference.",
+                "verification": ["Run the authoritative inference cases once."],
+            },
+        },
+    )
+
+    rendered = render_stage_prompt(request)
+
+    assert '"id": "DEBUG_DIAGNOSE"' in rendered
+    assert "cheap static diagnosis before expensive inference" in rendered
+    assert "Planning itself has no tools" in rendered
+    assert "Do not retrieve or reread the complete Playbook" in rendered
+    assert "typed presentation Persona section" in rendered
+    assert "Persona authority is presentation-only" in rendered
+    assert "commentary belongs only in the JSON `commentary` field" in rendered
+    assert "$strategy_handoff" not in rendered
+
+
+def test_strategy_prompt_tracks_the_actual_tool_boundary() -> None:
+    tool_request = _request(Stage.TRIAGE)
+    tool_request = StageRequest(
+        **{
+            **tool_request.__dict__,
+            "allow_tools": True,
+            "allow_side_effects": True,
+        }
+    )
+    tool_prompt = render_stage_prompt(tool_request)
+    no_tool_prompt = render_stage_prompt(_request(Stage.TRIAGE))
+
+    assert "including with authorised side effects" in tool_prompt
+    assert "The Strategist has no tool access" in no_tool_prompt
+    assert "Do not call, simulate, or claim to have called a tool" in no_tool_prompt
+    assert "responsibility is strategic" in tool_prompt
+    assert "Do not turn Strategy into detailed Planning" in tool_prompt
+    assert "context preparation agent" not in tool_prompt
+    assert "prepare a stronger execution strategy" not in tool_prompt
+
+
+def test_planning_prompt_with_full_tools_keeps_execution_work_downstream() -> None:
+    request = _request(Stage.PLANNING)
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "allow_tools": True,
+            "allow_side_effects": True,
+        }
+    )
+
+    rendered = render_stage_prompt(request)
+
+    assert "freely choose and call any registered tool" in rendered
+    assert "Do not edit artifacts, apply fixes" in rendered
+    assert "Return a plan, not a completed implementation" in rendered
+    assert "Planning itself has no tools" not in rendered
+
+
+def test_planning_prompt_with_read_only_tools_keeps_mutations_in_execution() -> None:
+    request = _request(Stage.PLANNING)
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "allow_tools": True,
+            "allow_side_effects": False,
+        }
+    )
+
+    rendered = render_stage_prompt(request)
+
+    assert "read-only tools actually exposed by HASHI" in rendered
+    assert "Do not modify artifacts, apply fixes" in rendered
+    assert "Return a plan, not a completed implementation" in rendered
+    assert "including tools whose interface can produce side effects" not in rendered
 
 
 def test_planning_renders_exact_available_subagent_profile_names() -> None:
@@ -429,6 +533,7 @@ def test_direct_prompt_is_one_natural_language_agent_with_full_catalogues() -> N
                 "hashi_read_only": False,
             }
         ],
+        strategy_playbook=None,
         guidance="Address the user as Captain.",
         display_name="Agent",
         usable=True,
@@ -447,6 +552,75 @@ def test_direct_prompt_is_one_natural_language_agent_with_full_catalogues() -> N
     assert "Address the user as Captain." in system_prompt
     assert "Return only the natural-language response" in system_prompt
     assert "$tool_catalogue" not in system_prompt
+    assert "Direct Strategy Playbook self-selection" not in system_prompt
+
+
+def test_prompt_tool_catalogue_keeps_guidance_without_duplicate_parameters() -> None:
+    system_prompt = render_direct_system_prompt(
+        goal="Read one file.",
+        habit_catalogue=[],
+        skills_catalogue=[],
+        tool_catalogue=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_read",
+                    "description": "Read one file; this does not verify correctness.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "SECRET_SCHEMA_MARKER"}
+                        },
+                    },
+                },
+                "hashi_read_only": True,
+            }
+        ],
+        strategy_playbook=None,
+        guidance="",
+        display_name="Agent",
+        usable=False,
+        persona_block_begin="[persona]",
+        persona_block_end="[persona_end]",
+    )
+
+    assert '"name": "file_read"' in system_prompt
+    assert "Read one file; this does not verify correctness." in system_prompt
+    assert '"hashi_read_only": true' in system_prompt
+    assert "SECRET_SCHEMA_MARKER" not in system_prompt
+    assert '"parameters"' not in system_prompt
+
+
+def test_direct_prompt_can_self_select_from_the_complete_strategy_playbook() -> None:
+    system_prompt = render_direct_system_prompt(
+        goal="Schedule the meetings.",
+        habit_catalogue=[],
+        skills_catalogue=[],
+        tool_catalogue=[],
+        strategy_playbook={
+            "playbook_version": "test-v1",
+            "sha256": "sha256:test",
+            "cards": [
+                {
+                    "id": "OPTIMIZATION_SCHEDULING",
+                    "strategy": ["Model all hard constraints."],
+                    "validation": ["Reparse the generated schedule."],
+                }
+            ],
+        },
+        guidance="",
+        display_name="Agent",
+        usable=False,
+        persona_block_begin="[persona]",
+        persona_block_end="[persona_end]",
+    )
+
+    assert "Direct Strategy Playbook self-selection" in system_prompt
+    assert "Before making the first task tool call" in system_prompt
+    assert "normally one to\n   three" in system_prompt
+    assert "Strategy Cards used: CARD_ID" in system_prompt
+    assert '"playbook_version": "test-v1"' in system_prompt
+    assert '"id": "OPTIMIZATION_SCHEDULING"' in system_prompt
 
 
 def test_review_uses_one_complete_prompt_with_draft_plan_and_actual_tools() -> None:
@@ -501,21 +675,44 @@ def test_review_uses_one_complete_prompt_with_draft_plan_and_actual_tools() -> N
     assert "$active_plan" not in review_system
 
 
-def test_triage_uses_schema_v2_with_goal_resolution_and_habit_catalogue() -> None:
+def test_strategy_uses_schema_v3_with_playbook_capabilities_and_resources() -> None:
     request = _request(
         Stage.TRIAGE,
         habit_catalogue=["[inspect-first] Inspect current state before reporting."],
+        strategy_cards={
+            "playbook_version": "1",
+            "cards": [
+                {
+                    "id": "CODE_MODIFY",
+                    "version": "1.0.0",
+                    "title": "Modify code",
+                    "content": "Inspect, modify, and verify.",
+                }
+            ],
+        },
+        execution_capabilities={"tools": [{"function": {"name": "file_read"}}]},
+        request_resources={"attachments": [{"attachment_id": "attachment-1"}]},
     )
     system_prompt = render_internal_stage_system_prompt(request)
     stage_prompt = render_stage_prompt(request)
 
     assert system_prompt == stage_prompt
-    assert "triage classifier and context preparation agent" in stage_prompt
+    assert "You are the task strategist" in stage_prompt
     assert "Original user request and context" in stage_prompt
     assert '"real_goal"' in stage_prompt
+    assert '"selected_strategy_cards"' in stage_prompt
+    assert '"execution_brief"' in stage_prompt
     assert '"relevant_habits"' in stage_prompt
+    assert '"commentary"' in stage_prompt
+    assert "typed presentation Persona section" in stage_prompt
+    assert "Persona authority is presentation-only" in stage_prompt
+    assert "dedicated user-facing response or clarification lane" in stage_prompt
+    assert '"id": "CODE_MODIFY"' in stage_prompt
+    assert '"name": "file_read"' in stage_prompt
+    assert '"attachment_id": "attachment-1"' in stage_prompt
     assert "[inspect-first] Inspect current state before reporting." in stage_prompt
-    assert "$schema_v2" not in stage_prompt
+    assert "$schema_v3" not in stage_prompt
+    assert "$strategy_cards" not in stage_prompt
     assert "$habit_catalogue" not in stage_prompt
     assert "checkpoint_policy" not in stage_prompt
     assert "checkpoint_reason" not in stage_prompt

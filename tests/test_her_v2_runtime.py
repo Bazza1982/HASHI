@@ -382,11 +382,28 @@ def _triage(
     real_goal: str | None,
     clarification: str | None = None,
     relevant_habits: tuple[str, ...] = (),
+    selected_strategy_cards: tuple[str, ...] | None = None,
+    execution_strategy: str | None = None,
 ):
+    work = classification in {"SIMPLE_TASK", "COMPLEX_TASK", "HIGH_VOLUME_TASK"}
+    selected = (
+        selected_strategy_cards
+        if selected_strategy_cards is not None
+        else (("SIMPLE_QA",) if work else ())
+    )
     return {
         "classification": classification,
         "real_goal": real_goal,
+        "selected_strategy_cards": list(selected),
         "relevant_habits": list(relevant_habits),
+        "execution_brief": {
+            "strategy": execution_strategy or ("Execute and verify." if work else ""),
+            "stages": ["Execute", "Verify"] if work else [],
+            "dependencies": [],
+            "verification": ["Verify the requested outcome"] if work else [],
+            "success_criteria": ["The requested outcome is complete"] if work else [],
+            "replan_conditions": ["Current evidence invalidates the approach"] if work else [],
+        },
         "clarification": clarification,
     }
 
@@ -708,6 +725,8 @@ async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_
     assert request.checkpoint_coordinator is None
     assert request.context["automatic_effort_upgrade_allowed"] is False
     assert request.context["sub_agent_delegation_allowed"] is False
+    assert request.context["direct_strategy_self_selection"] is False
+    assert request.context["strategy_playbook"] is None
     assert request.context["habit_catalogue"] == ["advisory habit"]
     assert request.context["skills_catalogue"][0]["id"] == "reports"
     assert profile.model == "quick-model"
@@ -724,6 +743,65 @@ async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_
         Stage.REVIEW,
         Stage.FINALISATION,
     }.isdisjoint(request.stage for _profile, request in provider.requests)
+
+
+@pytest.mark.asyncio
+async def test_zero_can_self_select_from_playbook_without_adding_a_stage(tmp_path):
+    provider = ScriptedProvider(
+        {
+            Stage.DIRECT: [
+                StageResponse(
+                    data={
+                        "message": (
+                            "Work complete.\nStrategy Cards used: "
+                            "OPTIMIZATION_SCHEDULING, TEST_QA"
+                        )
+                    },
+                    provider="fake-api",
+                    model="quick-model",
+                )
+            ]
+        }
+    )
+    runtime = _runtime(
+        tmp_path,
+        provider,
+        config=_config(direct_strategy_self_selection=True),
+    )
+
+    result = await runtime.run_turn(
+        "Schedule the meetings directly.",
+        "request-zero-direct-playbook",
+        effort=Effort.ZERO,
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert len(provider.requests) == 1
+    _profile, request = provider.requests[0]
+    assert request.stage is Stage.DIRECT
+    assert request.context["direct_strategy_self_selection"] is True
+    playbook = request.context["strategy_playbook"]
+    assert playbook["playbook_version"] == "2026-08-29.1"
+    assert playbook["sha256"].startswith("sha256:")
+    assert len(playbook["cards"]) == 38
+    assert {
+        Stage.IMMEDIATE_RESPONSE,
+        Stage.TRIAGE,
+        Stage.PLANNING,
+        Stage.EXECUTION,
+        Stage.REPLANNING,
+        Stage.REVIEW,
+        Stage.FINALISATION,
+    }.isdisjoint(item.stage for _profile, item in provider.requests)
+    audit_rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl").read_text().splitlines()
+    ]
+    attached = next(
+        row for row in audit_rows if row["event"] == "direct_strategy_playbook_attached"
+    )
+    assert attached["payload"]["card_count"] == 38
+    assert attached["payload"]["selection_mode"] == "direct_self_selection"
 
 
 @pytest.mark.asyncio
@@ -1823,7 +1901,7 @@ async def test_deferred_clarification_resolution_is_deduplicated_by_delivery_sta
 
 
 @pytest.mark.asyncio
-async def test_medium_turn_uses_triage_real_goal_and_routes_tools_only_to_execution(
+async def test_medium_turn_uses_strategy_goal_and_routes_tools_to_planning_and_execution(
     tmp_path,
 ):
     real_goal = "Implement and test the requested feature."
@@ -1872,10 +1950,130 @@ async def test_medium_turn_uses_triage_real_goal_and_routes_tools_only_to_execut
     assert len(execution_calls) == 1
     assert execution_calls[0].allow_tools is True
     assert execution_calls[0].allow_side_effects is True
+    planning_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.PLANNING
+    )
+    assert planning_call.allow_tools is True
+    assert planning_call.allow_side_effects is False
+    assert planning_call.context["strategy_handoff"]["execution_brief"]["strategy"]
+    assert (
+        execution_calls[0].context["strategy_handoff"]
+        == planning_call.context["strategy_handoff"]
+    )
     assert all(
         not call.allow_tools
         for _profile, call in provider.requests
-        if call.stage is not Stage.EXECUTION
+        if call.stage not in {Stage.PLANNING, Stage.EXECUTION}
+    )
+    strategy_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
+    )
+    assert strategy_call.allow_tools is False
+    assert strategy_call.allow_side_effects is False
+    assert strategy_call.role == "strategist"
+
+
+@pytest.mark.parametrize("planning_tools_enabled", [False, True])
+@pytest.mark.asyncio
+async def test_medium_stage_tool_access_uses_frozen_policy_and_capability_gate(
+    tmp_path,
+    planning_tools_enabled,
+):
+    scripts = _initial(
+        "COMPLEX_TASK",
+        real_goal="Diagnose, repair, and verify the supplied implementation.",
+    )
+    scripts.update(
+        {
+            Stage.PLANNING: [{"plan": ["inspect", "repair", "verify"]}],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Repaired and verified.",
+                }
+            ],
+        }
+    )
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        config=_config(
+            strategy_tools_enabled=True,
+            planning_tools_enabled=planning_tools_enabled,
+        ),
+    ).run_turn("Repair it", "request-stage-tool-access", effort=Effort.MEDIUM)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    strategy_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
+    )
+    planning_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.PLANNING
+    )
+    execution_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.EXECUTION
+    )
+    assert strategy_call.allow_tools is False
+    assert strategy_call.allow_side_effects is False
+    assert planning_call.allow_tools is planning_tools_enabled
+    assert planning_call.allow_side_effects is False
+    assert execution_call.allow_tools is True
+    assert execution_call.allow_side_effects is True
+
+
+@pytest.mark.asyncio
+async def test_low_strategy_handoff_contains_only_selected_cards_and_skips_planning(
+    tmp_path,
+):
+    scripts = _initial("SIMPLE_TASK", real_goal="Modify and verify the target.")
+    scripts[Stage.TRIAGE] = [
+        _triage(
+            "SIMPLE_TASK",
+            real_goal="Modify and verify the target.",
+            selected_strategy_cards=("CODE_MODIFY", "TEST_QA"),
+            execution_strategy="Inspect the implementation, change it, and verify it.",
+        )
+    ]
+    scripts[Stage.EXECUTION] = [
+        {"disposition": "COMPLETED", "summary": "Modified and verified."}
+    ]
+    provider = ScriptedProvider(scripts)
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        skills_catalogue=({"name": "debug", "description": "Debug work"},),
+    ).run_turn("Modify it", "request-low-strategy-handoff", effort=Effort.LOW)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert not any(call.stage is Stage.PLANNING for _profile, call in provider.requests)
+    strategy_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.TRIAGE
+    )
+    assert strategy_call.role == "strategist"
+    assert strategy_call.allow_tools is True
+    assert strategy_call.allow_side_effects is True
+    assert len(strategy_call.context["strategy_cards"]["cards"]) == 38
+    assert strategy_call.context["execution_capabilities"]["skills"] == [
+        {"name": "debug", "description": "Debug work"}
+    ]
+
+    execution_call = next(
+        call for _profile, call in provider.requests if call.stage is Stage.EXECUTION
+    )
+    assert execution_call.context["active_plan"] is None
+    handoff = execution_call.context["strategy_handoff"]
+    assert [card["id"] for card in handoff["selected_strategy_cards"]] == [
+        "CODE_MODIFY",
+        "TEST_QA",
+    ]
+    assert "SIMPLE_QA" not in {
+        card["id"] for card in handoff["selected_strategy_cards"]
+    }
+    assert handoff["execution_brief"]["strategy"] == (
+        "Inspect the implementation, change it, and verify it."
     )
 
 
@@ -2085,6 +2283,10 @@ async def test_execution_receives_the_same_complete_request_context_as_planning(
         "change",
         "verify",
     ]
+    assert (
+        execution_request.context["strategy_handoff"]
+        == planning_request.context["strategy_handoff"]
+    )
     assert result.terminal_state is TerminalState.COMPLETED
 
 
@@ -2112,8 +2314,10 @@ async def test_normal_mode_enables_external_side_effect_authority(tmp_path):
         "active_plan",
         "real_goal",
         "relevant_habits",
+        "strategy_handoff",
         "sub_agent_results",
     }
+    assert execution.context["strategy_handoff"]["execution_brief"]["strategy"]
     assert execution.context["real_goal"] == "resolved goal"
     assert execution.context["relevant_habits"] == []
     assert execution.allow_tools is True
@@ -3600,6 +3804,55 @@ async def test_missing_optional_commentary_does_not_fail_work(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_public_planned_mode_publishes_strategy_and_planning_persona_progress_only(
+    tmp_path,
+):
+    scripts = _initial("COMPLEX_TASK")
+    scripts[Stage.TRIAGE][0]["commentary"] = (
+        "Captain, the safe implementation strategy is selected; planning comes next."
+    )
+    scripts.update(
+        {
+            Stage.PLANNING: [
+                {
+                    "plan": ["inspect", "change", "verify"],
+                    "commentary": (
+                        "Captain, the execution plan is ready; implementation comes next."
+                    ),
+                }
+            ],
+            Stage.EXECUTION: [
+                {
+                    "disposition": "COMPLETED",
+                    "summary": "Done.",
+                    "commentary": "This duplicate Execution update must stay internal.",
+                }
+            ],
+            Stage.FINALISATION: [{"report": "Done."}],
+        }
+    )
+    commentary = RecordingCommentaryPort()
+
+    result = await _runtime(
+        tmp_path,
+        ScriptedProvider(scripts),
+        commentary=commentary,
+    ).run_turn("Do it", "request-persona-progress", effort="medium")
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert [(item.stage, item.text) for item in commentary.records] == [
+        (
+            Stage.TRIAGE,
+            "Captain, the safe implementation strategy is selected; planning comes next.",
+        ),
+        (
+            Stage.PLANNING,
+            "Captain, the execution plan is ready; implementation comes next.",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_only_successful_stage_results_publish_neutral_commentary(
     tmp_path,
 ):
@@ -4452,10 +4705,13 @@ async def test_triage_recovers_unambiguous_control_json_from_reasoning(tmp_path)
         Stage.TRIAGE: [
             StageResponse(
                 text="",
-                reasoning_trace=(
-                    '{"classification":"COMPLEX_TASK",'
-                    '"real_goal":"Diagnose the fault",'
-                    '"relevant_habits":[],"clarification":null}'
+                reasoning_trace=json.dumps(
+                    _triage(
+                        "COMPLEX_TASK",
+                        real_goal="Diagnose the fault",
+                        selected_strategy_cards=("BUG_DIAGNOSIS",),
+                        execution_strategy="Inspect evidence and diagnose the fault.",
+                    )
                 ),
                 provider="fake-api",
                 model="model-triage",
@@ -4630,10 +4886,11 @@ async def test_simple_classification_can_escalate_execution_capability_without_m
         "active_plan",
         "continuation_rules",
         "real_goal",
-        "relevant_habits",
-        "replan_continuation",
-        "sub_agent_results",
-    }
+            "relevant_habits",
+            "replan_continuation",
+            "strategy_handoff",
+            "sub_agent_results",
+        }
     assert (
         second_execution.context["continuation_rules"][
             "never_repeat_completed_side_effects_because_of_replanning"
@@ -4832,11 +5089,8 @@ async def test_specialist_json_repair_has_no_attempt_cap_and_preserves_classific
         StageResponse(text="still not json"),
         StageResponse(text="not json on the third attempt"),
         StageResponse(text="not json on the fourth attempt"),
-        StageResponse(
-            text=(
-                '{"classification":"SIMPLE_TASK","real_goal":"Do it",'
-                '"relevant_habits":[],"clarification":null}'
-            ),
+            StageResponse(
+                text=json.dumps(_triage("SIMPLE_TASK", real_goal="Do it")),
             reasoning_trace=None,
             provider="fake-api",
             model="model-triage",

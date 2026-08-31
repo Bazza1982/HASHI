@@ -7,7 +7,8 @@ cost tail can never itself accrue cost.
 
 Data contract (one line item per provider/stage invocation):
   request_id, parent_request_id, phase, engine, model, input/output/thinking
-  tokens, token_source, cost_usd, cost_source.
+  tokens, token_source, cost_usd, cost_source, optional prompt-cache hit/miss
+  tokens, and optional provider-call latency.
 
 ``cost_usd`` uses ``None`` for "unknown" and is strictly distinguished from a
 genuine ``0.0`` (local / free model).
@@ -46,6 +47,18 @@ class PerCallUsageLineItem:
     thinking_in_output: bool = False
     cost_usd: float | None = None
     cost_source: str = "unknown"      # provider / pricing_table / local_zero / unknown
+    prompt_cache_hit_tokens: int | None = None
+    prompt_cache_miss_tokens: int | None = None
+    provider_call_latency_ms: float | None = None
+    provider_request_id: str = ""
+    attempt: int = 1
+    retry_count: int = 0
+    recovery_kind: str = "none"
+    compact: bool = False
+    routing_revision: int = 1
+    capability_revision: int = 1
+    pricing_revision: str = "unknown"
+    status: str = "completed"
 
     @property
     def total_tokens(self) -> int:
@@ -66,7 +79,37 @@ class PerCallUsageLineItem:
             "thinking_in_output": self.thinking_in_output,
             "cost_usd": self.cost_usd,
             "cost_source": self.cost_source,
+            "prompt_cache_hit_tokens": self.prompt_cache_hit_tokens,
+            "prompt_cache_miss_tokens": self.prompt_cache_miss_tokens,
+            "provider_call_latency_ms": self.provider_call_latency_ms,
+            "provider_request_id": self.provider_request_id,
+            "attempt": self.attempt,
+            "retry_count": self.retry_count,
+            "recovery_kind": self.recovery_kind,
+            "compact": self.compact,
+            "routing_revision": self.routing_revision,
+            "capability_revision": self.capability_revision,
+            "pricing_revision": self.pricing_revision,
+            "status": self.status,
         }
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_nonnegative_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(max(0.0, float(value)), 3)
+    except (TypeError, ValueError):
+        return None
 
 
 def line_item_from_dict(data: dict[str, Any]) -> PerCallUsageLineItem:
@@ -90,6 +133,24 @@ def line_item_from_dict(data: dict[str, Any]) -> PerCallUsageLineItem:
         thinking_in_output=thinking_in_output,
         cost_usd=data.get("cost_usd"),
         cost_source=str(data.get("cost_source") or "unknown"),
+        prompt_cache_hit_tokens=_optional_nonnegative_int(
+            data.get("prompt_cache_hit_tokens")
+        ),
+        prompt_cache_miss_tokens=_optional_nonnegative_int(
+            data.get("prompt_cache_miss_tokens")
+        ),
+        provider_call_latency_ms=_optional_nonnegative_float(
+            data.get("provider_call_latency_ms")
+        ),
+        provider_request_id=str(data.get("provider_request_id") or ""),
+        attempt=max(1, int(data.get("attempt") or 1)),
+        retry_count=max(0, int(data.get("retry_count") or 0)),
+        recovery_kind=str(data.get("recovery_kind") or "none"),
+        compact=bool(data.get("compact", False)),
+        routing_revision=max(1, int(data.get("routing_revision") or 1)),
+        capability_revision=max(1, int(data.get("capability_revision") or 1)),
+        pricing_revision=str(data.get("pricing_revision") or "unknown"),
+        status=str(data.get("status") or "completed"),
     )
 
 

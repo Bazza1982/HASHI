@@ -327,6 +327,13 @@ class CodexCLIAdapter(BaseBackend):
         selected_effort = self._request_reasoning_effort(
             request_options=request_options,
         )
+        tool_workspace: Path | None = None
+        if isinstance(request_options, Mapping):
+            raw_workspace = request_options.get(
+                "_hashi_internal_tool_workspace"
+            )
+            if raw_workspace:
+                tool_workspace = Path(str(raw_workspace))
         try:
             # Refresh on every request so an MCP server added after adapter
             # initialization can never escape the isolated tool-call boundary.
@@ -370,6 +377,7 @@ class CodexCLIAdapter(BaseBackend):
             parallel_tool_calls=parallel_tool_calls,
             use_streaming=use_streaming,
             on_stream_event=on_stream_event,
+            workspace_dir=tool_workspace,
         )
 
     async def generate_structured_response(

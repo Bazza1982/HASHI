@@ -67,17 +67,17 @@ from .models import (
     ReviewOutcome,
     Stage,
     StageResponse,
+    StrategyDecision,
     SubAgentAssignment,
     SubAgentResult,
     TerminalState,
     ToolEvidenceReceipt,
     TriageClassification,
-    TriageDecision,
     TurnResult,
     parse_effort,
     terminal_lifecycle,
 )
-from .policy import resolve_policy, terminal_for_execution
+from .policy import EffortPolicy, resolve_policy, terminal_for_execution
 from .presentation import RequiredPersonaRenderer
 from .progress import ProgressTracker
 from .prompts import extract_authoritative_current_request
@@ -99,8 +99,12 @@ from .structured import (
     parse_immediate,
     parse_plan,
     parse_replanning,
-    parse_triage,
+    parse_strategy,
     validate_review_response,
+)
+from .strategy_playbook import (
+    StrategyPlaybookError,
+    load_strategy_playbook,
 )
 
 Validator = Callable[[StageResponse], Any]
@@ -218,6 +222,8 @@ class _TurnState:
     attachment_manifest: tuple[Mapping[str, Any], ...] = ()
     habit_catalogue: tuple[str, ...] = ()
     relevant_habits: tuple[str, ...] = ()
+    strategy_handoff: Mapping[str, Any] | None = None
+    strategy_playbook_ref: Mapping[str, Any] | None = None
     media_routing_by_stage: dict[str, list[Mapping[str, Any]]] = field(
         default_factory=dict
     )
@@ -704,6 +710,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 state, request_content_override=direct_content
             )
 
+        effort_policy = resolve_policy(
+            state.effort,
+            review_limit=self.config.review_limits[state.effort],
+        )
+
         habit_catalogue: Sequence[str] = ()
         if self.config.meditation_enabled:
             with suppress(Exception):
@@ -808,13 +819,57 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 request_content_override=await adapted_content(immediate_transport),
             )
 
+        playbook = load_strategy_playbook()
+        execution_capabilities = {
+            "tools": [dict(item) for item in self._execution_tool_catalogue()],
+            "skills": [dict(item) for item in self.skills_catalogue],
+            "allow_side_effects": not self.config.shadow_mode,
+        }
+        request_resources = {
+            "attachments": [dict(item) for item in state.attachment_manifest]
+        }
+
+        strategy_mapping_parser = getattr(parse_strategy, "_mapping_parser")
+
+        def validate_strategy_mapping(
+            data: Mapping[str, Any],
+        ) -> StrategyDecision:
+            decision = strategy_mapping_parser(data)
+            try:
+                playbook.resolve_cards(decision.selected_strategy_cards)
+            except StrategyPlaybookError as exc:
+                raise StructuredOutputError(str(exc)) from exc
+            return decision
+
+        def validate_strategy(response: StageResponse) -> StrategyDecision:
+            decision = parse_strategy(response)
+            try:
+                playbook.resolve_cards(decision.selected_strategy_cards)
+            except StrategyPlaybookError as exc:
+                raise StructuredOutputError(str(exc)) from exc
+            return decision
+
+        setattr(validate_strategy, "_mapping_parser", validate_strategy_mapping)
+
         async def invoke_triage():
+            strategy_tools_enabled = (
+                effort_policy.strategy_tools and self.config.strategy_tools_enabled
+            )
             return await self._invoke_stage(
                 state,
                 Stage.TRIAGE,
-                parse_triage,
-                allow_tools=False,
-                context={"habit_catalogue": list(state.habit_catalogue)},
+                validate_strategy,
+                allow_tools=strategy_tools_enabled,
+                allow_side_effects=(
+                    strategy_tools_enabled and not self.config.shadow_mode
+                ),
+                role_override="strategist",
+                context={
+                    "habit_catalogue": list(state.habit_catalogue),
+                    "strategy_cards": playbook.prompt_payload(),
+                    "execution_capabilities": execution_capabilities,
+                    "request_resources": request_resources,
+                },
                 request_content_override=await adapted_content(triage_transport),
             )
 
@@ -894,7 +949,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             raise
 
         _triage_response, triage = triage_pair
-        assert isinstance(triage, TriageDecision)
+        assert isinstance(triage, StrategyDecision)
 
         if (
             triage.classification is TriageClassification.DIRECT_RESPONSE
@@ -949,6 +1004,19 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 triage = replace(
                     triage,
                     classification=TriageClassification.SIMPLE_TASK,
+                    execution_brief={
+                        "strategy": (
+                            "Use the capable Execution route to inspect the supplied "
+                            "media and complete the resolved goal."
+                        ),
+                        "stages": ["Inspect the supplied media", "Complete the goal"],
+                        "dependencies": ["Goal completion follows media inspection"],
+                        "verification": ["Verify the result against the supplied media"],
+                        "success_criteria": ["The media-dependent goal is satisfied"],
+                        "replan_conditions": [
+                            "The supplied media cannot be inspected reliably"
+                        ],
+                    },
                 )
                 self._audit(
                     state,
@@ -974,7 +1042,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     },
                 )
 
-        self._record_triage(state, triage)
+        self._record_strategy(state, triage, playbook)
         state.progress.record("classification", triage.classification.value)
 
         if (
@@ -1178,7 +1246,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 "Triage returned an unsupported work classification"
             )
         if not immediate_pending_for_work:
-            return await self._run_work(state, triage.classification)
+            return await self._run_work(
+                state,
+                triage.classification,
+                policy=effort_policy,
+            )
 
         late_immediate = asyncio.create_task(
             self._deliver_pending_immediate(state, immediate_task)
@@ -1186,7 +1258,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         state.late_immediate_source_task = immediate_task
         state.late_immediate_delivery_task = late_immediate
         try:
-            return await self._run_work(state, triage.classification)
+            return await self._run_work(
+                state,
+                triage.classification,
+                policy=effort_policy,
+            )
         finally:
             await self._settle_late_immediate(
                 state,
@@ -1210,6 +1286,27 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     turn_id=state.ledger.turn_id,
                 )
 
+        strategy_playbook: Mapping[str, Any] | None = None
+        if self.config.direct_strategy_self_selection:
+            playbook = load_strategy_playbook()
+            strategy_playbook = playbook.prompt_payload()
+            state.strategy_playbook_ref = {
+                "playbook_version": playbook.playbook_version,
+                "sha256": playbook.sha256,
+                "card_count": len(playbook.cards),
+                "selection_mode": "direct_self_selection",
+            }
+            ref = self._audit(
+                state,
+                stage=Stage.DIRECT.value,
+                role=self.config.stage_roles[Stage.DIRECT],
+                event="direct_strategy_playbook_attached",
+                event_id=f"{state.ledger.turn_id}:direct-strategy-playbook",
+                payload=dict(state.strategy_playbook_ref),
+            )
+            state.ledger.add_log_ref(ref)
+            self.ledger_store.save(state.ledger)
+
         response, direct_text = await self._invoke_stage(
             state,
             Stage.DIRECT,
@@ -1220,6 +1317,8 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 "habit_catalogue": list(habits),
                 "habits_are_advisory": True,
                 "skills_catalogue": [dict(item) for item in self.skills_catalogue],
+                "direct_strategy_self_selection": bool(strategy_playbook),
+                "strategy_playbook": strategy_playbook,
                 "zero_orchestration": True,
                 "automatic_effort_upgrade_allowed": False,
                 "sub_agent_delegation_allowed": False,
@@ -1451,13 +1550,13 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         return tuple(catalogue)
 
     async def _run_work(
-        self, state: _TurnState, classification: TriageClassification
+        self,
+        state: _TurnState,
+        classification: TriageClassification,
+        *,
+        policy: EffortPolicy,
     ) -> TurnResult:
         state.ledger.assert_classification(classification)
-        policy = resolve_policy(
-            state.effort,
-            review_limit=self.config.review_limits[state.effort],
-        )
         if policy.planning:
             execution_tool_catalogue = self._execution_tool_catalogue()
 
@@ -1474,6 +1573,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
 
             planning_context: dict[str, Any] = {
                 "classification": classification.value,
+                "strategy_handoff": copy.deepcopy(
+                    dict(state.strategy_handoff)
+                    if isinstance(state.strategy_handoff, Mapping)
+                    else {}
+                ),
                 "relevant_habits": list(state.relevant_habits),
                 "available_execution_tools": [
                     dict(item) for item in execution_tool_catalogue
@@ -1484,11 +1588,19 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 planning_context["available_sub_agent_profiles"] = list(
                     self.config.sub_agent_execution_profile_names()
                 )
+            planning_tools_enabled = (
+                policy.planning_tools and self.config.planning_tools_enabled
+            )
             _response, plan = await self._invoke_stage(
                 state,
                 Stage.PLANNING,
                 validate_plan,
-                allow_tools=False,
+                allow_tools=planning_tools_enabled,
+                # Planning may ground the paper plan with current evidence, but
+                # it never owns downstream mutations.  Keeping this boundary
+                # read-only also lets transient provider failures retry safely
+                # after Planning tool calls.
+                allow_side_effects=False,
                 context=planning_context,
             )
             await self._transition(state, LifecycleState.PLANNED)
@@ -2098,6 +2210,10 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     _subagent_result_payload(result) for result in sub_agent_results
                 ],
             }
+            if isinstance(state.strategy_handoff, Mapping):
+                execution_context["strategy_handoff"] = copy.deepcopy(
+                    dict(state.strategy_handoff)
+                )
             if replan_coordinator is not None:
                 execution_context.update(
                     {

@@ -25,8 +25,10 @@ from orchestrator.flexible_backend_registry import (
     PROVIDER_ONLY_ENGINE_IDS,
     canonical_backend_engine,
     get_secret_lookup_order,
+    normalize_effort,
 )
 from orchestrator.her_v2.config import HERv2Config
+from orchestrator.her_v2.models import Route
 from orchestrator.her_v2.runtime_configuration import (
     HER_V2_CONFIGURATION_DRAFT_STATE_KEY,
     HER_V2_CONFIGURATION_PRESETS_STATE_KEY,
@@ -95,6 +97,20 @@ class FlexibleBackendManager:
             for backend_cfg in self.config.allowed_backends
             if backend_cfg.get("engine")
         }
+        # Keep ordinary Agent configuration inside the currently supported
+        # three-mode HER product surface.  The runtime still understands the
+        # retired higher values for historical artifacts and isolated tests.
+        for backend_cfg in self.config.allowed_backends:
+            engine = canonical_backend_engine(backend_cfg.get("engine"))
+            raw_effort = backend_cfg.get("effort")
+            if engine == HER_V2_ENGINE and isinstance(raw_effort, str):
+                normalized = normalize_effort(
+                    engine,
+                    raw_effort,
+                    backend_cfg.get("model"),
+                )
+                if normalized:
+                    backend_cfg["effort"] = normalized
         if self.state_file.exists():
             try:
                 state = self.state_store.read()
@@ -180,22 +196,7 @@ class FlexibleBackendManager:
                         state_needs_repair = True
                 if "agent_mode" in state:
                     persisted_mode = state["agent_mode"]
-                    if (
-                        self.config.active_backend == HER_V2_ENGINE
-                        and persisted_mode == "fixed"
-                    ):
-                        # HER v2 has always been stateless.  Older ``her`` state
-                        # could retain its former CLI session mode when the
-                        # backend ID was upgraded, so repair only that legacy
-                        # combination at the same boundary that upgrades the ID.
-                        self.agent_mode = "flex"
-                        state["agent_mode"] = "flex"
-                        state_needs_repair = True
-                        self.logger.warning(
-                            "Migrated stale HER v2 agent_mode=fixed to flex."
-                        )
-                    else:
-                        self.agent_mode = persisted_mode
+                    self.agent_mode = persisted_mode
                 if "privacy_level" in state:
                     try:
                         self.privacy_level = parse_privacy_level(state["privacy_level"])
@@ -209,10 +210,30 @@ class FlexibleBackendManager:
                     for backend_cfg in self.config.allowed_backends:
                         engine = backend_cfg.get("engine")
                         effort = backend_efforts.get(engine)
-                        if effort is None and engine == HER_V2_ENGINE:
+                        canonical_engine = canonical_backend_engine(engine)
+                        if effort is None and canonical_engine == HER_V2_ENGINE:
                             effort = backend_efforts.get("her")
                         if isinstance(effort, str) and effort.strip():
-                            backend_cfg["effort"] = effort.strip().lower()
+                            raw_effort = effort.strip().lower()
+                            normalized = (
+                                normalize_effort(
+                                    canonical_engine,
+                                    raw_effort,
+                                    backend_cfg.get("model"),
+                                )
+                                if canonical_engine == HER_V2_ENGINE
+                                else raw_effort
+                            )
+                            if normalized:
+                                backend_cfg["effort"] = normalized
+                            if canonical_engine == HER_V2_ENGINE and (
+                                normalized != raw_effort
+                                or "her" in backend_efforts
+                                or backend_efforts.get(HER_V2_ENGINE) != normalized
+                            ):
+                                backend_efforts[HER_V2_ENGINE] = normalized
+                                backend_efforts.pop("her", None)
+                                state_needs_repair = True
                 if state_needs_repair:
                     self.state_store.replace(state)
             except Exception as e:
@@ -662,14 +683,62 @@ class FlexibleBackendManager:
         selected = self._normalise_her_v2_target_providers(selected)
         self._validate_her_v2_selection(selected)
 
+        current = self.get_her_v2_configuration()
+        current_route = current.to_dict()
+        selected_route = selected.to_dict()
+        for payload in (current_route, selected_route):
+            payload.pop("routing_revision", None)
+            payload.pop("capability_revision", None)
+            payload.pop("pricing_revision", None)
+        next_revision = current.routing_revision + (
+            1 if selected_route != current_route else 0
+        )
+        selected = replace(
+            selected,
+            routing_revision=next_revision,
+            capability_revision=current.capability_revision,
+            pricing_revision=current.pricing_revision,
+        )
+
+        changed_targets = []
+        for route in Route:
+            old_target = current.target_for_route(route)
+            new_target = selected.target_for_route(route)
+            if new_target != old_target and new_target not in changed_targets:
+                changed_targets.append(new_target)
+
+        preflight: dict[str, Any] = {
+            "status": "not_required" if not changed_targets else "runtime_unavailable",
+            "targets": [],
+            "insufficient_targets": [],
+        }
+        if self.runtime is not None and changed_targets:
+            from orchestrator.context_compaction import preflight_route_context_fit
+
+            preflight = preflight_route_context_fit(
+                self.runtime,
+                selected,
+                targets=changed_targets,
+            )
+            insufficient = list(preflight.get("insufficient_targets") or [])
+            if insufficient:
+                target = insufficient[0]
+                raise ValueError(
+                    "Target model context is too small for the settled Session "
+                    f"({target.get('provider')}/{target.get('model')}: "
+                    f"{int(target.get('current_context_tokens') or 0):,} > "
+                    f"{int(target.get('usable_input_tokens') or 0):,} tokens). "
+                    "Run /compact after the active Turn settles, then retry the switch."
+                )
+
         effective = self._effective_her_v2_config(selected)
         parsed = HERv2Config.from_mapping(effective)
         serialized = selected.to_dict()
-        current = self.get_her_v2_configuration()
         draft = self.get_her_v2_draft_configuration()
 
         def update_state(state: dict[str, Any]) -> dict[str, Any]:
             state[HER_V2_CONFIGURATION_STATE_KEY] = serialized
+            state["her_v2_last_route_preflight"] = preflight
             presets = state.get(HER_V2_CONFIGURATION_PRESETS_STATE_KEY)
             presets = dict(presets) if isinstance(presets, dict) else {}
             presets[current.routing_mode] = current.to_dict()

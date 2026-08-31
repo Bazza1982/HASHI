@@ -691,6 +691,89 @@ async def test_fixed_session_backend_uses_incremental_prompt():
 
 
 @pytest.mark.asyncio
+async def test_her_fixed_backend_replaces_assembled_pcm_with_typed_transport(
+    monkeypatch,
+):
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.agent_mode = "fixed"
+    observed = {}
+    captured_bindings = []
+    monkeypatch.setattr(
+        runtime_session,
+        "capture_backend_binding",
+        lambda _runtime, *, request_id: captured_bindings.append(request_id),
+    )
+
+    class _HERAssembler:
+        turns_injection_enabled = True
+        saved_memory_injection_enabled = True
+        MAX_RECENT_EXCHANGES = 8
+
+        def build_prompt_payload(self, prompt, backend, **_kwargs):
+            assert backend == "her-v2"
+            return {
+                "final_prompt": "FULL PCM MUST NOT CROSS THE BACKEND BOUNDARY",
+                "transport_snapshot": {
+                    "version": 1,
+                    "sections": [
+                        {
+                            "key": "permanent_system",
+                            "title": "SYSTEM",
+                            "text": "policy",
+                            "authority": "permanent_system",
+                            "rank": 0,
+                            "protected": True,
+                            "metadata": {},
+                            "order": 0,
+                        }
+                    ],
+                },
+                "audit": {"incremental": True, "sections": []},
+                "envelope": {"version": 1, "sections": []},
+            }
+
+    class _HERBackend:
+        _session_id = "her-session-existing"
+        persistent_session_busy = False
+        capabilities = SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        )
+
+        def prepare_fixed_turn_input(self, **kwargs):
+            observed.update(kwargs)
+            return (
+                "HASHI_HER_FIXED_ENVELOPE_V1\n{\"operation\":\"append_turn\"}",
+                {
+                    "operation": "append_turn",
+                    "incremental": True,
+                    "transport_chars": 70,
+                },
+            )
+
+    runtime.context_assembler = _HERAssembler()
+    runtime.backend_manager.current_backend = _HERBackend()
+    item = _item()
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    prompt = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
+
+    assert prompt.final_prompt.startswith("HASHI_HER_FIXED_ENVELOPE_V1")
+    assert "FULL PCM" not in prompt.final_prompt
+    assert prompt.incremental is True
+    assert observed["user_message"].endswith("Hello")
+    assert "primer" in observed["user_message"]
+    assert observed["request_id"] == "req-1"
+    assert prompt.prompt_audit["her_fixed_backend"]["operation"] == "append_turn"
+    assert captured_bindings == ["req-1"]
+
+
+@pytest.mark.asyncio
 async def test_build_turn_prompt_binds_bare_continue_to_persisted_stopped_task():
     runtime = _runtime()
     original_item = _item(
@@ -2567,7 +2650,28 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
                 "thinking_event_count": 2,
                 "thinking_redacted_count": 1,
                 "thinking_sources": ["reasoning", "reasoning_details.encrypted"],
-            }
+            },
+            "meter": {
+                "line_items": [
+                    {
+                        "request_id": "req-1:provider-call:1",
+                        "parent_request_id": "req-1",
+                        "phase": "execution",
+                        "engine": "deepseek-api",
+                        "model": "deepseek-v4-flash",
+                        "input": 100,
+                        "output": 10,
+                        "thinking": 2,
+                        "token_source": "provider",
+                        "thinking_in_output": True,
+                        "cost_usd": 0.0001,
+                        "cost_source": "provider",
+                        "prompt_cache_hit_tokens": 80,
+                        "prompt_cache_miss_tokens": 20,
+                        "provider_call_latency_ms": 123.456,
+                    }
+                ]
+            },
         },
     )
 
@@ -2593,6 +2697,18 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
     assert event["thinking_event_count"] == 2
     assert event["thinking_redacted_count"] == 1
     assert event["thinking_sources"] == ["reasoning", "reasoning_details.encrypted"]
+    assert event["provider_call_metrics"] == [
+        {
+            "request_id": "req-1:provider-call:1",
+            "parent_request_id": "req-1",
+            "phase": "execution",
+            "engine": "deepseek-api",
+            "model": "deepseek-v4-flash",
+            "prompt_cache_hit_tokens": 80,
+            "prompt_cache_miss_tokens": 20,
+            "provider_call_latency_ms": 123.456,
+        }
+    ]
     assert event["section_chars"] == {"Workzone": 8}
     assert event["wrapper_applied"] is True
 

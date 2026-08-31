@@ -207,6 +207,69 @@ def test_her_stage_provider_preserves_per_http_call_price_tiers():
     assert provider.usage_line_items[1].cost_usd == pytest.approx(0.0045)
 
 
+def test_her_stage_provider_preserves_deepseek_cache_and_call_latency():
+    provider = object.__new__(HashiStageProvider)
+    provider.usage_line_items = []
+    response = BackendResponse(
+        text="done",
+        duration_ms=1,
+        usage=TokenUsage(input_tokens=1_000, output_tokens=100),
+        stream_metadata={
+            "meter": {
+                "provider_calls": [
+                    {
+                        "input": 1_000,
+                        "output": 100,
+                        "thinking": 0,
+                        "token_source": "provider",
+                        "thinking_in_output": True,
+                        "cost_usd": None,
+                        "prompt_cache_hit_tokens": 800,
+                        "prompt_cache_miss_tokens": 200,
+                        "provider_call_latency_ms": 321.9874,
+                    }
+                ]
+            }
+        },
+    )
+
+    provider._record_usage_line_item(
+        request_id="request-deepseek-cache",
+        phase="execution",
+        engine="deepseek-api",
+        model="deepseek-v4-flash",
+        response=response,
+    )
+
+    assert len(provider.usage_line_items) == 1
+    item = provider.usage_line_items[0]
+    assert item.prompt_cache_hit_tokens == 800
+    assert item.prompt_cache_miss_tokens == 200
+    assert item.provider_call_latency_ms == 321.987
+    assert item.cost_usd == pytest.approx(0.000058)
+
+
+def test_her_stage_provider_does_not_invent_call_from_explicit_empty_meter():
+    provider = object.__new__(HashiStageProvider)
+    provider.usage_line_items = []
+    response = BackendResponse(
+        text="",
+        duration_ms=1,
+        is_success=False,
+        stream_metadata={"meter": {"provider_calls": []}},
+    )
+
+    provider._record_usage_line_item(
+        request_id="request-before-http",
+        phase="execution",
+        engine="deepseek-api",
+        model="deepseek-v4-flash",
+        response=response,
+    )
+
+    assert provider.usage_line_items == []
+
+
 # ── Formatter ────────────────────────────────────────────────────────────────
 
 def test_formatter_pricing_table_has_approx():
@@ -287,6 +350,8 @@ def test_line_item_from_dict_roundtrip():
         request_id="r1", phase="execution", engine="deepseek", model="deepseek-v4-pro",
         input_tokens=10, output_tokens=20, thinking_tokens=3,
         token_source="provider", cost_usd=0.0001, cost_source="provider",
+        prompt_cache_hit_tokens=8, prompt_cache_miss_tokens=2,
+        provider_call_latency_ms=12.346,
     )
     restored = line_item_from_dict(item.to_dict())
     assert restored == item

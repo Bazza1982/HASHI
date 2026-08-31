@@ -28,6 +28,12 @@ from adapters.her_v2_provider import (
 )
 from adapters.stream_events import StreamCallback
 from orchestrator.her_v2.audit import AuditPersistenceError, DurableAuditLog
+from orchestrator.her_v2.backend_session import (
+    HER_FIXED_ENVELOPE_PREFIX,
+    AcceptedHerTurn,
+    HerBackendSessionCoordinator,
+    HerFixedProtocolError,
+)
 from orchestrator.her_v2.commentary import PersonaCommentaryPipeline
 from orchestrator.her_v2.config import (
     HERv2Config,
@@ -43,6 +49,7 @@ from orchestrator.her_v2.learning import HERv2Learning
 from orchestrator.her_v2.ledger import LedgerStore
 from orchestrator.her_v2.models import (
     Effort,
+    Route,
     Stage,
     StageRequest,
     StageResponse,
@@ -63,6 +70,7 @@ from orchestrator.multimodal_contract import (
 
 HER_V2_DISPLAY_NAME = "HASHI Engine Runtime v2"
 HER_V2_VERSION = "2.0.0-alpha.1"
+_HER_INTERNAL_CODEX_ENGINES = frozenset({"codex", "codex-cli", "codex-app-server"})
 
 __all__ = [
     "HER_V2_DISPLAY_NAME",
@@ -132,7 +140,7 @@ class HERv2Adapter(BaseBackend):
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
-            supports_sessions=False,
+            supports_sessions=True,
             supports_files=True,
             supports_tool_use=True,
             supports_thinking_stream=True,
@@ -141,6 +149,10 @@ class HERv2Adapter(BaseBackend):
             supports_progress_stream=True,
             supports_tool_stream=True,
             supports_answer_stream=False,
+            continuation_mode="native",
+            tool_request_mode="native",
+            recovery_mode="reconstruct_safe",
+            reasoning_transport="absent",
         )
 
     def __init__(self, agent_config, global_config, api_key: str = None):
@@ -160,6 +172,10 @@ class HERv2Adapter(BaseBackend):
         self._recorded_delivery_ids: set[str] = set()
         self._initialized = False
         self.effort = "medium"
+        self._session_id: str | None = None
+        self._session_coordinator: HerBackendSessionCoordinator | None = None
+        self._fixed_transport_audit: dict[str, dict[str, Any]] = {}
+        self._canonical_active_turns: dict[str, AcceptedHerTurn] = {}
 
     @property
     def _extra(self) -> dict[str, Any]:
@@ -178,6 +194,21 @@ class HERv2Adapter(BaseBackend):
         journal = self._wip_active_journals.get(request_ref)
         if journal is not None:
             journal.append_audit(record)
+
+    def _observe_canonical_audit(self, record: Mapping[str, Any]) -> None:
+        """Required pre-audit write into the canonical Session event store."""
+
+        request_ref = str(record.get("request_ref") or "")
+        accepted = self._canonical_active_turns.get(request_ref)
+        if accepted is None or self._session_coordinator is None:
+            # Maintenance jobs and legacy non-fixed requests have no fixed
+            # Session authority to project into.
+            return
+        self._session_coordinator.store.record_runtime_event(
+            session_id=accepted.session_id,
+            turn_id=accepted.turn_id,
+            record=record,
+        )
 
     def _wip_journal_for_request(
         self,
@@ -266,6 +297,111 @@ class HERv2Adapter(BaseBackend):
             role="hashi_process",
             event=event,
             payload=dict(payload or {}),
+        )
+
+    def _persist_fixed_provider_usage(
+        self,
+        *,
+        accepted: AcceptedHerTurn | None,
+        provider: Any,
+        turn_config: HERv2Config,
+    ) -> int:
+        if accepted is None or self._session_coordinator is None:
+            return 0
+        durable_line_items: list[dict[str, Any]] = []
+        for item in getattr(provider, "usage_line_items", None) or []:
+            payload = item.to_dict()
+            payload.update(
+                {
+                    "routing_revision": turn_config.routing_revision,
+                    "capability_revision": turn_config.capability_revision,
+                    "pricing_revision": turn_config.pricing_revision,
+                }
+            )
+            durable_line_items.append(payload)
+        if not durable_line_items:
+            return 0
+        return self._session_coordinator.store.record_provider_requests(
+            session_id=accepted.session_id,
+            turn_id=accepted.turn_id,
+            line_items=durable_line_items,
+        )
+
+    def _fixed_provider_usage_observer(
+        self,
+        *,
+        accepted: AcceptedHerTurn,
+        turn_config: HERv2Config,
+    ) -> Callable[[Any], None]:
+        """Return a Turn-bound callback that writes each request immediately."""
+
+        def observe(item: Any) -> None:
+            if self._session_coordinator is None:
+                raise RuntimeError("HER fixed-session coordinator is unavailable")
+            payload = item.to_dict()
+            payload.update(
+                {
+                    "routing_revision": turn_config.routing_revision,
+                    "capability_revision": turn_config.capability_revision,
+                    "pricing_revision": turn_config.pricing_revision,
+                }
+            )
+            self._session_coordinator.store.record_provider_requests(
+                session_id=accepted.session_id,
+                turn_id=accepted.turn_id,
+                line_items=[payload],
+            )
+
+        return observe
+
+    def _fixed_control_failure_response(
+        self,
+        *,
+        accepted: AcceptedHerTurn,
+        started: float,
+        operation: str,
+        error: BaseException,
+    ) -> BackendResponse:
+        """Terminate an accepted Turn when canonical setup cannot be persisted."""
+
+        self.logger.error(
+            "HER v2 fixed control-plane setup failed operation=%s error=%s",
+            operation,
+            type(error).__name__,
+        )
+        if self._session_coordinator is not None:
+            try:
+                self._session_coordinator.complete(
+                    accepted,
+                    assistant_text="",
+                    error_text=(
+                        f"Canonical {operation} failed before Provider execution: "
+                        f"{type(error).__name__}"
+                    ),
+                )
+            except Exception as completion_error:
+                self.logger.error(
+                    "HER v2 fixed setup failure could not close Turn: %s",
+                    type(completion_error).__name__,
+                )
+        return BackendResponse(
+            text="",
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+            error=(
+                f"HER fixed-session {operation} could not be durably persisted."
+            ),
+            is_success=False,
+            error_code=ProviderFailureCode.AUDIT_PERSISTENCE_FAILURE.value,
+            error_retryable=False,
+            stream_metadata={
+                "her_v2": {
+                    "fixed_backend": {
+                        "session_id": accepted.session_id,
+                        "turn_id": accepted.turn_id,
+                        "control_plane_failure": operation,
+                    }
+                }
+            },
         )
 
     def accepts_media_input(self, modality: str) -> bool:
@@ -629,12 +765,26 @@ class HERv2Adapter(BaseBackend):
             if injected is None:
                 manager = self._backend_manager()
                 for profile in self._v2_config.all_provider_profiles():
+                    if str(profile.engine or "").strip().casefold() in (
+                        _HER_INTERNAL_CODEX_ENGINES
+                    ):
+                        raise HERv2ConfigurationError(
+                            "Codex is a separate HASHI backend and cannot be selected "
+                            "as an internal HER v2 provider; use hashi-api for GPT models"
+                        )
                     if not _manager_authorises_profile(manager, profile):
                         raise HERv2ConfigurationError(
                             f"profile {profile.name!r} provider/model is not configured on this HASHI instance"
                         )
 
             state_root = Path(self.config.workspace_dir) / "backend_state" / "her_v2"
+            self._session_coordinator = HerBackendSessionCoordinator(state_root)
+            reconciled_sessions = self._session_coordinator.store.reconcile_interrupted()
+            if reconciled_sessions:
+                self.logger.warning(
+                    "HER v2 retained %s session(s) while failing interrupted turns safely.",
+                    reconciled_sessions,
+                )
             self._ledger_store = LedgerStore(state_root / "ledgers")
             self._wip_journal = WIPJournal(state_root / "wip_journal.jsonl")
             self._wip_journal_cache[str(self._wip_journal.path.resolve())] = (
@@ -648,6 +798,7 @@ class HERv2Adapter(BaseBackend):
                 primary_root / "her_v2_audit.jsonl",
                 state_root / "audit_fallback.jsonl",
                 observer=self._observe_wip_audit,
+                canonical_observer=self._observe_canonical_audit,
             )
             self._audit_log.replay_fallback()
             reconciled = self._ledger_store.reconcile_interrupted()
@@ -710,8 +861,96 @@ class HERv2Adapter(BaseBackend):
             self._initialized = False
             return False
 
+    def prepare_fixed_turn_input(
+        self,
+        *,
+        prompt_payload: Mapping[str, Any],
+        user_message: str,
+        request_id: str,
+        request_meta: Mapping[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        """Create one full-open or incremental fixed-backend transport envelope.
+
+        HASHI calls this after assembling its authoritative current PCM view but
+        before invoking HER.  Only the first call carries every section.  Later
+        calls are diffed against HER's durable acknowledgement and carry the new
+        user message plus changed/revoked sections.
+        """
+
+        if self._session_coordinator is None:
+            raise HerFixedProtocolError(
+                "session_core_unavailable", "HER fixed-session core is not initialized."
+            )
+        if not self._session_id:
+            self._session_id = f"her-{uuid.uuid4().hex}"
+        snapshot = prompt_payload.get("transport_snapshot")
+        if not isinstance(snapshot, Mapping):
+            raise HerFixedProtocolError(
+                "invalid_pcm_snapshot", "HASHI did not provide a typed PCM snapshot."
+            )
+        sections = snapshot.get("sections")
+        if not isinstance(sections, list):
+            raise HerFixedProtocolError(
+                "invalid_pcm_snapshot", "HASHI PCM snapshot sections are missing."
+            )
+        manifest = request_meta.get("attachment_manifest")
+        resources = manifest if isinstance(manifest, list) else []
+        revoked_resources = request_meta.get("revoked_attachment_ids")
+        if not isinstance(revoked_resources, (list, tuple, set, frozenset)):
+            revoked_resources = ()
+        conversation_id = str(
+            request_meta.get("hashi_session_id")
+            or f"legacy:{self.config.name}"
+        )
+        workzone = str(
+            request_meta.get("session_workspace")
+            or self.config.workspace_dir
+        )
+        encoded, audit = self._session_coordinator.prepare_transport(
+            session_id=self._session_id,
+            sections=sections,
+            resources=resources,
+            user_message=str(user_message),
+            request_id=str(request_id),
+            message_id=str(request_meta.get("hashi_message_id") or request_id),
+            instance_id=str(
+                getattr(self.global_config, "instance_id", "") or ""
+            ),
+            agent_id=str(self.config.name),
+            owner_id=str(request_meta.get("owner_id") or ""),
+            hashi_conversation_id=conversation_id,
+            context_generation=int(request_meta.get("context_generation") or 1),
+            workzone_identity=workzone,
+            revoked_resource_ids=[str(item) for item in revoked_resources],
+        )
+        self._fixed_transport_audit[str(request_id)] = dict(audit)
+        while len(self._fixed_transport_audit) > 512:
+            self._fixed_transport_audit.pop(next(iter(self._fixed_transport_audit)))
+        return encoded, audit
+
+    def can_resume_fixed_session(self) -> bool:
+        """Confirm that an outer HASHI binding has durable HER state behind it."""
+
+        if self._session_coordinator is None or not self._session_id:
+            return False
+        current = self._session_coordinator.store.session(self._session_id)
+        if current is None:
+            # Retain the opaque ID so a full open snapshot can recreate the
+            # missing local materialisation without changing HASHI's binding.
+            return False
+        if str(current.get("status") or "") == "open":
+            return True
+        # A closed epoch is never resumed under the old ID.
+        self._session_id = None
+        return False
+
     def _new_stage_provider(
-        self, *, on_stream_event: StreamCallback, silent: bool
+        self,
+        *,
+        on_stream_event: StreamCallback,
+        silent: bool,
+        usage_observer: Callable[[Any], None] | None = None,
+        default_recovery_kind: str = "none",
     ) -> StageProvider:
         injected = getattr(self.config, "_her_v2_stage_provider", None)
         if injected is not None:
@@ -725,6 +964,8 @@ class HERv2Adapter(BaseBackend):
             audit_log=self._audit_log,
             workzone_ref=str(self.effective_workdir.resolve()),
             runtime_context=self._runtime_context(),
+            usage_observer=usage_observer,
+            default_recovery_kind=default_recovery_kind,
         )
 
     def _provider_retry_policy(self) -> ProviderRetryPolicy:
@@ -1103,6 +1344,10 @@ class HERv2Adapter(BaseBackend):
     ) -> BackendResponse:
         del is_retry
         started = time.perf_counter()
+        fixed_turn: AcceptedHerTurn | None = None
+        frozen_route: dict[str, Any] = {}
+        wip_parity: dict[str, Any] = {}
+        canonical_recovery_context: dict[str, Any] | None = None
         if (
             not self._initialized
             or not self._v2_config
@@ -1120,6 +1365,10 @@ class HERv2Adapter(BaseBackend):
                     "provider_failure_description": "HER v2 is not initialized."
                 },
             )
+        # Freeze the complete immutable routing/capability snapshot at Turn
+        # ingress. A concurrent /provider or /model change updates only the
+        # adapter default used by the next call to generate_response.
+        turn_config = self._v2_config
         request_meta = self._runtime_request_meta(request_id)
         try:
             effort_resolution = resolve_request_effort(
@@ -1151,6 +1400,89 @@ class HERv2Adapter(BaseBackend):
             effort_resolution.scheduler_task_id or "none",
             effort_resolution.scheduler_trigger or "none",
         )
+        if str(prompt or "").startswith(HER_FIXED_ENVELOPE_PREFIX):
+            if self._session_coordinator is None:
+                return BackendResponse(
+                    text="",
+                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                    error="HER fixed-session core is not initialized",
+                    is_success=False,
+                    error_code="session_core_unavailable",
+                    error_retryable=False,
+                )
+            try:
+                fixed_turn = self._session_coordinator.accept(prompt)
+            except HerFixedProtocolError as exc:
+                return BackendResponse(
+                    text="",
+                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                    error=str(exc),
+                    is_success=False,
+                    error_code=exc.code,
+                    error_retryable=False,
+                    stream_metadata={
+                        "her_v2": {
+                            "version": HER_V2_VERSION,
+                            "fixed_backend": {"protocol_error": exc.code},
+                        }
+                    },
+                )
+            self._session_id = fixed_turn.session_id
+            if fixed_turn.duplicate:
+                if fixed_turn.duplicate_text:
+                    return BackendResponse(
+                        text=fixed_turn.duplicate_text,
+                        duration_ms=round(
+                            (time.perf_counter() - started) * 1000, 2
+                        ),
+                        is_success=True,
+                        stop_reason="idempotent_replay",
+                        stream_metadata={
+                            "her_v2": {
+                                "version": HER_V2_VERSION,
+                                "fixed_backend": {
+                                    "session_id": fixed_turn.session_id,
+                                    "turn_id": fixed_turn.turn_id,
+                                    "idempotent_replay": True,
+                                },
+                            }
+                        },
+                    )
+                return BackendResponse(
+                    text="",
+                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                    error="HER fixed-session turn is already active",
+                    is_success=False,
+                    error_code="turn_already_active",
+                    error_retryable=False,
+                )
+            prompt = fixed_turn.materialized_prompt
+            try:
+                canonical_recovery_context = (
+                    self._session_coordinator.store.consume_recovery_context(
+                        session_id=fixed_turn.session_id,
+                        current_turn_id=fixed_turn.turn_id,
+                    )
+                )
+            except Exception as exc:
+                return self._fixed_control_failure_response(
+                    accepted=fixed_turn,
+                    started=started,
+                    operation="recovery binding",
+                    error=exc,
+                )
+            if canonical_recovery_context:
+                prompt += (
+                    "\n\n--- HER CANONICAL ACTIVE-TURN RECOVERY — CONTEXT ONLY ---\n\n"
+                    "This state survived a process interruption. Investigate unresolved "
+                    "side effects before continuing; do not replay them automatically.\n\n"
+                    + json.dumps(
+                        canonical_recovery_context,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
         request_ref = f"hashi-request:{request_id}"
         wip_journal = self._wip_journal_for_request(request_meta)
         prior_wip_summary = (
@@ -1158,7 +1490,10 @@ class HERv2Adapter(BaseBackend):
             if wip_journal is not None
             else {"record_count": 0, "size_bytes": 0}
         )
-        if int(prior_wip_summary.get("record_count") or 0) > 0:
+        if (
+            int(prior_wip_summary.get("record_count") or 0) > 0
+            and canonical_recovery_context is None
+        ):
             self._surface_wip_recovery_warning(
                 request_id=request_id,
                 summary=prior_wip_summary,
@@ -1186,16 +1521,19 @@ class HERv2Adapter(BaseBackend):
                 "context_injected": bool(prior_wip),
             },
         )
-        if prior_wip:
+        if prior_wip and canonical_recovery_context is None:
             prompt = f"{prompt}\n\n{prior_wip}"
             self._record_wip_lifecycle(
                 "wip_journal_context_injected",
                 request_id=request_id,
                 payload=prior_wip_summary,
             )
-        provider = self._new_stage_provider(
-            on_stream_event=on_stream_event, silent=silent
-        )
+        elif prior_wip and canonical_recovery_context is not None:
+            self._record_wip_lifecycle(
+                "wip_journal_shadow_context_suppressed",
+                request_id=request_id,
+                payload=prior_wip_summary,
+            )
         habit_config = self._habit_meditation_config()
         habit_request_eligible = self._habit_request_eligible(request_id)
         if habit_config.enabled and not habit_request_eligible:
@@ -1203,7 +1541,6 @@ class HERv2Adapter(BaseBackend):
                 "HER v2 Habit pipeline skipped by request eligibility: request=%s",
                 request_id,
             )
-        turn_config = self._v2_config
         runtime_context = self._runtime_context()
         voice_manager = getattr(runtime_context, "voice_manager", None)
         native_enabled = getattr(voice_manager, "native_audio_enabled", None)
@@ -1240,6 +1577,12 @@ class HERv2Adapter(BaseBackend):
                     native_policy if isinstance(native_policy, Mapping) else None
                 )
             except HERv2ConfigurationError as exc:
+                if fixed_turn is not None and self._session_coordinator is not None:
+                    self._session_coordinator.complete(
+                        fixed_turn,
+                        assistant_text="",
+                        error_text=f"Invalid native voice route: {exc}",
+                    )
                 return BackendResponse(
                     text="",
                     duration_ms=round((time.perf_counter() - started) * 1000, 2),
@@ -1248,6 +1591,92 @@ class HERv2Adapter(BaseBackend):
                     error_code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR.value,
                     error_retryable=False,
                 )
+        if fixed_turn is not None and self._session_coordinator is not None:
+            try:
+                route_snapshot = {
+                    "routing_mode": turn_config.routing_mode,
+                    "profiles": [
+                        {
+                            "name": profile.name,
+                            "provider": profile.engine,
+                            "model": profile.model,
+                            "reasoning": profile.reasoning,
+                        }
+                        for profile in turn_config.all_provider_profiles()
+                    ],
+                    "routes": {
+                        route.value: {
+                            "provider": profile.engine,
+                            "model": profile.model,
+                            "reasoning": profile.reasoning,
+                        }
+                        for route in Route
+                        for profile in (turn_config.profile_for_route(route),)
+                    },
+                    "voice_origin_active": bool(turn_config.voice_origin_active),
+                }
+                frozen_route = self._session_coordinator.store.freeze_turn_routing(
+                    session_id=fixed_turn.session_id,
+                    turn_id=fixed_turn.turn_id,
+                    routing_revision=turn_config.routing_revision,
+                    capability_revision=turn_config.capability_revision,
+                    pricing_revision=turn_config.pricing_revision,
+                    route_snapshot=route_snapshot,
+                )
+            except Exception as exc:
+                return self._fixed_control_failure_response(
+                    accepted=fixed_turn,
+                    started=started,
+                    operation="route freeze",
+                    error=exc,
+                )
+            if frozen_route.get("rebuild_from_checkpoint"):
+                checkpoint = dict(frozen_route.get("checkpoint") or {})
+                checkpoint.pop("recent_settled_exchanges", None)
+                prompt += (
+                    "\n\n--- HER PROVIDER CONTEXT REBUILD — SETTLED CHECKPOINT ---\n\n"
+                    "The provider/model route changed for this Turn. Continue the same "
+                    "HER Session from this settled checkpoint; the recent settled "
+                    "exchanges are already materialised above. This checkpoint is "
+                    "context, not a new user request.\n\n"
+                    + json.dumps(
+                        checkpoint,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+        try:
+            provider = self._new_stage_provider(
+                on_stream_event=on_stream_event,
+                silent=silent,
+                usage_observer=(
+                    self._fixed_provider_usage_observer(
+                        accepted=fixed_turn,
+                        turn_config=turn_config,
+                    )
+                    if fixed_turn is not None
+                    else None
+                ),
+                default_recovery_kind=(
+                    "active_turn_recovery:"
+                    + str(
+                        canonical_recovery_context.get("recovery_disposition")
+                        or "unknown"
+                    ).casefold()
+                    if canonical_recovery_context is not None
+                    else "none"
+                ),
+            )
+        except Exception as exc:
+            if fixed_turn is not None:
+                return self._fixed_control_failure_response(
+                    accepted=fixed_turn,
+                    started=started,
+                    operation="Provider construction",
+                    error=exc,
+                )
+            raise
         runtime_config = replace(
             turn_config,
             # The shared /timeout command is idle-only.  Bind its live value
@@ -1283,13 +1712,13 @@ class HERv2Adapter(BaseBackend):
             on_stream_event,
             allow_immediate_response=(
                 not silent
-                # The state loader normalises HER v2's retired ``fixed`` value
-                # to ``flex``. Other working modes own their final presentation,
-                # so only plain Flex may publish a pre-Triage direct response.
+                # HER v2 owns presentation in both of its supported foreground
+                # modes. Wrapper/audit/dual-brain modes retain their separate
+                # final-presentation owners.
                 and str(getattr(self._backend_manager(), "agent_mode", "flex"))
                 .strip()
                 .lower()
-                == "flex"
+                in {"flex", "fixed"}
                 # A callback must explicitly prove it can promote, replace, or
                 # discard the provisional message after authoritative Triage.
                 # Ordinary Telegram callbacks therefore stay on the single
@@ -1324,6 +1753,9 @@ class HERv2Adapter(BaseBackend):
             commentary = PersonaCommentaryPipeline(
                 packager=commentary_packager,
                 delivery=delivery,
+                stage_authored_persona_stages=frozenset(
+                    {Stage.TRIAGE, Stage.PLANNING}
+                ),
             )
 
         required_persona = getattr(
@@ -1373,6 +1805,8 @@ class HERv2Adapter(BaseBackend):
         )
         if wip_journal is not None:
             self._wip_active_journals[request_ref] = wip_journal
+        if fixed_turn is not None:
+            self._canonical_active_turns[request_ref] = fixed_turn
         self._active_runtimes[request_id] = runtime
         try:
             result = await runtime.run_turn(
@@ -1381,12 +1815,67 @@ class HERv2Adapter(BaseBackend):
                 effort=effort_resolution.effective,
                 request_content=request_content,
             )
+        except asyncio.CancelledError:
+            try:
+                self._persist_fixed_provider_usage(
+                    accepted=fixed_turn,
+                    provider=provider,
+                    turn_config=turn_config,
+                )
+            except Exception as usage_error:
+                self.logger.error(
+                    "HER v2 cancellation usage persistence failed: %s",
+                    type(usage_error).__name__,
+                )
+            finally:
+                if fixed_turn is not None and self._session_coordinator is not None:
+                    self._session_coordinator.cancel(
+                        fixed_turn,
+                        reason="HASHI cancelled the active HER turn.",
+                    )
+            raise
+        except BaseException as exc:
+            usage_error_text = ""
+            try:
+                self._persist_fixed_provider_usage(
+                    accepted=fixed_turn,
+                    provider=provider,
+                    turn_config=turn_config,
+                )
+            except Exception as usage_error:
+                usage_error_text = (
+                    f"; provider usage persistence failed: "
+                    f"{type(usage_error).__name__}"
+                )
+            finally:
+                if fixed_turn is not None and self._session_coordinator is not None:
+                    self._session_coordinator.complete(
+                        fixed_turn,
+                        assistant_text="",
+                        error_text=(
+                            f"{type(exc).__name__}: {exc}{usage_error_text}"
+                        ),
+                    )
+            raise
         finally:
             self._active_runtimes.pop(request_id, None)
             self._wip_active_journals.pop(request_ref, None)
+            self._canonical_active_turns.pop(request_ref, None)
         ledger_status = str(result.ledger.get("status") or "").upper()
         if wip_journal is not None:
             final_wip_summary = wip_journal.activity_summary()
+            if fixed_turn is not None and self._session_coordinator is not None:
+                snapshot = wip_journal.snapshot()
+                wip_parity = self._session_coordinator.store.compare_wip_shadow(
+                    session_id=fixed_turn.session_id,
+                    turn_id=fixed_turn.turn_id,
+                    wip_event_ids=[
+                        str(record.get("event_id") or "")
+                        for record in snapshot.records
+                        if record.get("kind") == "her_v2_audit"
+                        and str(record.get("request_ref") or "") == request_ref
+                    ],
+                )
             if ledger_status == "COMPLETED":
                 wip_journal.clear_completed()
                 self._record_wip_lifecycle(
@@ -1484,13 +1973,122 @@ class HERv2Adapter(BaseBackend):
             }
         if stopped and not error:
             error = "HER v2 turn was stopped by an authorised control path."
+        if fixed_turn is not None and self._session_coordinator is not None:
+            closed_turn: dict[str, Any] = {}
+            try:
+                self._persist_fixed_provider_usage(
+                    accepted=fixed_turn,
+                    provider=provider,
+                    turn_config=turn_config,
+                )
+            except Exception as usage_error:
+                technical_error = True
+                terminal_error_code = (
+                    ProviderFailureCode.AUDIT_PERSISTENCE_FAILURE.value
+                )
+                error = (
+                    "[AUDIT_PERSISTENCE_FAILURE] Provider usage could not be "
+                    "durably reconciled: "
+                    f"{type(usage_error).__name__}"
+                )
+                metadata["her_v2"]["provider_usage_persistence_error"] = {
+                    "error_type": type(usage_error).__name__,
+                    "replay_blocked": True,
+                }
+                metadata["her_v2"]["error"] = {
+                    "code": terminal_error_code,
+                    "description": (
+                        "Provider usage could not be durably reconciled; "
+                        "automatic replay was blocked."
+                    ),
+                }
+            if stopped:
+                closed_turn = self._session_coordinator.cancel(
+                    fixed_turn,
+                    reason=error,
+                )
+            else:
+                closed_turn = self._session_coordinator.complete(
+                    fixed_turn,
+                    assistant_text=result.text,
+                    error_text=error if technical_error else "",
+                )
+            recovery_state = self._session_coordinator.store.active_turn_recovery(
+                fixed_turn.session_id,
+                fixed_turn.turn_id,
+            ) or {}
+            recovery_disposition = str(
+                recovery_state.get("recovery_disposition") or ""
+            )
+            if recovery_disposition == "UNKNOWN_SIDE_EFFECT":
+                technical_error = True
+                terminal_error_code = "UNKNOWN_SIDE_EFFECT"
+                error = (
+                    "[UNKNOWN_SIDE_EFFECT] A non-read-only tool operation did "
+                    "not receive an unambiguous successful receipt. Investigate "
+                    "the durable recovery evidence before retrying."
+                )
+                metadata["her_v2"]["error"] = {
+                    "code": terminal_error_code,
+                    "description": error[error.index("]") + 1 :].strip(),
+                }
+            durable = self._session_coordinator.store.session(
+                fixed_turn.session_id
+            ) or {}
+            transport_audit = self._fixed_transport_audit.pop(
+                str(request_id), {}
+            )
+            metadata["her_v2"]["fixed_backend"] = {
+                "protocol": "hashi.her-fixed-backend.v1",
+                "session_id": fixed_turn.session_id,
+                "session_epoch": fixed_turn.epoch,
+                "turn_id": fixed_turn.turn_id,
+                "message_id": fixed_turn.message_id,
+                "state_version": int(
+                    durable.get("state_version") or fixed_turn.state_version
+                ),
+                "pcm_revision": int(
+                    durable.get("pcm_revision") or fixed_turn.pcm_revision
+                ),
+                "resource_revision": int(
+                    durable.get("resource_revision")
+                    or fixed_turn.resource_revision
+                ),
+                "canonical_sequence": int(
+                    durable.get("canonical_sequence")
+                    or fixed_turn.canonical_sequence
+                ),
+                "transport": transport_audit,
+                "routing": {
+                    key: value
+                    for key, value in frozen_route.items()
+                    if key != "checkpoint"
+                },
+                "turn_status": str(closed_turn.get("status") or ""),
+                "recovery_disposition": recovery_disposition or None,
+                "wip_shadow": wip_parity,
+                "reasoning_required": False,
+            }
         # Expose per-stage cost line items for the /meter tail.  ``metadata``
         # is already a plain dict carried on ``stream_metadata``.
         line_items = getattr(provider, "usage_line_items", None) or []
         if line_items:
-            metadata.setdefault("meter", {})["line_items"] = [
-                item.to_dict() for item in line_items
-            ]
+            serialized_line_items = []
+            for item in line_items:
+                payload = item.to_dict()
+                # Preserve new observability fields even when /reboot min
+                # retained an older tools.meter_cost module in memory.
+                payload["prompt_cache_hit_tokens"] = getattr(
+                    item, "prompt_cache_hit_tokens", None
+                )
+                payload["prompt_cache_miss_tokens"] = getattr(
+                    item, "prompt_cache_miss_tokens", None
+                )
+                payload["provider_call_latency_ms"] = getattr(
+                    item, "provider_call_latency_ms", None
+                )
+                serialized_line_items.append(payload)
+            metadata.setdefault("meter", {})["line_items"] = serialized_line_items
         return BackendResponse(
             text=result.text,
             duration_ms=duration_ms,
@@ -1558,6 +2156,32 @@ class HERv2Adapter(BaseBackend):
             self._recorded_delivery_ids.add(identifier)
         return True
 
+    def record_maintenance_provider_requests(
+        self, line_items: list[Mapping[str, Any]]
+    ) -> int:
+        """Attach non-Turn maintenance usage to the current fixed Session."""
+
+        if not self._session_id or self._session_coordinator is None:
+            return 0
+        return self._session_coordinator.store.record_provider_requests(
+            session_id=self._session_id,
+            turn_id="",
+            line_items=[dict(item) for item in line_items],
+        )
+
+    def can_record_maintenance_provider_requests(self) -> bool:
+        return bool(self._session_id and self._session_coordinator is not None)
+
+    def durable_meter_summary(self, *, turn_only: bool = False) -> dict[str, Any]:
+        if not self._session_id or self._session_coordinator is None:
+            return {}
+        session = self._session_coordinator.store.session(self._session_id) or {}
+        turn_id = str(session.get("last_turn_id") or "") if turn_only else None
+        return self._session_coordinator.store.usage_summary(
+            self._session_id,
+            turn_id=turn_id,
+        )
+
     async def shutdown(self):
         runtime_context = self._runtime_context()
         interrupt = getattr(runtime_context, "_user_interrupt", None)
@@ -1580,6 +2204,11 @@ class HERv2Adapter(BaseBackend):
             await self._learning.shutdown()
 
     async def handle_new_session(self) -> bool:
-        # HER v2 never revives an execution stack.  HASHI conversation context
-        # naturally supplies the next newly triaged turn.
+        # HASHI owns the explicit conversation/context-generation switch. Close
+        # the old epoch durably, then clear the live binding so the next request
+        # opens a new logical thread. Ordinary process replacement calls
+        # ``shutdown`` instead and therefore retains the session.
+        if self._session_id and self._session_coordinator is not None:
+            self._session_coordinator.store.close_session(self._session_id)
+        self._session_id = None
         return True

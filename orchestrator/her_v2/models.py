@@ -48,7 +48,7 @@ class Effort(StrEnum):
 
 EFFORT_DISPLAY_LABELS: Mapping[Effort, str] = {
     Effort.ZERO: "Direct",
-    Effort.LOW: "Fast path",
+    Effort.LOW: "Strategic",
     Effort.MEDIUM: "Planned",
     Effort.HIGH: "Adaptive",
     Effort.XHIGH: "Reviewed",
@@ -58,6 +58,7 @@ EFFORT_DISPLAY_LABELS: Mapping[Effort, str] = {
 _EFFORT_ALIASES: Mapping[str, Effort] = {
     "direct": Effort.ZERO,
     "zero_orchestration": Effort.ZERO,
+    "strategic": Effort.LOW,
     "fast": Effort.LOW,
     "fast_path": Effort.LOW,
     "planned": Effort.MEDIUM,
@@ -263,6 +264,18 @@ class TriageDecision:
     classification: TriageClassification
     real_goal: str
     relevant_habits: tuple[str, ...] = ()
+    clarification: str = ""
+
+
+@dataclass(frozen=True)
+class StrategyDecision:
+    """Validated Strategy schema-v3 handoff at the legacy Triage wire stage."""
+
+    classification: TriageClassification
+    real_goal: str
+    selected_strategy_cards: tuple[str, ...] = ()
+    relevant_habits: tuple[str, ...] = ()
+    execution_brief: Mapping[str, Any] = field(default_factory=dict)
     clarification: str = ""
 
 

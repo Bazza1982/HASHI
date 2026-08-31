@@ -5,7 +5,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from orchestrator import ui_language
 from orchestrator.command_registry import RuntimeCommand
@@ -90,6 +90,29 @@ def _compact_wip_journals(
     journals = _wip_journals(runtime, session_workspace)
     if not journals:
         return _WIPRecoveryResult(status="not_needed", code="NO_ACTIVE_WIP")
+    backend = getattr(getattr(runtime, "backend_manager", None), "current_backend", None)
+    coordinator_owner = getattr(backend, "_session_coordinator", None)
+    session_id = str(getattr(backend, "_session_id", "") or "")
+    canonical_store = getattr(coordinator_owner, "store", None)
+    recovery_getter = getattr(canonical_store, "active_turn_recovery", None)
+    canonical_recovery = (
+        recovery_getter(session_id)
+        if session_id and callable(recovery_getter)
+        else None
+    )
+    if isinstance(canonical_recovery, Mapping):
+        # New sessions recover from the canonical SQLite state. The WIP file
+        # remains a comparison shadow during the retirement window and must
+        # not be ingested into history a second time.
+        snapshots = [journal.snapshot() for journal in journals]
+        return _WIPRecoveryResult(
+            status="not_needed",
+            code="CANONICAL_RECOVERY_AUTHORITATIVE",
+            journal_count=len(journals),
+            record_count=sum(snapshot.record_count for snapshot in snapshots),
+            source_bytes=sum(snapshot.size_bytes for snapshot in snapshots),
+            message="Canonical HER recovery state retained; WIP is shadow-only.",
+        )
     committed = 0
     record_count = 0
     source_bytes = 0
@@ -359,6 +382,15 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
             update,
             f"{ui_language.tr('compact.already_running')}\n\n"
             f"{ui_language.tr('compact.running_help')}",
+        )
+        return
+
+    busy = getattr(runtime, "_backend_busy", None)
+    if callable(busy) and busy():
+        await _send(
+            runtime,
+            update,
+            ui_language.tr("compact.active_turn_blocked"),
         )
         return
 

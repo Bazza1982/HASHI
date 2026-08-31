@@ -19,6 +19,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+PRICING_REVISION = "2026-08-23.v1"
+
 # ── Pricing table (USD per million tokens) ────────────────────────────────────
 # Key: model name as used in agents.json / HASHI config (normalized to lowercase)
 # "cached" = per-million price for cached/prompt-cache input tokens.
