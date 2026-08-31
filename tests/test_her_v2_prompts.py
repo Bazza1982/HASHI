@@ -391,6 +391,24 @@ def test_planning_prompt_with_full_tools_keeps_execution_work_downstream() -> No
     assert "Planning itself has no tools" not in rendered
 
 
+def test_planning_prompt_with_read_only_tools_keeps_mutations_in_execution() -> None:
+    request = _request(Stage.PLANNING)
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "allow_tools": True,
+            "allow_side_effects": False,
+        }
+    )
+
+    rendered = render_stage_prompt(request)
+
+    assert "read-only tools actually exposed by HASHI" in rendered
+    assert "Do not modify artifacts, apply fixes" in rendered
+    assert "Return a plan, not a completed implementation" in rendered
+    assert "including tools whose interface can produce side effects" not in rendered
+
+
 def test_planning_renders_exact_available_subagent_profile_names() -> None:
     request = _request(
         Stage.PLANNING,

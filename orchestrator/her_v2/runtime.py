@@ -1578,10 +1578,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 Stage.PLANNING,
                 validate_plan,
                 allow_tools=self.config.planning_tools_enabled,
-                allow_side_effects=(
-                    self.config.planning_tools_enabled
-                    and not self.config.shadow_mode
-                ),
+                # Planning may ground the paper plan with current evidence, but
+                # it never owns downstream mutations.  Keeping this boundary
+                # read-only also lets transient provider failures retry safely
+                # after Planning tool calls.
+                allow_side_effects=False,
                 context=planning_context,
             )
             await self._transition(state, LifecycleState.PLANNED)

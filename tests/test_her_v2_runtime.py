@@ -2018,7 +2018,7 @@ async def test_medium_stage_tool_access_is_controlled_independently(
     assert strategy_call.allow_tools is False
     assert strategy_call.allow_side_effects is False
     assert planning_call.allow_tools is planning_tools_enabled
-    assert planning_call.allow_side_effects is planning_tools_enabled
+    assert planning_call.allow_side_effects is False
     assert execution_call.allow_tools is True
     assert execution_call.allow_side_effects is True
 
