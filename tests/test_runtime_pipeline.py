@@ -2604,6 +2604,41 @@ async def test_handle_backend_error_notifies_and_delivers_error():
 
 
 @pytest.mark.asyncio
+async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners():
+    runtime = _runtime()
+    item = _item()
+    response = SimpleNamespace(
+        error="Selected model is at capacity.",
+        error_code="PROVIDER_CAPACITY_UNAVAILABLE",
+        error_retryable=True,
+        http_status=503,
+        provider_request_id="req_provider_1",
+        retry_after_s=2.5,
+        tool_call_count=3,
+        side_effects_possible=True,
+    )
+
+    await runtime_pipeline.handle_backend_error(
+        runtime,
+        item,
+        response,
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+    )
+
+    payload = runtime.listener_payloads[0]
+    assert payload["error_code"] == "PROVIDER_CAPACITY_UNAVAILABLE"
+    assert payload["error_retryable"] is True
+    assert payload["http_status"] == 503
+    assert payload["provider_request_id"] == "req_provider_1"
+    assert payload["retry_after_s"] == 2.5
+    assert payload["tool_call_count"] == 3
+    assert payload["side_effects_possible"] is True
+    assert runtime.sent_message["text"] == response.error
+
+
+@pytest.mark.asyncio
 async def test_handle_backend_error_passes_raw_failure_to_delivery_boundary():
     runtime = _runtime()
     item = _item()

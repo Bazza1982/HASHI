@@ -2628,6 +2628,28 @@ def clear_context_compaction_request_state(runtime, request_id: str) -> None:
         execution_requests.discard(str(request_id))
 
 
+def backend_failure_fields(response: Any) -> dict[str, Any]:
+    """Expose typed provider failure metadata without changing error text."""
+
+    fields: dict[str, Any] = {}
+    for name in (
+        "error_code",
+        "error_retryable",
+        "http_status",
+        "provider_request_id",
+        "retry_after_s",
+    ):
+        value = getattr(response, name, None)
+        if value is not None and value != "":
+            fields[name] = value
+    tool_call_count = int(getattr(response, "tool_call_count", 0) or 0)
+    if tool_call_count:
+        fields["tool_call_count"] = tool_call_count
+    if bool(getattr(response, "side_effects_possible", False)):
+        fields["side_effects_possible"] = True
+    return fields
+
+
 def _typed_capacity_recovery_is_safe(response: Any) -> bool:
     if str(getattr(response, "error_code", "") or "") != "CONTEXT_CAPACITY_REJECTED":
         return False
@@ -2828,6 +2850,7 @@ async def handle_backend_error(
     await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
     observe_terminal_response(runtime, item, response)
     err_msg = response.error or "Unknown error"
+    failure_fields = backend_failure_fields(response)
     # /stop, /steer, and /retry intentionally kill the backend process
     # (e.g. exit -9 / SIGKILL).
     # That is expected course-correction, not a backend failure — never show ❌ Backend error.
@@ -2889,6 +2912,7 @@ async def handle_backend_error(
             "error": err_msg,
             "source": item.source,
             "summary": item.summary,
+            **failure_fields,
             **request_context_warning_fields(runtime, item.request_id),
         },
     )
@@ -2907,8 +2931,17 @@ async def handle_backend_error(
         )
         return
     runtime.error_logger.error(
-        f"Flex Backend error for {item.request_id} "
-        f"({runtime.config.active_backend}, source={item.source}): {err_msg}"
+        "Flex Backend error for %s (%s, source=%s, code=%s, retryable=%s, "
+        "status=%s, provider_request_id=%s, side_effects=%s): %s",
+        item.request_id,
+        runtime.config.active_backend,
+        item.source,
+        failure_fields.get("error_code") or "untyped",
+        failure_fields.get("error_retryable"),
+        failure_fields.get("http_status"),
+        failure_fields.get("provider_request_id") or "none",
+        failure_fields.get("side_effects_possible", False),
+        err_msg,
     )
     if runtime._should_retry_codex_scheduler_failure(item, err_msg):
         runtime._schedule_codex_scheduler_retry(item)

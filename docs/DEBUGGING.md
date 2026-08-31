@@ -122,6 +122,10 @@ Look at:
   - `workspaces/<agent>/handoff.md`
   - `workspaces/<agent>/recent_context.jsonl`
 
+Codex event logs are bounded, credential-redacted JSONL with `.1`/`.2`
+backups. See [CODEX_FAILURE_CONTRACT.md](CODEX_FAILURE_CONTRACT.md) for
+terminal-event parsing, typed errors, replay safety, and retention settings.
+
 Questions:
 
 - did the subprocess launch?

@@ -496,7 +496,15 @@ def test_codex_idle_timeout_preserves_last_agent_message(tmp_path, monkeypatch: 
     assert "idle for 1s" in (response.error or "")
     assert "I made useful progress before stalling." in (response.error or "")
     assert killed_reasons == ["idle-timeout:req-0003"]
-    assert "I made useful progress before stalling." in (tmp_path / "codex_exec_events.jsonl").read_text()
+    event_log = (tmp_path / "codex_exec_events.jsonl").read_text()
+    assert "I made useful progress before stalling." not in event_log
+    logged_message = next(
+        json.loads(line)["item"]["text"]
+        for line in event_log.splitlines()
+        if json.loads(line).get("item", {}).get("type") == "agent_message"
+    )
+    assert logged_message["redacted"] is True
+    assert logged_message["chars"] == len("I made useful progress before stalling.")
 
 
 def test_codex_nonzero_exit_preserves_last_agent_message(tmp_path, monkeypatch: pytest.MonkeyPatch):
@@ -522,7 +530,261 @@ def test_codex_nonzero_exit_preserves_last_agent_message(tmp_path, monkeypatch: 
     assert response.is_success is False
     assert "non-zero status" in (response.error or "")
     assert "Latest progress before stop." in (response.error or "")
-    assert "Latest progress before stop." in (tmp_path / "codex_exec_events.jsonl").read_text()
+    event_log = (tmp_path / "codex_exec_events.jsonl").read_text()
+    assert "Latest progress before stop." not in event_log
+    logged_message = next(
+        json.loads(line)["item"]["text"]
+        for line in event_log.splitlines()
+        if json.loads(line).get("item", {}).get("type") == "agent_message"
+    )
+    assert logged_message["redacted"] is True
+    assert logged_message["chars"] == len("Latest progress before stop.")
+
+
+def test_codex_turn_failed_preserves_exact_typed_capacity_error_and_activity(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter = _build_adapter(tmp_path)
+    adapter.set_session_mode(True)
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "thread_capacity"}),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "Tests are complete."},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "item_command",
+                    "type": "command_execution",
+                    "command": "pytest",
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_collab",
+                    "type": "collab_tool_call",
+                    "status": "completed",
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "turn.failed",
+                "error": {
+                    "message": "Selected model is at capacity. Please try a different model."
+                },
+            }
+        ),
+    ]
+    proc = _HangingProc(lines)
+
+    async def _fake_create_subprocess_exec(*_args, **_kwargs):
+        async def _finish():
+            await asyncio.sleep(0.01)
+            proc.finish(1)
+
+        asyncio.create_task(_finish())
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    response = asyncio.run(adapter.generate_response("hello", "req-capacity"))
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_CAPACITY_UNAVAILABLE"
+    assert response.error_retryable is True
+    assert response.http_status == 503
+    assert response.tool_call_count == 2
+    assert response.side_effects_possible is True
+    assert response.error.startswith("Selected model is at capacity.")
+    assert "Tests are complete." in response.error
+    assert adapter._session_id == "thread_capacity"
+
+
+def test_codex_dropped_event_gap_blocks_automatic_replay(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter = _build_adapter(tmp_path)
+    proc = _HangingProc(
+        [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item_gap",
+                        "type": "error",
+                        "message": (
+                            "in-process app-server event stream lagged; "
+                            "dropped 32 events"
+                        ),
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "turn.failed",
+                    "error": {"message": "Selected model is at capacity."},
+                }
+            ),
+        ]
+    )
+
+    async def _fake_create_subprocess_exec(*_args, **_kwargs):
+        proc.finish(1)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    response = asyncio.run(adapter.generate_response("hello", "req-event-gap"))
+
+    assert response.tool_call_count == 0
+    assert response.side_effects_possible is True
+    assert response.stream_metadata["codex_side_effect_item_ids"] == [
+        "event-gap:item_gap"
+    ]
+
+
+def test_codex_context_rejection_clears_provider_session_for_safe_recovery(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter = _build_adapter(tmp_path)
+    adapter.set_session_mode(True)
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "thread_full"}),
+        json.dumps(
+            {
+                "type": "turn.failed",
+                "error": {
+                    "message": (
+                        "Codex ran out of room in the model's context window. "
+                        "Start a new thread before retrying."
+                    )
+                },
+            }
+        ),
+    ]
+    proc = _HangingProc(lines)
+
+    async def _fake_create_subprocess_exec(*_args, **_kwargs):
+        async def _finish():
+            await asyncio.sleep(0.01)
+            proc.finish(1)
+
+        asyncio.create_task(_finish())
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    response = asyncio.run(adapter.generate_response("hello", "req-context"))
+
+    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
+    assert response.error_retryable is False
+    assert response.side_effects_possible is False
+    assert adapter._session_id is None
+
+
+def test_codex_turn_failed_uses_bounded_terminal_grace(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter = _build_adapter(tmp_path)
+    adapter.POST_TURN_COMPLETION_GRACE_SEC = 0.01
+    proc = _HangingProc(
+        [
+            json.dumps(
+                {
+                    "type": "turn.failed",
+                    "error": {"message": "Selected model is at capacity."},
+                }
+            )
+        ]
+    )
+    killed_reasons = []
+
+    async def _fake_create_subprocess_exec(*_args, **_kwargs):
+        return proc
+
+    async def _fake_force_kill_process_tree(proc_obj, logger=None, reason=""):
+        killed_reasons.append(reason)
+        proc_obj.finish(-9)
+        return True
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(adapter, "force_kill_process_tree", _fake_force_kill_process_tree)
+
+    response = asyncio.run(adapter.generate_response("hello", "req-failed-hang"))
+
+    assert response.error_code == "PROVIDER_CAPACITY_UNAVAILABLE"
+    assert killed_reasons == ["turn-failed-grace-expired:req-failed-hang"]
+
+
+def test_codex_reconnect_error_is_not_terminal_when_turn_completes(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter = _build_adapter(tmp_path)
+    proc = _HangingProc(
+        [
+            json.dumps(
+                {
+                    "type": "error",
+                    "message": "Reconnecting... 2/5 (stream disconnected before completion)",
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Recovered."},
+                }
+            ),
+            json.dumps({"type": "turn.completed"}),
+        ]
+    )
+
+    async def _fake_create_subprocess_exec(*_args, **_kwargs):
+        proc.finish(0)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    response = asyncio.run(adapter.generate_response("hello", "req-recovered"))
+
+    assert response.is_success is True
+    assert response.text == "Recovered."
+
+
+@pytest.mark.asyncio
+async def test_codex_adapter_serializes_concurrent_direct_requests(tmp_path, monkeypatch):
+    adapter = _build_adapter(tmp_path)
+    active = 0
+    maximum = 0
+
+    async def fake_generate(*_args, **_kwargs):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return BackendResponse(text="done", duration_ms=1)
+
+    monkeypatch.setattr(adapter, "_generate_response", fake_generate)
+
+    await asyncio.gather(
+        adapter.generate_response("one", "req-one"),
+        adapter.generate_response("two", "req-two"),
+    )
+
+    assert maximum == 1
 
 
 def test_codex_add_dir_uses_access_root_when_workzone_off(tmp_path):

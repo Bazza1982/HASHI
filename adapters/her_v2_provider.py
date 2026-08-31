@@ -290,6 +290,7 @@ def _retryable_for_provider_code(code: ProviderFailureCode | str) -> bool:
         ProviderFailureCode.PROVIDER_UNKNOWN.value,
         ProviderFailureCode.PROVIDER_REQUEST_TIMEOUT.value,
         ProviderFailureCode.PROVIDER_RATE_LIMITED.value,
+        ProviderFailureCode.PROVIDER_CAPACITY_UNAVAILABLE.value,
         ProviderFailureCode.PROVIDER_SERVER_ERROR.value,
         ProviderFailureCode.PROVIDER_CONNECTION_FAILED.value,
         ProviderFailureCode.PROVIDER_RESPONSE_START_TIMEOUT.value,

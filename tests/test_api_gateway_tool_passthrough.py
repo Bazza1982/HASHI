@@ -607,7 +607,167 @@ async def test_gateway_external_stream_marks_activity_on_typed_backend_error(
     ]
     error = next(event["error"] for event in events if "error" in event)
     assert error["code"] == "PROVIDER_MODALITY_UNSUPPORTED"
-    assert error["metadata"] == {"provider_activity": True}
+    assert error["metadata"] == {
+        "provider_activity": True,
+        "tool_call_count": 1,
+        "side_effects_possible": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_gateway_text_stream_emits_typed_error_without_success_terminal_or_cache(
+    tmp_path,
+):
+    class _FailedTextAdapter(_ExternalAdapter):
+        async def generate_response(
+            self,
+            *_args,
+            on_stream_event=None,
+            **_kwargs,
+        ):
+            if on_stream_event is not None:
+                await on_stream_event(
+                    StreamEvent(kind=KIND_TEXT_DELTA, summary="partial progress")
+                )
+            return BackendResponse(
+                text="",
+                duration_ms=1,
+                error="Selected model is at capacity.",
+                is_success=False,
+                error_code="PROVIDER_CAPACITY_UNAVAILABLE",
+                error_retryable=True,
+                http_status=503,
+                provider_request_id="req_capacity_1",
+            )
+
+    server = _server(tmp_path, _FailedTextAdapter())
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-5.5",
+                "messages": [{"role": "user", "content": "Continue."}],
+                "session_id": "failed-stream-session",
+                "stream": True,
+            },
+        )
+        raw = await response.text()
+
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in raw.splitlines()
+        if line.startswith("data: {")
+    ]
+    error = next(event["error"] for event in events if "error" in event)
+    assert response.status == 200  # SSE headers were committed before provider failure.
+    assert error["code"] == "PROVIDER_CAPACITY_UNAVAILABLE"
+    assert error["status"] == 503
+    assert error["metadata"] == {
+        "provider_activity": True,
+        "retryable": True,
+        "provider_request_id": "req_capacity_1",
+    }
+    assert not any(
+        event.get("choices", [{}])[0].get("finish_reason") == "stop"
+        for event in events
+        if event.get("choices")
+    )
+    assert raw.rstrip().endswith("data: [DONE]")
+    assert server._sessions.get("failed-stream-session") is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_text_sync_uses_typed_backend_status_and_error_contract(tmp_path):
+    class _FailedTextAdapter(_ExternalAdapter):
+        async def generate_response(self, *_args, **_kwargs):
+            return BackendResponse(
+                text="",
+                duration_ms=1,
+                error="You've hit your usage limit.",
+                is_success=False,
+                error_code="PROVIDER_QUOTA_EXHAUSTED",
+                error_retryable=True,
+                http_status=429,
+                retry_after_s=30,
+            )
+
+    server = _server(tmp_path, _FailedTextAdapter())
+    response = await server.handle_chat_completions(
+        _Request(
+            {
+                "model": "gpt-5.5",
+                "messages": [{"role": "user", "content": "Continue."}],
+            }
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 429
+    assert payload["error"]["message"] == "You've hit your usage limit."
+    assert payload["error"]["type"] == "rate_limit_error"
+    assert payload["error"]["code"] == "PROVIDER_QUOTA_EXHAUSTED"
+    assert payload["error"]["metadata"] == {
+        "retryable": True,
+        "retry_after_s": 30.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_gateway_serializes_same_session_before_reading_cached_history(tmp_path):
+    class _SessionAdapter(_ExternalAdapter):
+        def __init__(self):
+            super().__init__()
+            self.prompts = []
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+
+        async def generate_response(self, prompt, *_args, **_kwargs):
+            self.prompts.append(prompt)
+            turn = len(self.prompts)
+            if turn == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+            return BackendResponse(
+                text=f"reply-{turn}",
+                duration_ms=1,
+                is_success=True,
+            )
+
+    adapter = _SessionAdapter()
+    server = _server(tmp_path, adapter)
+    first = asyncio.create_task(
+        server.handle_chat_completions(
+            _Request(
+                {
+                    "model": "gpt-5.5",
+                    "session_id": "serial-session",
+                    "messages": [{"role": "user", "content": "first"}],
+                }
+            )
+        )
+    )
+    await adapter.first_started.wait()
+    second = asyncio.create_task(
+        server.handle_chat_completions(
+            _Request(
+                {
+                    "model": "gpt-5.5",
+                    "session_id": "serial-session",
+                    "messages": [{"role": "user", "content": "second"}],
+                }
+            )
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert adapter.prompts == ["User: first"]
+    adapter.release_first.set()
+    await asyncio.gather(first, second)
+
+    assert len(adapter.prompts) == 2
+    assert "User: first" in adapter.prompts[1]
+    assert "Assistant: reply-1" in adapter.prompts[1]
+    assert adapter.prompts[1].endswith("User: second")
 
 
 @pytest.mark.asyncio

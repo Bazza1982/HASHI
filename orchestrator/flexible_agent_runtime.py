@@ -10167,6 +10167,7 @@ class FlexibleAgentRuntime:
                 )
             else:
                 err_msg = response.error or "Unknown error"
+                failure_fields = runtime_pipeline.backend_failure_fields(response)
                 receipt_error = err_msg
                 self._mark_error(err_msg)
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
@@ -10186,6 +10187,7 @@ class FlexibleAgentRuntime:
                         "error": err_msg,
                         "source": item.source,
                         "summary": item.summary,
+                        **failure_fields,
                         **runtime_pipeline.request_context_warning_fields(
                             self, item.request_id
                         ),
@@ -10194,7 +10196,17 @@ class FlexibleAgentRuntime:
                 if self._should_buffer_during_transfer(item.request_id):
                     self._record_suppressed_transfer_result(item, success=False, error=err_msg)
                     return
-                self.error_logger.error(f"Background task {item.request_id} failed: {err_msg}")
+                self.error_logger.error(
+                    "Background task %s failed code=%s retryable=%s status=%s "
+                    "provider_request_id=%s side_effects=%s: %s",
+                    item.request_id,
+                    failure_fields.get("error_code") or "untyped",
+                    failure_fields.get("error_retryable"),
+                    failure_fields.get("http_status"),
+                    failure_fields.get("provider_request_id") or "none",
+                    failure_fields.get("side_effects_possible", False),
+                    err_msg,
+                )
                 clipped = (
                     err_msg
                     if len(err_msg) <= 3000

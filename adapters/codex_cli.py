@@ -10,6 +10,13 @@ from pathlib import Path
 import adapters.stream_events as stream_event_types
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
 from adapters.codex_app_server import CodexAppServerToolBridge, disabled_mcp_override
+from adapters.codex_errors import CodexFailure, parse_codex_failure
+from adapters.codex_event_log import (
+    DEFAULT_BACKUP_COUNT,
+    DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_EVENT_BYTES,
+    CodexEventLogWriter,
+)
 from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
@@ -30,12 +37,28 @@ from adapters.hashi_mcp import prepare_hashi_mcp
 _CODEX_REQUEST_REASONING_EFFORTS = frozenset(
     {"none", "low", "medium", "high", "xhigh", "max"}
 )
+_CODEX_TOOL_ITEM_TYPES = frozenset(
+    {
+        "collab_tool_call",
+        "command_execution",
+        "computer_use",
+        "dynamic_tool_call",
+        "file_change",
+        "function_call",
+        "image_generation",
+        "mcp_tool_call",
+        "tool_call",
+        "web_search",
+    }
+)
+_CODEX_SIDE_EFFECT_ITEM_TYPES = _CODEX_TOOL_ITEM_TYPES - {"web_search"}
 
 
 class CodexCLIAdapter(BaseBackend):
     LONG_PROMPT_STDIN_THRESHOLD = 24000
     DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
     POST_TURN_COMPLETION_GRACE_SEC = 15
+    MAX_STDERR_CAPTURE_BYTES = 256 * 1024
     MCP_INVENTORY_TIMEOUT_SEC = 30
     MCP_INVENTORY_MAX_ATTEMPTS = 2
 
@@ -56,6 +79,10 @@ class CodexCLIAdapter(BaseBackend):
         super().__init__(agent_config, global_config, api_key)
         self.logger = logging.getLogger(f"Backend.Codex.{self.config.name}")
         self.current_proc = None
+        # Codex adapters carry process/session/usage state.  Serialize direct
+        # callers as a final safety boundary even when an upstream pool also
+        # leases adapters exclusively.
+        self._request_lock = asyncio.Lock()
         self._active_read_tasks: list[asyncio.Task] = []
         self._external_tool_processes: set[object] = set()
         self._external_mcp_server_names: tuple[str, ...] | None = None
@@ -65,6 +92,48 @@ class CodexCLIAdapter(BaseBackend):
             self.cmd_base = f"{self.cmd_base}.cmd"
         self.access_root = str(self.config.resolve_access_root())
         self.events_log_path = self.config.workspace_dir / "codex_exec_events.jsonl"
+        extra = dict(self.config.extra or {})
+
+        def configured_int(key: str, default: int, *, minimum: int) -> int:
+            raw = extra.get(key)
+            if raw is None:
+                return default
+            try:
+                parsed = int(raw)
+            except (TypeError, ValueError):
+                self.logger.warning(
+                    "Invalid %s=%r; using default %s",
+                    key,
+                    raw,
+                    default,
+                )
+                return default
+            if parsed < minimum:
+                self.logger.warning(
+                    "Invalid %s=%s; minimum is %s, using default %s",
+                    key,
+                    parsed,
+                    minimum,
+                    default,
+                )
+                return default
+            return parsed
+
+        self.events_log_max_bytes = configured_int(
+            "codex_event_log_max_bytes",
+            DEFAULT_MAX_BYTES,
+            minimum=64 * 1024,
+        )
+        self.events_log_backup_count = configured_int(
+            "codex_event_log_backups",
+            DEFAULT_BACKUP_COUNT,
+            minimum=0,
+        )
+        self.events_log_max_event_bytes = configured_int(
+            "codex_event_log_max_event_bytes",
+            DEFAULT_MAX_EVENT_BYTES,
+            minimum=1024,
+        )
         # Persistent session state
         self._session_id: str | None = None
         self._session_mode: bool = bool((self.config.extra or {}).get("session_mode", False))
@@ -229,6 +298,32 @@ class CodexCLIAdapter(BaseBackend):
         model: str | None = None,
     ) -> BackendResponse:
         """Capture one Codex dynamic-tool batch without executing caller tools."""
+        async with self._request_lock:
+            return await self._generate_external_tool_response(
+                messages,
+                tools,
+                request_id,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                use_streaming=use_streaming,
+                request_options=request_options,
+                on_stream_event=on_stream_event,
+                model=model,
+            )
+
+    async def _generate_external_tool_response(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        request_id: str,
+        *,
+        tool_choice=None,
+        parallel_tool_calls: bool | None = None,
+        use_streaming: bool = False,
+        request_options: dict | None = None,
+        on_stream_event=None,
+        model: str | None = None,
+    ) -> BackendResponse:
         selected_effort = self._request_reasoning_effort(
             request_options=request_options,
         )
@@ -303,12 +398,18 @@ class CodexCLIAdapter(BaseBackend):
 
     async def handle_new_session(self) -> bool:
         """Clear session ID so the next request starts a fresh codex session."""
-        old_id = self._session_id
-        self._session_id = None
-        if old_id:
-            self.logger.info(f"Codex session cleared (was {old_id[:8]}…). Next request starts fresh.")
-        else:
-            self.logger.info("Codex handle_new_session: no active session, nothing to clear.")
+        async with self._request_lock:
+            old_id = self._session_id
+            self._session_id = None
+            if old_id:
+                self.logger.info(
+                    f"Codex session cleared (was {old_id[:8]}…). "
+                    "Next request starts fresh."
+                )
+            else:
+                self.logger.info(
+                    "Codex handle_new_session: no active session, nothing to clear."
+                )
         return True
 
     def set_session_mode(self, enabled: bool) -> None:
@@ -426,9 +527,13 @@ class CodexCLIAdapter(BaseBackend):
             event = json.loads(raw_line)
         except json.JSONDecodeError:
             return pending_agent_message
+        if not isinstance(event, Mapping):
+            return pending_agent_message
 
         etype = event.get("type", "")
         item = event.get("item") or {}
+        if not isinstance(item, Mapping):
+            item = {}
         item_type = item.get("type", "")
 
         if etype == "turn.completed":
@@ -567,7 +672,7 @@ class CodexCLIAdapter(BaseBackend):
         cmd += ["--", prompt_arg]
         return cmd
 
-    def _extract_response_text(self, output_path: Path, stdout_lines: list[str]) -> str:
+    def _extract_response_text(self, output_path: Path, fallback: str = "") -> str:
         response = ""
         if output_path.exists():
             response = output_path.read_text(encoding="utf-8").strip()
@@ -575,26 +680,16 @@ class CodexCLIAdapter(BaseBackend):
 
         if response:
             return response
+        return str(fallback or "").strip()
 
-        for raw_line in stdout_lines:
-            try:
-                event = json.loads(raw_line)
-            except json.JSONDecodeError:
-                continue
-            item = event.get("item")
-            if event.get("type") == "item.completed" and isinstance(item, dict):
-                if item.get("type") == "agent_message" and item.get("text"):
-                    response = item["text"].strip()
-        return response
-
-    def _persist_stdout_lines(self, stdout_lines: list[str]) -> None:
-        if not stdout_lines:
-            return
-        with open(self.events_log_path, "a", encoding="utf-8") as f:
-            for raw_line in stdout_lines:
-                f.write(raw_line)
-                if not raw_line.endswith("\n"):
-                    f.write("\n")
+    def _event_log_writer(self) -> CodexEventLogWriter:
+        return CodexEventLogWriter(
+            self.events_log_path,
+            max_bytes=self.events_log_max_bytes,
+            backup_count=self.events_log_backup_count,
+            max_event_bytes=self.events_log_max_event_bytes,
+            logger=self.logger,
+        )
 
     def _error_with_last_message(self, prefix: str, response: str) -> str:
         response = (response or "").strip()
@@ -602,7 +697,59 @@ class CodexCLIAdapter(BaseBackend):
             return prefix
         return f"{prefix}\n\nLast Codex message before exit:\n{response}"
 
+    def _failure_response(
+        self,
+        failure: CodexFailure,
+        *,
+        duration_ms: float,
+        last_message: str = "",
+        tool_item_ids: set[str] | None = None,
+        side_effect_item_ids: set[str] | None = None,
+        provider_activity_observed: bool = False,
+    ) -> BackendResponse:
+        tool_ids = set(tool_item_ids or ())
+        side_effect_ids = set(side_effect_item_ids or ())
+        return BackendResponse(
+            text="",
+            duration_ms=duration_ms,
+            error=self._error_with_last_message(failure.message, last_message),
+            is_success=False,
+            usage=self._last_usage,
+            tool_call_count=len(tool_ids),
+            error_code=failure.code,
+            error_retryable=failure.retryable,
+            http_status=failure.http_status,
+            provider_request_id=failure.provider_request_id,
+            retry_after_s=failure.retry_after_s,
+            side_effects_possible=bool(side_effect_ids),
+            stream_metadata={
+                "provider_failure_description": failure.description,
+                "provider_activity_observed": bool(
+                    provider_activity_observed or tool_ids or last_message
+                ),
+                "codex_tool_item_ids": sorted(tool_ids),
+                "codex_side_effect_item_ids": sorted(side_effect_ids),
+            },
+        )
+
     async def generate_response(
+        self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
+        on_stream_event: StreamCallback = None,
+        reasoning_effort: str | None = None,
+        request_content: Mapping | None = None,
+    ) -> BackendResponse:
+        async with self._request_lock:
+            return await self._generate_response(
+                prompt,
+                request_id,
+                is_retry=is_retry,
+                silent=silent,
+                on_stream_event=on_stream_event,
+                reasoning_effort=reasoning_effort,
+                request_content=request_content,
+            )
+
+    async def _generate_response(
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
         on_stream_event: StreamCallback = None,
         reasoning_effort: str | None = None,
@@ -796,9 +943,46 @@ class CodexCLIAdapter(BaseBackend):
         )
         session_mode = "resume" if self._session_id else "new"
         effective_workdir = self.effective_workdir
-        stdout_lines: list[str] = []
+        proc = None
+        stdout_task: asyncio.Task | None = None
+        stderr_task: asyncio.Task | None = None
+        event_log: CodexEventLogWriter | None = None
+        stderr_buffer = bytearray()
+        stdout_line_count = 0
+        pending_agent_message: dict | None = None
+        captured_thread_id: str | None = None
+        last_agent_message = ""
+        last_error_event: Mapping | None = None
+        terminal_failure: CodexFailure | None = None
+        terminal_event_type: str | None = None
+        terminal_event_at: float | None = None
+        forced_terminal = False
+        tool_item_ids: set[str] = set()
+        side_effect_item_ids: set[str] = set()
+        provider_activity_observed = False
 
         try:
+            try:
+                event_log = self._event_log_writer()
+                event_log.__enter__()
+            except Exception as log_exc:
+                if event_log is not None:
+                    try:
+                        event_log.close()
+                    except OSError as close_exc:
+                        self.logger.warning(
+                            "Codex event log cleanup after open failure also failed "
+                            "for %s: %s",
+                            request_id,
+                            close_exc,
+                        )
+                event_log = None
+                self.logger.error(
+                    "Codex event log unavailable for %s: %s: %s",
+                    request_id,
+                    type(log_exc).__name__,
+                    log_exc,
+                )
             self.logger.info(
                 f"Launching Codex request {request_id} "
                 f"(session={session_mode}, session_id={self._session_id or 'none'}, "
@@ -820,35 +1004,102 @@ class CodexCLIAdapter(BaseBackend):
             proc = self.current_proc
             self.logger.info(
                 f"Codex subprocess started for {request_id} "
-                f"(pid={proc.pid}, cmd={cmd})"
+                f"(pid={proc.pid}, argv_count={len(cmd)}, "
+                f"prompt_transport={'stdin' if stdin_data is not None else 'argv'})"
             )
             self._touch_activity()  # mark process launch as initial activity
-
-            stderr_chunks: list[bytes] = []
             timeout_kind: str | None = None
-            pending_agent_message: dict | None = None
-            captured_thread_id: str | None = None
-            turn_completed_at: float | None = None
-            forced_completion = False
 
             async def _read_stdout():
+                nonlocal event_log
+                nonlocal last_agent_message
+                nonlocal last_error_event
                 nonlocal pending_agent_message
-                nonlocal timeout_kind
                 nonlocal captured_thread_id
-                nonlocal turn_completed_at
+                nonlocal provider_activity_observed
+                nonlocal stdout_line_count
+                nonlocal terminal_event_at
+                nonlocal terminal_event_type
+                nonlocal terminal_failure
                 async for line in iter_stream_lines(proc.stdout):
                     self._touch_activity()
                     decoded = line.decode(errors="replace")
-                    stdout_lines.append(decoded)
+                    stdout_line_count += 1
+                    if event_log is not None:
+                        try:
+                            event_log.append(decoded)
+                        except Exception as log_exc:
+                            self.logger.error(
+                                "Codex event log write failed for %s: %s: %s",
+                                request_id,
+                                type(log_exc).__name__,
+                                log_exc,
+                            )
+                            event_log.close()
+                            event_log = None
                     try:
                         event = json.loads(decoded)
                     except json.JSONDecodeError:
                         event = None
-                    if event is not None:
-                        if captured_thread_id is None and event.get("type") == "thread.started" and event.get("thread_id"):
-                            captured_thread_id = event["thread_id"]
-                        if event.get("type") == "turn.completed":
-                            turn_completed_at = time.perf_counter()
+                    if isinstance(event, Mapping):
+                        event_type = str(event.get("type") or "")
+                        if (
+                            captured_thread_id is None
+                            and event_type == "thread.started"
+                            and event.get("thread_id")
+                        ):
+                            captured_thread_id = str(event["thread_id"])
+                        item = event.get("item")
+                        if isinstance(item, Mapping):
+                            item_type = str(item.get("type") or "")
+                            item_id = str(item.get("id") or "").strip()
+                            if not item_id:
+                                item_id = f"line-{stdout_line_count}:{item_type}"
+                            if item_type == "agent_message" and item.get("text"):
+                                last_agent_message = str(item.get("text") or "").strip()
+                                provider_activity_observed = True
+                            tool_item = (
+                                item_type in _CODEX_TOOL_ITEM_TYPES
+                                or item_type.endswith("_tool_call")
+                            )
+                            side_effect_item = (
+                                item_type in _CODEX_SIDE_EFFECT_ITEM_TYPES
+                                or (
+                                    item_type.endswith("_tool_call")
+                                    and item_type != "web_search"
+                                )
+                            )
+                            if (
+                                event_type in {"item.started", "item.completed"}
+                                and tool_item
+                            ):
+                                tool_item_ids.add(item_id)
+                                provider_activity_observed = True
+                            if (
+                                event_type in {"item.started", "item.completed"}
+                                and side_effect_item
+                            ):
+                                side_effect_item_ids.add(item_id)
+                            item_error = str(item.get("message") or "").casefold()
+                            if (
+                                item_type == "error"
+                                and "dropped" in item_error
+                                and "event" in item_error
+                            ):
+                                # A dropped provider event can hide a command or
+                                # file mutation.  Record conservative evidence so
+                                # no recovery layer blindly replays the turn.
+                                side_effect_item_ids.add(f"event-gap:{item_id}")
+                                provider_activity_observed = True
+                        if event_type == "error":
+                            last_error_event = event
+                        elif event_type == "turn.completed":
+                            terminal_event_type = event_type
+                            terminal_event_at = time.perf_counter()
+                        elif event_type == "turn.failed":
+                            terminal_event_type = event_type
+                            terminal_event_at = time.perf_counter()
+                            terminal_failure = parse_codex_failure(event)
                     pending_agent_message = self._parse_codex_event(
                         decoded,
                         on_stream_event,
@@ -863,7 +1114,10 @@ class CodexCLIAdapter(BaseBackend):
                     if not chunk:
                         break
                     self._touch_activity()
-                    stderr_chunks.append(chunk)
+                    stderr_buffer.extend(chunk)
+                    overflow = len(stderr_buffer) - self.MAX_STDERR_CAPTURE_BYTES
+                    if overflow > 0:
+                        del stderr_buffer[:overflow]
 
             stderr_task = asyncio.create_task(_read_stderr())
             self._active_read_tasks = [stdout_task, stderr_task]
@@ -882,10 +1136,12 @@ class CodexCLIAdapter(BaseBackend):
                     5.0,
                     max(0.1, self.IDLE_TIMEOUT_SEC - idle_for),
                 )
-                if turn_completed_at is not None:
-                    remaining_turn = (turn_completed_at + self.POST_TURN_COMPLETION_GRACE_SEC) - now_perf
+                if terminal_event_at is not None:
+                    remaining_turn = (
+                        terminal_event_at + self.POST_TURN_COMPLETION_GRACE_SEC
+                    ) - now_perf
                     if remaining_turn <= 0:
-                        forced_completion = True
+                        forced_terminal = True
                         break
                     wait_slice = min(wait_slice, max(0.1, remaining_turn))
                 try:
@@ -907,69 +1163,84 @@ class CodexCLIAdapter(BaseBackend):
                     proc, logger=self.logger,
                     reason=f"{timeout_kind}-timeout:{request_id}",
                 )
-                self.current_proc = None
                 await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
                 self._active_read_tasks = []
-                self._persist_stdout_lines(stdout_lines)
-                response = self._extract_response_text(output_path, stdout_lines)
+                response = self._extract_response_text(
+                    output_path,
+                    last_agent_message,
+                )
                 error_text = (
-                    f"Codex CLI was idle for {self.IDLE_TIMEOUT_SEC}s with no output."
+                    f"Codex CLI was idle for {self.IDLE_TIMEOUT_SEC}s with no output "
+                    "and timed out."
+                )
+                failure = parse_codex_failure(
+                    fallback_message=error_text,
                 )
                 return with_media_metadata(
-                    BackendResponse(
-                        text="",
+                    self._failure_response(
+                        failure,
                         duration_ms=duration_ms,
-                        error=self._error_with_last_message(error_text, response),
-                        is_success=False,
+                        last_message=response,
+                        tool_item_ids=tool_item_ids,
+                        side_effect_item_ids=side_effect_item_ids,
+                        provider_activity_observed=provider_activity_observed,
                     )
                 )
 
-            if forced_completion and proc.returncode is None:
+            if forced_terminal and proc.returncode is None:
+                terminal_label = terminal_event_type or "terminal event"
                 self.logger.warning(
-                    f"Codex request {request_id} produced turn.completed but the subprocess "
+                    f"Codex request {request_id} produced {terminal_label} but the subprocess "
                     f"did not exit within {self.POST_TURN_COMPLETION_GRACE_SEC}s; forcing shutdown."
                 )
                 await self.force_kill_process_tree(
                     proc,
                     logger=self.logger,
-                    reason=f"turn-completed-grace-expired:{request_id}",
+                    reason=f"{terminal_label.replace('.', '-')}-grace-expired:{request_id}",
                 )
 
-            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            read_results = await asyncio.gather(
+                stdout_task,
+                stderr_task,
+                return_exceptions=True,
+            )
+            for reader_name, result in zip(("stdout", "stderr"), read_results):
+                if isinstance(result, Exception):
+                    self.logger.error(
+                        "Codex %s reader failed for %s: %s: %s",
+                        reader_name,
+                        request_id,
+                        type(result).__name__,
+                        result,
+                    )
             self._active_read_tasks = []
-            stderr_data = b"".join(stderr_chunks)
             if proc.returncode is None:
                 await proc.wait()
             returncode = proc.returncode
-            self.current_proc = None
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
-
-            self._persist_stdout_lines(stdout_lines)
 
             self.logger.info(
                 f"Codex request {request_id} exited "
                 f"(returncode={returncode}, duration_ms={duration_ms}, "
-                f"stdout_lines={len(stdout_lines)}, stderr_bytes={len(stderr_data)})"
+                f"stdout_lines={stdout_line_count}, stderr_bytes={len(stderr_buffer)}, "
+                f"terminal={terminal_event_type or 'none'}, tools={len(tool_item_ids)}, "
+                f"side_effects={bool(side_effect_item_ids)})"
             )
 
-            response = self._extract_response_text(output_path, stdout_lines)
+            response = self._extract_response_text(
+                output_path,
+                last_agent_message,
+            )
 
-            if returncode != 0 and not forced_completion:
-                err_msg = stderr_data.decode(errors="replace").strip()
-                if not err_msg:
-                    err_msg = "Codex CLI exited with a non-zero status."
-                err_msg = self._error_with_last_message(err_msg, response)
-                return with_media_metadata(
-                    BackendResponse(
-                        text="",
-                        duration_ms=duration_ms,
-                        error=err_msg,
-                        is_success=False,
-                    )
-                )
-
-            # Persist the session ID from this turn so the next request can resume it
-            if self._session_mode and captured_thread_id and captured_thread_id != self._session_id:
+            # A thread can be created before a provider failure.  Preserve it
+            # for transient failures so a retry continues the same turn.  A
+            # context-capacity rejection is the exception: resuming the full
+            # provider thread would simply replay the same oversized history.
+            if (
+                self._session_mode
+                and captured_thread_id
+                and captured_thread_id != self._session_id
+            ):
                 self.logger.info(
                     f"Codex session established: {captured_thread_id} "
                     f"(was: {self._session_id or 'none'})"
@@ -978,13 +1249,101 @@ class CodexCLIAdapter(BaseBackend):
             elif not self._session_mode:
                 self._session_id = None
 
-            if not response:
+            if terminal_failure is not None:
+                if (
+                    terminal_failure.code == "CONTEXT_CAPACITY_REJECTED"
+                    and self._session_mode
+                    and self._session_id is not None
+                ):
+                    rejected_session = self._session_id
+                    self._session_id = None
+                    self.logger.warning(
+                        "Cleared Codex session %s after context-capacity rejection "
+                        "for %s; the typed recovery retry will start a new thread.",
+                        rejected_session,
+                        request_id,
+                    )
+                self.logger.error(
+                    "Codex request %s failed code=%s retryable=%s status=%s "
+                    "provider_request_id=%s tools=%s side_effects=%s",
+                    request_id,
+                    terminal_failure.code,
+                    terminal_failure.retryable,
+                    terminal_failure.http_status,
+                    terminal_failure.provider_request_id or "none",
+                    len(tool_item_ids),
+                    bool(side_effect_item_ids),
+                )
                 return with_media_metadata(
-                    BackendResponse(
-                        text="",
+                    self._failure_response(
+                        terminal_failure,
                         duration_ms=duration_ms,
-                        error="Codex CLI completed without a final assistant message.",
-                        is_success=False,
+                        last_message=response,
+                        tool_item_ids=tool_item_ids,
+                        side_effect_item_ids=side_effect_item_ids,
+                        provider_activity_observed=provider_activity_observed,
+                    )
+                )
+
+            if returncode != 0 and terminal_event_type != "turn.completed":
+                err_msg = stderr_buffer.decode(errors="replace").strip()
+                if not err_msg:
+                    err_msg = "Codex CLI exited with a non-zero status."
+                failure = parse_codex_failure(
+                    last_error_event,
+                    fallback_message=err_msg,
+                )
+                self.logger.error(
+                    "Codex request %s exited non-zero without turn.failed "
+                    "code=%s retryable=%s returncode=%s tools=%s side_effects=%s",
+                    request_id,
+                    failure.code,
+                    failure.retryable,
+                    returncode,
+                    len(tool_item_ids),
+                    bool(side_effect_item_ids),
+                )
+                return with_media_metadata(
+                    self._failure_response(
+                        failure,
+                        duration_ms=duration_ms,
+                        last_message=response,
+                        tool_item_ids=tool_item_ids,
+                        side_effect_item_ids=side_effect_item_ids,
+                        provider_activity_observed=provider_activity_observed,
+                    )
+                )
+            if returncode != 0 and terminal_event_type == "turn.completed":
+                self.logger.warning(
+                    "Codex request %s completed authoritatively before subprocess "
+                    "exit returncode=%s; accepting the completed turn.",
+                    request_id,
+                    returncode,
+                )
+
+            if not response:
+                failure = (
+                    parse_codex_failure(last_error_event)
+                    if last_error_event is not None
+                    else CodexFailure(
+                        message=(
+                            "Codex CLI completed without a final assistant message."
+                        ),
+                        code="PROVIDER_EMPTY_RESPONSE",
+                        retryable=True,
+                        http_status=502,
+                        description=(
+                            "Codex completed without deliverable assistant content."
+                        ),
+                    )
+                )
+                return with_media_metadata(
+                    self._failure_response(
+                        failure,
+                        duration_ms=duration_ms,
+                        tool_item_ids=tool_item_ids,
+                        side_effect_item_ids=side_effect_item_ids,
+                        provider_activity_observed=provider_activity_observed,
                     )
                 )
 
@@ -994,30 +1353,94 @@ class CodexCLIAdapter(BaseBackend):
                     duration_ms=duration_ms,
                     is_success=True,
                     usage=self._last_usage,
+                    tool_call_count=len(tool_item_ids),
+                    side_effects_possible=bool(side_effect_item_ids),
+                    stream_metadata={
+                        "provider_activity_observed": bool(
+                            provider_activity_observed or tool_item_ids
+                        ),
+                        "codex_tool_item_ids": sorted(tool_item_ids),
+                        "codex_side_effect_item_ids": sorted(
+                            side_effect_item_ids
+                        ),
+                    },
                 )
             )
 
         except asyncio.CancelledError:
             self.logger.warning(f"Generation cancelled for {request_id}")
-            if self.current_proc:
+            if proc is not None and proc.returncode is None:
                 await self.force_kill_process_tree(
-                    self.current_proc,
+                    proc,
                     logger=self.logger,
                     reason=f"cancelled:{request_id}",
                 )
-            self._persist_stdout_lines(stdout_lines)
             raise
         except Exception as e:
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            self.logger.exception(
+                "Unexpected Codex adapter failure for %s after %sms",
+                request_id,
+                duration_ms,
+            )
+            if proc is not None and proc.returncode is None:
+                await self.force_kill_process_tree(
+                    proc,
+                    logger=self.logger,
+                    reason=f"adapter-exception:{request_id}",
+                )
+            failure = parse_codex_failure(fallback_message=str(e))
             return with_media_metadata(
-                BackendResponse(
-                    text="",
-                    duration_ms=0,
-                    error=str(e),
-                    is_success=False,
+                self._failure_response(
+                    failure,
+                    duration_ms=duration_ms,
+                    last_message=last_agent_message,
+                    tool_item_ids=tool_item_ids,
+                    side_effect_item_ids=side_effect_item_ids,
+                    provider_activity_observed=provider_activity_observed,
                 )
             )
         finally:
-            output_path.unlink(missing_ok=True)
+            if proc is not None and proc.returncode is None:
+                self.logger.error(
+                    "Codex process still running during final cleanup for %s; "
+                    "forcing shutdown.",
+                    request_id,
+                )
+                await self.force_kill_process_tree(
+                    proc,
+                    logger=self.logger,
+                    reason=f"final-cleanup:{request_id}",
+                )
+            readers = [
+                task
+                for task in (stdout_task, stderr_task)
+                if task is not None and not task.done()
+            ]
+            for task in readers:
+                task.cancel()
+            if readers:
+                await asyncio.gather(*readers, return_exceptions=True)
+            if self.current_proc is proc:
+                self.current_proc = None
+            self._active_read_tasks = []
+            if event_log is not None:
+                try:
+                    event_log.close()
+                except OSError as close_exc:
+                    self.logger.warning(
+                        "Codex event log close failed for %s: %s",
+                        request_id,
+                        close_exc,
+                    )
+            try:
+                output_path.unlink(missing_ok=True)
+            except OSError as unlink_exc:
+                self.logger.warning(
+                    "Codex output cleanup failed for %s: %s",
+                    request_id,
+                    unlink_exc,
+                )
 
     async def shutdown(self):
         if self.current_proc:

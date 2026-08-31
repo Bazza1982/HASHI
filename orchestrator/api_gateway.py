@@ -17,6 +17,7 @@ session cache (in-memory, TTL-based) for clients that don't resend full history.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
 import logging
@@ -441,18 +442,46 @@ def _backend_stream_error_payload(
         or stream_metadata.get("provider_activity")
         or stream_metadata.get("provider_activity_observed")
     )
+    if normalized_status == 401:
+        error_type = "authentication_error"
+    elif normalized_status == 403:
+        error_type = "permission_error"
+    elif normalized_status == 429:
+        error_type = "rate_limit_error"
+    elif normalized_status >= 500:
+        error_type = "server_error"
+    else:
+        error_type = "invalid_request_error"
     error: dict[str, Any] = {
         "message": message,
-        "type": (
-            "invalid_request_error"
-            if normalized_status < 500
-            else "server_error"
-        ),
+        "type": error_type,
         "code": code,
         "status": normalized_status,
     }
+    metadata: dict[str, Any] = {}
     if provider_activity:
-        error["metadata"] = {"provider_activity": True}
+        metadata["provider_activity"] = True
+    retryable = getattr(response, "error_retryable", None)
+    if retryable is not None:
+        metadata["retryable"] = bool(retryable)
+    retry_after_s = getattr(response, "retry_after_s", None)
+    if retry_after_s is not None:
+        try:
+            metadata["retry_after_s"] = max(0.0, float(retry_after_s))
+        except (TypeError, ValueError):
+            pass
+    provider_request_id = str(
+        getattr(response, "provider_request_id", None) or ""
+    ).strip()
+    if provider_request_id:
+        metadata["provider_request_id"] = provider_request_id
+    tool_call_count = int(getattr(response, "tool_call_count", 0) or 0)
+    if tool_call_count:
+        metadata["tool_call_count"] = tool_call_count
+    if bool(getattr(response, "side_effects_possible", False)):
+        metadata["side_effects_possible"] = True
+    if metadata:
+        error["metadata"] = metadata
     return {"error": error}
 
 
@@ -462,6 +491,27 @@ def _backend_http_error_status(response: Any, *, default: int = 502) -> int:
     except (TypeError, ValueError):
         return default
     return status if 400 <= status <= 599 else default
+
+
+def _backend_json_error_response(
+    response: Any,
+    *,
+    fallback_message: str = "backend error",
+    fallback_code: str = "backend_error",
+    default_status: int = 502,
+) -> web.Response:
+    """Return one OpenAI-compatible typed backend error response."""
+
+    status = _backend_http_error_status(response, default=default_status)
+    message = str(getattr(response, "error", None) or fallback_message)
+    code = str(getattr(response, "error_code", None) or fallback_code)
+    payload = _backend_stream_error_payload(
+        message,
+        code=code,
+        status=status,
+        response=response,
+    )
+    return web.json_response(payload, status=status)
 
 
 def _validate_reasoning_effort(
@@ -692,6 +742,26 @@ class _SessionCache:
     def __init__(self, ttl: int = SESSION_TTL_SEC):
         self._ttl = ttl
         self._store: dict[str, dict[str, Any]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._lock_refs: dict[str, int] = {}
+
+    @asynccontextmanager
+    async def lease(self, session_id: str):
+        """Serialize read/append/write for one server-managed conversation."""
+
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        self._lock_refs[session_id] = self._lock_refs.get(session_id, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            remaining = self._lock_refs.get(session_id, 1) - 1
+            if remaining <= 0:
+                self._lock_refs.pop(session_id, None)
+                if session_id not in self._store:
+                    self._locks.pop(session_id, None)
+            else:
+                self._lock_refs[session_id] = remaining
 
     def get(self, session_id: str) -> list[dict] | None:
         entry = self._store.get(session_id)
@@ -719,36 +789,59 @@ class _SessionCache:
         expired = [k for k, v in self._store.items() if now - v["ts"] > self._ttl]
         for k in expired:
             del self._store[k]
+            if self._lock_refs.get(k, 0) <= 0:
+                self._locks.pop(k, None)
 
 
 # ── Adapter pool ──────────────────────────────────────────────────────────────
 
 class _AdapterPool:
-    """Lazily initialised per-engine adapter instances, separate from Telegram runtimes."""
+    """Lazily initialized, model-stable adapters with exclusive request leases.
+
+    CLI adapters expose mutable process/session state.  Pooling only by engine
+    allowed one request to replace ``config.model`` while another request was
+    running, and concurrent calls could overwrite ``current_proc``.  A pool
+    entry is therefore immutable for one ``(engine, model)`` pair and guarded
+    by a request lock.
+    """
 
     def __init__(self, global_config, secrets: dict, workspace_root: Path):
         self._global_config = global_config
         self._secrets = secrets
         self._workspace_root = workspace_root
-        self._adapters: dict[str, Any] = {}
-        self._init_locks: dict[str, asyncio.Lock] = {}
+        self._adapters: dict[tuple[str, str], Any] = {}
+        self._init_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._request_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+    @staticmethod
+    def _key(engine: str, model: str) -> tuple[str, str]:
+        return (str(engine).strip(), str(model).strip())
 
     async def get(self, engine: str, model: str) -> Any:
-        if engine not in self._init_locks:
-            self._init_locks[engine] = asyncio.Lock()
+        key = self._key(engine, model)
+        if key not in self._init_locks:
+            self._init_locks[key] = asyncio.Lock()
 
-        async with self._init_locks[engine]:
-            if engine in self._adapters:
-                return self._adapters[engine]
+        async with self._init_locks[key]:
+            if key in self._adapters:
+                return self._adapters[key]
 
             adapter = await self._create(engine, model)
-            self._adapters[engine] = adapter
+            self._adapters[key] = adapter
+            self._request_locks.setdefault(key, asyncio.Lock())
             return adapter
+
+    def request_lock(self, engine: str, model: str) -> asyncio.Lock:
+        """Return the exclusive invocation lock for a model-stable adapter."""
+
+        key = self._key(engine, model)
+        return self._request_locks.setdefault(key, asyncio.Lock())
 
     async def _create(self, engine: str, model: str) -> Any:
         from orchestrator.config import AgentConfig
 
-        workspace = self._workspace_root / "api-gateway" / engine
+        safe_model = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(model))[:100] or "default"
+        workspace = self._workspace_root / "api-gateway" / engine / safe_model
         workspace.mkdir(parents=True, exist_ok=True)
 
         cfg = AgentConfig(
@@ -779,19 +872,28 @@ class _AdapterPool:
         return adapter
 
     async def update_model(self, engine: str, model: str):
-        """Update the model on an existing adapter."""
-        adapter = self._adapters.get(engine)
-        if adapter and hasattr(adapter, "config"):
-            adapter.config.model = model
+        """Compatibility no-op: pooled adapter models are immutable."""
+
+        adapter = self._adapters.get(self._key(engine, model))
+        if adapter is not None and hasattr(adapter, "config"):
+            configured = str(getattr(adapter.config, "model", "") or "")
+            if configured != str(model):
+                raise RuntimeError(
+                    "API adapter model identity drifted after initialization"
+                )
 
     async def shutdown(self):
-        for engine, adapter in self._adapters.items():
+        for (engine, model), adapter in self._adapters.items():
             try:
                 await adapter.shutdown()
-                logger.info(f"API adapter shut down: {engine}")
+                logger.info(f"API adapter shut down: {engine} (model={model})")
             except Exception as e:
-                logger.warning(f"Error shutting down API adapter {engine}: {e}")
+                logger.warning(
+                    f"Error shutting down API adapter {engine} (model={model}): {e}"
+                )
         self._adapters.clear()
+        self._init_locks.clear()
+        self._request_locks.clear()
 
 
 # ── Gateway server ────────────────────────────────────────────────────────────
@@ -1085,7 +1187,20 @@ class APIGatewayServer:
     # ── Route: GET /health ────────────────────────────────────────────────────
 
     async def handle_health(self, request: web.Request) -> web.Response:
-        initialized = sorted(self._pool._adapters.keys())
+        initialized_entries = list(self._pool._adapters.keys())
+        initialized = sorted({
+            key[0] if isinstance(key, tuple) else str(key)
+            for key in initialized_entries
+        })
+        adapter_instances = sorted(
+            [
+                {"engine": key[0], "model": key[1]}
+                if isinstance(key, tuple)
+                else {"engine": str(key), "model": None}
+                for key in initialized_entries
+            ],
+            key=lambda item: (item["engine"], item["model"] or ""),
+        )
         configured_enabled = bool(load_api_gateway_config(self.global_config).get("enabled", False))
         available_engines = [
             engine for engine, status in self._engine_status.items() if status.get("available")
@@ -1101,6 +1216,7 @@ class APIGatewayServer:
                 "active_requests": len(self._active_requests),
                 "configured_enabled": configured_enabled,
                 "engines": initialized,
+                "adapter_instances": adapter_instances,
                 "engine_status": self._engine_status,
                 "available_engines": available_engines,
                 "available_models": self._available_models(),
@@ -1114,6 +1230,7 @@ class APIGatewayServer:
     # ── Route: POST /v1/chat/completions ──────────────────────────────────────
 
     async def handle_chat_completions(self, request: web.Request) -> web.Response:
+        self._sessions.purge_expired()
         try:
             body = await request.json()
         except Exception:
@@ -1188,9 +1305,22 @@ class APIGatewayServer:
         extra_body = body.get("extra_body") or {}
         if not isinstance(extra_body, dict):
             return web.json_response({"error": "extra_body must be an object"}, status=400)
-        session_id: str | None = (
+        raw_session_id = (
             extra_body.get("session_id")
             or body.get("session_id")
+        )
+        if raw_session_id is not None and (
+            not isinstance(raw_session_id, str)
+            or not raw_session_id.strip()
+            or len(raw_session_id.strip()) > 256
+        ):
+            return _external_tool_error(
+                "session_id must be a non-empty string of at most 256 characters",
+                code="invalid_session_id",
+                param="session_id",
+            )
+        session_id: str | None = (
+            raw_session_id.strip() if isinstance(raw_session_id, str) else None
         )
 
         if external_tool_mode and session_id:
@@ -1210,18 +1340,69 @@ class APIGatewayServer:
                 param="session_id",
             )
 
+        request_id = f"apireq-{uuid.uuid4().hex[:8]}"
+        t_start = time.time()
+        request_kwargs = {
+            "body": body,
+            "engine": engine,
+            "model": model,
+            "messages": messages,
+            "external_tools": external_tools,
+            "external_tool_mode": external_tool_mode,
+            "structured_conversation_mode": structured_conversation_mode,
+            "stream": stream,
+            "session_id": session_id,
+            "request_id": request_id,
+            "t_start": t_start,
+            "request": request,
+            "reasoning_effort": reasoning_effort,
+        }
+        if session_id is None:
+            return await self._handle_validated_chat(**request_kwargs)
+
+        lease_started = time.perf_counter()
+        async with self._sessions.lease(session_id):
+            self._observe(
+                "session_lease_acquired",
+                gateway_request_id=request_id,
+                session_id=session_id,
+                wait_ms=round(
+                    (time.perf_counter() - lease_started) * 1000,
+                    2,
+                ),
+            )
+            return await self._handle_validated_chat(**request_kwargs)
+
+    async def _handle_validated_chat(
+        self,
+        *,
+        body: dict[str, Any],
+        engine: str,
+        model: str,
+        messages: list[dict],
+        external_tools: list[dict],
+        external_tool_mode: bool,
+        structured_conversation_mode: bool,
+        stream: bool,
+        session_id: str | None,
+        request_id: str,
+        t_start: float,
+        request: web.Request,
+        reasoning_effort: str | None,
+    ) -> web.StreamResponse:
+        """Assemble session state, then invoke one exclusively leased adapter."""
+
         if session_id:
             cached = self._sessions.get(session_id)
             if cached:
-                # Prepend cached history, then append new messages
-                # Avoid duplicating the last user turn
                 combined = list(cached)
-                for msg in messages:
+                for message in messages:
                     if not any(
-                        m.get("role") == msg.get("role") and m.get("content") == msg.get("content")
-                        for m in combined[-4:]
+                        existing.get("role") == message.get("role")
+                        and existing.get("content") == message.get("content")
+                        for existing in combined[-4:]
                     ):
-                        combined.append(msg)
+                        combined.append(message)
                 messages = combined
             structured_conversation_mode = _uses_structured_conversation(messages)
             if structured_conversation_mode:
@@ -1237,9 +1418,11 @@ class APIGatewayServer:
         if not external_tool_mode and not structured_conversation_mode:
             prompt = _messages_to_prompt(messages)
             if not prompt.strip():
-                return web.json_response({"error": "empty prompt after assembly"}, status=400)
+                return web.json_response(
+                    {"error": "empty prompt after assembly"},
+                    status=400,
+                )
 
-        # Terminal: show incoming
         user_preview = _message_text_preview(messages) or prompt[:120] or (
             "[structured conversation]"
             if structured_conversation_mode
@@ -1247,13 +1430,11 @@ class APIGatewayServer:
         )
         _print_api_in(model, user_preview)
 
-        request_id = f"apireq-{uuid.uuid4().hex[:8]}"
-        upstream_request_id = self._upstream_request_id(request)
         request_headers = getattr(request, "headers", {})
         self._observe(
             "request_received",
             gateway_request_id=request_id,
-            upstream_request_id=upstream_request_id,
+            upstream_request_id=self._upstream_request_id(request),
             provider_call=request_headers.get("X-Hashi-Provider-Call"),
             after_tool_end=(
                 request_headers.get("X-Hashi-After-Tool-End", "false").casefold()
@@ -1273,13 +1454,70 @@ class APIGatewayServer:
 
         try:
             adapter = await self._pool.get(engine, model)
-            # Update model on adapter in case it changed
-            await self._pool.update_model(engine, model)
-        except Exception as e:
-            logger.error(f"Adapter init failed for {engine}: {e}")
-            return web.json_response({"error": f"backend unavailable: {e}"}, status=503)
+        except Exception as exc:
+            logger.error("Adapter init failed for %s: %s", engine, exc)
+            return web.json_response(
+                {"error": f"backend unavailable: {exc}"},
+                status=503,
+            )
 
-        t_start = time.time()
+        lock_factory = getattr(self._pool, "request_lock", None)
+        if callable(lock_factory):
+            request_lock = lock_factory(engine, model)
+        else:
+            request_lock = getattr(adapter, "_hashi_gateway_request_lock", None)
+            if request_lock is None:
+                request_lock = asyncio.Lock()
+                setattr(adapter, "_hashi_gateway_request_lock", request_lock)
+        lease_started = time.perf_counter()
+        async with request_lock:
+            lease_wait_ms = round(
+                (time.perf_counter() - lease_started) * 1000,
+                2,
+            )
+            self._observe(
+                "adapter_lease_acquired",
+                gateway_request_id=request_id,
+                engine=engine,
+                model=model,
+                wait_ms=lease_wait_ms,
+            )
+            return await self._dispatch_chat_request(
+                adapter=adapter,
+                prompt=prompt,
+                request_id=request_id,
+                model=model,
+                session_id=session_id,
+                messages=messages,
+                body=body,
+                external_tools=external_tools,
+                external_tool_mode=external_tool_mode,
+                structured_conversation_mode=structured_conversation_mode,
+                stream=stream,
+                t_start=t_start,
+                request=request,
+                reasoning_effort=reasoning_effort,
+            )
+
+    async def _dispatch_chat_request(
+        self,
+        *,
+        adapter,
+        prompt: str,
+        request_id: str,
+        model: str,
+        session_id: str | None,
+        messages: list[dict],
+        body: dict[str, Any],
+        external_tools: list[dict],
+        external_tool_mode: bool,
+        structured_conversation_mode: bool,
+        stream: bool,
+        t_start: float,
+        request: web.Request,
+        reasoning_effort: str | None,
+    ) -> web.StreamResponse:
+        """Route one request while its model-stable adapter lease is held."""
 
         if external_tool_mode:
             supports_passthrough = getattr(adapter, "supports_external_tool_passthrough", None)
@@ -1353,17 +1591,16 @@ class APIGatewayServer:
                 request,
                 reasoning_effort=reasoning_effort,
             )
-        else:
-            return await self._handle_sync(
-                adapter,
-                prompt,
-                request_id,
-                model,
-                session_id,
-                messages,
-                t_start,
-                reasoning_effort=reasoning_effort,
-            )
+        return await self._handle_sync(
+            adapter,
+            prompt,
+            request_id,
+            model,
+            session_id,
+            messages,
+            t_start,
+            reasoning_effort=reasoning_effort,
+        )
 
     def _xai_base_url(self) -> str:
         return str(getattr(self.global_config, "xai_api_base_url", "") or "").strip()
@@ -1558,10 +1795,10 @@ class APIGatewayServer:
         if not response.is_success:
             error = response.error or "backend error"
             logger.error("External tool backend failure %s: %s", request_id, error)
-            return _external_tool_error(
-                error,
-                code=response.error_code or "external_tool_backend_error",
-                status=_backend_http_error_status(response),
+            return _backend_json_error_response(
+                response,
+                fallback_message=error,
+                fallback_code="external_tool_backend_error",
             )
 
         text = response.text or ""
@@ -1758,10 +1995,10 @@ class APIGatewayServer:
                 status=500,
             )
         if not response.is_success:
-            return _external_tool_error(
-                response.error or "backend error",
-                code=response.error_code or "structured_conversation_backend_error",
-                status=_backend_http_error_status(response),
+            return _backend_json_error_response(
+                response,
+                fallback_message=response.error or "backend error",
+                fallback_code="structured_conversation_backend_error",
             )
         if response.tool_calls:
             return _external_tool_error(
@@ -1935,15 +2172,38 @@ class APIGatewayServer:
                 **request_options,
             )
         except Exception as e:
-            logger.error(f"Backend error for {request_id}: {e}")
-            return web.json_response({"error": str(e)}, status=500)
+            logger.exception("Backend raised for %s", request_id)
+            return web.json_response(
+                {
+                    "error": {
+                        "message": str(e),
+                        "type": "server_error",
+                        "code": "backend_invocation_error",
+                        "status": 500,
+                    }
+                },
+                status=500,
+            )
 
         elapsed = time.time() - t_start
 
         if not response.is_success:
             err = response.error or "backend error"
-            logger.error(f"API gateway backend failure {request_id}: {err}")
-            return web.json_response({"error": err}, status=500)
+            logger.error(
+                "API gateway backend failure %s code=%s status=%s "
+                "retryable=%s side_effects=%s: %s",
+                request_id,
+                response.error_code or "backend_error",
+                response.http_status,
+                response.error_retryable,
+                response.side_effects_possible,
+                err,
+            )
+            return _backend_json_error_response(
+                response,
+                fallback_message=err,
+                fallback_code="backend_error",
+            )
 
         text = response.text or ""
         _print_api_out(model, elapsed, len(text), stream=False)
@@ -2122,12 +2382,26 @@ class APIGatewayServer:
                 tool_end_count=tool_end_count,
                 elapsed_ms=round((time.time() - t_start) * 1000, 2),
             )
-            logger.error(f"Streaming backend error for {request_id}: {e}")
+            logger.exception("Streaming backend raised for %s", request_id)
             try:
+                payload = _backend_stream_error_payload(
+                    str(e),
+                    code="backend_invocation_error",
+                    status=500,
+                    streamed_text=bool(collected_text),
+                )
+                await resp.write(
+                    f"data: {json.dumps(payload)}\n\n".encode()
+                )
                 await resp.write(b"data: [DONE]\n\n")
                 await resp.write_eof()
-            except Exception:
-                pass
+            except Exception as write_exc:
+                self._observe(
+                    "stream_error_write_failed",
+                    gateway_request_id=request_id,
+                    error_type=type(write_exc).__name__,
+                    elapsed_ms=round((time.time() - t_start) * 1000, 2),
+                )
             return resp
 
         self._observe(
@@ -2140,6 +2414,53 @@ class APIGatewayServer:
             tool_end_count=tool_end_count,
             elapsed_ms=round((time.time() - t_start) * 1000, 2),
         )
+
+        if not response.is_success:
+            error = response.error or "backend error"
+            status = _backend_http_error_status(response)
+            code = response.error_code or "backend_error"
+            logger.error(
+                "Streaming backend failure %s code=%s status=%s retryable=%s "
+                "side_effects=%s: %s",
+                request_id,
+                code,
+                status,
+                response.error_retryable,
+                response.side_effects_possible,
+                error,
+            )
+            try:
+                payload = _backend_stream_error_payload(
+                    error,
+                    code=code,
+                    status=status,
+                    response=response,
+                    streamed_text=bool(collected_text),
+                )
+                await resp.write(
+                    f"data: {json.dumps(payload)}\n\n".encode()
+                )
+                await resp.write(b"data: [DONE]\n\n")
+                await resp.write_eof()
+            except Exception as write_exc:
+                self._observe(
+                    "stream_error_write_failed",
+                    gateway_request_id=request_id,
+                    error_type=type(write_exc).__name__,
+                    elapsed_ms=round((time.time() - t_start) * 1000, 2),
+                )
+            else:
+                self._observe(
+                    "stream_terminal_error_sent",
+                    gateway_request_id=request_id,
+                    error_code=code,
+                    error_status=status,
+                    event_count=event_count,
+                    last_event_kind=last_event_kind,
+                    tool_end_count=tool_end_count,
+                    elapsed_ms=round((time.time() - t_start) * 1000, 2),
+                )
+            return resp
 
         elapsed = time.time() - t_start
 
